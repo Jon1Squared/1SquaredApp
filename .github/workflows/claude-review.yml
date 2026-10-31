@@ -1,0 +1,57 @@
+name: Claude Senior Developer Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - develop
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  claude-senior-dev:
+    name: Claude Architecture & Code Review
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Senior Developer Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are the Senior Developer and Principal Architecture Reviewer for 1Squared.
+            Read `CLAUDE.md`, `AGENTS.md`, `docs/architecture-standard.md`, and `docs/decisions/0001-shared-repo-and-transitional-store.md`.
+
+            If this workflow was triggered by a Pull Request opening or update:
+            1. Classify the change (core feature, core extension point, configuration option, client extension, client configuration, or infrastructure).
+            2. Review all changed files against the 10 Architecture Rules in `AGENTS.md` and `docs/architecture-standard.md`:
+               - Rule 1 & 2: No client-specific code, names, IDs, or branches in core; client differences must be schema-validated config or public extension points.
+               - Rule 3: Extensions import only from `@platform/core` public API (`core/src/api/`), never from core internals.
+               - Rule 4 & 9: All data access and background/outbox commands are tenant-scoped (`tenantId` from verified token only) and covered by two-tenant isolation tests where data access is touched.
+               - Rule 5: No secrets, keys, or real client personal data in code, logs, tests, or config files (Key Vault references only).
+               - Rule 6, 7 & 8: Works identically in single-tenant and multi-tenant hosting modes; config schema and API changes are backward compatible.
+            3. Check TypeScript types, edge cases, and test coverage, and post a concise, constructive Senior Developer review on the Pull Request with a clear PASS or CHANGES REQUESTED summary.
+
+            If this workflow was triggered by an `@claude` mention in a comment or issue, respond directly to the request while strictly following `CLAUDE.md` and `docs/architecture-standard.md`.
