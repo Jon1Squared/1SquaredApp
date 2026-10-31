@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Calendar, ChevronDown, MoreHorizontal } from 'lucide-react';
+import { Calendar, MoreHorizontal } from 'lucide-react';
 import {
   enquiryStatusTone,
   isExceptionalUrgencyLabel,
@@ -119,19 +119,12 @@ export function EnquiriesListClient({
   const [sort, setSort] = useState<DataListSortState | null>(null);
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
 
-  // Split button "+ New" menu state
-  const [newMenuOpen, setNewMenuOpen] = useState(false);
-  const newMenuRef = useRef<HTMLDivElement>(null);
-
   // Per-row actions menu state
   const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
 
   useEffect(() => {
     function handleOutsideClick(e: MouseEvent) {
       const target = e.target as Node;
-      if (newMenuRef.current && !newMenuRef.current.contains(target)) {
-        setNewMenuOpen(false);
-      }
       if (openRowMenuId) {
         const el = (target as HTMLElement | null)?.closest?.('[data-row-menu]');
         if (!el) {
@@ -1036,74 +1029,6 @@ export function EnquiriesListClient({
       <div className="page-header">
         <div>
           <h1>Enquiries &amp; Quotes</h1>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Pre-engagement intake. Urgent and emergency enquiries are pinned to the top, followed by
-            quotes with overdue follow-ups, then everything else oldest first.
-          </p>
-        </div>
-        <div className="page-header__actions">
-          <div
-            className="popover-anchor"
-            ref={newMenuRef}
-            style={{ display: 'inline-flex', alignItems: 'stretch', position: 'relative' }}
-          >
-            <Link
-              href="/enquiries/new"
-              className="btn btn--primary"
-              style={{
-                borderTopRightRadius: 0,
-                borderBottomRightRadius: 0,
-                paddingRight: 14,
-              }}
-            >
-              + New
-            </Link>
-            <button
-              type="button"
-              className="btn btn--primary"
-              aria-label="Choose new enquiry or new quote"
-              aria-expanded={newMenuOpen}
-              onClick={() => setNewMenuOpen((v) => !v)}
-              style={{
-                borderTopLeftRadius: 0,
-                borderBottomLeftRadius: 0,
-                borderLeft: '1px solid rgba(255, 255, 255, 0.25)',
-                padding: '0 10px',
-              }}
-            >
-              <ChevronDown size={15} aria-hidden="true" />
-            </button>
-            {newMenuOpen ? (
-              <div
-                className="popover-menu"
-                role="menu"
-                style={{ right: 0, top: 'calc(100% + 4px)', minWidth: 165, zIndex: 50 }}
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="popover-menu__item"
-                  onClick={() => {
-                    setNewMenuOpen(false);
-                    router.push('/enquiries/new');
-                  }}
-                >
-                  New enquiry
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="popover-menu__item"
-                  onClick={() => {
-                    setNewMenuOpen(false);
-                    router.push('/quotes/new');
-                  }}
-                >
-                  New quote
-                </button>
-              </div>
-            ) : null}
-          </div>
         </div>
       </div>
 
@@ -1162,6 +1087,23 @@ export function EnquiriesListClient({
         >
           Closed ({closedCount})
         </button>
+        <div
+          style={{
+            marginLeft: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            paddingBottom: 6,
+            flexShrink: 0,
+          }}
+        >
+          <Link href="/enquiries/new" className="btn btn--primary">
+            + New enquiry
+          </Link>
+          <Link href="/quotes/new" className="btn btn--primary">
+            + New quote
+          </Link>
+        </div>
       </div>
 
       <DataListFilterBar

@@ -567,6 +567,16 @@
       "allowMultiple": false,
       "hierarchical": true,
       "description": "Group → audience type"
+    },
+    {
+      "key": "cf_test_field_f7un",
+      "label": "Test Field",
+      "group": "custom",
+      "appliesTo": [
+        "enquiry"
+      ],
+      "allowMultiple": false,
+      "hierarchical": false
     }
   ],
   "values": [
@@ -7690,9 +7700,45 @@
       "meta": {
         "stageGroupId": "matter_stage_group.advisory_non_contentious_advice"
       }
+    },
+    {
+      "id": "cf_test_field_f7un.hiya",
+      "listKey": "cf_test_field_f7un",
+      "label": "Hiya",
+      "sortOrder": 1,
+      "active": true,
+      "parentId": null
+    },
+    {
+      "id": "cf_test_field_f7un.bora_da",
+      "listKey": "cf_test_field_f7un",
+      "label": "Bora Da",
+      "sortOrder": 2,
+      "active": true,
+      "parentId": null
+    },
+    {
+      "id": "cf_test_field_f7un.bonjour",
+      "listKey": "cf_test_field_f7un",
+      "label": "Bonjour",
+      "sortOrder": 3,
+      "active": true,
+      "parentId": null
     }
   ],
-  "customFields": [],
+  "customFields": [
+    {
+      "id": "cf_test_field_f7un",
+      "recordType": "enquiry",
+      "label": "Test Field",
+      "fieldType": "choice",
+      "optionsListKey": "cf_test_field_f7un",
+      "section": "enquiry_caller",
+      "required": false,
+      "sortOrder": 1,
+      "active": true
+    }
+  ],
   "orgStructure": {
     "legalEntities": [
       {
@@ -10133,8 +10179,44 @@
   },
   "pmsLinks": [],
   "notes": [],
-  "audit": [],
+  "audit": [
+    {
+      "id": "AU-000003",
+      "at": "2026-10-31T12:23:20.234Z",
+      "recordType": "customField",
+      "recordId": "cf_test_field_f7un",
+      "action": "custom-field-change",
+      "field": "enquiry · Test Field",
+      "oldValue": "Test Field (active)",
+      "newValue": "Test Field (choice, active)",
+      "byId": "P-000001"
+    },
+    {
+      "id": "AU-000002",
+      "at": "2026-10-31T12:22:32.953Z",
+      "recordType": "customField",
+      "recordId": "cf_test_field_f7un",
+      "action": "custom-field-change",
+      "field": "enquiry · Test Field",
+      "oldValue": "Test Field (active)",
+      "newValue": "Test Field (text, active)",
+      "byId": "P-000001"
+    },
+    {
+      "id": "AU-000001",
+      "at": "2026-10-31T12:22:05.183Z",
+      "recordType": "customField",
+      "recordId": "cf_test_field_f7un",
+      "action": "custom-field-change",
+      "field": "enquiry · Test Field",
+      "oldValue": null,
+      "newValue": "Test Field (longText, active)",
+      "byId": "P-000001"
+    }
+  ],
   "mergeHistory": [],
   "recentlyViewed": {},
-  "counters": {}
+  "counters": {
+    "AU": 3
+  }
 }

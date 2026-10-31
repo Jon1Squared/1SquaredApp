@@ -62,7 +62,93 @@
   "integrations": {
     "pmsConnectionSecretVaultRef": "kv://kv-not-a-law-firm-dev/pms-connection-string",
     "companiesHouseApiKeyVaultRef": "kv://kv-not-a-law-firm-dev/companies-house-api-key",
-    "aiProviderChoice": "azure_openai_uk"
+    "aiProviderChoice": "azure_openai_uk",
+    "pmsSync": {
+      "enabled": true,
+      "providerKey": "generic_sql",
+      "syncMode": "two_way",
+      "matterCodeAllocation": "onesquared",
+      "clientCodeAllocation": "onesquared",
+      "pollIntervalMinutes": 15,
+      "fieldMappings": [
+        {
+          "id": "MAP-ORG-NAME",
+          "entityType": "client_organisation",
+          "onesquaredFieldKey": "legalName",
+          "externalFieldKey": "client_name",
+          "ownership": "onesquared_master",
+          "active": true
+        },
+        {
+          "id": "MAP-ORG-COMP-NO",
+          "entityType": "client_organisation",
+          "onesquaredFieldKey": "companyNumber",
+          "externalFieldKey": "company_number",
+          "ownership": "onesquared_master",
+          "active": true
+        },
+        {
+          "id": "MAP-MAT-TITLE",
+          "entityType": "matter",
+          "onesquaredFieldKey": "title",
+          "externalFieldKey": "matter_description",
+          "ownership": "onesquared_master",
+          "active": true
+        },
+        {
+          "id": "MAP-MAT-BILLING-BASIS",
+          "entityType": "matter",
+          "onesquaredFieldKey": "billingBasisLabel",
+          "externalFieldKey": "billing_basis",
+          "ownership": "onesquared_master",
+          "active": true
+        },
+        {
+          "id": "MAP-MAT-FEE-ESTIMATE",
+          "entityType": "matter",
+          "onesquaredFieldKey": "feeEstimateGbp",
+          "externalFieldKey": "fee_estimate",
+          "ownership": "bidirectional",
+          "active": true
+        },
+        {
+          "id": "MAP-MAT-FEE-CAP",
+          "entityType": "matter",
+          "onesquaredFieldKey": "agreedFeeCapGbp",
+          "externalFieldKey": "fixed_fee_amount",
+          "ownership": "onesquared_master",
+          "active": true
+        },
+        {
+          "id": "MAP-MAT-CLIENT-REF",
+          "entityType": "matter",
+          "onesquaredFieldKey": "CORE-050",
+          "externalFieldKey": "client_reference",
+          "ownership": "onesquared_master",
+          "active": true
+        }
+      ]
+    }
   },
-  "enabledExtensions": ["nalf-matter-costs-governance"]
+  "customFields": [
+    {
+      "id": "cf_test_field_f7un",
+      "recordType": "enquiry",
+      "label": "Test Field",
+      "fieldType": "choice",
+      "optionsListKey": "cf_test_field_f7un",
+      "options": [
+        "Hiya",
+        "Bora Da",
+        "Bonjour"
+      ],
+      "section": "enquiry_caller",
+      "required": false,
+      "sortOrder": 1,
+      "active": true
+    }
+  ],
+  "enabledExtensions": [
+    "nalf-matter-costs-governance"
+  ]
 }

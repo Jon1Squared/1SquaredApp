@@ -86,6 +86,12 @@ export interface FirmStore {
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'pembroke-vaughan.json');
+const TENANT_CONFIG_FILE = path.join(
+  process.cwd(),
+  'client-not-a-law-firm',
+  'config',
+  'base.json',
+);
 
 declare global {
   var __oneSquaredStore: FirmStore | undefined;
@@ -881,6 +887,37 @@ export function saveStore(store: FirmStore): void {
     global.__oneSquaredStoreMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
   } catch {
     // ignore read-only fs errors in serverless environments
+  }
+  try {
+    if (fs.existsSync(TENANT_CONFIG_FILE)) {
+      const rawCfg = JSON.parse(fs.readFileSync(TENANT_CONFIG_FILE, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      rawCfg.customFields = store.customFields.map((def) => {
+        const opts = def.optionsListKey
+          ? store.values
+              .filter((v) => v.listKey === def.optionsListKey && v.active)
+              .sort((a, b) => a.sortOrder - b.sortOrder)
+              .map((v) => v.label)
+          : undefined;
+        return {
+          id: def.id,
+          recordType: def.recordType,
+          label: def.label,
+          fieldType: def.fieldType,
+          ...(def.optionsListKey ? { optionsListKey: def.optionsListKey } : {}),
+          ...(opts && opts.length > 0 ? { options: opts } : {}),
+          section: def.section,
+          required: def.required,
+          sortOrder: def.sortOrder,
+          active: def.active,
+        };
+      });
+      fs.writeFileSync(TENANT_CONFIG_FILE, `${JSON.stringify(rawCfg, null, 2)}\n`, 'utf8');
+    }
+  } catch {
+    // ignore read-only fs errors
   }
   if (!firestoreSynced) {
     void trySyncToFirestore(store);

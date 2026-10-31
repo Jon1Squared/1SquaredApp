@@ -3,16 +3,11 @@
 import React, { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Calendar, Layers, Plus } from 'lucide-react';
+import { Calendar } from 'lucide-react';
 import type { PillTone, UrgencyEdgeKind } from '@/domain/badges';
 import { formatDate, formatKeyDateSummary } from '@/domain/dates';
 import { resolveLabel } from '@/domain/lists';
-import {
-  extractCriticalDates,
-  fieldGroupsForSubcategory,
-  MATTER_FIELD_MODEL,
-  specificFieldsForSubcategory,
-} from '@/domain/matters';
+import { extractCriticalDates } from '@/domain/matters';
 import { hrefForId, personDisplayName } from '@/domain/names';
 import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
 import { isTaskOpen } from '@/domain/tasks';
@@ -83,7 +78,6 @@ export function MattersListClient({
 }: MattersListClientProps) {
   const router = useRouter();
 
-  const [viewMode, setViewMode] = useState<'matters' | 'explorer'>('matters');
   const [tab, setTab] = useState<MattersTab>('all');
   const [query, setQuery] = useState('');
   const [practiceAreaId, setPracticeAreaId] = useState('all');
@@ -93,12 +87,6 @@ export function MattersListClient({
   const [showPmsColumns, setShowPmsColumns] = useState(true);
   const [sort, setSort] = useState<DataListSortState | null>(null);
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
-
-  // Field Model Explorer state
-  const [explorerPracticeArea, setExplorerPracticeArea] = useState('all');
-  const [selectedRuleCode, setSelectedRuleCode] = useState<string>(
-    MATTER_FIELD_MODEL.subcategoryMatrix[0]?.code ?? 'CC01',
-  );
 
   const clientNameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -444,29 +432,6 @@ export function MattersListClient({
     tasks,
   ]);
 
-  const explorerRules = useMemo(() => {
-    return MATTER_FIELD_MODEL.subcategoryMatrix.filter((r) =>
-      explorerPracticeArea === 'all' ? true : r.practiceArea === explorerPracticeArea,
-    );
-  }, [explorerPracticeArea]);
-
-  const activeRule = useMemo(
-    () =>
-      MATTER_FIELD_MODEL.subcategoryMatrix.find((r) => r.code === selectedRuleCode) ??
-      MATTER_FIELD_MODEL.subcategoryMatrix[0],
-    [selectedRuleCode],
-  );
-
-  const activeGroups = useMemo(
-    () => (activeRule ? fieldGroupsForSubcategory(activeRule.subcategory) : []),
-    [activeRule],
-  );
-
-  const activeSpecificFields = useMemo(
-    () => (activeRule ? specificFieldsForSubcategory(activeRule.subcategory) : []),
-    [activeRule],
-  );
-
   const mineCount = useMemo(() => matters.filter(isMyMatter).length, [matters, currentUserId]);
   const transactionalCount = useMemo(
     () => matters.filter((m) => m.typeBadge === 'Transactional').length,
@@ -486,33 +451,10 @@ export function MattersListClient({
       <div className="page-header">
         <div>
           <h1>Matters</h1>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Active and prospective client engagements across {practiceAreas.length} practice
-            areas.
-          </p>
-        </div>
-        <div className="page-header__actions">
-          <button
-            type="button"
-            className={`btn ${viewMode === 'explorer' ? 'btn--secondary' : 'btn--ghost'}`}
-            onClick={() => setViewMode((m) => (m === 'matters' ? 'explorer' : 'matters'))}
-          >
-            <Layers size={16} />
-            <span>
-              {viewMode === 'explorer'
-                ? 'Back to matters list'
-                : 'Field model explorer (66 types)'}
-            </span>
-          </button>
-          <Link href="/matters/new" className="btn btn--primary">
-            + New matter
-          </Link>
         </div>
       </div>
 
-      {viewMode === 'matters' ? (
-        <>
-          <div className="tabs-bar" role="tablist" aria-label="Matter views">
+      <div className="tabs-bar" role="tablist" aria-label="Matter views">
             <button
               type="button"
               role="tab"
@@ -560,6 +502,20 @@ export function MattersListClient({
             >
               Advisory ({advisoryCount})
             </button>
+            <div
+              style={{
+                marginLeft: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                paddingBottom: 6,
+                flexShrink: 0,
+              }}
+            >
+              <Link href="/matters/new" className="btn btn--primary">
+                + New matter
+              </Link>
+            </div>
           </div>
 
           <DataListFilterBar
@@ -765,232 +721,6 @@ export function MattersListClient({
               );
             }}
           />
-        </>
-      ) : (
-        <div>
-          <div
-            style={{
-              background: 'var(--surface-subtle)',
-              borderRadius: 'var(--radius-md)',
-              padding: '18px 22px',
-              marginBottom: 24,
-            }}
-          >
-            <div className="section-label" style={{ marginBottom: 6 }}>
-              Matter &amp; Engagement Field Model — Subcategory Matrix Explorer
-            </div>
-            <p className="muted" style={{ margin: 0, fontSize: '0.92rem' }}>
-              Select any of the <strong>66 work type subcategories</strong> below to inspect
-              the automatic taxonomy defaults (Type Badge, Default Matter Type, Typical
-              Billing Basis), the reusable <strong>Layer 2 Field Groups (FG01–FG09)</strong>{' '}
-              switched on, and the <strong>Layer 3 Subcategory-Specific Fields</strong>{' '}
-              required for that matter type.
-            </p>
-          </div>
-
-          <div className="filter-bar">
-            <select
-              aria-label="Filter matrix by practice area"
-              value={explorerPracticeArea}
-              onChange={(e) => {
-                const pa = e.target.value;
-                setExplorerPracticeArea(pa);
-                const first = MATTER_FIELD_MODEL.subcategoryMatrix.find((r) =>
-                  pa === 'all' ? true : r.practiceArea === pa,
-                );
-                if (first) setSelectedRuleCode(first.code);
-              }}
-              className="field-select"
-              style={{ width: 'auto', minWidth: 280 }}
-            >
-              <option value="all">All 11 practice areas (66 subcategories)</option>
-              {Array.from(
-                new Set(MATTER_FIELD_MODEL.subcategoryMatrix.map((r) => r.practiceArea)),
-              ).map((pa) => (
-                <option key={pa} value={pa}>
-                  {pa}
-                </option>
-              ))}
-            </select>
-
-            <select
-              aria-label="Select work type subcategory"
-              value={activeRule?.code ?? ''}
-              onChange={(e) => setSelectedRuleCode(e.target.value)}
-              className="field-select"
-              style={{ width: 'auto', minWidth: 320 }}
-            >
-              {explorerRules.map((r) => (
-                <option key={r.code} value={r.code}>
-                  {r.code} — {r.subcategory} ({r.practiceArea})
-                </option>
-              ))}
-            </select>
-
-            {activeRule ? (
-              <Link
-                href={`/matters/new?subcategory=${encodeURIComponent(activeRule.subcategory)}`}
-                className="btn btn--primary"
-                style={{ marginLeft: 'auto' }}
-              >
-                <Plus size={15} />
-                <span>Open a {activeRule.subcategory} matter</span>
-              </Link>
-            ) : null}
-          </div>
-
-          {activeRule ? (
-            <div>
-              <div
-                style={{
-                  background: 'var(--input-bg)',
-                  borderRadius: 'var(--radius-md)',
-                  padding: '18px 22px',
-                  marginBottom: 28,
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: 24,
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                }}
-              >
-                <div>
-                  <div className="section-label">
-                    {activeRule.code} · {activeRule.practiceArea}
-                  </div>
-                  <h2 style={{ margin: '4px 0 6px', fontSize: '1.3rem' }}>
-                    {activeRule.subcategory}
-                  </h2>
-                  <div className="muted" style={{ fontSize: '0.9rem' }}>
-                    Default Matter Type: <strong>{activeRule.defaultMatterType}</strong> ·
-                    Typical Billing Basis: <strong>{activeRule.typicalBillingBasis}</strong> ·
-                    Total fields captured: <strong>{activeRule.totalFields}</strong> (
-                    {MATTER_FIELD_MODEL.coreFields.length} Core +{' '}
-                    {activeGroups.reduce((s, g) => s + g.fields.length, 0)} Field Group +{' '}
-                    {activeSpecificFields.length} Subcategory-specific)
-                  </div>
-                </div>
-                <div className="btn-row">
-                  <StatusPill
-                    label={`Type badge: ${activeRule.typeBadge}`}
-                    tone={
-                      activeRule.typeBadge === 'Contentious'
-                        ? 'alert'
-                        : activeRule.typeBadge === 'Transactional'
-                          ? 'positive'
-                          : 'neutral'
-                    }
-                  />
-                  {activeRule.fieldGroupCodes.map((fg) => (
-                    <StatusPill key={fg} label={fg} tone="warning" />
-                  ))}
-                </div>
-              </div>
-
-              <section className="profile-section">
-                <div className="profile-section__header">
-                  <span className="section-label">
-                    Layer 3 — Subcategory-Specific Fields for {activeRule.subcategory} (
-                    {activeSpecificFields.length} fields)
-                  </span>
-                </div>
-                {activeSpecificFields.map((f) => (
-                  <div key={f.id} className="list-row">
-                    <div className="list-row__main">
-                      <div className="list-row__title">
-                        <span
-                          className="muted"
-                          style={{
-                            fontFamily: 'monospace',
-                            fontSize: '0.84rem',
-                            marginRight: 8,
-                          }}
-                        >
-                          {f.id}
-                        </span>
-                        {f.name}
-                      </div>
-                      <div className="list-row__meta">
-                        <span>
-                          Data type: <strong>{f.dataType}</strong>
-                        </span>
-                        {f.valuesSource && f.valuesSource !== '—' ? (
-                          <span> · Options / source: {f.valuesSource}</span>
-                        ) : null}
-                        {f.notes ? <span> · {f.notes}</span> : null}
-                      </div>
-                    </div>
-                    <div className="list-row__aside">
-                      {f.criticalDate ? (
-                        <StatusPill label="Critical date" tone="alert" />
-                      ) : null}
-                      <StatusPill
-                        label={`Required: ${f.required}`}
-                        tone={f.required === 'Opening' ? 'warning' : 'neutral'}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </section>
-
-              {activeGroups.map((group) => (
-                <section key={group.code} className="profile-section">
-                  <div className="profile-section__header">
-                    <span className="section-label">
-                      Layer 2 — Field Group {group.code}:{' '}
-                      {group.name.replace(`${group.code} — `, '')} ({group.fields.length}{' '}
-                      fields)
-                    </span>
-                  </div>
-                  <p
-                    className="muted"
-                    style={{ marginTop: 0, marginBottom: 12, fontSize: '0.88rem' }}
-                  >
-                    {group.description}
-                  </p>
-                  {group.fields.map((f) => (
-                    <div key={f.id} className="list-row">
-                      <div className="list-row__main">
-                        <div className="list-row__title">
-                          <span
-                            className="muted"
-                            style={{
-                              fontFamily: 'monospace',
-                              fontSize: '0.84rem',
-                              marginRight: 8,
-                            }}
-                          >
-                            {f.id}
-                          </span>
-                          {f.name}
-                        </div>
-                        <div className="list-row__meta">
-                          <span>
-                            Data type: <strong>{f.dataType}</strong>
-                          </span>
-                          {f.valuesSource && f.valuesSource !== '—' ? (
-                            <span> · Options: {f.valuesSource}</span>
-                          ) : null}
-                          {f.notes ? <span> · {f.notes}</span> : null}
-                        </div>
-                      </div>
-                      <div className="list-row__aside">
-                        {f.criticalDate ? (
-                          <StatusPill label="Critical date" tone="alert" />
-                        ) : null}
-                        <StatusPill
-                          label={`Required: ${f.required}`}
-                          tone={f.required === 'Opening' ? 'warning' : 'neutral'}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </section>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      )}
     </div>
   );
 }

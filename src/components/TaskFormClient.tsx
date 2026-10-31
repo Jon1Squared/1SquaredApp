@@ -3,15 +3,18 @@
 import React, { useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { Search } from 'lucide-react';
 import { saveTaskAction } from '@/app/actions';
 import { enquiryDisplayName } from '@/domain/enquiries';
-import { personDisplayName } from '@/domain/names';
+import { personDisplayName, primaryEmail, primaryPhone, recordHref } from '@/domain/names';
+import { quoteClientDisplayName, quoteWorkTypeSummary } from '@/domain/quotes';
 import type {
   ChoiceValue,
   Enquiry,
   Matter,
   Organisation,
   Person,
+  Quote,
   TaskLinkedRecord,
   TaskLinkedRecordType,
   Team,
@@ -29,10 +32,22 @@ interface Props {
   organisations: Organisation[];
   matters: Matter[];
   enquiries: Enquiry[];
+  quotes?: Quote[];
   values: ChoiceValue[];
   currentUserId: string;
   initialLinkedRecord?: TaskLinkedRecord | null;
   initialTeamId?: string | null;
+}
+
+interface SearchableRecordItem {
+  recordType: TaskLinkedRecordType;
+  recordId: string;
+  typeLabel: 'Matter' | 'Enquiry' | 'Quote' | 'Organisation' | 'Person';
+  reference: string;
+  title: string;
+  subtitle: string;
+  href: string;
+  searchText: string;
 }
 
 export function TaskFormClient({
@@ -40,6 +55,7 @@ export function TaskFormClient({
   organisations,
   matters,
   enquiries,
+  quotes = [],
   values,
   currentUserId,
   initialLinkedRecord,
@@ -60,8 +76,8 @@ export function TaskFormClient({
   const [linkedRecords, setLinkedRecords] = useState<TaskLinkedRecord[]>(
     initialLinkedRecord ? [initialLinkedRecord] : [],
   );
-  const [linkRecordType, setLinkRecordType] = useState<TaskLinkedRecordType>('matter');
-  const [linkRecordId, setLinkRecordId] = useState('');
+  const [recordSearchQuery, setRecordSearchQuery] = useState('');
+  const [recordSearchFocused, setRecordSearchFocused] = useState(false);
 
   // Build suggested people based on linked matter/enquiry or current user's team
   const suggestedPeople = useMemo<SuggestedTaskAssignee[]>(() => {
@@ -119,65 +135,150 @@ export function TaskFormClient({
     return list;
   }, [linkedRecords, matters, employees, people, currentUserId]);
 
-  const availableRecordsForType = useMemo(() => {
-    if (linkRecordType === 'enquiry') {
-      return enquiries.map((e) => ({
-        id: e.id,
-        label: `${e.reference} — ${enquiryDisplayName(e)} (${e.summary})`,
-      }));
-    }
-    if (linkRecordType === 'matter') {
-      return matters.map((m) => ({
-        id: m.id,
-        label: `${m.matterNumber} — ${m.title || 'Untitled matter'}`,
-      }));
-    }
-    if (linkRecordType === 'person') {
-      return people
-        .filter((p) => !p.mergedIntoId)
-        .map((p) => ({
-          id: p.id,
-          label: `${personDisplayName(p)} (${p.id})`,
-        }));
-    }
-    return organisations
-      .filter((o) => !o.mergedIntoId)
-      .map((o) => ({
-        id: o.id,
-        label: `${o.legalName} (${o.id})`,
-      }));
-  }, [linkRecordType, enquiries, matters, people, organisations]);
+  const searchableRecords = useMemo<SearchableRecordItem[]>(() => {
+    const items: SearchableRecordItem[] = [];
 
-  const resolveLinkedLabel = (lr: TaskLinkedRecord) => {
-    if (lr.recordType === 'enquiry') {
-      const e = enquiries.find((x) => x.id === lr.recordId);
-      return e ? `Enquiry: ${e.reference} (${enquiryDisplayName(e)})` : `Enquiry: ${lr.recordId}`;
+    for (const m of matters) {
+      const clientOrg = organisations.find((o) => o.id === m.clientId);
+      const clientPerson = people.find((p) => p.id === m.clientId);
+      const clientName = clientOrg
+        ? clientOrg.legalName
+        : clientPerson
+          ? personDisplayName(clientPerson)
+          : '';
+      const title = m.title || 'Untitled matter';
+      items.push({
+        recordType: 'matter',
+        recordId: m.id,
+        typeLabel: 'Matter',
+        reference: m.matterNumber,
+        title: `${m.matterNumber} — ${title}`,
+        subtitle: clientName,
+        href: `/matters/${m.id}`,
+        searchText: `matter ${m.matterNumber} ${m.id} ${title} ${clientName}`.toLowerCase(),
+      });
     }
-    if (lr.recordType === 'matter') {
-      const m = matters.find((x) => x.id === lr.recordId);
-      return m
-        ? `Matter: ${m.matterNumber} — ${m.title || 'Untitled matter'}`
-        : `Matter: ${lr.recordId}`;
+
+    for (const e of enquiries) {
+      const name = enquiryDisplayName(e, 'Unnamed enquiry');
+      items.push({
+        recordType: 'enquiry',
+        recordId: e.id,
+        typeLabel: 'Enquiry',
+        reference: e.reference,
+        title: `${e.reference} — ${name}`,
+        subtitle: e.summary || '',
+        href: `/enquiries/${e.id}`,
+        searchText: `enquiry ${e.reference} ${e.id} ${name} ${e.callingOnBehalfOf ?? ''} ${e.summary ?? ''} ${e.email ?? ''} ${e.phone ?? ''}`.toLowerCase(),
+      });
     }
-    if (lr.recordType === 'person') {
-      const p = people.find((x) => x.id === lr.recordId);
-      return p ? `Person: ${personDisplayName(p)}` : `Person: ${lr.recordId}`;
+
+    for (const q of quotes) {
+      const clientName = quoteClientDisplayName(q, people, organisations);
+      const workSummary = quoteWorkTypeSummary(q, values);
+      items.push({
+        recordType: 'quote',
+        recordId: q.id,
+        typeLabel: 'Quote',
+        reference: q.reference,
+        title: `${q.reference} — ${clientName}`,
+        subtitle: q.scope || workSummary,
+        href: `/quotes/${q.id}`,
+        searchText: `quote ${q.reference} ${q.id} ${clientName} ${q.prospectName ?? ''} ${q.prospectOrganisationName ?? ''} ${q.prospectEmail ?? ''} ${q.prospectPhone ?? ''} ${q.scope ?? ''} ${workSummary}`.toLowerCase(),
+      });
     }
-    const o = organisations.find((x) => x.id === lr.recordId);
-    return o ? `Organisation: ${o.legalName}` : `Organisation: ${lr.recordId}`;
+
+    for (const o of organisations) {
+      if (o.mergedIntoId) continue;
+      const trading = (o.otherNames ?? []).map((n) => n.name).join(', ');
+      items.push({
+        recordType: 'organisation',
+        recordId: o.id,
+        typeLabel: 'Organisation',
+        reference: o.id,
+        title: o.legalName,
+        subtitle: [trading, o.companyNumber ? `Co. ${o.companyNumber}` : '', o.generalEmail]
+          .filter(Boolean)
+          .join(' · '),
+        href: `/organisations/${o.id}`,
+        searchText: `organisation organization ${o.legalName} ${o.id} ${trading} ${o.companyNumber ?? ''} ${o.generalEmail ?? ''}`.toLowerCase(),
+      });
+    }
+
+    for (const p of people) {
+      if (p.mergedIntoId) continue;
+      const name = personDisplayName(p);
+      const email = primaryEmail(p);
+      const phone = primaryPhone(p);
+      items.push({
+        recordType: 'person',
+        recordId: p.id,
+        typeLabel: 'Person',
+        reference: p.id,
+        title: name,
+        subtitle: [email, phone].filter(Boolean).join(' · '),
+        href: `/people/${p.id}`,
+        searchText: `person ${name} ${p.id} ${email} ${phone}`.toLowerCase(),
+      });
+    }
+
+    return items;
+  }, [matters, enquiries, quotes, organisations, people, values]);
+
+  const matchingSearchRecords = useMemo(() => {
+    const tokens = recordSearchQuery
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (tokens.length === 0) return [];
+
+    return searchableRecords
+      .filter((item) => {
+        if (
+          linkedRecords.some(
+            (lr) => lr.recordType === item.recordType && lr.recordId === item.recordId,
+          )
+        ) {
+          return false;
+        }
+        return tokens.every((tok) => item.searchText.includes(tok));
+      })
+      .slice(0, 12);
+  }, [recordSearchQuery, searchableRecords, linkedRecords]);
+
+  const resolveLinkedItem = (lr: TaskLinkedRecord) => {
+    const found = searchableRecords.find(
+      (item) => item.recordType === lr.recordType && item.recordId === lr.recordId,
+    );
+    if (found) {
+      return {
+        typeLabel: found.typeLabel,
+        label: found.title,
+        href: found.href,
+      };
+    }
+    const typeLabel =
+      lr.recordType.charAt(0).toUpperCase() + lr.recordType.slice(1);
+    return {
+      typeLabel,
+      label: lr.recordId,
+      href: recordHref({ id: lr.recordId, recordType: lr.recordType }),
+    };
   };
 
-  const handleAddLink = () => {
-    if (!linkRecordId) return;
-    if (
-      linkedRecords.some(
-        (lr) => lr.recordType === linkRecordType && lr.recordId === linkRecordId,
-      )
-    ) {
-      return;
-    }
-    setLinkedRecords((prev) => [...prev, { recordType: linkRecordType, recordId: linkRecordId }]);
-    setLinkRecordId('');
+  const handleSelectRecord = (item: Pick<SearchableRecordItem, 'recordType' | 'recordId'>) => {
+    setLinkedRecords((prev) => {
+      if (
+        prev.some(
+          (lr) => lr.recordType === item.recordType && lr.recordId === item.recordId,
+        )
+      ) {
+        return prev;
+      }
+      return [...prev, { recordType: item.recordType, recordId: item.recordId }];
+    });
+    setRecordSearchQuery('');
   };
 
   const handleSubmit = (payload: CreateTaskSubmitPayload) => {
@@ -248,62 +349,187 @@ export function TaskFormClient({
             </div>
             {linkedRecords.length > 0 ? (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-                {linkedRecords.map((lr) => (
-                  <span key={`${lr.recordType}-${lr.recordId}`} className="tag-chip">
-                    {resolveLinkedLabel(lr)}
-                    <button
-                      type="button"
-                      aria-label={`Remove ${lr.recordId}`}
-                      onClick={() =>
-                        setLinkedRecords((prev) =>
-                          prev.filter(
-                            (x) =>
-                              !(x.recordType === lr.recordType && x.recordId === lr.recordId),
-                          ),
-                        )
-                      }
+                {linkedRecords.map((lr) => {
+                  const info = resolveLinkedItem(lr);
+                  return (
+                    <span
+                      key={`${lr.recordType}-${lr.recordId}`}
+                      className="tag-chip"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
                     >
-                      ×
-                    </button>
-                  </span>
-                ))}
+                      <span
+                        style={{
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.03em',
+                          color: '#475569',
+                        }}
+                      >
+                        {info.typeLabel}:
+                      </span>
+                      <Link
+                        href={info.href}
+                        style={{ color: 'inherit', textDecoration: 'underline' }}
+                      >
+                        {info.label}
+                      </Link>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${lr.recordId}`}
+                        onClick={() =>
+                          setLinkedRecords((prev) =>
+                            prev.filter(
+                              (x) =>
+                                !(x.recordType === lr.recordType && x.recordId === lr.recordId),
+                            ),
+                          )
+                        }
+                      >
+                        ×
+                      </button>
+                    </span>
+                  );
+                })}
               </div>
             ) : null}
-            <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr auto', gap: 8 }}>
-              <select
-                className="field-select"
-                aria-label="Linked record type"
-                value={linkRecordType}
-                onChange={(e) => {
-                  setLinkRecordType(e.target.value as TaskLinkedRecordType);
-                  setLinkRecordId('');
-                }}
-              >
-                <option value="matter">Matter</option>
-                <option value="enquiry">Enquiry</option>
-                <option value="person">Person</option>
-                <option value="organisation">Organisation</option>
-              </select>
-              <select
-                className="field-select"
-                aria-label="Select record to link"
-                value={linkRecordId}
-                onChange={(e) => setLinkRecordId(e.target.value)}
-              >
-                <option value="">Select record…</option>
-                {availableRecordsForType.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className="btn btn--secondary btn--sm"
-                onClick={handleAddLink}
-              >
-                Add link
-              </button>
+
+            <div style={{ position: 'relative' }}>
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                <Search
+                  size={15}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    left: 10,
+                    color: '#64748b',
+                    pointerEvents: 'none',
+                  }}
+                />
+                <input
+                  type="search"
+                  className="field-input"
+                  aria-label="Search linked records"
+                  placeholder="Search for a matter, enquiry, quote, organisation or person…"
+                  style={{ paddingLeft: 32, width: '100%' }}
+                  value={recordSearchQuery}
+                  onFocus={() => setRecordSearchFocused(true)}
+                  onBlur={() => {
+                    // Delay closing slightly so mousedown/click on a result item registers
+                    setTimeout(() => setRecordSearchFocused(false), 150);
+                  }}
+                  onChange={(e) => setRecordSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && matchingSearchRecords.length > 0) {
+                      e.preventDefault();
+                      handleSelectRecord(matchingSearchRecords[0]);
+                    }
+                  }}
+                />
+              </div>
+
+              {recordSearchQuery.trim().length > 0 && recordSearchFocused ? (
+                <div
+                  role="listbox"
+                  aria-label="Matching records"
+                  style={{
+                    marginTop: 4,
+                    border: '1px solid #cbd5e1',
+                    borderRadius: 8,
+                    background: '#ffffff',
+                    boxShadow: '0 8px 20px rgba(15, 23, 42, 0.08)',
+                    maxHeight: 260,
+                    overflowY: 'auto',
+                  }}
+                >
+                  {matchingSearchRecords.length === 0 ? (
+                    <div
+                      className="muted"
+                      style={{ padding: '10px 12px', fontSize: 12.5 }}
+                    >
+                      No matching matters, enquiries, quotes, organisations or people found.
+                    </div>
+                  ) : (
+                    matchingSearchRecords.map((item) => (
+                      <div
+                        key={`${item.recordType}-${item.recordId}`}
+                        role="option"
+                        aria-selected={false}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          handleSelectRecord(item);
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 10,
+                          padding: '8px 12px',
+                          borderBottom: '1px solid #f1f5f9',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              fontSize: 13,
+                              fontWeight: 600,
+                              color: '#0f172a',
+                            }}
+                          >
+                            <span
+                              style={{
+                                fontSize: 10.5,
+                                fontWeight: 700,
+                                textTransform: 'uppercase',
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                background: '#f1f5f9',
+                                color: '#334155',
+                                flexShrink: 0,
+                              }}
+                            >
+                              {item.typeLabel}
+                            </span>
+                            <span
+                              style={{
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {item.title}
+                            </span>
+                          </div>
+                          {item.subtitle ? (
+                            <div
+                              className="muted"
+                              style={{
+                                fontSize: 11.5,
+                                marginTop: 2,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {item.subtitle}
+                            </div>
+                          ) : null}
+                        </div>
+                        <span
+                          className="btn btn--secondary btn--sm"
+                          style={{ flexShrink: 0, pointerEvents: 'none' }}
+                        >
+                          + Add link
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              ) : null}
             </div>
           </div>
         }

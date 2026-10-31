@@ -7,6 +7,7 @@ import { formatDate, formatDateTime } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { hrefForId, personDisplayName } from '@/domain/names';
+import { quoteClientDisplayName } from '@/domain/quotes';
 import { canUserReassignTask, canUserTakeTask, isTaskOpen, isTaskOverdue } from '@/domain/tasks';
 import type {
   AuditEntry,
@@ -15,6 +16,7 @@ import type {
   Matter,
   Organisation,
   Person,
+  Quote,
   Task,
   TaskLinkedRecord,
   TaskLinkedRecordType,
@@ -31,6 +33,7 @@ interface Props {
   organisations: Organisation[];
   matters: Matter[];
   enquiries: Enquiry[];
+  quotes?: Quote[];
   values: ChoiceValue[];
   audit: AuditEntry[];
   currentUserId: string;
@@ -43,6 +46,7 @@ export function TaskDetailClient({
   organisations,
   matters,
   enquiries,
+  quotes = [],
   values,
   audit,
   currentUserId,
@@ -100,6 +104,12 @@ export function TaskDetailClient({
         ? `Enquiry: ${e.reference} — ${enquiryDisplayName(e)} (${e.summary})`
         : `Enquiry: ${lr.recordId}`;
     }
+    if (lr.recordType === 'quote') {
+      const q = quotes.find((x) => x.id === lr.recordId);
+      return q
+        ? `Quote: ${q.reference} — ${quoteClientDisplayName(q, people, organisations)}`
+        : `Quote: ${lr.recordId}`;
+    }
     if (lr.recordType === 'matter') {
       const m = matters.find((x) => x.id === lr.recordId);
       return m ? `Matter: ${m.matterNumber} — ${m.title}` : `Matter: ${lr.recordId}`;
@@ -117,6 +127,12 @@ export function TaskDetailClient({
       return enquiries.map((e) => ({
         id: e.id,
         label: `${e.reference} — ${enquiryDisplayName(e)} (${e.summary})`,
+      }));
+    }
+    if (linkRecordType === 'quote') {
+      return quotes.map((q) => ({
+        id: q.id,
+        label: `${q.reference} — ${quoteClientDisplayName(q, people, organisations)}`,
       }));
     }
     if (linkRecordType === 'matter') {
@@ -139,7 +155,7 @@ export function TaskDetailClient({
         id: o.id,
         label: `${o.legalName} (${o.id})`,
       }));
-  }, [linkRecordType, enquiries, matters, people, organisations]);
+  }, [linkRecordType, enquiries, quotes, matters, people, organisations]);
 
   const overdue = isTaskOverdue(task);
   const canTake = canUserTakeTask(currentUserId, task, teams, people, values);
@@ -485,6 +501,7 @@ export function TaskDetailClient({
                   }}
                 >
                   <option value="enquiry">Enquiry</option>
+                  <option value="quote">Quote</option>
                   <option value="matter">Matter</option>
                   <option value="person">Person</option>
                   <option value="organisation">Organisation</option>

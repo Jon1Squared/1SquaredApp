@@ -9,6 +9,7 @@ import { formatDate, formatDateTime, formatKeyDateSummary } from '@/domain/dates
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { hrefForId, personDisplayName } from '@/domain/names';
+import { quoteClientDisplayName } from '@/domain/quotes';
 import {
   isTaskOpen,
   isTaskOverdue,
@@ -22,6 +23,7 @@ import type {
   Matter,
   Organisation,
   Person,
+  Quote,
   Task,
   Team,
 } from '@/domain/types';
@@ -43,6 +45,7 @@ interface Props {
   organisations: Organisation[];
   matters: Matter[];
   enquiries: Enquiry[];
+  quotes?: Quote[];
   values: ChoiceValue[];
   currentUserId: string;
 }
@@ -108,6 +111,7 @@ export function TasksListClient({
   organisations,
   matters,
   enquiries,
+  quotes = [],
   values,
   currentUserId,
 }: Props) {
@@ -165,6 +169,14 @@ export function TasksListClient({
         title: e ? enquiryDisplayName(e, 'Unnamed enquiry') : recordId,
         reference: e ? e.reference : recordId,
         typeLabel: 'Enquiry',
+      };
+    }
+    if (recordType === 'quote') {
+      const q = quotes.find((x) => x.id === recordId);
+      return {
+        title: q ? quoteClientDisplayName(q, people, organisations) : recordId,
+        reference: q ? q.reference : recordId,
+        typeLabel: 'Quote',
       };
     }
     if (recordType === 'matter') {
@@ -474,15 +486,6 @@ export function TasksListClient({
       <div className="page-header">
         <div>
           <h1>Tasks</h1>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Work assigned to people and teams across enquiries, matters, people and
-            organisations. Overdue and high-priority tasks are pinned to the top.
-          </p>
-        </div>
-        <div className="page-header__actions">
-          <Link href="/tasks/new" className="btn btn--primary">
-            + New task
-          </Link>
         </div>
       </div>
 
@@ -525,6 +528,20 @@ export function TasksListClient({
             All open ({allOpenCount})
           </button>
         )}
+        <div
+          style={{
+            marginLeft: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            paddingBottom: 6,
+            flexShrink: 0,
+          }}
+        >
+          <Link href="/tasks/new" className="btn btn--primary">
+            + New task
+          </Link>
+        </div>
       </div>
 
       <DataListFilterBar
@@ -625,6 +642,7 @@ export function TasksListClient({
               >
                 <option value="all">All record types</option>
                 <option value="enquiry">Enquiry</option>
+                <option value="quote">Quote</option>
                 <option value="matter">Matter</option>
                 <option value="person">Person</option>
                 <option value="organisation">Organisation</option>

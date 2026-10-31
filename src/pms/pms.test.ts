@@ -273,5 +273,71 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     });
     expect(callHandlerItems.some((i) => i.kind.startsWith('pms_'))).toBe(false);
   });
+
+  it('builds two-way outbound PMS commands and reconciles inbound commercials respecting System-of-Record ownership', async () => {
+    const {
+      buildPmsOutboundMatterCommand,
+      reconcilePmsInboundMatterCommercials,
+    } = await import('@/domain/pms');
+    const { getAppSnapshot } = await import('@/server/services');
+    const { getActiveTenantConfiguration } = await import('@/platform/tenantRuntime');
+
+    const snap = getAppSnapshot();
+    const tenantConfig = getActiveTenantConfiguration();
+    const mappings = tenantConfig.integrations.pmsSync?.fieldMappings ?? [];
+    expect(mappings.length).toBeGreaterThan(0);
+
+    const matter = snap.matters[0]!;
+    const cmd = buildPmsOutboundMatterCommand({
+      commandId: 'PMSO-000001',
+      tenantId: tenantConfig.tenantId,
+      correlationId: 'corr-sync-001',
+      commandType: 'update_matter_commercials',
+      matter: {
+        ...matter,
+        feeEstimateGbp: 18500,
+        agreedFeeCapGbp: 20000,
+        fieldValues: { ...matter.fieldValues, 'CORE-050': 'PO-9988' },
+      },
+      pmsLinks: snap.pmsLinks,
+      fieldMappings: mappings,
+      values: snap.values,
+      createdById: 'P-000001',
+    });
+
+    expect(cmd.tenantId).toBe('not-a-law-firm');
+    expect(cmd.mappedFields.matter_description).toBe(matter.title);
+    expect(cmd.mappedFields.fee_estimate).toBe(18500);
+    expect(cmd.mappedFields.fixed_fee_amount).toBe(20000);
+    expect(cmd.mappedFields.client_reference).toBe('PO-9988');
+
+    // Inbound reconciliation: bidirectional fee_estimate updates 1Squared, while onesquared_master title reports a discrepancy without overwriting
+    const source = new DemoDbPmsSource();
+    const pmsRow = source.getAllMatterFinancials()[0]!;
+    const reconciled = reconcilePmsInboundMatterCommercials(
+      {
+        ...matter,
+        title: '1Squared Master Title',
+        feeEstimateGbp: 10000,
+      },
+      {
+        ...pmsRow,
+        matter_description: 'External PMS Different Title',
+        fee_estimate: 24500,
+      },
+      mappings,
+      snap.values,
+    );
+
+    expect(reconciled.updatedMatterFields.feeEstimateGbp).toBe(24500);
+    expect(reconciled.updatedMatterFields.title).toBeUndefined();
+    expect(
+      reconciled.discrepancies.some(
+        (d) =>
+          d.onesquaredFieldKey === 'title' &&
+          d.ownership === 'onesquared_master',
+      ),
+    ).toBe(true);
+  });
 });
 

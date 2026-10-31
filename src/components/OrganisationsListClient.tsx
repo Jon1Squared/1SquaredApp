@@ -443,14 +443,6 @@ export function OrganisationsListClient({
       <div className="page-header">
         <div>
           <h1>Organisations</h1>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Corporate clients, prospects, referrers, counterparties and suppliers.
-          </p>
-        </div>
-        <div className="page-header__actions">
-          <Link href="/organisations/new" className="btn btn--primary">
-            + New organisation
-          </Link>
         </div>
       </div>
 
@@ -500,6 +492,20 @@ export function OrganisationsListClient({
         >
           Archived ({archivedCount})
         </button>
+        <div
+          style={{
+            marginLeft: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            paddingBottom: 6,
+            flexShrink: 0,
+          }}
+        >
+          <Link href="/organisations/new" className="btn btn--primary">
+            + New organisation
+          </Link>
+        </div>
       </div>
 
       <DataListFilterBar

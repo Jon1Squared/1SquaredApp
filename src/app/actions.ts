@@ -9,6 +9,7 @@ import type {
   ConflictCheckRecord,
   ContactLogMethod,
   ContactLogOutcome,
+  CustomFieldRecordType,
   CustomFieldType,
   EmployeeSensitiveRecord,
   EmploymentRecord,
@@ -302,7 +303,7 @@ export async function createMatterStageGroupAction(input: {
 
 export async function saveCustomFieldAction(input: {
   id?: string;
-  recordType: RecordType;
+  recordType: CustomFieldRecordType;
   label: string;
   fieldType: CustomFieldType;
   section: FormSection;

@@ -105,6 +105,108 @@
           "type": "string",
           "enum": ["azure_openai_uk", "disabled"],
           "default": "disabled"
+        },
+        "pmsSync": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Two-way Finance/PMS synchronisation settings and field mappings",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "providerKey": { "type": "string", "default": "generic_sql" },
+            "syncMode": {
+              "type": "string",
+              "enum": ["read_only", "two_way"],
+              "default": "two_way"
+            },
+            "matterCodeAllocation": {
+              "type": "string",
+              "enum": ["onesquared", "pms_on_open"],
+              "default": "onesquared"
+            },
+            "clientCodeAllocation": {
+              "type": "string",
+              "enum": ["onesquared", "pms_on_open"],
+              "default": "onesquared"
+            },
+            "pollIntervalMinutes": { "type": "integer", "default": 15 },
+            "fieldMappings": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "entityType",
+                  "onesquaredFieldKey",
+                  "externalFieldKey",
+                  "ownership",
+                  "active"
+                ],
+                "properties": {
+                  "id": { "type": "string" },
+                  "entityType": {
+                    "type": "string",
+                    "enum": [
+                      "client_organisation",
+                      "client_person",
+                      "matter",
+                      "fee_estimate",
+                      "employee"
+                    ]
+                  },
+                  "onesquaredFieldKey": { "type": "string" },
+                  "externalFieldKey": { "type": "string" },
+                  "ownership": {
+                    "type": "string",
+                    "enum": ["onesquared_master", "pms_master", "bidirectional"],
+                    "default": "onesquared_master"
+                  },
+                  "active": { "type": "boolean", "default": true }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "customFields": {
+      "type": "array",
+      "description": "Per-client custom fields, screen locations, and mandatory rules",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "recordType",
+          "label",
+          "fieldType",
+          "section",
+          "required",
+          "sortOrder",
+          "active"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "recordType": {
+            "type": "string",
+            "enum": ["enquiry", "person", "organisation", "matter", "quote", "task"]
+          },
+          "label": { "type": "string" },
+          "fieldType": {
+            "type": "string",
+            "enum": ["text", "longText", "number", "date", "yesNo", "choice"]
+          },
+          "optionsListKey": { "type": "string" },
+          "options": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "section": { "type": "string", "default": "additional" },
+          "required": { "type": "boolean", "default": false },
+          "sortOrder": { "type": "integer", "default": 1 },
+          "active": { "type": "boolean", "default": true }
         }
       }
     },

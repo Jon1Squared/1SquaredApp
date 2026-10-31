@@ -38,6 +38,7 @@ export default async function EnquiryDetailPage({
       enquiries={snap.enquiries}
       teams={snap.teams}
       values={snap.values}
+      customFields={snap.customFields}
       enquirySettings={snap.enquirySettings}
       currentUserId={snap.currentUserId}
     />

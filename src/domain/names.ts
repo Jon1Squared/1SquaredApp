@@ -37,6 +37,7 @@ export function primaryPhone(p: Person): string {
 export function recordHref(r: { id: string; recordType: string }): string {
   if (r.recordType === 'matter') return `/matters/${r.id}`;
   if (r.recordType === 'enquiry') return `/enquiries/${r.id}`;
+  if (r.recordType === 'quote') return `/quotes/${r.id}`;
   if (r.recordType === 'task') return `/tasks/${r.id}`;
   return r.recordType === 'person' ? `/people/${r.id}` : `/organisations/${r.id}`;
 }
@@ -44,6 +45,7 @@ export function recordHref(r: { id: string; recordType: string }): string {
 export function hrefForId(id: string): string {
   if (id.startsWith('M-')) return `/matters/${id}`;
   if (id.startsWith('ENQ-')) return `/enquiries/${id}`;
+  if (id.startsWith('QTE-')) return `/quotes/${id}`;
   if (id.startsWith('TSK-')) return `/tasks/${id}`;
   return id.startsWith('P-') ? `/people/${id}` : `/organisations/${id}`;
 }

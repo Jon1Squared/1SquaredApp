@@ -13,6 +13,8 @@ import type {
   MatterCostsHookInput,
   MatterCostsHookResult,
   PlatformExtension,
+  PmsOutboundCommand,
+  PmsOutboundSyncResult,
   TenantConfiguration,
   TenantContext,
 } from '../api/index';
@@ -150,6 +152,74 @@ export class ExtensionHost {
       requiresPartnerSignOff,
       governanceWarnings: aggregatedWarnings,
       allowProceed,
+    };
+  }
+
+  public async executePmsOutboundCommandHook(
+    tenantCtx: TenantContext,
+    tenantConfig: TenantConfiguration,
+    command: PmsOutboundCommand,
+  ): Promise<PmsOutboundSyncResult> {
+    if (
+      tenantCtx.tenantId !== tenantConfig.tenantId ||
+      command.tenantId !== tenantCtx.tenantId
+    ) {
+      throw new Error(
+        'EXTENSION_TENANT_MISMATCH: TenantContext, TenantConfiguration, and PmsOutboundCommand must belong to the same tenant.',
+      );
+    }
+
+    const active = this.getActiveExtensionsForTenant(tenantConfig);
+    const scopedContext: ExtensionExecutionContext = Object.freeze({
+      tenant: Object.freeze({
+        tenantId: tenantCtx.tenantId,
+        hostingMode: tenantCtx.hostingMode,
+        environment: tenantCtx.environment,
+        correlationId: tenantCtx.correlationId,
+        actorRoles: tenantCtx.actorRoles,
+      }),
+      config: Object.freeze({ ...tenantConfig }),
+    });
+
+    for (const ext of active) {
+      const fn = ext.hooks.onPmsOutboundCommand;
+      if (!fn) continue;
+
+      const timeoutMs =
+        ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
+
+      try {
+        const result = await Promise.race<PmsOutboundSyncResult>([
+          Promise.resolve(fn(scopedContext, command)),
+          new Promise<PmsOutboundSyncResult>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
+                  ),
+                ),
+              timeoutMs,
+            ),
+          ),
+        ]);
+        return result;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'Unknown error';
+        return {
+          commandId: command.id,
+          status: 'Failed',
+          syncedAt: new Date().toISOString(),
+          errorMessage: `[Extension isolated error: ${ext.manifest.id}] ${reason}`,
+        };
+      }
+    }
+
+    return {
+      commandId: command.id,
+      status: 'Pending',
+      syncedAt: new Date().toISOString(),
+      errorMessage: null,
     };
   }
 }

@@ -2,6 +2,7 @@
  * Domain rules for Enquiries: validation, live duplicate checks, conflict pre-checks,
  * failed contact attempt tracking, sorting, and retention anonymisation.
  */
+import { activeDefinitions, isCustomFieldValueMissing } from './customFields';
 import { addMonths, isBefore } from './dates';
 import {
   findOrganisationDuplicates,
@@ -33,6 +34,7 @@ import {
 import { isUserTeamLeadFor, resolveUserAppRole } from './tasks';
 import type {
   ChoiceValue,
+  CustomFieldDefinition,
   Enquiry,
   EnquiryConflictSnapshot,
   EnquiryConflictStatus,
@@ -71,15 +73,19 @@ export function enquiryDisplayName(
  * Returns the ordered list of human-readable field names still required before a draft or new enquiry
  * can be routed to a practice area team.
  */
-export function getMissingRoutingFields(input: {
-  firstName?: string;
-  lastName?: string;
-  email?: string;
-  phone?: string;
-  practiceAreaId?: string;
-  summary?: string;
-  notes?: string;
-}): string[] {
+export function getMissingRoutingFields(
+  input: {
+    firstName?: string;
+    lastName?: string;
+    email?: string;
+    phone?: string;
+    practiceAreaId?: string;
+    summary?: string;
+    notes?: string;
+    customFields?: Record<string, unknown>;
+  },
+  customFieldDefs: CustomFieldDefinition[] = [],
+): string[] {
   const list: string[] = [];
   if (!input.firstName?.trim()) list.push('first name');
   if (!input.lastName?.trim()) list.push('last name');
@@ -87,6 +93,14 @@ export function getMissingRoutingFields(input: {
   if (!input.practiceAreaId?.trim()) list.push('practice area');
   if (!input.summary?.trim()) list.push('summary');
   if (!input.notes?.trim()) list.push('enquiry notes');
+
+  const activeEnquiryDefs = activeDefinitions(customFieldDefs, 'enquiry');
+  const submittedCf = input.customFields ?? {};
+  for (const def of activeEnquiryDefs) {
+    if (isCustomFieldValueMissing(def, submittedCf[def.id])) {
+      list.push(def.label.toLowerCase());
+    }
+  }
   return list;
 }
 
@@ -1461,6 +1475,7 @@ export interface EnquiryFormState {
   otherPartiesNamed: string;
   urgencyId: string;
   keyDate: string;
+  customFields?: Record<string, unknown>;
 }
 
 export function extractEnquiryFormInitialState(
@@ -1496,10 +1511,15 @@ export function extractEnquiryFormInitialState(
     otherPartiesNamed: enquiry?.otherPartiesNamed ?? '',
     urgencyId: enquiry?.urgencyId || defaults.urgencyId || '',
     keyDate: enquiry?.keyDate ?? '',
+    ...(enquiry?.customFields && Object.keys(enquiry.customFields).length > 0
+      ? { customFields: { ...enquiry.customFields } }
+      : {}),
   };
 }
 
 export function isEnquiryFormDirty(current: EnquiryFormState, baseline: EnquiryFormState): boolean {
+  const cfCurrent = JSON.stringify(current.customFields ?? {});
+  const cfBaseline = JSON.stringify(baseline.customFields ?? {});
   return (
     current.channelId !== baseline.channelId ||
     current.firstName !== baseline.firstName ||
@@ -1525,7 +1545,8 @@ export function isEnquiryFormDirty(current: EnquiryFormState, baseline: EnquiryF
     current.notes !== baseline.notes ||
     current.otherPartiesNamed !== baseline.otherPartiesNamed ||
     current.urgencyId !== baseline.urgencyId ||
-    current.keyDate !== baseline.keyDate
+    current.keyDate !== baseline.keyDate ||
+    cfCurrent !== cfBaseline
   );
 }
 

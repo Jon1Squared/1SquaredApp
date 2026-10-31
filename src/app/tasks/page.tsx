@@ -15,6 +15,7 @@ export default async function TasksPage() {
       organisations={snap.organisations}
       matters={snap.matters}
       enquiries={snap.enquiries}
+      quotes={snap.quotes}
       values={snap.values}
       currentUserId={snap.currentUserId}
     />

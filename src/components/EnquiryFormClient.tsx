@@ -16,6 +16,11 @@ import {
 } from '@/app/actions';
 import { enquiryStatusTone, urgencyTone } from '@/domain/badges';
 import {
+  activeDefinitions,
+  isCustomFieldValueMissing,
+  validateCustomFields,
+} from '@/domain/customFields';
+import {
   formatDate,
   formatDateTime,
   formatKeyDateCountdown,
@@ -55,6 +60,7 @@ import type {
   ChoiceValue,
   ContactLogMethod,
   ContactLogOutcome,
+  CustomFieldDefinition,
   Enquiry,
   EnquirySentEmailSnapshot,
   EnquirySettings,
@@ -71,6 +77,7 @@ import {
   type CreateTaskSubmitPayload,
   type SuggestedTaskAssignee,
 } from './CreateTaskModal';
+import { CustomFieldGroupItems } from './FormControls';
 import { InfoPopover } from './InfoPopover';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -96,6 +103,7 @@ interface Props {
   enquiries?: Enquiry[];
   teams: Team[];
   values: ChoiceValue[];
+  customFields?: CustomFieldDefinition[];
   enquirySettings?: EnquirySettings;
   currentUserId: string;
 }
@@ -139,6 +147,7 @@ export function EnquiryFormClient({
   enquiries = [],
   teams,
   values,
+  customFields = [],
   enquirySettings,
   currentUserId,
 }: Props) {
@@ -303,6 +312,38 @@ export function EnquiryFormClient({
   const [keyDate, setKeyDate] = useState(initialFormState.keyDate);
   const [keyDateLabel, setKeyDateLabel] = useState(enquiry?.keyDateLabel ?? '');
 
+  // Client-configured custom fields on the Enquiry screen
+  const [cfValues, setCfValues] = useState<Record<string, unknown>>(
+    initialFormState.customFields ?? {},
+  );
+
+  const enquiryCustomDefs = useMemo(
+    () => activeDefinitions(customFields, 'enquiry'),
+    [customFields],
+  );
+  const callerCustomDefs = useMemo(
+    () => enquiryCustomDefs.filter((d) => d.section === 'enquiry_caller'),
+    [enquiryCustomDefs],
+  );
+  const contactCustomDefs = useMemo(
+    () => enquiryCustomDefs.filter((d) => d.section === 'enquiry_contact'),
+    [enquiryCustomDefs],
+  );
+  const enquiryDetailsCustomDefs = useMemo(
+    () => enquiryCustomDefs.filter((d) => d.section === 'enquiry_details'),
+    [enquiryCustomDefs],
+  );
+  const additionalCustomDefs = useMemo(
+    () =>
+      enquiryCustomDefs.filter(
+        (d) =>
+          d.section !== 'enquiry_caller' &&
+          d.section !== 'enquiry_contact' &&
+          d.section !== 'enquiry_details',
+      ),
+    [enquiryCustomDefs],
+  );
+
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   // Save bar & dirty tracking state
@@ -406,6 +447,7 @@ export function EnquiryFormClient({
       otherPartiesNamed,
       urgencyId,
       keyDate,
+      customFields: cfValues,
     }),
     [
       channelId,
@@ -433,6 +475,7 @@ export function EnquiryFormClient({
       otherPartiesNamed,
       urgencyId,
       keyDate,
+      cfValues,
     ],
   );
 
@@ -486,16 +529,20 @@ export function EnquiryFormClient({
   // Clear "Still needed" banner as soon as all missing fields are completed
   const missingItems = useMemo(
     () =>
-      getMissingRoutingFields({
-        firstName,
-        lastName,
-        phone,
-        email,
-        practiceAreaId,
-        summary,
-        notes,
-      }),
-    [firstName, lastName, phone, email, practiceAreaId, summary, notes],
+      getMissingRoutingFields(
+        {
+          firstName,
+          lastName,
+          phone,
+          email,
+          practiceAreaId,
+          summary,
+          notes,
+          customFields: cfValues,
+        },
+        customFields,
+      ),
+    [firstName, lastName, phone, email, practiceAreaId, summary, notes, cfValues, customFields],
   );
 
   useEffect(() => {
@@ -673,10 +720,22 @@ export function EnquiryFormClient({
     );
   }, [useRecordedSnapshot, savedSnapshot, liveEntityMatches, conflictKeys, organisations]);
 
-  const callerMissingCount = (!firstName.trim() ? 1 : 0) + (!lastName.trim() ? 1 : 0);
-  const hasContactInfo = Boolean(phone.trim() || email.trim());
+  const callerMissingCount =
+    (!firstName.trim() ? 1 : 0) +
+    (!lastName.trim() ? 1 : 0) +
+    callerCustomDefs.filter((d) => isCustomFieldValueMissing(d, cfValues[d.id])).length;
+  const contactCustomMissingCount = contactCustomDefs.filter((d) =>
+    isCustomFieldValueMissing(d, cfValues[d.id]),
+  ).length;
+  const hasContactInfo = Boolean(phone.trim() || email.trim()) && contactCustomMissingCount === 0;
   const enquiryMissingCount =
-    (!practiceAreaId ? 1 : 0) + (!summary.trim() ? 1 : 0) + (!notes.trim() ? 1 : 0);
+    (!practiceAreaId ? 1 : 0) +
+    (!summary.trim() ? 1 : 0) +
+    (!notes.trim() ? 1 : 0) +
+    enquiryDetailsCustomDefs.filter((d) => isCustomFieldValueMissing(d, cfValues[d.id])).length;
+  const additionalMissingCount = additionalCustomDefs.filter((d) =>
+    isCustomFieldValueMissing(d, cfValues[d.id]),
+  ).length;
 
   // Quick conflict check per-field threshold & distinct record count
   const hasSearchInputs = useMemo(
@@ -884,6 +943,14 @@ export function EnquiryFormClient({
       if (!notes.trim()) {
         nextErrors.notes = 'Provide enquiry notes.';
       }
+      const cfVal = validateCustomFields(
+        customFields,
+        'enquiry',
+        cfValues,
+        enquiry?.customFields ?? {},
+        values,
+      );
+      Object.assign(nextErrors, cfVal.errors);
       setErrors(nextErrors);
       showToast(`Still needed: ${missingItems.join(', ')}`);
       return;
@@ -930,6 +997,7 @@ export function EnquiryFormClient({
           sourceId: sourceId || null,
           referrerPersonId: enquiry?.referrerPersonId ?? null,
           privacyNoticeGiven,
+          customFields: cfValues,
         },
         { id: enquiry?.id, asDraft },
       );
@@ -2215,6 +2283,14 @@ export function EnquiryFormClient({
                     ))}
                   </select>
                 </div>
+
+                <CustomFieldGroupItems
+                  definitions={callerCustomDefs}
+                  values={values}
+                  fieldValues={cfValues}
+                  errors={errors}
+                  onChange={setCfValues}
+                />
               </div>
               {errors.name ? <span className="field-error">{errors.name}</span> : null}
             </section>
@@ -2230,7 +2306,11 @@ export function EnquiryFormClient({
                 <span
                   className={`new-enquiry-badge ${hasContactInfo ? 'new-enquiry-badge--ok' : ''}`}
                 >
-                  {hasContactInfo ? 'Complete' : 'Phone or email'}
+                  {hasContactInfo
+                    ? 'Complete'
+                    : !phone.trim() && !email.trim()
+                      ? 'Phone or email'
+                      : `${contactCustomMissingCount} required`}
                 </span>
               </div>
 
@@ -2306,6 +2386,14 @@ export function EnquiryFormClient({
                     onChange={(e) => setBestTimeToCall(e.target.value)}
                   />
                 </div>
+
+                <CustomFieldGroupItems
+                  definitions={contactCustomDefs}
+                  values={values}
+                  fieldValues={cfValues}
+                  errors={errors}
+                  onChange={setCfValues}
+                />
               </div>
 
               {/* ADDRESS SUBSECTION */}
@@ -2683,7 +2771,53 @@ export function EnquiryFormClient({
                 />
               </div>
             </div>
+
+            {enquiryDetailsCustomDefs.length > 0 ? (
+              <div className="form-grid-3">
+                <CustomFieldGroupItems
+                  definitions={enquiryDetailsCustomDefs}
+                  values={values}
+                  fieldValues={cfValues}
+                  errors={errors}
+                  onChange={setCfValues}
+                />
+              </div>
+            ) : null}
           </section>
+
+          {additionalCustomDefs.length > 0 ? (
+            <section
+              className="new-enquiry-card"
+              aria-labelledby="sec-enquiry-additional-heading"
+            >
+              <div className="new-enquiry-card__top">
+                <h2
+                  id="sec-enquiry-additional-heading"
+                  className="new-enquiry-card__label"
+                >
+                  4 · ADDITIONAL DETAILS
+                </h2>
+                <span
+                  className={`new-enquiry-badge ${
+                    additionalMissingCount === 0 ? 'new-enquiry-badge--ok' : ''
+                  }`}
+                >
+                  {additionalMissingCount === 0
+                    ? 'Complete'
+                    : `${additionalMissingCount} required`}
+                </span>
+              </div>
+              <div className="form-grid-3">
+                <CustomFieldGroupItems
+                  definitions={additionalCustomDefs}
+                  values={values}
+                  fieldValues={cfValues}
+                  errors={errors}
+                  onChange={setCfValues}
+                />
+              </div>
+            </section>
+          ) : null}
           </div>
 
           {/* ==============================================================

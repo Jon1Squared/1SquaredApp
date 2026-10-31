@@ -20,6 +20,12 @@ import {
   updateEmployeeRoleAction,
   updateEmployeeRolesAndSupportsAction,
 } from '@/app/actions';
+import {
+  CUSTOM_FIELD_SCREEN_OPTIONS,
+  formatSectionLocationLabel,
+  getDefaultSectionForRecordType,
+  getScreenFieldLocations,
+} from '@/domain/customFields';
 import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
 import { whereUsed } from '@/domain/fieldRegistry';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
@@ -33,6 +39,7 @@ import type {
   ChoiceList,
   ChoiceValue,
   CustomFieldDefinition,
+  CustomFieldRecordType,
   CustomFieldType,
   Enquiry,
   EnquirySettings,
@@ -317,12 +324,12 @@ export function AdminClient({
   };
 
   // Custom fields state
-  const [cfRecordType, setCfRecordType] = useState<RecordType>('person');
+  const [cfRecordType, setCfRecordType] = useState<CustomFieldRecordType>('enquiry');
   const [cfModalOpen, setCfModalOpen] = useState(false);
   const [editingCf, setEditingCf] = useState<CustomFieldDefinition | null>(null);
   const [cfLabel, setCfLabel] = useState('');
   const [cfType, setCfType] = useState<CustomFieldType>('text');
-  const [cfSection, setCfSection] = useState<FormSection>('additional');
+  const [cfSection, setCfSection] = useState<FormSection>('enquiry_details');
   const [cfRequired, setCfRequired] = useState(false);
   const [cfOptionsText, setCfOptionsText] = useState('');
 
@@ -638,7 +645,7 @@ export function AdminClient({
     setEditingCf(null);
     setCfLabel('');
     setCfType('text');
-    setCfSection('additional');
+    setCfSection(getDefaultSectionForRecordType(cfRecordType));
     setCfRequired(false);
     setCfOptionsText('');
     setCfModalOpen(true);
@@ -677,7 +684,43 @@ export function AdminClient({
             : undefined,
       });
       setCfModalOpen(false);
-      showToast('Custom field saved');
+      showToast('Custom field saved to client configuration');
+    });
+  };
+
+  const handleToggleCfRequired = (def: CustomFieldDefinition) => {
+    startTransition(async () => {
+      await saveCustomFieldAction({
+        id: def.id,
+        recordType: def.recordType,
+        label: def.label,
+        fieldType: def.fieldType,
+        section: def.section,
+        required: !def.required,
+        active: def.active,
+      });
+      showToast(
+        !def.required
+          ? `"${def.label}" is now mandatory`
+          : `"${def.label}" is now optional`,
+      );
+    });
+  };
+
+  const handleChangeCfLocation = (def: CustomFieldDefinition, nextSection: FormSection) => {
+    startTransition(async () => {
+      await saveCustomFieldAction({
+        id: def.id,
+        recordType: def.recordType,
+        label: def.label,
+        fieldType: def.fieldType,
+        section: nextSection,
+        required: def.required,
+        active: def.active,
+      });
+      showToast(
+        `Moved "${def.label}" to ${formatSectionLocationLabel(def.recordType, nextSection)}`,
+      );
     });
   };
 
@@ -2610,24 +2653,54 @@ export function AdminClient({
       {/* TAB: CUSTOM FIELDS */}
       {tab === 'custom-fields' && (
         <div>
+          <div
+            className="subcard"
+            style={{
+              marginBottom: 16,
+              borderLeft: '4px solid var(--accent-primary, #1f6feb)',
+              background: 'var(--surface-subtle, rgba(31, 111, 235, 0.04))',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                flexWrap: 'wrap',
+              }}
+            >
+              <div>
+                <strong style={{ fontSize: 14 }}>
+                  Client Custom Fields, Screen Locations &amp; Mandatory Rules
+                </strong>
+                <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+                  All core application fields remain available to every client. Additional client
+                  fields, their screen locations, and mandatory status are saved per client in{' '}
+                  <code>client-not-a-law-firm/config/base.json</code>.
+                </div>
+              </div>
+              <StatusPill label="Layer 2 · Client Configuration" tone="positive" />
+            </div>
+          </div>
+
           <div className="list-section__header" style={{ marginBottom: 18 }}>
-            <div className="filter-bar" style={{ margin: 0 }}>
-              <button
-                type="button"
-                className={`btn btn--sm ${cfRecordType === 'person' ? 'btn--primary' : 'btn--secondary'}`}
-                onClick={() => setCfRecordType('person')}
-              >
-                Person custom fields (
-                {customFields.filter((d) => d.recordType === 'person').length})
-              </button>
-              <button
-                type="button"
-                className={`btn btn--sm ${cfRecordType === 'organisation' ? 'btn--primary' : 'btn--secondary'}`}
-                onClick={() => setCfRecordType('organisation')}
-              >
-                Organisation custom fields (
-                {customFields.filter((d) => d.recordType === 'organisation').length})
-              </button>
+            <div className="filter-bar" style={{ margin: 0, flexWrap: 'wrap' }}>
+              {CUSTOM_FIELD_SCREEN_OPTIONS.map((scr) => {
+                const count = customFields.filter((d) => d.recordType === scr.recordType).length;
+                return (
+                  <button
+                    key={scr.recordType}
+                    type="button"
+                    className={`btn btn--sm ${
+                      cfRecordType === scr.recordType ? 'btn--primary' : 'btn--secondary'
+                    }`}
+                    onClick={() => setCfRecordType(scr.recordType)}
+                  >
+                    {scr.label} ({count})
+                  </button>
+                );
+              })}
             </div>
             <button type="button" className="btn btn--primary" onClick={openNewCfModal}>
               + Add custom field
@@ -2635,7 +2708,13 @@ export function AdminClient({
           </div>
 
           {cfForSelectedType.length === 0 ? (
-            <p className="muted">No custom fields defined for this record type.</p>
+            <p className="muted">
+              No custom fields configured for the{' '}
+              {CUSTOM_FIELD_SCREEN_OPTIONS.find((s) => s.recordType === cfRecordType)?.label ??
+                cfRecordType}
+              . Click <strong>+ Add custom field</strong> to add one and choose its location and
+              mandatory status.
+            </p>
           ) : (
             cfForSelectedType.map((def, idx) => {
               const opts = def.optionsListKey
@@ -2643,20 +2722,51 @@ export function AdminClient({
                     .filter((v) => v.active)
                     .map((v) => v.label)
                 : [];
+              const screenLocations = getScreenFieldLocations(def.recordType);
               return (
                 <div key={def.id} className="list-row">
                   <div className="list-row__main">
                     <div className="list-row__title">
                       {def.label}{' '}
-                      {def.required ? <StatusPill label="Required" tone="warning" /> : null}
+                      {def.required ? (
+                        <StatusPill label="Mandatory" tone="warning" />
+                      ) : (
+                        <StatusPill label="Optional" tone="neutral" />
+                      )}
                       {!def.active ? <StatusPill label="Inactive" tone="neutral" /> : null}
                     </div>
                     <div className="list-row__meta">
-                      Type: {FIELD_TYPE_LABELS[def.fieldType]} · Section: {def.section}
+                      Type: {FIELD_TYPE_LABELS[def.fieldType]} · Location:{' '}
+                      <strong>{formatSectionLocationLabel(def.recordType, def.section)}</strong>
                       {opts.length > 0 ? ` · Options: ${opts.join(', ')}` : ''}
                     </div>
                   </div>
-                  <div className="list-row__aside">
+                  <div className="list-row__aside" style={{ flexWrap: 'wrap', gap: 6 }}>
+                    <select
+                      aria-label={`Screen location for ${def.label}`}
+                      className="field-select"
+                      style={{ height: 30, fontSize: 12.5, padding: '0 24px 0 8px', width: 'auto' }}
+                      disabled={pending}
+                      value={def.section}
+                      onChange={(e) =>
+                        handleChangeCfLocation(def, e.target.value as FormSection)
+                      }
+                    >
+                      {screenLocations.map((loc) => (
+                        <option key={loc.value} value={loc.value}>
+                          {loc.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={pending}
+                      onClick={() => handleToggleCfRequired(def)}
+                      title="Toggle whether this field is mandatory or optional"
+                    >
+                      {def.required ? 'Make optional' : 'Make mandatory'}
+                    </button>
                     <button
                       type="button"
                       className="btn btn--ghost btn--sm"
@@ -2708,7 +2818,11 @@ export function AdminClient({
                   <h2>
                     {editingCf
                       ? `Edit custom field: ${editingCf.label}`
-                      : `Add custom field (${cfRecordType === 'person' ? 'Person' : 'Organisation'})`}
+                      : `Add custom field (${
+                          CUSTOM_FIELD_SCREEN_OPTIONS.find(
+                            (s) => s.recordType === cfRecordType,
+                          )?.label ?? cfRecordType
+                        })`}
                   </h2>
                 </div>
                 <form onSubmit={handleSaveCf}>
@@ -2722,7 +2836,7 @@ export function AdminClient({
                         type="text"
                         required
                         className="field-input"
-                        placeholder="e.g. Will storage reference"
+                        placeholder="e.g. Legal aid eligibility checked, Referral source code"
                         value={cfLabel}
                         onChange={(e) => setCfLabel(e.target.value)}
                       />
@@ -2747,7 +2861,7 @@ export function AdminClient({
                     </div>
                     <div className="field-group">
                       <label className="field-label" htmlFor="cf-section-select">
-                        Section
+                        Location on screen
                       </label>
                       <select
                         id="cf-section-select"
@@ -2755,10 +2869,13 @@ export function AdminClient({
                         value={cfSection}
                         onChange={(e) => setCfSection(e.target.value as FormSection)}
                       >
-                        <option value="additional">Additional details</option>
-                        <option value="A">Section A (Identity / Personal)</option>
-                        <option value="C">Section C (Relationship)</option>
-                        <option value="D">Section D (Compliance)</option>
+                        {getScreenFieldLocations(editingCf?.recordType ?? cfRecordType).map(
+                          (loc) => (
+                            <option key={loc.value} value={loc.value}>
+                              {loc.label}
+                            </option>
+                          ),
+                        )}
                       </select>
                     </div>
                     {cfType === 'choice' ? (
@@ -2783,7 +2900,7 @@ export function AdminClient({
                           checked={cfRequired}
                           onChange={(e) => setCfRequired(e.target.checked)}
                         />
-                        <span>Required when saving a record</span>
+                        <span>Mandatory field (required before saving / routing)</span>
                       </label>
                     </div>
                   </div>

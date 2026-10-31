@@ -21,6 +21,7 @@ import {
   closeEnquiryRecord,
   logEnquiryContactRecord,
   prepareEnquiryConversion,
+  saveCustomFieldDefinition,
   saveEnquiryRecord,
 } from '@/server/services';
 import { createSeedStore, getStore } from '@/server/store';
@@ -761,5 +762,79 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(
       conflictWhenOtherPartyIsEnqCaller.some((h) => h.recordId === savedEnq.id),
     ).toBe(true);
+  });
+
+  it('11. Client-configured custom fields on the Enquiry screen support screen locations and mandatory validation', () => {
+    const store = getStore();
+    const channelId =
+      store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
+    const practiceAreaId =
+      store.values.find((v) => v.listKey === 'work_type' && !v.parentId && v.active)?.id ?? '';
+
+    const mandatoryCallerField = saveCustomFieldDefinition(
+      {
+        recordType: 'enquiry',
+        label: 'Referral campaign code',
+        fieldType: 'text',
+        section: 'enquiry_caller',
+        required: true,
+      },
+      'P-000018',
+    );
+    const optionalDetailsField = saveCustomFieldDefinition(
+      {
+        recordType: 'enquiry',
+        label: 'Legal aid eligibility checked',
+        fieldType: 'yesNo',
+        section: 'enquiry_details',
+        required: false,
+      },
+      'P-000018',
+    );
+
+    // Routing without the mandatory custom field fails and lists the missing field
+    const blocked = saveEnquiryRecord(
+      {
+        channelId,
+        firstName: 'Carys',
+        lastName: 'Pritchard',
+        phone: '07700 900555',
+        practiceAreaId,
+        summary: 'Commercial lease review',
+        notes: 'Caller requested urgent review of heads of terms.',
+        customFields: {},
+      },
+      { byId: 'P-000018', asDraft: false },
+    );
+
+    expect(blocked.enquiry).toBeUndefined();
+    expect(blocked.missingFields).toContain('referral campaign code');
+    expect(blocked.errors?.[mandatoryCallerField.id]).toBe(
+      'Referral campaign code is required',
+    );
+
+    // Completing the mandatory custom field routes and persists customFields on the Enquiry
+    const routed = saveEnquiryRecord(
+      {
+        channelId,
+        firstName: 'Carys',
+        lastName: 'Pritchard',
+        phone: '07700 900555',
+        practiceAreaId,
+        summary: 'Commercial lease review',
+        notes: 'Caller requested urgent review of heads of terms.',
+        customFields: {
+          [mandatoryCallerField.id]: 'CMP-2026-Q4',
+          [optionalDetailsField.id]: true,
+        },
+      },
+      { byId: 'P-000018', asDraft: false },
+    );
+
+    expect(routed.errors).toBeUndefined();
+    expect(routed.enquiry?.customFields).toEqual({
+      [mandatoryCallerField.id]: 'CMP-2026-Q4',
+      [optionalDetailsField.id]: true,
+    });
   });
 });

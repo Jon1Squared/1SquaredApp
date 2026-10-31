@@ -110,6 +110,7 @@ import type {
   ContactLogMethod,
   ContactLogOutcome,
   CustomFieldDefinition,
+  CustomFieldRecordType,
   CustomFieldType,
   EmployeePermission,
   EmployeeSensitiveRecord,
@@ -3020,7 +3021,7 @@ export function createMatterStageGroup(
 export function saveCustomFieldDefinition(
   input: {
     id?: string;
-    recordType: RecordType;
+    recordType: CustomFieldRecordType;
     label: string;
     fieldType: CustomFieldType;
     section: FormSection;
@@ -3896,11 +3897,21 @@ export function saveEnquiryRecord(
         : existing?.privacyNoticeGiven ?? true,
     linkedPersonId:
       input.linkedPersonId !== undefined ? input.linkedPersonId : existing?.linkedPersonId ?? null,
+    customFields:
+      input.customFields !== undefined ? input.customFields : existing?.customFields ?? {},
   };
 
+  const cfValidation = validateCustomFields(
+    store.customFields,
+    'enquiry',
+    mergedInput.customFields,
+    existing?.customFields ?? {},
+    store.values,
+  );
+
   if (!asDraft) {
-    const missingFields = getMissingRoutingFields(mergedInput);
-    const errors: Record<string, string> = {};
+    const missingFields = getMissingRoutingFields(mergedInput, store.customFields);
+    const errors: Record<string, string> = { ...cfValidation.errors };
     if (!mergedInput.firstName) errors.firstName = 'First name is required.';
     if (!mergedInput.lastName) errors.lastName = 'Last name is required.';
     if (!mergedInput.firstName || !mergedInput.lastName) {
@@ -4014,6 +4025,7 @@ export function saveEnquiryRecord(
       referredToName: existing?.referredToName,
       convertedMatterId: existing?.convertedMatterId ?? null,
       contactLog: input.contactLog ?? existing?.contactLog ?? [],
+      customFields: cfValidation.values,
       anonymisedAt: existing?.anonymisedAt ?? null,
       createdById: existing?.createdById ?? opts.byId,
       createdAt: existing?.createdAt ?? now,
@@ -4160,6 +4172,7 @@ export function saveEnquiryRecord(
         ? input.convertedMatterId
         : existing?.convertedMatterId ?? null,
     contactLog: input.contactLog ?? existing?.contactLog ?? [],
+    customFields: cfValidation.values,
     anonymisedAt: existing?.anonymisedAt ?? null,
     createdById: existing?.createdById ?? opts.byId,
     createdAt: existing?.createdAt ?? now,

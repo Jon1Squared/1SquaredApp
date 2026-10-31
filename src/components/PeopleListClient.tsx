@@ -468,14 +468,6 @@ export function PeopleListClient({
       <div className="page-header">
         <div>
           <h1>People</h1>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Clients, contacts, referrers, enquiry-stage callers and firm staff.
-          </p>
-        </div>
-        <div className="page-header__actions">
-          <Link href="/people/new" className="btn btn--primary">
-            + New person
-          </Link>
         </div>
       </div>
 
@@ -525,6 +517,20 @@ export function PeopleListClient({
         >
           Archived ({archivedCount})
         </button>
+        <div
+          style={{
+            marginLeft: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            paddingBottom: 6,
+            flexShrink: 0,
+          }}
+        >
+          <Link href="/people/new" className="btn btn--primary">
+            + New person
+          </Link>
+        </div>
       </div>
 
       <DataListFilterBar

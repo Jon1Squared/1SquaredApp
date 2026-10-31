@@ -717,17 +717,17 @@ export function SingleAddressEditor({
   return <div className="subcard">{innerContent}</div>;
 }
 
-export function CustomFieldsFormSection({
+export function CustomFieldGroupItems({
   definitions,
   values,
-  lists,
   fieldValues,
+  errors,
   onChange,
 }: {
   definitions: CustomFieldDefinition[];
   values: ChoiceValue[];
-  lists?: ChoiceList[];
   fieldValues: Record<string, unknown>;
+  errors?: Record<string, string>;
   onChange: (next: Record<string, unknown>) => void;
 }) {
   const activeDefs = useMemo(
@@ -745,100 +745,140 @@ export function CustomFieldsFormSection({
   };
 
   return (
+    <>
+      {activeDefs.map((def) => {
+        const raw = fieldValues[def.id];
+        const err = errors?.[def.id];
+        return (
+          <div
+            key={def.id}
+            className={`field-group ${def.fieldType === 'longText' ? 'field-group--full' : ''}`}
+          >
+            <label className="field-label" htmlFor={`cf-${def.id}`}>
+              {def.label}{' '}
+              {def.required ? <span style={{ color: 'var(--coral)' }}>*</span> : null}
+            </label>
+            {def.fieldType === 'text' && (
+              <input
+                id={`cf-${def.id}`}
+                type="text"
+                className="field-input"
+                required={def.required}
+                value={typeof raw === 'string' ? raw : ''}
+                onChange={(e) => setVal(def.id, e.target.value)}
+              />
+            )}
+            {def.fieldType === 'longText' && (
+              <textarea
+                id={`cf-${def.id}`}
+                className="field-textarea"
+                rows={3}
+                required={def.required}
+                value={typeof raw === 'string' ? raw : ''}
+                onChange={(e) => setVal(def.id, e.target.value)}
+              />
+            )}
+            {def.fieldType === 'number' && (
+              <input
+                id={`cf-${def.id}`}
+                type="number"
+                className="field-input"
+                required={def.required}
+                value={raw === null || raw === undefined ? '' : String(raw)}
+                onChange={(e) =>
+                  setVal(def.id, e.target.value === '' ? null : Number(e.target.value))
+                }
+              />
+            )}
+            {def.fieldType === 'date' && (
+              <input
+                id={`cf-${def.id}`}
+                type="date"
+                className="field-input"
+                required={def.required}
+                value={typeof raw === 'string' ? raw : ''}
+                onChange={(e) => setVal(def.id, e.target.value || null)}
+              />
+            )}
+            {def.fieldType === 'yesNo' && (
+              <select
+                id={`cf-${def.id}`}
+                className="field-select"
+                required={def.required}
+                value={
+                  raw === true || raw === 'true'
+                    ? 'true'
+                    : raw === false || raw === 'false'
+                      ? 'false'
+                      : ''
+                }
+                onChange={(e) =>
+                  setVal(
+                    def.id,
+                    e.target.value === '' ? null : e.target.value === 'true',
+                  )
+                }
+              >
+                <option value="">Select…</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            )}
+            {def.fieldType === 'choice' && def.optionsListKey && (
+              <ChoiceSelect
+                id={`cf-${def.id}`}
+                listKey={def.optionsListKey}
+                values={values}
+                value={typeof raw === 'string' ? raw : null}
+                onChange={(v) => setVal(def.id, v)}
+                required={def.required}
+              />
+            )}
+            {err ? <span className="field-error">{err}</span> : null}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+export function CustomFieldsFormSection({
+  definitions,
+  values,
+  lists,
+  fieldValues,
+  errors,
+  onChange,
+}: {
+  definitions: CustomFieldDefinition[];
+  values: ChoiceValue[];
+  lists?: ChoiceList[];
+  fieldValues: Record<string, unknown>;
+  errors?: Record<string, string>;
+  onChange: (next: Record<string, unknown>) => void;
+}) {
+  const activeDefs = useMemo(
+    () =>
+      definitions
+        .filter((d) => d.active)
+        .sort((a, b) => a.sortOrder - b.sortOrder),
+    [definitions],
+  );
+
+  if (activeDefs.length === 0) return null;
+
+  return (
     <section className="form-section">
       <h2 className="section-label">Additional details (custom fields)</h2>
       <div className="form-grid" style={{ marginTop: 12 }}>
-        {activeDefs.map((def) => {
-          const raw = fieldValues[def.id];
-          return (
-            <div
-              key={def.id}
-              className={`field-group ${def.fieldType === 'longText' ? 'field-group--full' : ''}`}
-            >
-              <label className="field-label" htmlFor={`cf-${def.id}`}>
-                {def.label}
-                {def.required ? ' *' : ''}
-              </label>
-              {def.fieldType === 'text' && (
-                <input
-                  id={`cf-${def.id}`}
-                  type="text"
-                  className="field-input"
-                  required={def.required}
-                  value={typeof raw === 'string' ? raw : ''}
-                  onChange={(e) => setVal(def.id, e.target.value)}
-                />
-              )}
-              {def.fieldType === 'longText' && (
-                <textarea
-                  id={`cf-${def.id}`}
-                  className="field-textarea"
-                  rows={3}
-                  required={def.required}
-                  value={typeof raw === 'string' ? raw : ''}
-                  onChange={(e) => setVal(def.id, e.target.value)}
-                />
-              )}
-              {def.fieldType === 'number' && (
-                <input
-                  id={`cf-${def.id}`}
-                  type="number"
-                  className="field-input"
-                  required={def.required}
-                  value={raw === null || raw === undefined ? '' : String(raw)}
-                  onChange={(e) =>
-                    setVal(def.id, e.target.value === '' ? null : Number(e.target.value))
-                  }
-                />
-              )}
-              {def.fieldType === 'date' && (
-                <input
-                  id={`cf-${def.id}`}
-                  type="date"
-                  className="field-input"
-                  required={def.required}
-                  value={typeof raw === 'string' ? raw : ''}
-                  onChange={(e) => setVal(def.id, e.target.value || null)}
-                />
-              )}
-              {def.fieldType === 'yesNo' && (
-                <select
-                  id={`cf-${def.id}`}
-                  className="field-select"
-                  required={def.required}
-                  value={
-                    raw === true || raw === 'true'
-                      ? 'true'
-                      : raw === false || raw === 'false'
-                        ? 'false'
-                        : ''
-                  }
-                  onChange={(e) =>
-                    setVal(
-                      def.id,
-                      e.target.value === '' ? null : e.target.value === 'true',
-                    )
-                  }
-                >
-                  <option value="">Select…</option>
-                  <option value="true">Yes</option>
-                  <option value="false">No</option>
-                </select>
-              )}
-              {def.fieldType === 'choice' && def.optionsListKey && (
-                <ChoiceSelect
-                  id={`cf-${def.id}`}
-                  listKey={def.optionsListKey}
-                  values={values}
-                  value={typeof raw === 'string' ? raw : null}
-                  onChange={(v) => setVal(def.id, v)}
-                  required={def.required}
-                />
-              )}
-              {lists ? null : null}
-            </div>
-          );
-        })}
+        <CustomFieldGroupItems
+          definitions={activeDefs}
+          values={values}
+          fieldValues={fieldValues}
+          errors={errors}
+          onChange={onChange}
+        />
+        {lists ? null : null}
       </div>
     </section>
   );

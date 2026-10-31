@@ -13,7 +13,13 @@ export default async function NewTaskPage({
   const userId = await getCurrentUserId();
   const snap = getAppSnapshot(userId);
 
-  const validTypes: TaskLinkedRecordType[] = ['enquiry', 'matter', 'person', 'organisation'];
+  const validTypes: TaskLinkedRecordType[] = [
+    'enquiry',
+    'quote',
+    'matter',
+    'person',
+    'organisation',
+  ];
   const initialLinkedRecord: TaskLinkedRecord | null =
     sp.recordType &&
     sp.recordId &&
@@ -28,6 +34,7 @@ export default async function NewTaskPage({
       organisations={snap.organisations}
       matters={snap.matters}
       enquiries={snap.enquiries}
+      quotes={snap.quotes}
       values={snap.values}
       currentUserId={snap.currentUserId}
       initialLinkedRecord={initialLinkedRecord}

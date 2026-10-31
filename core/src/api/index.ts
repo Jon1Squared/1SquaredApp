@@ -15,13 +15,15 @@ export type ExtensionPermission =
   | 'matter:costs:validate'
   | 'matter:open:gate'
   | 'config:read'
-  | 'audit:write';
+  | 'audit:write'
+  | 'pms:sync';
 
 export type ExtensionHookName =
   | 'beforeMatterCostsCalculate'
   | 'afterMatterCostsCalculate'
   | 'beforeMatterOpen'
-  | 'afterMatterOpen';
+  | 'afterMatterOpen'
+  | 'onPmsOutboundCommand';
 
 export interface ExtensionManifest {
   id: string;
@@ -74,6 +76,89 @@ export interface DisbursementPresetConfigEntry {
   vatApplicable: boolean;
 }
 
+export type CustomFieldScreenType =
+  | 'enquiry'
+  | 'person'
+  | 'organisation'
+  | 'matter'
+  | 'quote'
+  | 'task';
+
+export interface CustomFieldConfigEntry {
+  id: string;
+  recordType: CustomFieldScreenType;
+  label: string;
+  fieldType: 'text' | 'longText' | 'number' | 'date' | 'yesNo' | 'choice';
+  optionsListKey?: string;
+  options?: string[];
+  section: string;
+  required: boolean;
+  sortOrder: number;
+  active: boolean;
+}
+
+export type PmsFieldOwnershipDirection =
+  | 'onesquared_master'
+  | 'pms_master'
+  | 'bidirectional';
+
+export type PmsSyncEntityType =
+  | 'client_organisation'
+  | 'client_person'
+  | 'matter'
+  | 'fee_estimate'
+  | 'employee';
+
+export interface PmsFieldMappingEntry {
+  id: string;
+  entityType: PmsSyncEntityType;
+  /** 1Squared field key (core property name, CORE-xxx code, or customField id) */
+  onesquaredFieldKey: string;
+  /** Third-party Finance/PMS DB column or API property path */
+  externalFieldKey: string;
+  /** System of Record ownership governing sync direction */
+  ownership: PmsFieldOwnershipDirection;
+  active: boolean;
+}
+
+export interface PmsIntegrationSyncConfig {
+  enabled: boolean;
+  providerKey: string;
+  syncMode: 'read_only' | 'two_way';
+  matterCodeAllocation: 'onesquared' | 'pms_on_open';
+  clientCodeAllocation: 'onesquared' | 'pms_on_open';
+  pollIntervalMinutes: number;
+  fieldMappings: PmsFieldMappingEntry[];
+}
+
+export type PmsOutboundCommandType =
+  | 'upsert_client'
+  | 'open_matter'
+  | 'update_matter_commercials'
+  | 'revise_fee_estimate';
+
+export interface PmsOutboundCommand<TPayload = Record<string, unknown>> {
+  id: string;
+  tenantId: string;
+  correlationId: string;
+  commandType: PmsOutboundCommandType;
+  entityType: 'organisation' | 'person' | 'matter';
+  onesquaredId: string;
+  externalPmsCode: string | null;
+  payload: TPayload;
+  mappedFields: Record<string, unknown>;
+  createdAt: string;
+  createdById: string;
+}
+
+export interface PmsOutboundSyncResult {
+  commandId: string;
+  status: 'Synced' | 'Pending' | 'Failed';
+  allocatedExternalPmsCode?: string | null;
+  syncedAt: string;
+  errorMessage?: string | null;
+}
+
 export interface TenantConfiguration {
   schemaVersion: string;
   tenantId: string;
@@ -101,7 +186,9 @@ export interface TenantConfiguration {
     pmsConnectionSecretVaultRef: string;
     companiesHouseApiKeyVaultRef: string;
     aiProviderChoice: 'azure_openai_uk' | 'disabled';
+    pmsSync?: PmsIntegrationSyncConfig;
   };
+  customFields: CustomFieldConfigEntry[];
   enabledExtensions: string[];
 }
 
@@ -138,5 +225,9 @@ export interface PlatformExtension {
       ctx: ExtensionExecutionContext,
       input: MatterCostsHookInput,
     ) => Promise<MatterCostsHookResult> | MatterCostsHookResult;
+    onPmsOutboundCommand?: (
+      ctx: ExtensionExecutionContext,
+      command: PmsOutboundCommand,
+    ) => Promise<PmsOutboundSyncResult> | PmsOutboundSyncResult;
   };
 }

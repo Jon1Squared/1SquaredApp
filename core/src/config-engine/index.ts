@@ -68,6 +68,103 @@ const DisbursementPresetSchema = z
   })
   .strict();
 
+const CustomFieldConfigEntrySchema = z
+  .object({
+    id: z.string().min(1).describe('Unique custom field identifier'),
+    recordType: z
+      .enum(['enquiry', 'person', 'organisation', 'matter', 'quote', 'task'])
+      .describe('Target screen / record type for this custom field'),
+    label: z.string().min(1).describe('Display label shown on the form and profile'),
+    fieldType: z
+      .enum(['text', 'longText', 'number', 'date', 'yesNo', 'choice'])
+      .describe('Input control and validation data type'),
+    optionsListKey: z
+      .string()
+      .optional()
+      .describe('Choice list key when fieldType is choice'),
+    options: z
+      .array(z.string())
+      .optional()
+      .describe('Selectable option labels when fieldType is choice'),
+    section: z
+      .string()
+      .default('additional')
+      .describe('Location / section key on the target screen where this field is rendered'),
+    required: z
+      .boolean()
+      .default(false)
+      .describe('Whether the client requires this field to be completed before saving/routing'),
+    sortOrder: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(1)
+      .describe('Display order within the target screen section'),
+    active: z
+      .boolean()
+      .default(true)
+      .describe('Whether the custom field is currently active'),
+  })
+  .strict();
+
+const PmsFieldMappingEntrySchema = z
+  .object({
+    id: z.string().min(1).describe('Unique field mapping identifier'),
+    entityType: z
+      .enum(['client_organisation', 'client_person', 'matter', 'fee_estimate', 'employee'])
+      .describe('Target entity type for the cross-system mapping'),
+    onesquaredFieldKey: z
+      .string()
+      .min(1)
+      .describe('1Squared field key (core property, CORE-xxx code, or customField id)'),
+    externalFieldKey: z
+      .string()
+      .min(1)
+      .describe('Third-party Finance/PMS DB column or API property path'),
+    ownership: z
+      .enum(['onesquared_master', 'pms_master', 'bidirectional'])
+      .default('onesquared_master')
+      .describe('System of Record ownership governing sync direction'),
+    active: z.boolean().default(true).describe('Whether this mapping is active'),
+  })
+  .strict();
+
+const PmsIntegrationSyncConfigSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .default(true)
+      .describe('Whether PMS / Finance DB synchronisation is enabled for this tenant'),
+    providerKey: z
+      .string()
+      .min(1)
+      .default('generic_sql')
+      .describe('Identifier of the connected PMS / Finance adapter'),
+    syncMode: z
+      .enum(['read_only', 'two_way'])
+      .default('two_way')
+      .describe('Whether integration is read-only inbound or two-way'),
+    matterCodeAllocation: z
+      .enum(['onesquared', 'pms_on_open'])
+      .default('onesquared')
+      .describe('System responsible for allocating canonical matter numbers'),
+    clientCodeAllocation: z
+      .enum(['onesquared', 'pms_on_open'])
+      .default('onesquared')
+      .describe('System responsible for allocating canonical client codes'),
+    pollIntervalMinutes: z
+      .number()
+      .int()
+      .positive()
+      .default(15)
+      .describe('Inbound delta sync polling interval in minutes'),
+    fieldMappings: z
+      .array(PmsFieldMappingEntrySchema)
+      .default([])
+      .describe('Field-level mappings and System-of-Record ownership rules'),
+  })
+  .strict();
+
 export const TenantConfigurationSchema = z
   .object({
     schemaVersion: z
@@ -144,8 +241,15 @@ export const TenantConfigurationSchema = z
           .enum(['azure_openai_uk', 'disabled'])
           .default('disabled')
           .describe('Configured AI model provider for this tenant'),
+        pmsSync: PmsIntegrationSyncConfigSchema.optional().describe(
+          'Two-way Finance/PMS synchronisation settings and field mappings',
+        ),
       })
       .strict(),
+    customFields: z
+      .array(CustomFieldConfigEntrySchema)
+      .default([])
+      .describe('Per-client custom fields, screen locations, and mandatory rules'),
     enabledExtensions: z
       .array(z.string())
       .default([])

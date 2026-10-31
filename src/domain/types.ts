@@ -7,6 +7,13 @@
 export type RecordType = 'person' | 'organisation';
 /** All primary record types across pillars. */
 export type AnyRecordType = RecordType | 'matter' | 'enquiry' | 'task';
+/** Screens / record types that support per-client custom fields. */
+export type CustomFieldRecordType =
+  | RecordType
+  | 'enquiry'
+  | 'matter'
+  | 'quote'
+  | 'task';
 
 export type ListGroup =
   | 'people'
@@ -25,7 +32,7 @@ export interface ChoiceList {
   key: string;
   label: string;
   group: ListGroup;
-  appliesTo: RecordType[];
+  appliesTo: CustomFieldRecordType[];
   allowMultiple: boolean;
   hierarchical: boolean;
   description?: string;
@@ -46,11 +53,25 @@ export interface ChoiceValue {
 }
 
 export type CustomFieldType = 'text' | 'longText' | 'number' | 'date' | 'yesNo' | 'choice';
-export type FormSection = 'A' | 'C' | 'D' | 'additional';
+export type FormSection =
+  | 'A'
+  | 'C'
+  | 'D'
+  | 'additional'
+  | 'enquiry_caller'
+  | 'enquiry_contact'
+  | 'enquiry_details'
+  | 'matter_overview'
+  | 'matter_parties'
+  | 'matter_costs'
+  | 'quote_client'
+  | 'quote_scope'
+  | 'quote_fees'
+  | 'task_details';
 
 export interface CustomFieldDefinition {
   id: string;
-  recordType: RecordType;
+  recordType: CustomFieldRecordType;
   label: string;
   fieldType: CustomFieldType;
   /** For choice fields: the ChoiceList holding the options. */
@@ -861,7 +882,7 @@ export interface Team {
 // ------------------------------------------------------------------ Tasks
 export type TaskStatus = 'To do' | 'In progress' | 'Waiting' | 'Done' | 'Cancelled';
 
-export type TaskLinkedRecordType = 'enquiry' | 'matter' | 'person' | 'organisation';
+export type TaskLinkedRecordType = 'enquiry' | 'quote' | 'matter' | 'person' | 'organisation';
 
 export interface TaskLinkedRecord {
   recordType: TaskLinkedRecordType;
@@ -1030,6 +1051,7 @@ export interface Enquiry {
   referredToName?: string;
   convertedMatterId: string | null; // M-xxxxxx
   contactLog: ContactLogEntry[];
+  customFields?: Record<string, unknown>;
   anonymisedAt?: string | null;
   createdById: string;
   createdAt: string;
@@ -1308,6 +1330,10 @@ export interface PmsLink {
   matchedBy: PmsMatchedBy;
   matchedAt: string;
   matchedByUserId?: string | null;
+  syncDirection?: 'inbound' | 'outbound' | 'bidirectional';
+  syncStatus?: 'Synced' | 'Pending' | 'Failed';
+  lastSyncedAt?: string | null;
+  lastSyncError?: string | null;
 }
 
 // ------------------------------------------------------------------ Role-based Home Pages

@@ -224,5 +224,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(isolatedResult.governanceWarnings[0]).toContain(
       'Extension isolated error: faulty-ext',
     );
+
+    // Verify two-tenant isolation on outbound PMS sync commands
+    await expect(
+      host.executePmsOutboundCommandHook(ctx, config, {
+        id: 'PMSO-000001',
+        tenantId: 'pembroke-vaughan', // Forged tenantId
+        correlationId: 'corr-pms-001',
+        commandType: 'open_matter',
+        entityType: 'matter',
+        onesquaredId: 'M-000001',
+        externalPmsCode: null,
+        payload: {},
+        mappedFields: {},
+        createdAt: '2026-10-31T12:00:00Z',
+        createdById: 'P-000001',
+      }),
+    ).rejects.toThrow(/EXTENSION_TENANT_MISMATCH/);
   });
 });

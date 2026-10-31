@@ -21,7 +21,12 @@ import type {
   PmsLink,
   Team,
 } from './types';
-import type { PmsClient, PmsFeeEarner, PmsMatter } from '@/pms/types';
+import type {
+  PmsFieldMappingEntry,
+  PmsOutboundCommand,
+  PmsOutboundCommandType,
+} from '../../core/src/api/index';
+import type { PmsClient, PmsFeeEarner, PmsMatter, PmsMatterFinancials } from '@/pms/types';
 
 /** Format GBP currency with £ and 2 decimal places; negatives in brackets. */
 export function formatGbp(amount: number | null | undefined): string {
@@ -315,3 +320,202 @@ export function findOneSquaredIdForPmsCode(
 
 // Keep normaliseOrgName referenced for potential fuzzy matching
 void normaliseOrgName;
+
+/**
+ * Extract the 1Squared value for a configured field mapping key across core fields,
+ * matter `fieldValues` (`CORE-xxx` / `FGxx`), and `customFields`.
+ */
+export function resolveOneSquaredFieldValueForMapping(
+  record: Matter | Organisation | Person,
+  fieldKey: string,
+  values: ChoiceValue[] = [],
+): unknown {
+  if ('matterNumber' in record) {
+    if (fieldKey === 'billingBasisLabel') {
+      return resolveLabel(values, record.billingBasisId) || record.billingBasisId;
+    }
+    if (fieldKey === 'practiceAreaLabel') {
+      return resolveLabel(values, record.practiceAreaId) || record.practiceAreaId;
+    }
+    if (fieldKey === 'workTypeSubcategoryLabel') {
+      return (
+        resolveLabel(values, record.workTypeSubcategoryId) ||
+        record.workTypeSubcategoryId
+      );
+    }
+    if (fieldKey in record.fieldValues) {
+      return record.fieldValues[fieldKey];
+    }
+  }
+  if (record.customFields && fieldKey in record.customFields) {
+    return record.customFields[fieldKey];
+  }
+  const direct = (record as unknown as Record<string, unknown>)[fieldKey];
+  return direct !== undefined ? direct : null;
+}
+
+/**
+ * Build a tenant-scoped outbound PMS command for a Matter (`open_matter`,
+ * `update_matter_commercials`, or `revise_fee_estimate`), including mapped fields
+ * owned by 1Squared (`onesquared_master` or `bidirectional`).
+ */
+export function buildPmsOutboundMatterCommand(input: {
+  commandId: string;
+  tenantId: string;
+  correlationId: string;
+  commandType: Extract<
+    PmsOutboundCommandType,
+    'open_matter' | 'update_matter_commercials' | 'revise_fee_estimate'
+  >;
+  matter: Matter;
+  pmsLinks: PmsLink[];
+  fieldMappings: PmsFieldMappingEntry[];
+  values: ChoiceValue[];
+  createdById: string;
+  nowIso?: string;
+}): PmsOutboundCommand<{
+  matterNumber: string;
+  title: string;
+  clientId: string;
+  externalClientCode: string | null;
+  feeEstimateGbp: number | null;
+  agreedFeeCapGbp: number | null;
+  billingBasisLabel: string;
+}> {
+  if (!input.tenantId || !input.tenantId.trim()) {
+    throw new Error(
+      'PMS_OUTBOUND_TENANCY_ERROR: Outbound PMS commands require a valid tenantId.',
+    );
+  }
+
+  const externalMatterCode = findPmsCodeForRecord(
+    input.pmsLinks,
+    'matter',
+    input.matter.id,
+  );
+  const externalClientCode =
+    findPmsCodeForRecord(input.pmsLinks, 'organisation', input.matter.clientId) ??
+    findPmsCodeForRecord(input.pmsLinks, 'person', input.matter.clientId);
+
+  const mappedFields: Record<string, unknown> = {};
+  for (const mapping of input.fieldMappings) {
+    if (!mapping.active) continue;
+    if (mapping.entityType !== 'matter' && mapping.entityType !== 'fee_estimate') {
+      continue;
+    }
+    if (
+      mapping.ownership !== 'onesquared_master' &&
+      mapping.ownership !== 'bidirectional'
+    ) {
+      continue;
+    }
+    mappedFields[mapping.externalFieldKey] = resolveOneSquaredFieldValueForMapping(
+      input.matter,
+      mapping.onesquaredFieldKey,
+      input.values,
+    );
+  }
+
+  return {
+    id: input.commandId,
+    tenantId: input.tenantId,
+    correlationId: input.correlationId,
+    commandType: input.commandType,
+    entityType: 'matter',
+    onesquaredId: input.matter.id,
+    externalPmsCode: externalMatterCode,
+    payload: {
+      matterNumber: input.matter.matterNumber,
+      title: input.matter.title,
+      clientId: input.matter.clientId,
+      externalClientCode,
+      feeEstimateGbp: input.matter.feeEstimateGbp,
+      agreedFeeCapGbp: input.matter.agreedFeeCapGbp,
+      billingBasisLabel:
+        resolveLabel(input.values, input.matter.billingBasisId) ||
+        input.matter.billingBasisId,
+    },
+    mappedFields,
+    createdAt: input.nowIso ?? new Date().toISOString(),
+    createdById: input.createdById,
+  };
+}
+
+export interface PmsMatterReconciliationResult {
+  updatedMatterFields: Partial<Pick<Matter, 'feeEstimateGbp' | 'agreedFeeCapGbp' | 'title'>>;
+  updatedFieldValues: Record<string, unknown>;
+  discrepancies: {
+    onesquaredFieldKey: string;
+    externalFieldKey: string;
+    onesquaredValue: unknown;
+    externalValue: unknown;
+    ownership: PmsFieldMappingEntry['ownership'];
+  }[];
+}
+
+/**
+ * Reconcile inbound third-party PMS matter financials against a 1Squared Matter:
+ * - Fields with `ownership === 'pms_master'` or `'bidirectional'` can update 1Squared when changed in the PMS.
+ * - Fields with `ownership === 'onesquared_master'` are never overwritten by the PMS; if they differ,
+ *   a discrepancy is recorded so an outbound sync or review can resolve it.
+ */
+export function reconcilePmsInboundMatterCommercials(
+  matter: Matter,
+  pmsFinancials: PmsMatterFinancials,
+  fieldMappings: PmsFieldMappingEntry[],
+  values: ChoiceValue[] = [],
+): PmsMatterReconciliationResult {
+  const updatedMatterFields: Partial<
+    Pick<Matter, 'feeEstimateGbp' | 'agreedFeeCapGbp' | 'title'>
+  > = {};
+  const updatedFieldValues: Record<string, unknown> = {};
+  const discrepancies: PmsMatterReconciliationResult['discrepancies'] = [];
+
+  const externalRecord = pmsFinancials as unknown as Record<string, unknown>;
+
+  for (const mapping of fieldMappings) {
+    if (!mapping.active || mapping.entityType !== 'matter') continue;
+    const extVal = externalRecord[mapping.externalFieldKey];
+    if (extVal === undefined) continue;
+
+    const currentVal = resolveOneSquaredFieldValueForMapping(
+      matter,
+      mapping.onesquaredFieldKey,
+      values,
+    );
+
+    const isDifferent = String(currentVal ?? '') !== String(extVal ?? '');
+    if (!isDifferent) continue;
+
+    if (mapping.ownership === 'onesquared_master') {
+      discrepancies.push({
+        onesquaredFieldKey: mapping.onesquaredFieldKey,
+        externalFieldKey: mapping.externalFieldKey,
+        onesquaredValue: currentVal,
+        externalValue: extVal,
+        ownership: mapping.ownership,
+      });
+      continue;
+    }
+
+    // ownership is 'pms_master' or 'bidirectional' -> accept inbound update
+    if (mapping.onesquaredFieldKey === 'feeEstimateGbp' && typeof extVal === 'number') {
+      updatedMatterFields.feeEstimateGbp = extVal;
+    } else if (
+      mapping.onesquaredFieldKey === 'agreedFeeCapGbp' &&
+      typeof extVal === 'number'
+    ) {
+      updatedMatterFields.agreedFeeCapGbp = extVal;
+    } else if (mapping.onesquaredFieldKey === 'title' && typeof extVal === 'string') {
+      updatedMatterFields.title = extVal;
+    } else if (mapping.onesquaredFieldKey.startsWith('CORE-') || mapping.onesquaredFieldKey.startsWith('FG')) {
+      updatedFieldValues[mapping.onesquaredFieldKey] = extVal;
+    }
+  }
+
+  return {
+    updatedMatterFields,
+    updatedFieldValues,
+    discrepancies,
+  };
+}
