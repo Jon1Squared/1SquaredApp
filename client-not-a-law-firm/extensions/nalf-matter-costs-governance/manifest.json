@@ -1,0 +1,16 @@
+{
+  "id": "nalf-matter-costs-governance",
+  "name": "Not A Law Firm — Partner Cost Sign-off Governance",
+  "version": "1.2.0",
+  "description": "Enforces Partner Cost Sign-off whenever estimated fees or caps reach the configured threshold.",
+  "supportedCoreApiRange": "^1.0.0",
+  "permissions": [
+    "matter:read",
+    "matter:costs:validate",
+    "matter:open:gate",
+    "config:read"
+  ],
+  "hooks": ["beforeMatterCostsCalculate", "beforeMatterOpen"],
+  "uiSlots": ["matter-costs-governance-banner"],
+  "hookTimeoutMs": 1500
+}

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.1squared.uk/schemas/tenant-config.schema.json",
+  "title": "TenantConfiguration",
+  "description": "Schema-validated per-tenant configuration owned by @platform/core",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "tenantId",
+    "displayName",
+    "hostingMode",
+    "environment",
+    "branding",
+    "featureFlags",
+    "matterCosts",
+    "integrations",
+    "enabledExtensions"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "default": "1.0.0",
+      "description": "Semantic version of the configuration schema"
+    },
+    "tenantId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$",
+      "description": "Unique immutable tenant slug"
+    },
+    "displayName": {
+      "type": "string",
+      "description": "Tenant display name"
+    },
+    "hostingMode": {
+      "type": "string",
+      "enum": ["single_tenant", "multi_tenant"],
+      "default": "multi_tenant",
+      "description": "Deployment tenancy mode"
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["dev", "test", "training", "live"],
+      "default": "dev",
+      "description": "Target deployment environment"
+    },
+    "branding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primaryDomain", "accentColorHex", "logoAssetKey"],
+      "properties": {
+        "primaryDomain": { "type": "string" },
+        "accentColorHex": { "type": "string", "default": "#1f6feb" },
+        "logoAssetKey": { "type": "string", "default": "default-logo.svg" }
+      }
+    },
+    "featureFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enableMatterCostsGovernance",
+        "enablePmsLiveRateSync",
+        "enableAiMatterExtraction"
+      ],
+      "properties": {
+        "enableMatterCostsGovernance": { "type": "boolean", "default": true },
+        "enablePmsLiveRateSync": { "type": "boolean", "default": true },
+        "enableAiMatterExtraction": { "type": "boolean", "default": false }
+      }
+    },
+    "matterCosts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rateSourceMode",
+        "allowMatterRateOverrides",
+        "partnerSignOffThresholdGbp",
+        "rateCards",
+        "disbursementPresets"
+      ],
+      "properties": {
+        "rateSourceMode": {
+          "type": "string",
+          "enum": ["application_table", "pms_when_linked"],
+          "default": "pms_when_linked"
+        },
+        "allowMatterRateOverrides": { "type": "boolean", "default": true },
+        "partnerSignOffThresholdGbp": { "type": "number", "default": 25000 },
+        "rateCards": { "type": "array" },
+        "disbursementPresets": { "type": "array" }
+      }
+    },
+    "integrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pmsConnectionSecretVaultRef",
+        "companiesHouseApiKeyVaultRef",
+        "aiProviderChoice"
+      ],
+      "properties": {
+        "pmsConnectionSecretVaultRef": { "type": "string" },
+        "companiesHouseApiKeyVaultRef": { "type": "string" },
+        "aiProviderChoice": {
+          "type": "string",
+          "enum": ["azure_openai_uk", "disabled"],
+          "default": "disabled"
+        }
+      }
+    },
+    "enabledExtensions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    }
+  }
+}

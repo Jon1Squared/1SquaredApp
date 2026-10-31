@@ -1,0 +1,1873 @@
+{
+  "workType": [
+    {
+      "practiceArea": "Corporate & Commercial",
+      "subcategories": [
+        {
+          "name": "Company formations & structures",
+          "badge": "Formation"
+        },
+        {
+          "name": "Shareholder agreements",
+          "badge": "Agreements"
+        },
+        {
+          "name": "Mergers & acquisitions",
+          "badge": "M&A"
+        },
+        {
+          "name": "Joint ventures",
+          "badge": "JV"
+        },
+        {
+          "name": "Commercial contracts",
+          "badge": "Contracts"
+        },
+        {
+          "name": "Agency & distribution",
+          "badge": "Contracts"
+        },
+        {
+          "name": "Corporate governance",
+          "badge": "Governance"
+        },
+        {
+          "name": "Due diligence",
+          "badge": "M&A"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Real Estate & Property",
+      "subcategories": [
+        {
+          "name": "Residential conveyancing",
+          "badge": "Residential"
+        },
+        {
+          "name": "Commercial property",
+          "badge": "Commercial"
+        },
+        {
+          "name": "Landlord & tenant",
+          "badge": "Leases"
+        },
+        {
+          "name": "Development & planning",
+          "badge": "Development"
+        },
+        {
+          "name": "Finance & secured lending",
+          "badge": "Finance"
+        },
+        {
+          "name": "Property management",
+          "badge": "Management"
+        },
+        {
+          "name": "Construction contracts",
+          "badge": "Construction"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Employment & HR",
+      "subcategories": [
+        {
+          "name": "Employment contracts",
+          "badge": "Contracts"
+        },
+        {
+          "name": "Disciplinary & grievance",
+          "badge": "Process"
+        },
+        {
+          "name": "Settlement agreements",
+          "badge": "Agreements"
+        },
+        {
+          "name": "Redundancy & restructuring",
+          "badge": "Process"
+        },
+        {
+          "name": "TUPE transfers",
+          "badge": "Transfer"
+        },
+        {
+          "name": "HR policies & handbooks",
+          "badge": "Policies"
+        },
+        {
+          "name": "Tribunal claims",
+          "badge": "Litigation"
+        },
+        {
+          "name": "Executive & senior hire",
+          "badge": "Contracts"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Dispute Resolution",
+      "subcategories": [
+        {
+          "name": "Pre-action correspondence",
+          "badge": "Litigation"
+        },
+        {
+          "name": "Court pleadings",
+          "badge": "Litigation"
+        },
+        {
+          "name": "Mediation & ADR",
+          "badge": "ADR"
+        },
+        {
+          "name": "Arbitration",
+          "badge": "ADR"
+        },
+        {
+          "name": "Enforcement",
+          "badge": "Enforcement"
+        },
+        {
+          "name": "Injunctions & urgent relief",
+          "badge": "Litigation"
+        },
+        {
+          "name": "Cost management",
+          "badge": "Costs"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Intellectual Property",
+      "subcategories": [
+        {
+          "name": "Trade mark applications",
+          "badge": "Registration"
+        },
+        {
+          "name": "IP assignment & licensing",
+          "badge": "Agreements"
+        },
+        {
+          "name": "Copyright notices",
+          "badge": "Protection"
+        },
+        {
+          "name": "Confidentiality & NDAs",
+          "badge": "Agreements"
+        },
+        {
+          "name": "IP due diligence",
+          "badge": "M&A"
+        },
+        {
+          "name": "Infringement & enforcement",
+          "badge": "Litigation"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Private Client",
+      "subcategories": [
+        {
+          "name": "Wills & codicils",
+          "badge": "Wills"
+        },
+        {
+          "name": "Lasting powers of attorney",
+          "badge": "LPA"
+        },
+        {
+          "name": "Trusts & settlements",
+          "badge": "Trusts"
+        },
+        {
+          "name": "Estate administration",
+          "badge": "Probate"
+        },
+        {
+          "name": "Inheritance tax planning",
+          "badge": "Tax"
+        },
+        {
+          "name": "Court of Protection",
+          "badge": "Capacity"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Finance & Banking",
+      "subcategories": [
+        {
+          "name": "Loan & facility agreements",
+          "badge": "Finance"
+        },
+        {
+          "name": "Security documents",
+          "badge": "Security"
+        },
+        {
+          "name": "Guarantees & indemnities",
+          "badge": "Agreements"
+        },
+        {
+          "name": "Asset finance",
+          "badge": "Finance"
+        },
+        {
+          "name": "Restructuring & insolvency",
+          "badge": "Insolvency"
+        },
+        {
+          "name": "Regulatory compliance",
+          "badge": "Regulatory"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Regulatory & Compliance",
+      "subcategories": [
+        {
+          "name": "Data protection & GDPR",
+          "badge": "Privacy"
+        },
+        {
+          "name": "Anti-bribery & corruption",
+          "badge": "Compliance"
+        },
+        {
+          "name": "Financial services regulation",
+          "badge": "Regulatory"
+        },
+        {
+          "name": "Environmental & planning",
+          "badge": "Regulatory"
+        },
+        {
+          "name": "Health & safety",
+          "badge": "H&S"
+        },
+        {
+          "name": "Regulatory investigations",
+          "badge": "Litigation"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Technology & Digital",
+      "subcategories": [
+        {
+          "name": "Software & SaaS agreements",
+          "badge": "Contracts"
+        },
+        {
+          "name": "Data sharing & processing",
+          "badge": "Privacy"
+        },
+        {
+          "name": "AI & emerging tech",
+          "badge": "AI"
+        },
+        {
+          "name": "Outsourcing contracts",
+          "badge": "Contracts"
+        },
+        {
+          "name": "Cyber incident response",
+          "badge": "Incident"
+        },
+        {
+          "name": "Fintech & payments",
+          "badge": "Fintech"
+        }
+      ]
+    },
+    {
+      "practiceArea": "Family",
+      "subcategories": [
+        {
+          "name": "Pre-nuptial agreements",
+          "badge": "Agreements"
+        },
+        {
+          "name": "Separation & divorce",
+          "badge": "Divorce"
+        },
+        {
+          "name": "Financial orders",
+          "badge": "Court"
+        },
+        {
+          "name": "Children arrangements",
+          "badge": "Children"
+        },
+        {
+          "name": "Cohabitation agreements",
+          "badge": "Agreements"
+        },
+        {
+          "name": "Domestic abuse proceedings",
+          "badge": "Court"
+        }
+      ]
+    }
+  ],
+  "documentType": [
+    {
+      "category": "Agreements & Contracts",
+      "documentTypes": [
+        {
+          "name": "Agreement",
+          "description": "A bilateral or multilateral legally binding arrangement between parties"
+        },
+        {
+          "name": "Contract",
+          "description": "A formal agreement enforceable at law, typically with consideration"
+        },
+        {
+          "name": "Deed",
+          "description": "A signed, witnessed formal instrument (no consideration required)"
+        },
+        {
+          "name": "Framework Agreement",
+          "description": "An overarching agreement under which specific contracts are called off"
+        },
+        {
+          "name": "Memorandum of Understanding",
+          "description": "A non-binding statement of intent between parties"
+        },
+        {
+          "name": "Heads of Terms",
+          "description": "A summary of the key terms of a proposed transaction"
+        },
+        {
+          "name": "Side Letter",
+          "description": "A supplementary letter modifying or clarifying a main agreement"
+        },
+        {
+          "name": "Novation Agreement",
+          "description": "Transfers rights and obligations from one party to another"
+        }
+      ]
+    },
+    {
+      "category": "Court & Tribunal Documents",
+      "documentTypes": [
+        {
+          "name": "Claim Form",
+          "description": "Initiates court proceedings (e.g. N1, ET1)"
+        },
+        {
+          "name": "Particulars of Claim",
+          "description": "Sets out the facts and legal basis of a claim"
+        },
+        {
+          "name": "Defence",
+          "description": "The responding party's answer to a claim"
+        },
+        {
+          "name": "Witness Statement",
+          "description": "A signed statement of evidence from a witness"
+        },
+        {
+          "name": "Expert Report",
+          "description": "An independent expert's opinion on a technical matter"
+        },
+        {
+          "name": "Skeleton Argument",
+          "description": "A written outline of submissions for a hearing"
+        },
+        {
+          "name": "Order / Judgment",
+          "description": "A court-issued direction or decision"
+        },
+        {
+          "name": "Application Notice",
+          "description": "A request to the court for a specific order"
+        },
+        {
+          "name": "Cost Budget (Precedent H)",
+          "description": "A costs management document for multi-track claims"
+        }
+      ]
+    },
+    {
+      "category": "Corporate Documents",
+      "documentTypes": [
+        {
+          "name": "Board Resolution",
+          "description": "A formal decision of the board of directors"
+        },
+        {
+          "name": "Written Resolution (Members)",
+          "description": "A members' resolution passed without a meeting"
+        },
+        {
+          "name": "Minutes of Meeting",
+          "description": "A formal record of decisions taken at a meeting"
+        },
+        {
+          "name": "Power of Attorney",
+          "description": "Authorises one party to act on behalf of another"
+        },
+        {
+          "name": "Certificate",
+          "description": "A formal confirmation of a fact (e.g. share certificate, compliance cert)"
+        },
+        {
+          "name": "Register",
+          "description": "A statutory or internal record (e.g. register of members)"
+        },
+        {
+          "name": "Articles of Association",
+          "description": "The constitutional document of a company"
+        },
+        {
+          "name": "Shareholders' Resolution",
+          "description": "A resolution passed by the shareholders"
+        }
+      ]
+    },
+    {
+      "category": "Correspondence",
+      "documentTypes": [
+        {
+          "name": "Client Care Letter",
+          "description": "The engagement letter and terms of business"
+        },
+        {
+          "name": "Letter Before Action",
+          "description": "Pre-action notice of intent to commence proceedings"
+        },
+        {
+          "name": "Demand Letter",
+          "description": "A formal demand for payment or performance"
+        },
+        {
+          "name": "Without Prejudice Letter",
+          "description": "Correspondence protected from use as evidence"
+        },
+        {
+          "name": "Open Letter",
+          "description": "Correspondence that may be referred to in proceedings"
+        },
+        {
+          "name": "Completion Letter",
+          "description": "Confirms satisfaction of conditions on completion"
+        },
+        {
+          "name": "Requisition",
+          "description": "A query raised on title or due diligence"
+        },
+        {
+          "name": "Undertaking",
+          "description": "A professional commitment given by a solicitor"
+        }
+      ]
+    },
+    {
+      "category": "Policies & Procedures",
+      "documentTypes": [
+        {
+          "name": "Policy",
+          "description": "A statement of the firm's or client's position on a matter"
+        },
+        {
+          "name": "Procedure",
+          "description": "Step-by-step instructions for carrying out a process"
+        },
+        {
+          "name": "Handbook",
+          "description": "A comprehensive guide (e.g. employee handbook)"
+        },
+        {
+          "name": "Code of Conduct",
+          "description": "Standards of behaviour expected of individuals"
+        },
+        {
+          "name": "Terms & Conditions",
+          "description": "Standard terms governing a commercial relationship"
+        },
+        {
+          "name": "Privacy Notice",
+          "description": "A GDPR-compliant notice of data processing activities"
+        },
+        {
+          "name": "Compliance Framework",
+          "description": "A structured approach to meeting regulatory obligations"
+        }
+      ]
+    },
+    {
+      "category": "Regulatory & Statutory Filings",
+      "documentTypes": [
+        {
+          "name": "Companies House Filing",
+          "description": "Statutory return to Companies House (e.g. CS01, AP01)"
+        },
+        {
+          "name": "HMRC Return / Election",
+          "description": "A tax return, claim, or election made to HMRC"
+        },
+        {
+          "name": "Regulatory Notification",
+          "description": "A notification to a regulator (e.g. FCA, ICO, SRA)"
+        },
+        {
+          "name": "Planning Application",
+          "description": "An application for planning permission or consent"
+        },
+        {
+          "name": "Land Registry AP1",
+          "description": "An application to register a disposition at HMLR"
+        },
+        {
+          "name": "Probate Application",
+          "description": "An application for a grant of representation"
+        },
+        {
+          "name": "Tribunal Claim Form",
+          "description": "A claim filed with a regulatory or employment tribunal"
+        }
+      ]
+    },
+    {
+      "category": "Finance & Security Documents",
+      "documentTypes": [
+        {
+          "name": "Loan Agreement",
+          "description": "Sets out the terms of a lending arrangement"
+        },
+        {
+          "name": "Debenture",
+          "description": "A security document creating fixed and floating charges"
+        },
+        {
+          "name": "Legal Charge / Mortgage",
+          "description": "Creates a charge over real property as security"
+        },
+        {
+          "name": "Guarantee",
+          "description": "A secondary obligation to meet another's obligations"
+        },
+        {
+          "name": "Deeds of Priority / Subordination",
+          "description": "Governs ranking of security interests"
+        },
+        {
+          "name": "Drawdown Notice",
+          "description": "A borrower's request to draw funds under a facility"
+        },
+        {
+          "name": "Compliance Certificate",
+          "description": "Confirms compliance with financial covenants"
+        },
+        {
+          "name": "Intercreditor Agreement",
+          "description": "Governs relations between multiple creditors"
+        }
+      ]
+    },
+    {
+      "category": "Transactional Documents",
+      "documentTypes": [
+        {
+          "name": "Term Sheet",
+          "description": "A non-binding summary of proposed transaction terms"
+        },
+        {
+          "name": "Share Purchase Agreement",
+          "description": "Agreement for the sale and purchase of shares"
+        },
+        {
+          "name": "Asset Purchase Agreement",
+          "description": "Agreement for the sale and purchase of assets"
+        },
+        {
+          "name": "Disclosure Letter",
+          "description": "Qualifies the warranties in a share or asset purchase"
+        },
+        {
+          "name": "Completion Accounts",
+          "description": "Post-completion financial statements for price adjustment"
+        },
+        {
+          "name": "Escrow Agreement",
+          "description": "Governs the holding of funds or documents by a third party"
+        },
+        {
+          "name": "Tax Deed",
+          "description": "Allocates tax liabilities in a corporate transaction"
+        },
+        {
+          "name": "Transitional Services Agreement",
+          "description": "Governs post-completion service arrangements"
+        }
+      ]
+    },
+    {
+      "category": "Intellectual Property",
+      "documentTypes": [
+        {
+          "name": "Assignment",
+          "description": "Transfers ownership of IP from one party to another"
+        },
+        {
+          "name": "Licence",
+          "description": "Grants rights to use IP without transferring ownership"
+        },
+        {
+          "name": "Co-existence Agreement",
+          "description": "Allows parallel use of similar marks"
+        },
+        {
+          "name": "Option Agreement",
+          "description": "A right to acquire IP rights at a future date"
+        },
+        {
+          "name": "NDA / Confidentiality Agreement",
+          "description": "Protects confidential information shared between parties"
+        },
+        {
+          "name": "IP Schedule",
+          "description": "A schedule listing IP assets in a transaction"
+        }
+      ]
+    },
+    {
+      "category": "Internal Documents",
+      "documentTypes": [
+        {
+          "name": "File Note",
+          "description": "An internal record of advice given or actions taken"
+        },
+        {
+          "name": "Attendance Note",
+          "description": "A contemporaneous record of a meeting or call"
+        },
+        {
+          "name": "Internal Memorandum",
+          "description": "Internal communication between fee earners or teams"
+        },
+        {
+          "name": "Precedent / Template",
+          "description": "A standard form document for reuse"
+        },
+        {
+          "name": "Checklist",
+          "description": "A structured list of tasks or items to be verified"
+        },
+        {
+          "name": "Report to Client",
+          "description": "A formal written report of advice to a client"
+        },
+        {
+          "name": "Opinion",
+          "description": "A formal legal opinion on a point of law"
+        },
+        {
+          "name": "Due Diligence Report",
+          "description": "A summary of findings from a due diligence exercise"
+        }
+      ]
+    },
+    {
+      "category": "Property Documents",
+      "documentTypes": [
+        {
+          "name": "Contract for Sale",
+          "description": "The formal contract for the sale of land"
+        },
+        {
+          "name": "Transfer (TR1/TP1)",
+          "description": "The HMLR transfer form effecting change of ownership"
+        },
+        {
+          "name": "Lease / Underlease",
+          "description": "A grant of a leasehold interest in property"
+        },
+        {
+          "name": "Licence to Assign / Alter",
+          "description": "Landlord's consent to a lease transaction or works"
+        },
+        {
+          "name": "Rent Review Memorandum",
+          "description": "Records the outcome of a rent review"
+        },
+        {
+          "name": "Schedule of Condition",
+          "description": "A record of a property's condition at a point in time"
+        },
+        {
+          "name": "Overage Agreement",
+          "description": "Provides for additional payment on occurrence of a trigger event"
+        },
+        {
+          "name": "Option / Pre-emption",
+          "description": "A right to buy or first refusal over a property"
+        }
+      ]
+    },
+    {
+      "category": "Employment Documents",
+      "documentTypes": [
+        {
+          "name": "Contract of Employment",
+          "description": "Sets out the terms and conditions of employment"
+        },
+        {
+          "name": "Settlement Agreement",
+          "description": "Settles employment claims on termination"
+        },
+        {
+          "name": "Compromise Agreement",
+          "description": "An older form of settlement agreement (pre-2013)"
+        },
+        {
+          "name": "Restrictive Covenant",
+          "description": "Post-termination restrictions on an employee's activities"
+        },
+        {
+          "name": "Secondment Agreement",
+          "description": "Governs the temporary transfer of an employee"
+        },
+        {
+          "name": "Variation of Contract",
+          "description": "Records a change to terms and conditions"
+        },
+        {
+          "name": "Disciplinary / Grievance Letter",
+          "description": "Formal correspondence in a disciplinary or grievance process"
+        },
+        {
+          "name": "Reference Letter",
+          "description": "A formal reference provided for a former employee"
+        }
+      ]
+    }
+  ],
+  "clientAndMatter": [
+    {
+      "dimension": "Client Tier",
+      "description": "Segmentation of clients by strategic value and relationship depth",
+      "values": [
+        {
+          "name": "Platinum",
+          "description": "Strategic client — panel / key account; senior relationship partner assigned; quarterly reviews"
+        },
+        {
+          "name": "Gold",
+          "description": "Significant client — regular work; relationship partner assigned; annual reviews"
+        },
+        {
+          "name": "Silver",
+          "description": "Established client — recurring instructions; supervised by senior fee earner"
+        },
+        {
+          "name": "Bronze",
+          "description": "Occasional client — ad hoc instructions; standard supervision"
+        },
+        {
+          "name": "Referral",
+          "description": "Referred by intermediary or panel firm; referral terms apply"
+        },
+        {
+          "name": "One-off / New",
+          "description": "First or single instruction; standard new client checks; enhanced supervision"
+        }
+      ]
+    },
+    {
+      "dimension": "Matter Type",
+      "description": "The nature of the retainer and how the matter is managed",
+      "values": [
+        {
+          "name": "Transactional",
+          "description": "A discrete deal or transaction with a defined completion event (e.g. M&A, conveyancing, financing)"
+        },
+        {
+          "name": "Advisory",
+          "description": "Ongoing or project-based legal advice without a transaction (e.g. regulatory guidance, opinion)"
+        },
+        {
+          "name": "Contentious",
+          "description": "Dispute or litigation matter — court, tribunal, arbitration, or ADR"
+        },
+        {
+          "name": "Regulatory / Compliance",
+          "description": "Regulatory filing, investigation, or compliance programme"
+        },
+        {
+          "name": "Drafting / Documentation",
+          "description": "Template creation, precedent drafting, or document review programme"
+        },
+        {
+          "name": "Corporate Support",
+          "description": "Routine company secretarial, board support, or governance matter"
+        },
+        {
+          "name": "Pro Bono",
+          "description": "No fee; internal approval required; partner sign-off mandatory"
+        }
+      ]
+    },
+    {
+      "dimension": "Billing Basis",
+      "description": "How fees are charged to the client for this matter",
+      "values": [
+        {
+          "name": "Hourly Rate",
+          "description": "Standard time-recorded billing at agreed hourly rates by level of fee earner"
+        },
+        {
+          "name": "Fixed Fee",
+          "description": "Agreed lump sum for defined scope; scope change protocol applies"
+        },
+        {
+          "name": "Capped Fee",
+          "description": "Hourly rate billing subject to an agreed cap; client notified before cap reached"
+        },
+        {
+          "name": "Conditional Fee (CFA)",
+          "description": "No-win no-fee arrangement; uplift agreed; client care letter to confirm"
+        },
+        {
+          "name": "Damages-Based Agreement (DBA)",
+          "description": "Fee contingent on recovery; regulated under DBA Regulations 2013"
+        },
+        {
+          "name": "Retainer / Subscription",
+          "description": "Monthly or annual fee for agreed services or hours of access"
+        },
+        {
+          "name": "Blended Rate",
+          "description": "Single agreed rate applied regardless of fee earner level"
+        },
+        {
+          "name": "Pro Bono",
+          "description": "No charge; recorded at nil for management information purposes"
+        }
+      ]
+    },
+    {
+      "dimension": "Risk Rating",
+      "description": "Matter-level risk assessment for supervision and conflicts purposes",
+      "values": [
+        {
+          "name": "Low",
+          "description": "Routine matter; standard supervision; no unusual conflict or regulatory risk"
+        },
+        {
+          "name": "Medium",
+          "description": "Some complexity; enhanced review at key stages; senior sign-off on advice"
+        },
+        {
+          "name": "High",
+          "description": "Complex, novel, or high-value; partner supervision throughout; file review required"
+        },
+        {
+          "name": "Critical",
+          "description": "Regulatory, reputational, or major financial risk; COLP / COFA notification may be required"
+        },
+        {
+          "name": "Conflict Flagged",
+          "description": "Potential conflict identified; formal conflict check and waiver process in progress"
+        },
+        {
+          "name": "Sensitive",
+          "description": "Political, media, or reputational sensitivity; managing partner awareness required"
+        }
+      ]
+    },
+    {
+      "dimension": "Client Sector",
+      "description": "The primary industry or sector of the client organisation",
+      "values": [
+        {
+          "name": "Financial Services",
+          "description": "Banking, insurance, asset management, fintech, payments"
+        },
+        {
+          "name": "Real Estate & Construction",
+          "description": "Property developers, housebuilders, REITs, contractors"
+        },
+        {
+          "name": "Technology & Digital",
+          "description": "Software, platforms, SaaS, digital media, telecoms"
+        },
+        {
+          "name": "Healthcare & Life Sciences",
+          "description": "NHS, pharma, medtech, private healthcare, biotech"
+        },
+        {
+          "name": "Energy & Natural Resources",
+          "description": "Oil & gas, renewables, utilities, mining"
+        },
+        {
+          "name": "Retail & Consumer",
+          "description": "Retail, FMCG, hospitality, leisure, food & beverage"
+        },
+        {
+          "name": "Manufacturing & Industrial",
+          "description": "Engineering, automotive, aerospace, chemicals"
+        },
+        {
+          "name": "Public Sector & Charity",
+          "description": "Local authority, central government, charities, education"
+        },
+        {
+          "name": "Professional Services",
+          "description": "Accountancy, consulting, architecture, other law firms"
+        },
+        {
+          "name": "Private Individual",
+          "description": "HNW individuals, family offices, private clients"
+        },
+        {
+          "name": "Other / Mixed",
+          "description": "Does not fit a single sector; or sector not yet classified"
+        }
+      ]
+    },
+    {
+      "dimension": "Matter Size",
+      "description": "Indicative value or complexity bracket for resource planning and reporting",
+      "values": [
+        {
+          "name": "Micro",
+          "description": "Under £10,000 estimated fees — typically fixed fee or short advisory"
+        },
+        {
+          "name": "Small",
+          "description": "£10,000 – £50,000 estimated fees — standard supervision"
+        },
+        {
+          "name": "Medium",
+          "description": "£50,000 – £250,000 estimated fees — senior oversight; budget review at 50% consumed"
+        },
+        {
+          "name": "Large",
+          "description": "£250,000 – £1,000,000 estimated fees — partner-led; monthly budget review"
+        },
+        {
+          "name": "Major",
+          "description": "Over £1,000,000 estimated fees — dedicated team; steering committee; regular client reporting"
+        },
+        {
+          "name": "Undetermined",
+          "description": "Fee estimate not yet established — to be updated within 10 working days of opening"
+        }
+      ]
+    }
+  ],
+  "crmAndRelationships": [
+    {
+      "dimension": "Contact Type",
+      "description": "The nature of the individual or organisation in the firm's CRM",
+      "values": [
+        {
+          "name": "Client — Active",
+          "description": "Currently instructing the firm on at least one open matter.",
+          "guidance": "Check for open matters; client care obligations apply"
+        },
+        {
+          "name": "Client — Dormant",
+          "description": "Has instructed the firm previously but no active matter in the last 24 months.",
+          "guidance": "Consider re-engagement; data retention review due"
+        },
+        {
+          "name": "Client — Former",
+          "description": "Has instructed the firm but relationship formally concluded; no expectation of return.",
+          "guidance": "Conflict check still required; data retention policy applies"
+        },
+        {
+          "name": "Prospect",
+          "description": "An individual or organisation identified as a target for new business; not yet instructed.",
+          "guidance": "No client care obligations yet; GDPR basis for holding data to be confirmed"
+        },
+        {
+          "name": "Lead",
+          "description": "A prospect who has made an enquiry or expressed interest in the firm's services.",
+          "guidance": "Initial conflict check recommended; respond within agreed SLA"
+        },
+        {
+          "name": "Referrer — Professional",
+          "description": "An accountant, IFA, surveyor, or other professional who refers clients to the firm.",
+          "guidance": "Referral agreement / terms may apply; track referrals received and reciprocated"
+        },
+        {
+          "name": "Referrer — Client",
+          "description": "An existing or former client who introduces new clients.",
+          "guidance": "Thank-you protocol; no referral fee without SRA compliance"
+        },
+        {
+          "name": "Referrer — Internal",
+          "description": "A cross-referral from another team or office within the firm.",
+          "guidance": "Cross-referral tracking; revenue credit allocation"
+        },
+        {
+          "name": "Introducer",
+          "description": "A third party who introduces work under a formal introduction agreement (e.g. broker, agent).",
+          "guidance": "Introduction agreement required; FCA implications if regulated activity"
+        },
+        {
+          "name": "Panel / Network Member",
+          "description": "A fellow member of a referral network, law firm panel, or professional association.",
+          "guidance": "Panel terms apply; reciprocal referral expectations"
+        },
+        {
+          "name": "Opposing Counsel / Firm",
+          "description": "A law firm or solicitor on the other side of a matter.",
+          "guidance": "Conflict monitoring; professional courtesy obligations"
+        },
+        {
+          "name": "Expert / Counsel",
+          "description": "A barrister, KC, or independent expert instructed by the firm.",
+          "guidance": "Track availability, rates, and areas of expertise"
+        },
+        {
+          "name": "Supplier / Vendor",
+          "description": "A firm supplying services to the firm (e.g. costs draftsman, process server, search agent).",
+          "guidance": "Procurement terms; DPA data processor agreement may be required"
+        },
+        {
+          "name": "Regulatory Body / Court",
+          "description": "A court, tribunal, regulator, or public authority the firm deals with.",
+          "guidance": "Not a commercial relationship; contact record for process purposes only"
+        },
+        {
+          "name": "Media / Press",
+          "description": "A journalist, publisher, or media contact.",
+          "guidance": "All contact via marketing / managing partner; no unsanctioned comment"
+        },
+        {
+          "name": "Potential Recruit",
+          "description": "An individual being considered for employment or a lateral hire.",
+          "guidance": "HR confidentiality; separate from client CRM if possible"
+        }
+      ]
+    },
+    {
+      "dimension": "Relationship Status",
+      "description": "The current state of the firm's relationship with this contact",
+      "values": [
+        {
+          "name": "Target",
+          "description": "Identified as a desirable contact or client; no relationship established yet.",
+          "guidance": "Assign relationship owner; add to BD plan"
+        },
+        {
+          "name": "Cold",
+          "description": "No recent meaningful contact; relationship has lapsed or never properly developed.",
+          "guidance": "Consider outreach campaign or remove from active pipeline"
+        },
+        {
+          "name": "Warm",
+          "description": "Some engagement (e.g. event attendance, newsletter open, social connection); not yet converting.",
+          "guidance": "Nurture with relevant content; invite to events"
+        },
+        {
+          "name": "Active",
+          "description": "Regular meaningful contact; relationship is live and productive.",
+          "guidance": "Maintain cadence; record touchpoints in CRM"
+        },
+        {
+          "name": "Instructing",
+          "description": "Currently giving instructions; at least one open matter.",
+          "guidance": "Fee earner responsible for day-to-day; relationship partner for strategic oversight"
+        },
+        {
+          "name": "Key Account",
+          "description": "A strategically important client managed under a formal key account plan.",
+          "guidance": "Key account plan in place; quarterly partner review; dedicated BD budget"
+        },
+        {
+          "name": "At Risk",
+          "description": "Signals of dissatisfaction, reduced instructions, or competitor approach detected.",
+          "guidance": "Urgent relationship partner intervention required; escalate to managing partner if needed"
+        },
+        {
+          "name": "Lost",
+          "description": "Has moved instructions to a competitor or ceased using the firm.",
+          "guidance": "Exit interview if possible; record reason; flag for potential reactivation"
+        },
+        {
+          "name": "On Hold",
+          "description": "Relationship paused by agreement (e.g. conflict, regulatory restriction, client request).",
+          "guidance": "Review date to be set; do not contact without prior clearance"
+        }
+      ]
+    },
+    {
+      "dimension": "Pipeline Stage",
+      "description": "Where a prospect or lead sits in the new business development pipeline",
+      "values": [
+        {
+          "name": "Identified",
+          "description": "Added to the pipeline as a potential target; no contact made.",
+          "guidance": "Assign to BD owner; set initial outreach date"
+        },
+        {
+          "name": "Initial Contact",
+          "description": "First contact made (e.g. meeting at event, introduction, cold outreach).",
+          "guidance": "Log touchpoint; send follow-up within 48 hours"
+        },
+        {
+          "name": "Qualified",
+          "description": "Confirmed as a viable prospect with a genuine need and budget; fits firm's target profile.",
+          "guidance": "Assign relationship partner; add to sector BD plan"
+        },
+        {
+          "name": "Meeting / Pitch Scheduled",
+          "description": "A formal introductory meeting or credentials presentation arranged.",
+          "guidance": "Prepare credentials pack; confirm attendees and agenda"
+        },
+        {
+          "name": "Proposal / Pitch Submitted",
+          "description": "A formal proposal, tender response, or pitch document has been submitted.",
+          "guidance": "Follow up within agreed timescale; note decision date"
+        },
+        {
+          "name": "Panel / Preferred Status",
+          "description": "Appointed to a panel or agreed as a preferred supplier without a specific matter yet.",
+          "guidance": "Panel terms agreed; relationship partner to drive first instruction"
+        },
+        {
+          "name": "First Instruction Received",
+          "description": "First matter opened; prospect converts to active client.",
+          "guidance": "Trigger client onboarding; assign client tier; update CRM status"
+        },
+        {
+          "name": "Repeat Instructions",
+          "description": "More than one matter received; relationship is established.",
+          "guidance": "Review client tier; consider key account status if volume warrants"
+        },
+        {
+          "name": "Stalled",
+          "description": "Pipeline has stopped moving; no response or engagement for 60+ days.",
+          "guidance": "Relationship owner to make direct contact; consider removing from active pipeline"
+        },
+        {
+          "name": "Lost — No Instruction",
+          "description": "Prospect has confirmed they will not instruct the firm on this occasion.",
+          "guidance": "Record reason; keep warm for future if appropriate"
+        }
+      ]
+    },
+    {
+      "dimension": "Referrer / Source Type",
+      "description": "How this contact came to know the firm, or how they refer work",
+      "values": [
+        {
+          "name": "Existing Client Referral",
+          "description": "Introduced by an existing or former client.",
+          "guidance": "Highest quality source; acknowledge and thank promptly"
+        },
+        {
+          "name": "Professional Referral — Accountant",
+          "description": "Referred by an accountancy firm or individual accountant.",
+          "guidance": "Track referrals in/out; reciprocate where appropriate"
+        },
+        {
+          "name": "Professional Referral — IFA / Wealth Manager",
+          "description": "Referred by an independent financial adviser or wealth manager.",
+          "guidance": "Common for private client and tax work"
+        },
+        {
+          "name": "Professional Referral — Surveyor / Agent",
+          "description": "Referred by a surveyor, estate agent, or property consultant.",
+          "guidance": "Common for real estate and construction work"
+        },
+        {
+          "name": "Professional Referral — Other Law Firm",
+          "description": "Referred by a firm that cannot or will not act (e.g. conflict, capacity, specialism).",
+          "guidance": "Reciprocal referral expected; maintain relationship"
+        },
+        {
+          "name": "Professional Referral — Other",
+          "description": "Any other professional referral source (e.g. insolvency practitioner, banker).",
+          "guidance": "Note profession and specific individual in CRM"
+        },
+        {
+          "name": "Event / Conference",
+          "description": "Met at a firm event, industry conference, seminar, or webinar.",
+          "guidance": "Record event name and date; follow up within 48 hours"
+        },
+        {
+          "name": "Website / Digital Enquiry",
+          "description": "Inbound enquiry via website contact form, email, or digital channel.",
+          "guidance": "Respond within agreed SLA; track conversion rate"
+        },
+        {
+          "name": "Directory / Chambers / Legal 500",
+          "description": "Found the firm via a legal directory listing.",
+          "guidance": "Note directory and edition; useful for BD and directory submission evidence"
+        },
+        {
+          "name": "Social Media / LinkedIn",
+          "description": "Connected or enquired via LinkedIn or other social media platform.",
+          "guidance": "Assign to BD owner; move to CRM within 24 hours"
+        },
+        {
+          "name": "Panel Appointment",
+          "description": "Appointed through a competitive tender or panel review process.",
+          "guidance": "Note panel name, duration, and review date"
+        },
+        {
+          "name": "Advertising / PR",
+          "description": "Responded to firm advertising, press coverage, or PR activity.",
+          "guidance": "Track campaign source for marketing ROI analysis"
+        },
+        {
+          "name": "Alumni",
+          "description": "A former employee or trainee who has instructed or referred work.",
+          "guidance": "Alumni programme; maintain warm relationship"
+        },
+        {
+          "name": "Cold Outreach",
+          "description": "The firm proactively approached this contact without a prior introduction.",
+          "guidance": "Note outreach method and date; manage GDPR basis carefully"
+        },
+        {
+          "name": "Unknown / Not Recorded",
+          "description": "Source not captured at the time of onboarding.",
+          "guidance": "Prompt fee earner to update; aim for <5% unknown in CRM"
+        }
+      ]
+    },
+    {
+      "dimension": "Engagement Level",
+      "description": "How actively and deeply this contact engages with the firm across all touchpoints",
+      "values": [
+        {
+          "name": "Advocate",
+          "description": "Actively promotes the firm; provides references; speaks at firm events; refers regularly.",
+          "guidance": "Highest value relationship; involve in key account planning; recognise and reward loyalty"
+        },
+        {
+          "name": "Engaged",
+          "description": "Regular contact; attends events; responds to communications; gives repeat instructions.",
+          "guidance": "Maintain cadence; invite to premium events; consider thought leadership collaboration"
+        },
+        {
+          "name": "Receptive",
+          "description": "Opens communications; attends occasional events; responds when contacted.",
+          "guidance": "Nurture with relevant content; invite to appropriate events"
+        },
+        {
+          "name": "Passive",
+          "description": "Receives communications but rarely engages; instructs occasionally.",
+          "guidance": "Review contact preferences; consider targeted outreach"
+        },
+        {
+          "name": "Disengaged",
+          "description": "Not opening communications; no recent contact; at risk of lapsing.",
+          "guidance": "Try alternative channel; consider removing from mailing lists if no response"
+        },
+        {
+          "name": "Opted Out",
+          "description": "Has requested to stop receiving marketing communications.",
+          "guidance": "Comply immediately; remove from all marketing lists; retain in CRM for conflict purposes only"
+        }
+      ]
+    }
+  ],
+  "jurisdiction": [
+    {
+      "group": "Domestic — England & Wales",
+      "systems": [
+        {
+          "name": "English Law",
+          "notes": "Governed by the law of England and Wales; courts of England and Wales"
+        },
+        {
+          "name": "Common Law",
+          "notes": "Judge-made law and precedent; distinct from civil law systems"
+        },
+        {
+          "name": "Statute",
+          "notes": "Act of Parliament or statutory instrument applicable in England and Wales"
+        },
+        {
+          "name": "FCA Regulated",
+          "notes": "Subject to Financial Conduct Authority regulation"
+        },
+        {
+          "name": "SRA Regulated",
+          "notes": "Subject to Solicitors Regulation Authority oversight"
+        },
+        {
+          "name": "HMRC / Tax",
+          "notes": "UK tax law — HMRC administered; includes SDLT, CGT, IHT, VAT, corporation tax"
+        },
+        {
+          "name": "HMLR / Land Registry",
+          "notes": "Property matters registrable at HM Land Registry"
+        },
+        {
+          "name": "Companies House",
+          "notes": "Companies Act 2006 filings; registered in England and Wales"
+        }
+      ]
+    },
+    {
+      "group": "Devolved — Scotland",
+      "systems": [
+        {
+          "name": "Scots Law",
+          "notes": "Separate legal system; distinct property law (feudal origins), contract, and procedure"
+        },
+        {
+          "name": "Court of Session",
+          "notes": "Scotland's supreme civil court; equivalent to High Court in E&W"
+        },
+        {
+          "name": "Sheriff Court",
+          "notes": "Lower civil and criminal court in Scotland"
+        },
+        {
+          "name": "Registers of Scotland",
+          "notes": "Scottish equivalent of HMLR; sasines and Land Register"
+        },
+        {
+          "name": "OSCR",
+          "notes": "Office of the Scottish Charity Regulator"
+        }
+      ]
+    },
+    {
+      "group": "Devolved — Northern Ireland",
+      "systems": [
+        {
+          "name": "Northern Ireland Law",
+          "notes": "Separate legal system; largely mirrors E&W but distinct in some areas"
+        },
+        {
+          "name": "Land Registry NI",
+          "notes": "Separate land registration from HMLR"
+        },
+        {
+          "name": "Companies Registry NI",
+          "notes": "Northern Ireland-specific company registrations"
+        }
+      ]
+    },
+    {
+      "group": "European Union",
+      "systems": [
+        {
+          "name": "EU Law (directly applicable)",
+          "notes": "EU Regulations applying directly without domestic implementation"
+        },
+        {
+          "name": "EU Directives (implemented)",
+          "notes": "Domestic legislation implementing EU Directives (pre/post-Brexit)"
+        },
+        {
+          "name": "GDPR (EU)",
+          "notes": "EU GDPR — applies to processing of EU data subjects' data"
+        },
+        {
+          "name": "EU Competition Law",
+          "notes": "Article 101/102 TFEU; EU Merger Regulation"
+        },
+        {
+          "name": "ECJ / CJEU",
+          "notes": "Court of Justice of the European Union — EU law interpretation"
+        },
+        {
+          "name": "EEA / Single Market",
+          "notes": "European Economic Area; includes Iceland, Liechtenstein, Norway"
+        }
+      ]
+    },
+    {
+      "group": "International — Key Jurisdictions",
+      "systems": [
+        {
+          "name": "New York Law",
+          "notes": "Common commercial governing law for international transactions"
+        },
+        {
+          "name": "Delaware Law",
+          "notes": "US corporate law; common for US-incorporated entities"
+        },
+        {
+          "name": "Irish Law",
+          "notes": "Important post-Brexit for EU-passport financial services"
+        },
+        {
+          "name": "Luxembourg Law",
+          "notes": "Common for EU fund structures and holding companies"
+        },
+        {
+          "name": "Cayman Islands",
+          "notes": "Offshore; common for investment funds and structured finance"
+        },
+        {
+          "name": "BVI",
+          "notes": "British Virgin Islands; common for offshore holding structures"
+        },
+        {
+          "name": "Jersey / Guernsey",
+          "notes": "Channel Islands; trusts, funds, finance; not EU members"
+        },
+        {
+          "name": "UAE / DIFC",
+          "notes": "Dubai International Financial Centre; common law enclave"
+        },
+        {
+          "name": "Singapore",
+          "notes": "Common law; major Asian financial centre"
+        },
+        {
+          "name": "Hong Kong",
+          "notes": "Common law; financial centre; separate from mainland China"
+        }
+      ]
+    },
+    {
+      "group": "Cross-Border / Multi-Jurisdiction",
+      "systems": [
+        {
+          "name": "Cross-border (specify)",
+          "notes": "Matter spans two or more jurisdictions; lead jurisdiction to be designated"
+        },
+        {
+          "name": "Arbitration Seat — London",
+          "notes": "LCIA, ICC, or ad hoc; London-seated; English law procedural rules"
+        },
+        {
+          "name": "Arbitration Seat — Paris",
+          "notes": "ICC; Paris-seated; French arbitration law"
+        },
+        {
+          "name": "Arbitration Seat — Singapore",
+          "notes": "SIAC; Singapore-seated"
+        },
+        {
+          "name": "Arbitration Seat — Other",
+          "notes": "Specify seat and rules in matter details"
+        },
+        {
+          "name": "International Trade / Sanctions",
+          "notes": "OFAC, OFSI, EU sanctions; export controls; cross-border trade rules"
+        },
+        {
+          "name": "Private International Law",
+          "notes": "Conflict of laws; choice of law; recognition and enforcement of judgments"
+        }
+      ]
+    }
+  ],
+  "audience": [
+    {
+      "group": "Internal",
+      "types": [
+        {
+          "name": "Fee earner",
+          "notes": "A document for the use of the fee earner handling the matter (e.g. file note, research note, checklist)"
+        },
+        {
+          "name": "Supervising solicitor / partner",
+          "notes": "A document for review by the supervising solicitor or partner (e.g. draft for approval, risk assessment)"
+        },
+        {
+          "name": "Accounts / billing",
+          "notes": "A document for the finance or accounts team (e.g. billing narrative, costs schedule)"
+        },
+        {
+          "name": "Knowledge management",
+          "notes": "A precedent, template, or know-how document for the KM / library function"
+        },
+        {
+          "name": "Compliance / COLP / COFA",
+          "notes": "A document for the firm's compliance officer (e.g. conflict report, AML record)"
+        },
+        {
+          "name": "HR / People",
+          "notes": "An internal HR document (e.g. employment record, performance review)"
+        },
+        {
+          "name": "Management / board",
+          "notes": "A document for the firm's management board or partnership (e.g. management information, board paper)"
+        }
+      ]
+    },
+    {
+      "group": "Client-Facing",
+      "types": [
+        {
+          "name": "Client — individual",
+          "notes": "A private individual client (e.g. private client, employment claimant, residential purchaser)"
+        },
+        {
+          "name": "Client — corporate (in-house counsel)",
+          "notes": "A corporate client receiving advice through their in-house legal team"
+        },
+        {
+          "name": "Client — corporate (business stakeholder)",
+          "notes": "A corporate client receiving advice directly (e.g. CEO, CFO, board)"
+        },
+        {
+          "name": "Client — public sector",
+          "notes": "A local authority, government body, or other public sector client"
+        },
+        {
+          "name": "Client — charity / NFP",
+          "notes": "A charity or not-for-profit organisation"
+        }
+      ]
+    },
+    {
+      "group": "Counterparty & Third Party",
+      "types": [
+        {
+          "name": "Counterparty solicitors",
+          "notes": "The opposing or other side's legal representatives in a transaction or dispute"
+        },
+        {
+          "name": "Counterparty (direct)",
+          "notes": "The other party to a transaction or dispute, without their own solicitor"
+        },
+        {
+          "name": "Third-party expert",
+          "notes": "An independent expert, valuer, surveyor, accountant, or other specialist"
+        },
+        {
+          "name": "Intermediary",
+          "notes": "A broker, agent, introducer, or referral partner"
+        },
+        {
+          "name": "Lender / bank",
+          "notes": "A financial institution in a financing transaction"
+        },
+        {
+          "name": "Insurer",
+          "notes": "An insurance company or Lloyd's syndicate"
+        },
+        {
+          "name": "Company secretarial / registry",
+          "notes": "Companies House, HMLR, or another registry"
+        }
+      ]
+    },
+    {
+      "group": "Court, Tribunal & Regulatory",
+      "types": [
+        {
+          "name": "Court — High Court / County Court",
+          "notes": "Documents filed or served in proceedings before the High Court or County Court"
+        },
+        {
+          "name": "Court — Court of Appeal / Supreme Court",
+          "notes": "Appellate proceedings; higher level of formality and review required"
+        },
+        {
+          "name": "Employment Tribunal",
+          "notes": "ET1 / ET3 and associated pleadings, witness statements, and orders"
+        },
+        {
+          "name": "Arbitration tribunal",
+          "notes": "Documents prepared for a private arbitration (LCIA, ICC, SIAC, or ad hoc)"
+        },
+        {
+          "name": "Mediator",
+          "notes": "Documents prepared for or submitted in a mediation (without prejudice unless agreed otherwise)"
+        },
+        {
+          "name": "FCA",
+          "notes": "Regulatory filings, notifications, and correspondence with the Financial Conduct Authority"
+        },
+        {
+          "name": "ICO",
+          "notes": "Data protection regulatory correspondence with the Information Commissioner's Office"
+        },
+        {
+          "name": "HMRC",
+          "notes": "Tax returns, elections, and correspondence with HM Revenue & Customs"
+        },
+        {
+          "name": "SRA",
+          "notes": "Solicitors Regulation Authority notifications, responses, and regulatory filings"
+        },
+        {
+          "name": "Other regulator (specify)",
+          "notes": "Any other regulatory body; specify in matter details"
+        }
+      ]
+    }
+  ],
+  "matterStage": [
+    {
+      "stage": "Stage 1 — Inception & Onboarding",
+      "description": "Matter opened; client onboarded; engagement terms agreed",
+      "milestones": [
+        {
+          "code": "1.1",
+          "name": "Conflict check",
+          "description": "Formal conflict of interest check completed and cleared"
+        },
+        {
+          "code": "1.2",
+          "name": "AML / KYC checks",
+          "description": "Anti-money laundering and know your client verification"
+        },
+        {
+          "code": "1.3",
+          "name": "Client care letter",
+          "description": "Engagement letter and terms of business issued and signed"
+        },
+        {
+          "code": "1.4",
+          "name": "Matter opening form",
+          "description": "Internal matter opened on practice management system"
+        },
+        {
+          "code": "1.5",
+          "name": "Fee estimate / costs budget",
+          "description": "Initial costs estimate provided to client"
+        },
+        {
+          "code": "1.6",
+          "name": "Scope definition",
+          "description": "Scope of retainer agreed and documented"
+        },
+        {
+          "code": "1.7",
+          "name": "Team assignment",
+          "description": "Lead partner, supervising solicitor, and fee earners assigned"
+        }
+      ]
+    },
+    {
+      "stage": "Stage 2 — Investigation & Due Diligence",
+      "description": "Fact-finding, research, and due diligence before advising or transacting",
+      "milestones": [
+        {
+          "code": "2.1",
+          "name": "Instructions taken",
+          "description": "Detailed instructions recorded; key facts established"
+        },
+        {
+          "code": "2.2",
+          "name": "Legal research",
+          "description": "Research into applicable law, precedent, and regulation"
+        },
+        {
+          "code": "2.3",
+          "name": "Due diligence request list",
+          "description": "Requests for documents and information from client or counterparty"
+        },
+        {
+          "code": "2.4",
+          "name": "Document review",
+          "description": "Review of title documents, contracts, corporate records, or disclosure materials"
+        },
+        {
+          "code": "2.5",
+          "name": "Third-party enquiries",
+          "description": "Searches, enquiries, and requisitions (e.g. local authority, Land Registry, Companies House)"
+        },
+        {
+          "code": "2.6",
+          "name": "Risk assessment",
+          "description": "Identification of legal, commercial, and regulatory risks"
+        },
+        {
+          "code": "2.7",
+          "name": "Due diligence report",
+          "description": "Written report of findings; marked-up documents; issues list"
+        }
+      ]
+    },
+    {
+      "stage": "Stage 3 — Advice & Strategy",
+      "description": "Formulation and delivery of legal advice; strategy agreed with client",
+      "milestones": [
+        {
+          "code": "3.1",
+          "name": "Advice note / opinion",
+          "description": "Written legal advice on key issues"
+        },
+        {
+          "code": "3.2",
+          "name": "Strategy meeting",
+          "description": "Discussion of options and recommended course of action"
+        },
+        {
+          "code": "3.3",
+          "name": "Counsel instructions",
+          "description": "Briefing of barrister or specialist counsel where required"
+        },
+        {
+          "code": "3.4",
+          "name": "Risk register update",
+          "description": "Formal update of matter risk register following advice"
+        },
+        {
+          "code": "3.5",
+          "name": "Client approval",
+          "description": "Client confirms instructions to proceed on agreed strategy"
+        }
+      ]
+    },
+    {
+      "stage": "Stage 4 — Drafting & Negotiation",
+      "description": "Preparation of documents and negotiation of terms with counterparties",
+      "milestones": [
+        {
+          "code": "4.1",
+          "name": "First draft",
+          "description": "Initial draft of key transaction or litigation documents"
+        },
+        {
+          "code": "4.2",
+          "name": "Internal review",
+          "description": "Review by supervising solicitor or partner before issue"
+        },
+        {
+          "code": "4.3",
+          "name": "Counterparty negotiation",
+          "description": "Exchange of drafts and negotiation of terms"
+        },
+        {
+          "code": "4.4",
+          "name": "Agreed form documents",
+          "description": "Documents agreed in final or near-final form"
+        },
+        {
+          "code": "4.5",
+          "name": "Board / partner approval",
+          "description": "Client-side internal approval of transaction terms"
+        },
+        {
+          "code": "4.6",
+          "name": "Conditions satisfaction",
+          "description": "Satisfaction or waiver of conditions precedent"
+        },
+        {
+          "code": "4.7",
+          "name": "Execution",
+          "description": "Documents signed / executed by all parties"
+        }
+      ]
+    },
+    {
+      "stage": "Stage 5 — Completion / Resolution",
+      "description": "The transaction completes or the dispute is resolved",
+      "milestones": [
+        {
+          "code": "5.1",
+          "name": "Completion meeting",
+          "description": "Final steps to effect completion; funds transfer; document release"
+        },
+        {
+          "code": "5.2",
+          "name": "Completion statement",
+          "description": "Financial statement of monies paid and received on completion"
+        },
+        {
+          "code": "5.3",
+          "name": "Settlement",
+          "description": "Dispute resolved by agreement; settlement agreement executed"
+        },
+        {
+          "code": "5.4",
+          "name": "Judgment / Award",
+          "description": "Court judgment or arbitral award received"
+        },
+        {
+          "code": "5.5",
+          "name": "Registration / Filing",
+          "description": "Post-completion registration at HMLR, Companies House, or other registry"
+        },
+        {
+          "code": "5.6",
+          "name": "Completion report",
+          "description": "Report to client confirming completion and summarising key terms"
+        },
+        {
+          "code": "5.7",
+          "name": "Funds transfer",
+          "description": "Client account transaction; bill raised; disbursements settled"
+        }
+      ]
+    },
+    {
+      "stage": "Stage 6 — Post-Completion & Ongoing",
+      "description": "Actions arising after completion; ongoing obligations; retained matters",
+      "milestones": [
+        {
+          "code": "6.1",
+          "name": "Post-completion actions",
+          "description": "Outstanding conditions; deferred obligations; earn-out; retention"
+        },
+        {
+          "code": "6.2",
+          "name": "Stamp duty / tax returns",
+          "description": "SDLT return; stamp duty adjudication; corporation tax filing"
+        },
+        {
+          "code": "6.3",
+          "name": "Warranty period",
+          "description": "Monitoring of warranty claims period in transactional matters"
+        },
+        {
+          "code": "6.4",
+          "name": "Regulatory reporting",
+          "description": "Ongoing regulatory notifications or compliance filings"
+        },
+        {
+          "code": "6.5",
+          "name": "Ongoing retainer",
+          "description": "Continuing advisory relationship; standing instructions"
+        },
+        {
+          "code": "6.6",
+          "name": "File review",
+          "description": "Periodic file review by supervisor; billing status check"
+        }
+      ]
+    },
+    {
+      "stage": "Stage 7 — File Closure",
+      "description": "Matter concluded; file closed and archived",
+      "milestones": [
+        {
+          "code": "7.1",
+          "name": "Final bill issued",
+          "description": "Completion account sent to client; all disbursements settled"
+        },
+        {
+          "code": "7.2",
+          "name": "Client satisfaction",
+          "description": "Feedback obtained; relationship review conducted"
+        },
+        {
+          "code": "7.3",
+          "name": "Deeds / documents returned",
+          "description": "Original documents returned to client or securely stored"
+        },
+        {
+          "code": "7.4",
+          "name": "Undertakings discharged",
+          "description": "All professional undertakings confirmed as discharged"
+        },
+        {
+          "code": "7.5",
+          "name": "File archive",
+          "description": "Electronic and physical file archived per retention policy"
+        },
+        {
+          "code": "7.6",
+          "name": "Lessons learned",
+          "description": "Post-matter review (for major matters); precedent updates"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "1.0.0",
+  "tenantId": "not-a-law-firm",
+  "displayName": "Not A Law Firm LLP",
+  "hostingMode": "multi_tenant",
+  "environment": "dev",
+  "branding": {
+    "primaryDomain": "notalawfirm.co.uk",
+    "accentColorHex": "#1f6feb",
+    "logoAssetKey": "nalf-logo.svg"
+  },
+  "featureFlags": {
+    "enableMatterCostsGovernance": true,
+    "enablePmsLiveRateSync": true,
+    "enableAiMatterExtraction": true
+  },
+  "matterCosts": {
+    "rateSourceMode": "pms_when_linked",
+    "allowMatterRateOverrides": true,
+    "partnerSignOffThresholdGbp": 25000,
+    "rateCards": [
+      {
+        "id": "RC-DEFAULT",
+        "name": "Firm Standard Rate Card",
+        "practiceAreaKey": null,
+        "pmsDepartmentCode": "Standard",
+        "partnerRateGbp": 350,
+        "associateRateGbp": 250,
+        "traineeRateGbp": 145,
+        "customGrades": [],
+        "active": true
+      },
+      {
+        "id": "RC-CORP",
+        "name": "Corporate & Commercial Rate Card",
+        "practiceAreaKey": "work_type.corporate_and_commercial",
+        "pmsDepartmentCode": "Corporate & Commercial",
+        "partnerRateGbp": 395,
+        "associateRateGbp": 285,
+        "traineeRateGbp": 160,
+        "customGrades": [],
+        "active": true
+      }
+    ],
+    "disbursementPresets": [
+      {
+        "id": "DISB-COUNSEL",
+        "description": "Counsel's advice / hearing fee",
+        "defaultAmountGbp": 1500,
+        "practiceAreaKey": null,
+        "vatApplicable": true
+      },
+      {
+        "id": "DISB-CH",
+        "description": "Companies House filing & search fees",
+        "defaultAmountGbp": 100,
+        "practiceAreaKey": "work_type.corporate_and_commercial",
+        "vatApplicable": false
+      }
+    ]
+  },
+  "integrations": {
+    "pmsConnectionSecretVaultRef": "kv://kv-not-a-law-firm-dev/pms-connection-string",
+    "companiesHouseApiKeyVaultRef": "kv://kv-not-a-law-firm-dev/companies-house-api-key",
+    "aiProviderChoice": "azure_openai_uk"
+  },
+  "enabledExtensions": ["nalf-matter-costs-governance"]
+}

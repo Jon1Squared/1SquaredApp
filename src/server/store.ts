@@ -1,0 +1,919 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { migrateEmployeesToEmploymentRecords } from '@/domain/employment';
+import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
+import {
+  createDefaultMatterCostsConfig,
+  syncRateCardsWithPmsFeeEarners,
+} from '@/domain/matterCosts';
+import {
+  buildDefaultMatterPartyTaxonomy,
+  migrateMatterPartiesToTwoFieldModel,
+} from '@/domain/matterParties';
+import { buildDefaultOrgStructure } from '@/domain/orgStructure';
+import { computeAutomaticPmsLinks } from '@/domain/pms';
+import type {
+  AuditEntry,
+  ChoiceList,
+  ChoiceValue,
+  CustomFieldDefinition,
+  EmployeeMigrationReport,
+  EmployeeSensitiveRecord,
+  Enquiry,
+  EnquirySettings,
+  HomePagesConfig,
+  Matter,
+  MatterCostsConfig,
+  MatterPartyMigrationReport,
+  MatterPartyTaxonomy,
+  MergeHistory,
+  Note,
+  NotificationItem,
+  Organisation,
+  OrgStructureCatalogue,
+  Person,
+  PersonOrganisationLink,
+  PmsLink,
+  Quote,
+  SignOffItem,
+  Task,
+  TaskSettings,
+  Team,
+} from '@/domain/types';
+import { getPmsSource } from '@/pms/pmsSource';
+import { buildSeedLists } from '@/seed/lists';
+import {
+  buildDemoData,
+  DEFAULT_ENQUIRY_SETTINGS,
+  DEFAULT_TASK_SETTINGS,
+  DEFAULT_USER_ID,
+  FIRM,
+} from '@/seed/demo';
+
+export interface FirmStore {
+  firmId: string;
+  firm: typeof FIRM;
+  isCleanDeployment?: boolean;
+  lists: ChoiceList[];
+  values: ChoiceValue[];
+  customFields: CustomFieldDefinition[];
+  orgStructure: OrgStructureCatalogue;
+  matterPartyTaxonomy: MatterPartyTaxonomy;
+  matterPartyMigrationReport?: MatterPartyMigrationReport;
+  people: Person[];
+  employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord>;
+  employeeMigrationReport?: EmployeeMigrationReport;
+  organisations: Organisation[];
+  links: PersonOrganisationLink[];
+  matters: Matter[];
+  teams: Team[];
+  tasks: Task[];
+  enquiries: Enquiry[];
+  quotes: Quote[];
+  notifications: NotificationItem[];
+  enquirySettings: EnquirySettings;
+  taskSettings: TaskSettings;
+  signOffs: SignOffItem[];
+  homePagesConfig: HomePagesConfig;
+  matterCostsConfig: MatterCostsConfig;
+  pmsLinks: PmsLink[];
+  notes: Note[];
+  audit: AuditEntry[];
+  mergeHistory: MergeHistory[];
+  recentlyViewed: Record<string, string[]>;
+  counters: Record<string, number>;
+}
+
+const DATA_DIR = path.join(process.cwd(), 'data');
+const DATA_FILE = path.join(DATA_DIR, 'pembroke-vaughan.json');
+
+declare global {
+  var __oneSquaredStore: FirmStore | undefined;
+  var __oneSquaredStoreMtimeMs: number | undefined;
+}
+
+function buildInitialPmsLinks(
+  organisations: Organisation[],
+  people: Person[],
+  matters: Matter[],
+  existingLinks: PmsLink[] = [],
+): PmsLink[] {
+  const pms = getPmsSource();
+  const pmsClients = pms.listClients();
+  const pmsFeeEarners = pms.listFeeEarners();
+  const pmsMatters = pms.listMatters();
+  const nowIso = new Date().toISOString();
+
+  // Seed links for the 4 demo matters noted in the PMS workbook README
+  // (Penarth lease, Price purchase, Pugh estate, Brightwater tribunal claim)
+  // plus the key story matters seeded in demo.ts
+  const seededMatterLinks: PmsLink[] = [...existingLinks];
+  const addSeedMatterLink = (matterId: string | undefined, pmsCode: string) => {
+    if (!matterId) return;
+    if (
+      seededMatterLinks.some(
+        (l) => l.entityType === 'matter' && (l.onesquaredId === matterId || l.pmsCode === pmsCode),
+      )
+    ) {
+      return;
+    }
+    seededMatterLinks.push({
+      id: `PMSL-M-${pmsCode}`,
+      entityType: 'matter',
+      onesquaredId: matterId,
+      pmsCode,
+      matchedBy: 'seed',
+      matchedAt: nowIso,
+    });
+  };
+
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PEN001-0004' || m.matterNumber === 'PEN001-0001')?.id,
+    'PEN001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PEN001-0002')?.id,
+    'PEN001-0002',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PRI001-0001')?.id,
+    'PRI001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PUG001-0001')?.id,
+    'PUG001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.id === 'M-000007')?.id,
+    'BRI001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'BRI001-0003' && m.title.includes('Afon Care'))?.id,
+    'BRI001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'SEV001-0001')?.id,
+    'SEV001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PEN001-0003')?.id,
+    'PEN001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'HAR001-0003')?.id,
+    'HAR001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'BAY001-0001')?.id,
+    'BAY001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'JON002-0001')?.id,
+    'SJO001-0001',
+  );
+
+  return computeAutomaticPmsLinks(
+    seededMatterLinks,
+    organisations,
+    people,
+    matters,
+    pmsClients,
+    pmsFeeEarners,
+    pmsMatters,
+    nowIso,
+    true,
+  );
+}
+
+export function createSeedStore(today: Date = new Date()): FirmStore {
+  const seedLists = buildSeedLists();
+  const demo = buildDemoData(today);
+  const pmsLinks = buildInitialPmsLinks(demo.organisations, demo.people, demo.matters);
+  const orgStructure = buildDefaultOrgStructure();
+  const rawValues = [...seedLists.values, ...demo.customValues];
+  const empMigration = migrateEmployeesToEmploymentRecords(
+    demo.people,
+    rawValues,
+    orgStructure,
+    pmsLinks,
+    today.toISOString(),
+  );
+  const matterPartyTaxonomy = buildDefaultMatterPartyTaxonomy(rawValues);
+  const partyMigration = migrateMatterPartiesToTwoFieldModel(
+    rawValues,
+    demo.matters,
+    matterPartyTaxonomy,
+    today.toISOString(),
+  );
+  const pmsFeeEarners = getPmsSource().listFeeEarners();
+  const matterCostsConfig = syncRateCardsWithPmsFeeEarners(
+    createDefaultMatterCostsConfig(partyMigration.values, today.toISOString()),
+    pmsFeeEarners,
+    partyMigration.values,
+    today.toISOString(),
+  );
+  return {
+    firmId: 'not-a-law-firm',
+    firm: FIRM,
+    isCleanDeployment: false,
+    lists: [...seedLists.lists, ...demo.customLists],
+    values: partyMigration.values,
+    customFields: demo.customFields,
+    orgStructure,
+    matterPartyTaxonomy,
+    matterPartyMigrationReport: partyMigration.report,
+    people: empMigration.people,
+    employeeSensitiveRecords: {},
+    employeeMigrationReport: empMigration.report,
+    organisations: demo.organisations,
+    links: demo.links,
+    matters: partyMigration.matters,
+    teams: demo.teams,
+    tasks: demo.tasks,
+    enquiries: demo.enquiries,
+    quotes: demo.quotes,
+    notifications: demo.notifications,
+    enquirySettings: demo.enquirySettings,
+    taskSettings: demo.taskSettings,
+    signOffs: demo.signOffs,
+    homePagesConfig: demo.homePagesConfig,
+    matterCostsConfig,
+    pmsLinks,
+    notes: demo.notes,
+    audit: demo.audit,
+    mergeHistory: [],
+    recentlyViewed: demo.recentlyViewed,
+    counters: { ...demo.counters, PMSL: pmsLinks.length },
+  };
+}
+
+/**
+ * Creates a clean, empty store representing a brand-new tenant deployment
+ * with zero client records, zero employees, zero matters, zero enquiries,
+ * zero quotes, zero tasks, zero teams, zero PMS links, and zero audit history,
+ * while retaining the Core taxonomy/lists and default tenant configuration.
+ */
+export function createCleanDeploymentStore(today: Date = new Date()): FirmStore {
+  const nowIso = today.toISOString();
+  const seedLists = buildSeedLists();
+  const orgStructure = buildDefaultOrgStructure();
+  const matterPartyTaxonomy = buildDefaultMatterPartyTaxonomy(seedLists.values);
+  const partyMigration = migrateMatterPartiesToTwoFieldModel(
+    seedLists.values,
+    [],
+    matterPartyTaxonomy,
+    nowIso,
+  );
+  const homePagesConfig = createDefaultHomePagesConfig(nowIso);
+  homePagesConfig.firmSettings.demoMode = false;
+  const matterCostsConfig = createDefaultMatterCostsConfig(partyMigration.values, nowIso);
+
+  return {
+    firmId: 'not-a-law-firm',
+    firm: FIRM,
+    isCleanDeployment: true,
+    lists: seedLists.lists,
+    values: partyMigration.values,
+    customFields: [],
+    orgStructure,
+    matterPartyTaxonomy,
+    matterPartyMigrationReport: partyMigration.report,
+    people: [],
+    employeeSensitiveRecords: {},
+    employeeMigrationReport: {
+      migratedAt: nowIso,
+      migratedCount: 0,
+      unmappedRecords: [],
+    },
+    organisations: [],
+    links: [],
+    matters: [],
+    teams: [],
+    tasks: [],
+    enquiries: [],
+    quotes: [],
+    notifications: [],
+    enquirySettings: { ...DEFAULT_ENQUIRY_SETTINGS },
+    taskSettings: {
+      templates: DEFAULT_TASK_SETTINGS.templates.map((t) => ({ ...t })),
+    },
+    signOffs: [],
+    homePagesConfig,
+    matterCostsConfig,
+    pmsLinks: [],
+    notes: [],
+    audit: [],
+    mergeHistory: [],
+    recentlyViewed: {},
+    counters: {},
+  };
+}
+
+let firestoreSynced = false;
+
+async function trySyncToFirestore(store: FirmStore): Promise<void> {
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    return;
+  }
+  try {
+    const { getApps, initializeApp, cert } = await import('firebase-admin/app');
+    const { getFirestore } = await import('firebase-admin/firestore');
+    if (!getApps().length) {
+      if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        initializeApp({
+          credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)),
+          projectId: process.env.FIREBASE_PROJECT_ID || 'onesquared-poc',
+        });
+      } else {
+        initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'onesquared-poc' });
+      }
+    }
+    const db = getFirestore();
+    await db
+      .collection('firms')
+      .doc(store.firmId)
+      .set(
+        {
+          firm: store.firm,
+          counters: store.counters,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true },
+      );
+    firestoreSynced = true;
+  } catch {
+    // Fallback to local store when Firestore API or credentials are not active
+  }
+}
+
+function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
+  let changed = false;
+  if (store.firmId !== 'not-a-law-firm') {
+    store.firmId = 'not-a-law-firm';
+    changed = true;
+  }
+  if (!store.firm || store.firm.name !== FIRM.name || store.firm.shortName !== FIRM.shortName) {
+    store.firm = { ...FIRM };
+    changed = true;
+  }
+  if (store.orgStructure && Array.isArray(store.orgStructure.legalEntities)) {
+    const defaultEntities = buildDefaultOrgStructure().legalEntities;
+    for (const defLe of defaultEntities) {
+      const existingLe = store.orgStructure.legalEntities.find((le) => le.id === defLe.id);
+      if (existingLe && existingLe.name.includes('Pembroke Vaughan')) {
+        existingLe.name = defLe.name;
+        existingLe.code = defLe.code;
+        changed = true;
+      }
+    }
+  }
+  if (Array.isArray(store.people)) {
+    for (const p of store.people) {
+      if (Array.isArray(p.emails)) {
+        for (const em of p.emails) {
+          if (em.address.toLowerCase().includes('@pembrokevaughan.co.uk')) {
+            em.address = em.address.replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.co.uk');
+            changed = true;
+          } else if (em.address.toLowerCase().includes('@pembrokevaughan.example')) {
+            em.address = em.address.replace(
+              /@pembrokevaughan\.example/gi,
+              '@notalawfirm.example',
+            );
+            changed = true;
+          }
+        }
+        // Deduplicate emails if migration collapsed an existing + newly added email
+        const seen = new Set<string>();
+        p.emails = p.emails.filter((em) => {
+          const lower = em.address.toLowerCase();
+          if (seen.has(lower)) return false;
+          seen.add(lower);
+          return true;
+        });
+      }
+      if (p.employment?.systems?.firmWorkEmail?.toLowerCase().includes('@pembrokevaughan')) {
+        p.employment.systems.firmWorkEmail = p.employment.systems.firmWorkEmail
+          .replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.co.uk')
+          .replace(/@pembrokevaughan\.example/gi, '@notalawfirm.example');
+        changed = true;
+      }
+    }
+  }
+  if (store.homePagesConfig && Array.isArray(store.homePagesConfig.roles)) {
+    for (const r of store.homePagesConfig.roles) {
+      if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.co.uk')) {
+        r.demoUserEmail = r.demoUserEmail.replace(
+          /@pembrokevaughan\.co\.uk/gi,
+          '@notalawfirm.co.uk',
+        );
+        changed = true;
+      }
+    }
+  }
+  if (
+    store.matterCostsConfig &&
+    (store.matterCostsConfig.clientProfileCode === 'BASE-STANDARD' ||
+      store.matterCostsConfig.clientProfileName.includes('Pembroke Vaughan') ||
+      store.matterCostsConfig.clientProfileName.includes('Standard Base Platform'))
+  ) {
+    store.matterCostsConfig.clientProfileCode = 'NALF-LLP';
+    store.matterCostsConfig.clientProfileName =
+      'Not A Law Firm LLP — Client Configuration (notalawfirm.co.uk)';
+    changed = true;
+  }
+  return changed;
+}
+
+export function getStore(): FirmStore {
+  const isTestEnv = Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
+  if (!isTestEnv && fs.existsSync(DATA_FILE)) {
+    try {
+      const diskMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
+      if (global.__oneSquaredStore && global.__oneSquaredStoreMtimeMs !== diskMtimeMs) {
+        global.__oneSquaredStore = undefined;
+      }
+    } catch {
+      // ignore stat errors
+    }
+  }
+  if (
+    global.__oneSquaredStore &&
+    Array.isArray(global.__oneSquaredStore.matters) &&
+    Array.isArray(global.__oneSquaredStore.enquiries) &&
+    Array.isArray(global.__oneSquaredStore.tasks) &&
+    Array.isArray(global.__oneSquaredStore.teams) &&
+    Array.isArray(global.__oneSquaredStore.pmsLinks) &&
+    Array.isArray(global.__oneSquaredStore.signOffs) &&
+    global.__oneSquaredStore.homePagesConfig
+  ) {
+    const seedLists = buildSeedLists();
+    let addedSeedItems = migrateFirmBrandingToNotALawFirm(global.__oneSquaredStore);
+    for (const l of seedLists.lists) {
+      if (!global.__oneSquaredStore.lists.some((x) => x.key === l.key)) {
+        global.__oneSquaredStore.lists.push(l);
+        addedSeedItems = true;
+      }
+    }
+    for (const v of seedLists.values) {
+      const existingVal = global.__oneSquaredStore.values.find((x) => x.id === v.id);
+      if (!existingVal) {
+        global.__oneSquaredStore.values.push(v);
+        addedSeedItems = true;
+      } else if (v.listKey === 'work_type' && v.meta) {
+        if (
+          existingVal.meta?.amlInScope === undefined ||
+          existingVal.meta?.clientMoneyThresholdGbp === undefined
+        ) {
+          existingVal.meta = {
+            ...v.meta,
+            ...(existingVal.meta ?? {}),
+          };
+          addedSeedItems = true;
+        }
+      }
+    }
+    const memBethan = global.__oneSquaredStore.people.find((p) => p.id === 'P-000003');
+    if (
+      memBethan &&
+      Array.isArray(memBethan.roles) &&
+      memBethan.roles[0] === 'risk_compliance' &&
+      memBethan.roles.length > 2
+    ) {
+      memBethan.roles = [
+        'fee_earner',
+        ...memBethan.roles.filter((r) => r !== 'fee_earner'),
+      ];
+      if (global.__oneSquaredStore.homePagesConfig) {
+        global.__oneSquaredStore.homePagesConfig.lastViewingRoleByUserId = {
+          ...(global.__oneSquaredStore.homePagesConfig.lastViewingRoleByUserId ?? {}),
+          'P-000003': 'fee_earner',
+        };
+      }
+      addedSeedItems = true;
+    }
+    if (!global.__oneSquaredStore.orgStructure) {
+      global.__oneSquaredStore.orgStructure = buildDefaultOrgStructure();
+      addedSeedItems = true;
+    }
+    if (!global.__oneSquaredStore.employeeSensitiveRecords) {
+      global.__oneSquaredStore.employeeSensitiveRecords = {};
+      addedSeedItems = true;
+    }
+    if (
+      global.__oneSquaredStore.people.some(
+        (p) =>
+          (p.isEmployee && !p.employment) ||
+          p.employment?.supervisingPartnerId === 'P-000013' ||
+          (p.employment?.divisionId === 'DIV-LEGAL' && !p.employment.supervisingPartnerId),
+      )
+    ) {
+      const empMig = migrateEmployeesToEmploymentRecords(
+        global.__oneSquaredStore.people,
+        global.__oneSquaredStore.values,
+        global.__oneSquaredStore.orgStructure,
+        global.__oneSquaredStore.pmsLinks,
+      );
+      global.__oneSquaredStore.people = empMig.people;
+      global.__oneSquaredStore.employeeMigrationReport = empMig.report;
+      addedSeedItems = true;
+    }
+    const mpList = global.__oneSquaredStore.lists.find((x) => x.key === 'matter_party_role');
+    if (mpList && mpList.label !== 'Matter Parties') {
+      mpList.label = 'Matter Parties';
+      addedSeedItems = true;
+    }
+    if (
+      !global.__oneSquaredStore.matterPartyTaxonomy ||
+      !global.__oneSquaredStore.matterPartyMigrationReport ||
+      global.__oneSquaredStore.values.some((v) => v.listKey === 'matter_party_role' && v.active)
+    ) {
+      const taxonomy =
+        global.__oneSquaredStore.matterPartyTaxonomy ??
+        buildDefaultMatterPartyTaxonomy(global.__oneSquaredStore.values);
+      const partyMig = migrateMatterPartiesToTwoFieldModel(
+        global.__oneSquaredStore.values,
+        global.__oneSquaredStore.matters,
+        taxonomy,
+      );
+      global.__oneSquaredStore.matterPartyTaxonomy = taxonomy;
+      global.__oneSquaredStore.values = partyMig.values;
+      global.__oneSquaredStore.matters = partyMig.matters;
+      global.__oneSquaredStore.matterPartyMigrationReport = partyMig.report;
+      addedSeedItems = true;
+    }
+    if (!global.__oneSquaredStore.matterCostsConfig) {
+      global.__oneSquaredStore.matterCostsConfig = syncRateCardsWithPmsFeeEarners(
+        createDefaultMatterCostsConfig(global.__oneSquaredStore.values),
+        getPmsSource().listFeeEarners(),
+        global.__oneSquaredStore.values,
+      );
+      addedSeedItems = true;
+    }
+    if (addedSeedItems) {
+      saveStore(global.__oneSquaredStore);
+    }
+    return global.__oneSquaredStore;
+  }
+  if (!isTestEnv && fs.existsSync(DATA_FILE)) {
+    try {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const parsed = JSON.parse(raw) as FirmStore;
+      let migrated = false;
+      const seedLists = buildSeedLists();
+
+      if (!parsed.isCleanDeployment) {
+        const demo = buildDemoData(new Date());
+
+        if (!Array.isArray(parsed.matters) || parsed.matters.length === 0) {
+          parsed.matters = demo.matters;
+          parsed.counters = { ...parsed.counters, M: demo.counters.M };
+          migrated = true;
+        }
+
+        if (!Array.isArray(parsed.teams) || parsed.teams.length === 0) {
+          parsed.teams = demo.teams;
+          parsed.counters = { ...parsed.counters, TM: demo.counters.TM };
+          migrated = true;
+        }
+
+        if (!Array.isArray(parsed.enquiries) || parsed.enquiries.length === 0) {
+          parsed.enquiries = demo.enquiries;
+          parsed.counters = { ...parsed.counters, ENQ: demo.counters.ENQ };
+          migrated = true;
+        }
+
+        // Ensure PMS-aligned demo organisations, people, and matters are present
+        for (const demoOrg of demo.organisations) {
+          const existingOrg = parsed.organisations.find((x) => x.id === demoOrg.id);
+          if (!existingOrg) {
+            parsed.organisations.push(demoOrg);
+            migrated = true;
+          } else if (existingOrg.companyNumber !== demoOrg.companyNumber && demoOrg.id <= 'O-000007') {
+            existingOrg.companyNumber = demoOrg.companyNumber;
+            existingOrg.legalName = demoOrg.legalName;
+            existingOrg.otherNames = demoOrg.otherNames;
+            migrated = true;
+          }
+        }
+
+        for (const p of demo.people) {
+          const existingPerson = parsed.people.find(
+            (x) =>
+              x.id === p.id ||
+              (p.emails[0] &&
+                x.emails.some((e) => e.address.toLowerCase() === p.emails[0].address.toLowerCase())),
+          );
+          if (!existingPerson) {
+            parsed.people.push(p);
+            parsed.counters.P = Math.max(parsed.counters.P ?? 0, demo.counters.P);
+            migrated = true;
+          } else {
+            // Ensure PMS matching emails and role/demo metadata exist on seeded employees
+            for (const em of p.emails) {
+              if (!existingPerson.emails.some((e) => e.address.toLowerCase() === em.address.toLowerCase())) {
+                existingPerson.emails.push(em);
+                migrated = true;
+              }
+            }
+            if (p.roles && (!existingPerson.roles || existingPerson.roles.length === 0)) {
+              existingPerson.roles = p.roles;
+              migrated = true;
+            }
+            if (p.demo !== undefined && existingPerson.demo !== p.demo) {
+              existingPerson.demo = p.demo;
+              existingPerson.showsWorkOfId = p.showsWorkOfId ?? null;
+              migrated = true;
+            }
+            if (p.supportsIds && (!existingPerson.supportsIds || existingPerson.supportsIds.length === 0)) {
+              existingPerson.supportsIds = p.supportsIds;
+              migrated = true;
+            }
+          }
+        }
+
+        // Sync team memberships for newly added employees/demo users
+        for (const demoTeam of demo.teams) {
+          const existingTeam = parsed.teams.find((t) => t.id === demoTeam.id || t.name === demoTeam.name);
+          if (existingTeam) {
+            for (const memberId of demoTeam.memberIds) {
+              if (!existingTeam.memberIds.includes(memberId)) {
+                existingTeam.memberIds.push(memberId);
+                migrated = true;
+              }
+            }
+            for (const leadId of demoTeam.leadIds) {
+              if (!existingTeam.leadIds.includes(leadId)) {
+                existingTeam.leadIds.push(leadId);
+                migrated = true;
+              }
+            }
+          }
+        }
+
+        for (const m of demo.matters) {
+          const existingMatter = parsed.matters.find(
+            (x) => x.id === m.id || x.matterNumber === m.matterNumber,
+          );
+          if (!existingMatter) {
+            parsed.matters.push(m);
+            parsed.counters.M = Math.max(parsed.counters.M ?? 0, demo.counters.M);
+            migrated = true;
+          } else if (m.fieldValues && Object.keys(m.fieldValues).length > 0) {
+            existingMatter.fieldValues = {
+              ...existingMatter.fieldValues,
+              ...m.fieldValues,
+            };
+            migrated = true;
+          }
+        }
+
+        for (const enq of demo.enquiries) {
+          const existingEnq = parsed.enquiries.find((x) => x.id === enq.id);
+          if (!existingEnq) {
+            parsed.enquiries.push(enq);
+            parsed.counters.ENQ = Math.max(parsed.counters.ENQ ?? 0, demo.counters.ENQ);
+            migrated = true;
+          } else if (enq.id === 'ENQ-000009' && existingEnq.keyDate !== enq.keyDate) {
+            existingEnq.keyDate = enq.keyDate;
+            migrated = true;
+          }
+        }
+
+        if (!Array.isArray(parsed.quotes) || parsed.quotes.length === 0) {
+          parsed.quotes = demo.quotes;
+          parsed.counters = { ...parsed.counters, QTE: demo.counters.QTE };
+          migrated = true;
+        } else {
+          for (const q of demo.quotes) {
+            if (!parsed.quotes.some((x) => x.id === q.id || x.reference === q.reference)) {
+              parsed.quotes.push(q);
+              parsed.counters.QTE = Math.max(parsed.counters.QTE ?? 0, demo.counters.QTE);
+              migrated = true;
+            }
+          }
+        }
+
+        if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
+          parsed.tasks = demo.tasks;
+          parsed.counters = { ...parsed.counters, TSK: demo.counters.TSK };
+          migrated = true;
+        } else {
+          for (const t of demo.tasks) {
+            if (!parsed.tasks.some((x) => x.id === t.id)) {
+              parsed.tasks.push(t);
+              parsed.counters.TSK = Math.max(parsed.counters.TSK ?? 0, demo.counters.TSK);
+              migrated = true;
+            }
+          }
+        }
+
+        if (!Array.isArray(parsed.notifications)) {
+          parsed.notifications = demo.notifications;
+          parsed.counters = { ...parsed.counters, NTF: demo.counters.NTF };
+          migrated = true;
+        }
+
+        if (!Array.isArray(parsed.signOffs) || parsed.signOffs.length === 0) {
+          parsed.signOffs = demo.signOffs;
+          parsed.counters = { ...parsed.counters, SO: demo.signOffs.length };
+          migrated = true;
+        }
+
+        const refreshedPmsLinks = buildInitialPmsLinks(
+          parsed.organisations,
+          parsed.people,
+          parsed.matters,
+          Array.isArray(parsed.pmsLinks) ? parsed.pmsLinks : [],
+        );
+        if (!Array.isArray(parsed.pmsLinks) || refreshedPmsLinks.length !== parsed.pmsLinks.length) {
+          parsed.pmsLinks = refreshedPmsLinks;
+          parsed.counters = { ...parsed.counters, PMSL: parsed.pmsLinks.length };
+          migrated = true;
+        }
+      }
+
+      if (!parsed.enquirySettings) {
+        parsed.enquirySettings = { ...DEFAULT_ENQUIRY_SETTINGS };
+        migrated = true;
+      }
+
+      if (!parsed.taskSettings) {
+        parsed.taskSettings = {
+          templates: DEFAULT_TASK_SETTINGS.templates.map((t) => ({ ...t })),
+        };
+        migrated = true;
+      }
+
+      if (!parsed.homePagesConfig || !Array.isArray(parsed.homePagesConfig.roles)) {
+        parsed.homePagesConfig = createDefaultHomePagesConfig(new Date().toISOString());
+        migrated = true;
+      } else if (!parsed.homePagesConfig.updatedById || parsed.homePagesConfig.updatedById === 'system') {
+        for (const r of parsed.homePagesConfig.roles) {
+          if (r.isBuiltIn && (r.primaryPanels.includes('my_tasks_today') || r.summaryPanels.includes('my_tasks_today')) && !r.primaryPanels.includes('to_do') && !r.summaryPanels.includes('to_do')) {
+            r.primaryPanels = r.primaryPanels
+              .map((p) => (p === 'my_tasks_today' ? 'to_do' : p))
+              .filter((p) => p !== 'key_dates_and_deadlines');
+            r.summaryPanels = r.summaryPanels
+              .map((p) => (p === 'my_tasks_today' ? 'to_do' : p))
+              .filter((p) => p !== 'key_dates_and_deadlines');
+            migrated = true;
+          }
+        }
+      }
+
+      for (const l of seedLists.lists) {
+        if (!parsed.lists.some((x) => x.key === l.key)) {
+          parsed.lists.push(l);
+          migrated = true;
+        }
+      }
+      for (const v of seedLists.values) {
+        const existingVal = parsed.values.find((x) => x.id === v.id);
+        if (!existingVal) {
+          parsed.values.push(v);
+          migrated = true;
+        } else if (v.listKey === 'work_type' && v.meta) {
+          if (
+            existingVal.meta?.amlInScope === undefined ||
+            existingVal.meta?.clientMoneyThresholdGbp === undefined
+          ) {
+            existingVal.meta = {
+              ...v.meta,
+              ...(existingVal.meta ?? {}),
+            };
+            migrated = true;
+          }
+        }
+      }
+
+      if (!parsed.orgStructure) {
+        parsed.orgStructure = buildDefaultOrgStructure();
+        migrated = true;
+      }
+      if (!parsed.employeeSensitiveRecords) {
+        parsed.employeeSensitiveRecords = {};
+        migrated = true;
+      }
+      if (
+        parsed.people.some(
+          (p) =>
+            (p.isEmployee && !p.employment) ||
+            p.employment?.supervisingPartnerId === 'P-000013' ||
+            (p.employment?.divisionId === 'DIV-LEGAL' && !p.employment.supervisingPartnerId),
+        )
+      ) {
+        const empMig = migrateEmployeesToEmploymentRecords(
+          parsed.people,
+          parsed.values,
+          parsed.orgStructure,
+          parsed.pmsLinks,
+        );
+        parsed.people = empMig.people;
+        parsed.employeeMigrationReport = empMig.report;
+        migrated = true;
+      }
+
+      const parsedMpList = parsed.lists.find((x) => x.key === 'matter_party_role');
+      if (parsedMpList && parsedMpList.label !== 'Matter Parties') {
+        parsedMpList.label = 'Matter Parties';
+        migrated = true;
+      }
+
+      if (
+        !parsed.matterPartyTaxonomy ||
+        !parsed.matterPartyMigrationReport ||
+        parsed.values.some((v) => v.listKey === 'matter_party_role' && v.active)
+      ) {
+        const taxonomy =
+          parsed.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(parsed.values);
+        const partyMig = migrateMatterPartiesToTwoFieldModel(
+          parsed.values,
+          parsed.matters,
+          taxonomy,
+        );
+        parsed.matterPartyTaxonomy = taxonomy;
+        parsed.values = partyMig.values;
+        parsed.matters = partyMig.matters;
+        parsed.matterPartyMigrationReport = partyMig.report;
+        migrated = true;
+      }
+
+      if (!parsed.matterCostsConfig) {
+        parsed.matterCostsConfig = syncRateCardsWithPmsFeeEarners(
+          createDefaultMatterCostsConfig(parsed.values),
+          getPmsSource().listFeeEarners(),
+          parsed.values,
+        );
+        migrated = true;
+      }
+
+      if (migrateFirmBrandingToNotALawFirm(parsed)) {
+        migrated = true;
+      }
+
+      if (migrated) {
+        saveStore(parsed);
+      }
+      global.__oneSquaredStore = parsed;
+      try {
+        global.__oneSquaredStoreMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
+      } catch {
+        // ignore stat errors
+      }
+      return global.__oneSquaredStore;
+    } catch {
+      // recreate if corrupted
+    }
+  }
+  const fresh = createSeedStore(new Date());
+  saveStore(fresh);
+  return fresh;
+}
+
+export function saveStore(store: FirmStore): void {
+  global.__oneSquaredStore = store;
+  if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+    return;
+  }
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+    global.__oneSquaredStoreMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
+  } catch {
+    // ignore read-only fs errors in serverless environments
+  }
+  if (!firestoreSynced) {
+    void trySyncToFirestore(store);
+  }
+}
+
+export function resetStore(): FirmStore {
+  const fresh = createSeedStore(new Date());
+  saveStore(fresh);
+  return fresh;
+}
+
+export function clearStoreToCleanDeployment(): FirmStore {
+  const clean = createCleanDeploymentStore(new Date());
+  saveStore(clean);
+  return clean;
+}
+
+export function nextId(
+  store: FirmStore,
+  prefix: 'P' | 'O' | 'L' | 'N' | 'AU' | 'M' | 'TM' | 'TSK' | 'ENQ' | 'NTF' | 'PMSL' | 'SO',
+): string {
+  const n = (store.counters[prefix] ?? 0) + 1;
+  store.counters[prefix] = n;
+  return `${prefix}-${String(n).padStart(6, '0')}`;
+}
+
+export function nextQuoteReference(store: FirmStore, year: number = new Date().getFullYear()): string {
+  const n = (store.counters.QTE ?? 0) + 1;
+  store.counters.QTE = n;
+  return `QTE-${year}-${String(n).padStart(4, '0')}`;
+}
+
+export { DEFAULT_USER_ID };
+
+

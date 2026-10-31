@@ -1,0 +1,7029 @@
+import { cookies } from 'next/headers';
+import { attentionList } from '@/domain/attention';
+import { diffRecords } from '@/domain/audit';
+import { validateCustomFields } from '@/domain/customFields';
+import {
+  addDays,
+  addWorkingDays,
+  calculateFirstContactDue,
+  formatDate,
+  toIsoDate,
+  type WorkingHoursConfig,
+} from '@/domain/dates';
+import {
+  calculateQuoteTotals,
+  evaluateQuoteEffectiveStatus,
+  quoteClientDisplayName,
+} from '@/domain/quotes';
+import {
+  resolveMatterConflictCheckRecord,
+  resolveMatterOpeningSnapshot,
+  resolveMatterRiskAssessment,
+} from '@/domain/matterOpeningRecord';
+import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
+import {
+  computeEnquiryConflictSnapshot,
+  enquiryDisplayName,
+  getMissingRoutingFields,
+  isEnquiryOpen,
+  isEnquiryRouted,
+  isReadyForRetentionAnonymisation,
+  runEnquiryConflictSearch,
+  validateEnquiryInput,
+} from '@/domain/enquiries';
+import type { FormatContext } from '@/domain/fieldRegistry';
+import {
+  createDefaultHomePagesConfig,
+  getLeftRailVisibility,
+  resolveActiveViewingRole,
+  resolveEmployeeRoles,
+} from '@/domain/homeConfig';
+import {
+  canDeactivate,
+  nextSortOrder,
+  reorder,
+  resolveLabel,
+  systemKeyOf,
+  valueBySystemKey,
+} from '@/domain/lists';
+import { planMerge } from '@/domain/merge';
+import { personDisplayName, recordDisplayName } from '@/domain/names';
+import {
+  canUserViewFinance,
+  computeAutomaticPmsLinks,
+  findOneSquaredIdForPmsCode,
+  findPmsCodeForRecord,
+  suggestMatterMatches,
+  type PmsSuggestedMatch,
+} from '@/domain/pms';
+import { buildSearchIndex } from '@/domain/searchIndex';
+import {
+  applyEffectiveDatedEmploymentHistory,
+  applyLeaverEffects,
+  computeStaffMatterStatus,
+  createDefaultEmploymentRecord,
+  emptyDiversityAnswers,
+  filterEmploymentForUser,
+  findOpenMattersWherePersonIsParty,
+  findRecordsOwnedByLeavers,
+  hasEmployeePermission,
+  isSelectableInEmployeeDropdown,
+  isWorkingAtFirm,
+  maskBankDetails,
+  maskNationalInsuranceNumber,
+  resolveEmployeePermissions,
+  syncPersonWorkContactFlags,
+  validateEmploymentRecord,
+} from '@/domain/employment';
+import {
+  buildDefaultOrgStructure,
+  mapLegacyEmployeeRoleToRoleType,
+  mapRoleTypeToLegacyEmployeeRoleId,
+  resolveOrgDepartment,
+} from '@/domain/orgStructure';
+import {
+  buildDefaultMatterPartyTaxonomy,
+  computeMatterPartyUsageCounts,
+} from '@/domain/matterParties';
+import {
+  createDefaultMatterCostsConfig,
+  syncRateCardsWithPmsFeeEarners,
+} from '@/domain/matterCosts';
+import {
+  countMyUrgentBadgeTasks,
+  isTaskOpen,
+  resolveRoutedTeam,
+  resolveUserAppRole,
+} from '@/domain/tasks';
+import type {
+  Address,
+  AnyRecord,
+  AppRole,
+  AuditAction,
+  AuditEntry,
+  AutoTaskTrigger,
+  CapacityGroupName,
+  ChoiceList,
+  ChoiceValue,
+  ConflictCheckRecord,
+  ContactLogEntry,
+  ContactLogMethod,
+  ContactLogOutcome,
+  CustomFieldDefinition,
+  CustomFieldType,
+  EmployeePermission,
+  EmployeeSensitiveRecord,
+  EmploymentRecord,
+  Enquiry,
+  EnquirySentEmailSnapshot,
+  EnquirySettings,
+  EnquiryStatus,
+  FormSection,
+  HomeFirmSettings,
+  HomePagesConfig,
+  Matter,
+  MatterCostsConfig,
+  MatterPartyCapacityDef,
+  MatterPartyRelationshipDef,
+  MatterPartyTaxonomy,
+  MergeHistory,
+  OrgStructureCatalogue,
+  Note,
+  NotificationItem,
+  NotificationKind,
+  Organisation,
+  Person,
+  PersonOrganisationLink,
+  PmsEntityType,
+  PmsLink,
+  Quote,
+  QuoteDeclineReason,
+  QuoteDisbursement,
+  QuoteFeeBasis,
+  QuoteStatus,
+  RecordType,
+  RoleHomeConfig,
+  SignOffItem,
+  Task,
+  TaskLinkedRecord,
+  TaskSettings,
+  TaskStatus,
+  Team,
+  WorkTypeProfileCode,
+} from '@/domain/types';
+import { getPmsSource } from '@/pms/pmsSource';
+import type {
+  PmsCashReceivedSummary,
+  PmsClient,
+  PmsClientAccountEntry,
+  PmsClientFinancials,
+  PmsClientFullBundle,
+  PmsDepartmentFinancials,
+  PmsDisbursement,
+  PmsExtractInfo,
+  PmsFeeEarner,
+  PmsFeeEarnerPerformance,
+  PmsFeeEarnerWeeklyTime,
+  PmsInvoiceBalance,
+  PmsInvoiceDetail,
+  PmsMatter,
+  PmsMatterFinancials,
+  PmsMatterFullBundle,
+  PmsMonthlyFeesBilled,
+} from '@/pms/types';
+import { slug, vid } from '@/seed/lists';
+import {
+  clearStoreToCleanDeployment,
+  DEFAULT_USER_ID,
+  type FirmStore,
+  getStore,
+  nextId,
+  nextQuoteReference,
+  resetStore,
+  saveStore,
+} from './store';
+
+export const USER_COOKIE = 'onesquared_user';
+
+const BOOTSTRAP_SESSION_USER: Person = {
+  id: 'P-BOOTSTRAP-ADMIN',
+  recordType: 'person',
+  recordOwnerId: 'P-BOOTSTRAP-ADMIN',
+  recordStatusId: 'person_record_status.active',
+  createdById: 'system',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedById: 'system',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+  sourceId: null,
+  lastVerifiedAt: null,
+  tags: [],
+  duplicateStatusId: 'duplicate_status.none',
+  notDuplicateOf: [],
+  possibleMatchIds: [],
+  mergedIntoId: null,
+  lastInteractionAt: null,
+  customFields: {},
+  titleId: null,
+  firstName: 'System',
+  middleNames: '',
+  surname: 'Administrator',
+  preferredName: '',
+  dateOfBirth: null,
+  otherNames: [],
+  jobTitle: 'New Client Deployment · System Administrator',
+  emails: [
+    {
+      id: 'em-bootstrap',
+      address: 'admin@notalawfirm.co.uk',
+      typeId: null,
+      isPrimary: true,
+    },
+  ],
+  phones: [],
+  preferredContactMethodId: null,
+  preferredLanguageId: null,
+  addresses: [],
+  website: '',
+  relationshipOwnerId: null,
+  relationshipStatusId: null,
+  relationshipStandingId: null,
+  relationshipRoleIds: [],
+  originId: null,
+  firstKnownAt: null,
+  engagementLevelId: null,
+  interests: '',
+  relationshipNotes: '',
+  marketingConsentId: null,
+  consentRecord: '',
+  verificationStatusId: null,
+  verifiedAt: null,
+  verificationMethodId: null,
+  verificationReviewerId: null,
+  riskReferences: '',
+  isEmployee: true,
+  employeeRoleId: 'employee_role.system_administrator',
+  departmentId: null,
+  appRole: 'admin',
+  roles: [
+    'admin',
+    'managing_partner',
+    'partner',
+    'fee_earner',
+    'legal_secretary',
+    'enquiries_coordinator',
+    'finance',
+    'risk_compliance',
+  ],
+};
+
+export async function getCurrentUserId(): Promise<string> {
+  try {
+    const jar = await cookies();
+    const val = jar.get(USER_COOKIE)?.value;
+    const store = getStore();
+    if (val && store.people.some((p) => p.id === val && p.isEmployee)) {
+      return val;
+    }
+  } catch {
+    // Fallback when called outside request context
+  }
+  return DEFAULT_USER_ID;
+}
+
+export function activeEmployees(store: FirmStore = getStore()): Person[] {
+  return store.people
+    .filter(
+      (p) =>
+        isSelectableInEmployeeDropdown(p) &&
+        !p.mergedIntoId &&
+        systemKeyOf(store.values, p.recordStatusId) === 'active',
+    )
+    .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b)));
+}
+
+export function formatContext(store: FirmStore): FormatContext {
+  const names = new Map<string, string>();
+  for (const p of store.people) names.set(p.id, personDisplayName(p));
+  for (const o of store.organisations) names.set(o.id, o.legalName);
+  for (const m of store.matters) names.set(m.id, `${m.matterNumber} — ${m.title}`);
+  for (const e of store.enquiries) names.set(e.id, `${e.reference} — ${enquiryDisplayName(e)}`);
+  for (const t of store.tasks) names.set(t.id, `${t.reference} — ${t.title}`);
+  for (const tm of store.teams) names.set(tm.id, tm.name);
+  return {
+    values: store.values,
+    nameOf: (id: string) => names.get(id) ?? id,
+  };
+}
+
+function writeAudit(
+  store: FirmStore,
+  entry: Omit<AuditEntry, 'id' | 'at'> & { at?: string },
+): AuditEntry {
+  const full: AuditEntry = {
+    id: nextId(store, 'AU'),
+    at: entry.at ?? new Date().toISOString(),
+    recordType: entry.recordType,
+    recordId: entry.recordId,
+    action: entry.action,
+    field: entry.field,
+    oldValue: entry.oldValue,
+    newValue: entry.newValue,
+    byId: entry.byId,
+    ...(entry.snapshot !== undefined ? { snapshot: entry.snapshot } : {}),
+  };
+  store.audit.unshift(full);
+  return full;
+}
+
+export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
+  const store = getStore();
+  const now = new Date();
+  const user =
+    store.people.find((p) => p.id === userId) ??
+    store.people[0] ??
+    BOOTSTRAP_SESSION_USER;
+  const employees = activeEmployees(store);
+  const currentUserRole = resolveUserAppRole(user, store.teams, store.values);
+  const currentUserEmployeePermissions = resolveEmployeePermissions(
+    user,
+    store.people,
+    store.teams,
+  );
+  const orgStructure = store.orgStructure ?? buildDefaultOrgStructure();
+
+  // Filter employment records on people at the API level based on requesting user's permissions
+  const filteredPeople: Person[] = store.people.map((p) => {
+    if (!p.employment) return p;
+    return {
+      ...p,
+      employment: filterEmploymentForUser(
+        p.employment,
+        user,
+        store.people,
+        store.teams,
+        orgStructure,
+      ),
+    };
+  });
+
+  const canSeeSensitive = currentUserEmployeePermissions.includes('employee:sensitive');
+  const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = canSeeSensitive
+    ? structuredClone(store.employeeSensitiveRecords ?? {})
+    : {};
+
+  const leaverOwnedRecords = findRecordsOwnedByLeavers(
+    store.people,
+    store.organisations,
+    store.matters,
+    store.tasks,
+    store.enquiries,
+  );
+
+  const homePagesConfig = store.homePagesConfig ?? createDefaultHomePagesConfig(now.toISOString());
+  const currentUserRoles = resolveEmployeeRoles(user, store.teams);
+  const activeViewingRole = resolveActiveViewingRole(user, homePagesConfig, store.teams);
+  const leftRailVisibility = getLeftRailVisibility(activeViewingRole, currentUserRoles);
+
+  // If the current user is a demo user with showsWorkOfId, resolve the underlying employee for personal panels
+  const effectiveWorkPerson: Person =
+    user.demo && user.showsWorkOfId
+      ? (store.people.find((p) => p.id === user.showsWorkOfId) ?? user)
+      : user;
+
+  const canViewFinance =
+    canUserViewFinance(user, store.teams, store.values) ||
+    leftRailVisibility.finance ||
+    leftRailVisibility.risk;
+
+  const pms = getPmsSource();
+  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+
+  const pmsExtractInfo = isCleanEmpty
+    ? {
+        asAtDate: now.toISOString().slice(0, 10),
+        sourceFile: 'No PMS linked (Clean Client Deployment)',
+        importedAt: now.toISOString(),
+      }
+    : pms.getExtractInfo();
+  const allMatterFins = isCleanEmpty ? [] : pms.getAllMatterFinancials();
+  const allClientFins = isCleanEmpty ? [] : pms.getAllClientFinancials();
+  const finByMatterCode = new Map(allMatterFins.map((f) => [f.matter_code, f]));
+  const finByClientCode = new Map(allClientFins.map((f) => [f.client_code, f]));
+
+  const pmsSummaryByMatterId: Record<string, PmsMatterFinancials> = {};
+  const pmsSummaryByClientId: Record<string, PmsClientFinancials> = {};
+  for (const link of store.pmsLinks) {
+    if (link.entityType === 'matter') {
+      const fin = finByMatterCode.get(link.pmsCode);
+      if (fin) pmsSummaryByMatterId[link.onesquaredId] = fin;
+    } else if (link.entityType === 'organisation' || link.entityType === 'person') {
+      const fin = finByClientCode.get(link.pmsCode);
+      if (fin) pmsSummaryByClientId[link.onesquaredId] = fin;
+    }
+  }
+
+  const allFeeEarnerPerformance: PmsFeeEarnerPerformance[] = isCleanEmpty
+    ? []
+    : pms.getFeeEarnerPerformance();
+  const myFeCode =
+    findPmsCodeForRecord(store.pmsLinks, 'employee', effectiveWorkPerson.id) ??
+    findPmsCodeForRecord(store.pmsLinks, 'employee', user.id);
+
+  let myFeeEarnerFigures: PmsFeeEarnerPerformance | null = null;
+  let myWeeklyTime: PmsFeeEarnerWeeklyTime | null = null;
+  if (myFeCode && !isCleanEmpty) {
+    myFeeEarnerFigures =
+      allFeeEarnerPerformance.find((fe) => fe.fee_earner_id === myFeCode) ?? null;
+    myWeeklyTime = pms.getFeeEarnerWeeklyTime(
+      myFeCode,
+      homePagesConfig.firmSettings.workingDayPaceHours,
+    );
+  }
+
+  const pmsAgedDebt: PmsInvoiceBalance[] = isCleanEmpty ? [] : pms.getAgedDebt();
+  const pmsInvoices: PmsInvoiceDetail[] = isCleanEmpty ? [] : pms.getInvoices();
+  const pmsMonthlyFeesBilled = isCleanEmpty
+    ? { months: [], yearToDateTotal: 0 }
+    : pms.getMonthlyFeesBilled('2026');
+  const pmsCashReceived: PmsCashReceivedSummary = isCleanEmpty
+    ? {
+        octoberTotal: 0,
+        octoberReceiptCount: 0,
+        septemberTotal: 0,
+        septemberReceiptCount: 0,
+      }
+    : pms.getCashReceivedSummary();
+  const pmsDepartmentFinancials = isCleanEmpty
+    ? {
+        departments: [],
+        firmTotal: {
+          practiceArea: 'Total',
+          openMatters: 0,
+          billedThisYear: 0,
+          unbilledWip: 0,
+          outstandingDebt: 0,
+          overdueDebt: 0,
+          octoberHours: 0,
+        },
+      }
+    : pms.getDepartmentFinancials();
+
+  // Gather unbilled disbursements and client account entries across matters for Finance/Secretary/Risk panels
+  const pmsAllDisbursements: PmsDisbursement[] = [];
+  const pmsClientAccountByMatterCode: Record<string, PmsClientAccountEntry[]> = {};
+  if (!isCleanEmpty) {
+    for (const mf of allMatterFins) {
+      if (mf.unbilled_disbursements > 0) {
+        pmsAllDisbursements.push(...pms.getDisbursements(mf.matter_code));
+      }
+      if (
+        mf.client_account_balance > 0 ||
+        mf.matter_code === 'PRI001-0001' ||
+        mf.matter_code === 'PUG001-0001'
+      ) {
+        pmsClientAccountByMatterCode[mf.matter_code] = pms.getClientAccountLedger(mf.matter_code);
+      }
+    }
+  }
+
+  const searchIndex = buildSearchIndex(
+    store.people,
+    store.organisations,
+    store.links,
+    store.values,
+    store.matters,
+    store.enquiries,
+    store.tasks,
+    store.teams,
+  );
+  const attention = attentionList([...store.people, ...store.organisations], store.values, now, {
+    userId: effectiveWorkPerson.id,
+    tasks: store.tasks,
+    enquiries: store.enquiries,
+    teams: store.teams,
+    matters: store.matters,
+    pmsSummaryByMatterId,
+    canViewFinance: true,
+  });
+  const recentIds = store.recentlyViewed[user.id] ?? store.recentlyViewed[effectiveWorkPerson.id] ?? [];
+  const userNotifications = store.notifications
+    .filter((n) => n.recipientId === user.id || n.recipientId === effectiveWorkPerson.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const taskBadgeCount = countMyUrgentBadgeTasks(store.tasks, effectiveWorkPerson.id, now);
+
+  // Keep quote statuses up to date when follow-up or valid-until dates pass
+  for (const q of store.quotes ?? []) {
+    const eff = evaluateQuoteEffectiveStatus(q, now);
+    if (eff !== q.status) {
+      q.status = eff;
+      if (eff === 'Expired' && !q.timeline.some((t) => t.kind === 'expired')) {
+        q.timeline.push({
+          id: `QT-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          kind: 'expired',
+          at: now.toISOString(),
+          byId: null,
+          title: 'Quote expired',
+          detail: `Valid-until date (${q.validUntil}) passed without an outcome.`,
+        });
+      }
+    }
+  }
+
+  return {
+    firm: store.firm,
+    currentUser: user,
+    currentUserId: user.id,
+    currentUserRole,
+    currentUserRoles,
+    currentUserEmployeePermissions,
+    orgStructure,
+    matterPartyTaxonomy: store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values),
+    matterPartyMigrationReport: store.matterPartyMigrationReport,
+    employeeSensitiveRecords,
+    employeeMigrationReport: store.employeeMigrationReport,
+    leaverOwnedRecords,
+    activeViewingRole,
+    leftRailVisibility,
+    effectiveWorkPerson,
+    homePagesConfig,
+    signOffs: store.signOffs ?? [],
+    canViewFinance,
+    pmsExtractInfo,
+    pmsLinks: store.pmsLinks,
+    pmsSummaryByMatterId,
+    pmsSummaryByClientId,
+    allMatterFins,
+    allClientFins,
+    allFeeEarnerPerformance,
+    myFeeEarnerFigures,
+    myWeeklyTime,
+    pmsAgedDebt,
+    pmsInvoices,
+    pmsMonthlyFeesBilled,
+    pmsCashReceived,
+    pmsDepartmentFinancials,
+    pmsAllDisbursements,
+    pmsClientAccountByMatterCode,
+    employees,
+    lists: store.lists,
+    values: store.values,
+    customFields: store.customFields,
+    people: filteredPeople,
+    organisations: store.organisations,
+    links: store.links,
+    matters: store.matters,
+    teams: store.teams,
+    tasks: store.tasks,
+    enquiries: store.enquiries,
+    quotes: store.quotes ?? [],
+    notifications: userNotifications,
+    enquirySettings: store.enquirySettings,
+    taskSettings: store.taskSettings,
+    matterCostsConfig: store.matterCostsConfig ?? createDefaultMatterCostsConfig(store.values),
+    taskBadgeCount,
+    notes: store.notes,
+    audit: store.audit,
+    mergeHistory: store.mergeHistory,
+    searchIndex,
+    attention,
+    recentIds,
+  };
+}
+
+export function recordRecentlyViewed(userId: string, recordId: string): void {
+  const store = getStore();
+  const current = store.recentlyViewed[userId] ?? [];
+  const next = [recordId, ...current.filter((id) => id !== recordId)].slice(0, 8);
+  store.recentlyViewed[userId] = next;
+  saveStore(store);
+}
+
+/**
+ * API-level read of a person's employment and sensitive records, enforcing permissions
+ * and optionally logging views of restricted payroll or sensitive sections.
+ */
+export function getEmployeeDetailsForUser(
+  personId: string,
+  byId: string,
+  opts: { logViewPayroll?: boolean; logViewSensitive?: boolean } = {},
+): {
+  employment: EmploymentRecord | null;
+  sensitive: EmployeeSensitiveRecord | null;
+  permissions: EmployeePermission[];
+  errors?: Record<string, string>;
+} {
+  const store = getStore();
+  const user = store.people.find((p) => p.id === byId) ?? null;
+  const person = store.people.find((p) => p.id === personId) ?? null;
+  const perms = resolveEmployeePermissions(user, store.people, store.teams);
+  const errors: Record<string, string> = {};
+
+  if (!person) {
+    return { employment: null, sensitive: null, permissions: perms, errors: { notFound: 'Person not found.' } };
+  }
+
+  if (opts.logViewPayroll) {
+    if (!perms.includes('employee:payroll')) {
+      errors.payrollPermission = 'You do not have permission to view payroll details.';
+    } else {
+      logEmployeeRestrictedAccess(personId, 'payroll', byId);
+    }
+  }
+
+  if (opts.logViewSensitive) {
+    if (!perms.includes('employee:sensitive')) {
+      errors.sensitivePermission = 'You do not have permission to view sensitive employee information.';
+    } else {
+      logEmployeeRestrictedAccess(personId, 'sensitive', byId);
+    }
+  }
+
+  const employment = filterEmploymentForUser(
+    person.employment,
+    user,
+    store.people,
+    store.teams,
+    store.orgStructure,
+  );
+  const sensitive = perms.includes('employee:sensitive')
+    ? structuredClone(store.employeeSensitiveRecords?.[personId] ?? null)
+    : null;
+
+  return {
+    employment,
+    sensitive,
+    permissions: perms,
+    ...(Object.keys(errors).length > 0 ? { errors } : {}),
+  };
+}
+
+/**
+ * Logs every view of payroll and sensitive fields with user and timestamp.
+ */
+export function logEmployeeRestrictedAccess(
+  personId: string,
+  section: 'payroll' | 'sensitive',
+  byId: string,
+  fieldDetail?: string,
+): { auditEntry?: AuditEntry; error?: string } {
+  const store = getStore();
+  const user = store.people.find((p) => p.id === byId) ?? null;
+  const requiredPerm: EmployeePermission =
+    section === 'payroll' ? 'employee:payroll' : 'employee:sensitive';
+
+  if (!hasEmployeePermission(user, requiredPerm, store.people, store.teams)) {
+    return { error: `Permission denied: ${requiredPerm} is required.` };
+  }
+
+  const entry = writeAudit(store, {
+    recordType: section === 'payroll' ? 'employee_payroll' : 'employee_sensitive',
+    recordId: personId,
+    action: section === 'payroll' ? 'view-payroll' : 'view-sensitive',
+    field: fieldDetail ?? (section === 'payroll' ? 'Payroll & benefits' : 'Sensitive information'),
+    oldValue: null,
+    newValue: `Viewed by ${user ? personDisplayName(user) : byId}`,
+    byId,
+  });
+  saveStore(store);
+  return { auditEntry: entry };
+}
+
+/**
+ * Reassigns records owned by a leaver to another active employee.
+ */
+export function reassignLeaverOwnedRecords(
+  fromLeaverId: string,
+  toEmployeeId: string,
+  byId: string,
+): { reassignedCount: number; errors?: Record<string, string> } {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const targetEmp = store.people.find((p) => p.id === toEmployeeId);
+  if (!targetEmp || !isSelectableInEmployeeDropdown(targetEmp)) {
+    return {
+      reassignedCount: 0,
+      errors: { toEmployeeId: 'Replacement owner must be an active employee.' },
+    };
+  }
+
+  let count = 0;
+  for (const p of store.people) {
+    if (p.mergedIntoId) continue;
+    if (p.relationshipOwnerId === fromLeaverId) {
+      p.relationshipOwnerId = toEmployeeId;
+      count++;
+    }
+    if (p.recordOwnerId === fromLeaverId) {
+      p.recordOwnerId = toEmployeeId;
+      count++;
+    }
+    if (p.verificationReviewerId === fromLeaverId) {
+      p.verificationReviewerId = toEmployeeId;
+      count++;
+    }
+  }
+  for (const o of store.organisations) {
+    if (o.mergedIntoId) continue;
+    if (o.relationshipPartnerId === fromLeaverId) {
+      o.relationshipPartnerId = toEmployeeId;
+      count++;
+    }
+    if (o.recordOwnerId === fromLeaverId) {
+      o.recordOwnerId = toEmployeeId;
+      count++;
+    }
+    if (o.reviewerId === fromLeaverId) {
+      o.reviewerId = toEmployeeId;
+      count++;
+    }
+  }
+  for (const m of store.matters) {
+    if (m.responsiblePartnerId === fromLeaverId) {
+      m.responsiblePartnerId = toEmployeeId;
+      count++;
+    }
+    if (m.supervisingPartnerId === fromLeaverId) {
+      m.supervisingPartnerId = toEmployeeId;
+      count++;
+    }
+    if (m.leadFeeEarnerId === fromLeaverId) {
+      m.leadFeeEarnerId = toEmployeeId;
+      count++;
+    }
+  }
+  for (const t of store.tasks) {
+    if (t.status !== 'Done' && t.status !== 'Cancelled' && t.assignedPersonId === fromLeaverId) {
+      t.assignedPersonId = toEmployeeId;
+      count++;
+    }
+  }
+  for (const e of store.enquiries) {
+    if (e.assignedToId === fromLeaverId) {
+      e.assignedToId = toEmployeeId;
+      count++;
+    }
+  }
+
+  writeAudit(store, {
+    recordType: 'person',
+    recordId: fromLeaverId,
+    action: 'assign',
+    field: 'Leaver record reassignment',
+    oldValue: fromLeaverId,
+    newValue: `Reassigned ${count} record role(s) to ${personDisplayName(targetEmp)} (${toEmployeeId})`,
+    byId,
+    at: now,
+  });
+
+  saveStore(store);
+  return { reassignedCount: count };
+}
+
+export function savePersonRecord(
+  input: Partial<Person> & { firstName: string; surname: string },
+  opts: {
+    id?: string;
+    byId: string;
+    customFieldsSubmitted?: Record<string, unknown>;
+    flagPossibleDuplicate?: boolean;
+    matchedDuplicateIds?: string[];
+    worksAtFirm?: boolean;
+    employmentSubmitted?: Partial<EmploymentRecord> | null;
+    sensitiveSubmitted?: Partial<EmployeeSensitiveRecord> | null;
+    keepAsContactOnLeave?: boolean;
+    initialLink?: {
+      organisationId: string;
+      jobTitle?: string;
+      department?: string;
+      roleWithinOrganisation?: string;
+      contactRoleIds?: string[];
+      isPrimaryContact?: boolean;
+      startDate?: string | null;
+    } | null;
+  },
+): { person: Person; errors?: Record<string, string> } {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const today = toIsoDate(new Date());
+  const existing = opts.id ? store.people.find((p) => p.id === opts.id) ?? null : null;
+  const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
+  const userPerms = new Set(resolveEmployeePermissions(actingUser, store.people, store.teams));
+  const orgStructure = store.orgStructure ?? buildDefaultOrgStructure();
+
+  if (!input.firstName?.trim() || !input.surname?.trim()) {
+    return { person: existing as Person, errors: { name: 'First name and surname are required.' } };
+  }
+
+  // Determine whether the person works at the firm (or has an employment record)
+  const hasEmploymentPayload =
+    opts.employmentSubmitted !== undefined
+      ? opts.employmentSubmitted !== null
+      : input.employment !== undefined
+        ? input.employment !== null
+        : opts.worksAtFirm !== undefined
+          ? opts.worksAtFirm
+          : Boolean(input.isEmployee ?? existing?.employment ?? existing?.isEmployee);
+
+  const rawEmpInput: Partial<EmploymentRecord> | null =
+    opts.employmentSubmitted ?? input.employment ?? null;
+
+  // Enforce API-level permission checks on employment & sensitive data modifications
+  if (rawEmpInput) {
+    if (!userPerms.has('employee:edit_core')) {
+      return {
+        person: existing as Person,
+        errors: {
+          permission: 'You do not have permission (employee:edit_core) to create or edit employment records.',
+        },
+      };
+    }
+    if (
+      (rawEmpInput.contract !== undefined ||
+        rawEmpInput.rightToWork !== undefined ||
+        rawEmpInput.emergencyContacts !== undefined) &&
+      !userPerms.has('employee:hr_restricted')
+    ) {
+      return {
+        person: existing as Person,
+        errors: {
+          permission:
+            'You do not have permission (employee:hr_restricted) to edit HR restricted fields (contract, right to work, emergency contacts).',
+        },
+      };
+    }
+    if (rawEmpInput.payroll !== undefined && !userPerms.has('employee:payroll')) {
+      return {
+        person: existing as Person,
+        errors: {
+          permission: 'You do not have permission (employee:payroll) to edit payroll and benefits fields.',
+        },
+      };
+    }
+  }
+
+  if (opts.sensitiveSubmitted !== undefined && opts.sensitiveSubmitted !== null) {
+    if (!userPerms.has('employee:sensitive')) {
+      return {
+        person: existing as Person,
+        errors: {
+          permission: 'You do not have permission (employee:sensitive) to edit sensitive employee information.',
+        },
+      };
+    }
+  }
+
+  const effectiveDob =
+    input.dateOfBirth !== undefined ? input.dateOfBirth : existing?.dateOfBirth ?? null;
+  const targetPersonId = existing?.id ?? nextId(store, 'P');
+
+  // Build or merge the EmploymentRecord when the person works at the firm (or is a leaver with employment history)
+  let nextEmployment: EmploymentRecord | null = existing?.employment
+    ? structuredClone(existing.employment)
+    : null;
+
+  if (hasEmploymentPayload || rawEmpInput) {
+    const baseEmp =
+      nextEmployment ??
+      createDefaultEmploymentRecord({
+        person: {
+          ...existing,
+          ...input,
+          id: targetPersonId,
+          firstName: input.firstName.trim(),
+          surname: input.surname.trim(),
+          jobTitle: rawEmpInput?.jobTitle ?? existing?.employment?.jobTitle ?? input.jobTitle ?? '',
+        },
+        allPeople: store.people,
+        orgStructure,
+        byId: opts.byId,
+        nowIso: now,
+        status: rawEmpInput?.status ?? (input.isEmployee ? 'Active' : 'Pre-start'),
+      });
+
+    // If legacy callers passed employeeRoleId or departmentId without rawEmpInput, map them
+    const mappedLegacyRole =
+      !rawEmpInput?.roleType && input.employeeRoleId
+        ? mapLegacyEmployeeRoleToRoleType(input.employeeRoleId)
+        : null;
+    const mappedLegacyDept =
+      !rawEmpInput?.departmentId && input.departmentId
+        ? resolveOrgDepartment(input.departmentId, orgStructure)
+        : null;
+
+    if (input.isEmployee && !rawEmpInput && !input.employeeRoleId && !existing?.employeeRoleId && !existing?.employment?.roleType) {
+      return {
+        person: existing as Person,
+        errors: { employeeRoleId: 'An employee must have a role type.' },
+      };
+    }
+
+    const resolvedDept =
+      resolveOrgDepartment(
+        rawEmpInput?.departmentId ?? mappedLegacyDept?.id ?? baseEmp.departmentId,
+        orgStructure,
+      ) ?? null;
+
+    const mergedLineManagerId =
+      rawEmpInput?.lineManagerId !== undefined
+        ? rawEmpInput.lineManagerId
+        : baseEmp.lineManagerId;
+
+    const candidateEmp: EmploymentRecord = {
+      ...baseEmp,
+      personId: targetPersonId,
+      engagementType:
+        rawEmpInput?.engagementType ??
+        mappedLegacyRole?.engagementType ??
+        baseEmp.engagementType,
+      status: rawEmpInput?.status ?? baseEmp.status,
+      employeeNumber: (rawEmpInput?.employeeNumber ?? baseEmp.employeeNumber ?? '').trim(),
+      employingEntityId: rawEmpInput?.employingEntityId ?? baseEmp.employingEntityId,
+      // Firm job title lives on the employment record, separate from contact person.jobTitle
+      jobTitle: (
+        rawEmpInput?.jobTitle ??
+        existing?.employment?.jobTitle ??
+        baseEmp.jobTitle ??
+        ''
+      ).trim(),
+      gradeOrBand: rawEmpInput?.gradeOrBand ?? baseEmp.gradeOrBand,
+      roleType:
+        rawEmpInput?.roleType ?? mappedLegacyRole?.roleType ?? baseEmp.roleType,
+      divisionId:
+        rawEmpInput?.divisionId !== undefined
+          ? rawEmpInput.divisionId
+          : resolvedDept?.parentDivisionId ?? baseEmp.divisionId,
+      departmentId:
+        resolvedDept?.id ?? rawEmpInput?.departmentId ?? baseEmp.departmentId ?? '',
+      teamOrPracticeGroupId:
+        rawEmpInput?.teamOrPracticeGroupId !== undefined
+          ? rawEmpInput.teamOrPracticeGroupId
+          : baseEmp.teamOrPracticeGroupId,
+      officeId:
+        rawEmpInput?.officeId !== undefined ? rawEmpInput.officeId : baseEmp.officeId,
+      costCentreId:
+        rawEmpInput?.costCentreId !== undefined && rawEmpInput.costCentreId !== ''
+          ? rawEmpInput.costCentreId
+          : resolvedDept?.defaultCostCentreId ?? baseEmp.costCentreId,
+      profitCentreId:
+        rawEmpInput?.profitCentreId !== undefined && rawEmpInput.profitCentreId !== ''
+          ? rawEmpInput.profitCentreId
+          : resolvedDept?.defaultProfitCentreId ?? baseEmp.profitCentreId,
+      isTopOfHierarchy:
+        rawEmpInput?.isTopOfHierarchy !== undefined
+          ? rawEmpInput.isTopOfHierarchy
+          : baseEmp.isTopOfHierarchy,
+      lineManagerId: mergedLineManagerId,
+      supervisingPartnerId:
+        rawEmpInput?.supervisingPartnerId !== undefined
+          ? rawEmpInput.supervisingPartnerId
+          : baseEmp.supervisingPartnerId,
+      timesheetApproverId:
+        rawEmpInput?.timesheetApproverId !== undefined && rawEmpInput.timesheetApproverId !== null
+          ? rawEmpInput.timesheetApproverId
+          : mergedLineManagerId,
+      holidayApproverId:
+        rawEmpInput?.holidayApproverId !== undefined && rawEmpInput.holidayApproverId !== null
+          ? rawEmpInput.holidayApproverId
+          : mergedLineManagerId,
+      onboardingBuddyId:
+        rawEmpInput?.onboardingBuddyId !== undefined
+          ? rawEmpInput.onboardingBuddyId
+          : baseEmp.onboardingBuddyId,
+      effectiveFrom: rawEmpInput?.effectiveFrom || baseEmp.effectiveFrom || today,
+      effectiveTo:
+        rawEmpInput?.effectiveTo !== undefined ? rawEmpInput.effectiveTo : baseEmp.effectiveTo,
+      contract:
+        rawEmpInput?.contract !== undefined
+          ? rawEmpInput.contract
+            ? {
+                ...baseEmp.contract!,
+                ...rawEmpInput.contract,
+                continuousServiceDate:
+                  rawEmpInput.contract.continuousServiceDate ||
+                  rawEmpInput.contract.startDate ||
+                  baseEmp.contract?.continuousServiceDate ||
+                  today,
+              }
+            : null
+          : baseEmp.contract,
+      feeEarner:
+        rawEmpInput?.feeEarner !== undefined
+          ? rawEmpInput.feeEarner
+          : baseEmp.feeEarner,
+      rightToWork:
+        rawEmpInput?.rightToWork !== undefined
+          ? rawEmpInput.rightToWork
+          : baseEmp.rightToWork,
+      payroll:
+        rawEmpInput?.payroll !== undefined
+          ? rawEmpInput.payroll
+          : baseEmp.payroll,
+      emergencyContacts:
+        rawEmpInput?.emergencyContacts !== undefined
+          ? rawEmpInput.emergencyContacts
+          : baseEmp.emergencyContacts,
+      systems:
+        rawEmpInput?.systems !== undefined
+          ? rawEmpInput.systems
+          : baseEmp.systems,
+      updatedById: opts.byId,
+      updatedAt: now,
+    };
+
+    // Only enforce full employment field validation when employmentSubmitted was explicitly provided
+    // (or when creating/editing via the full employee form)
+    if (rawEmpInput) {
+      const empErrors = validateEmploymentRecord(candidateEmp, {
+        personId: targetPersonId,
+        dateOfBirth: effectiveDob,
+        allPeople: store.people,
+        orgStructure,
+        requireContractStartDate: Boolean(rawEmpInput.contract),
+      });
+      if (Object.keys(empErrors).length > 0) {
+        return { person: existing as Person, errors: empErrors };
+      }
+    }
+
+    nextEmployment = applyEffectiveDatedEmploymentHistory(
+      existing?.employment,
+      candidateEmp,
+      opts.byId,
+      now,
+    );
+  } else if (opts.worksAtFirm === false && existing?.employment) {
+    // If unchecked and status wasn't already Leaver, transition to Leaver
+    const leavingRes = applyLeaverEffects(
+      {
+        emails: input.emails ?? existing.emails ?? [],
+        phones: input.phones ?? existing.phones ?? [],
+        relationshipRoleIds: input.relationshipRoleIds ?? existing.relationshipRoleIds ?? [],
+      },
+      existing.employment,
+      today,
+      opts.keepAsContactOnLeave ?? true,
+    );
+    input.emails = leavingRes.emails;
+    input.phones = leavingRes.phones;
+    input.relationshipRoleIds = leavingRes.relationshipRoleIds;
+    nextEmployment = leavingRes.employment;
+  }
+
+  // Handle conversion path 3: Status set to 'Leaver'
+  if (nextEmployment && nextEmployment.status === 'Leaver') {
+    const leavingDate =
+      nextEmployment.contract?.leavingDate || nextEmployment.effectiveTo || today;
+    const leavingRes = applyLeaverEffects(
+      {
+        emails: input.emails ?? existing?.emails ?? [],
+        phones: input.phones ?? existing?.phones ?? [],
+        relationshipRoleIds: input.relationshipRoleIds ?? existing?.relationshipRoleIds ?? [],
+      },
+      nextEmployment,
+      leavingDate,
+      opts.keepAsContactOnLeave ?? nextEmployment.contract?.keepAsContactOnLeave ?? true,
+    );
+    input.emails = leavingRes.emails;
+    input.phones = leavingRes.phones;
+    input.relationshipRoleIds = leavingRes.relationshipRoleIds;
+    nextEmployment = leavingRes.employment;
+  }
+
+  // Handle conversion path 1: Contact or client becomes an employee
+  const wasWorkingAtFirm = isWorkingAtFirm(existing);
+  const nowWorkingAtFirm = Boolean(nextEmployment && nextEmployment.status !== 'Leaver');
+  if (!wasWorkingAtFirm && nowWorkingAtFirm && nextEmployment) {
+    const openMatters = findOpenMattersWherePersonIsParty(targetPersonId, store.matters);
+    nextEmployment.conflictCheckOnHire = {
+      checkedAt: now,
+      openMatterIds: openMatters.map((m) => m.id),
+      flaggedToRisk: openMatters.length > 0,
+      informationBarrierConsidered: openMatters.length > 0,
+      riskNotes:
+        openMatters.length > 0
+          ? `Person is a party on ${openMatters.length} open matter(s) (${openMatters.map((m) => m.matterNumber).join(', ')}). Flagged to Risk & Compliance to consider an information barrier.`
+          : 'No open matter conflicts detected on hire.',
+    };
+
+    if (openMatters.length > 0) {
+      // Flag to Risk & Compliance so an information barrier can be considered
+      const riskOfficerId =
+        store.people.find((p) => p.employeeRoleId === 'employee_role.risk_and_compliance')?.id ??
+        'P-000003';
+      store.notifications.unshift({
+        id: nextId(store, 'NTF'),
+        recipientId: riskOfficerId,
+        kind: 'task_assigned',
+        title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
+        detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMatters.map((m) => m.matterNumber).join(', ')}.`,
+        href: `/people/${targetPersonId}`,
+        recordId: targetPersonId,
+        createdAt: now,
+        read: false,
+        byId: opts.byId,
+      });
+
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: targetPersonId,
+        action: 'status-change',
+        field: 'Conflict check on hire (Risk flag)',
+        oldValue: 'External contact / client',
+        newValue: nextEmployment.conflictCheckOnHire.riskNotes,
+        byId: opts.byId,
+        at: now,
+      });
+
+      // Also if the person is a client on any of those open matters, mark them as staff matters with restricted access
+      for (const m of openMatters) {
+        if (m.clientId === targetPersonId || m.additionalClientIds?.includes(targetPersonId)) {
+          m.isStaffMatter = true;
+          const allowed = new Set<string>([
+            ...(m.restrictedAccessUserIds ?? []),
+            ...(m.responsiblePartnerId ? [m.responsiblePartnerId] : []),
+            ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
+            ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
+            ...(m.teamMemberIds ?? []),
+            riskOfficerId,
+            'P-000004',
+          ]);
+          m.restrictedAccessUserIds = Array.from(allowed);
+        }
+      }
+    }
+  }
+
+  const cfValidation = validateCustomFields(
+    store.customFields,
+    'person',
+    opts.customFieldsSubmitted ?? input.customFields ?? {},
+    existing?.customFields ?? {},
+    store.values,
+  );
+  if (Object.keys(cfValidation.errors).length > 0) {
+    return { person: existing as Person, errors: cfValidation.errors };
+  }
+
+  const defaultStatus = valueBySystemKey(store.values, 'person_record_status', 'active')!.id;
+  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+  const dupPossible = valueBySystemKey(store.values, 'duplicate_status', 'possible_match')!.id;
+
+  const duplicateStatusId = opts.flagPossibleDuplicate
+    ? dupPossible
+    : input.duplicateStatusId ?? existing?.duplicateStatusId ?? dupNone;
+
+  const matchedIds = opts.flagPossibleDuplicate
+    ? Array.from(new Set([...(existing?.possibleMatchIds ?? []), ...(opts.matchedDuplicateIds ?? [])]))
+    : existing?.possibleMatchIds ?? [];
+
+  // Preserve contact jobTitle when editing employment jobTitle (never overwrite contact jobTitle with firm jobTitle)
+  const contactJobTitle =
+    input.jobTitle !== undefined ? input.jobTitle.trim() : existing?.jobTitle ?? '';
+
+  // Preserve marketingConsentId: being an employee must not change Marketing consent
+  const preservedMarketingConsentId =
+    input.marketingConsentId !== undefined
+      ? input.marketingConsentId
+      : existing?.marketingConsentId ?? vid('marketing_consent', 'Not asked');
+
+  // Preserve Client ID verificationStatusId: Right-to-work evidence must not automatically satisfy client ID verification
+  const preservedVerificationStatusId =
+    input.verificationStatusId !== undefined
+      ? input.verificationStatusId
+      : existing?.verificationStatusId ?? vid('verification_status', 'Not required');
+
+  let person: Person = {
+    id: targetPersonId,
+    recordType: 'person',
+    recordOwnerId: input.recordOwnerId ?? existing?.recordOwnerId ?? opts.byId,
+    recordStatusId: input.recordStatusId || existing?.recordStatusId || defaultStatus,
+    createdById: existing?.createdById ?? opts.byId,
+    createdAt: existing?.createdAt ?? now,
+    updatedById: opts.byId,
+    updatedAt: now,
+    sourceId: input.sourceId ?? existing?.sourceId ?? vid('data_source', 'Manual entry'),
+    lastVerifiedAt: input.lastVerifiedAt !== undefined ? input.lastVerifiedAt : existing?.lastVerifiedAt ?? today,
+    tags: input.tags ?? existing?.tags ?? [],
+    duplicateStatusId,
+    notDuplicateOf: existing?.notDuplicateOf ?? [],
+    possibleMatchIds: matchedIds,
+    mergedIntoId: existing?.mergedIntoId ?? null,
+    lastInteractionAt:
+      input.lastInteractionAt !== undefined ? input.lastInteractionAt : existing?.lastInteractionAt ?? null,
+    customFields: cfValidation.values,
+
+    titleId: input.titleId ?? existing?.titleId ?? null,
+    firstName: input.firstName.trim(),
+    middleNames: (input.middleNames ?? existing?.middleNames ?? '').trim(),
+    surname: input.surname.trim(),
+    preferredName: (input.preferredName ?? existing?.preferredName ?? '').trim(),
+    dateOfBirth: effectiveDob,
+    otherNames: input.otherNames ?? existing?.otherNames ?? [],
+    jobTitle: contactJobTitle,
+    emails: input.emails ?? existing?.emails ?? [],
+    phones: input.phones ?? existing?.phones ?? [],
+    preferredContactMethodId: input.preferredContactMethodId ?? existing?.preferredContactMethodId ?? null,
+    preferredLanguageId:
+      input.preferredLanguageId ?? existing?.preferredLanguageId ?? vid('language', 'English'),
+    addresses: input.addresses ?? existing?.addresses ?? [],
+    website: (input.website ?? existing?.website ?? '').trim(),
+
+    relationshipOwnerId:
+      input.relationshipOwnerId !== undefined
+        ? input.relationshipOwnerId
+        : existing?.relationshipOwnerId ?? opts.byId,
+    relationshipStatusId:
+      input.relationshipStatusId !== undefined
+        ? input.relationshipStatusId
+        : existing?.relationshipStatusId ?? vid('relationship_status', 'Active'),
+    relationshipStandingId:
+      input.relationshipStandingId !== undefined
+        ? input.relationshipStandingId
+        : existing?.relationshipStandingId ?? null,
+    relationshipRoleIds: input.relationshipRoleIds ?? existing?.relationshipRoleIds ?? [],
+    originId: input.originId !== undefined ? input.originId : existing?.originId ?? null,
+    firstKnownAt: input.firstKnownAt !== undefined ? input.firstKnownAt : existing?.firstKnownAt ?? today,
+    engagementLevelId:
+      input.engagementLevelId !== undefined ? input.engagementLevelId : existing?.engagementLevelId ?? null,
+    interests: input.interests ?? existing?.interests ?? '',
+    relationshipNotes: input.relationshipNotes ?? existing?.relationshipNotes ?? '',
+    marketingConsentId: preservedMarketingConsentId,
+    consentRecord: input.consentRecord ?? existing?.consentRecord ?? '',
+
+    verificationStatusId: preservedVerificationStatusId,
+    verifiedAt: input.verifiedAt !== undefined ? input.verifiedAt : existing?.verifiedAt ?? null,
+    verificationMethodId:
+      input.verificationMethodId !== undefined ? input.verificationMethodId : existing?.verificationMethodId ?? null,
+    verificationReviewerId:
+      input.verificationReviewerId !== undefined
+        ? input.verificationReviewerId
+        : existing?.verificationReviewerId ?? null,
+    riskReferences: input.riskReferences ?? existing?.riskReferences ?? '',
+
+    isEmployee: nowWorkingAtFirm,
+    employeeRoleId: nowWorkingAtFirm
+      ? nextEmployment
+        ? mapRoleTypeToLegacyEmployeeRoleId(
+            nextEmployment.roleType,
+            input.employeeRoleId ?? existing?.employeeRoleId,
+          )
+        : input.employeeRoleId ?? existing?.employeeRoleId ?? null
+      : null,
+    departmentId: nowWorkingAtFirm
+      ? nextEmployment
+        ? resolveOrgDepartment(nextEmployment.departmentId, orgStructure)?.legacyChoiceValueId ??
+          nextEmployment.departmentId
+        : input.departmentId ?? existing?.departmentId ?? null
+      : null,
+    employment: nextEmployment,
+    ...(input.employeePermissions !== undefined
+      ? { employeePermissions: input.employeePermissions }
+      : existing?.employeePermissions !== undefined
+        ? { employeePermissions: existing.employeePermissions }
+        : {}),
+    ...(input.appRole !== undefined
+      ? { appRole: input.appRole }
+      : existing?.appRole !== undefined
+        ? { appRole: existing.appRole }
+        : {}),
+    ...(input.roles !== undefined
+      ? { roles: input.roles }
+      : existing?.roles !== undefined
+        ? { roles: existing.roles }
+        : {}),
+    ...(input.demo !== undefined
+      ? { demo: input.demo }
+      : existing?.demo !== undefined
+        ? { demo: existing.demo }
+        : {}),
+    ...(input.showsWorkOfId !== undefined
+      ? { showsWorkOfId: input.showsWorkOfId }
+      : existing?.showsWorkOfId !== undefined
+        ? { showsWorkOfId: existing.showsWorkOfId }
+        : {}),
+    ...(input.supportsIds !== undefined
+      ? { supportsIds: input.supportsIds }
+      : existing?.supportsIds !== undefined
+        ? { supportsIds: existing.supportsIds }
+        : {}),
+    createdFromEnquiryId:
+      input.createdFromEnquiryId ??
+      existing?.createdFromEnquiryId ??
+      (opts.id?.startsWith('ENQ-') ? opts.id : null),
+  };
+
+  if (person.employment) {
+    person = syncPersonWorkContactFlags(person, orgStructure);
+  }
+
+  if (person.emails.length > 0 && !person.emails.some((e) => e.active !== false && e.isPrimary)) {
+    const firstActive = person.emails.find((e) => e.active !== false) ?? person.emails[0];
+    firstActive.isPrimary = true;
+  }
+
+  // Audit payroll changes with user and timestamp
+  if (rawEmpInput?.payroll) {
+    const oldPay = existing?.employment?.payroll;
+    const newPay = nextEmployment?.payroll;
+    if (JSON.stringify(oldPay ?? null) !== JSON.stringify(newPay ?? null)) {
+      writeAudit(store, {
+        recordType: 'employee_payroll',
+        recordId: person.id,
+        action: 'update-payroll',
+        field: 'Payroll & benefits',
+        oldValue: oldPay
+          ? `NI: ${maskNationalInsuranceNumber(oldPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(oldPay.bankSortCode || '', oldPay.bankAccountNumber || '').accountNumber}`
+          : null,
+        newValue: newPay
+          ? `NI: ${maskNationalInsuranceNumber(newPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(newPay.bankSortCode || '', newPay.bankAccountNumber || '').accountNumber}, Ref: ${newPay.externalPayrollReference || '—'}`
+          : null,
+        byId: opts.byId,
+        at: now,
+      });
+    }
+  }
+
+  // Store & audit sensitive information separately from main employment record
+  if (opts.sensitiveSubmitted) {
+    if (!store.employeeSensitiveRecords) {
+      store.employeeSensitiveRecords = {};
+    }
+    const oldSens = store.employeeSensitiveRecords[person.id] ?? null;
+    const nextSens: EmployeeSensitiveRecord = {
+      personId: person.id,
+      reasonableAdjustmentsNeeded:
+        opts.sensitiveSubmitted.reasonableAdjustmentsNeeded ??
+        oldSens?.reasonableAdjustmentsNeeded ??
+        '',
+      diversity: {
+        ...emptyDiversityAnswers(),
+        ...(oldSens?.diversity ?? {}),
+        ...(opts.sensitiveSubmitted.diversity ?? {}),
+      },
+      updatedById: opts.byId,
+      updatedAt: now,
+    };
+    if (JSON.stringify(oldSens) !== JSON.stringify(nextSens)) {
+      store.employeeSensitiveRecords[person.id] = nextSens;
+      writeAudit(store, {
+        recordType: 'employee_sensitive',
+        recordId: person.id,
+        action: 'update-sensitive',
+        field: 'Sensitive information (special category data)',
+        oldValue: oldSens ? 'Recorded' : null,
+        newValue: `Updated by ${actingUser ? personDisplayName(actingUser) : opts.byId}`,
+        byId: opts.byId,
+        at: now,
+      });
+    }
+  }
+
+  const ctx = formatContext(store);
+  if (!existing) {
+    store.people.push(person);
+    writeAudit(store, {
+      recordType: 'person',
+      recordId: person.id,
+      action: 'create',
+      field: null,
+      oldValue: null,
+      newValue: personDisplayName(person),
+      byId: opts.byId,
+      at: now,
+    });
+  } else {
+    const idx = store.people.findIndex((p) => p.id === existing.id);
+    const changes = diffRecords(
+      'person',
+      existing as unknown as Record<string, unknown>,
+      person as unknown as Record<string, unknown>,
+      ctx,
+      store.customFields,
+    );
+    store.people[idx] = person;
+    for (const ch of changes) {
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: person.id,
+        action: 'update',
+        field: ch.field,
+        oldValue: ch.oldValue,
+        newValue: ch.newValue,
+        byId: opts.byId,
+        at: now,
+      });
+    }
+  }
+
+  if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
+    for (const otherId of opts.matchedDuplicateIds) {
+      const other = store.people.find((p) => p.id === otherId);
+      if (other && !other.possibleMatchIds.includes(person.id)) {
+        other.possibleMatchIds.push(person.id);
+        other.duplicateStatusId = dupPossible;
+      }
+    }
+  }
+
+  if (person.createdFromEnquiryId) {
+    const srcEnq = store.enquiries.find((e) => e.id === person.createdFromEnquiryId);
+    if (srcEnq && !srcEnq.linkedPersonId) {
+      srcEnq.linkedPersonId = person.id;
+    }
+  }
+
+  if (!existing && opts.initialLink?.organisationId) {
+    createOrUpdateLink(
+      {
+        personId: person.id,
+        organisationId: opts.initialLink.organisationId,
+        jobTitle: opts.initialLink.jobTitle || person.jobTitle,
+        department: opts.initialLink.department || '',
+        roleWithinOrganisation: opts.initialLink.roleWithinOrganisation || '',
+        contactRoleIds: opts.initialLink.contactRoleIds ?? [],
+        isPrimaryContact: Boolean(opts.initialLink.isPrimaryContact),
+        isCurrent: true,
+        startDate: opts.initialLink.startDate ?? today,
+        endDate: null,
+        contactStatusId: vid('contact_status', 'Active'),
+      },
+      opts.byId,
+    );
+  }
+
+  // Keep operational teams (store.teams) synchronised with the employee's Organisation Structure Department / Team
+  if (person.employment) {
+    if (person.employment.status === 'Leaver') {
+      for (const tm of store.teams) {
+        tm.memberIds = tm.memberIds.filter((id) => id !== person.id);
+        tm.leadIds = tm.leadIds.filter((id) => id !== person.id);
+      }
+    } else {
+      const deptId = person.employment.departmentId;
+      const tpgId = person.employment.teamOrPracticeGroupId;
+      const deptObj = resolveOrgDepartment(deptId, orgStructure);
+      const tpgObj = orgStructure.teamsOrPracticeGroups.find((t) => t.id === tpgId);
+
+      const deptToTeamNameMap: Record<string, string> = {
+        'DEPT-RE': 'Real Estate & Property',
+        'DEPT-CORP': 'Corporate & Commercial',
+        'DEPT-DR': 'Dispute Resolution & Litigation',
+        'DEPT-PC': 'Private Client, Trusts & Family',
+        'DEPT-EMP': 'Employment & HR',
+        'DEPT-RISK': 'Risk & Compliance',
+        'DEPT-FIN': 'Accounts',
+        'DEPT-BD': 'Intake',
+      };
+      const targetTeamName = deptToTeamNameMap[deptId] ?? tpgObj?.name ?? deptObj?.name ?? '';
+      if (targetTeamName) {
+        const matchingTeam = store.teams.find(
+          (tm) =>
+            tm.name.toLowerCase() === targetTeamName.toLowerCase() ||
+            (deptObj && tm.name.toLowerCase().includes(deptObj.name.toLowerCase())),
+        );
+        if (matchingTeam) {
+          if (!matchingTeam.memberIds.includes(person.id)) {
+            matchingTeam.memberIds.push(person.id);
+          }
+          if (
+            person.employment.roleType === 'Partner/Member' &&
+            !matchingTeam.leadIds.includes(person.id)
+          ) {
+            matchingTeam.leadIds.push(person.id);
+          }
+        }
+      }
+    }
+  }
+
+  saveStore(store);
+  return { person };
+}
+
+export function saveOrganisationRecord(
+  input: Partial<Organisation> & { legalName: string },
+  opts: {
+    id?: string;
+    byId: string;
+    customFieldsSubmitted?: Record<string, unknown>;
+    flagPossibleDuplicate?: boolean;
+    matchedDuplicateIds?: string[];
+  },
+): { organisation: Organisation; errors?: Record<string, string> } {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const today = toIsoDate(new Date());
+  const existing = opts.id ? store.organisations.find((o) => o.id === opts.id) ?? null : null;
+
+  if (!input.legalName?.trim()) {
+    return { organisation: existing as Organisation, errors: { legalName: 'Legal name is required.' } };
+  }
+
+  const cfValidation = validateCustomFields(
+    store.customFields,
+    'organisation',
+    opts.customFieldsSubmitted ?? input.customFields ?? {},
+    existing?.customFields ?? {},
+    store.values,
+  );
+  if (Object.keys(cfValidation.errors).length > 0) {
+    return { organisation: existing as Organisation, errors: cfValidation.errors };
+  }
+
+  const defaultStatus = valueBySystemKey(store.values, 'organisation_record_status', 'active')!.id;
+  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+  const dupPossible = valueBySystemKey(store.values, 'duplicate_status', 'possible_match')!.id;
+
+  const duplicateStatusId = opts.flagPossibleDuplicate
+    ? dupPossible
+    : input.duplicateStatusId ?? existing?.duplicateStatusId ?? dupNone;
+
+  const matchedIds = opts.flagPossibleDuplicate
+    ? Array.from(new Set([...(existing?.possibleMatchIds ?? []), ...(opts.matchedDuplicateIds ?? [])]))
+    : existing?.possibleMatchIds ?? [];
+
+  const organisation: Organisation = {
+    id: existing?.id ?? nextId(store, 'O'),
+    recordType: 'organisation',
+    recordOwnerId: input.recordOwnerId ?? existing?.recordOwnerId ?? opts.byId,
+    recordStatusId: input.recordStatusId || existing?.recordStatusId || defaultStatus,
+    createdById: existing?.createdById ?? opts.byId,
+    createdAt: existing?.createdAt ?? now,
+    updatedById: opts.byId,
+    updatedAt: now,
+    sourceId: input.sourceId ?? existing?.sourceId ?? vid('data_source', 'Manual entry'),
+    lastVerifiedAt: input.lastVerifiedAt !== undefined ? input.lastVerifiedAt : existing?.lastVerifiedAt ?? today,
+    tags: input.tags ?? existing?.tags ?? [],
+    duplicateStatusId,
+    notDuplicateOf: existing?.notDuplicateOf ?? [],
+    possibleMatchIds: matchedIds,
+    mergedIntoId: existing?.mergedIntoId ?? null,
+    lastInteractionAt:
+      input.lastInteractionAt !== undefined ? input.lastInteractionAt : existing?.lastInteractionAt ?? null,
+    customFields: cfValidation.values,
+
+    legalName: input.legalName.trim(),
+    otherNames: input.otherNames ?? existing?.otherNames ?? [],
+    organisationTypeId:
+      input.organisationTypeId ?? existing?.organisationTypeId ?? vid('organisation_type', 'Company'),
+    companyNumber: (input.companyNumber ?? existing?.companyNumber ?? '').trim(),
+    vatNumber: (input.vatNumber ?? existing?.vatNumber ?? '').trim(),
+    countryOfRegistrationId:
+      input.countryOfRegistrationId ?? existing?.countryOfRegistrationId ?? vid('country', 'United Kingdom'),
+    registeredAddress:
+      input.registeredAddress !== undefined ? input.registeredAddress : existing?.registeredAddress ?? null,
+    correspondenceAddress:
+      input.correspondenceAddress !== undefined
+        ? input.correspondenceAddress
+        : existing?.correspondenceAddress ?? null,
+    peopleWithSignificantControl:
+      input.peopleWithSignificantControl !== undefined
+        ? input.peopleWithSignificantControl
+        : existing?.peopleWithSignificantControl ?? [],
+    directors:
+      input.directors !== undefined
+        ? input.directors
+        : existing?.directors ?? [],
+    website: (input.website ?? existing?.website ?? '').trim(),
+    mainPhone: (input.mainPhone ?? existing?.mainPhone ?? '').trim(),
+    generalEmail: (input.generalEmail ?? existing?.generalEmail ?? '').trim(),
+    parentOrganisationId:
+      input.parentOrganisationId !== undefined ? input.parentOrganisationId : existing?.parentOrganisationId ?? null,
+
+    relationshipPartnerId:
+      input.relationshipPartnerId !== undefined
+        ? input.relationshipPartnerId
+        : existing?.relationshipPartnerId ?? opts.byId,
+    relationshipTypeIds: input.relationshipTypeIds ?? existing?.relationshipTypeIds ?? [],
+    relationshipStatusId:
+      input.relationshipStatusId !== undefined
+        ? input.relationshipStatusId
+        : existing?.relationshipStatusId ?? vid('relationship_status', 'Active'),
+    relationshipStandingId:
+      input.relationshipStandingId !== undefined
+        ? input.relationshipStandingId
+        : existing?.relationshipStandingId ?? null,
+    sectorId: input.sectorId !== undefined ? input.sectorId : existing?.sectorId ?? null,
+    clientTierId: input.clientTierId !== undefined ? input.clientTierId : existing?.clientTierId ?? null,
+    originId: input.originId !== undefined ? input.originId : existing?.originId ?? null,
+    relationshipStartedAt:
+      input.relationshipStartedAt !== undefined
+        ? input.relationshipStartedAt
+        : existing?.relationshipStartedAt ?? null,
+    engagementLevelId:
+      input.engagementLevelId !== undefined ? input.engagementLevelId : existing?.engagementLevelId ?? null,
+    pipelineStageId:
+      input.pipelineStageId !== undefined ? input.pipelineStageId : existing?.pipelineStageId ?? null,
+    bdNotes: input.bdNotes ?? existing?.bdNotes ?? '',
+
+    clientReference: (input.clientReference ?? existing?.clientReference ?? '').trim(),
+    onboardingStatusId:
+      input.onboardingStatusId !== undefined ? input.onboardingStatusId : existing?.onboardingStatusId ?? null,
+    conflictStatusId:
+      input.conflictStatusId !== undefined ? input.conflictStatusId : existing?.conflictStatusId ?? null,
+    conflictReference: (input.conflictReference ?? existing?.conflictReference ?? '').trim(),
+    riskRatingId: input.riskRatingId !== undefined ? input.riskRatingId : existing?.riskRatingId ?? null,
+    riskAssessmentStatusId:
+      input.riskAssessmentStatusId !== undefined
+        ? input.riskAssessmentStatusId
+        : existing?.riskAssessmentStatusId ?? null,
+    verificationStatusId:
+      input.verificationStatusId !== undefined ? input.verificationStatusId : existing?.verificationStatusId ?? null,
+    billingAddress: input.billingAddress !== undefined ? input.billingAddress : existing?.billingAddress ?? null,
+    invoicePreferenceId:
+      input.invoicePreferenceId !== undefined ? input.invoicePreferenceId : existing?.invoicePreferenceId ?? null,
+    paymentTermsId: input.paymentTermsId !== undefined ? input.paymentTermsId : existing?.paymentTermsId ?? null,
+    creditControlNotes: input.creditControlNotes ?? existing?.creditControlNotes ?? '',
+    engagementTermsRef: (input.engagementTermsRef ?? existing?.engagementTermsRef ?? '').trim(),
+    reviewDate: input.reviewDate !== undefined ? input.reviewDate : existing?.reviewDate ?? null,
+    reviewerId: input.reviewerId !== undefined ? input.reviewerId : existing?.reviewerId ?? null,
+  };
+
+  const ctx = formatContext(store);
+  if (!existing) {
+    store.organisations.push(organisation);
+    writeAudit(store, {
+      recordType: 'organisation',
+      recordId: organisation.id,
+      action: 'create',
+      field: null,
+      oldValue: null,
+      newValue: organisation.legalName,
+      byId: opts.byId,
+      at: now,
+    });
+  } else {
+    const idx = store.organisations.findIndex((o) => o.id === existing.id);
+    const changes = diffRecords(
+      'organisation',
+      existing as unknown as Record<string, unknown>,
+      organisation as unknown as Record<string, unknown>,
+      ctx,
+      store.customFields,
+    );
+    store.organisations[idx] = organisation;
+    for (const ch of changes) {
+      writeAudit(store, {
+        recordType: 'organisation',
+        recordId: organisation.id,
+        action: 'update',
+        field: ch.field,
+        oldValue: ch.oldValue,
+        newValue: ch.newValue,
+        byId: opts.byId,
+        at: now,
+      });
+    }
+  }
+
+  if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
+    for (const otherId of opts.matchedDuplicateIds) {
+      const other = store.organisations.find((o) => o.id === otherId);
+      if (other && !other.possibleMatchIds.includes(organisation.id)) {
+        other.possibleMatchIds.push(organisation.id);
+        other.duplicateStatusId = dupPossible;
+      }
+    }
+  }
+
+  saveStore(store);
+  return { organisation };
+}
+
+export function createOrUpdateLink(
+  input: Omit<PersonOrganisationLink, 'id' | 'createdById' | 'createdAt' | 'updatedById' | 'updatedAt'> & {
+    id?: string;
+  },
+  byId: string,
+): PersonOrganisationLink {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const existing = input.id ? store.links.find((l) => l.id === input.id) ?? null : null;
+  const person = store.people.find((p) => p.id === input.personId);
+  const org = store.organisations.find((o) => o.id === input.organisationId);
+  const label = `${person ? personDisplayName(person) : input.personId} ↔ ${org ? org.legalName : input.organisationId}`;
+
+  const link: PersonOrganisationLink = {
+    id: existing?.id ?? nextId(store, 'L'),
+    personId: input.personId,
+    organisationId: input.organisationId,
+    jobTitle: input.jobTitle.trim(),
+    department: input.department.trim(),
+    roleWithinOrganisation: input.roleWithinOrganisation.trim(),
+    contactRoleIds: input.contactRoleIds,
+    isPrimaryContact: input.isPrimaryContact,
+    isCurrent: input.isCurrent,
+    startDate: input.startDate || null,
+    endDate: input.endDate || null,
+    contactStatusId: input.contactStatusId || vid('contact_status', 'Active'),
+    createdById: existing?.createdById ?? byId,
+    createdAt: existing?.createdAt ?? now,
+    updatedById: byId,
+    updatedAt: now,
+  };
+
+  if (!existing) {
+    store.links.push(link);
+    for (const [rtype, rid] of [
+      ['person', link.personId],
+      ['organisation', link.organisationId],
+    ] as const) {
+      writeAudit(store, {
+        recordType: rtype,
+        recordId: rid,
+        action: 'link',
+        field: 'Organisation link',
+        oldValue: null,
+        newValue: label + (link.jobTitle ? ` (${link.jobTitle})` : ''),
+        byId,
+        at: now,
+      });
+    }
+  } else {
+    const idx = store.links.findIndex((l) => l.id === existing.id);
+    store.links[idx] = link;
+    for (const [rtype, rid] of [
+      ['person', link.personId],
+      ['organisation', link.organisationId],
+    ] as const) {
+      writeAudit(store, {
+        recordType: rtype,
+        recordId: rid,
+        action: 'link-update',
+        field: 'Organisation link',
+        oldValue: label,
+        newValue: label + (link.jobTitle ? ` (${link.jobTitle})` : ''),
+        byId,
+        at: now,
+      });
+    }
+  }
+  saveStore(store);
+  return link;
+}
+
+export function deleteLink(linkId: string, byId: string): void {
+  const store = getStore();
+  const existing = store.links.find((l) => l.id === linkId);
+  if (!existing) return;
+  const person = store.people.find((p) => p.id === existing.personId);
+  const org = store.organisations.find((o) => o.id === existing.organisationId);
+  const label = `${person ? personDisplayName(person) : existing.personId} ↔ ${org ? org.legalName : existing.organisationId}`;
+  store.links = store.links.filter((l) => l.id !== linkId);
+  for (const [rtype, rid] of [
+    ['person', existing.personId],
+    ['organisation', existing.organisationId],
+  ] as const) {
+    writeAudit(store, {
+      recordType: rtype,
+      recordId: rid,
+      action: 'unlink',
+      field: 'Organisation link',
+      oldValue: label,
+      newValue: null,
+      byId,
+    });
+  }
+  saveStore(store);
+}
+
+export function addNoteToRecord(recordType: RecordType | 'matter', recordId: string, text: string, byId: string): Note {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const today = toIsoDate(new Date());
+  const note: Note = {
+    id: nextId(store, 'N'),
+    recordType,
+    recordId,
+    authorId: byId,
+    at: now,
+    text: text.trim(),
+  };
+  store.notes.unshift(note);
+
+  const target: (AnyRecord | Matter) | undefined =
+    recordType === 'person'
+      ? store.people.find((p) => p.id === recordId)
+      : recordType === 'matter'
+        ? store.matters.find((m) => m.id === recordId)
+        : store.organisations.find((o) => o.id === recordId);
+
+  if (target) {
+    const oldInteraction = target.lastInteractionAt;
+    target.lastInteractionAt = today;
+    target.updatedAt = now;
+    target.updatedById = byId;
+    writeAudit(store, {
+      recordType,
+      recordId,
+      action: 'note',
+      field: 'Note added',
+      oldValue: oldInteraction,
+      newValue: note.text.slice(0, 120),
+      byId,
+      at: now,
+    });
+  }
+  saveStore(store);
+  return note;
+}
+
+export function generateMatterNumber(store: FirmStore, clientId: string): string {
+  const org = store.organisations.find((o) => o.id === clientId);
+  const person = store.people.find((p) => p.id === clientId);
+  let prefix = 'MAT001';
+  if (org?.clientReference?.trim()) {
+    prefix = org.clientReference.trim().toUpperCase();
+  } else if (org) {
+    prefix = org.legalName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X') + '001';
+  } else if (person) {
+    prefix = person.surname.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X') + '001';
+  }
+  const existingForClient = store.matters.filter((m) => m.clientId === clientId || m.matterNumber.startsWith(`${prefix}-`));
+  let maxSeq = existingForClient.length;
+  for (const m of existingForClient) {
+    const match = m.matterNumber.match(/-(\d+)$/);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (!Number.isNaN(n) && n > maxSeq) maxSeq = n;
+    }
+  }
+  const nextSeq = maxSeq + 1;
+  return `${prefix}-${String(nextSeq).padStart(4, '0')}`;
+}
+
+export function saveMatterRecord(
+  input: Partial<Matter> & {
+    title: string;
+    clientId: string;
+    practiceAreaId: string;
+    workTypeSubcategoryId: string;
+  },
+  opts: {
+    id?: string;
+    byId: string;
+    saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
+  },
+): { matter: Matter; errors?: Record<string, string> } {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const today = toIsoDate(new Date());
+  const existing = opts.id ? store.matters.find((m) => m.id === opts.id) ?? null : null;
+  const isDraftSave = opts.saveMode === 'draft';
+
+  const errors: Record<string, string> = {};
+  if (!isDraftSave) {
+    if (!input.title?.trim()) errors.title = 'Matter title / description is required.';
+    if (!input.clientId) errors.clientId = 'Client (instructing entity or individual) is required.';
+    if (!input.practiceAreaId) errors.practiceAreaId = 'Practice area is required.';
+    if (!input.workTypeSubcategoryId) errors.workTypeSubcategoryId = 'Work type subcategory is required.';
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return { matter: existing as Matter, errors };
+  }
+
+  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+  const defaultStatus = vid('matter_status', 'Active');
+  const cmiIncompleteStatus =
+    store.values.find((v) => v.listKey === 'matter_status' && v.label === 'CMI incomplete')?.id ??
+    vid('matter_status', 'CMI incomplete');
+  const prospectiveStatus =
+    store.values.find((v) => v.listKey === 'matter_status' && v.label === 'Prospective / Enquiry')?.id ??
+    defaultStatus;
+
+  const promoteEnquiryPersonId = (rawId: string | null | undefined): string | null => {
+    if (!rawId) return null;
+    if (!rawId.startsWith('ENQ-')) return rawId;
+    const enq = store.enquiries.find((e) => e.id === rawId);
+    if (!enq) return rawId;
+    if (enq.linkedPersonId && store.people.some((p) => p.id === enq.linkedPersonId)) {
+      return enq.linkedPersonId;
+    }
+    const existingFromEnq = store.people.find((p) => p.createdFromEnquiryId === enq.id);
+    if (existingFromEnq) {
+      enq.linkedPersonId = existingFromEnq.id;
+      return existingFromEnq.id;
+    }
+    const newPersonId = nextId(store, 'P');
+    const activeRecordStatus =
+      valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
+    const newPerson: Person = {
+      id: newPersonId,
+      recordType: 'person',
+      recordOwnerId: enq.assignedToId || opts.byId,
+      recordStatusId: activeRecordStatus,
+      createdById: opts.byId,
+      createdAt: now,
+      updatedById: opts.byId,
+      updatedAt: now,
+      sourceId: enq.sourceId || vid('data_source', 'Manual entry'),
+      lastVerifiedAt: today,
+      tags: [],
+      duplicateStatusId: dupNone,
+      notDuplicateOf: [],
+      possibleMatchIds: [],
+      mergedIntoId: null,
+      lastInteractionAt: today,
+      customFields: {},
+      titleId: null,
+      firstName: enq.firstName.trim() || 'Enquiry',
+      middleNames: '',
+      surname: enq.lastName.trim() || 'Contact',
+      preferredName: '',
+      otherNames: [],
+      dateOfBirth: null,
+      preferredLanguageId: null,
+      jobTitle: '',
+      isEmployee: false,
+      employeeRoleId: null,
+      departmentId: null,
+      employment: null,
+      emails: enq.email.trim()
+        ? [
+            {
+              id: `e_${Date.now()}`,
+              address: enq.email.trim(),
+              typeId: vid('email_type', enq.callingOnBehalfOf ? 'Work' : 'Personal'),
+              isPrimary: true,
+            },
+          ]
+        : [],
+      phones: enq.phone.trim()
+        ? [
+            {
+              id: `p_${Date.now()}`,
+              number: enq.phone.trim(),
+              typeId: vid('phone_type', 'Mobile'),
+            },
+          ]
+        : [],
+      addresses: enq.address ? [{ ...enq.address, id: enq.address.id || `a_${Date.now()}` }] : [],
+      website: '',
+      preferredContactMethodId: enq.preferredContactMethodId || null,
+      relationshipOwnerId: enq.assignedToId || opts.byId,
+      relationshipStatusId: vid('relationship_status', 'Active'),
+      relationshipStandingId: null,
+      relationshipRoleIds: [
+        vid('person_role', enq.callingOnBehalfOf ? 'Client contact' : 'Private client'),
+      ],
+      originId: enq.sourceId || null,
+      firstKnownAt: today,
+      engagementLevelId: null,
+      interests: '',
+      relationshipNotes: enq.summary || '',
+      marketingConsentId: null,
+      consentRecord: '',
+      verificationStatusId: null,
+      verifiedAt: null,
+      verificationMethodId: null,
+      verificationReviewerId: null,
+      riskReferences: '',
+      createdFromEnquiryId: enq.id,
+    };
+    store.people.push(newPerson);
+    enq.linkedPersonId = newPersonId;
+    return newPersonId;
+  };
+
+  const effectiveClientId =
+    promoteEnquiryPersonId(
+      input.clientId !== undefined ? input.clientId : existing?.clientId,
+    ) ?? '';
+  const rawMatterNumber = (input.matterNumber ?? existing?.matterNumber ?? '').trim();
+  const matterNumber = isDraftSave
+    ? rawMatterNumber || 'DRAFT'
+    : !rawMatterNumber || rawMatterNumber === 'DRAFT'
+      ? generateMatterNumber(store, effectiveClientId)
+      : rawMatterNumber;
+
+  // Auto-create new contacts/organisations on save for any party added by typing a new name
+  const createdRecordByPartyId = new Map<string, string>();
+  const resolvedParties = (input.parties ?? existing?.parties ?? []).map((pt) => {
+    if (pt.linkedRecordId) {
+      if (pt.linkedRecordId.startsWith('ENQ-')) {
+        const promotedId = promoteEnquiryPersonId(pt.linkedRecordId);
+        if (promotedId) {
+          createdRecordByPartyId.set(pt.id, promotedId);
+          return { ...pt, linkedRecordId: promotedId };
+        }
+      }
+      return pt;
+    }
+    if (!pt.name?.trim() || pt.name.trim().startsWith('[')) {
+      return pt;
+    }
+    const cleanName = pt.name.trim();
+    const isPerson = pt.entityType === 'person';
+    if (isPerson) {
+      const existingPerson = store.people.find(
+        (p) => !p.mergedIntoId && personDisplayName(p).toLowerCase() === cleanName.toLowerCase(),
+      );
+      if (existingPerson) {
+        createdRecordByPartyId.set(pt.id, existingPerson.id);
+        return { ...pt, linkedRecordId: existingPerson.id };
+      }
+      const parts = cleanName.split(/\s+/);
+      const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : cleanName;
+      const surname = parts.length > 1 ? parts[parts.length - 1] : 'Contact';
+      const newPersonId = nextId(store, 'P');
+      const activeRecordStatus =
+        valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
+      const newPerson: Person = {
+        id: newPersonId,
+        recordType: 'person',
+        recordOwnerId: opts.byId,
+        recordStatusId: activeRecordStatus,
+        createdById: opts.byId,
+        createdAt: now,
+        updatedById: opts.byId,
+        updatedAt: now,
+        sourceId: vid('data_source', 'Manual entry'),
+        lastVerifiedAt: today,
+        tags: [],
+        duplicateStatusId: dupNone,
+        notDuplicateOf: [],
+        possibleMatchIds: [],
+        mergedIntoId: null,
+        lastInteractionAt: today,
+        customFields: {},
+        titleId: null,
+        firstName,
+        middleNames: '',
+        surname,
+        preferredName: '',
+        otherNames: pt.identifiers?.previousNames?.trim()
+          ? [
+              {
+                id: `ON-${Date.now()}`,
+                name: pt.identifiers.previousNames.trim(),
+                typeId: vid('name_type', 'Former / Maiden Name'),
+              },
+            ]
+          : [],
+        dateOfBirth: pt.identifiers?.dateOfBirth?.trim() || null,
+        preferredLanguageId: null,
+        jobTitle: '',
+        isEmployee: false,
+        employeeRoleId: null,
+        departmentId: null,
+        employment: null,
+        emails: [],
+        phones: [],
+        addresses: pt.identifiers?.town?.trim()
+          ? [
+              {
+                id: `ADDR-${Date.now()}`,
+                typeId: vid('address_type', 'Home / Residential'),
+                line1: '',
+                line2: '',
+                town: pt.identifiers.town.trim(),
+                county: '',
+                postcode: '',
+                countryId: vid('country', 'United Kingdom'),
+              },
+            ]
+          : [],
+        website: '',
+        preferredContactMethodId: null,
+        relationshipOwnerId: opts.byId,
+        relationshipStatusId: vid('relationship_status', 'Active'),
+        relationshipStandingId: null,
+        relationshipRoleIds: [],
+        originId: null,
+        firstKnownAt: today,
+        engagementLevelId: null,
+        interests: '',
+        relationshipNotes: '',
+        marketingConsentId: null,
+        consentRecord: '',
+        verificationStatusId: null,
+        verifiedAt: null,
+        verificationMethodId: null,
+        verificationReviewerId: null,
+        riskReferences: '',
+      };
+      store.people.push(newPerson);
+      createdRecordByPartyId.set(pt.id, newPersonId);
+      return { ...pt, linkedRecordId: newPersonId };
+    } else {
+      const existingOrg = store.organisations.find(
+        (o) => !o.mergedIntoId && o.legalName.toLowerCase() === cleanName.toLowerCase(),
+      );
+      if (existingOrg) {
+        createdRecordByPartyId.set(pt.id, existingOrg.id);
+        return { ...pt, linkedRecordId: existingOrg.id };
+      }
+      const newOrgId = nextId(store, 'O');
+      const activeRecordStatus =
+        valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
+      const newOrg: Organisation = {
+        id: newOrgId,
+        recordType: 'organisation',
+        recordOwnerId: opts.byId,
+        recordStatusId: activeRecordStatus,
+        createdById: opts.byId,
+        createdAt: now,
+        updatedById: opts.byId,
+        updatedAt: now,
+        sourceId: vid('data_source', 'Manual entry'),
+        lastVerifiedAt: today,
+        tags: [],
+        duplicateStatusId: dupNone,
+        notDuplicateOf: [],
+        possibleMatchIds: [],
+        mergedIntoId: null,
+        lastInteractionAt: today,
+        customFields: {},
+        legalName: cleanName,
+        otherNames: [],
+        organisationTypeId: vid('organisation_type', 'Company'),
+        companyNumber: pt.identifiers?.companyNumber?.trim() || '',
+        vatNumber: '',
+        countryOfRegistrationId: vid('country', 'United Kingdom'),
+        registeredAddress: pt.identifiers?.registeredTown?.trim()
+          ? {
+              id: `ADDR-${Date.now()}`,
+              typeId: vid('address_type', 'Registered Office'),
+              line1: '',
+              line2: '',
+              town: pt.identifiers.registeredTown.trim(),
+              county: '',
+              postcode: '',
+              countryId: vid('country', 'United Kingdom'),
+            }
+          : null,
+        correspondenceAddress: null,
+        peopleWithSignificantControl: [],
+        directors: [],
+        website: '',
+        mainPhone: '',
+        generalEmail: '',
+        parentOrganisationId: null,
+        relationshipPartnerId: opts.byId,
+        relationshipTypeIds: [vid('relationship_type', 'Other Party / Counterparty')],
+        relationshipStatusId: vid('relationship_status', 'Active'),
+        relationshipStandingId: null,
+        sectorId: null,
+        clientTierId: null,
+        originId: null,
+        relationshipStartedAt: today,
+        engagementLevelId: null,
+        pipelineStageId: null,
+        bdNotes: '',
+        clientReference: '',
+        onboardingStatusId: null,
+        conflictStatusId: null,
+        conflictReference: '',
+        riskRatingId: null,
+        riskAssessmentStatusId: null,
+        verificationStatusId: null,
+        billingAddress: null,
+        invoicePreferenceId: null,
+        paymentTermsId: null,
+        creditControlNotes: '',
+        engagementTermsRef: '',
+        reviewDate: null,
+        reviewerId: null,
+      };
+      store.organisations.push(newOrg);
+      createdRecordByPartyId.set(pt.id, newOrgId);
+      return { ...pt, linkedRecordId: newOrgId };
+    }
+  });
+
+  const resolvedConflictCheckRecord =
+    input.conflictCheckRecord !== undefined
+      ? input.conflictCheckRecord
+        ? {
+            ...input.conflictCheckRecord,
+            parties: input.conflictCheckRecord.parties.map((cp) =>
+              !cp.linkedRecordId && createdRecordByPartyId.has(cp.id)
+                ? { ...cp, linkedRecordId: createdRecordByPartyId.get(cp.id)! }
+                : cp,
+            ),
+          }
+        : null
+      : existing?.conflictCheckRecord ?? null;
+
+  const matter: Matter = {
+    id: existing?.id ?? nextId(store, 'M'),
+    recordType: 'matter',
+    recordOwnerId: input.leadFeeEarnerId || input.responsiblePartnerId || existing?.recordOwnerId || opts.byId,
+    recordStatusId:
+      isDraftSave || opts.saveMode === 'submit_referred'
+        ? prospectiveStatus
+        : opts.saveMode === 'submit_cleared'
+          ? input.matterStatusId || cmiIncompleteStatus
+          : input.matterStatusId || existing?.recordStatusId || cmiIncompleteStatus,
+    createdById: existing?.createdById ?? opts.byId,
+    createdAt: existing?.createdAt ?? now,
+    updatedById: opts.byId,
+    updatedAt: now,
+    sourceId: input.sourceId ?? existing?.sourceId ?? vid('data_source', 'Manual entry'),
+    lastVerifiedAt: input.lastVerifiedAt !== undefined ? input.lastVerifiedAt : existing?.lastVerifiedAt ?? today,
+    tags: input.tags ?? existing?.tags ?? [],
+    duplicateStatusId: existing?.duplicateStatusId ?? dupNone,
+    notDuplicateOf: existing?.notDuplicateOf ?? [],
+    possibleMatchIds: existing?.possibleMatchIds ?? [],
+    mergedIntoId: existing?.mergedIntoId ?? null,
+    lastInteractionAt: input.lastInteractionAt !== undefined ? input.lastInteractionAt : existing?.lastInteractionAt ?? today,
+    customFields: input.customFields ?? existing?.customFields ?? {},
+
+    matterNumber,
+    title: (input.title !== undefined ? input.title : existing?.title ?? '').trim(),
+    shortDescription: (input.shortDescription ?? existing?.shortDescription ?? '').trim(),
+    clientId: effectiveClientId,
+    additionalClientIds: (input.additionalClientIds ?? existing?.additionalClientIds ?? []).map(
+      (cid) => promoteEnquiryPersonId(cid) || cid,
+    ),
+    parentMatterId: input.parentMatterId !== undefined ? input.parentMatterId : existing?.parentMatterId ?? null,
+    relatedMatterIds: input.relatedMatterIds ?? existing?.relatedMatterIds ?? [],
+    matterStatusId:
+      isDraftSave || opts.saveMode === 'submit_referred'
+        ? prospectiveStatus
+        : opts.saveMode === 'submit_cleared'
+          ? input.matterStatusId || cmiIncompleteStatus
+          : input.matterStatusId || existing?.matterStatusId || cmiIncompleteStatus,
+    sourceEnquiryId: input.sourceEnquiryId !== undefined ? input.sourceEnquiryId : existing?.sourceEnquiryId ?? null,
+    sourceQuoteId: input.sourceQuoteId !== undefined ? input.sourceQuoteId : existing?.sourceQuoteId ?? null,
+    practiceAreaId:
+      input.practiceAreaId !== undefined
+        ? input.practiceAreaId
+        : existing?.practiceAreaId ?? '',
+    workTypeSubcategoryId:
+      input.workTypeSubcategoryId !== undefined
+        ? input.workTypeSubcategoryId
+        : existing?.workTypeSubcategoryId ?? '',
+    typeBadge: input.typeBadge !== undefined ? input.typeBadge : existing?.typeBadge ?? '',
+    matterTypeId: input.matterTypeId !== undefined ? input.matterTypeId : existing?.matterTypeId ?? '',
+    clientTierId: input.clientTierId !== undefined ? input.clientTierId : existing?.clientTierId ?? null,
+    clientSectorId: input.clientSectorId !== undefined ? input.clientSectorId : existing?.clientSectorId ?? null,
+    billingBasisId: input.billingBasisId !== undefined ? input.billingBasisId : existing?.billingBasisId ?? '',
+    riskRatingId: input.riskRatingId !== undefined ? input.riskRatingId : existing?.riskRatingId ?? '',
+    matterSizeId: input.matterSizeId !== undefined ? input.matterSizeId : existing?.matterSizeId ?? null,
+    jurisdictionGroupId:
+      input.jurisdictionGroupId ?? existing?.jurisdictionGroupId ?? vid('jurisdiction', 'UK Jurisdictions'),
+    jurisdictionIds: input.jurisdictionIds ?? existing?.jurisdictionIds ?? [],
+    governingLawId: input.governingLawId !== undefined ? input.governingLawId : existing?.governingLawId ?? null,
+    forumCourt: (input.forumCourt ?? existing?.forumCourt ?? '').trim(),
+    responsiblePartnerId:
+      input.responsiblePartnerId !== undefined ? input.responsiblePartnerId : existing?.responsiblePartnerId ?? opts.byId,
+    supervisingPartnerId:
+      input.supervisingPartnerId !== undefined ? input.supervisingPartnerId : existing?.supervisingPartnerId ?? opts.byId,
+    leadFeeEarnerId:
+      input.leadFeeEarnerId !== undefined ? input.leadFeeEarnerId : existing?.leadFeeEarnerId ?? opts.byId,
+    teamMemberIds: input.teamMemberIds ?? existing?.teamMemberIds ?? [],
+    relationshipPartnerId:
+      input.relationshipPartnerId !== undefined ? input.relationshipPartnerId : existing?.relationshipPartnerId ?? opts.byId,
+    instructingContactId: promoteEnquiryPersonId(
+      input.instructingContactId !== undefined ? input.instructingContactId : existing?.instructingContactId ?? null,
+    ),
+    billingContactId: promoteEnquiryPersonId(
+      input.billingContactId !== undefined ? input.billingContactId : existing?.billingContactId ?? null,
+    ),
+    referrerTypeId: input.referrerTypeId !== undefined ? input.referrerTypeId : existing?.referrerTypeId ?? null,
+    referrerContactId: promoteEnquiryPersonId(
+      input.referrerContactId !== undefined ? input.referrerContactId : existing?.referrerContactId ?? null,
+    ),
+    parties: resolvedParties,
+    conflictCheckStatus: input.conflictCheckStatus ?? existing?.conflictCheckStatus ?? 'Clear',
+    conflictCheckDate: input.conflictCheckDate !== undefined ? input.conflictCheckDate : existing?.conflictCheckDate ?? today,
+    conflictClearedById:
+      input.conflictClearedById !== undefined ? input.conflictClearedById : existing?.conflictClearedById ?? null,
+    conflictNotes: input.conflictNotes ?? existing?.conflictNotes ?? '',
+    amlStatus: (input.amlStatus || existing?.amlStatus || 'CMI incomplete').trim(),
+    amlCompletedAt: input.amlCompletedAt !== undefined ? input.amlCompletedAt : existing?.amlCompletedAt ?? null,
+    sourceOfFundsVerified: input.sourceOfFundsVerified ?? existing?.sourceOfFundsVerified ?? 'In progress',
+    sourceOfWealthVerified: input.sourceOfWealthVerified ?? existing?.sourceOfWealthVerified ?? 'N/A',
+    engagementLetterStatus: input.engagementLetterStatus ?? existing?.engagementLetterStatus ?? 'Drafting',
+    engagementLetterSentAt:
+      input.engagementLetterSentAt !== undefined ? input.engagementLetterSentAt : existing?.engagementLetterSentAt ?? null,
+    engagementLetterSignedAt:
+      input.engagementLetterSignedAt !== undefined
+        ? input.engagementLetterSignedAt
+        : existing?.engagementLetterSignedAt ?? null,
+    feeEstimateGbp: input.feeEstimateGbp !== undefined ? input.feeEstimateGbp : existing?.feeEstimateGbp ?? null,
+    agreedFeeCapGbp: input.agreedFeeCapGbp !== undefined ? input.agreedFeeCapGbp : existing?.agreedFeeCapGbp ?? null,
+    retainerMoniesOnAccountGbp:
+      input.retainerMoniesOnAccountGbp !== undefined
+        ? input.retainerMoniesOnAccountGbp
+        : existing?.retainerMoniesOnAccountGbp ?? null,
+    stageId: input.stageId ?? existing?.stageId ?? vid('matter_stage', 'Stage 1 — Inception & Onboarding'),
+    milestoneId: input.milestoneId !== undefined ? input.milestoneId : existing?.milestoneId ?? null,
+    enquiryReceivedAt:
+      input.enquiryReceivedAt !== undefined ? input.enquiryReceivedAt : existing?.enquiryReceivedAt ?? today,
+    openedAt: input.openedAt !== undefined ? input.openedAt : existing?.openedAt ?? today,
+    targetCompletionAt:
+      input.targetCompletionAt !== undefined ? input.targetCompletionAt : existing?.targetCompletionAt ?? null,
+    completedAt: input.completedAt !== undefined ? input.completedAt : existing?.completedAt ?? null,
+    closedAt: input.closedAt !== undefined ? input.closedAt : existing?.closedAt ?? null,
+    retentionPeriod: input.retentionPeriod ?? existing?.retentionPeriod ?? '6 years',
+    destructionDueAt:
+      input.destructionDueAt !== undefined ? input.destructionDueAt : existing?.destructionDueAt ?? null,
+    fieldValues: {
+      ...(existing?.fieldValues ?? {}),
+      ...(input.fieldValues ?? {}),
+    },
+    conflictCheckRecord: resolvedConflictCheckRecord,
+    ...computeStaffMatterStatus(
+      {
+        clientId: effectiveClientId,
+        additionalClientIds: input.additionalClientIds ?? existing?.additionalClientIds ?? [],
+        responsiblePartnerId:
+          input.responsiblePartnerId !== undefined
+            ? input.responsiblePartnerId
+            : existing?.responsiblePartnerId ?? opts.byId,
+        supervisingPartnerId:
+          input.supervisingPartnerId !== undefined
+            ? input.supervisingPartnerId
+            : existing?.supervisingPartnerId ?? opts.byId,
+        leadFeeEarnerId:
+          input.leadFeeEarnerId !== undefined
+            ? input.leadFeeEarnerId
+            : existing?.leadFeeEarnerId ?? opts.byId,
+        teamMemberIds: input.teamMemberIds ?? existing?.teamMemberIds ?? [],
+      },
+      store.people,
+    ),
+  };
+
+  // Ensure full conflict check record, risk assessment snapshot, and immutable matter opening snapshot are persisted
+  if (!matter.conflictCheckRecord) {
+    matter.conflictCheckRecord = resolveMatterConflictCheckRecord(
+      matter,
+      store.people,
+      store.organisations,
+    );
+  }
+  const fullRiskAssessment = resolveMatterRiskAssessment(
+    matter,
+    store.people,
+    store.values,
+  );
+  matter.fieldValues['riskAssessment'] = fullRiskAssessment;
+
+  const isOpeningEvent =
+    !existing ||
+    opts.saveMode === 'submit_cleared' ||
+    opts.saveMode === 'submit_referred' ||
+    !existing.fieldValues?.['matterOpeningSnapshot'];
+  if (isOpeningEvent) {
+    // Re-build fresh immutable snapshot at the moment of opening (ignoring any prior draft snapshot)
+    const cleanFieldVals = { ...matter.fieldValues };
+    delete cleanFieldVals['matterOpeningSnapshot'];
+    const openingSnapshot = resolveMatterOpeningSnapshot(
+      { ...matter, fieldValues: cleanFieldVals },
+      store.people,
+      store.organisations,
+      store.values,
+      store.enquiries,
+      store.quotes,
+    );
+    openingSnapshot.saveMode = opts.saveMode ?? 'opened';
+    openingSnapshot.capturedAt = now;
+    matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
+  }
+
+  if (!existing) {
+    store.matters.unshift(matter);
+    writeAudit(store, {
+      recordType: 'matter',
+      recordId: matter.id,
+      action: 'create',
+      field: null,
+      oldValue: null,
+      newValue: `${matter.matterNumber} — ${matter.title}`,
+      byId: opts.byId,
+      at: now,
+    });
+    writeAudit(store, {
+      recordType: 'matter',
+      recordId: matter.id,
+      action: 'create',
+      field: 'Conflict check record',
+      oldValue: null,
+      newValue: `${matter.conflictCheckRecord.status} (${matter.conflictCheckRecord.outcomeLabel}) · ${matter.conflictCheckRecord.parties.length} parties checked`,
+      byId: opts.byId,
+      at: now,
+    });
+    writeAudit(store, {
+      recordType: 'matter',
+      recordId: matter.id,
+      action: 'create',
+      field: 'Matter risk assessment',
+      oldValue: null,
+      newValue: `Overall risk: ${fullRiskAssessment.overallRisk} (${fullRiskAssessment.completedQuestions}/${fullRiskAssessment.totalQuestions} questions completed)`,
+      byId: opts.byId,
+      at: now,
+    });
+    writeAudit(store, {
+      recordType: 'matter',
+      recordId: matter.id,
+      action: 'create',
+      field: 'Matter opening snapshot (PDF)',
+      oldValue: null,
+      newValue: `Matter-Opening-Record-${matter.matterNumber}.pdf (Immutable historical copy captured at matter opening)`,
+      byId: opts.byId,
+      at: now,
+    });
+
+    if (matter.sourceEnquiryId) {
+      finalizeEnquiryConversionToMatter(store, matter.sourceEnquiryId, matter, opts.byId, now);
+    }
+    if (matter.sourceQuoteId) {
+      finalizeQuoteConversionToMatter(store, matter.sourceQuoteId, matter, opts.byId, now);
+    }
+  } else {
+    const idx = store.matters.findIndex((m) => m.id === existing.id);
+    store.matters[idx] = matter;
+    writeAudit(store, {
+      recordType: 'matter',
+      recordId: matter.id,
+      action: 'update',
+      field: 'Matter details & type-specific fields',
+      oldValue: existing.title,
+      newValue: `${matter.matterNumber} — ${matter.title}`,
+      byId: opts.byId,
+      at: now,
+    });
+    if (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred') {
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: matter.id,
+        action: 'update',
+        field: 'Matter opening snapshot (PDF)',
+        oldValue: null,
+        newValue: `Matter-Opening-Record-${matter.matterNumber}.pdf (Immutable historical copy captured at matter opening)`,
+        byId: opts.byId,
+        at: now,
+      });
+    }
+
+    if (matter.sourceEnquiryId) {
+      finalizeEnquiryConversionToMatter(store, matter.sourceEnquiryId, matter, opts.byId, now);
+    }
+    if (matter.sourceQuoteId) {
+      finalizeQuoteConversionToMatter(store, matter.sourceQuoteId, matter, opts.byId, now);
+    }
+  }
+
+  // Handle To Do task creation / completion for Draft & Referred conflict checks
+  const clientOrg = store.organisations.find((o) => o.id === matter.clientId);
+  const clientPerson = store.people.find((p) => p.id === matter.clientId);
+  const clientLabel =
+    clientOrg?.legalName ||
+    (clientPerson ? personDisplayName(clientPerson) : matter.title || 'Untitled matter');
+  const draftTaskTitle = `Conflict check · ${clientLabel} · Draft`;
+
+  const existingDraftTask = store.tasks.find(
+    (t) =>
+      t.status !== 'Done' &&
+      t.status !== 'Cancelled' &&
+      (t.title === draftTaskTitle ||
+        (t.title.startsWith('Conflict check ·') &&
+          t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id))),
+  );
+
+  if (isDraftSave) {
+    if (existingDraftTask) {
+      existingDraftTask.title = draftTaskTitle;
+      existingDraftTask.updatedAt = now;
+      existingDraftTask.updatedById = opts.byId;
+    } else {
+      const taskId = nextId(store, 'TSK');
+      const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
+      if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
+      else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
+      store.tasks.unshift({
+        id: taskId,
+        reference: taskId,
+        title: draftTaskTitle,
+        description: `Saved conflict check draft for ${matter.title}. Reopen to run fresh search and submit.`,
+        taskTypeId: vid('task_type', 'Conflict check'),
+        priorityId: vid('task_priority', 'High'),
+        dueAt: today,
+        assignedTeamId: null,
+        assignedPersonId: opts.byId,
+        status: 'To do',
+        linkedRecords,
+        createdById: opts.byId,
+        createdAt: now,
+        updatedById: opts.byId,
+        updatedAt: now,
+        completedById: null,
+        completedAt: null,
+        comments: [],
+      });
+    }
+  } else if (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred') {
+    if (existingDraftTask) {
+      existingDraftTask.status = 'Done';
+      existingDraftTask.completedById = opts.byId;
+      existingDraftTask.completedAt = now;
+      existingDraftTask.updatedAt = now;
+      existingDraftTask.updatedById = opts.byId;
+    }
+    if (opts.saveMode === 'submit_referred') {
+      const riskTaskId = nextId(store, 'TSK');
+      const riskTeam = store.teams.find((tm) => tm.name.toLowerCase().includes('risk') || tm.name.toLowerCase().includes('compliance'));
+      const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
+      if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
+      else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
+      store.tasks.unshift({
+        id: riskTaskId,
+        reference: riskTaskId,
+        title: `Conflict review · ${clientLabel} — ${matter.title}`,
+        description:
+          matter.conflictCheckRecord?.reviewerMessage ||
+          `Referred to Risk & Compliance for conflict review on ${clientLabel}.`,
+        taskTypeId: vid('task_type', 'Conflict check'),
+        priorityId: vid('task_priority', 'High'),
+        dueAt: today,
+        assignedTeamId: riskTeam?.id ?? null,
+        assignedPersonId: 'P-000003', // Bethan Rees (COLP)
+        status: 'To do',
+        linkedRecords,
+        createdById: opts.byId,
+        createdAt: now,
+        updatedById: opts.byId,
+        updatedAt: now,
+        completedById: null,
+        completedAt: null,
+        comments: [],
+      });
+    }
+  }
+
+  saveStore(store);
+  return { matter };
+}
+
+export function updateMatterConflictRecord(
+  matterId: string,
+  record: ConflictCheckRecord,
+  byId: string,
+): { matter: Matter | null } {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const today = toIsoDate(new Date());
+  const matter = store.matters.find((m) => m.id === matterId);
+  if (!matter) return { matter: null };
+
+  matter.conflictCheckRecord = record;
+  matter.updatedAt = now;
+  matter.updatedById = byId;
+
+  if (record.status === 'Approved' || record.status === 'Cleared') {
+    matter.conflictCheckStatus =
+      record.outcomeLabel === 'Approved with conditions'
+        ? 'Approved with conditions'
+        : 'Cleared';
+    matter.conflictClearedById = record.approvedById || record.submittedById || byId;
+    matter.conflictCheckDate = today;
+    if (matter.matterNumber === 'DRAFT') {
+      matter.matterNumber = generateMatterNumber(store, matter.clientId);
+    }
+    const activeStatusId = vid('matter_status', 'Active');
+    matter.matterStatusId = activeStatusId;
+    matter.recordStatusId = activeStatusId;
+  } else if (record.status === 'Declined') {
+    matter.conflictCheckStatus = 'Declined — Conflict of interest';
+  } else if (record.status === 'Referred') {
+    matter.conflictCheckStatus = 'Referred to risk for review';
+  }
+
+  writeAudit(store, {
+    recordType: 'matter',
+    recordId: matter.id,
+    action: 'update',
+    field: 'Conflict check record',
+    oldValue: null,
+    newValue: `${record.status} — ${record.outcomeLabel}`,
+    byId,
+    at: now,
+  });
+
+  saveStore(store);
+  return { matter };
+}
+
+export function dismissDuplicateMatch(recordType: RecordType, recordId: string, otherId: string | null, byId: string): void {
+  const store = getStore();
+  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+  const list: AnyRecord[] = recordType === 'person' ? store.people : store.organisations;
+  const rec = list.find((r) => r.id === recordId);
+  if (!rec) return;
+
+  const targets = otherId ? [otherId] : [...rec.possibleMatchIds];
+  for (const tid of targets) {
+    if (!rec.notDuplicateOf.includes(tid)) rec.notDuplicateOf.push(tid);
+    rec.possibleMatchIds = rec.possibleMatchIds.filter((id) => id !== tid);
+    const other = list.find((r) => r.id === tid);
+    if (other) {
+      if (!other.notDuplicateOf.includes(recordId)) other.notDuplicateOf.push(recordId);
+      other.possibleMatchIds = other.possibleMatchIds.filter((id) => id !== recordId);
+      if (other.possibleMatchIds.length === 0) other.duplicateStatusId = dupNone;
+    }
+  }
+  if (rec.possibleMatchIds.length === 0) rec.duplicateStatusId = dupNone;
+
+  writeAudit(store, {
+    recordType,
+    recordId,
+    action: 'duplicate',
+    field: 'Duplicate status',
+    oldValue: 'Possible match',
+    newValue: 'Dismissed (Not a duplicate)',
+    byId,
+  });
+  saveStore(store);
+}
+
+export function executeMerge(
+  recordType: RecordType,
+  survivorId: string,
+  mergedId: string,
+  byId: string,
+): MergeHistory {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const list: AnyRecord[] = recordType === 'person' ? store.people : store.organisations;
+  const survivor = list.find((r) => r.id === survivorId);
+  const merged = list.find((r) => r.id === mergedId);
+  if (!survivor || !merged) throw new Error('Record not found for merge');
+
+  const plan = planMerge(survivor, merged);
+  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+  const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
+  const statusMerged = valueBySystemKey(
+    store.values,
+    recordType === 'person' ? 'person_record_status' : 'organisation_record_status',
+    'merged',
+  )!.id;
+
+  // Repoint links
+  let linksMoved = 0;
+  for (const link of store.links) {
+    if (recordType === 'person' && link.personId === merged.id) {
+      const duplicateLink = store.links.some(
+        (l) => l.personId === survivor.id && l.organisationId === link.organisationId && l.isCurrent === link.isCurrent,
+      );
+      if (!duplicateLink) {
+        link.personId = survivor.id;
+        linksMoved++;
+      }
+    } else if (recordType === 'organisation' && link.organisationId === merged.id) {
+      const duplicateLink = store.links.some(
+        (l) => l.organisationId === survivor.id && l.personId === link.personId && l.isCurrent === link.isCurrent,
+      );
+      if (!duplicateLink) {
+        link.organisationId = survivor.id;
+        linksMoved++;
+      }
+    }
+  }
+  if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
+    plan.fieldsTaken.push('Organisation links');
+  }
+
+  // Repoint subsidiary parent links if merging an organisation
+  if (recordType === 'organisation') {
+    for (const org of store.organisations) {
+      if (org.parentOrganisationId === merged.id && org.id !== survivor.id) {
+        org.parentOrganisationId = survivor.id;
+      }
+    }
+  }
+
+  // Copy notes to survivor
+  let notesMoved = 0;
+  for (const note of store.notes) {
+    if (note.recordType === recordType && note.recordId === merged.id) {
+      note.recordId = survivor.id;
+      note.mergedFromId = merged.id;
+      notesMoved++;
+    }
+  }
+  if (notesMoved > 0 && !plan.fieldsTaken.includes('Notes')) {
+    plan.fieldsTaken.push('Notes');
+  }
+
+  // Update survivor
+  plan.survivor.updatedAt = now;
+  plan.survivor.updatedById = byId;
+  plan.survivor.possibleMatchIds = plan.survivor.possibleMatchIds.filter((id) => id !== merged.id);
+  if (plan.survivor.possibleMatchIds.length === 0) {
+    plan.survivor.duplicateStatusId = dupNone;
+  }
+
+  const sIdx = list.findIndex((r) => r.id === survivor.id);
+  list[sIdx] = plan.survivor;
+
+  // Mark merged record
+  merged.mergedIntoId = survivor.id;
+  merged.recordStatusId = statusMerged;
+  merged.duplicateStatusId = dupMerged;
+  merged.possibleMatchIds = [];
+  merged.updatedAt = now;
+  merged.updatedById = byId;
+
+  const history: MergeHistory = {
+    id: nextId(store, 'M'),
+    recordType,
+    survivorId: survivor.id,
+    mergedId: merged.id,
+    mergedLabel: recordDisplayName(merged),
+    byId,
+    at: now,
+    fieldsTaken: plan.fieldsTaken,
+  };
+  store.mergeHistory.unshift(history);
+
+  writeAudit(store, {
+    recordType,
+    recordId: survivor.id,
+    action: 'merge',
+    field: `Merged ${merged.id} (${recordDisplayName(merged)}) into ${survivor.id}`,
+    oldValue: merged.id,
+    newValue: plan.fieldsTaken.length ? `Fields taken: ${plan.fieldsTaken.join(', ')}` : 'No additional fields needed',
+    byId,
+    at: now,
+  });
+
+  writeAudit(store, {
+    recordType,
+    recordId: merged.id,
+    action: 'merged-into',
+    field: 'Merged into surviving record',
+    oldValue: merged.id,
+    newValue: survivor.id,
+    byId,
+    at: now,
+  });
+
+  saveStore(store);
+  return history;
+}
+
+export function findCandidateDuplicatesForRecord(record: AnyRecord): AnyRecord[] {
+  const store = getStore();
+  // Same rules as the People / Organisation forms: a shared address alone isn't a duplicate.
+  const notAddressOnly = (reasons: string[]) =>
+    reasons.some((r) => r !== 'address' && r !== 'postcode');
+  if (record.recordType === 'person') {
+    const matches = findPersonDuplicates(
+      {
+        id: record.id,
+        firstName: record.firstName,
+        preferredName: record.preferredName,
+        surname: record.surname,
+        emails: record.emails.map((e) => e.address),
+        phones: record.phones.map((p) => p.number),
+        addresses: record.addresses,
+      },
+      store.people,
+      record.notDuplicateOf,
+      { fuzzy: true },
+    );
+    return matches.filter((m) => notAddressOnly(m.reasons)).map((m) => m.record);
+  }
+  const matches = findOrganisationDuplicates(
+    {
+      id: record.id,
+      legalName: record.legalName,
+      otherNames: record.otherNames.map((n) => n.name),
+      companyNumber: record.companyNumber,
+      emails: record.generalEmail ? [record.generalEmail] : [],
+      phones: record.mainPhone ? [record.mainPhone] : [],
+      addresses: [record.registeredAddress, record.correspondenceAddress].filter(
+        (a): a is Address => Boolean(a),
+      ),
+    },
+    store.organisations,
+    record.notDuplicateOf,
+    { fuzzy: true },
+  );
+  return matches.filter((m) => notAddressOnly(m.reasons)).map((m) => m.record);
+}
+
+// ------------------------------------------------------------------ Admin: Choice lists
+export function addChoiceValue(
+  input: {
+    listKey: string;
+    label: string;
+    description?: string;
+    guidance?: string;
+    parentId?: string | null;
+    meta?: Record<string, string>;
+  },
+  byId: string,
+): ChoiceValue {
+  const store = getStore();
+  const label = input.label.trim();
+  if (!label) throw new Error('Label is required');
+  let id = vid(input.listKey, (input.parentId ? slug(input.parentId) + '_' : '') + label);
+  let suffix = 2;
+  while (store.values.some((v) => v.id === id)) {
+    id = `${vid(input.listKey, label)}_${suffix++}`;
+  }
+  const val: ChoiceValue = {
+    id,
+    listKey: input.listKey,
+    label,
+    description: input.description?.trim() || undefined,
+    guidance: input.guidance?.trim() || undefined,
+    parentId: input.parentId ?? null,
+    sortOrder: nextSortOrder(store.values, input.listKey),
+    active: true,
+    meta: input.meta && Object.keys(input.meta).length > 0 ? input.meta : undefined,
+  };
+  store.values.push(val);
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: input.listKey,
+    action: 'list-change',
+    field: `Added value to ${input.listKey}`,
+    oldValue: null,
+    newValue: val.label,
+    byId,
+  });
+  saveStore(store);
+  return val;
+}
+
+export function updateChoiceValue(
+  id: string,
+  patch: {
+    label?: string;
+    description?: string;
+    guidance?: string;
+    active?: boolean;
+    meta?: Record<string, string>;
+  },
+  byId: string,
+): { value?: ChoiceValue; error?: string } {
+  const store = getStore();
+  const val = store.values.find((v) => v.id === id);
+  if (!val) return { error: 'Value not found' };
+
+  if (patch.active === false && val.active) {
+    const check = canDeactivate(val);
+    if (!check.ok) return { error: check.reason };
+  }
+
+  const beforeLabel = val.label;
+  const beforeActive = val.active;
+  if (patch.label !== undefined && patch.label.trim()) val.label = patch.label.trim();
+  if (patch.description !== undefined) val.description = patch.description.trim() || undefined;
+  if (patch.guidance !== undefined) val.guidance = patch.guidance.trim() || undefined;
+  if (patch.active !== undefined) val.active = patch.active;
+  if (patch.meta !== undefined) {
+    val.meta = { ...(val.meta ?? {}), ...patch.meta };
+  }
+
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: val.listKey,
+    action: 'list-change',
+    field: val.id,
+    oldValue: `${beforeLabel}${beforeActive ? '' : ' (inactive)'}`,
+    newValue: `${val.label}${val.active ? '' : ' (inactive)'}`,
+    byId,
+  });
+  saveStore(store);
+  return { value: val };
+}
+
+export function reorderChoiceValue(id: string, direction: -1 | 1, byId: string): void {
+  const store = getStore();
+  const changed = reorder(store.values, id, direction);
+  if (!changed.length) return;
+  for (const u of changed) {
+    const idx = store.values.findIndex((v) => v.id === u.id);
+    if (idx !== -1) store.values[idx] = u;
+  }
+  const target = store.values.find((v) => v.id === id)!;
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: target.listKey,
+    action: 'list-change',
+    field: `Re-ordered ${target.label}`,
+    oldValue: null,
+    newValue: direction === -1 ? 'Moved up' : 'Moved down',
+    byId,
+  });
+  saveStore(store);
+}
+
+export function createMatterStageGroup(
+  input: {
+    label: string;
+    description?: string;
+    mode: 'from_default' | 'scratch';
+    selectedDefaultStageIds?: string[];
+  },
+  byId: string,
+): ChoiceValue {
+  const store = getStore();
+  const label = input.label.trim();
+  if (!label) throw new Error('Group name is required');
+
+  // Ensure Default Group exists in store.values
+  const defaultGroupId = 'matter_stage_group.default_group';
+  if (!store.values.some((v) => v.id === defaultGroupId)) {
+    store.values.push({
+      id: defaultGroupId,
+      listKey: 'matter_stage_group',
+      label: 'Default Group',
+      description: 'Standard firm-wide matter stage and milestone framework',
+      sortOrder: 1,
+      active: true,
+      parentId: null,
+      systemKey: 'default_group',
+    });
+  }
+  for (const v of store.values) {
+    if (v.listKey === 'matter_stage' && !v.parentId && !v.meta?.stageGroupId) {
+      v.meta = { ...(v.meta ?? {}), stageGroupId: defaultGroupId };
+    }
+  }
+
+  let groupId = vid('matter_stage_group', label);
+  let suffix = 2;
+  while (store.values.some((v) => v.id === groupId)) {
+    groupId = `${vid('matter_stage_group', label)}_${suffix++}`;
+  }
+
+  const groupVal: ChoiceValue = {
+    id: groupId,
+    listKey: 'matter_stage_group',
+    label,
+    description: input.description?.trim() || undefined,
+    parentId: null,
+    sortOrder: nextSortOrder(store.values, 'matter_stage_group'),
+    active: true,
+  };
+  store.values.push(groupVal);
+
+  if (input.mode === 'from_default' && input.selectedDefaultStageIds?.length) {
+    const selectedSet = new Set(input.selectedDefaultStageIds);
+    const defaultStages = store.values
+      .filter(
+        (v) =>
+          v.listKey === 'matter_stage' &&
+          !v.parentId &&
+          (v.meta?.stageGroupId ?? defaultGroupId) === defaultGroupId &&
+          selectedSet.has(v.id),
+      )
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+
+    defaultStages.forEach((srcStage, sIdx) => {
+      let newStageId = vid('matter_stage', `${slug(label)}_${srcStage.label}`);
+      let stgSuffix = 2;
+      while (store.values.some((v) => v.id === newStageId)) {
+        newStageId = `${vid('matter_stage', `${slug(label)}_${srcStage.label}`)}_${stgSuffix++}`;
+      }
+
+      const clonedStage: ChoiceValue = {
+        id: newStageId,
+        listKey: 'matter_stage',
+        label: srcStage.label,
+        description: srcStage.description,
+        guidance: srcStage.guidance,
+        parentId: null,
+        sortOrder: sIdx + 1,
+        active: true,
+        meta: { ...(srcStage.meta ?? {}), stageGroupId: groupId },
+      };
+      store.values.push(clonedStage);
+
+      const srcMilestones = store.values
+        .filter((v) => v.listKey === 'matter_stage' && v.parentId === srcStage.id)
+        .sort((a, b) => a.sortOrder - b.sortOrder);
+
+      srcMilestones.forEach((srcMs, mIdx) => {
+        let newMsId = vid('matter_stage', `${slug(newStageId)}_${srcMs.label}`);
+        let msSuffix = 2;
+        while (store.values.some((v) => v.id === newMsId)) {
+          newMsId = `${vid('matter_stage', `${slug(newStageId)}_${srcMs.label}`)}_${msSuffix++}`;
+        }
+        store.values.push({
+          id: newMsId,
+          listKey: 'matter_stage',
+          label: srcMs.label,
+          description: srcMs.description,
+          guidance: srcMs.guidance,
+          parentId: newStageId,
+          sortOrder: mIdx + 1,
+          active: true,
+          meta: srcMs.meta ? { ...srcMs.meta } : undefined,
+        });
+      });
+    });
+  }
+
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: 'matter_stage',
+    action: 'list-change',
+    field: 'Created matter stage group',
+    oldValue: null,
+    newValue: `${groupVal.label} (${input.mode === 'from_default' ? 'copied from Default Group' : 'from scratch'})`,
+    byId,
+  });
+  saveStore(store);
+  return groupVal;
+}
+
+// ------------------------------------------------------------------ Admin: Custom fields
+export function saveCustomFieldDefinition(
+  input: {
+    id?: string;
+    recordType: RecordType;
+    label: string;
+    fieldType: CustomFieldType;
+    section: FormSection;
+    required: boolean;
+    active?: boolean;
+    options?: string[];
+  },
+  byId: string,
+): CustomFieldDefinition {
+  const store = getStore();
+  const existing = input.id ? store.customFields.find((d) => d.id === input.id) ?? null : null;
+  const id = existing?.id ?? `cf_${slug(input.label)}_${Date.now().toString(36).slice(-4)}`;
+
+  let optionsListKey = existing?.optionsListKey;
+  if (input.fieldType === 'choice') {
+    optionsListKey = optionsListKey ?? id;
+    if (!store.lists.some((l) => l.key === optionsListKey)) {
+      const list: ChoiceList = {
+        key: optionsListKey,
+        label: input.label.trim(),
+        group: 'custom',
+        appliesTo: [input.recordType],
+        allowMultiple: false,
+        hierarchical: false,
+      };
+      store.lists.push(list);
+    }
+    if (input.options?.length) {
+      const existingVals = store.values.filter((v) => v.listKey === optionsListKey);
+      input.options
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach((optLabel, idx) => {
+          if (!existingVals.some((ev) => ev.label.toLowerCase() === optLabel.toLowerCase())) {
+            store.values.push({
+              id: vid(optionsListKey!, optLabel),
+              listKey: optionsListKey!,
+              label: optLabel,
+              sortOrder: existingVals.length + idx + 1,
+              active: true,
+              parentId: null,
+            });
+          }
+        });
+    }
+  }
+
+  const sameType = store.customFields.filter((d) => d.recordType === input.recordType);
+  const maxOrder = sameType.length ? Math.max(...sameType.map((d) => d.sortOrder)) : 0;
+
+  const def: CustomFieldDefinition = {
+    id,
+    recordType: input.recordType,
+    label: input.label.trim(),
+    fieldType: input.fieldType,
+    optionsListKey,
+    section: input.section,
+    required: input.required,
+    sortOrder: existing?.sortOrder ?? maxOrder + 1,
+    active: input.active ?? existing?.active ?? true,
+  };
+
+  if (!existing) {
+    store.customFields.push(def);
+  } else {
+    const idx = store.customFields.findIndex((d) => d.id === existing.id);
+    store.customFields[idx] = def;
+  }
+
+  writeAudit(store, {
+    recordType: 'customField',
+    recordId: def.id,
+    action: 'custom-field-change' as AuditAction,
+    field: `${def.recordType} · ${def.label}`,
+    oldValue: existing ? `${existing.label} (${existing.active ? 'active' : 'inactive'})` : null,
+    newValue: `${def.label} (${def.fieldType}, ${def.active ? 'active' : 'inactive'})`,
+    byId,
+  });
+  saveStore(store);
+  return def;
+}
+
+export function reorderCustomField(id: string, direction: -1 | 1, byId: string): void {
+  const store = getStore();
+  const target = store.customFields.find((d) => d.id === id);
+  if (!target) return;
+  const siblings = store.customFields
+    .filter((d) => d.recordType === target.recordType)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+  const idx = siblings.findIndex((d) => d.id === id);
+  const swapIdx = idx + direction;
+  if (swapIdx < 0 || swapIdx >= siblings.length) return;
+  [siblings[idx], siblings[swapIdx]] = [siblings[swapIdx], siblings[idx]];
+  siblings.forEach((d, i) => {
+    d.sortOrder = i + 1;
+  });
+  writeAudit(store, {
+    recordType: 'customField',
+    recordId: target.id,
+    action: 'custom-field-change',
+    field: `Re-ordered ${target.label}`,
+    oldValue: null,
+    newValue: direction === -1 ? 'Moved up' : 'Moved down',
+    byId,
+  });
+  saveStore(store);
+}
+
+export function resetAllDemoData(byId: string): void {
+  const fresh = resetStore();
+  writeAudit(fresh, {
+    recordType: 'system',
+    recordId: 'demo-data',
+    action: 'create',
+    field: 'Reset demo data',
+    oldValue: null,
+    newValue: 'Restored initial Not A Law Firm LLP dataset',
+    byId,
+  });
+  saveStore(fresh);
+}
+
+export function clearAllDataToCleanDeployment(byId: string = 'system'): void {
+  void byId;
+  clearStoreToCleanDeployment();
+}
+
+// ------------------------------------------------------------------ Notifications
+function pushNotification(
+  store: FirmStore,
+  input: {
+    recipientId: string;
+    kind: NotificationKind;
+    title: string;
+    detail: string;
+    href: string;
+    recordId: string;
+    byId: string;
+    at?: string;
+  },
+): NotificationItem | null {
+  // Don't notify someone about an action they took themselves unless it's an overdue alert
+  if (input.recipientId === input.byId && input.kind !== 'task_overdue') return null;
+  const item: NotificationItem = {
+    id: nextId(store, 'NTF'),
+    recipientId: input.recipientId,
+    kind: input.kind,
+    title: input.title,
+    detail: input.detail,
+    href: input.href,
+    recordId: input.recordId,
+    createdAt: input.at ?? new Date().toISOString(),
+    read: false,
+    byId: input.byId,
+  };
+  store.notifications.unshift(item);
+  return item;
+}
+
+export function markNotificationRead(id: string, userId: string): void {
+  const store = getStore();
+  const n = store.notifications.find((x) => x.id === id && x.recipientId === userId);
+  if (n) {
+    n.read = true;
+    saveStore(store);
+  }
+}
+
+export function markAllNotificationsRead(userId: string): void {
+  const store = getStore();
+  for (const n of store.notifications) {
+    if (n.recipientId === userId) n.read = true;
+  }
+  saveStore(store);
+}
+
+// ------------------------------------------------------------------ Admin: Teams & Settings
+export function saveTeamRecord(
+  input: {
+    id?: string;
+    name: string;
+    description?: string;
+    memberIds: string[];
+    leadIds: string[];
+    practiceAreaIds: string[];
+    active?: boolean;
+  },
+  byId: string,
+): { team?: Team; error?: string } {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const name = input.name.trim();
+  if (!name) return { error: 'Team name is required.' };
+
+  const existing = input.id ? store.teams.find((t) => t.id === input.id) ?? null : null;
+  const memberIds = Array.from(new Set([...input.memberIds, ...input.leadIds]));
+  const leadIds = input.leadIds.filter((id) => memberIds.includes(id));
+
+  const team: Team = {
+    id: existing?.id ?? nextId(store, 'TM'),
+    name,
+    description: (input.description ?? existing?.description ?? '').trim(),
+    memberIds,
+    leadIds,
+    practiceAreaIds: input.practiceAreaIds,
+    active: input.active ?? existing?.active ?? true,
+    createdById: existing?.createdById ?? byId,
+    createdAt: existing?.createdAt ?? now,
+    updatedById: byId,
+    updatedAt: now,
+  };
+
+  if (!existing) {
+    store.teams.push(team);
+    writeAudit(store, {
+      recordType: 'team',
+      recordId: team.id,
+      action: 'create',
+      field: 'Team created',
+      oldValue: null,
+      newValue: team.name,
+      byId,
+      at: now,
+    });
+  } else {
+    const idx = store.teams.findIndex((t) => t.id === existing.id);
+    store.teams[idx] = team;
+    writeAudit(store, {
+      recordType: 'team',
+      recordId: team.id,
+      action: 'update',
+      field: 'Team updated',
+      oldValue: existing.name,
+      newValue: `${team.name} (${team.memberIds.length} members, ${team.active ? 'active' : 'inactive'})`,
+      byId,
+      at: now,
+    });
+  }
+  saveStore(store);
+  return { team };
+}
+
+export function updateEmployeeRoleSetting(
+  personId: string,
+  appRole: AppRole | null,
+  byId: string,
+): void {
+  const store = getStore();
+  const person = store.people.find((p) => p.id === personId && p.isEmployee);
+  if (!person) return;
+  const before = person.appRole ?? 'auto';
+  person.appRole = appRole;
+  person.updatedAt = new Date().toISOString();
+  person.updatedById = byId;
+  writeAudit(store, {
+    recordType: 'person',
+    recordId: person.id,
+    action: 'update',
+    field: 'App role',
+    oldValue: String(before),
+    newValue: String(appRole ?? 'auto'),
+    byId,
+  });
+  saveStore(store);
+}
+
+export function saveEnquirySettingsRecord(
+  patch: Partial<EnquirySettings>,
+  byId: string,
+): EnquirySettings {
+  const store = getStore();
+  store.enquirySettings = {
+    ...store.enquirySettings,
+    ...patch,
+  };
+  writeAudit(store, {
+    recordType: 'system',
+    recordId: 'enquiry-settings',
+    action: 'update',
+    field: 'Enquiry settings',
+    oldValue: null,
+    newValue: `Emergency ${store.enquirySettings.emergencyHours}h · Hours ${store.enquirySettings.workDayStart}–${store.enquirySettings.workDayEnd} · Attempts ${store.enquirySettings.failedAttemptsBeforeSuggestNoResponse} · Retention ${store.enquirySettings.retentionMonths}m`,
+    byId,
+  });
+  saveStore(store);
+  return store.enquirySettings;
+}
+
+export function saveTaskSettingsRecord(
+  settings: TaskSettings,
+  byId: string,
+): TaskSettings {
+  const store = getStore();
+  store.taskSettings = settings;
+  writeAudit(store, {
+    recordType: 'system',
+    recordId: 'task-settings',
+    action: 'update',
+    field: 'Task settings',
+    oldValue: null,
+    newValue: 'Updated automatic task templates and due offsets',
+    byId,
+  });
+  saveStore(store);
+  return store.taskSettings;
+}
+
+// ------------------------------------------------------------------ Tasks
+function workingHoursConfigFromStore(store: FirmStore): WorkingHoursConfig {
+  return {
+    workDayStart: store.enquirySettings.workDayStart || '09:00',
+    workDayEnd: store.enquirySettings.workDayEnd || '17:30',
+    workingDays: store.enquirySettings.workingDays || [1, 2, 3, 4, 5],
+    emergencyHours: store.enquirySettings.emergencyHours || 2,
+  };
+}
+
+export function saveTaskRecord(
+  input: {
+    id?: string;
+    title: string;
+    description?: string;
+    taskTypeId?: string;
+    priorityId?: string;
+    dueAt: string;
+    assignedTeamId?: string | null;
+    assignedPersonId?: string | null;
+    assignedPersonIds?: string[];
+    multiAssigneeMode?: 'shared' | 'separate';
+    status?: TaskStatus;
+    linkedRecords?: TaskLinkedRecord[];
+    autoTrigger?: AutoTaskTrigger | null;
+  },
+  byId: string,
+): { task?: Task; tasks?: Task[]; error?: string } {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const title = input.title?.trim();
+  if (!title) return { error: 'Task title is required.' };
+  if (!input.dueAt) return { error: 'Due date is required.' };
+
+  const cleanPersonIds = Array.from(
+    new Set(
+      (input.assignedPersonIds && input.assignedPersonIds.length > 0
+        ? input.assignedPersonIds
+        : input.assignedPersonId
+          ? [input.assignedPersonId]
+          : []
+      ).filter(Boolean),
+    ),
+  );
+
+  if (!input.assignedTeamId && cleanPersonIds.length === 0) {
+    return { error: 'Task must be assigned to a team, a person, or both.' };
+  }
+
+  const existing = input.id ? store.tasks.find((t) => t.id === input.id) ?? null : null;
+
+  // Separate task per assignee when creating a new task with multiAssigneeMode === 'separate'
+  if (!existing && input.multiAssigneeMode === 'separate' && cleanPersonIds.length > 1) {
+    const createdTasks: Task[] = [];
+    for (const pid of cleanPersonIds) {
+      const id = nextId(store, 'TSK');
+      const separateTask: Task = {
+        id,
+        reference: id,
+        title,
+        description: (input.description ?? '').trim(),
+        taskTypeId: input.taskTypeId || vid('task_type', 'General'),
+        priorityId: input.priorityId || vid('task_priority', 'Normal'),
+        dueAt: input.dueAt,
+        assignedTeamId: input.assignedTeamId ?? null,
+        assignedPersonId: pid,
+        assignedPersonIds: [pid],
+        multiAssigneeMode: 'separate',
+        status: input.status ?? 'To do',
+        linkedRecords: input.linkedRecords ?? [],
+        createdById: byId,
+        createdAt: now,
+        updatedById: byId,
+        updatedAt: now,
+        completedById: null,
+        completedAt: null,
+        comments: [],
+        autoTrigger: input.autoTrigger ?? null,
+      };
+      store.tasks.unshift(separateTask);
+      createdTasks.push(separateTask);
+      writeAudit(store, {
+        recordType: 'task',
+        recordId: separateTask.id,
+        action: 'create',
+        field: 'Task created',
+        oldValue: null,
+        newValue: `${separateTask.reference} — ${separateTask.title}`,
+        byId,
+        at: now,
+      });
+      pushNotification(store, {
+        recipientId: pid,
+        kind: 'task_assigned',
+        title: `Task assigned to you: ${separateTask.title}`,
+        detail: `${separateTask.reference} · Due ${formatDate(separateTask.dueAt)}`,
+        href: `/tasks/${separateTask.id}`,
+        recordId: separateTask.id,
+        byId,
+        at: now,
+      });
+    }
+    saveStore(store);
+    return { task: createdTasks[0], tasks: createdTasks };
+  }
+
+  const id = existing?.id ?? nextId(store, 'TSK');
+  const status: TaskStatus = input.status ?? existing?.status ?? 'To do';
+  const wasDone = existing?.status === 'Done';
+  const isNowDone = status === 'Done';
+
+  const effectivePersonId =
+    cleanPersonIds[0] ??
+    (input.assignedPersonId !== undefined ? input.assignedPersonId : existing?.assignedPersonId ?? null);
+  const effectivePersonIds =
+    cleanPersonIds.length > 0
+      ? cleanPersonIds
+      : existing?.assignedPersonIds ?? (effectivePersonId ? [effectivePersonId] : []);
+
+  const task: Task = {
+    id,
+    reference: id,
+    title,
+    description: (input.description ?? existing?.description ?? '').trim(),
+    taskTypeId: input.taskTypeId || existing?.taskTypeId || vid('task_type', 'General'),
+    priorityId: input.priorityId || existing?.priorityId || vid('task_priority', 'Normal'),
+    dueAt: input.dueAt,
+    assignedTeamId:
+      input.assignedTeamId !== undefined ? input.assignedTeamId : existing?.assignedTeamId ?? null,
+    assignedPersonId: effectivePersonId,
+    assignedPersonIds: effectivePersonIds,
+    multiAssigneeMode: input.multiAssigneeMode ?? existing?.multiAssigneeMode ?? 'shared',
+    status,
+    linkedRecords: input.linkedRecords ?? existing?.linkedRecords ?? [],
+    createdById: existing?.createdById ?? byId,
+    createdAt: existing?.createdAt ?? now,
+    updatedById: byId,
+    updatedAt: now,
+    completedById: isNowDone ? (wasDone ? existing?.completedById ?? byId : byId) : null,
+    completedAt: isNowDone ? (wasDone ? existing?.completedAt ?? now : now) : null,
+    comments: existing?.comments ?? [],
+    autoTrigger: input.autoTrigger !== undefined ? input.autoTrigger : existing?.autoTrigger ?? null,
+  };
+
+  const ctx = formatContext(store);
+
+  if (!existing) {
+    store.tasks.unshift(task);
+    writeAudit(store, {
+      recordType: 'task',
+      recordId: task.id,
+      action: 'create',
+      field: 'Task created',
+      oldValue: null,
+      newValue: `${task.reference} — ${task.title}`,
+      byId,
+      at: now,
+    });
+
+    // Notify assignee(s) or team members
+    if (effectivePersonIds.length > 0) {
+      for (const pid of effectivePersonIds) {
+        pushNotification(store, {
+          recipientId: pid,
+          kind: 'task_assigned',
+          title: `Task assigned to you: ${task.title}`,
+          detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
+          href: `/tasks/${task.id}`,
+          recordId: task.id,
+          byId,
+          at: now,
+        });
+      }
+    } else if (task.assignedTeamId) {
+      const team = store.teams.find((tm) => tm.id === task.assignedTeamId);
+      if (team) {
+        for (const memberId of team.memberIds) {
+          pushNotification(store, {
+            recipientId: memberId,
+            kind: 'team_task_arrived',
+            title: `New task in ${team.name} queue`,
+            detail: `${task.reference} — ${task.title}`,
+            href: `/tasks/${task.id}`,
+            recordId: task.id,
+            byId,
+            at: now,
+          });
+        }
+      }
+    }
+  } else {
+    const idx = store.tasks.findIndex((t) => t.id === existing.id);
+    store.tasks[idx] = task;
+
+    if (existing.status !== task.status) {
+      writeAudit(store, {
+        recordType: 'task',
+        recordId: task.id,
+        action: 'status-change',
+        field: 'Status',
+        oldValue: existing.status,
+        newValue: task.status,
+        byId,
+        at: now,
+      });
+    }
+    if (existing.dueAt !== task.dueAt) {
+      writeAudit(store, {
+        recordType: 'task',
+        recordId: task.id,
+        action: 'update',
+        field: 'Due date',
+        oldValue: formatDate(existing.dueAt),
+        newValue: formatDate(task.dueAt),
+        byId,
+        at: now,
+      });
+    }
+    if (
+      existing.assignedPersonId !== task.assignedPersonId ||
+      existing.assignedTeamId !== task.assignedTeamId
+    ) {
+      const oldLabel = [
+        existing.assignedTeamId ? ctx.nameOf(existing.assignedTeamId) : '',
+        existing.assignedPersonId ? ctx.nameOf(existing.assignedPersonId) : 'Unclaimed',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      const newLabel = [
+        task.assignedTeamId ? ctx.nameOf(task.assignedTeamId) : '',
+        task.assignedPersonId ? ctx.nameOf(task.assignedPersonId) : 'Unclaimed',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      writeAudit(store, {
+        recordType: 'task',
+        recordId: task.id,
+        action: 'assign',
+        field: 'Assigned to',
+        oldValue: oldLabel,
+        newValue: newLabel,
+        byId,
+        at: now,
+      });
+
+      if (task.assignedPersonId && task.assignedPersonId !== existing.assignedPersonId) {
+        pushNotification(store, {
+          recipientId: task.assignedPersonId,
+          kind: 'task_assigned',
+          title: `Task assigned to you: ${task.title}`,
+          detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
+          href: `/tasks/${task.id}`,
+          recordId: task.id,
+          byId,
+          at: now,
+        });
+      }
+    }
+  }
+
+  // If this task is linked to a New enquiry and now has an assignedPersonId, sync the enquiry!
+  if (task.assignedPersonId) {
+    for (const lr of task.linkedRecords) {
+      if (lr.recordType === 'enquiry') {
+        const enq = store.enquiries.find((e) => e.id === lr.recordId);
+        if (enq && (enq.status === 'New' || !enq.assignedToId)) {
+          const prevStatus = enq.status;
+          const prevAssignee = enq.assignedToId;
+          enq.assignedToId = task.assignedPersonId;
+          if (enq.status === 'New') {
+            enq.status = 'Assigned';
+          }
+          enq.updatedAt = now;
+          enq.updatedById = byId;
+
+          writeAudit(store, {
+            recordType: 'enquiry',
+            recordId: enq.id,
+            action: 'assign',
+            field: 'Assigned to',
+            oldValue: prevAssignee ? ctx.nameOf(prevAssignee) : 'Unclaimed',
+            newValue: `${ctx.nameOf(task.assignedPersonId)} (status: ${prevStatus} → ${enq.status})`,
+            byId,
+            at: now,
+          });
+        }
+      }
+    }
+  }
+
+  saveStore(store);
+  return { task };
+}
+
+export function takeTaskRecord(taskId: string, byId: string): { task?: Task; error?: string } {
+  const store = getStore();
+  const existing = store.tasks.find((t) => t.id === taskId);
+  if (!existing) return { error: 'Task not found.' };
+  return saveTaskRecord(
+    {
+      id: existing.id,
+      title: existing.title,
+      description: existing.description,
+      taskTypeId: existing.taskTypeId,
+      priorityId: existing.priorityId,
+      dueAt: existing.dueAt,
+      assignedTeamId: existing.assignedTeamId,
+      assignedPersonId: byId,
+      status: existing.status,
+      linkedRecords: existing.linkedRecords,
+    },
+    byId,
+  );
+}
+
+export function addTaskCommentRecord(
+  taskId: string,
+  text: string,
+  byId: string,
+): { task?: Task; error?: string } {
+  const store = getStore();
+  const task = store.tasks.find((t) => t.id === taskId);
+  if (!task) return { error: 'Task not found.' };
+  const trimmed = text.trim();
+  if (!trimmed) return { error: 'Comment text is required.' };
+
+  const now = new Date().toISOString();
+  const commentId = `TC-${Date.now().toString(36)}`;
+  task.comments.push({
+    id: commentId,
+    authorId: byId,
+    at: now,
+    text: trimmed,
+  });
+  task.updatedAt = now;
+  task.updatedById = byId;
+
+  writeAudit(store, {
+    recordType: 'task',
+    recordId: task.id,
+    action: 'comment',
+    field: 'Comment added',
+    oldValue: null,
+    newValue: trimmed.slice(0, 120),
+    byId,
+    at: now,
+  });
+
+  const authorName = formatContext(store).nameOf(byId);
+  const recipients = new Set<string>();
+  if (task.assignedPersonId) recipients.add(task.assignedPersonId);
+  if (task.createdById) recipients.add(task.createdById);
+  for (const rId of recipients) {
+    pushNotification(store, {
+      recipientId: rId,
+      kind: 'task_comment',
+      title: `New comment on ${task.reference}`,
+      detail: `${authorName}: "${trimmed.slice(0, 90)}"`,
+      href: `/tasks/${task.id}`,
+      recordId: task.id,
+      byId,
+      at: now,
+    });
+  }
+
+  saveStore(store);
+  return { task };
+}
+
+// ------------------------------------------------------------------ Enquiries & Automatic Tasks
+function raiseAutomaticTask(
+  store: FirmStore,
+  trigger: AutoTaskTrigger,
+  vars: { name?: string; matterNumber?: string },
+  opts: {
+    dueAt: string;
+    assignedTeamId: string | null;
+    assignedPersonId: string | null;
+    linkedRecords: TaskLinkedRecord[];
+    description: string;
+    byId: string;
+    now: string;
+    overridePriorityId?: string;
+  },
+): Task {
+  const tpl = store.taskSettings.templates.find((t) => t.trigger === trigger);
+  const rawTitle =
+    tpl?.titleTemplate ??
+    (trigger === 'enquiry_contact'
+      ? 'Contact new enquiry: {name}'
+      : trigger === 'non_engagement_letter'
+        ? 'Send non-engagement letter: {name}'
+        : 'Complete matter opening: {matterNumber}');
+  const title = rawTitle
+    .replace('{name}', vars.name ?? '')
+    .replace('{matterNumber}', vars.matterNumber ?? '')
+    .trim();
+
+  const id = nextId(store, 'TSK');
+  const task: Task = {
+    id,
+    reference: id,
+    title,
+    description: opts.description,
+    taskTypeId:
+      tpl?.taskTypeId ||
+      (trigger === 'enquiry_contact'
+        ? vid('task_type', 'Call back')
+        : trigger === 'non_engagement_letter'
+          ? vid('task_type', 'Send letter')
+          : vid('task_type', 'Complete matter opening')),
+    priorityId: opts.overridePriorityId || tpl?.priorityId || vid('task_priority', 'Normal'),
+    dueAt: opts.dueAt,
+    assignedTeamId: opts.assignedTeamId,
+    assignedPersonId: opts.assignedPersonId,
+    status: 'To do',
+    linkedRecords: opts.linkedRecords,
+    createdById: opts.byId,
+    createdAt: opts.now,
+    updatedById: opts.byId,
+    updatedAt: opts.now,
+    completedById: null,
+    completedAt: null,
+    comments: [],
+    autoTrigger: trigger,
+  };
+
+  store.tasks.unshift(task);
+  writeAudit(store, {
+    recordType: 'task',
+    recordId: task.id,
+    action: 'create',
+    field: `Automatic task (${trigger})`,
+    oldValue: null,
+    newValue: `${task.reference} — ${task.title}`,
+    byId: opts.byId,
+    at: opts.now,
+  });
+
+  if (task.assignedPersonId) {
+    pushNotification(store, {
+      recipientId: task.assignedPersonId,
+      kind: 'task_assigned',
+      title: `Task assigned to you: ${task.title}`,
+      detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
+      href: `/tasks/${task.id}`,
+      recordId: task.id,
+      byId: opts.byId,
+      at: opts.now,
+    });
+  } else if (task.assignedTeamId) {
+    const team = store.teams.find((tm) => tm.id === task.assignedTeamId);
+    if (team) {
+      for (const memberId of team.memberIds) {
+        pushNotification(store, {
+          recipientId: memberId,
+          kind: 'team_task_arrived',
+          title: `New task in ${team.name} queue`,
+          detail: `${task.reference} — ${task.title}`,
+          href: `/tasks/${task.id}`,
+          recordId: task.id,
+          byId: opts.byId,
+          at: opts.now,
+        });
+      }
+    }
+  }
+
+  return task;
+}
+
+function completeOpenContactTasksForEnquiry(
+  store: FirmStore,
+  enquiryId: string,
+  reasonLabel: string,
+  byId: string,
+  now: string,
+): void {
+  for (const t of store.tasks) {
+    const isLinked = t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === enquiryId);
+    const isContactTask =
+      t.autoTrigger === 'enquiry_contact' ||
+      t.taskTypeId === vid('task_type', 'Call back') ||
+      t.title.toLowerCase().startsWith('contact new enquiry');
+    if (isLinked && isContactTask && isTaskOpen(t)) {
+      const oldStatus = t.status;
+      t.status = 'Done';
+      t.completedById = byId;
+      t.completedAt = now;
+      t.updatedById = byId;
+      t.updatedAt = now;
+      writeAudit(store, {
+        recordType: 'task',
+        recordId: t.id,
+        action: 'status-change',
+        field: 'Auto-completed',
+        oldValue: oldStatus,
+        newValue: `Done (${reasonLabel})`,
+        byId,
+        at: now,
+      });
+    }
+  }
+}
+
+export function saveEnquiryRecord(
+  input: Partial<Enquiry> & {
+    firstName?: string;
+    lastName?: string;
+    channelId?: string;
+    practiceAreaId?: string;
+    summary?: string;
+    notes?: string;
+    urgencyId?: string;
+    privacyNoticeGiven?: boolean;
+  },
+  opts: { id?: string; byId: string; asDraft?: boolean; now?: string },
+): {
+  enquiry?: Enquiry;
+  routedTeamName?: string;
+  routedToIntakeFallback?: boolean;
+  errors?: Record<string, string>;
+  missingFields?: string[];
+} {
+  const store = getStore();
+  const now = opts.now ?? new Date().toISOString();
+  const existing = opts.id ? store.enquiries.find((e) => e.id === opts.id) ?? null : null;
+  const asDraft = Boolean(opts.asDraft || input.status === 'Draft');
+
+  const mergedInput = {
+    channelId: input.channelId ?? existing?.channelId ?? vid('enquiry_channel', 'Phone'),
+    firstName: (input.firstName ?? existing?.firstName ?? '').trim(),
+    lastName: (input.lastName ?? existing?.lastName ?? '').trim(),
+    callingOnBehalfOf: (input.callingOnBehalfOf ?? existing?.callingOnBehalfOf ?? '').trim(),
+    linkedOrganisationId:
+      input.linkedOrganisationId !== undefined
+        ? input.linkedOrganisationId
+        : existing?.linkedOrganisationId ?? null,
+    email: (input.email ?? existing?.email ?? '').trim(),
+    phone: (input.phone ?? existing?.phone ?? '').trim(),
+    preferredContactMethodId:
+      input.preferredContactMethodId !== undefined
+        ? input.preferredContactMethodId
+        : existing?.preferredContactMethodId ?? null,
+    bestTimeToCall: (input.bestTimeToCall ?? existing?.bestTimeToCall ?? '').trim(),
+    address: input.address !== undefined ? input.address : existing?.address ?? null,
+    practiceAreaId: (input.practiceAreaId ?? existing?.practiceAreaId ?? '').trim(),
+    workTypeSubcategoryId:
+      input.workTypeSubcategoryId !== undefined
+        ? input.workTypeSubcategoryId
+        : existing?.workTypeSubcategoryId ?? null,
+    summary: (input.summary ?? existing?.summary ?? '').trim(),
+    notes: (input.notes ?? existing?.notes ?? '').trim(),
+    otherPartiesNamed: (input.otherPartiesNamed ?? existing?.otherPartiesNamed ?? '').trim(),
+    urgencyId: input.urgencyId ?? existing?.urgencyId ?? vid('enquiry_urgency', 'Standard'),
+    keyDate: input.keyDate !== undefined ? input.keyDate : existing?.keyDate ?? null,
+    keyDateLabel: (input.keyDateLabel ?? existing?.keyDateLabel ?? '').trim(),
+    sourceId: input.sourceId !== undefined ? input.sourceId : existing?.sourceId ?? null,
+    referrerPersonId:
+      input.referrerPersonId !== undefined
+        ? input.referrerPersonId
+        : existing?.referrerPersonId ?? null,
+    privacyNoticeGiven:
+      input.privacyNoticeGiven !== undefined
+        ? Boolean(input.privacyNoticeGiven)
+        : existing?.privacyNoticeGiven ?? true,
+    linkedPersonId:
+      input.linkedPersonId !== undefined ? input.linkedPersonId : existing?.linkedPersonId ?? null,
+  };
+
+  if (!asDraft) {
+    const missingFields = getMissingRoutingFields(mergedInput);
+    const errors: Record<string, string> = {};
+    if (!mergedInput.firstName) errors.firstName = 'First name is required.';
+    if (!mergedInput.lastName) errors.lastName = 'Last name is required.';
+    if (!mergedInput.firstName || !mergedInput.lastName) {
+      errors.name = 'First name and last name are required.';
+    }
+    if (!mergedInput.phone && !mergedInput.email) {
+      errors.contact = 'At least one of email or phone number is required.';
+    }
+    if (mergedInput.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mergedInput.email)) {
+      errors.email = 'Enter a valid email address.';
+    }
+    if (!mergedInput.channelId) {
+      errors.channelId = 'Channel is required.';
+    }
+    if (!mergedInput.practiceAreaId) {
+      errors.practiceAreaId = 'Practice area is required.';
+    }
+    if (!mergedInput.summary) {
+      errors.summary = 'Summary is required.';
+    } else if (mergedInput.summary.length > 120) {
+      errors.summary = 'Summary must be 120 characters or fewer.';
+    }
+    if (!mergedInput.notes) {
+      errors.notes = 'High-level notes are required.';
+    }
+    if (!mergedInput.urgencyId) {
+      errors.urgencyId = 'Urgency is required.';
+    }
+
+    if (missingFields.length > 0 || Object.keys(errors).length > 0) {
+      return { errors, missingFields };
+    }
+  }
+
+  // Server-side Quick Conflict Check snapshot
+  const conflictSnapshot = computeEnquiryConflictSnapshot(
+    {
+      firstName: mergedInput.firstName,
+      lastName: mergedInput.lastName,
+      callingOnBehalfOf: mergedInput.callingOnBehalfOf,
+      otherPartiesNamed: mergedInput.otherPartiesNamed,
+      email: mergedInput.email,
+      phone: mergedInput.phone,
+      postcode: mergedInput.address?.postcode ?? '',
+      addressLine1: mergedInput.address?.line1 ?? '',
+      addressLine2: mergedInput.address?.line2 ?? '',
+      linkedPersonId: mergedInput.linkedPersonId,
+      linkedOrganisationId: mergedInput.linkedOrganisationId,
+    },
+    store.people,
+    store.organisations,
+    store.matters,
+    store.values,
+    {
+      recordedAt: now,
+      recordedById: opts.byId,
+      enquiries: store.enquiries,
+      excludeEnquiryId: existing?.id ?? null,
+    },
+  );
+
+  const conflictAuditSummary =
+    conflictSnapshot.matchCount === 0
+      ? '0 matches (none)'
+      : conflictSnapshot.highestSeverity === 'high'
+        ? `${conflictSnapshot.matchCount} ${conflictSnapshot.matchCount === 1 ? 'possible conflict' : 'possible conflicts'} (high severity)`
+        : `${conflictSnapshot.matchCount} ${conflictSnapshot.matchCount === 1 ? 'match' : 'matches'} (${conflictSnapshot.highestSeverity} severity)`;
+
+  const id = existing?.id ?? nextId(store, 'ENQ');
+  const receivedAt = input.receivedAt || existing?.receivedAt || now;
+
+  if (asDraft) {
+    const draftEnquiry: Enquiry = {
+      id,
+      reference: id,
+      receivedAt,
+      takenById: input.takenById || existing?.takenById || opts.byId,
+      channelId: mergedInput.channelId,
+      firstName: mergedInput.firstName,
+      lastName: mergedInput.lastName,
+      callingOnBehalfOf: mergedInput.callingOnBehalfOf,
+      linkedOrganisationId: mergedInput.linkedOrganisationId,
+      email: mergedInput.email,
+      phone: mergedInput.phone,
+      preferredContactMethodId: mergedInput.preferredContactMethodId,
+      bestTimeToCall: mergedInput.bestTimeToCall,
+      address: mergedInput.address,
+      practiceAreaId: mergedInput.practiceAreaId,
+      workTypeSubcategoryId: mergedInput.workTypeSubcategoryId,
+      summary: mergedInput.summary.slice(0, 120),
+      notes: mergedInput.notes,
+      otherPartiesNamed: mergedInput.otherPartiesNamed,
+      urgencyId: mergedInput.urgencyId,
+      keyDate: mergedInput.keyDate,
+      keyDateLabel: mergedInput.keyDateLabel,
+      sourceId: mergedInput.sourceId,
+      referrerPersonId: mergedInput.referrerPersonId,
+      privacyNoticeGiven: mergedInput.privacyNoticeGiven,
+      linkedPersonId: mergedInput.linkedPersonId,
+      assignedTeamId: null,
+      routedToIntakeFallback: false,
+      assignedToId: null,
+      status: 'Draft',
+      firstContactDueAt: null,
+      nextActionDate: null,
+      conflictStatus: conflictSnapshot.conflictStatus,
+      conflictSnapshot,
+      closeReasonId: existing?.closeReasonId ?? null,
+      closeNotes: existing?.closeNotes,
+      referredToOrganisationId: existing?.referredToOrganisationId ?? null,
+      referredToName: existing?.referredToName,
+      convertedMatterId: existing?.convertedMatterId ?? null,
+      contactLog: input.contactLog ?? existing?.contactLog ?? [],
+      anonymisedAt: existing?.anonymisedAt ?? null,
+      createdById: existing?.createdById ?? opts.byId,
+      createdAt: existing?.createdAt ?? now,
+      updatedById: opts.byId,
+      updatedAt: now,
+    };
+
+    if (!existing) {
+      store.enquiries.unshift(draftEnquiry);
+      const channelLabel = resolveLabel(store.values, draftEnquiry.channelId) || 'Phone';
+      const areaLabel = draftEnquiry.practiceAreaId
+        ? resolveLabel(store.values, draftEnquiry.practiceAreaId)
+        : '';
+      writeAudit(store, {
+        recordType: 'enquiry',
+        recordId: draftEnquiry.id,
+        action: 'create',
+        field: `Initial enquiry received (${channelLabel.toLowerCase()})`,
+        oldValue: null,
+        newValue: [
+          draftEnquiry.reference,
+          areaLabel || null,
+          draftEnquiry.summary ? `"${draftEnquiry.summary.slice(0, 80)}"` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        byId: draftEnquiry.takenById,
+        at: receivedAt,
+      });
+    } else {
+      const idx = store.enquiries.findIndex((e) => e.id === existing.id);
+      store.enquiries[idx] = draftEnquiry;
+    }
+
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: draftEnquiry.id,
+      action: existing ? 'update' : 'create',
+      field: 'Enquiry saved as draft',
+      oldValue: null,
+      newValue: draftEnquiry.reference,
+      byId: opts.byId,
+      at: now,
+    });
+
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: draftEnquiry.id,
+      action: 'duplicate',
+      field: 'Quick conflict check recorded',
+      oldValue: null,
+      newValue: conflictAuditSummary,
+      byId: opts.byId,
+      at: now,
+      snapshot: conflictSnapshot,
+    });
+
+    saveStore(store);
+    return {
+      enquiry: draftEnquiry,
+      routedToIntakeFallback: false,
+    };
+  }
+
+  // Routing / updating a non-draft enquiry
+  const isInitialRoute = !existing || existing.status === 'Draft';
+  const whCfg = workingHoursConfigFromStore(store);
+  const urgencyLabel = resolveLabel(store.values, mergedInput.urgencyId) || 'Standard';
+
+  // When routing (either brand new or transitioning from Draft -> New), calculate SLA from routing time (`now`)
+  const routingTime = isInitialRoute ? now : receivedAt;
+  const firstContactDueAt = isInitialRoute
+    ? calculateFirstContactDue(routingTime, urgencyLabel, whCfg)
+    : existing?.firstContactDueAt ?? calculateFirstContactDue(receivedAt, urgencyLabel, whCfg);
+
+  // Route to practice area team or fallback to Intake
+  let assignedTeamId =
+    input.assignedTeamId !== undefined ? input.assignedTeamId : existing?.assignedTeamId ?? null;
+  let routedToIntakeFallback = existing?.routedToIntakeFallback ?? false;
+  if (isInitialRoute && !assignedTeamId) {
+    const routed = resolveRoutedTeam(mergedInput.practiceAreaId, store.teams);
+    assignedTeamId = routed.team?.id ?? null;
+    routedToIntakeFallback = routed.isFallbackIntake;
+  }
+
+  const assignedToId =
+    input.assignedToId !== undefined ? input.assignedToId : existing?.assignedToId ?? null;
+  const defaultStatus: EnquiryStatus = assignedToId ? 'Assigned' : 'New';
+  const nextStatus: EnquiryStatus = isInitialRoute
+    ? input.status && input.status !== 'Draft'
+      ? input.status
+      : defaultStatus
+    : input.status ?? existing?.status ?? defaultStatus;
+
+  const enquiry: Enquiry = {
+    id,
+    reference: id,
+    receivedAt,
+    takenById: input.takenById || existing?.takenById || opts.byId,
+    channelId: mergedInput.channelId,
+    firstName: mergedInput.firstName,
+    lastName: mergedInput.lastName,
+    callingOnBehalfOf: mergedInput.callingOnBehalfOf,
+    linkedOrganisationId: mergedInput.linkedOrganisationId,
+    email: mergedInput.email,
+    phone: mergedInput.phone,
+    preferredContactMethodId: mergedInput.preferredContactMethodId,
+    bestTimeToCall: mergedInput.bestTimeToCall,
+    address: mergedInput.address,
+    practiceAreaId: mergedInput.practiceAreaId,
+    workTypeSubcategoryId: mergedInput.workTypeSubcategoryId,
+    summary: mergedInput.summary.slice(0, 120),
+    notes: mergedInput.notes,
+    otherPartiesNamed: mergedInput.otherPartiesNamed,
+    urgencyId: mergedInput.urgencyId,
+    keyDate: mergedInput.keyDate,
+    keyDateLabel: mergedInput.keyDateLabel,
+    sourceId: mergedInput.sourceId,
+    referrerPersonId: mergedInput.referrerPersonId,
+    privacyNoticeGiven: mergedInput.privacyNoticeGiven,
+    linkedPersonId: mergedInput.linkedPersonId,
+    assignedTeamId,
+    routedToIntakeFallback,
+    assignedToId,
+    status: nextStatus,
+    firstContactDueAt,
+    nextActionDate:
+      input.nextActionDate !== undefined && input.nextActionDate !== null
+        ? input.nextActionDate
+        : existing?.nextActionDate ?? firstContactDueAt.slice(0, 10),
+    conflictStatus: conflictSnapshot.conflictStatus,
+    conflictSnapshot,
+    closeReasonId:
+      input.closeReasonId !== undefined ? input.closeReasonId : existing?.closeReasonId ?? null,
+    closeNotes: input.closeNotes !== undefined ? input.closeNotes : existing?.closeNotes,
+    referredToOrganisationId:
+      input.referredToOrganisationId !== undefined
+        ? input.referredToOrganisationId
+        : existing?.referredToOrganisationId ?? null,
+    referredToName:
+      input.referredToName !== undefined ? input.referredToName : existing?.referredToName,
+    convertedMatterId:
+      input.convertedMatterId !== undefined
+        ? input.convertedMatterId
+        : existing?.convertedMatterId ?? null,
+    contactLog: input.contactLog ?? existing?.contactLog ?? [],
+    anonymisedAt: existing?.anonymisedAt ?? null,
+    createdById: existing?.createdById ?? opts.byId,
+    createdAt: existing?.createdAt ?? now,
+    updatedById: opts.byId,
+    updatedAt: now,
+  };
+
+  const routedTeam = store.teams.find((t) => t.id === enquiry.assignedTeamId);
+  const practiceAreaLabel =
+    resolveLabel(store.values, enquiry.practiceAreaId) || routedTeam?.name || 'Intake';
+
+  if (!existing) {
+    store.enquiries.unshift(enquiry);
+    const channelLabel = resolveLabel(store.values, enquiry.channelId) || 'Phone';
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enquiry.id,
+      action: 'create',
+      field: `Initial enquiry received (${channelLabel.toLowerCase()})`,
+      oldValue: null,
+      newValue: [
+        enquiry.reference,
+        practiceAreaLabel || null,
+        enquiry.summary ? `"${enquiry.summary.slice(0, 80)}"` : null,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      byId: enquiry.takenById,
+      at: receivedAt,
+    });
+  } else {
+    const idx = store.enquiries.findIndex((e) => e.id === existing.id);
+    store.enquiries[idx] = enquiry;
+  }
+
+  writeAudit(store, {
+    recordType: 'enquiry',
+    recordId: enquiry.id,
+    action: 'duplicate',
+    field: 'Quick conflict check recorded',
+    oldValue: null,
+    newValue: conflictAuditSummary,
+    byId: opts.byId,
+    at: now,
+    snapshot: conflictSnapshot,
+  });
+
+  if (isInitialRoute) {
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enquiry.id,
+      action: existing ? 'status-change' : 'create',
+      field: `Enquiry routed to ${practiceAreaLabel} team`,
+      oldValue: existing ? 'Draft' : null,
+      newValue: `${enquiry.reference} — ${enquiryDisplayName(enquiry)} (${routedTeam?.name ?? practiceAreaLabel})`,
+      byId: opts.byId,
+      at: now,
+    });
+
+    // Automatic task: Contact new enquiry: <name>
+    const priorityId =
+      urgencyLabel.toLowerCase().includes('emergency') ||
+      urgencyLabel.toLowerCase().includes('urgent')
+        ? vid('task_priority', 'Urgent')
+        : vid('task_priority', 'Normal');
+
+    const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'enquiry', recordId: enquiry.id }];
+    if (enquiry.linkedPersonId) {
+      linkedRecords.push({ recordType: 'person', recordId: enquiry.linkedPersonId });
+    }
+    if (enquiry.linkedOrganisationId) {
+      linkedRecords.push({ recordType: 'organisation', recordId: enquiry.linkedOrganisationId });
+    }
+
+    raiseAutomaticTask(
+      store,
+      'enquiry_contact',
+      { name: enquiryDisplayName(enquiry) },
+      {
+        dueAt: firstContactDueAt,
+        assignedTeamId: enquiry.assignedTeamId,
+        assignedPersonId: enquiry.assignedToId,
+        linkedRecords,
+        description: `${enquiry.summary}${enquiry.phone ? ` · Tel: ${enquiry.phone}` : ''}${enquiry.email ? ` · Email: ${enquiry.email}` : ''}`,
+        byId: opts.byId,
+        now,
+        overridePriorityId: priorityId,
+      },
+    );
+  } else {
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enquiry.id,
+      action: 'update',
+      field: 'Enquiry details updated',
+      oldValue: existing?.summary ?? null,
+      newValue: enquiry.summary,
+      byId: opts.byId,
+      at: now,
+    });
+  }
+
+  saveStore(store);
+  return {
+    enquiry,
+    routedTeamName: routedTeam?.name ?? 'Intake',
+    routedToIntakeFallback,
+  };
+}
+
+export function assignEnquiryRecord(
+  enquiryId: string,
+  assignedToId: string | null,
+  assignedTeamId: string | null | undefined,
+  byId: string,
+): { enquiry?: Enquiry; error?: string } {
+  const store = getStore();
+  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  if (!enq) return { error: 'Enquiry not found.' };
+  if (!isEnquiryRouted(enq)) {
+    return { error: 'Cannot assign a draft or closed enquiry before it has been routed.' };
+  }
+
+  const now = new Date().toISOString();
+  const ctx = formatContext(store);
+  const oldAssignee = enq.assignedToId ? ctx.nameOf(enq.assignedToId) : 'Unassigned';
+  const oldStatus = enq.status;
+
+  if (assignedTeamId !== undefined) {
+    enq.assignedTeamId = assignedTeamId;
+  }
+  enq.assignedToId = assignedToId;
+  if (assignedToId && enq.status === 'New') {
+    enq.status = 'Assigned';
+  }
+  enq.updatedAt = now;
+  enq.updatedById = byId;
+
+  const newAssignee = assignedToId ? ctx.nameOf(assignedToId) : 'Unassigned';
+  writeAudit(store, {
+    recordType: 'enquiry',
+    recordId: enq.id,
+    action: 'assign',
+    field: 'Assigned to',
+    oldValue: `${oldAssignee} (${oldStatus})`,
+    newValue: `${newAssignee} (${enq.status})`,
+    byId,
+    at: now,
+  });
+
+  // Automatic task rule: When enquiry is assigned to someone, the open contact task moves to them (due unchanged)
+  if (assignedToId) {
+    for (const t of store.tasks) {
+      const isLinked = t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === enq.id);
+      const isContactTask =
+        t.autoTrigger === 'enquiry_contact' ||
+        t.taskTypeId === vid('task_type', 'Call back') ||
+        t.title.toLowerCase().startsWith('contact new enquiry');
+      if (isLinked && isContactTask && isTaskOpen(t)) {
+        const prevTaskPerson = t.assignedPersonId;
+        t.assignedPersonId = assignedToId;
+        if (assignedTeamId) t.assignedTeamId = assignedTeamId;
+        t.updatedAt = now;
+        t.updatedById = byId;
+        writeAudit(store, {
+          recordType: 'task',
+          recordId: t.id,
+          action: 'assign',
+          field: 'Assigned to (from enquiry assignment)',
+          oldValue: prevTaskPerson ? ctx.nameOf(prevTaskPerson) : 'Team queue',
+          newValue: newAssignee,
+          byId,
+          at: now,
+        });
+      }
+    }
+
+    pushNotification(store, {
+      recipientId: assignedToId,
+      kind: 'enquiry_assigned',
+      title: `Enquiry assigned to you: ${enq.reference} (${enquiryDisplayName(enq)})`,
+      detail: `${resolveLabel(store.values, enq.practiceAreaId)} · ${enq.summary}`,
+      href: `/enquiries/${enq.id}`,
+      recordId: enq.id,
+      byId,
+      at: now,
+    });
+  }
+
+  saveStore(store);
+  return { enquiry: enq };
+}
+
+export function logEnquiryContactRecord(
+  enquiryId: string,
+  input: {
+    at?: string;
+    method: ContactLogMethod;
+    outcome: ContactLogOutcome;
+    note: string;
+  },
+  byId: string,
+): { enquiry?: Enquiry; suggestNoResponse?: boolean; error?: string } {
+  const store = getStore();
+  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  if (!enq) return { error: 'Enquiry not found.' };
+
+  const now = new Date().toISOString();
+  const entry: ContactLogEntry = {
+    id: `CL-${Date.now().toString(36)}`,
+    at: input.at || now,
+    method: input.method,
+    outcome: input.outcome,
+    note: input.note.trim(),
+    byId,
+  };
+  enq.contactLog.unshift(entry);
+
+  // If unassigned when logging contact on a routed enquiry, assign to the logger
+  if (!enq.assignedToId && enq.status !== 'Draft') {
+    enq.assignedToId = byId;
+  }
+
+  const prevStatus = enq.status;
+  if (input.outcome === 'Spoke' && (enq.status === 'New' || enq.status === 'Assigned')) {
+    enq.status = 'In contact';
+    // Complete the initial contact task once spoken
+    completeOpenContactTasksForEnquiry(
+      store,
+      enq.id,
+      'Spoke to enquirer',
+      byId,
+      now,
+    );
+  } else if (enq.status === 'New') {
+    enq.status = 'Assigned';
+  }
+
+  enq.updatedAt = now;
+  enq.updatedById = byId;
+
+  writeAudit(store, {
+    recordType: 'enquiry',
+    recordId: enq.id,
+    action: 'contact-log',
+    field: `Contact logged (${input.method} · ${input.outcome})`,
+    oldValue: prevStatus !== enq.status ? `Status: ${prevStatus}` : null,
+    newValue: `${entry.note.slice(0, 100)}${prevStatus !== enq.status ? ` (Status → ${enq.status})` : ''}`,
+    byId,
+    at: now,
+  });
+
+  const threshold = store.enquirySettings.failedAttemptsBeforeSuggestNoResponse || 3;
+  const hasSpoken = enq.contactLog.some((c) => c.outcome === 'Spoke');
+  const failedCount = hasSpoken ? 0 : enq.contactLog.filter((c) => c.outcome !== 'Spoke').length;
+
+  saveStore(store);
+  return {
+    enquiry: enq,
+    suggestNoResponse: isEnquiryOpen(enq) && failedCount >= threshold,
+  };
+}
+
+export function sendEnquiryEmailRecord(
+  enquiryId: string,
+  input: {
+    to: string;
+    subject: string;
+    bodyHtml: string;
+    bodyText: string;
+  },
+  byId: string,
+): { enquiry?: Enquiry; error?: string } {
+  const store = getStore();
+  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  if (!enq) return { error: 'Enquiry not found.' };
+
+  const to = input.to.trim();
+  const subject = input.subject.trim();
+  if (!to) return { error: 'Recipient email address is required.' };
+  if (!subject) return { error: 'Email subject is required.' };
+  if (!input.bodyText.trim() && !input.bodyHtml.trim()) {
+    return { error: 'Please enter a message before sending.' };
+  }
+
+  const now = new Date().toISOString();
+  enq.updatedAt = now;
+  enq.updatedById = byId;
+
+  const emailSnapshot: EnquirySentEmailSnapshot = {
+    kind: 'sent_email',
+    to,
+    subject,
+    bodyHtml: input.bodyHtml,
+    bodyText: input.bodyText.trim(),
+    sentAt: now,
+    sentById: byId,
+  };
+
+  writeAudit(store, {
+    recordType: 'enquiry',
+    recordId: enq.id,
+    action: 'email-sent',
+    field: `Email sent to ${to}`,
+    oldValue: null,
+    newValue: `Subject: "${subject}"${emailSnapshot.bodyText ? ` · ${emailSnapshot.bodyText.slice(0, 80)}` : ''}`,
+    byId,
+    at: now,
+    snapshot: emailSnapshot,
+  });
+
+  saveStore(store);
+  return { enquiry: enq };
+}
+
+export function closeEnquiryRecord(
+  enquiryId: string,
+  input: {
+    targetStatus: 'Declined' | 'Referred out' | 'No response';
+    closeReasonId?: string | null;
+    closeNotes?: string;
+    referredToOrganisationId?: string | null;
+    referredToName?: string;
+  },
+  byId: string,
+): { enquiry?: Enquiry; error?: string } {
+  const store = getStore();
+  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  if (!enq) return { error: 'Enquiry not found.' };
+
+  if (input.targetStatus === 'Declined' && !input.closeReasonId) {
+    return { error: 'A close reason is required when declining an enquiry.' };
+  }
+  if (
+    input.targetStatus === 'Referred out' &&
+    !input.referredToOrganisationId &&
+    !input.referredToName?.trim()
+  ) {
+    return { error: 'Please specify the firm or service the enquiry was referred to.' };
+  }
+  if (input.targetStatus === 'No response' && enq.contactLog.length < 2) {
+    return { error: 'At least two contact log entries are required before closing as no response.' };
+  }
+
+  const now = new Date().toISOString();
+  const prevStatus = enq.status;
+  enq.status = input.targetStatus;
+  enq.closeReasonId =
+    input.closeReasonId ||
+    (input.targetStatus === 'Referred out'
+      ? vid('enquiry_close_reason', 'Referred out')
+      : input.targetStatus === 'No response'
+        ? vid('enquiry_close_reason', 'No response')
+        : enq.closeReasonId);
+  if (input.closeNotes !== undefined) enq.closeNotes = input.closeNotes.trim();
+  if (input.referredToOrganisationId !== undefined) {
+    enq.referredToOrganisationId = input.referredToOrganisationId;
+  }
+  if (input.referredToName !== undefined) {
+    enq.referredToName = input.referredToName.trim();
+  }
+  if (!enq.assignedToId) {
+    enq.assignedToId = byId;
+  }
+  enq.updatedAt = now;
+  enq.updatedById = byId;
+
+  const reasonLabel = resolveLabel(store.values, enq.closeReasonId) || input.targetStatus;
+  writeAudit(store, {
+    recordType: 'enquiry',
+    recordId: enq.id,
+    action: 'status-change',
+    field: `Enquiry closed (${input.targetStatus})`,
+    oldValue: prevStatus,
+    newValue: `${input.targetStatus} — Reason: ${reasonLabel}${enq.referredToName ? ` · Referred to: ${enq.referredToName}` : ''}`,
+    byId,
+    at: now,
+  });
+
+  // Complete open contact task automatically
+  completeOpenContactTasksForEnquiry(
+    store,
+    enq.id,
+    `Enquiry closed as ${input.targetStatus}`,
+    byId,
+    now,
+  );
+
+  // If an enquiry-stage person record was created solely for this enquiry and has no matters or other open/converted enquiries, remove it
+  if (enq.linkedPersonId) {
+    const linkedId = enq.linkedPersonId;
+    const linkedPerson = store.people.find((p) => p.id === linkedId);
+    if (linkedPerson && !linkedPerson.isEmployee && linkedPerson.createdFromEnquiryId === enq.id) {
+      const hasMatters = store.matters.some(
+        (m) =>
+          m.clientId === linkedId ||
+          m.instructingContactId === linkedId ||
+          m.billingContactId === linkedId ||
+          m.referrerContactId === linkedId ||
+          m.additionalClientIds?.includes(linkedId) ||
+          m.parties.some((pt) => pt.linkedRecordId === linkedId),
+      );
+      const hasOtherActiveOrConvertedEnquiry = store.enquiries.some(
+        (other) =>
+          other.id !== enq.id &&
+          (other.linkedPersonId === linkedId || other.referrerPersonId === linkedId) &&
+          (isEnquiryOpen(other) || other.status === 'Converted'),
+      );
+      if (!hasMatters && !hasOtherActiveOrConvertedEnquiry) {
+        store.people = store.people.filter((p) => p.id !== linkedId);
+        store.links = store.links.filter((l) => l.personId !== linkedId);
+        enq.linkedPersonId = null;
+      }
+    }
+  }
+
+  saveStore(store);
+  return { enquiry: enq };
+}
+
+export function reopenEnquiryRecord(
+  enquiryId: string,
+  byId: string,
+): { enquiry?: Enquiry; error?: string } {
+  const store = getStore();
+  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  if (!enq) return { error: 'Enquiry not found.' };
+
+  const now = new Date().toISOString();
+  const prevStatus = enq.status;
+  enq.status = 'Assigned';
+  if (!enq.assignedToId) enq.assignedToId = byId;
+  enq.updatedAt = now;
+  enq.updatedById = byId;
+
+  writeAudit(store, {
+    recordType: 'enquiry',
+    recordId: enq.id,
+    action: 'status-change',
+    field: 'Enquiry reopened',
+    oldValue: prevStatus,
+    newValue: 'Assigned',
+    byId,
+    at: now,
+  });
+
+  saveStore(store);
+  return { enquiry: enq };
+}
+
+/**
+ * Step 1 & 2 of Converting an enquiry to a matter:
+ * - Runs the conflict check against the client and other parties named.
+ * - If clear, links or creates the Person (and Organisation + contact link if calling for a business).
+ * - Returns the clientId and instructingContactId so the user is routed to the pre-filled New Matter form.
+ */
+export function prepareEnquiryConversion(
+  enquiryId: string,
+  opts: {
+    usePersonId?: string | null;
+    useOrganisationId?: string | null;
+    createForBusiness?: boolean;
+  },
+  byId: string,
+): {
+  ok: boolean;
+  conflictBlocked?: boolean;
+  conflictReasons?: string[];
+  clientId?: string;
+  instructingContactId?: string | null;
+  enquiryId?: string;
+} {
+  const store = getStore();
+  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  if (!enq) return { ok: false, conflictReasons: ['Enquiry not found.'] };
+  if (!isEnquiryRouted(enq)) {
+    return {
+      ok: false,
+      conflictReasons: ['Cannot convert a draft enquiry before it has been routed.'],
+    };
+  }
+
+  const conflicts = runEnquiryConflictSearch(
+    {
+      firstName: enq.firstName,
+      lastName: enq.lastName,
+      callingOnBehalfOf: enq.callingOnBehalfOf,
+      otherPartiesNamed: enq.otherPartiesNamed,
+      email: enq.email,
+      phone: enq.phone,
+      address: enq.address,
+      linkedPersonId: opts.usePersonId ?? enq.linkedPersonId,
+      linkedOrganisationId: opts.useOrganisationId ?? enq.linkedOrganisationId,
+    },
+    store.people,
+    store.organisations,
+    store.matters,
+    store.values,
+    store.enquiries,
+    enq.id,
+  );
+
+  if (conflicts.hasBlockingConflict) {
+    const reasons = [
+      ...conflicts.otherPartyClientMatches.filter((h) => h.blocking).map((h) => h.reason),
+      ...conflicts.clientAgainstPartyMatches.filter((h) => h.blocking).map((h) => h.reason),
+    ];
+    return {
+      ok: false,
+      conflictBlocked: true,
+      conflictReasons: reasons,
+    };
+  }
+
+  // Link or create Person
+  let personId = opts.usePersonId || enq.linkedPersonId;
+  if (!personId) {
+    const createdPerson = savePersonRecord(
+      {
+        firstName: enq.firstName,
+        surname: enq.lastName,
+        emails: enq.email
+          ? [
+              {
+                id: `e_${Date.now()}`,
+                address: enq.email,
+                typeId: vid('email_type', enq.callingOnBehalfOf ? 'Work' : 'Personal'),
+                isPrimary: true,
+              },
+            ]
+          : [],
+        phones: enq.phone
+          ? [
+              {
+                id: `p_${Date.now()}`,
+                number: enq.phone,
+                typeId: vid('phone_type', 'Mobile'),
+              },
+            ]
+          : [],
+        addresses: enq.address ? [{ ...enq.address, id: `a_${Date.now()}` }] : [],
+        preferredContactMethodId: enq.preferredContactMethodId,
+        originId: enq.sourceId,
+        relationshipStatusId: vid('relationship_status', 'Prospective'),
+        relationshipRoleIds: [
+          vid('person_role', enq.callingOnBehalfOf ? 'Client contact' : 'Private client'),
+        ],
+        relationshipOwnerId: enq.assignedToId || byId,
+        sourceId: vid('data_source', 'Manual entry'),
+        createdFromEnquiryId: enq.id,
+      },
+      { byId },
+    );
+    personId = createdPerson.person.id;
+  }
+
+  enq.linkedPersonId = personId;
+
+  // If enquiry was made on behalf of a business, link or create the Organisation and link caller as contact
+  let clientId = personId;
+  let instructingContactId: string | null = personId;
+
+  if (opts.createForBusiness || enq.callingOnBehalfOf.trim() || opts.useOrganisationId || enq.linkedOrganisationId) {
+    let orgId = opts.useOrganisationId || enq.linkedOrganisationId;
+    if (!orgId && enq.callingOnBehalfOf.trim()) {
+      const createdOrg = saveOrganisationRecord(
+        {
+          legalName: enq.callingOnBehalfOf.trim(),
+          generalEmail: enq.email,
+          mainPhone: enq.phone,
+          registeredAddress: enq.address,
+          correspondenceAddress: enq.address,
+          relationshipPartnerId: enq.assignedToId || byId,
+          relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
+          relationshipStatusId: vid('relationship_status', 'Prospective'),
+          originId: enq.sourceId,
+          conflictStatusId: vid('conflict_status', 'Cleared'),
+        },
+        { byId },
+      );
+      orgId = createdOrg.organisation.id;
+    }
+
+    if (orgId) {
+      enq.linkedOrganisationId = orgId;
+      clientId = orgId;
+      const hasLink = store.links.some(
+        (l) => l.personId === personId && l.organisationId === orgId && l.isCurrent,
+      );
+      if (!hasLink) {
+        createOrUpdateLink(
+          {
+            personId,
+            organisationId: orgId,
+            jobTitle: '',
+            department: '',
+            roleWithinOrganisation: 'Instructing contact',
+            contactRoleIds: [vid('contact_role', 'Key relationship contact')],
+            isPrimaryContact: true,
+            isCurrent: true,
+            startDate: toIsoDate(new Date()),
+            endDate: null,
+            contactStatusId: vid('contact_status', 'Active'),
+          },
+          byId,
+        );
+      }
+    }
+  }
+
+  saveStore(store);
+  return {
+    ok: true,
+    clientId,
+    instructingContactId,
+    enquiryId: enq.id,
+  };
+}
+
+/**
+ * Step 4 & 5 of Converting an enquiry to a matter (called inside saveMatterRecord when sourceEnquiryId is set):
+ * - Marks the enquiry Converted and sets convertedMatterId.
+ * - Completes the open contact task.
+ * - Raises the automatic "Complete matter opening" task assigned to the matter lead fee earner (5 working days).
+ */
+function finalizeEnquiryConversionToMatter(
+  store: FirmStore,
+  enquiryId: string,
+  matter: Matter,
+  byId: string,
+  now: string,
+): void {
+  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  if (!enq) return;
+
+  const alreadyConvertedToThisMatter =
+    enq.status === 'Converted' && enq.convertedMatterId === matter.id;
+  const prevStatus = enq.status;
+  enq.status = 'Converted';
+  enq.convertedMatterId = matter.id;
+  if (!enq.assignedToId) enq.assignedToId = matter.leadFeeEarnerId || byId;
+  enq.updatedAt = now;
+  enq.updatedById = byId;
+
+  if (!alreadyConvertedToThisMatter) {
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'convert',
+      field: 'Converted to matter',
+      oldValue: prevStatus,
+      newValue: `${matter.matterNumber} — ${matter.title} (${matter.id})`,
+      byId,
+      at: now,
+    });
+
+    writeAudit(store, {
+      recordType: 'matter',
+      recordId: matter.id,
+      action: 'convert',
+      field: 'Created from enquiry',
+      oldValue: null,
+      newValue: `${enq.reference} — ${enquiryDisplayName(enq)}`,
+      byId,
+      at: now,
+    });
+  }
+
+  completeOpenContactTasksForEnquiry(
+    store,
+    enq.id,
+    `Enquiry converted to matter ${matter.matterNumber}`,
+    byId,
+    now,
+  );
+
+  // Automatic task: Complete matter opening (5 working days) once the matter has a real reference (or if none exists yet)
+  const hasCompleteOpeningTask = store.tasks.some(
+    (t) =>
+      t.autoTrigger === 'complete_matter_opening' &&
+      t.linkedRecords.some((lr) => lr.recordType === 'matter' && lr.recordId === matter.id),
+  );
+  if (!hasCompleteOpeningTask && matter.matterNumber !== 'DRAFT') {
+    const whCfg = workingHoursConfigFromStore(store);
+    const tpl = store.taskSettings.templates.find((t) => t.trigger === 'complete_matter_opening');
+    const offsetDays = tpl?.dueWorkingDaysOffset ?? 5;
+    const dueDate = toIsoDate(addWorkingDays(new Date(), offsetDays, whCfg));
+
+    raiseAutomaticTask(
+      store,
+      'complete_matter_opening',
+      {
+        name: enquiryDisplayName(enq),
+        matterNumber: `${matter.matterNumber} (${enquiryDisplayName(enq)})`,
+      },
+      {
+        dueAt: dueDate,
+        assignedTeamId: enq.assignedTeamId,
+        assignedPersonId: matter.leadFeeEarnerId || enq.assignedToId || byId,
+        linkedRecords: [
+          { recordType: 'matter', recordId: matter.id },
+          { recordType: 'enquiry', recordId: enq.id },
+          ...(matter.clientId.startsWith('P-')
+            ? [{ recordType: 'person' as const, recordId: matter.clientId }]
+            : [{ recordType: 'organisation' as const, recordId: matter.clientId }]),
+        ],
+        description: `Complete client due diligence (AML), issue engagement letter and confirm retainer monies on account for ${matter.matterNumber} (created from ${enq.reference}).`,
+        byId,
+        now,
+        overridePriorityId: vid('task_priority', 'High'),
+      },
+    );
+  }
+}
+
+/** Anonymise unconverted closed enquiries past the firm's retention period (or a specific enquiry). */
+export function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: string): number {
+  const store = getStore();
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const months = store.enquirySettings.retentionMonths || 12;
+  let count = 0;
+
+  for (const enq of store.enquiries) {
+    const matchTarget = specificEnquiryId
+      ? enq.id === specificEnquiryId && enq.status !== 'Converted' && !isEnquiryOpen(enq)
+      : isReadyForRetentionAnonymisation(enq, months, now);
+    if (!matchTarget || enq.anonymisedAt) continue;
+
+    enq.firstName = 'Anonymised';
+    enq.lastName = 'Enquirer';
+    enq.callingOnBehalfOf = '';
+    enq.email = '';
+    enq.phone = '';
+    enq.address = null;
+    enq.otherPartiesNamed = '';
+    enq.notes = '[Personal details removed under the firm data retention policy. Practice area, channel, dates and outcome retained for reporting.]';
+    enq.anonymisedAt = nowIso;
+    enq.updatedAt = nowIso;
+    enq.updatedById = byId;
+    count++;
+
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'update',
+      field: 'Privacy retention anonymisation',
+      oldValue: 'Personal details stored',
+      newValue: 'Personal details removed; practice area, channel, dates and outcome kept',
+      byId,
+      at: nowIso,
+    });
+  }
+
+  if (count > 0) saveStore(store);
+  return count;
+}
+
+// ============================================================================
+// PMS Financial Data & Matching Services
+// ============================================================================
+
+export interface PmsGroupCompanyRow {
+  organisationId: string;
+  organisationName: string;
+  isParent: boolean;
+  pmsClientCode: string | null;
+  financials: PmsClientFinancials | null;
+}
+
+export interface PmsGroupFinancials {
+  parentOrganisationId: string;
+  parentOrganisationName: string;
+  companies: PmsGroupCompanyRow[];
+  totals: {
+    unbilled_wip: number;
+    fees_billed: number;
+    total_invoiced_inc_vat: number;
+    total_paid: number;
+    outstanding_debt: number;
+    aged_not_yet_due: number;
+    aged_1_30: number;
+    aged_31_60: number;
+    aged_61_90: number;
+    aged_90_plus: number;
+    client_account_balance: number;
+    credit_limit: number;
+    credit_limit_used_pct: number | null;
+  };
+}
+
+export interface ClientPmsViewBundle {
+  extractInfo: PmsExtractInfo;
+  link: PmsLink | null;
+  clientBundle: PmsClientFullBundle | null;
+  pmsClient: PmsClient | null;
+  oneSquaredMatterIdByPmsCode: Record<string, string>;
+  groupView: PmsGroupFinancials | null;
+}
+
+export interface MatterPmsViewBundle {
+  extractInfo: PmsExtractInfo;
+  link: PmsLink | null;
+  matterBundle: PmsMatterFullBundle | null;
+  unlinkedPmsMattersForClient: PmsMatter[];
+  allUnlinkedPmsMatters: PmsMatter[];
+}
+
+export function getMatterPmsViewBundle(matterId: string): MatterPmsViewBundle {
+  const store = getStore();
+  const pms = getPmsSource();
+  const extractInfo = pms.getExtractInfo();
+  const link =
+    store.pmsLinks.find((l) => l.entityType === 'matter' && l.onesquaredId === matterId) ?? null;
+
+  const matterBundle = link ? pms.getMatterFullBundle(link.pmsCode) : null;
+
+  const linkedPmsCodes = new Set(
+    store.pmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
+  );
+  const allPmsMatters = pms.listMatters();
+  const allUnlinkedPmsMatters = allPmsMatters.filter((pm) => !linkedPmsCodes.has(pm.matter_code));
+
+  const matter = store.matters.find((m) => m.id === matterId);
+  let unlinkedPmsMattersForClient: PmsMatter[] = [];
+  if (matter) {
+    const clientEntityType: PmsEntityType = matter.clientId.startsWith('P-')
+      ? 'person'
+      : 'organisation';
+    const pmsClientCode = findPmsCodeForRecord(store.pmsLinks, clientEntityType, matter.clientId);
+    if (pmsClientCode) {
+      unlinkedPmsMattersForClient = allUnlinkedPmsMatters.filter(
+        (pm) => pm.client_code === pmsClientCode,
+      );
+    }
+  }
+
+  return {
+    extractInfo,
+    link,
+    matterBundle,
+    unlinkedPmsMattersForClient,
+    allUnlinkedPmsMatters,
+  };
+}
+
+export function getClientPmsViewBundle(
+  recordType: 'organisation' | 'person',
+  recordId: string,
+): ClientPmsViewBundle {
+  const store = getStore();
+  const pms = getPmsSource();
+  const extractInfo = pms.getExtractInfo();
+  const link =
+    store.pmsLinks.find((l) => l.entityType === recordType && l.onesquaredId === recordId) ?? null;
+
+  const clientBundle = link ? pms.getClientFullBundle(link.pmsCode) : null;
+  const pmsClient = link
+    ? pms.listClients().find((c) => c.client_code === link.pmsCode) ?? null
+    : null;
+
+  const oneSquaredMatterIdByPmsCode: Record<string, string> = {};
+  for (const l of store.pmsLinks) {
+    if (l.entityType === 'matter') {
+      oneSquaredMatterIdByPmsCode[l.pmsCode] = l.onesquaredId;
+    }
+  }
+
+  let groupView: PmsGroupFinancials | null = null;
+  if (recordType === 'organisation') {
+    const org = store.organisations.find((o) => o.id === recordId);
+    if (org) {
+      const subsidiaries = store.organisations.filter(
+        (o) => !o.mergedIntoId && o.parentOrganisationId === org.id,
+      );
+      if (subsidiaries.length > 0) {
+        const groupOrgs = [org, ...subsidiaries];
+        const companies: PmsGroupCompanyRow[] = groupOrgs.map((go) => {
+          const code = findPmsCodeForRecord(store.pmsLinks, 'organisation', go.id);
+          const fin = code ? pms.getClientFinancials(code) : null;
+          return {
+            organisationId: go.id,
+            organisationName: go.legalName,
+            isParent: go.id === org.id,
+            pmsClientCode: code,
+            financials: fin,
+          };
+        });
+
+        const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+        const sumField = (fn: (f: PmsClientFinancials) => number) =>
+          round2(companies.reduce((acc, c) => acc + (c.financials ? fn(c.financials) : 0), 0));
+
+        const outstanding_debt = sumField((f) => f.outstanding_debt);
+        const credit_limit = sumField((f) => f.credit_limit);
+
+        groupView = {
+          parentOrganisationId: org.id,
+          parentOrganisationName: org.legalName,
+          companies,
+          totals: {
+            unbilled_wip: sumField((f) => f.unbilled_wip),
+            fees_billed: sumField((f) => f.fees_billed),
+            total_invoiced_inc_vat: sumField((f) => f.total_invoiced_inc_vat),
+            total_paid: sumField((f) => f.total_paid),
+            outstanding_debt,
+            aged_not_yet_due: sumField((f) => f.aged_not_yet_due),
+            aged_1_30: sumField((f) => f.aged_1_30),
+            aged_31_60: sumField((f) => f.aged_31_60),
+            aged_61_90: sumField((f) => f.aged_61_90),
+            aged_90_plus: sumField((f) => f.aged_90_plus),
+            client_account_balance: sumField((f) => f.client_account_balance),
+            credit_limit,
+            credit_limit_used_pct: credit_limit > 0 ? outstanding_debt / credit_limit : null,
+          },
+        };
+      }
+    }
+  }
+
+  return {
+    extractInfo,
+    link,
+    clientBundle,
+    pmsClient,
+    oneSquaredMatterIdByPmsCode,
+    groupView,
+  };
+}
+
+export interface PmsAdminSnapshot {
+  extractInfo: PmsExtractInfo;
+  pmsLinks: PmsLink[];
+  pmsFeeEarners: PmsFeeEarner[];
+  pmsClients: PmsClient[];
+  pmsMatters: PmsMatter[];
+  suggestedMatterMatches: PmsSuggestedMatch[];
+}
+
+export function getPmsAdminSnapshot(): PmsAdminSnapshot {
+  const store = getStore();
+  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+  if (isCleanEmpty) {
+    const nowIso = new Date().toISOString();
+    return {
+      extractInfo: {
+        asAtDate: nowIso.slice(0, 10),
+        sourceFile: 'No PMS linked (Clean Client Deployment)',
+        importedAt: nowIso,
+      },
+      pmsLinks: [],
+      pmsFeeEarners: [],
+      pmsClients: [],
+      pmsMatters: [],
+      suggestedMatterMatches: [],
+    };
+  }
+  const pms = getPmsSource();
+  const extractInfo = pms.getExtractInfo();
+  const pmsFeeEarners = pms.listFeeEarners();
+  const pmsClients = pms.listClients();
+  const pmsMatters = pms.listMatters();
+  const suggestedMatterMatches = suggestMatterMatches(
+    store.pmsLinks,
+    store.matters,
+    pmsMatters,
+    store.values,
+  );
+  return {
+    extractInfo,
+    pmsLinks: store.pmsLinks,
+    pmsFeeEarners,
+    pmsClients,
+    pmsMatters,
+    suggestedMatterMatches,
+  };
+}
+
+export function linkPmsRecord(
+  entityType: PmsEntityType,
+  onesquaredId: string,
+  pmsCode: string,
+  byId: string,
+): PmsLink {
+  const store = getStore();
+  const now = new Date().toISOString();
+
+  // Remove any existing link for either side of this entityType
+  store.pmsLinks = store.pmsLinks.filter(
+    (l) =>
+      !(
+        l.entityType === entityType &&
+        (l.onesquaredId === onesquaredId || l.pmsCode === pmsCode)
+      ),
+  );
+
+  const link: PmsLink = {
+    id: nextId(store, 'PMSL'),
+    entityType,
+    onesquaredId,
+    pmsCode,
+    matchedBy: 'manual',
+    matchedAt: now,
+  };
+  store.pmsLinks.push(link);
+
+  const auditRecordType =
+    entityType === 'employee'
+      ? 'person'
+      : entityType === 'matter'
+        ? 'matter'
+        : entityType;
+  writeAudit(store, {
+    recordType: auditRecordType,
+    recordId: onesquaredId,
+    action: 'link',
+    field: 'PMS link',
+    oldValue: null,
+    newValue: `${pmsCode} (manual)`,
+    byId,
+    at: now,
+  });
+
+  saveStore(store);
+  return link;
+}
+
+export function unlinkPmsRecord(linkId: string, byId: string): void {
+  const store = getStore();
+  const existing = store.pmsLinks.find((l) => l.id === linkId);
+  if (!existing) return;
+  store.pmsLinks = store.pmsLinks.filter((l) => l.id !== linkId);
+
+  const auditRecordType =
+    existing.entityType === 'employee'
+      ? 'person'
+      : existing.entityType === 'matter'
+        ? 'matter'
+        : existing.entityType;
+  writeAudit(store, {
+    recordType: auditRecordType,
+    recordId: existing.onesquaredId,
+    action: 'unlink',
+    field: 'PMS link',
+    oldValue: existing.pmsCode,
+    newValue: null,
+    byId,
+  });
+
+  saveStore(store);
+}
+
+export function rerunAutomaticPmsMatching(byId: string): { totalLinks: number } {
+  const store = getStore();
+  const pms = getPmsSource();
+  const now = new Date().toISOString();
+  store.pmsLinks = computeAutomaticPmsLinks(
+    store.pmsLinks,
+    store.organisations,
+    store.people,
+    store.matters,
+    pms.listClients(),
+    pms.listFeeEarners(),
+    pms.listMatters(),
+    now,
+    false,
+  );
+  void byId;
+  saveStore(store);
+  return { totalLinks: store.pmsLinks.length };
+}
+
+function mapPmsPracticeAreaId(store: FirmStore, pmsPracticeArea: string): string {
+  const norm = pmsPracticeArea.trim().toLowerCase();
+  const paValues = store.values.filter((v) => v.listKey === 'work_type' && !v.parentId);
+  const exact = paValues.find((v) => v.label.toLowerCase() === norm);
+  if (exact) return exact.id;
+  if (norm.includes('corporate')) return vid('work_type', 'Corporate and commercial');
+  if (norm.includes('property')) return vid('work_type', 'Real estate and property');
+  if (norm.includes('employment')) return vid('work_type', 'Employment and HR');
+  if (norm.includes('dispute') || norm.includes('litigation'))
+    return vid('work_type', 'Dispute resolution and litigation');
+  if (norm.includes('private') || norm.includes('probate') || norm.includes('estate'))
+    return vid('work_type', 'Private client');
+  if (norm.includes('family')) return vid('work_type', 'Family');
+  return paValues[0]?.id ?? vid('work_type', 'Corporate and commercial');
+}
+
+function mapPmsWorkTypeSubcategoryId(
+  store: FirmStore,
+  practiceAreaId: string,
+  pmsWorkType: string,
+): string {
+  const norm = pmsWorkType.trim().toLowerCase();
+  const subValues = store.values.filter(
+    (v) => v.listKey === 'work_type' && v.parentId === practiceAreaId,
+  );
+  const exact = subValues.find((v) => v.label.toLowerCase() === norm);
+  if (exact) return exact.id;
+  const partial = subValues.find(
+    (v) => norm.includes(v.label.toLowerCase()) || v.label.toLowerCase().includes(norm),
+  );
+  if (partial) return partial.id;
+  return subValues[0]?.id ?? vid('work_type', 'Commercial contracts');
+}
+
+function mapPmsEmployeeRoleId(store: FirmStore, grade: string): string {
+  const g = grade.toLowerCase();
+  if (g.includes('partner')) return vid('employee_role', 'Partner');
+  if (g.includes('senior')) return vid('employee_role', 'Senior Associate');
+  if (g.includes('associate') || g.includes('solicitor')) return vid('employee_role', 'Solicitor');
+  if (g.includes('trainee')) return vid('employee_role', 'Trainee Solicitor');
+  if (g.includes('paralegal')) return vid('employee_role', 'Paralegal');
+  const roles = store.values.filter((v) => v.listKey === 'employee_role');
+  return roles[0]?.id ?? vid('employee_role', 'Solicitor');
+}
+
+export function createRecordFromPms(
+  entityType: PmsEntityType,
+  pmsCode: string,
+  byId: string,
+): { ok: boolean; createdId?: string; error?: string } {
+  const store = getStore();
+  const pms = getPmsSource();
+
+  const alreadyLinked = findOneSquaredIdForPmsCode(store.pmsLinks, entityType, pmsCode);
+  if (alreadyLinked) {
+    return { ok: true, createdId: alreadyLinked };
+  }
+
+  if (entityType === 'employee') {
+    const fe = pms.listFeeEarners().find((f) => f.fee_earner_id === pmsCode);
+    if (!fe) return { ok: false, error: `PMS fee earner ${pmsCode} not found.` };
+
+    const paId = mapPmsPracticeAreaId(store, fe.department);
+
+    const res = savePersonRecord(
+      {
+        firstName: fe.first_name,
+        surname: fe.last_name,
+        isEmployee: true,
+        employeeRoleId: mapPmsEmployeeRoleId(store, fe.grade),
+        departmentId: paId,
+        jobTitle: fe.grade,
+        emails: [
+          {
+            id: `EM-${Date.now()}`,
+            address: fe.email,
+            typeId: vid('email_type', 'Work'),
+            isPrimary: true,
+          },
+        ],
+        recordStatusId: valueBySystemKey(store.values, 'person_record_status', 'active')!.id,
+      },
+      { byId },
+    );
+    if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
+
+    linkPmsRecord('employee', res.person.id, pmsCode, byId);
+    return { ok: true, createdId: res.person.id };
+  }
+
+  if (entityType === 'organisation') {
+    const client = pms
+      .listClients()
+      .find((c) => c.client_code === pmsCode && c.client_type === 'Organisation');
+    if (!client) return { ok: false, error: `PMS organisation client ${pmsCode} not found.` };
+
+    const partner1SqId =
+      (client.client_partner_id
+        ? findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', client.client_partner_id)
+        : null) ?? byId;
+
+    const res = saveOrganisationRecord(
+      {
+        legalName: client.client_name,
+        organisationTypeId: vid('organisation_type', 'Private Limited Company (Ltd)'),
+        relationshipStatusId: vid('relationship_status', 'Active'),
+        companyNumber: client.company_number ?? '',
+        generalEmail: client.email ?? '',
+        mainPhone: client.phone ?? '',
+        billingAddress: client.billing_address
+          ? {
+              id: `AD-${Date.now()}`,
+              typeId: vid('address_type', 'Billing'),
+              line1: client.billing_address,
+              line2: '',
+              town: 'Cardiff',
+              county: '',
+              postcode: client.postcode ?? '',
+              countryId: vid('country', 'United Kingdom'),
+            }
+          : null,
+        relationshipPartnerId: partner1SqId,
+      },
+      { byId },
+    );
+    if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
+
+    linkPmsRecord('organisation', res.organisation.id, pmsCode, byId);
+    return { ok: true, createdId: res.organisation.id };
+  }
+
+  if (entityType === 'person') {
+    const client = pms
+      .listClients()
+      .find((c) => c.client_code === pmsCode && c.client_type === 'Individual');
+    if (!client) return { ok: false, error: `PMS individual client ${pmsCode} not found.` };
+
+    const parts = client.client_name.trim().split(/\s+/);
+    const firstName = parts[0] ?? client.client_name;
+    const surname = parts.slice(1).join(' ') || 'Client';
+    const partner1SqId =
+      (client.client_partner_id
+        ? findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', client.client_partner_id)
+        : null) ?? byId;
+
+    const res = savePersonRecord(
+      {
+        firstName,
+        surname,
+        isEmployee: false,
+        relationshipRoleIds: [vid('person_relationship_role', 'Client (individual)')],
+        emails: client.email
+          ? [
+              {
+                id: `EM-${Date.now()}`,
+                address: client.email,
+                typeId: vid('email_type', 'Personal'),
+                isPrimary: true,
+              },
+            ]
+          : [],
+        phones: client.phone
+          ? [
+              {
+                id: `PH-${Date.now()}`,
+                number: client.phone,
+                typeId: vid('phone_type', 'Mobile'),
+              },
+            ]
+          : [],
+        addresses: client.billing_address
+          ? [
+              {
+                id: `AD-${Date.now()}`,
+                typeId: vid('address_type', 'Home'),
+                line1: client.billing_address,
+                line2: '',
+                town: 'Cardiff',
+                county: '',
+                postcode: client.postcode ?? '',
+                countryId: vid('country', 'United Kingdom'),
+              },
+            ]
+          : [],
+        relationshipOwnerId: partner1SqId,
+      },
+      { byId },
+    );
+    if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
+
+    linkPmsRecord('person', res.person.id, pmsCode, byId);
+    return { ok: true, createdId: res.person.id };
+  }
+
+  if (entityType === 'matter') {
+    const pm = pms.listMatters().find((m) => m.matter_code === pmsCode);
+    if (!pm) return { ok: false, error: `PMS matter ${pmsCode} not found.` };
+
+    // Ensure the client exists & is linked in 1Squared first
+    const pmsClient = pms.listClients().find((c) => c.client_code === pm.client_code);
+    const clientEntityType: PmsEntityType =
+      pmsClient?.client_type === 'Individual' ? 'person' : 'organisation';
+    let clientId = findOneSquaredIdForPmsCode(store.pmsLinks, clientEntityType, pm.client_code);
+    if (!clientId) {
+      const createdClient = createRecordFromPms(clientEntityType, pm.client_code, byId);
+      if (!createdClient.ok || !createdClient.createdId) {
+        return {
+          ok: false,
+          error: createdClient.error ?? `Could not find or create client ${pm.client_code}.`,
+        };
+      }
+      clientId = createdClient.createdId;
+    }
+
+    // Ensure partner & lead fee earner exist or fallback cleanly
+    let partnerId = findOneSquaredIdForPmsCode(
+      store.pmsLinks,
+      'employee',
+      pm.responsible_partner_id,
+    );
+    if (!partnerId) {
+      const createdFe = createRecordFromPms('employee', pm.responsible_partner_id, byId);
+      partnerId = createdFe.createdId ?? byId;
+    }
+
+    let leadId = findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', pm.fee_earner_id);
+    if (!leadId) {
+      const createdLead = createRecordFromPms('employee', pm.fee_earner_id, byId);
+      leadId = createdLead.createdId ?? partnerId;
+    }
+
+    const paId = mapPmsPracticeAreaId(store, pm.practice_area);
+    const subId = mapPmsWorkTypeSubcategoryId(store, paId, pm.work_type);
+
+    const statusKey =
+      pm.status === 'Closed' ? 'closed' : pm.status === 'Pending' ? 'on_hold' : 'active';
+    const matterStatusId =
+      valueBySystemKey(store.values, 'matter_status', statusKey)?.id ??
+      vid('matter_status', 'Active');
+
+    const res = saveMatterRecord(
+      {
+        matterNumber: pm.matter_code,
+        title: pm.matter_description,
+        clientId,
+        practiceAreaId: paId,
+        workTypeSubcategoryId: subId,
+        matterStatusId,
+        openedAt: pm.date_opened,
+        closedAt: pm.date_closed,
+        responsiblePartnerId: partnerId,
+        leadFeeEarnerId: leadId,
+        teamMemberIds: Array.from(new Set([partnerId, leadId])),
+        shortDescription: `${pm.work_type} (${pm.billing_basis}) — imported from PMS (${pm.matter_code}).`,
+      },
+      { byId },
+    );
+    if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
+
+    linkPmsRecord('matter', res.matter.id, pmsCode, byId);
+    return { ok: true, createdId: res.matter.id };
+  }
+
+  return { ok: false, error: 'Unsupported entity type.' };
+}
+
+// ------------------------------------------------------------------ Role-based Home Pages & Actions
+
+export function switchViewingRole(
+  userId: string,
+  roleKey: string,
+): { ok: boolean; error?: string; roleKey?: string } {
+  const store = getStore();
+  const user = store.people.find((p) => p.id === userId);
+  if (!user) return { ok: false, error: 'User not found.' };
+
+  const userRoles = resolveEmployeeRoles(user, store.teams);
+  if (!userRoles.includes(roleKey)) {
+    return { ok: false, error: 'Role is not assigned to the current user.' };
+  }
+
+  if (!store.homePagesConfig) {
+    store.homePagesConfig = createDefaultHomePagesConfig(new Date().toISOString());
+  }
+  store.homePagesConfig.lastViewingRoleByUserId = {
+    ...(store.homePagesConfig.lastViewingRoleByUserId ?? {}),
+    [userId]: roleKey,
+  };
+  saveStore(store);
+  return { ok: true, roleKey };
+}
+
+export function saveHomePagesConfig(
+  input: {
+    roles?: RoleHomeConfig[];
+    firmSettings?: Partial<HomeFirmSettings>;
+  },
+  byId: string,
+): { ok: boolean; config: HomePagesConfig } {
+  const store = getStore();
+  const nowIso = new Date().toISOString();
+  const current = store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso);
+
+  const nextRoles = input.roles
+    ? input.roles.map((r) => ({
+        ...r,
+        headlineCardIds: (r.headlineCardIds ?? []).slice(0, 5),
+        primaryPanels: Array.from(new Set(r.primaryPanels ?? [])),
+        summaryPanels: Array.from(
+          new Set((r.summaryPanels ?? []).filter((p) => !(r.primaryPanels ?? []).includes(p))),
+        ),
+      }))
+    : current.roles;
+
+  const nextSettings: HomeFirmSettings = {
+    ...current.firmSettings,
+    ...(input.firmSettings ?? {}),
+  };
+
+  store.homePagesConfig = {
+    ...current,
+    roles: nextRoles,
+    firmSettings: nextSettings,
+    updatedAt: nowIso,
+    updatedById: byId,
+  };
+
+  writeAudit(store, {
+    recordType: 'system',
+    recordId: 'HOME-CONFIG',
+    action: 'update',
+    field: 'Home pages configuration',
+    oldValue: null,
+    newValue: `Updated role Home layouts and firm settings (demoMode=${nextSettings.demoMode})`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { ok: true, config: store.homePagesConfig };
+}
+
+export function resetHomePagesConfig(byId: string): { ok: boolean; config: HomePagesConfig } {
+  const store = getStore();
+  const nowIso = new Date().toISOString();
+  const preservedViewing = store.homePagesConfig?.lastViewingRoleByUserId ?? {};
+  const preservedDemo = store.homePagesConfig?.firmSettings?.demoMode ?? false;
+  const defaults = createDefaultHomePagesConfig(nowIso);
+  defaults.lastViewingRoleByUserId = preservedViewing;
+  defaults.firmSettings.demoMode = preservedDemo;
+  defaults.updatedById = byId;
+
+  store.homePagesConfig = defaults;
+  writeAudit(store, {
+    recordType: 'system',
+    recordId: 'HOME-CONFIG',
+    action: 'update',
+    field: 'Home pages configuration',
+    oldValue: null,
+    newValue: 'Reset role Home layouts to firm defaults',
+    byId,
+    at: nowIso,
+  });
+  saveStore(store);
+  return { ok: true, config: store.homePagesConfig };
+}
+
+export function addHomeRole(
+  input: {
+    key?: string;
+    label: string;
+    shortLabel?: string;
+    purpose: string;
+    copyFromRoleKey?: string;
+  },
+  byId: string,
+): { ok: boolean; error?: string; role?: RoleHomeConfig } {
+  const store = getStore();
+  const nowIso = new Date().toISOString();
+  if (!store.homePagesConfig) {
+    store.homePagesConfig = createDefaultHomePagesConfig(nowIso);
+  }
+  const cleanLabel = input.label.trim();
+  if (!cleanLabel) return { ok: false, error: 'Role name is required.' };
+
+  const key = (input.key || slug(cleanLabel)).replace(/[^a-z0-9_]+/g, '_');
+  if (store.homePagesConfig.roles.some((r) => r.key === key)) {
+    return { ok: false, error: `Role "${key}" already exists.` };
+  }
+
+  const template =
+    store.homePagesConfig.roles.find((r) => r.key === (input.copyFromRoleKey || 'fee_earner')) ??
+    store.homePagesConfig.roles[0];
+
+  const newRole: RoleHomeConfig = {
+    key,
+    label: cleanLabel,
+    shortLabel: (input.shortLabel || cleanLabel).trim(),
+    purpose: input.purpose.trim() || template.purpose,
+    headlineCardIds: [...template.headlineCardIds],
+    primaryPanels: [...template.primaryPanels],
+    summaryPanels: [...template.summaryPanels],
+    isBuiltIn: false,
+  };
+
+  store.homePagesConfig.roles.push(newRole);
+  store.homePagesConfig.updatedAt = nowIso;
+  store.homePagesConfig.updatedById = byId;
+
+  writeAudit(store, {
+    recordType: 'system',
+    recordId: `ROLE-${key}`,
+    action: 'create',
+    field: 'Home role',
+    oldValue: null,
+    newValue: `${newRole.label} (${newRole.key})`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { ok: true, role: newRole };
+}
+
+export function updateEmployeeRolesAndSupports(
+  personId: string,
+  input: {
+    roles?: string[];
+    supportsIds?: string[];
+  },
+  byId: string,
+): { ok: boolean; error?: string } {
+  const store = getStore();
+  const person = store.people.find((p) => p.id === personId);
+  if (!person) return { ok: false, error: 'Employee not found.' };
+
+  if (input.roles && input.roles.length > 0) {
+    person.roles = Array.from(new Set(input.roles));
+  }
+  if (input.supportsIds) {
+    person.supportsIds = Array.from(new Set(input.supportsIds));
+  }
+  person.updatedAt = new Date().toISOString();
+  person.updatedById = byId;
+
+  writeAudit(store, {
+    recordType: 'person',
+    recordId: person.id,
+    action: 'update',
+    field: 'Roles & supported fee earners',
+    oldValue: null,
+    newValue: `roles=[${(person.roles ?? []).join(', ')}], supports=[${(person.supportsIds ?? []).join(', ')}]`,
+    byId,
+  });
+
+  saveStore(store);
+  return { ok: true };
+}
+
+export function approveSignOff(
+  signOffId: string,
+  byId: string,
+): { ok: boolean; error?: string } {
+  const store = getStore();
+  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
+  if (!item) return { ok: false, error: 'Sign-off item not found.' };
+
+  const nowIso = new Date().toISOString();
+  item.status = 'Approved';
+  item.approvedById = byId;
+  item.approvedAt = nowIso;
+
+  writeAudit(store, {
+    recordType: item.matterId ? 'matter' : 'system',
+    recordId: item.matterId ?? item.id,
+    action: 'status-change',
+    field: 'Partner sign-off',
+    oldValue: 'Pending',
+    newValue: `Approved: ${item.title}`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { ok: true };
+}
+
+export function discussSignOff(
+  signOffId: string,
+  note: string,
+  byId: string,
+): { ok: boolean; error?: string } {
+  const store = getStore();
+  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
+  if (!item) return { ok: false, error: 'Sign-off item not found.' };
+
+  const nowIso = new Date().toISOString();
+  item.status = 'Discussing';
+  item.discussionNote = note.trim() || 'Partner requested discussion before sign-off.';
+
+  // Create a follow-up task for the requester
+  const linkedRecords: TaskLinkedRecord[] = [];
+  if (item.matterId) linkedRecords.push({ recordType: 'matter', recordId: item.matterId });
+  saveTaskRecord(
+    {
+      title: `Discuss partner sign-off: ${item.title}`,
+      description: item.discussionNote,
+      taskTypeId: vid('task_type', 'Review'),
+      priorityId: vid('task_priority', 'High'),
+      dueAt: toIsoDate(new Date()),
+      assignedPersonId: item.requestedById,
+      linkedRecords,
+    },
+    byId,
+  );
+
+  saveStore(store);
+  return { ok: true };
+}
+
+export function requestMatterBill(
+  matterCode: string,
+  byId: string,
+): { ok: boolean; taskId?: string } {
+  const store = getStore();
+  const matter = store.matters.find((m) => m.matterNumber === matterCode);
+  const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode) ?? matter?.id ?? null;
+  const targetMatter = linkedId ? store.matters.find((m) => m.id === linkedId) : matter;
+
+  const assignedPersonId = targetMatter?.leadFeeEarnerId ?? 'P-000002';
+  const linkedRecords: TaskLinkedRecord[] = targetMatter
+    ? [{ recordType: 'matter', recordId: targetMatter.id }]
+    : [];
+
+  const res = saveTaskRecord(
+    {
+      title: `Approve draft bill on ${matterCode}${targetMatter ? ` (${targetMatter.title})` : ''}`,
+      description: `Billing request raised from Home page for unbilled WIP on ${matterCode}.`,
+      taskTypeId: vid('task_type', 'Review'),
+      priorityId: vid('task_priority', 'High'),
+      dueAt: toIsoDate(new Date()),
+      assignedPersonId,
+      linkedRecords,
+    },
+    byId,
+  );
+
+  return { ok: true, taskId: res.task?.id };
+}
+
+export function flagMatterWriteOff(
+  matterCode: string,
+  amountGbp: number,
+  byId: string,
+): { ok: boolean; signOffId?: string } {
+  const store = getStore();
+  const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
+  const matter = linkedId
+    ? store.matters.find((m) => m.id === linkedId)
+    : store.matters.find((m) => m.matterNumber === matterCode);
+
+  const id = nextId(store, 'SO');
+  const nowIso = new Date().toISOString();
+  const formattedAmt = amountGbp.toLocaleString('en-GB', {
+    style: 'currency',
+    currency: 'GBP',
+  });
+
+  const signOff: SignOffItem = {
+    id,
+    kind: 'write_off',
+    title: `Write-off: ${formattedAmt} over cap/estimate on ${matterCode}`,
+    matterNumber: matterCode,
+    matterId: matter?.id ?? null,
+    subtitle: `${matterCode}${matter ? ` · ${matter.title}` : ''} · Flagged for partner write-off decision`,
+    requestedById: byId,
+    requestedAt: nowIso,
+    assignedPartnerId: matter?.supervisingPartnerId ?? 'P-000001',
+    status: 'Pending',
+  };
+
+  if (!Array.isArray(store.signOffs)) store.signOffs = [];
+  store.signOffs.unshift(signOff);
+  saveStore(store);
+  return { ok: true, signOffId: id };
+}
+
+export function remindTeamLeadOverdueCompliance(
+  teamId: string,
+  byId: string,
+): { ok: boolean } {
+  const store = getStore();
+  const team = store.teams.find((t) => t.id === teamId);
+  if (!team) return { ok: false };
+  const leadId = team.leadIds[0] ?? 'P-000001';
+  const nowIso = new Date().toISOString();
+
+  store.notifications.unshift({
+    id: nextId(store, 'NTF'),
+    recipientId: leadId,
+    kind: 'task_overdue',
+    title: `Compliance reminder: overdue onboarding / AML tasks in ${team.name}`,
+    detail: 'MLRO / COLP requested an update on overdue compliance tasks in your team.',
+    href: '/tasks',
+    recordId: team.id,
+    createdAt: nowIso,
+    read: false,
+    byId,
+  });
+
+  writeAudit(store, {
+    recordType: 'team',
+    recordId: team.id,
+    action: 'update',
+    field: 'Compliance reminder',
+    oldValue: null,
+    newValue: `Sent overdue compliance task reminder to team lead (${leadId})`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { ok: true };
+}
+
+export function recordInvoiceCreditControlAction(
+  input: {
+    invoiceNumber: string;
+    matterCode: string;
+    clientCode: string;
+    actionType: 'log_call' | 'send_reminder' | 'escalate';
+    note?: string;
+  },
+  byId: string,
+): { ok: boolean; taskId?: string } {
+  const store = getStore();
+  const linkedMatterId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', input.matterCode);
+  const linkedOrgId = findOneSquaredIdForPmsCode(store.pmsLinks, 'organisation', input.clientCode);
+  const linkedPersonId = findOneSquaredIdForPmsCode(store.pmsLinks, 'person', input.clientCode);
+
+  const linkedRecords: TaskLinkedRecord[] = [];
+  if (linkedMatterId) linkedRecords.push({ recordType: 'matter', recordId: linkedMatterId });
+  if (linkedOrgId) linkedRecords.push({ recordType: 'organisation', recordId: linkedOrgId });
+  if (linkedPersonId) linkedRecords.push({ recordType: 'person', recordId: linkedPersonId });
+
+  const matter = linkedMatterId ? store.matters.find((m) => m.id === linkedMatterId) : null;
+  const nowIso = new Date().toISOString();
+
+  if (input.actionType === 'escalate') {
+    const partnerId = matter?.responsiblePartnerId ?? 'P-000001';
+    const res = saveTaskRecord(
+      {
+        title: `Partner escalation: overdue invoice ${input.invoiceNumber} (${input.matterCode})`,
+        description:
+          input.note ||
+          `Credit control escalated overdue invoice ${input.invoiceNumber} on ${input.matterCode} for partner review / formal letter before action.`,
+        taskTypeId: vid('task_type', 'Review'),
+        priorityId: vid('task_priority', 'Urgent'),
+        dueAt: toIsoDate(new Date()),
+        assignedPersonId: partnerId,
+        linkedRecords,
+      },
+      byId,
+    );
+    return { ok: true, taskId: res.task?.id };
+  }
+
+  // Record a note on the client or matter and log an audit entry
+  const targetRecordId = linkedOrgId ?? linkedPersonId ?? linkedMatterId;
+  if (targetRecordId) {
+    store.notes.unshift({
+      id: nextId(store, 'N'),
+      recordType: targetRecordId.startsWith('O-')
+        ? 'organisation'
+        : targetRecordId.startsWith('P-')
+          ? 'person'
+          : 'matter',
+      recordId: targetRecordId,
+      authorId: byId,
+      at: nowIso,
+      text:
+        input.actionType === 'log_call'
+          ? `Credit control call logged regarding invoice ${input.invoiceNumber} (${input.matterCode}). ${input.note ?? ''}`.trim()
+          : `Credit control reminder statement sent for invoice ${input.invoiceNumber} (${input.matterCode}).`,
+    });
+  }
+
+  writeAudit(store, {
+    recordType: linkedMatterId ? 'matter' : 'system',
+    recordId: linkedMatterId ?? input.invoiceNumber,
+    action: 'note',
+    field: 'Credit control',
+    oldValue: null,
+    newValue: `${input.actionType === 'log_call' ? 'Logged chase call' : 'Sent reminder'} on ${input.invoiceNumber}`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { ok: true };
+}
+
+export function saveOrgStructure(
+  nextCatalogue: OrgStructureCatalogue,
+  byId: string,
+): { orgStructure: OrgStructureCatalogue } {
+  const store = getStore();
+  store.orgStructure = nextCatalogue;
+  writeAudit(store, {
+    recordType: 'system',
+    recordId: 'ORG-STRUCTURE',
+    action: 'update',
+    field: 'Organisation structure reference tables',
+    oldValue: null,
+    newValue: `Updated organisation hierarchy (${nextCatalogue.divisions.length} divisions, ${nextCatalogue.departments.length} departments, ${nextCatalogue.teamsOrPracticeGroups.length} teams/practice groups)`,
+    byId,
+    at: new Date().toISOString(),
+  });
+  saveStore(store);
+  return { orgStructure: store.orgStructure };
+}
+
+export function saveMatterPartyRelationship(
+  input: {
+    code: string;
+    label: string;
+    description?: string;
+    active?: boolean;
+    isNew?: boolean;
+  },
+  byId: string,
+): { relationship?: MatterPartyRelationshipDef; taxonomy: MatterPartyTaxonomy; error?: string } {
+  const store = getStore();
+  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+  store.matterPartyTaxonomy = taxonomy;
+  const code = input.code.trim().toUpperCase();
+  const label = input.label.trim();
+  if (!code) return { taxonomy, error: 'Relationship code is required.' };
+  if (!label) return { taxonomy, error: 'Relationship label is required.' };
+
+  const existingIdx = taxonomy.relationships.findIndex((r) => r.code === code);
+  if (input.isNew) {
+    if (existingIdx !== -1) {
+      return { taxonomy, error: `Relationship code "${code}" already exists. Codes are immutable.` };
+    }
+    const maxOrder = taxonomy.relationships.reduce((m, r) => Math.max(m, r.sortOrder), 0);
+    const created: MatterPartyRelationshipDef = {
+      code,
+      label,
+      description: (input.description ?? '').trim(),
+      sortOrder: maxOrder + 1,
+      active: input.active ?? true,
+    };
+    taxonomy.relationships.push(created);
+    writeAudit(store, {
+      recordType: 'list',
+      recordId: 'matter_party_role',
+      action: 'list-change',
+      field: `Relationship ${code}`,
+      oldValue: null,
+      newValue: `${code} — ${label}`,
+      byId,
+    });
+    saveStore(store);
+    return { relationship: created, taxonomy };
+  }
+
+  if (existingIdx === -1) {
+    return { taxonomy, error: `Relationship "${code}" not found.` };
+  }
+  const existing = taxonomy.relationships[existingIdx];
+  const updated: MatterPartyRelationshipDef = {
+    ...existing,
+    code: existing.code, // Immutable
+    label,
+    description: input.description !== undefined ? input.description.trim() : existing.description,
+    active: input.active !== undefined ? input.active : existing.active,
+  };
+  taxonomy.relationships[existingIdx] = updated;
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: 'matter_party_role',
+    action: 'list-change',
+    field: `Relationship ${existing.code}`,
+    oldValue: `${existing.label}${existing.active ? '' : ' (inactive)'}`,
+    newValue: `${updated.label}${updated.active ? '' : ' (inactive)'}`,
+    byId,
+  });
+  saveStore(store);
+  return { relationship: updated, taxonomy };
+}
+
+export function reorderMatterPartyRelationship(
+  code: string,
+  direction: -1 | 1,
+  byId: string,
+): { taxonomy: MatterPartyTaxonomy } {
+  const store = getStore();
+  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+  store.matterPartyTaxonomy = taxonomy;
+  const sorted = [...taxonomy.relationships].sort((a, b) => a.sortOrder - b.sortOrder);
+  const idx = sorted.findIndex((r) => r.code === code);
+  const swapIdx = idx + direction;
+  if (idx === -1 || swapIdx < 0 || swapIdx >= sorted.length) {
+    return { taxonomy };
+  }
+  [sorted[idx], sorted[swapIdx]] = [sorted[swapIdx], sorted[idx]];
+  sorted.forEach((r, i) => {
+    r.sortOrder = i + 1;
+  });
+  taxonomy.relationships = sorted;
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: 'matter_party_role',
+    action: 'list-change',
+    field: `Reordered relationship ${code}`,
+    oldValue: null,
+    newValue: direction === -1 ? 'Moved up' : 'Moved down',
+    byId,
+  });
+  saveStore(store);
+  return { taxonomy };
+}
+
+export function deleteMatterPartyRelationship(
+  code: string,
+  byId: string,
+): { taxonomy: MatterPartyTaxonomy; error?: string } {
+  const store = getStore();
+  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+  store.matterPartyTaxonomy = taxonomy;
+  const usage = computeMatterPartyUsageCounts(store.matters);
+  const count = usage.byRelationshipCode[code] ?? 0;
+  if (count > 0) {
+    return {
+      taxonomy,
+      error: `Relationship "${code}" is in use on ${count} matter party record(s). It can be deactivated but not deleted.`,
+    };
+  }
+  const existing = taxonomy.relationships.find((r) => r.code === code);
+  if (!existing) return { taxonomy, error: 'Relationship not found.' };
+  taxonomy.relationships = taxonomy.relationships.filter((r) => r.code !== code);
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: 'matter_party_role',
+    action: 'list-change',
+    field: `Deleted relationship ${code}`,
+    oldValue: existing.label,
+    newValue: null,
+    byId,
+  });
+  saveStore(store);
+  return { taxonomy };
+}
+
+export function saveMatterPartyCapacity(
+  input: {
+    code: string;
+    label: string;
+    group: CapacityGroupName;
+    description?: string;
+    allowedRelationships: string[];
+    profiles: WorkTypeProfileCode[];
+    active?: boolean;
+    isNew?: boolean;
+  },
+  byId: string,
+): { capacity?: MatterPartyCapacityDef; taxonomy: MatterPartyTaxonomy; error?: string } {
+  const store = getStore();
+  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+  store.matterPartyTaxonomy = taxonomy;
+  const code = input.code.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  const label = input.label.trim();
+  if (!code) return { taxonomy, error: 'Capacity code is required.' };
+  if (!label) return { taxonomy, error: 'Capacity label is required.' };
+
+  const existingIdx = taxonomy.capacities.findIndex((c) => c.code === code);
+  if (input.isNew) {
+    if (existingIdx !== -1) {
+      return { taxonomy, error: `Capacity code "${code}" already exists. Codes are immutable.` };
+    }
+    const maxOrder = taxonomy.capacities.reduce((m, c) => Math.max(m, c.sortOrder), 0);
+    const created: MatterPartyCapacityDef = {
+      code,
+      label,
+      group: input.group || 'Ownership, control and authority',
+      description: input.description?.trim() || undefined,
+      allowedRelationships: Array.from(new Set(input.allowedRelationships)),
+      profiles: Array.from(new Set(input.profiles)),
+      sortOrder: maxOrder + 1,
+      active: input.active ?? true,
+    };
+    taxonomy.capacities.push(created);
+    writeAudit(store, {
+      recordType: 'list',
+      recordId: 'matter_party_role',
+      action: 'list-change',
+      field: `Capacity ${code}`,
+      oldValue: null,
+      newValue: `${label} (${created.group})`,
+      byId,
+    });
+    saveStore(store);
+    return { capacity: created, taxonomy };
+  }
+
+  if (existingIdx === -1) {
+    return { taxonomy, error: `Capacity "${code}" not found.` };
+  }
+  const existing = taxonomy.capacities[existingIdx];
+  const updated: MatterPartyCapacityDef = {
+    ...existing,
+    code: existing.code, // Immutable
+    label,
+    group: input.group || existing.group,
+    description: input.description !== undefined ? input.description.trim() || undefined : existing.description,
+    allowedRelationships: Array.from(new Set(input.allowedRelationships)),
+    profiles: Array.from(new Set(input.profiles)),
+    active: input.active !== undefined ? input.active : existing.active,
+  };
+  taxonomy.capacities[existingIdx] = updated;
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: 'matter_party_role',
+    action: 'list-change',
+    field: `Capacity ${existing.code}`,
+    oldValue: `${existing.label}${existing.active ? '' : ' (inactive)'}`,
+    newValue: `${updated.label}${updated.active ? '' : ' (inactive)'}`,
+    byId,
+  });
+  saveStore(store);
+  return { capacity: updated, taxonomy };
+}
+
+export function deleteMatterPartyCapacity(
+  code: string,
+  byId: string,
+): { taxonomy: MatterPartyTaxonomy; error?: string } {
+  const store = getStore();
+  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+  store.matterPartyTaxonomy = taxonomy;
+  const usage = computeMatterPartyUsageCounts(store.matters);
+  const count = usage.byCapacityCode[code] ?? 0;
+  if (count > 0) {
+    return {
+      taxonomy,
+      error: `Capacity "${code}" is in use on ${count} matter party record(s). It can be deactivated but not deleted.`,
+    };
+  }
+  const existing = taxonomy.capacities.find((c) => c.code === code);
+  if (!existing) return { taxonomy, error: 'Capacity not found.' };
+  taxonomy.capacities = taxonomy.capacities.filter((c) => c.code !== code);
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: 'matter_party_role',
+    action: 'list-change',
+    field: `Deleted capacity ${code}`,
+    oldValue: existing.label,
+    newValue: null,
+    byId,
+  });
+  saveStore(store);
+  return { taxonomy };
+}
+
+export function updateWorkTypeProfiles(
+  workTypeSubcategoryId: string,
+  profiles: WorkTypeProfileCode[],
+  byId: string,
+): { taxonomy: MatterPartyTaxonomy } {
+  const store = getStore();
+  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+  store.matterPartyTaxonomy = taxonomy;
+  const prev = taxonomy.workTypeProfiles[workTypeSubcategoryId] ?? [];
+  const next = Array.from(new Set(profiles.filter((p) => p !== 'ALL')));
+  taxonomy.workTypeProfiles[workTypeSubcategoryId] = next;
+  writeAudit(store, {
+    recordType: 'list',
+    recordId: 'matter_party_role',
+    action: 'list-change',
+    field: `Work type profiles: ${workTypeSubcategoryId}`,
+    oldValue: prev.join(', '),
+    newValue: next.join(', '),
+    byId,
+  });
+  saveStore(store);
+  return { taxonomy };
+}
+
+// ============================================================================
+// Quotes Services
+// ============================================================================
+
+export interface SaveQuoteInput {
+  clientType: 'existing' | 'prospect';
+  linkedOrganisationId?: string | null;
+  linkedPersonId?: string | null;
+  prospectName?: string;
+  prospectOrganisationName?: string;
+  prospectEmail?: string;
+  prospectPhone?: string;
+  linkedEnquiryId?: string | null;
+  practiceAreaId: string;
+  workTypeSubcategoryId?: string | null;
+  scope: string;
+  assumptions?: string;
+  feeBasis: QuoteFeeBasis;
+  feeAmountExVat: number;
+  hourlyRateGbp?: number | null;
+  vatAmount?: number;
+  vatOverridden?: boolean;
+  disbursements?: QuoteDisbursement[];
+  validUntil?: string;
+  feeEarnerId?: string;
+  followUpAfterDays?: number;
+}
+
+export function saveQuoteRecord(
+  input: SaveQuoteInput,
+  opts: { id?: string; byId: string; markAsSent?: boolean },
+): { quote?: Quote; error?: string } {
+  const store = getStore();
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  const existing = opts.id ? store.quotes.find((q) => q.id === opts.id) : undefined;
+  if (opts.id && !existing) {
+    return { error: 'Quote not found.' };
+  }
+
+  const clientType = input.clientType || 'prospect';
+  const linkedOrganisationId = input.linkedOrganisationId || null;
+  const linkedPersonId = input.linkedPersonId || null;
+  const prospectName = (input.prospectName ?? '').trim();
+  const prospectOrganisationName = (input.prospectOrganisationName ?? '').trim();
+  const prospectEmail = (input.prospectEmail ?? '').trim();
+  const prospectPhone = (input.prospectPhone ?? '').trim();
+
+  if (clientType === 'existing' && !linkedOrganisationId && !linkedPersonId) {
+    return { error: 'Please select an existing client or switch to entering a new prospect.' };
+  }
+  if (clientType === 'prospect' && !prospectName && !prospectOrganisationName) {
+    return { error: 'Please enter the prospect name or organisation.' };
+  }
+  if (!input.practiceAreaId) {
+    return { error: 'Please select a practice area / work type.' };
+  }
+  if (!input.scope?.trim()) {
+    return { error: 'Please enter the description of work / scope.' };
+  }
+
+  const disbursements: QuoteDisbursement[] = (input.disbursements ?? [])
+    .filter((d) => d.description.trim() || Number(d.amountExVat) > 0)
+    .map((d, idx) => ({
+      id: d.id || `QDISB-${Date.now()}-${idx}`,
+      description: d.description.trim() || 'Disbursement',
+      amountExVat: Math.max(0, Number(d.amountExVat) || 0),
+      vatApplicable: Boolean(d.vatApplicable),
+    }));
+
+  const totals = calculateQuoteTotals(
+    input.feeAmountExVat,
+    input.vatOverridden ? input.vatAmount : null,
+    disbursements,
+  );
+
+  const feeEarnerId = input.feeEarnerId || existing?.feeEarnerId || opts.byId;
+  const routedTeam = resolveRoutedTeam(input.practiceAreaId, store.teams);
+  const feeEarnerTeam = store.teams.find(
+    (t) => t.active && t.memberIds.includes(feeEarnerId),
+  );
+  const assignedTeamId = routedTeam?.team?.id ?? feeEarnerTeam?.id ?? existing?.assignedTeamId ?? null;
+
+  const followUpAfterDays = Math.max(1, Number(input.followUpAfterDays) || 7);
+  const defaultValidUntil = toIsoDate(addDays(now, 30));
+  const validUntil = input.validUntil || existing?.validUntil || defaultValidUntil;
+
+  const markSent = Boolean(opts.markAsSent);
+  const sentAt = markSent ? nowIso : existing?.sentAt ?? null;
+  const nextFollowUpDate = markSent
+    ? toIsoDate(addDays(now, followUpAfterDays))
+    : existing?.nextFollowUpDate ?? null;
+
+  let status: QuoteStatus = existing?.status ?? 'Draft';
+  if (markSent) {
+    status = 'Sent';
+  }
+
+  if (!existing) {
+    const reference = nextQuoteReference(store, now.getFullYear());
+    const timeline: Quote['timeline'] = [
+      {
+        id: `QT-${Date.now()}-1`,
+        kind: 'created',
+        at: nowIso,
+        byId: opts.byId,
+        title: 'Quote created (v1)',
+        detail: `${input.feeBasis} — £${totals.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
+      },
+    ];
+    if (markSent) {
+      timeline.push({
+        id: `QT-${Date.now()}-2`,
+        kind: 'sent',
+        at: nowIso,
+        byId: opts.byId,
+        title: 'Marked as sent',
+        detail: `First follow-up scheduled for ${nextFollowUpDate}`,
+      });
+    }
+
+    const created: Quote = {
+      id: reference,
+      reference,
+      version: 1,
+      status,
+      clientType,
+      linkedOrganisationId,
+      linkedPersonId,
+      prospectName,
+      prospectOrganisationName,
+      prospectEmail,
+      prospectPhone,
+      linkedEnquiryId: input.linkedEnquiryId || null,
+      convertedMatterId: null,
+      practiceAreaId: input.practiceAreaId,
+      workTypeSubcategoryId: input.workTypeSubcategoryId || null,
+      scope: input.scope.trim(),
+      assumptions: (input.assumptions ?? '').trim(),
+      feeBasis: input.feeBasis,
+      feeAmountExVat: totals.feeAmountExVat,
+      hourlyRateGbp:
+        input.feeBasis === 'Hourly rate with estimate'
+          ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+          : null,
+      vatAmount: totals.vatOnFee,
+      vatOverridden: Boolean(input.vatOverridden),
+      disbursements,
+      totalIncVat: totals.totalIncVat,
+      feeEarnerId,
+      assignedTeamId,
+      validUntil,
+      followUpAfterDays,
+      sentAt,
+      nextFollowUpDate,
+      outcomeAt: null,
+      declineReason: null,
+      followUps: [],
+      versionHistory: [],
+      timeline,
+      createdById: opts.byId,
+      createdAt: nowIso,
+      updatedById: opts.byId,
+      updatedAt: nowIso,
+    };
+
+    store.quotes.unshift(created);
+    writeAudit(store, {
+      recordType: 'quote',
+      recordId: created.id,
+      action: 'create',
+      field: markSent ? 'Quote created and marked as sent' : 'Quote saved as draft',
+      oldValue: null,
+      newValue: `${created.reference} — ${quoteClientDisplayName(created, store.people, store.organisations)}`,
+      byId: opts.byId,
+      at: nowIso,
+    });
+    saveStore(store);
+    return { quote: created };
+  }
+
+  // Update existing quote
+  const wasSentNow = markSent && existing.status === 'Draft';
+  existing.clientType = clientType;
+  existing.linkedOrganisationId = linkedOrganisationId;
+  existing.linkedPersonId = linkedPersonId;
+  existing.prospectName = prospectName;
+  existing.prospectOrganisationName = prospectOrganisationName;
+  existing.prospectEmail = prospectEmail;
+  existing.prospectPhone = prospectPhone;
+  existing.linkedEnquiryId =
+    input.linkedEnquiryId !== undefined ? input.linkedEnquiryId || null : existing.linkedEnquiryId;
+  existing.practiceAreaId = input.practiceAreaId;
+  existing.workTypeSubcategoryId = input.workTypeSubcategoryId || null;
+  existing.scope = input.scope.trim();
+  existing.assumptions = (input.assumptions ?? '').trim();
+  existing.feeBasis = input.feeBasis;
+  existing.feeAmountExVat = totals.feeAmountExVat;
+  existing.hourlyRateGbp =
+    input.feeBasis === 'Hourly rate with estimate'
+      ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+      : null;
+  existing.vatAmount = totals.vatOnFee;
+  existing.vatOverridden = Boolean(input.vatOverridden);
+  existing.disbursements = disbursements;
+  existing.totalIncVat = totals.totalIncVat;
+  existing.feeEarnerId = feeEarnerId;
+  existing.assignedTeamId = assignedTeamId;
+  existing.validUntil = validUntil;
+  existing.followUpAfterDays = followUpAfterDays;
+  existing.updatedById = opts.byId;
+  existing.updatedAt = nowIso;
+
+  if (wasSentNow || markSent) {
+    existing.status = 'Sent';
+    existing.sentAt = nowIso;
+    existing.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
+    existing.timeline.push({
+      id: `QT-${Date.now()}-sent`,
+      kind: 'sent',
+      at: nowIso,
+      byId: opts.byId,
+      title: `v${existing.version} marked as sent`,
+      detail: `Follow-up scheduled for ${existing.nextFollowUpDate}`,
+    });
+  } else {
+    existing.status = evaluateQuoteEffectiveStatus(existing, now);
+  }
+
+  writeAudit(store, {
+    recordType: 'quote',
+    recordId: existing.id,
+    action: 'update',
+    field: wasSentNow ? 'Quote marked as sent' : 'Quote updated',
+    oldValue: null,
+    newValue: `${existing.reference} (v${existing.version})`,
+    byId: opts.byId,
+    at: nowIso,
+  });
+  saveStore(store);
+  return { quote: existing };
+}
+
+export function markQuoteSentRecord(
+  quoteId: string,
+  byId: string,
+): { quote?: Quote; error?: string } {
+  const store = getStore();
+  const quote = store.quotes.find((q) => q.id === quoteId);
+  if (!quote) return { error: 'Quote not found.' };
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const followUpDays = Math.max(1, quote.followUpAfterDays || 7);
+  const nextFollowUpDate = toIsoDate(addDays(now, followUpDays));
+
+  quote.status = 'Sent';
+  quote.sentAt = nowIso;
+  quote.nextFollowUpDate = nextFollowUpDate;
+  quote.updatedAt = nowIso;
+  quote.updatedById = byId;
+
+  quote.timeline.push({
+    id: `QT-${Date.now()}`,
+    kind: 'sent',
+    at: nowIso,
+    byId,
+    title: `v${quote.version} marked as sent`,
+    detail: `First follow-up scheduled for ${nextFollowUpDate} (${followUpDays} days)`,
+  });
+
+  writeAudit(store, {
+    recordType: 'quote',
+    recordId: quote.id,
+    action: 'status-change',
+    field: 'Mark as sent',
+    oldValue: 'Draft',
+    newValue: `Sent (follow-up due ${nextFollowUpDate})`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { quote };
+}
+
+export function logQuoteFollowUpRecord(
+  quoteId: string,
+  input: {
+    method: ContactLogMethod;
+    note: string;
+    nextFollowUpDate: string | null;
+  },
+  byId: string,
+): { quote?: Quote; error?: string } {
+  const store = getStore();
+  const quote = store.quotes.find((q) => q.id === quoteId);
+  if (!quote) return { error: 'Quote not found.' };
+  if (!input.note?.trim()) {
+    return { error: 'Please enter a follow-up note.' };
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const todayYmd = toIsoDate(now);
+  const nextDate = input.nextFollowUpDate || toIsoDate(addDays(now, quote.followUpAfterDays || 7));
+
+  quote.followUps.unshift({
+    id: `QFU-${Date.now()}`,
+    at: nowIso,
+    method: input.method,
+    note: input.note.trim(),
+    nextFollowUpDate: nextDate,
+    byId,
+  });
+
+  quote.nextFollowUpDate = nextDate;
+  if (quote.status === 'Follow-up due' && nextDate > todayYmd) {
+    quote.status = 'Sent';
+  }
+  quote.status = evaluateQuoteEffectiveStatus(quote, now);
+  quote.updatedAt = nowIso;
+  quote.updatedById = byId;
+
+  quote.timeline.push({
+    id: `QT-${Date.now()}`,
+    kind: 'follow_up',
+    at: nowIso,
+    byId,
+    title: `Follow-up logged (${input.method})`,
+    detail: `${input.note.trim()}${nextDate ? ` · Next follow-up: ${nextDate}` : ''}`,
+  });
+
+  writeAudit(store, {
+    recordType: 'quote',
+    recordId: quote.id,
+    action: 'contact-log',
+    field: `Quote follow-up (${input.method})`,
+    oldValue: null,
+    newValue: input.note.trim(),
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { quote };
+}
+
+export function reviseQuoteRecord(
+  quoteId: string,
+  input: {
+    feeBasis: QuoteFeeBasis;
+    feeAmountExVat: number;
+    hourlyRateGbp?: number | null;
+    vatAmount?: number;
+    vatOverridden?: boolean;
+    disbursements?: QuoteDisbursement[];
+    scope: string;
+    assumptions?: string;
+    validUntil?: string;
+    followUpAfterDays?: number;
+    revisionNote?: string;
+    markAsSent?: boolean;
+  },
+  byId: string,
+): { quote?: Quote; error?: string } {
+  const store = getStore();
+  const quote = store.quotes.find((q) => q.id === quoteId);
+  if (!quote) return { error: 'Quote not found.' };
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  // Archive current version as Superseded
+  quote.versionHistory.push({
+    version: quote.version,
+    status: 'Superseded',
+    feeBasis: quote.feeBasis,
+    feeAmountExVat: quote.feeAmountExVat,
+    hourlyRateGbp: quote.hourlyRateGbp,
+    vatAmount: quote.vatAmount,
+    disbursements: structuredClone(quote.disbursements),
+    totalIncVat: quote.totalIncVat,
+    scope: quote.scope,
+    assumptions: quote.assumptions,
+    validUntil: quote.validUntil,
+    createdAt: quote.createdAt,
+    sentAt: quote.sentAt,
+    supersededAt: nowIso,
+    byId,
+    revisionNote: input.revisionNote?.trim() || undefined,
+  });
+
+  const prevVersion = quote.version;
+  const nextVersion = prevVersion + 1;
+
+  const disbursements: QuoteDisbursement[] = (input.disbursements ?? quote.disbursements)
+    .filter((d) => d.description.trim() || Number(d.amountExVat) > 0)
+    .map((d, idx) => ({
+      id: d.id || `QDISB-${Date.now()}-${idx}`,
+      description: d.description.trim() || 'Disbursement',
+      amountExVat: Math.max(0, Number(d.amountExVat) || 0),
+      vatApplicable: Boolean(d.vatApplicable),
+    }));
+
+  const totals = calculateQuoteTotals(
+    input.feeAmountExVat,
+    input.vatOverridden ? input.vatAmount : null,
+    disbursements,
+  );
+
+  const followUpAfterDays = Math.max(
+    1,
+    Number(input.followUpAfterDays) || quote.followUpAfterDays || 7,
+  );
+
+  quote.version = nextVersion;
+  quote.feeBasis = input.feeBasis;
+  quote.feeAmountExVat = totals.feeAmountExVat;
+  quote.hourlyRateGbp =
+    input.feeBasis === 'Hourly rate with estimate'
+      ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+      : null;
+  quote.vatAmount = totals.vatOnFee;
+  quote.vatOverridden = Boolean(input.vatOverridden);
+  quote.disbursements = disbursements;
+  quote.totalIncVat = totals.totalIncVat;
+  quote.scope = input.scope.trim();
+  quote.assumptions = (input.assumptions ?? '').trim();
+  quote.validUntil = input.validUntil || toIsoDate(addDays(now, 30));
+  quote.followUpAfterDays = followUpAfterDays;
+  quote.outcomeAt = null;
+  quote.outcomeNote = undefined;
+  quote.declineReason = null;
+  quote.declineNote = undefined;
+  quote.updatedAt = nowIso;
+  quote.updatedById = byId;
+
+  const markSent = Boolean(input.markAsSent);
+  if (markSent) {
+    quote.status = 'Sent';
+    quote.sentAt = nowIso;
+    quote.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
+  } else {
+    quote.status = 'Draft';
+    quote.sentAt = null;
+    quote.nextFollowUpDate = null;
+  }
+
+  quote.timeline.push({
+    id: `QT-${Date.now()}-rev`,
+    kind: 'revised',
+    at: nowIso,
+    byId,
+    title: `Revised quote to v${nextVersion} (v${prevVersion} marked Superseded)`,
+    detail:
+      input.revisionNote?.trim() ||
+      `Updated to ${quote.feeBasis} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
+  });
+
+  if (markSent) {
+    quote.timeline.push({
+      id: `QT-${Date.now()}-sent`,
+      kind: 'sent',
+      at: nowIso,
+      byId,
+      title: `v${nextVersion} marked as sent`,
+      detail: `Next follow-up scheduled for ${quote.nextFollowUpDate}`,
+    });
+  }
+
+  writeAudit(store, {
+    recordType: 'quote',
+    recordId: quote.id,
+    action: 'update',
+    field: `Quote revised to v${nextVersion}`,
+    oldValue: `v${prevVersion} (Superseded)`,
+    newValue: `v${nextVersion} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT (${quote.status})`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { quote };
+}
+
+export function recordQuoteOutcomeRecord(
+  quoteId: string,
+  input: {
+    outcome: 'Accepted' | 'Declined';
+    declineReason?: QuoteDeclineReason | null;
+    note?: string;
+  },
+  byId: string,
+): { quote?: Quote; error?: string } {
+  const store = getStore();
+  const quote = store.quotes.find((q) => q.id === quoteId);
+  if (!quote) return { error: 'Quote not found.' };
+
+  if (input.outcome === 'Declined') {
+    if (!input.declineReason) {
+      return { error: 'Please select a reason for declining the quote.' };
+    }
+    if (input.declineReason === 'Other' && !input.note?.trim()) {
+      return { error: 'Please provide a note when selecting "Other" as the decline reason.' };
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const prevStatus = quote.status;
+  quote.status = input.outcome;
+  quote.outcomeAt = nowIso;
+  quote.nextFollowUpDate = null;
+  quote.updatedAt = nowIso;
+  quote.updatedById = byId;
+
+  if (input.outcome === 'Accepted') {
+    quote.outcomeNote = input.note?.trim() || undefined;
+    quote.declineReason = null;
+    quote.declineNote = undefined;
+    quote.timeline.push({
+      id: `QT-${Date.now()}`,
+      kind: 'accepted',
+      at: nowIso,
+      byId,
+      title: 'Outcome recorded: Accepted',
+      detail: input.note?.trim() || 'Client accepted the quote.',
+    });
+  } else {
+    quote.declineReason = input.declineReason!;
+    quote.declineNote = input.note?.trim() || undefined;
+    quote.timeline.push({
+      id: `QT-${Date.now()}`,
+      kind: 'declined',
+      at: nowIso,
+      byId,
+      title: `Outcome recorded: Declined (${input.declineReason})`,
+      detail: input.note?.trim() || undefined,
+    });
+  }
+
+  writeAudit(store, {
+    recordType: 'quote',
+    recordId: quote.id,
+    action: 'status-change',
+    field: 'Quote outcome',
+    oldValue: prevStatus,
+    newValue:
+      input.outcome === 'Declined'
+        ? `Declined · ${input.declineReason}${input.note?.trim() ? ` (${input.note.trim()})` : ''}`
+        : `Accepted${input.note?.trim() ? ` (${input.note.trim()})` : ''}`,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { quote };
+}
+
+/**
+ * Prepare a quote for conversion to a matter:
+ * Ensures a Person and/or Organisation record exists for the client/prospect,
+ * links them on the quote, and returns clientId & instructingContactId for /matters/new.
+ */
+export function prepareQuoteConversionRecord(
+  quoteId: string,
+  byId: string,
+): {
+  ok: boolean;
+  clientId?: string;
+  instructingContactId?: string | null;
+  quoteId?: string;
+  enquiryId?: string | null;
+  error?: string;
+} {
+  const store = getStore();
+  const quote = store.quotes.find((q) => q.id === quoteId);
+  if (!quote) return { ok: false, error: 'Quote not found.' };
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const today = toIsoDate(now);
+
+  let personId = quote.linkedPersonId;
+  let orgId = quote.linkedOrganisationId;
+
+  // If linked to an enquiry that already has linkedPersonId / linkedOrganisationId, inherit if missing
+  if (quote.linkedEnquiryId) {
+    const enq = store.enquiries.find((e) => e.id === quote.linkedEnquiryId);
+    if (enq) {
+      if (!personId && enq.linkedPersonId) personId = enq.linkedPersonId;
+      if (!orgId && enq.linkedOrganisationId) orgId = enq.linkedOrganisationId;
+    }
+  }
+
+  const hasOrgName = Boolean(quote.prospectOrganisationName.trim());
+  const hasPersonName = Boolean(quote.prospectName.trim());
+
+  if (!personId && hasPersonName) {
+    const parts = quote.prospectName.trim().split(/\s+/);
+    const firstName = parts[0] || 'Client';
+    const surname = parts.slice(1).join(' ') || 'Contact';
+
+    const createdPerson = savePersonRecord(
+      {
+        firstName,
+        surname,
+        emails: quote.prospectEmail
+          ? [
+              {
+                id: `em_${Date.now()}`,
+                address: quote.prospectEmail,
+                typeId: vid('email_type', hasOrgName ? 'Work' : 'Personal'),
+                isPrimary: true,
+              },
+            ]
+          : [],
+        phones: quote.prospectPhone
+          ? [
+              {
+                id: `ph_${Date.now()}`,
+                number: quote.prospectPhone,
+                typeId: vid('phone_type', 'Mobile'),
+              },
+            ]
+          : [],
+        relationshipStatusId: vid('relationship_status', 'Prospective'),
+        relationshipRoleIds: [
+          vid('person_role', hasOrgName ? 'Client contact' : 'Private client'),
+        ],
+        relationshipOwnerId: quote.feeEarnerId || byId,
+        sourceId: vid('data_source', 'Manual entry'),
+      },
+      { byId },
+    );
+    personId = createdPerson.person.id;
+  }
+
+  if (!orgId && hasOrgName) {
+    const createdOrg = saveOrganisationRecord(
+      {
+        legalName: quote.prospectOrganisationName.trim(),
+        generalEmail: quote.prospectEmail,
+        mainPhone: quote.prospectPhone,
+        relationshipPartnerId: quote.feeEarnerId || byId,
+        relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
+        relationshipStatusId: vid('relationship_status', 'Prospective'),
+        conflictStatusId: vid('conflict_status', 'Cleared'),
+      },
+      { byId },
+    );
+    orgId = createdOrg.organisation.id;
+
+    if (personId && orgId) {
+      const linkExists = store.links.some(
+        (l) => l.personId === personId && l.organisationId === orgId,
+      );
+      if (!linkExists) {
+        createOrUpdateLink(
+          {
+            personId,
+            organisationId: orgId,
+            jobTitle: '',
+            department: '',
+            roleWithinOrganisation: 'Instructing contact',
+            contactRoleIds: [vid('contact_role', 'Key relationship contact')],
+            isPrimaryContact: true,
+            isCurrent: true,
+            startDate: today,
+            endDate: null,
+            contactStatusId: vid('contact_status', 'Active'),
+          },
+          byId,
+        );
+      }
+    }
+  }
+
+  quote.linkedPersonId = personId;
+  quote.linkedOrganisationId = orgId;
+  quote.updatedAt = nowIso;
+  quote.updatedById = byId;
+
+  saveStore(store);
+
+  const clientId = orgId || personId || '';
+  const instructingContactId = orgId ? personId : personId;
+
+  return {
+    ok: true,
+    clientId,
+    instructingContactId,
+    quoteId: quote.id,
+    enquiryId: quote.linkedEnquiryId,
+  };
+}
+
+function finalizeQuoteConversionToMatter(
+  store: FirmStore,
+  quoteId: string,
+  matter: Matter,
+  byId: string,
+  now: string,
+): void {
+  const quote = store.quotes.find((q) => q.id === quoteId);
+  if (!quote) return;
+
+  const alreadyConverted = quote.convertedMatterId === matter.id;
+  quote.status = 'Accepted';
+  quote.convertedMatterId = matter.id;
+  if (!quote.outcomeAt) quote.outcomeAt = now;
+  quote.nextFollowUpDate = null;
+  quote.updatedAt = now;
+  quote.updatedById = byId;
+
+  if (!alreadyConverted) {
+    quote.timeline.push({
+      id: `QT-${Date.now()}-conv`,
+      kind: 'converted',
+      at: now,
+      byId,
+      title: `Converted to matter ${matter.matterNumber === 'DRAFT' ? '(Draft)' : matter.matterNumber}`,
+      detail: `${matter.title} (${matter.id})`,
+    });
+
+    writeAudit(store, {
+      recordType: 'quote',
+      recordId: quote.id,
+      action: 'convert',
+      field: 'Converted to matter',
+      oldValue: quote.reference,
+      newValue: `${matter.matterNumber} — ${matter.title} (${matter.id})`,
+      byId,
+      at: now,
+    });
+  }
+
+  // Also close any linked enquiry and link it to the matter
+  if (quote.linkedEnquiryId) {
+    if (!matter.sourceEnquiryId) {
+      matter.sourceEnquiryId = quote.linkedEnquiryId;
+    }
+    finalizeEnquiryConversionToMatter(store, quote.linkedEnquiryId, matter, byId, now);
+  }
+}
+
+export function saveMatterCostsConfig(
+  config: MatterCostsConfig,
+  byId: string = DEFAULT_USER_ID,
+): MatterCostsConfig {
+  const store = getStore();
+  const now = new Date().toISOString();
+  const next: MatterCostsConfig = {
+    ...config,
+    updatedAt: now,
+    updatedById: byId,
+  };
+  store.matterCostsConfig = next;
+  writeAudit(store, {
+    recordType: 'matter',
+    recordId: 'FIRM-MATTER-COSTS-CONFIG',
+    action: 'update',
+    field: 'Matter Costs & Rates Table Config',
+    oldValue: null,
+    newValue: `${next.clientProfileName} (${next.rateSourceMode}, ${next.rateCards.length} rate cards)`,
+    byId,
+    at: now,
+  });
+  saveStore(store);
+  return next;
+}
+
+export function syncMatterCostsRatesFromPms(
+  byId: string = DEFAULT_USER_ID,
+): MatterCostsConfig {
+  const store = getStore();
+  const pms = getPmsSource();
+  const feeEarners = pms.listFeeEarners();
+  const base = store.matterCostsConfig ?? createDefaultMatterCostsConfig(store.values);
+  const synced = syncRateCardsWithPmsFeeEarners(base, feeEarners, store.values);
+  const now = new Date().toISOString();
+  const next: MatterCostsConfig = {
+    ...synced,
+    pmsLinkActive: true,
+    updatedAt: now,
+    updatedById: byId,
+  };
+  store.matterCostsConfig = next;
+  writeAudit(store, {
+    recordType: 'matter',
+    recordId: 'FIRM-MATTER-COSTS-CONFIG',
+    action: 'update',
+    field: 'PMS Rate Cards Sync',
+    oldValue: base.pmsLastSyncedAt ?? 'Never',
+    newValue: `Synced ${feeEarners.length} fee earner rates from PMS (${now})`,
+    byId,
+    at: now,
+  });
+  saveStore(store);
+  return next;
+}
+
+
+
+

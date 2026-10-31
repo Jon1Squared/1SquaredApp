@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.1squared.uk/schemas/extension-manifest.schema.json",
+  "title": "ExtensionManifest",
+  "description": "Manifest schema for sandboxed client extensions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "name",
+    "version",
+    "description",
+    "supportedCoreApiRange",
+    "permissions",
+    "hooks"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "description": { "type": "string" },
+    "supportedCoreApiRange": { "type": "string" },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "matter:read",
+          "matter:costs:validate",
+          "matter:open:gate",
+          "config:read",
+          "audit:write"
+        ]
+      }
+    },
+    "hooks": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "beforeMatterCostsCalculate",
+          "afterMatterCostsCalculate",
+          "beforeMatterOpen",
+          "afterMatterOpen"
+        ]
+      }
+    },
+    "uiSlots": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "hookTimeoutMs": {
+      "type": "number",
+      "default": 2000
+    }
+  }
+}
