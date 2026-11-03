@@ -16,7 +16,7 @@ We need a first-class **Key Dates & Limitation** module across the platform that
 5. Drives reminders through a **single-task, non-stacking reminder state machine** in the existing tasks domain (`src/domain/tasks.ts`), updating one linked task in place as reminder stages progress or escalate.
 6. Provides a **Team Diary** (month, week, and list views) where each key date belongs to a team diary (`teamId`) as its backup owner, alongside an **Exceptions report** for compliance oversight.
 7. Enforces strict **staff/restricted matter isolation** in the data layer across the diary, reminders, exceptions, and calendar sync.
-8. Offers **one-way calendar sync** to Microsoft Outlook via Microsoft Graph using managed identities or Key Vault-referenced credentials, with the platform as the sole source of truth.
+8. Defines the contract and state model (`KeyDateCalendarSync`) for **one-way calendar sync** to Microsoft Outlook via Microsoft Graph (not available in Phase 1; records remain in state `'disabled'` until a live Microsoft Graph adapter is delivered), with the platform as the sole source of truth.
 9. Exposes additive extension points (`keyDate.beforeCreate`, `keyDate.afterStatusChange`, `keyDate.calculateCustomRule`) and extension permissions (`keydate:read`, `keydate:write`) in `@platform/core-api`.
 
 During design inspection against `docs/architecture-standard.md` and existing ADRs (notably ADR-0001, ADR-0010, ADR-0011, ADR-0014, and ADR-0016), several structural integration questions arose between the module specification and the existing codebase. This ADR records our architectural decisions for those integration points.
@@ -72,11 +72,11 @@ Every confirmed key date has at most one `KeyDateReminderState` and **one** link
 - Each `KeyDate` requires a `teamId` (`Team.id`), defaulting to the matter's owning team (or the enquiry's `assignedTeamId`), and `responsiblePersonIds` defaulting to the employees on the matter (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `teamMemberIds`).
 - **Restricted (staff) matter isolation:** Enforced in the data/service layer before records reach any UI, reminder dispatcher, exception report, or calendar sync job. For any matter where `isStaffMatter === true` or `restrictedAccessUserIds.length > 0`, key dates, reminders, and exceptions are omitted completely (with no placeholder) unless the viewer is authorised (in `matter.restrictedAccessUserIds`). Restricted matters **never** sync to external calendars under any configuration.
 
-### 7. One-Way Outlook Calendar Sync via Microsoft Graph
+### 7. One-Way Outlook Calendar Sync Contract (Deferred Live Graph Adapter)
 
-- Calendar sync is resolved from `matterTypes[].calendarSync.enabled` falling back to `defaults.calendarSync.enabled` (`true`).
-- Sync is strictly one-way to Microsoft Graph using Azure Managed Identity (`ManagedIdentityGraphCalendarAdapter`; never credentials or secrets in config or code). When live Microsoft Graph connectivity is not enabled on the default adapter, `KeyDateCalendarSync.state` is recorded as `'disabled'` rather than `'synced'`.
-- Event titles are rendered from `calendarSync.eventTitleTemplate` (`{matterReference}`, `{keyDateTypeLabel}`, `{title}`, `{category}`) without client names or personal data, and restricted matters are unconditionally excluded. Reassigning a key date re-runs calendar sync and deletes any removed owner's external event. Sync failures are recorded in `KeyDateCalendarSync` (`state: 'failed'`, `lastError` redacted of personal/client content) and surfaced in the compliance exceptions view as `calendar_sync_failed`.
+- Calendar sync policy is resolved from `matterTypes[].calendarSync.enabled` falling back to `defaults.calendarSync.enabled` (`true`).
+- Microsoft Outlook synchronisation via Microsoft Graph is **not available in Phase 1**. Until a live Microsoft Graph calendar adapter is delivered in a subsequent release, no external Graph calls are made by default (`ManagedIdentityGraphCalendarAdapter.isLiveGraphConfigured` is `false`) and every `KeyDateCalendarSync` record remains in state `'disabled'` (never marked `'synced'` without an injected adapter).
+- When a calendar adapter is supplied, event titles are rendered from `calendarSync.eventTitleTemplate` (`{matterReference}`, `{keyDateTypeLabel}`, `{title}`, `{category}`) without client names or personal data, and restricted matters are unconditionally excluded. Reassigning a key date re-runs calendar sync and deletes any removed owner's external event. Sync failures are recorded in `KeyDateCalendarSync` (`state: 'failed'`, `lastError` redacted of personal/client content) and surfaced in the compliance exceptions view as `calendar_sync_failed`.
 
 ### 8. Extension API v1.1.0
 

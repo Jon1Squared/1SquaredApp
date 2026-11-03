@@ -6,8 +6,6 @@
  * permission drift reconciliation.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   ALL_PERMISSION_KEYS,
@@ -68,11 +66,11 @@ import { personDisplayName } from '@/domain/names';
 import { resolvePersonPermissions } from '@/domain/rbac';
 import type { Matter, Person } from '@/domain/types';
 import {
-  brandVerifiedSessionActor,
-  getActiveTenantBaseConfigPath,
+  getActiveTenantConfiguration,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
-import { DEFAULT_USER_ID, type FirmStore, getStore, saveStore } from './store';
+import { createVerifiedSessionActorFromEntraSession } from './entraAuth';
+import { type FirmStore, getStore, saveStore } from './store';
 
 declare global {
   var __oneSquaredDocStoreRegistry: DocumentStoreProviderRegistry | undefined;
@@ -101,16 +99,25 @@ export function resetDocumentStoreSingletonsForTesting(): void {
   globalThis.__oneSquaredDocStoreHydratedTenants = undefined;
 }
 
-const TENANT_BASE_CONFIG_PATH = getActiveTenantBaseConfigPath();
-
 export function loadActiveDocumentTenantConfig(
   store: FirmStore = getStore(),
 ): TenantConfiguration {
-  const rawBase = JSON.parse(
-    fs.readFileSync(TENANT_BASE_CONFIG_PATH, 'utf8'),
-  ) as Record<string, unknown>;
+  const rawBase = getActiveTenantConfiguration() as unknown as Record<
+    string,
+    unknown
+  >;
 
   const override = store.documentStoreConfigOverride ?? {};
+  const hasOverride =
+    override.documentStores !== undefined ||
+    override.documentRouting !== undefined ||
+    override.matterFolderNameTemplate !== undefined ||
+    override.documentAccess !== undefined ||
+    override.matterFolderTemplates !== undefined;
+  if (!hasOverride) {
+    return rawBase as unknown as TenantConfiguration;
+  }
+
   const overlay: Record<string, unknown> = {};
   if (override.documentStores) {
     overlay.documentStores = override.documentStores;
@@ -187,9 +194,7 @@ export function resolvePersonEntraIdentity(
     };
   }
 
-  const oid =
-    person.entraObjectId ||
-    `oid-emp-${person.id.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  const oid = person.entraObjectId?.trim() || undefined;
 
   const { departmentId, teamId } = resolvePersonOrgAssignment(person, store);
   const groups: string[] = [];
@@ -283,20 +288,29 @@ export function buildTenantContextForUser(
       ? [...ALL_PERMISSION_KEYS]
       : resolvedPerms;
 
+  const nowIso = new Date().toISOString();
   const ctx = resolveCurrentTenantContext(
-    brandVerifiedSessionActor({
-      id: user.id,
-      tenantId: config.tenantId,
-      name: personDisplayName(user),
-      email: entraInfo.upn,
-      upn: entraInfo.upn,
-      roles: roles.length > 0 ? roles : ['fee_earner'],
-      groups: entraInfo.groups,
-      entraObjectId: entraInfo.entraObjectId,
-      entraTenantId: config.documentStores?.[0]?.auth.entraTenantId,
-      mfaVerified: options?.mfaVerified ?? false,
-      correlationId: options?.correlationId ?? `corr-${randomUUID()}`,
-    }),
+    createVerifiedSessionActorFromEntraSession(
+      {
+        personId: user.id,
+        oid: entraInfo.entraObjectId ?? '',
+        tid: config.documentStores?.[0]?.auth.entraTenantId ?? '',
+        sub: user.id,
+        email: entraInfo.upn,
+        displayName: personDisplayName(user),
+        entraRoles: roles.length > 0 ? [...roles] : ['fee_earner'],
+        mappedRoles: roles.length > 0 ? [...roles] : ['fee_earner'],
+        entraGroups: entraInfo.groups,
+        mfaVerified: options?.mfaVerified ?? false,
+        amr: options?.mfaVerified ? ['pwd', 'mfa'] : ['pwd'],
+        authenticatedAt: nowIso,
+        expiresAt: nowIso,
+      },
+      {
+        tenantId: config.tenantId,
+        correlationId: options?.correlationId ?? `corr-${randomUUID()}`,
+      },
+    ),
     config,
   );
 
@@ -490,6 +504,16 @@ export function buildMatterRoutingSubject(
   };
 }
 
+let customBeforeMatterDocumentsCloseHook:
+  | DocumentLifecycleDependencies['onBeforeMatterDocumentsClose']
+  | undefined;
+
+export function setBeforeMatterDocumentsCloseHookForTesting(
+  hook: DocumentLifecycleDependencies['onBeforeMatterDocumentsClose'] | undefined,
+): void {
+  customBeforeMatterDocumentsCloseHook = hook;
+}
+
 export function buildLifecycleDependencies(
   ctx: TenantContext,
   store: FirmStore = getStore(),
@@ -497,6 +521,22 @@ export function buildLifecycleDependencies(
 ): DocumentLifecycleDependencies {
   const repo = ensureRepositorySyncedWithStore(ctx, store);
   const registry = getRegistrySingleton();
+
+  const protectedContainerPaths = new Set<string>();
+  for (const dept of store.orgStructure.departments ?? []) {
+    if (dept.code) protectedContainerPaths.add(dept.code);
+    if (dept.id) protectedContainerPaths.add(dept.id);
+    for (const team of store.orgStructure.teamsOrPracticeGroups ?? []) {
+      if (team.parentDepartmentId === dept.id) {
+        if (dept.code && team.code) {
+          protectedContainerPaths.add(`${dept.code}/${team.code}`);
+        }
+        if (dept.id && team.id) {
+          protectedContainerPaths.add(`${dept.id}/${team.id}`);
+        }
+      }
+    }
+  }
 
   return {
     repository: repo,
@@ -526,6 +566,8 @@ export function buildLifecycleDependencies(
     matterFolderNameTemplate:
       config.matterFolderNameTemplate ??
       '{matterNumber} - {matterDescription}',
+    protectedContainerPaths: Array.from(protectedContainerPaths),
+    onBeforeMatterDocumentsClose: customBeforeMatterDocumentsCloseHook,
     resolveUserEntraObjectId: (_c: TenantContext, userId: string) => {
       const p = store.people.find((person) => person.id === userId);
       if (!p) return null;
@@ -619,7 +661,8 @@ function createMatterTreeItemVerifier(
 
 /**
  * Seeds sample files into a newly provisioned matter folder in the mocked SharePoint store
- * so users browsing the Matter -> Documents tab see realistic folders and files right away.
+ * only when Demo Mode (`featureFlags.enableDemoMode`) is explicitly enabled in a non-live environment (R20).
+ * Never constructs a user OBO assertion or injects library-root admin groups.
  */
 async function seedSampleDocumentsForMatterLocation(
   ctx: TenantContext,
@@ -630,8 +673,15 @@ async function seedSampleDocumentsForMatterLocation(
   config?: TenantConfiguration,
 ): Promise<void> {
   if (location.provisioningStatus !== 'provisioned') return;
-  const provider = deps.getProvider(location.storeId);
+  const activeCfg = config ?? loadActiveDocumentTenantConfig(store);
+  if (
+    !activeCfg.featureFlags?.enableDemoMode ||
+    activeCfg.environment === 'live'
+  ) {
+    return;
+  }
 
+  const provider = deps.getProvider(location.storeId);
   const clientCareFolderId =
     location.folderItemMap['01 Client Care'] ?? location.providerFolderItemId;
   const correspondenceFolderId =
@@ -639,56 +689,17 @@ async function seedSampleDocumentsForMatterLocation(
   const draftsFolderId =
     location.folderItemMap['03 Drafts'] ?? location.providerFolderItemId;
 
-  // Use a user context representing the lead fee earner (or a real admin employee if the lead is not in the routed team) with only their own resolved Entra groups
-  const activeCfg = config ?? loadActiveDocumentTenantConfig(store);
-  const leadId =
-    matter.leadFeeEarnerId ||
-    matter.supervisingPartnerId ||
-    matter.responsiblePartnerId ||
-    ctx.actorId;
-  const leadPerson = store.people.find((p) => p.id === leadId);
-  const adminPerson = store.people.find(
-    (p) =>
-      p.isEmployee &&
-      !p.mergedIntoId &&
-      (p.appRole === 'admin' || p.roles?.includes('admin')),
-  );
-  const seedActorPerson =
-    (matter.isStaffMatter
-      ? store.people.find((p) =>
-          (matter.restrictedAccessUserIds ?? []).includes(p.id),
-        )
-      : leadPerson) ??
-    adminPerson ??
-    leadPerson;
-  const seedActorId = seedActorPerson?.id ?? leadId;
-  const seedIdentity = seedActorPerson
-    ? resolvePersonEntraIdentity(seedActorPerson, activeCfg, store)
-    : undefined;
-  const seedGroups = [...(seedIdentity?.groups ?? [])];
-
-  const seedResolved = deps.resolveUserEntraObjectId(ctx, seedActorId);
-  const seedEntraObjectId =
-    seedResolved?.entraObjectId ?? seedIdentity?.entraObjectId;
-  if (!seedEntraObjectId) {
-    return;
-  }
-  const seedUserCtx: UserAccessContext = {
-    kind: 'user',
+  const provCtx: ProvisioningAccessContext = {
+    kind: 'provisioning',
     tenantContext: {
       ...ctx,
-      actorId: seedActorId,
-      entraObjectId: seedEntraObjectId,
-      actorGroups: seedGroups,
+      actorGroups: [],
     },
-    actorUserId: seedActorId,
-    entraObjectId: seedEntraObjectId,
-    userUpn: seedResolved?.upn ?? seedIdentity?.upn ?? ctx.actorEmail,
-    userAssertionToken: 'seed-user-obo-assertion',
+    triggerEvent: 'matter.documents.demo_seed',
   };
 
   try {
-    const existing = await provider.listItems(seedUserCtx, {
+    const existing = await provider.listItems(provCtx, {
       storeId: location.storeId,
       libraryId: location.libraryId,
       siteId: location.providerSiteId,
@@ -699,70 +710,70 @@ async function seedSampleDocumentsForMatterLocation(
       return;
     }
 
-    const engagementContent = new TextEncoder().encode(
-      `Client Care & Engagement Letter for ${matter.matterNumber} — ${matter.title}`,
-    );
-    await provider.uploadContent(
-      seedUserCtx,
-      {
-        storeId: location.storeId,
-        libraryId: location.libraryId,
-        siteId: location.providerSiteId,
-        driveId: location.providerDriveId,
-        folderItemId: clientCareFolderId,
-      },
+    const mockBackend = getRegistrySingleton().getMockBackend();
+    const seedFile = (
+      folderItemId: string,
+      fileName: string,
+      text: string,
+      mimeType: string,
+    ) => {
+      const { partition, item: parentFolder } = mockBackend.getItemOrThrow(
+        ctx.tenantId,
+        location.providerSiteId,
+        location.providerDriveId,
+        folderItemId,
+      );
+      if (mockBackend.findChildByName(partition, parentFolder.itemId, fileName)) {
+        return;
+      }
+      const bytes = new TextEncoder().encode(text);
+      const itemId = `sp-file-${randomUUID()}`;
+      const now = new Date().toISOString();
+      partition.items.set(itemId, {
+        itemId,
+        tenantId: partition.tenantId,
+        storeId: partition.storeId,
+        siteId: partition.siteId,
+        driveId: partition.driveId,
+        parentItemId: parentFolder.itemId,
+        itemType: 'file',
+        name: fileName,
+        relativePath: parentFolder.relativePath
+          ? `${parentFolder.relativePath}/${fileName}`
+          : fileName,
+        webUrl: `${parentFolder.webUrl}/${encodeURIComponent(fileName)}`,
+        sizeBytes: bytes.byteLength,
+        mimeType,
+        eTag: `"etag-${itemId}-1"`,
+        versionLabel: '1.0',
+        createdAt: now,
+        createdByDisplayName: '1Squared Demo Seed',
+        lastModifiedAt: now,
+        lastModifiedByDisplayName: '1Squared Demo Seed',
+        contentBytes: bytes,
+        inheritsFromParent: true,
+        directGrants: [],
+        sharingLinks: [],
+      });
+    };
+
+    seedFile(
+      clientCareFolderId,
       `${matter.matterNumber} - Client Care & Engagement Letter.docx`,
-      engagementContent,
-      engagementContent.byteLength,
-      {
-        conflictBehavior: 'replace',
-        mimeType:
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      },
+      `Client Care & Engagement Letter for ${matter.matterNumber} — ${matter.title}`,
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     );
-
-    const attendanceContent = new TextEncoder().encode(
-      `Initial Client Attendance Note for ${matter.matterNumber} — ${matter.title}`,
-    );
-    await provider.uploadContent(
-      seedUserCtx,
-      {
-        storeId: location.storeId,
-        libraryId: location.libraryId,
-        siteId: location.providerSiteId,
-        driveId: location.providerDriveId,
-        folderItemId: correspondenceFolderId,
-      },
+    seedFile(
+      correspondenceFolderId,
       `${matter.matterNumber} - Initial Attendance Note.docx`,
-      attendanceContent,
-      attendanceContent.byteLength,
-      {
-        conflictBehavior: 'replace',
-        mimeType:
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      },
+      `Initial Client Attendance Note for ${matter.matterNumber} — ${matter.title}`,
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     );
-
-    const draftContent = new TextEncoder().encode(
-      `Working Issues List & Draft Schedule for ${matter.matterNumber}`,
-    );
-    await provider.uploadContent(
-      seedUserCtx,
-      {
-        storeId: location.storeId,
-        libraryId: location.libraryId,
-        siteId: location.providerSiteId,
-        driveId: location.providerDriveId,
-        folderItemId: draftsFolderId,
-      },
+    seedFile(
+      draftsFolderId,
       `${matter.matterNumber} - Working Issues List.xlsx`,
-      draftContent,
-      draftContent.byteLength,
-      {
-        conflictBehavior: 'replace',
-        mimeType:
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      },
+      `Working Issues List & Draft Schedule for ${matter.matterNumber}`,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
   } catch {
     // Non-fatal if seeding sample files is skipped
@@ -862,7 +873,7 @@ export async function ensureMatterDocumentStoreProvisioned(
 export async function retryMatterDocumentProvisioning(
   matterId: string,
   userId: string,
-  options?: { mfaVerified?: boolean },
+  options?: { mfaVerified?: boolean; correlationId?: string },
 ): Promise<{
   location: MatterDocumentLocationRecord;
   job: DocumentLifecycleJobRecord;
@@ -942,6 +953,7 @@ export async function linkExistingMatterDocumentFolder(params: {
   allowRoutingMismatchOverride?: boolean;
   userId?: string;
   mfaVerified?: boolean;
+  correlationId?: string;
 }): Promise<{
   location: MatterDocumentLocationRecord;
   job: DocumentLifecycleJobRecord;
@@ -952,7 +964,7 @@ export async function linkExistingMatterDocumentFolder(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified },
+    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
 
@@ -1063,18 +1075,29 @@ export async function syncMatterLifecycleToDocumentStore(params: {
   }
 }
 
+const pendingLifecycleSyncPromises = new Set<Promise<void>>();
+
+export async function flushDocumentLifecycleSyncForTesting(): Promise<void> {
+  while (pendingLifecycleSyncPromises.size > 0) {
+    const batch = Array.from(pendingLifecycleSyncPromises);
+    await Promise.allSettled(batch);
+  }
+}
+
 /**
  * Updates document store location records and applies permission changes through `DocumentStoreProvider.setPermissions`
- * when a matter's lifecycle, team, or restriction state changes.
- * Fails closed with `UNAUTHENTICATED` if `userId` is missing or unknown; logs and records failed jobs & reconciliation
- * findings on provider failure.
+ * via the canonical lifecycle jobs (`closeMatterFolderJob`, `reopenMatterFolderJob`, `recalculateMatterPermissionsJob`,
+ * all executed through `runTenantBackgroundJob`).
+ * Fails closed synchronously with `UNAUTHENTICATED` if `userId` is missing or unknown; logs and records failed jobs &
+ * reconciliation findings on provider failure without writing premature `succeeded` records.
  */
 export function syncMatterLifecycleOnSaveSync(params: {
   matter: Matter;
   previousMatter?: Matter | null;
+  departmentChangeStrategy?: DepartmentChangeStrategy;
   userId?: string;
   store?: FirmStore;
-}): void {
+}): Promise<void> {
   const store = params.store ?? getStore();
   const config = loadActiveDocumentTenantConfig(store);
   const { ctx } = buildTenantContextForUser(params.userId ?? '', store, config);
@@ -1083,7 +1106,9 @@ export function syncMatterLifecycleOnSaveSync(params: {
     ctx,
     params.matter.id,
   );
-  if (existingLocs.length === 0) return;
+  if (existingLocs.length === 0) {
+    return Promise.resolve();
+  }
 
   const subject = buildMatterRoutingSubject(params.matter, store);
   const prevClosed = params.previousMatter
@@ -1096,166 +1121,33 @@ export function syncMatterLifecycleOnSaveSync(params: {
         ? 'reopened'
         : 'updated';
 
-  const triggerEvent =
-    event === 'closed'
-      ? 'matter.closed'
-      : event === 'reopened'
-        ? 'matter.reopened'
-        : 'matter.permissions.recalculated';
-  const now = new Date().toISOString();
-
-  for (const loc of existingLocs) {
-    if (loc.provisioningStatus !== 'provisioned') continue;
-    const permPlan = compileMatterFolderPermissions({
-      accessConfig: deps.accessConfig,
-      storeId: loc.storeId,
-      subject,
-      resolveUserEntraObjectId: (uid) => deps.resolveUserEntraObjectId(ctx, uid),
-    });
-
-    const recordProviderFailure = (err: unknown) => {
-      const norm = normaliseDocumentStoreError(err);
-      const errNow = new Date().toISOString();
-      console.error(
-        JSON.stringify({
-          level: 'error',
-          correlationId: ctx.correlationId,
-          tenantId: ctx.tenantId,
-          matterId: params.matter.id,
-          storeId: loc.storeId,
-          code: norm.code,
-          message: norm.message,
-        }),
-      );
-      deps.repository.putLifecycleJob(ctx, {
-        id: `job-perm-fail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        tenantId: ctx.tenantId,
-        correlationId: ctx.correlationId,
-        storeId: loc.storeId,
-        matterId: params.matter.id,
-        jobType: 'recalculate_permissions',
-        status: 'failed',
-        attemptCount: 1,
-        maxAttempts: 3,
-        triggeredByUserId: ctx.actorId || null,
-        triggerEvent,
-        payload: {
-          locationId: loc.id,
-          inherit: permPlan.inherit,
-          reason: permPlan.reason,
-        },
-        result: null,
-        lastErrorCode: norm.code,
-        lastErrorMessage: norm.message,
-        createdAt: errNow,
-        updatedAt: errNow,
-      });
-      deps.repository.putReconciliationFinding(ctx, {
-        id: `finding-sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        tenantId: ctx.tenantId,
-        storeId: loc.storeId,
-        libraryId: loc.libraryId,
-        matterId: params.matter.id,
-        providerItemId: loc.providerFolderItemId,
-        scopeIdentifier: params.matter.id,
-        findingType: 'unexpected_grant',
-        severity: 'high',
-        status: 'open',
-        intendedState: {
-          reason: permPlan.reason,
-        },
-        actualState: {
-          errorCode: norm.code,
-          errorMessage: norm.message,
-        },
-        detectedAt: errNow,
-        remediatedAt: null,
-        remediatedByUserId: null,
-      });
-      deps.repository.appendAuditEvent(
-        ctx,
-        buildDocumentStoreAuditEvent({
-          context: ctx,
-          identityUsed: 'provisioning',
-          triggerEvent,
-          action: 'lifecycle:matter:permissions_updated',
-          matterId: params.matter.id,
-          storeId: loc.storeId,
-          libraryId: loc.libraryId,
-          providerItemId: loc.providerFolderItemId,
-          outcome: 'failed',
-          errorCode: norm.code,
-        }),
-      );
-      persistRepositoryToStore(ctx, deps.repository, store, {
-        skipDiskSave: true,
-      });
-    };
-
+  const runPromise = (async () => {
     try {
-      const provider = deps.getProvider(loc.storeId);
-      const provCtx = Object.freeze({
-        kind: 'provisioning' as const,
-        tenantContext: ctx,
-        triggeredByUserId: ctx.actorId || null,
-        triggerEvent,
-      });
-      const setPermPromise = provider.setPermissions(
-        provCtx,
-        {
-          storeId: loc.storeId,
-          siteId: loc.providerSiteId,
-          driveId: loc.providerDriveId,
-          itemId: loc.providerFolderItemId,
-        },
-        permPlan.grants,
-        { inherit: permPlan.inherit },
-      );
-
-      deps.repository.putMatterLocation(ctx, {
-        ...loc,
-        hasUniquePermissions: !permPlan.inherit,
-        uniqueScopeCount: permPlan.consumesUniqueScope ? 1 : 0,
-        intendedGrants: permPlan.grants,
-        updatedAt: now,
-      });
-      deps.repository.putLifecycleJob(ctx, {
-        id: `job-perm-sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        tenantId: ctx.tenantId,
-        correlationId: ctx.correlationId,
-        storeId: loc.storeId,
-        matterId: params.matter.id,
-        jobType: 'recalculate_permissions',
-        status: 'succeeded',
-        attemptCount: 1,
-        maxAttempts: 3,
-        triggeredByUserId: ctx.actorId || null,
-        triggerEvent,
-        payload: {
-          locationId: loc.id,
-          inherit: permPlan.inherit,
-          reason: permPlan.reason,
-        },
-        result: {
-          hasUniquePermissions: !permPlan.inherit,
-        },
-        lastErrorCode: null,
-        lastErrorMessage: null,
-        createdAt: now,
-        updatedAt: now,
-      });
-
-      void setPermPromise.catch((err) => {
-        recordProviderFailure(err);
-      });
-    } catch (err) {
-      recordProviderFailure(err);
+      if (event === 'closed') {
+        await closeMatterFolderJob({ ctx, deps, subject });
+      } else if (event === 'reopened') {
+        await reopenMatterFolderJob({ ctx, deps, subject });
+      } else {
+        await recalculateMatterPermissionsJob({
+          ctx,
+          deps,
+          subject,
+          departmentChangeStrategy:
+            params.departmentChangeStrategy ?? 'repermission_in_place',
+        });
+      }
+    } catch {
+      // Provider failure is already logged and recorded by recalculateMatterPermissionsJob
+    } finally {
+      persistRepositoryToStore(ctx, deps.repository, store);
     }
-  }
+  })();
 
-  persistRepositoryToStore(ctx, deps.repository, store, {
-    skipDiskSave: true,
+  pendingLifecycleSyncPromises.add(runPromise);
+  void runPromise.finally(() => {
+    pendingLifecycleSyncPromises.delete(runPromise);
   });
+  return runPromise;
 }
 
 function checkMatterAccessForActor(
@@ -1315,6 +1207,7 @@ export async function browseMatterDocumentStoreFolder(params: {
   cursor?: string;
   pageSize?: number;
   userId?: string;
+  correlationId?: string;
 }): Promise<{
   requiresEntraSignIn?: boolean;
   entraSignInExplanation?: string;
@@ -1336,6 +1229,7 @@ export async function browseMatterDocumentStoreFolder(params: {
     params.userId ?? '',
     store,
     config,
+    { correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
 
@@ -1568,6 +1462,7 @@ export async function uploadMatterStoreDocument(params: {
   mimeType?: string;
   conflictBehavior?: DocumentConflictBehavior;
   userId?: string;
+  correlationId?: string;
 }): Promise<DocumentStoreItem> {
   const store = getStore();
   const config = loadActiveDocumentTenantConfig(store);
@@ -1575,6 +1470,7 @@ export async function uploadMatterStoreDocument(params: {
     params.userId ?? '',
     store,
     config,
+    { correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
   const matter = store.matters.find((m) => m.id === params.matterId);
@@ -1648,6 +1544,7 @@ export async function downloadMatterStoreDocument(params: {
   locationId: string;
   itemId: string;
   userId?: string;
+  correlationId?: string;
 }): Promise<{
   bytes: Uint8Array;
   fileName: string;
@@ -1659,6 +1556,7 @@ export async function downloadMatterStoreDocument(params: {
     params.userId ?? '',
     store,
     config,
+    { correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
   const matter = store.matters.find((m) => m.id === params.matterId);
@@ -1749,6 +1647,7 @@ export async function mutateMatterStoreItem(params: {
   destinationFolderItemId?: string;
   name?: string;
   userId?: string;
+  correlationId?: string;
 }): Promise<{
   item?: DocumentStoreItem;
   webUrl?: string;
@@ -1760,6 +1659,7 @@ export async function mutateMatterStoreItem(params: {
     params.userId ?? '',
     store,
     config,
+    { correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
   const matter = store.matters.find((m) => m.id === params.matterId);
@@ -1936,7 +1836,7 @@ export interface DocumentStoresAdminDashboardData {
 
 export function getDocumentStoresAdminDashboard(
   userId: string,
-  options?: { mfaVerified?: boolean },
+  options?: { mfaVerified?: boolean; correlationId?: string },
 ): DocumentStoresAdminDashboardData {
   const store = getStore();
   const config = loadActiveDocumentTenantConfig(store);
@@ -2019,6 +1919,7 @@ export async function testAdminDocumentStoreConnection(params: {
   storeId: string;
   userId?: string;
   mfaVerified?: boolean;
+  correlationId?: string;
 }): Promise<DocumentStoreConnectionTestResult> {
   const store = getStore();
   const config = loadActiveDocumentTenantConfig(store);
@@ -2026,7 +1927,7 @@ export async function testAdminDocumentStoreConnection(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified },
+    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_store:configure',
@@ -2063,6 +1964,7 @@ export async function resolveAdminSharePointLocationUrl(params: {
   rawUrlOrPath: string;
   userId?: string;
   mfaVerified?: boolean;
+  correlationId?: string;
 }): Promise<{
   parsed: ReturnType<typeof parseSharePointLocationUrl>;
   resolution?: DocumentLocationResolutionResult;
@@ -2073,7 +1975,7 @@ export async function resolveAdminSharePointLocationUrl(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified },
+    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_store:configure',
@@ -2130,6 +2032,7 @@ export function saveAdminDocumentStoreConfiguration(params: {
   matterFolderTemplates?: MatterFolderTemplatesConfig;
   userId?: string;
   mfaVerified?: boolean;
+  correlationId?: string;
 }): DocumentStoresAdminDashboardData {
   const store = getStore();
   const currentConfig = loadActiveDocumentTenantConfig(store);
@@ -2137,7 +2040,7 @@ export function saveAdminDocumentStoreConfiguration(params: {
     params.userId ?? '',
     store,
     configOrFallback(currentConfig),
-    { mfaVerified: params.mfaVerified },
+    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
   );
 
   if (params.section === 'stores' || params.section === 'routing_and_access') {
@@ -2171,9 +2074,10 @@ export function saveAdminDocumentStoreConfiguration(params: {
   };
 
   // Validate against schema before saving
-  const rawBase = JSON.parse(
-    fs.readFileSync(TENANT_BASE_CONFIG_PATH, 'utf8'),
-  ) as Record<string, unknown>;
+  const rawBase = getActiveTenantConfiguration() as unknown as Record<
+    string,
+    unknown
+  >;
   const validated = loadAndValidateTenantConfig(rawBase, nextOverride);
 
   // Also validate against tenant org structure & choice list IDs
@@ -2226,6 +2130,7 @@ export function previewAdminMatterFolderTemplate(params: {
   templatesConfigOverride?: MatterFolderTemplatesConfig;
   userId?: string;
   mfaVerified?: boolean;
+  correlationId?: string;
 }): ResolvedMatterFolderTemplate & {
   validation: ReturnType<typeof validateMatterFolderTemplatesConfig>;
 } {
@@ -2235,7 +2140,7 @@ export function previewAdminMatterFolderTemplate(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified },
+    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_template:configure',
@@ -2267,7 +2172,7 @@ export function previewAdminMatterFolderTemplate(params: {
 
 export async function applyAdminTemplateAdditionsToOpenMatters(
   userId: string,
-  options?: { mfaVerified?: boolean },
+  options?: { mfaVerified?: boolean; correlationId?: string },
 ): Promise<{
   job: DocumentLifecycleJobRecord;
   updatedMatterCount: number;
@@ -2309,6 +2214,7 @@ export async function runAdminDocumentReconciliationScan(params: {
   autoRemediate?: boolean;
   userId?: string;
   mfaVerified?: boolean;
+  correlationId?: string;
 }): Promise<{
   findings: DocumentReconciliationFindingRecord[];
   remediatedCount: number;
@@ -2319,7 +2225,7 @@ export async function runAdminDocumentReconciliationScan(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified },
+    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_access:review',
@@ -2346,6 +2252,7 @@ export async function remediateAdminReconciliationFinding(params: {
   findingId: string;
   userId?: string;
   mfaVerified?: boolean;
+  correlationId?: string;
 }): Promise<DocumentReconciliationFindingRecord> {
   const store = getStore();
   const config = loadActiveDocumentTenantConfig(store);
@@ -2353,7 +2260,7 @@ export async function remediateAdminReconciliationFinding(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified },
+    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_access:review',

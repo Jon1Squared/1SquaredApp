@@ -728,15 +728,11 @@ export function createOrProposeKeyDate(
 
   let resolvedCalculation: KeyDateCalculation | undefined;
   if (calculation) {
-    const foundRule =
-      findLimitationRule(config, calculation.ruleSetId, calculation.ruleId) ??
-      (() => {
-        for (const rs of config.limitationRuleSets ?? []) {
-          const r = rs.rules.find((rule) => rule.id === calculation.ruleId);
-          if (r) return { ruleSet: rs, rule: r };
-        }
-        return undefined;
-      })();
+    const foundRule = findLimitationRule(
+      config,
+      calculation.ruleSetId,
+      calculation.ruleId,
+    );
 
     if (!foundRule) {
       throw new Error(
@@ -1236,15 +1232,55 @@ export function supersedeConfirmedKeyDate(params: {
   }
 
   const beforeOld = structuredClone(existingKeyDate);
-  const carriedCalculation = updates.calculation
-    ? updates.calculation
-    : existingKeyDate.calculation
-      ? {
+  let carriedCalculation: KeyDateCalculation | undefined = updates.calculation;
+  let convertedRemovedRuleToManual = false;
+
+  if (!updates.calculation) {
+    if (existingKeyDate.calculation) {
+      const ruleStillExists = Boolean(
+        findLimitationRule(
+          config,
+          existingKeyDate.calculation.ruleSetId,
+          existingKeyDate.calculation.ruleId,
+        ),
+      );
+      if (ruleStillExists) {
+        carriedCalculation = {
           ...existingKeyDate.calculation,
           overrideReason:
             existingKeyDate.calculation.overrideReason || cleanReason,
+        };
+      } else {
+        if (
+          !hasKeyDatePermission(actor, 'keydate:override_calculation', {
+            config,
+            allPeople: people,
+            teams,
+          })
+        ) {
+          throw new Error(
+            'KEY_DATE_PERMISSION_ERROR: You need "keydate:override_calculation" to supersede a calculated key date whose limitation rule set has been removed from configuration.',
+          );
         }
-      : undefined;
+        carriedCalculation = undefined;
+        convertedRemovedRuleToManual = true;
+      }
+    } else if (existingKeyDate.source === 'calculated') {
+      if (
+        !hasKeyDatePermission(actor, 'keydate:override_calculation', {
+          config,
+          allPeople: people,
+          teams,
+        })
+      ) {
+        throw new Error(
+          'KEY_DATE_PERMISSION_ERROR: You need "keydate:override_calculation" to supersede a calculated key date without a calculation rule.',
+        );
+      }
+      carriedCalculation = undefined;
+      convertedRemovedRuleToManual = true;
+    }
+  }
 
   const replacementKeyDate = createOrProposeKeyDate({
     id: newKeyDateId,
@@ -1255,9 +1291,10 @@ export function supersedeConfirmedKeyDate(params: {
     dueDate: updates.dueDate,
     dueTime: updates.dueTime ?? existingKeyDate.dueTime,
     isCritical: updates.isCritical ?? existingKeyDate.isCritical,
-    source:
-      updates.source ??
-      (carriedCalculation ? 'calculated' : existingKeyDate.source),
+    source: convertedRemovedRuleToManual
+      ? 'manual'
+      : (updates.source ??
+        (carriedCalculation ? 'calculated' : existingKeyDate.source)),
     teamId: updates.teamId ?? existingKeyDate.teamId,
     responsiblePersonIds:
       updates.responsiblePersonIds ?? existingKeyDate.responsiblePersonIds,
@@ -1274,6 +1311,28 @@ export function supersedeConfirmedKeyDate(params: {
     nextAuditId,
   });
   replacementKeyDate.supersedesKeyDateId = existingKeyDate.id;
+
+  if (convertedRemovedRuleToManual) {
+    const previousCalculatedDate =
+      existingKeyDate.calculation?.calculatedDate ?? existingKeyDate.dueDate;
+    audit.push({
+      id: nextAuditId(),
+      recordType: 'key_date',
+      recordId: replacementKeyDate.id,
+      action: 'keydate-override-calculation',
+      field: 'dueDate',
+      oldValue: previousCalculatedDate,
+      newValue: replacementKeyDate.dueDate,
+      byId: actor.id,
+      at: nowIso,
+      reason: cleanReason,
+      snapshot: {
+        calculatedDate: previousCalculatedDate,
+        overriddenDate: replacementKeyDate.dueDate,
+        reason: cleanReason,
+      },
+    });
+  }
 
   existingKeyDate.status = 'superseded';
   existingKeyDate.supersededByKeyDateId = newKeyDateId;
@@ -1484,7 +1543,6 @@ export function reassignKeyDateTeamAndOwners(params: {
   const linkedTask = tasks.find(
     (t) =>
       t.linkedKeyDateId === keyDate.id ||
-      t.idempotencyKey === `keydate-reminder:${keyDate.id}` ||
       Boolean(t.idempotencyKey?.endsWith(`:${keyDate.id}`)),
   );
   if (linkedTask) {
@@ -1663,7 +1721,7 @@ export function carryEnquiryKeyDatesToMatter(params: {
     const linkedTask = tasks.find(
       (t) =>
         t.linkedKeyDateId === kd.id ||
-        t.idempotencyKey === `keydate-reminder:${kd.id}`,
+        Boolean(t.idempotencyKey?.endsWith(`:${kd.id}`)),
     );
     if (linkedTask) {
       linkedTask.linkedRecords = [{ recordType: 'matter', recordId: matter.id }];

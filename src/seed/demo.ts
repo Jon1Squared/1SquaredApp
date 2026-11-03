@@ -187,7 +187,15 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const people: Person[] = [];
   const addPerson = (id: string, createdOffset: number, fields: Partial<Person>) => {
-    const p = { ...personDefaults(id, createdOffset), ...fields };
+    const defaultEntraOid =
+      fields.isEmployee && fields.entraObjectId === undefined
+        ? `00000000-0000-4000-8000-${id.replace(/[^0-9]/g, '').padStart(12, '0')}`
+        : undefined;
+    const p = {
+      ...personDefaults(id, createdOffset),
+      ...(defaultEntraOid ? { entraObjectId: defaultEntraOid } : {}),
+      ...fields,
+    };
     people.push(p);
     return p;
   };
@@ -219,8 +227,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       surname,
       jobTitle,
       emails: [
-        email(`${slugFirst}.${slugSurname}@notalawfirm.co.uk`),
-        email(`${slugFirst}.${slugSurname}@notalawfirm.example`, 'Work', false),
+        email(`${slugFirst}.${slugSurname}@notalawfirm.example`),
       ],
       phones: [phone(phoneByOffice[office], 'Direct')],
       addresses: [officeAddr[office]],
@@ -1049,12 +1056,47 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const msId = (stage: string, milestone: string) =>
     v('matter_stage', `${stage.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '_')} ${milestone}`);
 
+  const seedPracticeAreaOrgAssignment: Record<
+    string,
+    { owningDepartmentId: string; owningTeamId: string }
+  > = {
+    [v('work_type', 'Real Estate & Property')]: {
+      owningDepartmentId: 'DEPT-RE',
+      owningTeamId: 'TPG-RE-COMM',
+    },
+    [v('work_type', 'Corporate & Commercial')]: {
+      owningDepartmentId: 'DEPT-CORP',
+      owningTeamId: 'TPG-CORP-MA',
+    },
+    [v('work_type', 'Banking, Finance & Restructuring')]: {
+      owningDepartmentId: 'DEPT-CORP',
+      owningTeamId: 'TPG-CORP-MA',
+    },
+    [v('work_type', 'Dispute Resolution & Litigation')]: {
+      owningDepartmentId: 'DEPT-DR',
+      owningTeamId: 'TPG-DR-COM',
+    },
+    [v('work_type', 'Private Client, Trusts & Family')]: {
+      owningDepartmentId: 'DEPT-PC',
+      owningTeamId: 'TPG-PC-WILLS',
+    },
+    [v('work_type', 'Employment & HR')]: {
+      owningDepartmentId: 'DEPT-EMP',
+      owningTeamId: 'TPG-EMP-ADV',
+    },
+    [v('work_type', 'Regulatory, Public & Specialist')]: {
+      owningDepartmentId: 'DEPT-RISK',
+      owningTeamId: 'TPG-RISK-AML',
+    },
+  };
+
   const addMatter = (
     createdOffset: number,
     fields: Partial<Matter> & Pick<Matter, 'matterNumber' | 'title' | 'clientId' | 'practiceAreaId' | 'workTypeSubcategoryId'>,
   ): Matter => {
     const id = `M-${String(++mn).padStart(6, '0')}`;
     const createdBy = fields.leadFeeEarnerId || 'P-000001';
+    const seedOrg = seedPracticeAreaOrgAssignment[fields.practiceAreaId];
     const m: Matter = {
       id,
       recordType: 'matter',
@@ -1083,6 +1125,14 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       matterStatusId: fields.matterStatusId ?? v('matter_status', 'Active'),
       practiceAreaId: fields.practiceAreaId,
       workTypeSubcategoryId: fields.workTypeSubcategoryId,
+      owningDepartmentId:
+        fields.owningDepartmentId !== undefined
+          ? fields.owningDepartmentId
+          : seedOrg?.owningDepartmentId,
+      owningTeamId:
+        fields.owningTeamId !== undefined
+          ? fields.owningTeamId
+          : seedOrg?.owningTeamId,
       typeBadge: fields.typeBadge ?? 'Transactional',
       matterTypeId: fields.matterTypeId ?? v('matter_type', 'Transactional'),
       clientTierId: fields.clientTierId ?? null,
@@ -1749,7 +1799,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Gethin',
     surname: 'Lloyd',
     jobTitle: 'Managing Partner, Corporate & Commercial',
-    emails: [email('gethin.lloyd@notalawfirm.co.uk')],
+    emails: [email('gethin.lloyd@notalawfirm.example')],
     phones: [phone('029 2018 0112', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1767,7 +1817,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Aled',
     surname: 'Thomas',
     jobTitle: 'Senior Associate',
-    emails: [email('aled.thomas@notalawfirm.co.uk')],
+    emails: [email('aled.thomas@notalawfirm.example')],
     phones: [phone('029 2018 0113', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1785,7 +1835,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Ffion',
     surname: 'Davies',
     jobTitle: 'Chartered Legal Executive',
-    emails: [email('ffion.davies@notalawfirm.co.uk')],
+    emails: [email('ffion.davies@notalawfirm.example')],
     phones: [phone('029 2018 0116', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1804,7 +1854,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Sarah',
     surname: 'Cole',
     jobTitle: 'Legal Secretary',
-    emails: [email('sarah.cole@notalawfirm.co.uk')],
+    emails: [email('sarah.cole@notalawfirm.example')],
     phones: [phone('029 2018 0121', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1823,7 +1873,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Lowri',
     surname: 'Ellis',
     jobTitle: 'Enquiries Coordinator',
-    emails: [email('lowri.ellis@notalawfirm.co.uk')],
+    emails: [email('lowri.ellis@notalawfirm.example')],
     phones: [phone('029 2018 0122', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1842,7 +1892,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Nia',
     surname: 'Jenkins',
     jobTitle: 'Credit Control Manager',
-    emails: [email('nia.jenkins@notalawfirm.co.uk')],
+    emails: [email('nia.jenkins@notalawfirm.example')],
     phones: [phone('029 2018 0123', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1870,7 +1920,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Felicity',
     surname: 'Fee-Earner',
     jobTitle: 'Solicitor (Demo)',
-    emails: [email('felicity.fee-earner@notalawfirm.co.uk')],
+    emails: [email('felicity.fee-earner@notalawfirm.example')],
     phones: [phone('029 2018 0191', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1890,7 +1940,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Patrick',
     surname: 'Partner',
     jobTitle: 'Partner, Head of Department (Demo)',
-    emails: [email('patrick.partner@notalawfirm.co.uk')],
+    emails: [email('patrick.partner@notalawfirm.example')],
     phones: [phone('029 2018 0192', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1910,7 +1960,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Simone',
     surname: 'Secretary',
     jobTitle: 'Legal Secretary (Demo)',
-    emails: [email('simone.secretary@notalawfirm.co.uk')],
+    emails: [email('simone.secretary@notalawfirm.example')],
     phones: [phone('029 2018 0193', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1931,7 +1981,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Ethel',
     surname: 'Enquiries',
     jobTitle: 'Enquiries Coordinator (Demo)',
-    emails: [email('ethel.enquiries@notalawfirm.co.uk')],
+    emails: [email('ethel.enquiries@notalawfirm.example')],
     phones: [phone('029 2018 0194', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1952,7 +2002,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Frank',
     surname: 'Finance',
     jobTitle: 'Credit Control Manager (Demo)',
-    emails: [email('frank.finance@notalawfirm.co.uk')],
+    emails: [email('frank.finance@notalawfirm.example')],
     phones: [phone('029 2018 0195', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1972,7 +2022,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Rita',
     surname: 'Risk',
     jobTitle: 'MLRO & COLP (Demo)',
-    emails: [email('rita.risk@notalawfirm.co.uk')],
+    emails: [email('rita.risk@notalawfirm.example')],
     phones: [phone('029 2018 0196', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1992,7 +2042,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Martha',
     surname: 'Managing-Partner',
     jobTitle: 'Managing Partner (Demo)',
-    emails: [email('martha.managing-partner@notalawfirm.co.uk')],
+    emails: [email('martha.managing-partner@notalawfirm.example')],
     phones: [phone('029 2018 0197', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -2012,7 +2062,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Adam',
     surname: 'Admin',
     jobTitle: 'Systems Administrator (Demo)',
-    emails: [email('adam.admin@notalawfirm.co.uk')],
+    emails: [email('adam.admin@notalawfirm.example')],
     phones: [phone('029 2018 0198', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),

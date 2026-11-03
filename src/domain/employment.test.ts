@@ -630,13 +630,28 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       ).length;
       expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);
 
-      // Revealing on demand via getEmployeeDetailsForUser returns the preserved record and logs view-sensitive
+      // R103 & R76: Calling getEmployeeDetailsForUser without logViewSensitive: true returns sensitive: null and writes no view-sensitive audit entry
+      const viewAuditCountBefore = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'view-sensitive',
+      ).length;
+      const unrevealed = getEmployeeDetailsForUser(target.id, 'P-000004');
+      expect(unrevealed.sensitive).toBeNull();
+      const viewAuditCountAfterUnrevealed = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'view-sensitive',
+      ).length;
+      expect(viewAuditCountAfterUnrevealed).toBe(viewAuditCountBefore);
+
+      // Revealing on demand via getEmployeeDetailsForUser with logViewSensitive: true returns the preserved record and logs view-sensitive
       const revealed = getEmployeeDetailsForUser(target.id, 'P-000004', {
         logViewSensitive: true,
       });
       expect(revealed.sensitive?.reasonableAdjustmentsNeeded).toBe(
         'Ergonomic standing desk and dual monitors',
       );
+      const viewAuditCountAfterRevealed = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'view-sensitive',
+      ).length;
+      expect(viewAuditCountAfterRevealed).toBe(viewAuditCountBefore + 1);
     });
   });
 

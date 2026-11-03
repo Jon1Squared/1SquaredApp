@@ -78,6 +78,26 @@ const riskComplianceOfficer = {
 
 const people = [feeEarner, teamLead, riskComplianceOfficer];
 
+const defaultMatter = {
+  id: 'MAT-000200',
+  matterNumber: 'NALF-2026-0200',
+  title: 'Standard Litigation Matter',
+  clientId: 'P-CLI-1',
+  practiceAreaId: 'work_type.dispute_resolution',
+  matterTypeId: 'matter_type.litigation',
+  owningTeamId: 'TM-LIT',
+  responsiblePartnerId: 'P-LEAD',
+  supervisingPartnerId: 'P-LEAD',
+  leadFeeEarnerId: 'P-FEE',
+  teamMemberIds: ['P-FEE', 'P-LEAD'],
+  isStaffMatter: false,
+  restrictedAccessUserIds: [],
+  matterStatusId: 'Open',
+  openedAt: '2026-01-10',
+  createdAt: '2026-01-10T09:00:00Z',
+  updatedAt: '2026-01-10T09:00:00Z',
+} as unknown as Matter;
+
 function makeConfirmedKeyDate(overrides?: Partial<KeyDate>): KeyDate {
   return {
     id: 'KD-REM-1',
@@ -138,6 +158,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       keyDates: [keyDate],
       reminderStates,
       tasks,
+      matters: [defaultMatter],
       teams,
       people,
       notifications,
@@ -168,6 +189,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       keyDates: [keyDate],
       reminderStates,
       tasks,
+      matters: [defaultMatter],
       teams,
       people,
       notifications,
@@ -197,6 +219,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       keyDates: [keyDate],
       reminderStates,
       tasks,
+      matters: [defaultMatter],
       teams,
       people,
       notifications,
@@ -229,6 +252,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       keyDates: [keyDate],
       reminderStates,
       tasks,
+      matters: [defaultMatter],
       teams,
       people,
       notifications,
@@ -246,6 +270,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       keyDates: [keyDate],
       reminderStates,
       tasks,
+      matters: [defaultMatter],
       teams,
       people,
       notifications,
@@ -265,6 +290,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       keyDates: [keyDate],
       reminderStates,
       tasks,
+      matters: [defaultMatter],
       teams,
       people,
       notifications,
@@ -289,6 +315,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       keyDates: [keyDate],
       reminderStates,
       tasks,
+      matters: [defaultMatter],
       teams,
       people,
       nextTaskId: () => 'TSK-PASTDUE',
@@ -313,19 +340,6 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
     const audit: AuditEntry[] = [];
     let seq = 1;
 
-    const syncedOrig = syncReminderForConfirmedKeyDate({
-      keyDate: original,
-      config,
-      tasks,
-      reminderStates,
-      todayIso: '2026-06-01',
-      nowIso: '2026-06-01T09:00:00Z',
-      actorId: feeEarner.id,
-      nextTaskId: () => `TSK-HANDOVER-${seq++}`,
-    });
-    const originalTaskId = syncedOrig.task!.id;
-    expect(tasks).toHaveLength(1);
-
     // Supersede original key date (on residential_conveyancing so replacement is immediately confirmed)
     const conveyancingMatter = {
       id: 'MAT-000200',
@@ -345,6 +359,22 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       updatedAt: '2026-01-10T09:00:00Z',
     } as unknown as Matter;
 
+    const syncedOrig = syncReminderForConfirmedKeyDate({
+      tenantId: 'tenant-nalf-test',
+      keyDate: original,
+      config,
+      tasks,
+      reminderStates,
+      matters: [conveyancingMatter],
+      people,
+      todayIso: '2026-06-01',
+      nowIso: '2026-06-01T09:00:00Z',
+      actorId: feeEarner.id,
+      nextTaskId: () => `TSK-HANDOVER-${seq++}`,
+    });
+    const originalTaskId = syncedOrig.task!.id;
+    expect(tasks).toHaveLength(1);
+
     const { replacementKeyDate } = supersedeConfirmedKeyDate({
       existingKeyDate: original,
       newKeyDateId: 'KD-REPLACEMENT-TASK',
@@ -362,10 +392,13 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
 
     // Hand over the task to the replacement key date
     const syncedReplacement = syncReminderForConfirmedKeyDate({
+      tenantId: 'tenant-nalf-test',
       keyDate: replacementKeyDate,
       config,
       tasks,
       reminderStates,
+      matters: [conveyancingMatter],
+      people,
       todayIso: '2026-06-15',
       nowIso: '2026-06-15T10:00:00Z',
       actorId: feeEarner.id,
@@ -524,5 +557,66 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
         nextAuditId: () => 'AU-REASSIGN-DENIED',
       }),
     ).toThrow(/does not have access to restricted matter/i);
+
+    // R97: A key date pointing to a missing matter creates no reminder task and writes the no_permitted_assignees audit entry
+    const missingMatterKd = makeConfirmedKeyDate({
+      id: 'KD-MISSING-MATTER-REM',
+      matterId: 'MAT-DELETED-OR-MISSING',
+      dueDate: '2026-08-31',
+      responsiblePersonIds: ['P-FEE', 'P-LEAD'],
+    });
+    const missingTasks: Task[] = [];
+    const missingStates: KeyDateReminderState[] = [];
+    const missingNotifications: NotificationItem[] = [];
+    const missingAudit: AuditEntry[] = [];
+
+    const missingSyncRes = syncReminderForConfirmedKeyDate({
+      tenantId: 'tenant-nalf-test',
+      keyDate: missingMatterKd,
+      config,
+      tasks: missingTasks,
+      reminderStates: missingStates,
+      matters: [restrictedMatter],
+      people,
+      audit: missingAudit,
+      todayIso: '2026-06-02',
+      nowIso: '2026-06-02T08:00:00Z',
+      actorId: 'P-LEAD',
+      nextTaskId: () => 'TSK-MISSING-SHOULD-NOT-EXIST',
+    });
+    expect(missingSyncRes.task).toBeNull();
+    expect(missingTasks).toHaveLength(0);
+    expect(
+      missingAudit.some(
+        (a) =>
+          a.action === 'keydate-reminder-escalate' &&
+          a.newValue === 'no_permitted_assignees',
+      ),
+    ).toBe(true);
+
+    const missingJobAudit: AuditEntry[] = [];
+    runTenantKeyDateReminderJob({
+      tenantId: 'tenant-nalf-test',
+      todayIso: '2026-08-01',
+      config,
+      keyDates: [missingMatterKd],
+      reminderStates: [],
+      tasks: missingTasks,
+      matters: [restrictedMatter],
+      teams,
+      people,
+      notifications: missingNotifications,
+      audit: missingJobAudit,
+      nextTaskId: () => 'TSK-MISSING-SHOULD-NOT-EXIST-2',
+    });
+    expect(missingTasks).toHaveLength(0);
+    expect(missingNotifications).toHaveLength(0);
+    expect(
+      missingJobAudit.some(
+        (a) =>
+          a.action === 'keydate-reminder-escalate' &&
+          a.newValue === 'no_permitted_assignees',
+      ),
+    ).toBe(true);
   });
 });

@@ -9,16 +9,12 @@ const eslintConfig = defineConfig([
   // keep those rules as 'error' across all new/updated components (including HomePagesAdminSection.tsx).
   {
     files: [
-      "src/components/AppShell.tsx",
       "src/components/CreateTaskModal.tsx",
       "src/components/DataList.tsx",
       "src/components/EnquiryFormClient.tsx",
       "src/components/EnquiryPreviewDrawer.tsx",
       "src/components/FormControls.tsx",
-      "src/components/MatterCostsAdminSection.tsx",
-      "src/components/MatterFormClient.tsx",
       "src/components/MatterPartiesAdminSection.tsx",
-      "src/components/MatterProfileClient.tsx",
       "src/components/SearchBox.tsx",
     ],
     rules: {

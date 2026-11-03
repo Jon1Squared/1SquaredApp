@@ -46,10 +46,16 @@ import {
 } from '../../src/domain/tasks';
 import {
   canPersonAccessMatter,
+  clearActiveSessionTokenRoles,
   getDefaultTenantRbacConfig,
   resolvePersonForEntraClaims,
+  resolvePersonPermissions,
+  runWithActiveActorSession,
+  setActiveSessionTokenRolesForPerson,
   setRuntimeRbacConfigOverride,
 } from '../../src/domain/rbac';
+import { NextRequest } from 'next/server';
+import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
 import {
   getAppSnapshot,
   logEmployeeRestrictedAccess,
@@ -60,6 +66,7 @@ import {
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
 } from '../../src/server/services';
+import { getStore } from '../../src/server/store';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -117,7 +124,7 @@ function makeTestPerson(overrides: Partial<Person> = {}): Person {
       {
         id: 'em-1',
         typeId: null,
-        address: 'test@notalawfirm.co.uk',
+        address: 'test@notalawfirm.example',
         isPrimary: true,
       },
     ],
@@ -548,7 +555,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           __verifiedByOidcMiddleware: true as const,
           sub: 'P-CREATOR',
           tenantId: 'tenant-alpha',
-          email: 'creator@notalawfirm.co.uk',
+          email: 'creator@notalawfirm.example',
           name: 'Creator Partner',
           roles: ['managing_partner'],
           mfaVerified: true,
@@ -956,7 +963,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           sub: 'entra-sub-1',
           oid: '8f2e91c0-4a12-4b9e-9c01-111111111111',
           tid: '00000000-0000-4000-8000-000000000099',
-          preferred_username: 'Patrick.Partner@notalawfirm.co.uk',
+          preferred_username: 'Patrick.Partner@notalawfirm.example',
           name: 'Patrick Partner',
           roles: ['1Squared.Partner'],
           groups: ['00000000-0000-0000-0000-000000000104'], // Mapped to risk_compliance in base.json
@@ -973,7 +980,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(verifiedToken.entraTenantId).toBe(
         '00000000-0000-4000-8000-000000000099',
       );
-      expect(verifiedToken.email).toBe('patrick.partner@notalawfirm.co.uk');
+      expect(verifiedToken.email).toBe('patrick.partner@notalawfirm.example');
       expect(verifiedToken.mfaVerified).toBe(true);
       expect(verifiedToken.roles).toContain('partner');
       expect(verifiedToken.roles).toContain('fee_earner');
@@ -991,7 +998,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           {
             id: 'em-dafydd',
             typeId: null,
-            address: 'dafydd.evans@notalawfirm.co.uk',
+            address: 'dafydd.evans@notalawfirm.example',
             isPrimary: true,
           },
         ],
@@ -1002,7 +1009,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const matched = resolvePersonForEntraClaims({
         claims: {
           oid: 'oid-dafydd-guid',
-          preferred_username: 'd.evans.renamed@notalawfirm.co.uk',
+          preferred_username: 'd.evans.renamed@notalawfirm.example',
           roles: ['1Squared.Partner'],
           amr: ['pwd', 'mfa'],
         },
@@ -1137,8 +1144,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-unmapped-502',
         name: 'New Unmapped Starter',
-        preferred_username: 'new.starter@notalawfirm.co.uk',
-        email: 'new.starter@notalawfirm.co.uk',
+        preferred_username: 'new.starter@notalawfirm.example',
+        email: 'new.starter@notalawfirm.example',
         roles: [],
         amr: ['pwd', 'mfa'],
       });
@@ -1154,7 +1161,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         oid: '00000000-0000-4000-8000-000000000004',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'P-000004',
-        email: 'sian.morgan@notalawfirm.co.uk',
+        email: 'sian.morgan@notalawfirm.example',
         displayName: 'Sian Morgan',
         entraRoles: ['1Squared.Admin'],
         mappedRoles: ['admin'],
@@ -1229,7 +1236,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-601',
         name: 'Token Only User',
-        email: 'token.only@notalawfirm.co.uk',
+        email: 'token.only@notalawfirm.example',
         roles: ['1Squared.Admin'],
         amr: ['pwd', 'mfa'],
       });
@@ -1239,7 +1246,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-601',
         name: 'Token Only User',
-        email: 'token.only@notalawfirm.co.uk',
+        email: 'token.only@notalawfirm.example',
         roles: [],
         amr: ['pwd', 'mfa'],
       });
@@ -1265,7 +1272,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-002',
         name: 'Dafydd Evans',
-        email: 'dafydd.evans@notalawfirm.co.uk',
+        email: 'dafydd.evans@notalawfirm.example',
         roles: ['1Squared.RiskCompliance'],
         amr: ['pwd', 'mfa'],
       });
@@ -1281,7 +1288,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-002',
         name: 'Dafydd Evans',
-        email: 'dafydd.evans@notalawfirm.co.uk',
+        email: 'dafydd.evans@notalawfirm.example',
         roles: [],
         amr: ['pwd', 'mfa'],
       });
@@ -1324,7 +1331,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         oid: '00000000-0000-4000-8000-000000000002',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: '00000000-0000-4000-8000-000000000002',
-        email: 'dafydd.evans@notalawfirm.co.uk',
+        email: 'dafydd.evans@notalawfirm.example',
         displayName: 'Dafydd Evans',
         entraRoles: [],
         mappedRoles: ['fee_earner'],
@@ -1390,6 +1397,114 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       resetAllDemoData('P-000001');
     });
 
+    it('enforces R100 request/tenant-scoped token roles without cross-tenant, post-logout, or cross-user leakage', async () => {
+      resetAllDemoData('P-000001');
+      clearActiveSessionTokenRoles();
+
+      updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            authorityMode: 'hybrid',
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+
+      // 1. Two-tenant isolation: P-000002 with ['admin'] token roles in tenant-a does NOT get admin permissions in tenant-b
+      const tenantBHybridRbac = {
+        ...getDefaultTenantRbacConfig('tenant-b'),
+        identityMapping: {
+          ...getDefaultTenantRbacConfig('tenant-b').identityMapping,
+          authorityMode: 'hybrid' as const,
+        },
+      };
+      setRuntimeRbacConfigOverride(tenantBHybridRbac, 'tenant-b');
+      setRuntimeRbacConfigOverride(
+        {
+          ...getDefaultTenantRbacConfig('tenant-a'),
+          identityMapping: {
+            ...getDefaultTenantRbacConfig('tenant-a').identityMapping,
+            authorityMode: 'hybrid' as const,
+          },
+        },
+        'tenant-a',
+      );
+
+      const dafydd = getAppSnapshot('P-000002').people.find((p) => p.id === 'P-000002')!;
+      expect(dafydd.roles).toEqual(['fee_earner']);
+
+      setActiveSessionTokenRolesForPerson('P-000002', ['admin'], {
+        tenantId: 'tenant-a',
+      });
+
+      const permsInTenantA = resolvePersonPermissions(dafydd, {
+        context: {
+          tenantId: 'tenant-a',
+          correlationId: 'r100-tenant-a',
+          actorId: 'P-000002',
+          actorRoles: ['fee_earner'],
+          mfaVerified: true,
+        },
+      });
+      expect(permsInTenantA).toContain('admin:access');
+
+      const permsInTenantB = resolvePersonPermissions(dafydd, {
+        context: {
+          tenantId: 'tenant-b',
+          correlationId: 'r100-tenant-b',
+          actorId: 'P-000002',
+          actorRoles: ['fee_earner'],
+          mfaVerified: true,
+        },
+      });
+      expect(permsInTenantB).not.toContain('admin:access');
+
+      // 2. Sign-out clears token roles: after POST /api/auth/logout, resolvePersonPermissions(person) returns stored roles only
+      setActiveSessionTokenRolesForPerson('P-000002', ['risk_compliance'], {
+        tenantId: 'not-a-law-firm',
+      });
+      expect(resolvePersonPermissions(dafydd)).toContain('risk:view');
+
+      const logoutReq = new NextRequest('http://localhost:3000/api/auth/logout', {
+        method: 'POST',
+      });
+      const logoutRes = await logoutPost(logoutReq);
+      expect(logoutRes.status).toBe(303);
+      expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
+
+      // 3. Cross-user check: while user A (P-000002) has ['risk_compliance'] token roles in their session,
+      // permission checks made by user B (P-000001) about user A return A's stored roles only
+      setActiveSessionTokenRolesForPerson('P-000002', ['risk_compliance'], {
+        tenantId: 'not-a-law-firm',
+      });
+      expect(resolvePersonPermissions(dafydd)).toContain('risk:view');
+
+      // When user B (P-000001) becomes the active actor, evaluating user A (dafydd) uses A's stored roles only
+      setActiveSessionTokenRolesForPerson('P-000001', ['partner', 'fee_earner'], {
+        tenantId: 'not-a-law-firm',
+      });
+      expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
+
+      // Also when explicitly passing actorId: 'P-000001' in context or running inside user B's AsyncLocalStorage scope
+      const permsSeenByUserB = runWithActiveActorSession(
+        {
+          tenantId: 'not-a-law-firm',
+          personId: 'P-000001',
+          tokenRoles: ['partner', 'fee_earner'],
+          expiresAtMs: Date.now() + 3600_000,
+        },
+        () => resolvePersonPermissions(dafydd),
+      );
+      expect(permsSeenByUserB).not.toContain('risk:view');
+
+      setRuntimeRbacConfigOverride(null, 'tenant-a');
+      setRuntimeRbacConfigOverride(null, 'tenant-b');
+      clearActiveSessionTokenRoles();
+      resetAllDemoData('P-000001');
+    });
+
     it('provisions or links an employee on Entra ID OIDC callback and creates a signed session cookie', () => {
       resetAllDemoData('P-000001');
 
@@ -1399,8 +1514,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-demo-dev',
           name: 'Dev Admin User',
-          preferred_username: 'dev.admin@notalawfirm.co.uk',
-          email: 'dev.admin@notalawfirm.co.uk',
+          preferred_username: 'dev.admin@notalawfirm.example',
+          email: 'dev.admin@notalawfirm.example',
           roles: ['1Squared.Admin', '1Squared.ManagingPartner'],
           amr: ['pwd', 'mfa'],
         });
@@ -1418,7 +1533,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           oid: '99999999-aaaa-bbbb-cccc-000000000001',
           tid: '11111111-2222-3333-4444-000000000000',
           name: 'Dev Admin User',
-          email: 'dev.admin@notalawfirm.co.uk',
+          email: 'dev.admin@notalawfirm.example',
           roles: ['1Squared.Admin', '1Squared.ManagingPartner'],
           amr: ['pwd', 'mfa'],
         },
@@ -1438,12 +1553,44 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         oid: '99999999-aaaa-bbbb-cccc-000000000001',
         tid: '11111111-2222-3333-4444-000000000000',
         name: 'Dev Admin User',
-        email: 'dev.admin@notalawfirm.co.uk',
+        email: 'dev.admin@notalawfirm.example',
         roles: ['1Squared.Admin'],
         amr: ['pwd', 'mfa'],
       });
       expect(secondSignIn.person.id).toBe(person.id);
 
+      resetAllDemoData('P-000001');
+    });
+
+    it('refuses Demo Mode persona switching to an employee with access to a restricted/staff matter not accessible to the signed-in actor (R104)', async () => {
+      resetAllDemoData('P-000001');
+      const store = getStore();
+      // Mark the first matter as a restricted staff matter where P-000002 is on restrictedAccessUserIds, and P-000006 (another fee_earner) is not
+      const staffMatter = store.matters[0]!;
+      staffMatter.isStaffMatter = true;
+      staffMatter.restrictedAccessUserIds = ['P-000001', 'P-000002'];
+
+      // Sign in as P-000006 (Owain Jenkins, fee_earner, not on restrictedAccessUserIds)
+      setTestEntraSessionOverride({
+        personId: 'P-000006',
+        oid: '00000000-0000-4000-8000-000000000006',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: 'P-000006',
+        email: 'owain.jenkins@notalawfirm.example',
+        displayName: 'Owain Jenkins',
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+
+      // Attempting to switch in Demo Mode from P-000006 to P-000002 (same fee_earner role, but named on restrictedAccessUserIds) is refused with FORBIDDEN
+      await expect(switchUserAction('P-000002')).rejects.toThrow(/FORBIDDEN|restricted or staff matters/i);
+
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     });
   });

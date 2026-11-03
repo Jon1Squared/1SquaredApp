@@ -16,7 +16,7 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
 - **Cryptographic Token Verification**: On callback (\`/api/auth/callback/microsoft-entra-id\`), 1Squared exchanges the authorization code for an ID token and verifies its RS256 signature against Microsoft Entra’s JWKS discovery endpoint, along with \`aud\`, \`tid\`, \`iss\`, \`nonce\`, \`exp\`, \`nbf\`, and \`iat\` claims.
 - **Signed Session Cookie**: Once verified, 1Squared issues an HMAC-SHA256 signed \`httpOnly\` session cookie (\`onesquared_entra_session\`). The acting user identity is resolved exclusively from this verified session—never from client-writable cookies, URL parameters, or form fields.
 - **CSRF-Safe Sign-Out**: Signing out from the account menu submits a \`POST\` request to \`/api/auth/logout\` (\`GET\` requests return \`405 Method Not Allowed\`), clearing the session cookie immediately.
-- **Demo Mode User Switching**: Switching between seeded personas is blocked in production (\`NODE_ENV === 'production'\`) and in \`live\` tenant environments (\`enableDemoMode\` cannot be \`true\` when \`environment === 'live'\`). Even in non-live demo environments where both \`featureFlags.enableDemoMode\` and \`firmSettings.demoMode\` are enabled, a signed-in user can only switch to a persona whose permissions are a subset of the permissions the signed-in user already holds.
+- **Demo Mode User Switching**: Switching between seeded personas is blocked in production (\`NODE_ENV === 'production'\`) and in \`live\` tenant environments (\`enableDemoMode\` cannot be \`true\` when \`environment === 'live'\`). Even in non-live demo environments where both \`featureFlags.enableDemoMode\` and \`firmSettings.demoMode\` are enabled, a signed-in user can only switch to a persona whose permissions are a subset of the permissions the signed-in user already holds and who does not have access to any restricted or staff matter (\`restrictedAccessUserIds\`) that the signed-in user cannot access.
 
 ## 2. Employee matching, provisioning & authority modes
 
@@ -32,7 +32,7 @@ Administrators can configure \`rbac.identityMapping.authorityMode\` in **Admin �
 
 | Authority Mode | How Roles Are Resolved |
 | --- | --- |
-| \`hybrid\` (default) | Combines roles mapped from the current Entra ID token (\`groups\` and \`roles\` claims) with the roles stored on the employee’s 1Squared profile for the duration of the request, without permanently overwriting stored 1Squared roles. |
+| \`hybrid\` (default) | Combines roles mapped from the current Entra ID token (\`groups\` and \`roles\` claims) with the roles stored on the employee’s 1Squared profile, scoped strictly to that \`(tenantId, personId)\` session and active request and cleared on sign-out, without permanently overwriting stored 1Squared roles. |
 | \`token_only\` | Uses exclusively the roles mapped from the Microsoft Entra ID token on each sign-in (including replacing stored roles with \`[]\` if all Entra roles are removed). |
 
 ## 3. Roles, permissions & per-person overrides

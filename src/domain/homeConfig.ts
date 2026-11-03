@@ -430,7 +430,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'Fee earner',
       purpose: "Today's tasks, enquiries to call back, active matters, key dates and personal WIP.",
       designNumber: '01',
-      demoUserEmail: 'felicity.fee-earner@notalawfirm.co.uk',
+      demoUserEmail: 'felicity.fee-earner@notalawfirm.example',
       headlineCardIds: ['fe_tasks_due', 'fe_enquiries_contact', 'fe_active_matters', 'fe_hours_month', 'fe_unbilled_wip'],
       primaryPanels: [
         'to_do',
@@ -448,7 +448,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'Partner',
       purpose: 'Matters needing attention, sign-offs, team capacity, WIP to bill, aged debt and key clients.',
       designNumber: '02',
-      demoUserEmail: 'patrick.partner@notalawfirm.co.uk',
+      demoUserEmail: 'patrick.partner@notalawfirm.example',
       headlineCardIds: ['pt_supervised_matters', 'pt_team_wip', 'pt_overdue_debt', 'pt_sign_offs', 'pt_enquiries_month'],
       primaryPanels: [
         'matters_needing_partner_attention',
@@ -471,7 +471,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'Support staff',
       purpose: 'Delegated tasks across supported fee earners, letters to send, matter openings and completions.',
       designNumber: '03',
-      demoUserEmail: 'simone.secretary@notalawfirm.co.uk',
+      demoUserEmail: 'simone.secretary@notalawfirm.example',
       headlineCardIds: ['ls_tasks_queue', 'ls_letters_docs', 'ls_matter_openings', 'ls_completions_7d', 'ls_unbilled_disb'],
       primaryPanels: [
         'team_tasks_for_supported_fee_earners',
@@ -493,7 +493,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'Business development',
       purpose: 'Inline enquiry capture, live callback SLA countdowns, unassigned queue and conversion funnel.',
       designNumber: '04',
-      demoUserEmail: 'ethel.enquiries@notalawfirm.co.uk',
+      demoUserEmail: 'ethel.enquiries@notalawfirm.example',
       headlineCardIds: ['ec_callbacks_due', 'ec_unassigned', 'ec_awaiting_fe', 'ec_converted_month', 'ec_no_response'],
       primaryPanels: [
         'quick_enquiry_capture',
@@ -516,7 +516,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'Finance',
       purpose: 'Aged debt bands, credit control chase queue, WIP ready to bill and client account ledger.',
       designNumber: '05',
-      demoUserEmail: 'frank.finance@notalawfirm.co.uk',
+      demoUserEmail: 'frank.finance@notalawfirm.example',
       headlineCardIds: ['fin_total_debt', 'fin_overdue_debt', 'fin_unbilled_wip', 'fin_unbilled_disb', 'fin_client_account'],
       primaryPanels: ['aged_debt_by_age_band', 'overdue_invoices_worklist', 'wip_ready_to_bill'],
       summaryPanels: [
@@ -534,7 +534,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'Risk & compliance',
       purpose: 'AML & CDD queue, conflict checks awaiting decision, high-risk matters and undertakings.',
       designNumber: '06',
-      demoUserEmail: 'rita.risk@notalawfirm.co.uk',
+      demoUserEmail: 'rita.risk@notalawfirm.example',
       headlineCardIds: ['rc_aml_pending', 'rc_conflicts_pending', 'rc_high_risk_matters', 'rc_overdue_tasks', 'rc_sra_breaches'],
       primaryPanels: [
         'aml_and_cdd_queue',
@@ -557,7 +557,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'Practice manager',
       purpose: 'Firm-wide billing vs budget, lockup, departmental performance, conversion and client concentration.',
       designNumber: '07',
-      demoUserEmail: 'martha.managing-partner@notalawfirm.co.uk',
+      demoUserEmail: 'martha.managing-partner@notalawfirm.example',
       headlineCardIds: ['mp_fees_ytd', 'mp_cash_month', 'mp_firm_wip', 'mp_total_debt', 'mp_open_matters'],
       primaryPanels: [
         'firm_financial_pulse',
@@ -580,7 +580,7 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
       shortLabel: 'System administrator',
       purpose: 'System configuration, role Home page layout management, and full executive overview.',
       designNumber: '00',
-      demoUserEmail: 'adam.admin@notalawfirm.co.uk',
+      demoUserEmail: 'adam.admin@notalawfirm.example',
       headlineCardIds: ['mp_fees_ytd', 'mp_cash_month', 'mp_firm_wip', 'mp_total_debt', 'mp_open_matters'],
       primaryPanels: [
         'firm_financial_pulse',

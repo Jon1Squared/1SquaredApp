@@ -250,7 +250,7 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
       keyDateTypeId: 'completion',
       dueDate: '2028-05-01',
       calculation: {
-        ruleSetId: 'ew-statute-of-limitations',
+        ruleSetId: 'ew-sample',
         ruleSetVersion: 1,
         ruleSetReviewStatus: 'unreviewed',
         ruleId: 'contract-simple',
@@ -570,14 +570,14 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
       homeRoles: ['partner'],
     } as unknown as Person;
 
-    // 1. Forged ruleSetReviewStatus: 'reviewed' on unreviewed ruleSet 'ew-statute-of-limitations' still lands as awaiting_verification
+    // 1. Forged ruleSetReviewStatus: 'reviewed' on unreviewed ruleSet 'ew-sample' still lands as awaiting_verification
     const kdForgedStatus = createOrProposeKeyDate({
       id: 'KD-FORGED-REV',
       matter: conveyancingMatter, // residential_conveyancing has verification.required = false
       keyDateTypeId: 'completion',
       dueDate: '2028-05-01', // 2022-05-01 + 6y = 2028-05-01
       calculation: {
-        ruleSetId: 'ew-statute-of-limitations',
+        ruleSetId: 'ew-sample',
         ruleSetVersion: 1,
         ruleSetReviewStatus: 'reviewed', // Forged by client! Config says 'unreviewed'
         ruleId: 'contract-simple',
@@ -605,7 +605,7 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
         keyDateTypeId: 'limitation',
         dueDate: '2029-01-01', // Differs from calculated 2028-05-01
         calculation: {
-          ruleSetId: 'ew-statute-of-limitations',
+          ruleSetId: 'ew-sample',
           ruleSetVersion: 1,
           ruleSetReviewStatus: 'unreviewed',
           ruleId: 'contract-simple',
@@ -631,7 +631,7 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
       keyDateTypeId: 'limitation',
       dueDate: '2028-04-15',
       calculation: {
-        ruleSetId: 'ew-statute-of-limitations',
+        ruleSetId: 'ew-sample',
         ruleSetVersion: 1,
         ruleSetReviewStatus: 'unreviewed',
         ruleId: 'contract-simple',
@@ -742,6 +742,120 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
         (a) =>
           a.action === 'keydate-override-calculation' &&
           a.recordId === 'KD-SUPERSEDED-BY-PARTNER',
+      ),
+    ).toBe(true);
+
+    // 6. R98: Matching only on (ruleSetId, ruleId) pair — supplying a valid ruleId with a mismatched ruleSetId is rejected with KEY_DATE_VALIDATION_ERROR
+    expect(() =>
+      createOrProposeKeyDate({
+        id: 'KD-MISMATCHED-RULESET-PAIR',
+        matter: conveyancingMatter,
+        keyDateTypeId: 'completion',
+        dueDate: '2028-05-01',
+        calculation: {
+          ruleSetId: 'mismatched-ruleset-id',
+          ruleSetVersion: 1,
+          ruleSetReviewStatus: 'reviewed',
+          ruleId: 'contract-simple',
+          triggers: { accrualDate: '2022-05-01' },
+          calculatedDate: '2028-05-01',
+          explanation: ['Mismatched ruleSetId with valid ruleId'],
+          overridden: false,
+        },
+        actor: feeEarner,
+        nowIso: '2026-02-04T10:00:00Z',
+        config,
+        teams,
+        people: [feeEarner, supervisor, partner],
+        audit,
+        nextAuditId: () => `AUD-${seq++}`,
+      }),
+    ).toThrow(/KEY_DATE_VALIDATION_ERROR/);
+
+    // 7. R94: When a confirmed calculated key date's rule set is later removed from config, superseding without a new calculation requires keydate:override_calculation, converts replacement to manual, and writes a keydate-override-calculation audit entry
+    const kdForRemovedRuleSet = createOrProposeKeyDate({
+      id: 'KD-CALC-REMOVED-RULESET',
+      matter: conveyancingMatter,
+      keyDateTypeId: 'completion',
+      dueDate: '2028-05-01',
+      calculation: {
+        ruleSetId: 'ew-sample',
+        ruleSetVersion: 1,
+        ruleSetReviewStatus: 'reviewed',
+        ruleId: 'contract-simple',
+        triggers: { accrualDate: '2022-05-01' },
+        calculatedDate: '2028-05-01',
+        explanation: ['6 years from accrual'],
+        overridden: false,
+      },
+      actor: feeEarner,
+      nowIso: '2026-02-04T10:00:00Z',
+      config,
+      teams,
+      people: [feeEarner, supervisor, partner],
+      audit,
+      nextAuditId: () => `AUD-${seq++}`,
+    });
+    verifyProposedKeyDate({
+      keyDate: kdForRemovedRuleSet,
+      verifier: supervisor,
+      nowIso: '2026-02-04T11:00:00Z',
+      config,
+      teams,
+      people: [feeEarner, supervisor, partner],
+      audit,
+      nextAuditId: () => `AUD-${seq++}`,
+    });
+    const configWithRuleSetRemoved = {
+      ...config,
+      limitationRuleSets: [],
+    };
+
+    expect(() =>
+      supersedeConfirmedKeyDate({
+        existingKeyDate: kdForRemovedRuleSet,
+        newKeyDateId: 'KD-REMOVED-RULESET-FE',
+        updates: {
+          dueDate: '2028-05-01',
+          title: 'Fee earner trying to supersede after rule set removed',
+        },
+        reason: 'Rule set removed from config',
+        actor: feeEarner,
+        nowIso: '2026-02-05T10:00:00Z',
+        config: configWithRuleSetRemoved,
+        matter: conveyancingMatter,
+        teams,
+        people: [feeEarner, supervisor, partner],
+        audit,
+        nextAuditId: () => `AUD-${seq++}`,
+      }),
+    ).toThrow(/KEY_DATE_PERMISSION_ERROR/);
+    expect(kdForRemovedRuleSet.status).toBe('confirmed');
+
+    const { replacementKeyDate: partnerReplacedAfterRuleRemoved } =
+      supersedeConfirmedKeyDate({
+        existingKeyDate: kdForRemovedRuleSet,
+        newKeyDateId: 'KD-REMOVED-RULESET-PARTNER',
+        updates: {
+          dueDate: '2028-07-01',
+        },
+        reason: 'Rule set retired; partner overriding to manual date.',
+        actor: partner,
+        nowIso: '2026-02-05T11:00:00Z',
+        config: configWithRuleSetRemoved,
+        matter: conveyancingMatter,
+        teams,
+        people: [feeEarner, supervisor, partner],
+        audit,
+        nextAuditId: () => `AUD-${seq++}`,
+      });
+    expect(partnerReplacedAfterRuleRemoved.source).toBe('manual');
+    expect(partnerReplacedAfterRuleRemoved.calculation).toBeUndefined();
+    expect(
+      audit.some(
+        (a) =>
+          a.action === 'keydate-override-calculation' &&
+          a.recordId === 'KD-REMOVED-RULESET-PARTNER',
       ),
     ).toBe(true);
   });

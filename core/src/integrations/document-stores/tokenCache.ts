@@ -361,6 +361,24 @@ export class DocumentStoreTokenService {
       return cached;
     }
 
+    const envName =
+      accessContext.tenantContext.environment ??
+      (
+        accessContext.tenantContext as {
+          tenant?: { environment?: string };
+        }
+      ).tenant?.environment ??
+      process.env.PLATFORM_ENVIRONMENT;
+    if (
+      this.oboExchangeHandler === defaultOboExchangeHandler &&
+      envName === 'live'
+    ) {
+      throw createDocumentStoreAuthError(
+        'misconfigured',
+        'LIVE_TOKEN_HANDLER_REQUIRED: Default mock OBO token exchange handler cannot be used when environment is "live".',
+      );
+    }
+
     try {
       const exchanged = await this.oboExchangeHandler({
         tenantId: accessContext.tenantContext.tenantId,
@@ -449,6 +467,24 @@ export class DocumentStoreTokenService {
       throw createDocumentStoreAuthError(
         'misconfigured',
         'SharePoint store with credentialMode "client_certificate" requires a Key Vault certificate secret reference.',
+      );
+    }
+
+    const envName =
+      accessContext.tenantContext.environment ??
+      (
+        accessContext.tenantContext as {
+          tenant?: { environment?: string };
+        }
+      ).tenant?.environment ??
+      process.env.PLATFORM_ENVIRONMENT;
+    if (
+      this.appTokenHandler === defaultAppTokenAcquireHandler &&
+      envName === 'live'
+    ) {
+      throw createDocumentStoreAuthError(
+        'misconfigured',
+        'LIVE_TOKEN_HANDLER_REQUIRED: Default mock application token handler cannot be used when environment is "live".',
       );
     }
 

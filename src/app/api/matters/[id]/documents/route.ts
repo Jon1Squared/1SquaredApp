@@ -38,12 +38,27 @@ function logMatterDocumentsRouteError(
   );
 }
 
+const VALID_CORRELATION_ID_RE = /^[a-zA-Z0-9._-]{1,64}$/;
+
+function resolveSafeCorrelationId(
+  headerValue: string | null,
+  fallbackPrefix: string,
+): string {
+  const trimmed = headerValue?.trim() ?? '';
+  if (VALID_CORRELATION_ID_RE.test(trimmed)) {
+    return trimmed;
+  }
+  return `${fallbackPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export async function GET(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const correlationId =
-    request.headers.get('x-correlation-id') ?? `corr-matter-docs-get-${Date.now()}`;
+  const correlationId = resolveSafeCorrelationId(
+    request.headers.get('x-correlation-id'),
+    'corr-matter-docs-get',
+  );
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
@@ -62,6 +77,7 @@ export async function GET(
         locationId,
         itemId,
         userId,
+        correlationId,
       });
 
       return new NextResponse(Buffer.from(downloaded.bytes), {
@@ -84,6 +100,7 @@ export async function GET(
       folderItemId,
       cursor,
       userId,
+      correlationId,
     });
 
     return NextResponse.json({ ok: true, ...browseResult });
@@ -115,8 +132,10 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const correlationId =
-    request.headers.get('x-correlation-id') ?? `corr-matter-docs-post-${Date.now()}`;
+  const correlationId = resolveSafeCorrelationId(
+    request.headers.get('x-correlation-id'),
+    'corr-matter-docs-post',
+  );
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
@@ -156,6 +175,7 @@ export async function POST(
         mimeType: file.type || 'application/octet-stream',
         conflictBehavior,
         userId,
+        correlationId,
       });
 
       return NextResponse.json({ ok: true, item: uploaded });
@@ -187,6 +207,7 @@ export async function POST(
           mimeType,
           conflictBehavior,
           userId,
+          correlationId,
         });
         return NextResponse.json({ ok: true, item });
       }
@@ -209,6 +230,7 @@ export async function POST(
             : undefined,
           name: body.name ? String(body.name) : undefined,
           userId,
+          correlationId,
         });
         return NextResponse.json({ ok: true, ...res });
       }
@@ -216,6 +238,7 @@ export async function POST(
       case 'retry_provisioning': {
         const retried = await retryMatterDocumentProvisioning(matterId, userId, {
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, ...retried });
       }
@@ -230,6 +253,7 @@ export async function POST(
             body.applyMissingTemplateFolders !== false,
           userId,
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, ...linked });
       }

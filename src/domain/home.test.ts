@@ -66,32 +66,32 @@ describe('Role-based Home pages & configuration', () => {
     expect(demoUsers.length).toBe(8);
 
     const demoEmails = demoUsers.map((d) => primaryEmail(d));
-    expect(demoEmails).toContain('felicity.fee-earner@notalawfirm.co.uk');
-    expect(demoEmails).toContain('patrick.partner@notalawfirm.co.uk');
-    expect(demoEmails).toContain('simone.secretary@notalawfirm.co.uk');
-    expect(demoEmails).toContain('ethel.enquiries@notalawfirm.co.uk');
-    expect(demoEmails).toContain('frank.finance@notalawfirm.co.uk');
-    expect(demoEmails).toContain('rita.risk@notalawfirm.co.uk');
-    expect(demoEmails).toContain('martha.managing-partner@notalawfirm.co.uk');
-    expect(demoEmails).toContain('adam.admin@notalawfirm.co.uk');
+    expect(demoEmails).toContain('felicity.fee-earner@notalawfirm.example');
+    expect(demoEmails).toContain('patrick.partner@notalawfirm.example');
+    expect(demoEmails).toContain('simone.secretary@notalawfirm.example');
+    expect(demoEmails).toContain('ethel.enquiries@notalawfirm.example');
+    expect(demoEmails).toContain('frank.finance@notalawfirm.example');
+    expect(demoEmails).toContain('rita.risk@notalawfirm.example');
+    expect(demoEmails).toContain('martha.managing-partner@notalawfirm.example');
+    expect(demoEmails).toContain('adam.admin@notalawfirm.example');
 
     // Felicity shows Dafydd Evans (P-000002)
     const felicity = demoUsers.find(
-      (d) => primaryEmail(d) === 'felicity.fee-earner@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'felicity.fee-earner@notalawfirm.example',
     );
     expect(felicity?.showsWorkOfId).toBe('P-000002');
     expect(felicity?.roles).toEqual(['fee_earner']);
 
     // Martha Managing-Partner has both managing_partner and partner roles
     const martha = demoUsers.find(
-      (d) => primaryEmail(d) === 'martha.managing-partner@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'martha.managing-partner@notalawfirm.example',
     );
     expect(martha?.showsWorkOfId).toBeTruthy();
     expect(martha?.roles).toEqual(['managing_partner', 'partner']);
 
     // Adam Admin has all roles
     const adam = demoUsers.find(
-      (d) => primaryEmail(d) === 'adam.admin@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'adam.admin@notalawfirm.example',
     );
     expect(adam?.showsWorkOfId).toBeNull();
     expect(adam?.roles).toContain('admin');
@@ -100,7 +100,7 @@ describe('Role-based Home pages & configuration', () => {
 
     // Simone Secretary supports Rhian Morgan (P-000001) and Dafydd Evans (P-000002)
     const simone = demoUsers.find(
-      (d) => primaryEmail(d) === 'simone.secretary@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'simone.secretary@notalawfirm.example',
     );
     expect(simone?.supportsIds).toContain('P-000001');
     expect(simone?.supportsIds).toContain('P-000002');
@@ -176,7 +176,7 @@ describe('Role-based Home pages & configuration', () => {
     expect(updatedPartner.summaryPanels).toContain('aged_debt_by_age_band');
 
     const adminUser = getAppSnapshot('P-000001').people.find(
-      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.co.uk',
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
     const updatedRoles = defaults.roles.map((r) => (r.key === 'partner' ? updatedPartner : r));
     const saveRes = saveHomePagesConfig(
@@ -205,7 +205,7 @@ describe('Role-based Home pages & configuration', () => {
 
   it('allows adding a custom role in Admin › Home pages and assigning roles/supports to employees', () => {
     const adminUser = getAppSnapshot('P-000001').people.find(
-      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.co.uk',
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
     const res = addHomeRole(
       {

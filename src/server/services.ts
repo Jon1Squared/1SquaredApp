@@ -101,6 +101,7 @@ import {
 } from '@/domain/tasks';
 import {
   AuthorisationError,
+  canPersonAccessMatter,
   getDefaultTenantRbacConfig,
   isRegisteredPermissionKey,
   mergeRbacConfigOverlay,
@@ -119,6 +120,7 @@ import {
 } from '@/domain/rbac';
 import {
   createSignedEntraSessionCookie,
+  createVerifiedSessionActorFromEntraSession,
   ENTRA_SESSION_COOKIE,
   getEntraSession,
   setTestEntraSessionOverride,
@@ -126,7 +128,6 @@ import {
   type EntraSessionPayload,
 } from './entraAuth';
 import {
-  brandVerifiedSessionActor,
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
@@ -266,7 +267,6 @@ import type {
 import { slug, vid } from '@/seed/lists';
 import {
   clearStoreToCleanDeployment,
-  DEFAULT_USER_ID,
   type FirmStore,
   getStore,
   nextId,
@@ -386,6 +386,35 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
       code: 'FORBIDDEN',
       message: `Cannot switch in Demo Mode to a persona holding permission '${missingPerm}' not held by the current actor.`,
       requiredPermission: missingPerm,
+      tenantId,
+      correlationId: 'auth-check',
+      actorUserId: actor.personId,
+    });
+  }
+
+  // R104: Refuse Demo Mode switch if the target persona can access any restricted/staff matter not accessible to the signed-in actor
+  const restrictedMatterWithTargetAccess = store.matters.find(
+    (m) =>
+      Boolean(
+        m.isStaffMatter ||
+          (m.restrictedAccessUserIds && m.restrictedAccessUserIds.length > 0),
+      ) &&
+      canPersonAccessMatter(m, targetPerson.id, targetPerson, {
+        allPeople: store.people,
+        teams: store.teams,
+      }) &&
+      !canPersonAccessMatter(m, actor.personId, actorPerson, {
+        allPeople: store.people,
+        teams: store.teams,
+        tokenRoles: actor.session.mappedRoles,
+      }),
+  );
+  if (restrictedMatterWithTargetAccess) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message:
+        'Cannot switch in Demo Mode to a persona who has access to restricted or staff matters not accessible to the current actor.',
+      requiredPermission: 'matter:restricted:access',
       tenantId,
       correlationId: 'auth-check',
       actorUserId: actor.personId,
@@ -871,9 +900,11 @@ export function getEmployeeDetailsForUser(
     store.teams,
     store.orgStructure,
   );
-  const sensitive = perms.includes('employee:sensitive')
-    ? structuredClone(store.employeeSensitiveRecords?.[personId] ?? null)
-    : null;
+  // R103: Only return sensitive HR records when logViewSensitive: true and the view-sensitive audit entry has been written
+  const sensitive =
+    opts.logViewSensitive === true && perms.includes('employee:sensitive')
+      ? structuredClone(store.employeeSensitiveRecords?.[personId] ?? null)
+      : null;
 
   return {
     employment,
@@ -1315,6 +1346,17 @@ export function savePersonRecord(
     nextEmployment = leavingRes.employment;
   }
 
+  const cfValidation = validateCustomFields(
+    store.customFields,
+    'person',
+    opts.customFieldsSubmitted ?? input.customFields ?? {},
+    existing?.customFields ?? {},
+    store.values,
+  );
+  if (Object.keys(cfValidation.errors).length > 0) {
+    return { person: existing as Person, errors: cfValidation.errors };
+  }
+
   // Handle conversion path 1: Contact or client becomes an employee
   const wasWorkingAtFirm = isWorkingAtFirm(existing);
   const nowWorkingAtFirm = Boolean(nextEmployment && nextEmployment.status !== 'Leaver');
@@ -1386,17 +1428,6 @@ export function savePersonRecord(
         }
       }
     }
-  }
-
-  const cfValidation = validateCustomFields(
-    store.customFields,
-    'person',
-    opts.customFieldsSubmitted ?? input.customFields ?? {},
-    existing?.customFields ?? {},
-    store.values,
-  );
-  if (Object.keys(cfValidation.errors).length > 0) {
-    return { person: existing as Person, errors: cfValidation.errors };
   }
 
   const defaultStatus = valueBySystemKey(store.values, 'person_record_status', 'active')!.id;
@@ -2622,25 +2653,11 @@ export function saveMatterRecord(
     owningDepartmentId:
       input.owningDepartmentId !== undefined
         ? input.owningDepartmentId
-        : existing?.owningDepartmentId ??
-          store.people.find(
-            (p) =>
-              p.id ===
-              (input.leadFeeEarnerId ??
-                existing?.leadFeeEarnerId ??
-                opts.byId),
-          )?.employment?.departmentId,
+        : existing?.owningDepartmentId,
     owningTeamId:
       input.owningTeamId !== undefined
         ? input.owningTeamId
-        : existing?.owningTeamId ??
-          store.people.find(
-            (p) =>
-              p.id ===
-              (input.leadFeeEarnerId ??
-                existing?.leadFeeEarnerId ??
-                opts.byId),
-          )?.employment?.teamOrPracticeGroupId,
+        : existing?.owningTeamId,
     ...computeStaffMatterStatus(
       {
         clientId: effectiveClientId,
@@ -8985,20 +9002,31 @@ export function runKeyDateReminderSchedulerRecord(
   }
 
   // Always resolve the tenant context from the authenticated session / active tenant configuration
+  const nowIso = new Date().toISOString();
+  const actorEmail =
+    actor.emails?.[0]?.address ??
+    `${actor.id.toLowerCase()}@tenant.example`;
   const effectiveTenantCtx =
     providedCtx ??
     resolveCurrentTenantContext(
-      brandVerifiedSessionActor({
-        id: actor.id,
-        name: `${actor.firstName} ${actor.surname}`,
-        email: actor.emails?.[0]?.address,
-        roles: actor.roles,
-        mfaVerified,
+      createVerifiedSessionActorFromEntraSession({
+        personId: actor.id,
+        oid: actor.entraObjectId ?? actor.id,
+        tid: '',
+        sub: actor.id,
+        email: actorEmail,
+        displayName: `${actor.firstName} ${actor.surname}`,
+        entraRoles: [...(actor.roles ?? [])],
+        mappedRoles: [...(actor.roles ?? [])],
+        entraGroups: [],
+        mfaVerified: mfaVerified === true,
+        amr: mfaVerified === true ? ['pwd', 'mfa'] : ['pwd'],
+        authenticatedAt: nowIso,
+        expiresAt: nowIso,
       }),
     );
 
   const todayIso = toIsoDate(new Date());
-  const nowIso = new Date().toISOString();
   store.keyDates = store.keyDates ?? [];
   store.keyDateReminderStates = store.keyDateReminderStates ?? [];
 

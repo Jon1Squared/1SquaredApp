@@ -831,7 +831,7 @@ export function applyLeaverEffects(
   const updatedEmails = person.emails.map((em) => {
     const isFirmDomain =
       em.firmIssued ||
-      em.address.toLowerCase().endsWith('@notalawfirm.co.uk') ||
+      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
       em.address.toLowerCase().endsWith('@notalawfirm.example') ||
       em.address.toLowerCase().endsWith('@pembrokevaughan.co.uk') ||
       em.address.toLowerCase().endsWith('@pembrokevaughan.example');
@@ -1051,7 +1051,7 @@ export function createDefaultEmploymentRecord(opts: {
       (e) =>
         e.address.toLowerCase().includes('@notalawfirm') ||
         e.address.toLowerCase().includes('@pembrokevaughan'),
-    )?.address ?? `${slugFirst}.${slugSurname}@notalawfirm.co.uk`;
+    )?.address ?? `${slugFirst}.${slugSurname}@notalawfirm.example`;
   const firmPhone = opts.person.phones?.[0]?.number ?? '';
 
   const record: EmploymentRecord = {
@@ -1377,7 +1377,7 @@ export function syncPersonWorkContactFlags(
   const emails = (person.emails ?? []).map((em) => {
     const isFirm =
       em.firmIssued ||
-      em.address.toLowerCase().endsWith('@notalawfirm.co.uk') ||
+      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
       em.address.toLowerCase().endsWith('@notalawfirm.example') ||
       em.address.toLowerCase().endsWith('@pembrokevaughan.co.uk') ||
       em.address.toLowerCase().endsWith('@pembrokevaughan.example') ||

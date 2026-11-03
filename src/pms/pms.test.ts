@@ -357,7 +357,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const ofcomDramaRegex =
       /^(01632\s?960\d{3}|020\s?7946\s?0\d{3}|029\s?2018\s?0\d{3}|0117\s?496\s?0\d{3}|07700\s?900\d{3}|08081\s?570\d{3}|0909\s?8790\d{3})$/;
     const allowedDomainRegex =
-      /@(notalawfirm\.co\.uk|example\.(com|org|net)|[a-z0-9.-]+\.(example|test))$/i;
+      /@(example\.(com|org|net)|[a-z0-9.-]+\.(example|test))$/i;
 
     for (const c of clients) {
       if (c.phone.trim()) {

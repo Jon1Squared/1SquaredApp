@@ -238,28 +238,189 @@ export function resolvePersonAuthoritativeRoles(
   return ['fee_earner'];
 }
 
-const activeSessionTokenRolesByPersonId = new Map<string, readonly string[]>();
+export interface ActiveActorTokenSession {
+  readonly tenantId: string;
+  readonly personId: string;
+  readonly tokenRoles: readonly string[];
+  readonly expiresAtMs: number;
+}
+
+type AsyncLocalStorageLike<T> = {
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
+};
+
+let actorSessionStorage: AsyncLocalStorageLike<ActiveActorTokenSession | null> | null | undefined;
+
+function getActorSessionAsyncStorage(): AsyncLocalStorageLike<ActiveActorTokenSession | null> | null {
+  if (actorSessionStorage !== undefined) {
+    return actorSessionStorage;
+  }
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    actorSessionStorage = null;
+    return null;
+  }
+  try {
+    const asyncHooks = process.getBuiltinModule('node:async_hooks') as
+      | typeof import('node:async_hooks')
+      | undefined;
+    actorSessionStorage = asyncHooks?.AsyncLocalStorage
+      ? new asyncHooks.AsyncLocalStorage<ActiveActorTokenSession | null>()
+      : null;
+  } catch {
+    actorSessionStorage = null;
+  }
+  return actorSessionStorage;
+}
+
+let currentActorTokenSession: ActiveActorTokenSession | null = null;
+const sessionTokenRolesByTenantAndPerson = new Map<
+  string,
+  ActiveActorTokenSession
+>();
+
+function makeTenantPersonSessionKey(tenantId: string, personId: string): string {
+  return `${tenantId}:${personId}`;
+}
+
+export function runWithActiveActorSession<R>(
+  session: ActiveActorTokenSession | null,
+  fn: () => R,
+): R {
+  if (session && session.expiresAtMs > Date.now()) {
+    sessionTokenRolesByTenantAndPerson.set(
+      makeTenantPersonSessionKey(session.tenantId, session.personId),
+      session,
+    );
+  }
+  const storage = getActorSessionAsyncStorage();
+  if (storage) {
+    return storage.run(session, fn);
+  }
+  const previous = currentActorTokenSession;
+  currentActorTokenSession = session;
+  try {
+    return fn();
+  } finally {
+    currentActorTokenSession = previous;
+  }
+}
 
 export function setActiveSessionTokenRolesForPerson(
   personId: string,
   tokenRoles: readonly string[] | null | undefined,
+  options?: {
+    tenantId?: string;
+    expiresAt?: string | number;
+  },
 ): void {
-  if (!personId) return;
-  if (!tokenRoles) {
-    activeSessionTokenRolesByPersonId.delete(personId);
+  const tenantId =
+    options?.tenantId?.trim() || getActiveTenantConfiguration().tenantId;
+  if (!personId) {
+    currentActorTokenSession = null;
     return;
   }
-  activeSessionTokenRolesByPersonId.set(personId, [...tokenRoles]);
+  const key = makeTenantPersonSessionKey(tenantId, personId);
+  if (!tokenRoles) {
+    sessionTokenRolesByTenantAndPerson.delete(key);
+    if (
+      currentActorTokenSession?.tenantId === tenantId &&
+      currentActorTokenSession?.personId === personId
+    ) {
+      currentActorTokenSession = null;
+    }
+    return;
+  }
+  const rawExpires = options?.expiresAt;
+  const parsedExpiresMs =
+    typeof rawExpires === 'number'
+      ? rawExpires
+      : typeof rawExpires === 'string'
+        ? new Date(rawExpires).getTime()
+        : Date.now() + 8 * 60 * 60 * 1000;
+  const expiresAtMs = Number.isFinite(parsedExpiresMs)
+    ? parsedExpiresMs
+    : Date.now() + 8 * 60 * 60 * 1000;
+
+  if (expiresAtMs <= Date.now()) {
+    sessionTokenRolesByTenantAndPerson.delete(key);
+    if (
+      currentActorTokenSession?.tenantId === tenantId &&
+      currentActorTokenSession?.personId === personId
+    ) {
+      currentActorTokenSession = null;
+    }
+    return;
+  }
+
+  const entry: ActiveActorTokenSession = {
+    tenantId,
+    personId,
+    tokenRoles: [...tokenRoles],
+    expiresAtMs,
+  };
+  sessionTokenRolesByTenantAndPerson.set(key, entry);
+  currentActorTokenSession = entry;
 }
 
 export function getActiveSessionTokenRolesForPerson(
   personId: string,
+  tenantId?: string,
 ): readonly string[] | undefined {
-  return activeSessionTokenRolesByPersonId.get(personId);
+  if (!personId) return undefined;
+  const targetTenantId =
+    tenantId?.trim() || getActiveTenantConfiguration().tenantId;
+  const scoped = getActorSessionAsyncStorage()?.getStore();
+  const activeActor = scoped !== undefined ? scoped : currentActorTokenSession;
+  // Token roles apply ONLY when evaluating the currently active request actor in the same tenant
+  if (
+    !activeActor ||
+    activeActor.tenantId !== targetTenantId ||
+    activeActor.personId !== personId
+  ) {
+    return undefined;
+  }
+  if (activeActor.expiresAtMs <= Date.now()) {
+    sessionTokenRolesByTenantAndPerson.delete(
+      makeTenantPersonSessionKey(targetTenantId, personId),
+    );
+    if (scoped === undefined) {
+      currentActorTokenSession = null;
+    }
+    return undefined;
+  }
+  const cached = sessionTokenRolesByTenantAndPerson.get(
+    makeTenantPersonSessionKey(targetTenantId, personId),
+  );
+  if (cached && cached.expiresAtMs <= Date.now()) {
+    sessionTokenRolesByTenantAndPerson.delete(
+      makeTenantPersonSessionKey(targetTenantId, personId),
+    );
+    return undefined;
+  }
+  return (cached ?? activeActor).tokenRoles;
 }
 
-export function clearActiveSessionTokenRoles(): void {
-  activeSessionTokenRolesByPersonId.clear();
+export function clearActiveSessionTokenRoles(
+  personId?: string,
+  tenantId?: string,
+): void {
+  if (personId) {
+    const targetTenantId =
+      tenantId?.trim() || getActiveTenantConfiguration().tenantId;
+    sessionTokenRolesByTenantAndPerson.delete(
+      makeTenantPersonSessionKey(targetTenantId, personId),
+    );
+    if (
+      currentActorTokenSession?.tenantId === targetTenantId &&
+      currentActorTokenSession?.personId === personId
+    ) {
+      currentActorTokenSession = null;
+    }
+    return;
+  }
+  sessionTokenRolesByTenantAndPerson.clear();
+  currentActorTokenSession = null;
 }
 
 export interface ResolvePersonPermissionsOptions {
@@ -274,15 +435,18 @@ export interface ResolvePersonPermissionsOptions {
         documentGeneration?: TenantConfiguration['documentGeneration'];
       }
     | null;
-  context?: Pick<
-    TenantContext,
-    | 'tenantId'
-    | 'correlationId'
-    | 'actorId'
-    | 'actorRoles'
-    | 'actorGroups'
-    | 'mfaVerified'
-  > | null;
+  context?:
+    | (Partial<
+        Pick<
+          TenantContext,
+          | 'correlationId'
+          | 'actorId'
+          | 'actorRoles'
+          | 'actorGroups'
+          | 'mfaVerified'
+        >
+      > & { tenantId: string })
+    | null;
   mfaVerified?: boolean;
   tokenRoles?: readonly string[];
 }
@@ -343,17 +507,34 @@ export function resolvePersonPermissionSet(
 
   const mfaVerified =
     options.mfaVerified ?? options.context?.mfaVerified ?? false;
-  const sessionTokenRoles = getActiveSessionTokenRolesForPerson(user.id);
+  const isEvaluatingContextActor =
+    !options.context?.actorId || options.context.actorId === user.id;
+  const sessionTokenRoles = isEvaluatingContextActor
+    ? getActiveSessionTokenRolesForPerson(user.id, activeTenantId)
+    : undefined;
   const contextActorRoles =
-    options.context?.actorRoles ??
     options.tokenRoles ??
-    sessionTokenRoles ??
+    (isEvaluatingContextActor
+      ? sessionTokenRoles
+        ? options.context?.actorRoles
+          ? Array.from(
+              new Set([...options.context.actorRoles, ...sessionTokenRoles]),
+            )
+          : sessionTokenRoles
+        : options.context?.actorRoles
+      : undefined) ??
     storedRoles;
 
   const resolved = resolvePermissions({
     context: options.context
       ? {
-          ...options.context,
+          tenantId: activeTenantId,
+          correlationId: options.context.correlationId ?? '',
+          actorId: user.id,
+          actorRoles: contextActorRoles,
+          actorGroups: isEvaluatingContextActor
+            ? options.context.actorGroups
+            : undefined,
           mfaVerified,
         }
       : {

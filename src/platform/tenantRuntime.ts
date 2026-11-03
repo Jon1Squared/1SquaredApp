@@ -1,8 +1,8 @@
 /**
  * Platform Runtime Bridge connecting the Next.js host (`onesquared`) to:
  * - Layer 1: `@platform/core` (Tenancy, Config Engine, Extension Host, PostgreSQL Database-per-Tenant)
- * - Layer 2: `client-not-a-law-firm/config/base.json` (Schema-validated Tenant Configuration)
- * - Layer 3: `client-not-a-law-firm/extensions/nalf-matter-costs-governance` (Bespoke Client Extension)
+ * - Layer 2: Tenant configuration package (`PLATFORM_TENANT_PACKAGE_DIR/config/base.json`)
+ * - Layer 3: Registered tenant extensions on `@platform/core-api`
  */
 
 import {
@@ -16,9 +16,6 @@ import {
   type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
-import defaultBundledBaseConfig from '../../client-not-a-law-firm/config/base.json';
-import defaultBundledDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
-import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
 
 let testBaseConfigOverride: Record<string, unknown> | null = null;
 let testDevOverlayOverride: Record<string, unknown> | null | undefined = undefined;
@@ -32,8 +29,36 @@ export function setActiveTenantConfigForTesting(
   testDevOverlayOverride = devOverlay;
 }
 
+function resolveTenantPackageDir(): string {
+  const configured = process.env.PLATFORM_TENANT_PACKAGE_DIR?.trim();
+  if (configured) {
+    return configured;
+  }
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: PLATFORM_TENANT_PACKAGE_DIR must be configured to resolve tenant configuration.',
+    );
+  }
+  const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
+  const entries = fs.readdirSync(process.cwd(), { withFileTypes: true });
+  const candidate = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('client-'))
+    .map((entry) => entry.name)
+    .sort()
+    .find((dirName) =>
+      fs.existsSync(path.join(process.cwd(), dirName, 'config', 'base.json')),
+    );
+  if (!candidate) {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: PLATFORM_TENANT_PACKAGE_DIR is not set and no client-* tenant package directory was found.',
+    );
+  }
+  return candidate;
+}
+
 export function getActiveTenantBaseConfigPath(): string {
-  const folder = process.env.PLATFORM_TENANT_PACKAGE_DIR || 'client-not-a-law-firm';
+  const folder = resolveTenantPackageDir();
   if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
     return `${folder}/config/base.json`;
   }
@@ -44,7 +69,7 @@ export function getActiveTenantBaseConfigPath(): string {
 export function getActiveTenantEnvironmentOverlayPath(
   env: 'dev' | 'test' | 'training' | 'live' = 'dev',
 ): string {
-  const folder = process.env.PLATFORM_TENANT_PACKAGE_DIR || 'client-not-a-law-firm';
+  const folder = resolveTenantPackageDir();
   if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
     return `${folder}/config/environments/${env}.json`;
   }
@@ -54,27 +79,37 @@ export function getActiveTenantEnvironmentOverlayPath(
 
 function readJsonConfigFile(
   filePath: string,
-  fallback: Record<string, unknown>,
   optional = false,
 ): Record<string, unknown> {
   if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
-    return fallback;
+    throw new Error(
+      `TENANT_CONFIG_ERROR: Cannot read tenant configuration file "${filePath}" outside Node.js runtime.`,
+    );
   }
   const cached = fileJsonCache.get(filePath);
   if (cached) {
     return cached;
   }
-  try {
-    const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
-    if (optional && !fs.existsSync(filePath)) {
+  const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+  if (!fs.existsSync(filePath)) {
+    if (optional) {
       return {};
     }
+    throw new Error(
+      `TENANT_CONFIG_ERROR: Tenant configuration file not found at "${filePath}".`,
+    );
+  }
+  try {
     const raw = fs.readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     fileJsonCache.set(filePath, parsed);
     return parsed;
-  } catch {
-    return fallback;
+  } catch (err) {
+    throw new Error(
+      `TENANT_CONFIG_ERROR: Invalid JSON in tenant configuration file "${filePath}": ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
 
@@ -82,10 +117,7 @@ export function getActiveTenantRawBaseConfig(): Record<string, unknown> {
   if (testBaseConfigOverride) {
     return testBaseConfigOverride;
   }
-  return readJsonConfigFile(
-    getActiveTenantBaseConfigPath(),
-    defaultBundledBaseConfig as Record<string, unknown>,
-  );
+  return readJsonConfigFile(getActiveTenantBaseConfigPath(), false);
 }
 
 export interface PlatformArchitectureSnapshot {
@@ -133,23 +165,12 @@ export type VerifiedSessionActorInput = UnbrandedSessionActorInput & {
   readonly [VERIFIED_SESSION_BRAND]: true;
 };
 
-/**
- * Stamps a verified session actor input with the internal brand symbol.
- * Must only be called by the OIDC / Entra session layer (`src/server/entraAuth.ts`) or transitional store adapters.
- */
-export function brandVerifiedSessionActor(
-  input: UnbrandedSessionActorInput,
-): VerifiedSessionActorInput {
-  return input as VerifiedSessionActorInput;
-}
-
 let cachedHost: ExtensionHost | null = null;
 let cachedCluster: PostgresTenantCluster | null = null;
 
 export function getPlatformExtensionHost(): ExtensionHost {
   if (!cachedHost) {
     cachedHost = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
-    cachedHost.registerExtension(notALawFirmMatterCostsExtension);
   }
   return cachedHost;
 }
@@ -176,7 +197,6 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
         ? {}
         : readJsonConfigFile(
             getActiveTenantEnvironmentOverlayPath(env),
-            env === 'dev' ? (defaultBundledDevOverlay as Record<string, unknown>) : {},
             true,
           );
   return loadAndValidateTenantConfig(
@@ -200,6 +220,12 @@ export function resolveCurrentTenantContext(
       'TENANCY_AUTH_ERROR: Missing or unverified OIDC session claims. TenantContext requires an authenticated actor.',
     );
   }
+  const actorEmail = (actor.email ?? actor.upn ?? '').trim();
+  if (!actorEmail) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session actor is missing required email/UPN claim.',
+    );
+  }
   const cfg = configOverride ?? getActiveTenantConfiguration();
   const sessionTenantId = cfg.tenantId;
   if (actor.tenantId && actor.tenantId !== sessionTenantId) {
@@ -212,7 +238,7 @@ export function resolveCurrentTenantContext(
       __verifiedByOidcMiddleware: true,
       sub: actorId,
       tenantId: sessionTenantId,
-      email: actor.email ?? `user@${cfg.branding.primaryDomain}`,
+      email: actorEmail,
       ...(actor.upn ? { upn: actor.upn } : {}),
       name: actor.name,
       roles: actor.roles ? [...actor.roles] : [],

@@ -510,8 +510,22 @@ export function computeKeyDateExceptions(
       });
     }
 
-    // 6. reminder_escalated_unacknowledged
+    // 6. reminder_escalated_unacknowledged & restricted_matter_no_permitted_assignee (R99)
     const reminder = reminderByKeyDateId.get(kd.id);
+    if (
+      kd.status === 'confirmed' &&
+      reminder &&
+      reminder.lastSkippedReason === 'no_permitted_assignees'
+    ) {
+      pushException({
+        kind: 'restricted_matter_no_permitted_assignee',
+        teamId: kd.teamId,
+        matterId: kd.matterId,
+        keyDateId: kd.id,
+        detectedAt: nowIso,
+        detail: `Restricted matter key date "${kd.title}" on ${refLabel} has no responsible person permitted to access the matter; reminder task creation was skipped.`,
+      });
+    }
     if (
       kd.status === 'confirmed' &&
       reminder &&

@@ -13,10 +13,7 @@ import {
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { computeAutomaticPmsLinks } from '@/domain/pms';
 import { setRuntimeRbacConfigOverride } from '@/domain/rbac';
-import {
-  getActiveTenantBaseConfigPath,
-  getActiveTenantConfiguration,
-} from '@/platform/tenantRuntime';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type { KeyDate } from '@/domain/keyDates.types';
 import type {
   AuditEntry,
@@ -125,11 +122,7 @@ function resolveReadableStorePath(): string | null {
 }
 
 function resolveActiveFirmId(): string {
-  try {
-    return getActiveTenantConfiguration().tenantId;
-  } catch {
-    return 'default-tenant';
-  }
+  return getActiveTenantConfiguration().tenantId;
 }
 
 declare global {
@@ -230,49 +223,6 @@ function buildInitialPmsLinks(
   );
 }
 
-function populateMatterOwningDepartmentAndTeam(
-  matters: Matter[],
-  people: Person[],
-  orgStructure: OrgStructureCatalogue,
-): boolean {
-  let changed = false;
-  for (const m of matters) {
-    if (m.owningDepartmentId !== undefined && m.owningTeamId !== undefined) {
-      continue;
-    }
-    const lead = people.find(
-      (p) =>
-        p.id ===
-        (m.leadFeeEarnerId || m.supervisingPartnerId || m.responsiblePartnerId),
-    );
-    const deptId =
-      m.owningDepartmentId ??
-      lead?.employment?.departmentId ??
-      (lead?.departmentId
-        ? orgStructure.departments.find(
-            (d) => d.id === lead.departmentId || d.legacyChoiceValueId === lead.departmentId,
-          )?.id
-        : undefined);
-    if (m.owningDepartmentId === undefined && deptId) {
-      m.owningDepartmentId = deptId;
-      changed = true;
-    }
-    const teamId =
-      m.owningTeamId ??
-      lead?.employment?.teamOrPracticeGroupId ??
-      (deptId
-        ? orgStructure.teamsOrPracticeGroups.find(
-            (t) => t.parentDepartmentId === deptId,
-          )?.id
-        : undefined);
-    if (m.owningTeamId === undefined && teamId) {
-      m.owningTeamId = teamId;
-      changed = true;
-    }
-  }
-  return changed;
-}
-
 export function createSeedStore(today: Date = new Date()): FirmStore {
   const seedLists = buildSeedLists();
   const demo = buildDemoData(today);
@@ -292,11 +242,6 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     demo.matters,
     matterPartyTaxonomy,
     today.toISOString(),
-  );
-  populateMatterOwningDepartmentAndTeam(
-    partyMigration.matters,
-    empMigration.people,
-    orgStructure,
   );
   const pmsFeeEarners = getPmsSource().listFeeEarners();
   const matterCostsConfig = syncRateCardsWithPmsFeeEarners(
@@ -603,7 +548,7 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
       if (Array.isArray(p.emails)) {
         for (const em of p.emails) {
           if (em.address.toLowerCase().includes('@pembrokevaughan.co.uk')) {
-            em.address = em.address.replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.co.uk');
+            em.address = em.address.replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.example');
             changed = true;
           } else if (em.address.toLowerCase().includes('@pembrokevaughan.example')) {
             em.address = em.address.replace(
@@ -624,7 +569,7 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
       }
       if (p.employment?.systems?.firmWorkEmail?.toLowerCase().includes('@pembrokevaughan')) {
         p.employment.systems.firmWorkEmail = p.employment.systems.firmWorkEmail
-          .replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.co.uk')
+          .replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.example')
           .replace(/@pembrokevaughan\.example/gi, '@notalawfirm.example');
         changed = true;
       }
@@ -651,7 +596,7 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
       if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.co.uk')) {
         r.demoUserEmail = r.demoUserEmail.replace(
           /@pembrokevaughan\.co\.uk/gi,
-          '@notalawfirm.co.uk',
+          '@notalawfirm.example',
         );
         changed = true;
       }
@@ -665,7 +610,7 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
   ) {
     store.matterCostsConfig.clientProfileCode = 'NALF-LLP';
     store.matterCostsConfig.clientProfileName =
-      'Not A Law Firm LLP — Client Configuration (notalawfirm.co.uk)';
+      'Not A Law Firm LLP — Client Configuration (notalawfirm.example)';
     changed = true;
   }
   return changed;
@@ -1097,15 +1042,6 @@ export function getStore(): FirmStore {
 
       if (!Array.isArray(parsed.keyDates)) {
         parsed.keyDates = buildSeedKeyDates(parsed.matters, parsed.teams, new Date());
-        migrated = true;
-      }
-      if (
-        populateMatterOwningDepartmentAndTeam(
-          parsed.matters,
-          parsed.people,
-          parsed.orgStructure,
-        )
-      ) {
         migrated = true;
       }
       if (!Array.isArray(parsed.keyDateNotApplicable)) {

@@ -4595,7 +4595,7 @@ export function PersonFormClient({
                               type="email"
                               className="field-input"
                               disabled={!canEditCore}
-                              placeholder="name@notalawfirm.co.uk"
+                              placeholder="name@notalawfirm.example"
                               value={sysFirmWorkEmail}
                               onChange={(e) => setSysFirmWorkEmail(e.target.value)}
                             />

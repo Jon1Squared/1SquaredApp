@@ -10,9 +10,18 @@ import {
   type VerifiedOidcTokenClaims,
 } from '@/domain/rbac';
 import {
-  brandVerifiedSessionActor,
+  type UnbrandedSessionActorInput,
   type VerifiedSessionActorInput,
 } from '@/platform/tenantRuntime';
+
+/**
+ * Private brand constructor — only `src/server/entraAuth.ts` may mint a `VerifiedSessionActorInput`.
+ */
+function brandVerifiedSessionActor(
+  input: UnbrandedSessionActorInput,
+): VerifiedSessionActorInput {
+  return input as VerifiedSessionActorInput;
+}
 
 export const ENTRA_PKCE_COOKIE = 'onesquared_entra_pkce';
 export const ENTRA_SESSION_COOKIE = 'onesquared_entra_session';
@@ -75,7 +84,9 @@ export function setTestEntraSessionOverride(
   }
   testEntraSessionOverride = session;
   if (session?.personId) {
-    setActiveSessionTokenRolesForPerson(session.personId, session.mappedRoles);
+    setActiveSessionTokenRolesForPerson(session.personId, session.mappedRoles, {
+      expiresAt: session.expiresAt,
+    });
   } else {
     clearActiveSessionTokenRoles();
   }
@@ -452,7 +463,10 @@ export async function getEntraSession(): Promise<EntraSessionPayload | null> {
       setActiveSessionTokenRolesForPerson(
         testEntraSessionOverride.personId,
         testEntraSessionOverride.mappedRoles,
+        { expiresAt: testEntraSessionOverride.expiresAt },
       );
+    } else {
+      clearActiveSessionTokenRoles();
     }
     return testEntraSessionOverride;
   }
@@ -464,10 +478,14 @@ export async function getEntraSession(): Promise<EntraSessionPayload | null> {
       setActiveSessionTokenRolesForPerson(
         verified.personId,
         verified.mappedRoles,
+        { expiresAt: verified.expiresAt },
       );
+    } else {
+      clearActiveSessionTokenRoles();
     }
     return verified;
   } catch {
+    clearActiveSessionTokenRoles();
     return null;
   }
 }

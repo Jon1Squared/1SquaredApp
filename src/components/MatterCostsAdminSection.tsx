@@ -61,24 +61,26 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
   function handleAddRateCard() {
     if (!newCardName.trim()) return;
     const pa = practiceAreas.find((p) => p.id === newCardPracticeAreaId);
-    const created: RateCardEntry = {
-      id: `RC-CUSTOM-${Date.now()}`,
-      name: newCardName.trim(),
-      practiceAreaId: pa?.id ?? null,
-      pmsDepartmentCode: pa?.label ?? 'Custom / Client Tier',
-      partnerRateGbp: Number(newCardPartnerRate) || 375,
-      associateRateGbp: Number(newCardAssociateRate) || 265,
-      traineeRateGbp: Number(newCardTraineeRate) || 150,
-      pmsPartnerRateGbp: null,
-      pmsAssociateRateGbp: null,
-      pmsTraineeRateGbp: null,
-      customGrades: [],
-      active: true,
-    };
-    setConfig((prev) => ({
-      ...prev,
-      rateCards: [...prev.rateCards, created],
-    }));
+    setConfig((prev) => {
+      const created: RateCardEntry = {
+        id: `RC-CUSTOM-${prev.rateCards.length + 1}`,
+        name: newCardName.trim(),
+        practiceAreaId: pa?.id ?? null,
+        pmsDepartmentCode: pa?.label ?? 'Custom / Client Tier',
+        partnerRateGbp: Number(newCardPartnerRate) || 375,
+        associateRateGbp: Number(newCardAssociateRate) || 265,
+        traineeRateGbp: Number(newCardTraineeRate) || 150,
+        pmsPartnerRateGbp: null,
+        pmsAssociateRateGbp: null,
+        pmsTraineeRateGbp: null,
+        customGrades: [],
+        active: true,
+      };
+      return {
+        ...prev,
+        rateCards: [...prev.rateCards, created],
+      };
+    });
     setNewCardName('');
     setNewCardPracticeAreaId('');
   }
@@ -190,7 +192,7 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <strong style={{ fontSize: 14 }}>
-              Three-Layer Platform Architecture · Active Tenant: Not A Law Firm LLP (notalawfirm.co.uk)
+              Three-Layer Platform Architecture · Active Tenant: Not A Law Firm LLP (notalawfirm.example)
             </strong>
             <StatusPill label="PostgreSQL DB-per-Tenant" tone="positive" />
             <StatusPill label="Model A (Azure Single-Tenant) & Model B (Multi-Tenant)" tone="neutral" />

@@ -77,19 +77,23 @@ export function AppShell({
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [avatarOpen, setAvatarOpen] = useState(false);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('onesquared_theme');
+      if (saved === 'dark' || saved === 'light') {
+        return saved;
+      }
+    }
+    return 'light';
+  });
 
   const newRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem('onesquared_theme') as 'light' | 'dark' | null;
-    if (saved === 'dark' || saved === 'light') {
-      setTheme(saved);
-      document.documentElement.dataset.theme = saved;
-    }
-  }, []);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   function toggleTheme() {
     const next = theme === 'light' ? 'dark' : 'light';

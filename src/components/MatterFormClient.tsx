@@ -530,6 +530,11 @@ function statusPillTone(
   return 'neutral';
 }
 
+let nextClientItemSeq = 1;
+function nextClientItemId(prefix: string): string {
+  return `${prefix}-${++nextClientItemSeq}`;
+}
+
 export function MatterFormClient({
   existing,
   isReopenedDraft = false,
@@ -587,15 +592,21 @@ export function MatterFormClient({
   }, [initialEmployees, people]);
 
   useEffect(() => {
-    setPeople(mergePeopleWithEnquiries(initialPeople, enquiries, values));
+    queueMicrotask(() => {
+      setPeople(mergePeopleWithEnquiries(initialPeople, enquiries, values));
+    });
   }, [initialPeople, enquiries, values]);
 
   useEffect(() => {
-    setOrganisations(initialOrganisations);
+    queueMicrotask(() => {
+      setOrganisations(initialOrganisations);
+    });
   }, [initialOrganisations]);
 
   useEffect(() => {
-    setLinks(initialLinks);
+    queueMicrotask(() => {
+      setLinks(initialLinks);
+    });
   }, [initialLinks]);
 
   const card1Ref = useRef<HTMLElement | null>(null);
@@ -847,11 +858,13 @@ export function MatterFormClient({
     if (prevUserIdRef.current !== currentUser.id) {
       prevUserIdRef.current = currentUser.id;
       if (!existing && !initialScenario && !initialEnquiry && !initialQuote) {
-        setPracticeAreaId(userMatterDefaults.practiceAreaId);
-        setWorkTypeSubcategoryId('');
-        setResponsiblePartnerId(userMatterDefaults.responsiblePartnerId);
-        setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId);
-        setSupervisingPartnerId(userMatterDefaults.responsiblePartnerId);
+        queueMicrotask(() => {
+          setPracticeAreaId(userMatterDefaults.practiceAreaId);
+          setWorkTypeSubcategoryId('');
+          setResponsiblePartnerId(userMatterDefaults.responsiblePartnerId);
+          setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId);
+          setSupervisingPartnerId(userMatterDefaults.responsiblePartnerId);
+        });
       }
     }
   }, [
@@ -1440,12 +1453,14 @@ export function MatterFormClient({
       practiceAreaId,
       preferredSource: costRateSource === 'pms' ? 'pms' : 'app_table',
     });
-    if (lookedUp.rateCard.id) setCostRateCardId(lookedUp.rateCard.id);
-    setCostRateSource(lookedUp.activeSource);
-    setPartnerRateGbp(String(lookedUp.partnerRateGbp));
-    setAssociateRateGbp(String(lookedUp.associateRateGbp));
-    setTraineeRateGbp(String(lookedUp.traineeRateGbp));
-    setCustomGradeRates(lookedUp.customGrades);
+    queueMicrotask(() => {
+      if (lookedUp.rateCard.id) setCostRateCardId(lookedUp.rateCard.id);
+      setCostRateSource(lookedUp.activeSource);
+      setPartnerRateGbp(String(lookedUp.partnerRateGbp));
+      setAssociateRateGbp(String(lookedUp.associateRateGbp));
+      setTraineeRateGbp(String(lookedUp.traineeRateGbp));
+      setCustomGradeRates(lookedUp.customGrades);
+    });
   }, [practiceAreaId, costsConfig, costRateSource]);
 
   function handleSelectWorkBasis(nextBasis: MatterCostWorkBasis) {
@@ -1475,7 +1490,7 @@ export function MatterFormClient({
     if (!desc) return;
     const amountGbp = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : 0;
     const entry: MatterDisbursementEntry = {
-      id: `DISB-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: nextClientItemId('DISB'),
       description: desc,
       amountGbp,
       vatApplicable: preset ? (preset.vatApplicable ?? true) : newDisbursementVat,
@@ -1964,7 +1979,9 @@ export function MatterFormClient({
         v.label.toLowerCase().startsWith(targetLabel),
     );
     if (matchVal && matchVal.id !== riskRatingId) {
-      setRiskRatingId(matchVal.id);
+      queueMicrotask(() => {
+        setRiskRatingId(matchVal.id);
+      });
     }
   }, [riskAssessmentSummary.overallRisk, values, riskRatingId]);
 
@@ -2067,7 +2084,12 @@ export function MatterFormClient({
   const [pastedDocContent, setPastedDocContent] = useState<string>('');
   const [previewDocId, setPreviewDocId] = useState<string | null>(null);
   const [showClaudeKeyConfig, setShowClaudeKeyConfig] = useState<boolean>(false);
-  const [claudeApiKeyOverride, setClaudeApiKeyOverride] = useState<string>('');
+  const [claudeApiKeyOverride, setClaudeApiKeyOverride] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return window.localStorage.getItem('onesquared_claude_api_key') ?? '';
+    }
+    return '';
+  });
   const [extractingAi, setExtractingAi] = useState<boolean>(false);
   const [aiExtractionResult, setAiExtractionResult] =
     useState<MatterAiExtractionResult | null>(null);
@@ -2079,13 +2101,6 @@ export function MatterFormClient({
   >({});
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
   const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const savedKey = window.localStorage.getItem('onesquared_claude_api_key');
-      if (savedKey) setClaudeApiKeyOverride(savedKey);
-    }
-  }, []);
 
   function handleClaudeKeyChange(val: string) {
     setClaudeApiKeyOverride(val);
@@ -2310,9 +2325,6 @@ export function MatterFormClient({
 
     // 1. Section 1: Matter Details & Team
     if (mPracticeArea?.matchedId) {
-      prevWorkTypeKeyRef.current = `${mPracticeArea.matchedId}__${
-        mWorkType?.matchedId ?? workTypeSubcategoryId
-      }`;
       setPracticeAreaId(mPracticeArea.matchedId);
       nextCitations['practiceArea'] = {
         sourceDoc: mPracticeArea.sourceDoc,
@@ -2329,8 +2341,6 @@ export function MatterFormClient({
       };
     }
     if (res.client?.matchedRecordId) {
-      // Prevent clientIds useEffect from overwriting extracted clientRelationshipStatus
-      prevClientsKeyRef.current = res.client.matchedRecordId;
       setClientIds([res.client.matchedRecordId]);
       nextCitations['client'] = {
         sourceDoc: res.client.sourceDoc,
@@ -2390,9 +2400,11 @@ export function MatterFormClient({
           confidence: s.confidence,
         };
       }
-      setRiskAnswers(nextAnswers);
-      setRiskFollowUps(nextFollowUps);
-      setExpandedRiskSectionIds(MATTER_RISK_SECTIONS.map((sec) => sec.id));
+      queueMicrotask(() => {
+        setRiskAnswers(nextAnswers);
+        setRiskFollowUps(nextFollowUps);
+        setExpandedRiskSectionIds(MATTER_RISK_SECTIONS.map((sec) => sec.id));
+      });
     }
 
     if (mKeyDates.length > 0) {
@@ -2585,22 +2597,14 @@ export function MatterFormClient({
 
   // Sync Reviewer mode when top bar "Viewing as" changes to Risk / Compliance
   useEffect(() => {
-    if (activeViewingRole === 'risk_compliance') {
-      setIsReviewerMode(true);
-    } else {
-      setIsReviewerMode(false);
-    }
+    queueMicrotask(() => {
+      if (activeViewingRole === 'risk_compliance') {
+        setIsReviewerMode(true);
+      } else {
+        setIsReviewerMode(false);
+      }
+    });
   }, [activeViewingRole]);
-
-  // Apply URL scenario if passed
-  useEffect(() => {
-    if (initialScenario === 'fast') applyDemoPreset('fast_path');
-    else if (initialScenario === 'results') applyDemoPreset('partly_complete');
-    else if (initialScenario === 'draft') applyDemoPreset('reopened_draft');
-    else if (initialScenario === 'referred') applyDemoPreset('referred_submitted');
-    else if (initialScenario === 'reviewer') applyDemoPreset('reviewer_view');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialScenario]);
 
   // Origin screen information for the "← Back to ..." link and Cancel button
   const [referrerInfo, setReferrerInfo] = useState<{ label: string; href: string } | null>(
@@ -2613,36 +2617,38 @@ export function MatterFormClient({
       const refUrl = new URL(document.referrer);
       if (refUrl.origin !== window.location.origin) return;
       const p = refUrl.pathname;
+      let nextInfo: { label: string; href: string } | null = null;
       if (p.startsWith('/people/')) {
         const pid = p.split('/')[2];
         const found = people.find((x) => x.id === pid);
-        if (found) {
-          setReferrerInfo({ label: personDisplayName(found), href: p });
-          return;
-        }
-        setReferrerInfo({ label: 'People', href: '/people' });
+        nextInfo = found
+          ? { label: personDisplayName(found), href: p }
+          : { label: 'People', href: '/people' };
       } else if (p.startsWith('/organisations/')) {
         const oid = p.split('/')[2];
         const found = organisations.find((x) => x.id === oid);
-        if (found) {
-          setReferrerInfo({ label: found.legalName, href: p });
-          return;
-        }
-        setReferrerInfo({ label: 'Organisations', href: '/organisations' });
+        nextInfo = found
+          ? { label: found.legalName, href: p }
+          : { label: 'Organisations', href: '/organisations' };
       } else if (p.startsWith('/enquiries/')) {
-        setReferrerInfo({ label: 'Enquiry', href: p });
+        nextInfo = { label: 'Enquiry', href: p };
       } else if (p.startsWith('/matters/')) {
-        setReferrerInfo({ label: 'Matters', href: '/matters' });
+        nextInfo = { label: 'Matters', href: '/matters' };
       } else if (p === '/people') {
-        setReferrerInfo({ label: 'People', href: '/people' });
+        nextInfo = { label: 'People', href: '/people' };
       } else if (p === '/organisations') {
-        setReferrerInfo({ label: 'Organisations', href: '/organisations' });
+        nextInfo = { label: 'Organisations', href: '/organisations' };
       } else if (p === '/matters') {
-        setReferrerInfo({ label: 'Matters', href: '/matters' });
+        nextInfo = { label: 'Matters', href: '/matters' };
       } else if (p === '/tasks') {
-        setReferrerInfo({ label: 'Tasks', href: '/tasks' });
+        nextInfo = { label: 'Tasks', href: '/tasks' };
       } else if (p === '/') {
-        setReferrerInfo({ label: 'Home', href: '/' });
+        nextInfo = { label: 'Home', href: '/' };
+      }
+      if (nextInfo) {
+        queueMicrotask(() => {
+          setReferrerInfo(nextInfo);
+        });
       }
     } catch {
       // ignore invalid referrer URL
@@ -2714,7 +2720,6 @@ export function MatterFormClient({
 
   const [leaveWarningModalOpen, setLeaveWarningModalOpen] = useState<boolean>(false);
   const [leaveWarningTargetHref, setLeaveWarningTargetHref] = useState<string | null>(null);
-  const initialSnapshotRef = useRef<string | null>(null);
   const [restoredSessionDirty, setRestoredSessionDirty] = useState<boolean>(false);
 
   // Clear any legacy sessionStorage draft keys so cancelled/abandoned form details are never remembered
@@ -2784,16 +2789,12 @@ export function MatterFormClient({
     ],
   );
 
-  useEffect(() => {
-    if (initialSnapshotRef.current === null) {
-      initialSnapshotRef.current = currentFormStateSignature;
-    }
-  }, [currentFormStateSignature]);
+  const [initialSnapshot, setInitialSnapshot] = useState<string>(
+    () => currentFormStateSignature,
+  );
 
   const isFormModified =
-    (initialSnapshotRef.current !== null &&
-      initialSnapshotRef.current !== currentFormStateSignature) ||
-    restoredSessionDirty;
+    initialSnapshot !== currentFormStateSignature || restoredSessionDirty;
 
   const hasUnsavedChanges =
     workflowState === 'editing' &&
@@ -4246,9 +4247,7 @@ export function MatterFormClient({
       resetAddPartyForm();
     } else {
       const created: ConflictCheckParty = {
-        id:
-          customParty?.id ??
-          `party-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: customParty?.id ?? nextClientItemId('party'),
         name: nameToUse,
         entityType: typeToUse,
         role: legacyRole,
@@ -4398,7 +4397,7 @@ export function MatterFormClient({
     for (const lp of linkedPeople) {
       const isDir = (lp.jobTitle || '').toLowerCase().includes('director');
       relatedToAdd.push({
-        id: `rel-${lp.id}-${Date.now()}`,
+        id: nextClientItemId(`rel-${lp.id}`),
         name: personDisplayName(lp),
         entityType: 'person',
         role: 'Related party',
@@ -4421,7 +4420,7 @@ export function MatterFormClient({
         );
         if (parentOrg) {
           relatedToAdd.push({
-            id: `rel-org-${parentOrg.id}-${Date.now()}`,
+            id: nextClientItemId(`rel-org-${parentOrg.id}`),
             name: parentOrg.legalName,
             entityType: 'organisation',
             role: 'Related party',
@@ -4440,7 +4439,7 @@ export function MatterFormClient({
       );
       for (const child of childOrgs) {
         relatedToAdd.push({
-          id: `rel-org-${child.id}-${Date.now()}`,
+          id: nextClientItemId(`rel-org-${child.id}`),
           name: child.legalName,
           entityType: 'organisation',
           role: 'Related party',
@@ -4864,6 +4863,19 @@ export function MatterFormClient({
     }
   }
 
+  // Apply URL scenario if passed
+  useEffect(() => {
+    if (!initialScenario) return;
+    queueMicrotask(() => {
+      if (initialScenario === 'fast') applyDemoPreset('fast_path');
+      else if (initialScenario === 'results') applyDemoPreset('partly_complete');
+      else if (initialScenario === 'draft') applyDemoPreset('reopened_draft');
+      else if (initialScenario === 'referred') applyDemoPreset('referred_submitted');
+      else if (initialScenario === 'reviewer') applyDemoPreset('reviewer_view');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialScenario]);
+
   // Build snapshot object for saving
   function buildConflictRecordSnapshot(
     overrideStatus?: ConflictCheckStatusPill,
@@ -5096,7 +5108,7 @@ export function MatterFormClient({
             // ignore
           }
         }
-        initialSnapshotRef.current = currentFormStateSignature;
+        setInitialSnapshot(currentFormStateSignature);
         setRestoredSessionDirty(false);
         const draftLabel = clientDisplayName || title.trim() || 'Untitled matter';
         showToast(
@@ -5192,7 +5204,7 @@ export function MatterFormClient({
         if (draftRes.matter) {
           targetMatterId = draftRes.matter.id;
           setSavedDraftMatterId(draftRes.matter.id);
-          initialSnapshotRef.current = currentFormStateSignature;
+          setInitialSnapshot(currentFormStateSignature);
           setRestoredSessionDirty(false);
         }
       }

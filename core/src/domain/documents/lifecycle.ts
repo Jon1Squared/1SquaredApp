@@ -69,6 +69,7 @@ export interface DocumentLifecycleDependencies {
     upn?: string;
     displayName?: string;
   } | null;
+  protectedContainerPaths?: readonly string[];
   onAfterMatterDocumentsProvisioned?: (payload: {
     ctx: TenantContext;
     matterId: string;
@@ -792,13 +793,42 @@ export async function linkExistingMatterFolderJob(params: {
       const expectedBaseNormalized = (expectedRoute.renderedBasePath ?? '')
         .toLowerCase()
         .replace(/^\/+|\/+$/g, '');
+      const actualSegments = actualNormalized.split('/').filter(Boolean);
+      const expectedBaseSegments = expectedBaseNormalized
+        .split('/')
+        .filter(Boolean);
 
-      // Never allow linking the library root or the routed department/team container folder itself (R3)
+      const matchesContainerScope = deps.repository
+        .listFolderScopes(ctx)
+        .some(
+          (s) =>
+            s.storeId === storeId &&
+            s.libraryId === libraryId &&
+            (s.scopeType === 'library_root' ||
+              s.scopeType === 'department' ||
+              s.scopeType === 'team') &&
+            s.providerItemId === resolvedLoc.folderItemId,
+        );
+
+      const matchesProtectedContainerPath = (
+        deps.protectedContainerPaths ?? []
+      ).some((rawPath) => {
+        const norm = rawPath.toLowerCase().replace(/^\/+|\/+$/g, '');
+        return (
+          Boolean(norm) &&
+          (actualNormalized === norm || norm.startsWith(`${actualNormalized}/`))
+        );
+      });
+
+      // Never allow linking the library root or any configured department/team container folder itself (R3, R92)
       if (
         !actualNormalized ||
+        matchesContainerScope ||
+        matchesProtectedContainerPath ||
         (expectedBaseNormalized &&
           (actualNormalized === expectedBaseNormalized ||
-            expectedBaseNormalized.startsWith(`${actualNormalized}/`)))
+            expectedBaseNormalized.startsWith(`${actualNormalized}/`) ||
+            actualSegments.length <= expectedBaseSegments.length))
       ) {
         deps.repository.appendAuditEvent(
           ctx,
@@ -816,7 +846,7 @@ export async function linkExistingMatterFolderJob(params: {
           }),
         );
         const err = new Error(
-          `PERMISSION_DENIED: Cannot link the department, team, or library root container folder ("${actualRelPath}") directly to a matter.`,
+          'PERMISSION_DENIED: Cannot link a department, team, or library root container folder directly to a matter.',
         ) as Error & { code: DocumentStoreErrorCode };
         err.code = 'access_denied';
         throw err;
@@ -1005,12 +1035,18 @@ export async function recalculateMatterPermissionsJob(params: {
       for (const loc of existingLocations) {
         if (loc.provisioningStatus !== 'provisioned') continue;
 
-        const expectedRoute = resolveMatterDocumentRoute({
-          subject,
-          stores: deps.stores,
-          routingRules: deps.routingRules,
-          matterFolderNameTemplate: deps.matterFolderNameTemplate,
-        });
+        let expectedRoute: ReturnType<typeof resolveMatterDocumentRoute> | null =
+          null;
+        try {
+          expectedRoute = resolveMatterDocumentRoute({
+            subject,
+            stores: deps.stores,
+            routingRules: deps.routingRules,
+            matterFolderNameTemplate: deps.matterFolderNameTemplate,
+          });
+        } catch {
+          expectedRoute = null;
+        }
 
         const currentBasePath = loc.relativePath
           .split('/')
@@ -1020,6 +1056,7 @@ export async function recalculateMatterPermissionsJob(params: {
         // If department/team changed and strategy is 'move_folder', delegate to moveMatterFolderJob
         if (
           departmentChangeStrategy === 'move_folder' &&
+          expectedRoute &&
           expectedRoute.store.storeId === loc.storeId &&
           expectedRoute.libraryId === loc.libraryId &&
           currentBasePath.toLowerCase() !==
@@ -1050,9 +1087,11 @@ export async function recalculateMatterPermissionsJob(params: {
 
         // If repermission_in_place is used after a department/team change on a standard matter,
         // break inheritance on the in-place folder so the new department/team gets access.
-        const inPlaceDeptMismatch =
-          currentBasePath.toLowerCase() !==
-          expectedRoute.renderedBasePath.toLowerCase();
+        const inPlaceDeptMismatch = Boolean(
+          expectedRoute &&
+            currentBasePath.toLowerCase() !==
+              expectedRoute.renderedBasePath.toLowerCase(),
+        );
         const effectiveInherit = inPlaceDeptMismatch ? false : permPlan.inherit;
 
         try {
@@ -1082,10 +1121,8 @@ export async function recalculateMatterPermissionsJob(params: {
               level: 'error',
               correlationId: ctx.correlationId,
               tenantId: ctx.tenantId,
-              matterId: subject.matterId,
               storeId: loc.storeId,
               code: errorCode,
-              message: errorMessage,
             }),
           );
           deps.repository.putLifecycleJob(ctx, {

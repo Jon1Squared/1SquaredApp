@@ -286,14 +286,6 @@ export function resolveMatterDocumentRoute(params: {
     throw err;
   }
 
-  if (!subject.teamId || !subject.teamId.trim()) {
-    const err = new Error(
-      `DOCUMENT_ROUTING_ERROR: Matter "${subject.matterNumber || subject.matterId}" has no owning team configured for document routing.`,
-    ) as Error & { code: DocumentStoreErrorCode };
-    err.code = 'misconfigured';
-    throw err;
-  }
-
   let matchedIndex = -1;
   let matchedRule: DocumentRoutingRule | undefined;
 
@@ -309,7 +301,8 @@ export function resolveMatterDocumentRoute(params: {
     const deptMatches =
       !criteria.departmentId || criteria.departmentId === subject.departmentId;
     const teamMatches =
-      !criteria.teamId || criteria.teamId === subject.teamId;
+      !criteria.teamId ||
+      (Boolean(subject.teamId) && criteria.teamId === subject.teamId);
     const workTypeMatches =
       !criteria.workTypeId ||
       criteria.workTypeId === subject.workTypeId ||
@@ -327,6 +320,19 @@ export function resolveMatterDocumentRoute(params: {
     throw new Error(
       'DOCUMENT_ROUTING_ERROR: No matching routing rule found and no default rule is configured.',
     );
+  }
+
+  const ruleRequiresTeam =
+    /\{(teamCode|teamId)\}/.test(matchedRule.basePath) ||
+    /\{(teamCode|teamId)\}/.test(matterFolderNameTemplate) ||
+    (matchedRule.match !== 'default' && Boolean(matchedRule.match.teamId));
+
+  if (ruleRequiresTeam && (!subject.teamId || !subject.teamId.trim())) {
+    const err = new Error(
+      `DOCUMENT_ROUTING_ERROR: Matter "${subject.matterNumber || subject.matterId}" has no owning team configured for document routing.`,
+    ) as Error & { code: DocumentStoreErrorCode };
+    err.code = 'misconfigured';
+    throw err;
   }
 
   const store = stores.find((s) => s.storeId === matchedRule.storeId);

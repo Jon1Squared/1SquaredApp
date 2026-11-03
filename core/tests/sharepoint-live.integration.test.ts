@@ -22,7 +22,7 @@ const LIVE_ENABLED =
   Boolean(process.env.SHAREPOINT_LIVE_ENTRA_TENANT_ID);
 
 describe.skipIf(!LIVE_ENABLED)(
-  'Opt-in Live SharePoint Online Integration Suite',
+  'Phase 1 SharePoint Document Store Mock Contract Harness',
   () => {
     it('exercises connection test, folder tree creation, permission assignment, file upload/download, and clean-up', async () => {
       const ctx = resolveTenantFromVerifiedToken({

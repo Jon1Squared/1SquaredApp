@@ -63,7 +63,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     __verifiedByOidcMiddleware: true as const,
     sub: 'P-ADMIN-1',
     tenantId: 'not-a-law-firm',
-    email: 'admin@notalawfirm.co.uk',
+    email: 'admin@notalawfirm.example',
     name: 'Alice Vance',
     roles: ['admin', 'partner'],
     mfaVerified: true,
@@ -1041,7 +1041,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       ),
     ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
 
-    // R1 & R22: Token hand-signed with the old constant 'platform-scoped-blob-token-key-v1:<tenantId>' is rejected
+    // R1 & R22: Token hand-signed with the old constant 'platform-scoped-blob-token-key-v1:<tenantId>' is rejected by both core storage and host getDocumentStorage()
     const oldSigningSecret = `platform-scoped-blob-token-key-v1:${ctxUserA.tenantId}`;
     const forgedSigWithOldKey = crypto
       .createHmac('sha256', oldSigningSecret)
@@ -1051,6 +1051,31 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       storage.verifyScopedDownloadToken(
         ctxUserA,
         `${payloadPart}.${forgedSigWithOldKey}`,
+      ),
+    ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
+
+    const hostInit = await getInitializedDocGenContext('P-000004');
+    const hostIssued = await hostInit.storage.issueScopedDownloadToken(
+      hostInit.ctx,
+      {
+        blobKey: `${hostInit.ctx.blobContainerName}/documents/DOC-HOST-1/v1.docx`,
+        fileName: 'host-letter.docx',
+        documentId: 'DOC-HOST-1',
+      },
+      300,
+    );
+    const [hostPayloadPart] = hostIssued.token.split('.');
+    const hostForgedSigWithOldKey = crypto
+      .createHmac(
+        'sha256',
+        `platform-scoped-blob-token-key-v1:${hostInit.ctx.tenantId}`,
+      )
+      .update(hostPayloadPart!)
+      .digest('hex');
+    await expect(
+      hostInit.storage.verifyScopedDownloadToken(
+        hostInit.ctx,
+        `${hostPayloadPart}.${hostForgedSigWithOldKey}`,
       ),
     ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
 
@@ -1385,7 +1410,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         oid: '00000000-0000-0000-0000-000000000007',
         tid: '11111111-2222-3333-4444-555555555555',
         displayName: 'Excluded Solicitor',
-        email: 'excluded@notalawfirm.co.uk',
+        email: 'excluded@notalawfirm.example',
         personId: 'P-000007',
         entraRoles: ['fee_earner'],
         mappedRoles: ['fee_earner'],
@@ -1474,7 +1499,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         oid: '00000000-0000-0000-0000-000000000001',
         tid: '11111111-2222-3333-4444-555555555555',
         displayName: 'Admin User',
-        email: 'admin@notalawfirm.co.uk',
+        email: 'admin@notalawfirm.example',
         personId: 'P-000001',
         entraRoles: ['admin'],
         mappedRoles: ['admin'],

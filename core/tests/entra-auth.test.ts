@@ -82,7 +82,7 @@ function makeValidPayload(overrides: Record<string, unknown> = {}): Record<strin
     iat: nowSec - 10,
     nbf: nowSec - 10,
     exp: nowSec + 3600,
-    preferred_username: 'dafydd.evans@notalawfirm.co.uk',
+    preferred_username: 'dafydd.evans@notalawfirm.example',
     roles: ['1Squared.FeeEarner'],
     amr: ['pwd', 'mfa'],
     ...overrides,
@@ -393,7 +393,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     expect(shouldUseSecureCookies()).toBe(true);
 
     const callbackReq = new NextRequest(
-      `https://app.notalawfirm.co.uk/api/auth/callback/microsoft-entra-id?code=auth-code-xyz&state=${encodeURIComponent(pkceDecoded.state)}`,
+      `https://app.notalawfirm.example/api/auth/callback/microsoft-entra-id?code=auth-code-xyz&state=${encodeURIComponent(pkceDecoded.state)}`,
       {
         headers: {
           cookie: `${ENTRA_PKCE_COOKIE}=${signedCookieValue}`,
@@ -419,7 +419,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
       oid: '00000000-0000-4000-8000-000000000002',
       tid: TEST_TENANT_ID,
       sub: 'P-000002',
-      email: 'dafydd.evans@notalawfirm.co.uk',
+      email: 'dafydd.evans@notalawfirm.example',
       displayName: 'Dafydd Evans',
       entraRoles: [],
       mappedRoles: ['fee_earner'],
@@ -439,7 +439,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         oid: '00000000-0000-4000-8000-000000000002',
         tid: TEST_TENANT_ID,
         sub: 'P-000001',
-        email: 'admin@notalawfirm.co.uk',
+        email: 'admin@notalawfirm.example',
         displayName: 'Forged Admin',
         entraRoles: ['1Squared.Admin'],
         mappedRoles: ['admin'],
@@ -462,7 +462,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         oid: '00000000-0000-4000-8000-000000000002',
         tid: TEST_TENANT_ID,
         sub: 'P-000002',
-        email: 'dafydd.evans@notalawfirm.co.uk',
+        email: 'dafydd.evans@notalawfirm.example',
         displayName: 'Dafydd Evans',
         entraRoles: [],
         mappedRoles: ['fee_earner'],
@@ -510,7 +510,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
       oid: '00000000-0000-4000-8000-000000000002',
       tid: TEST_TENANT_ID,
       sub: 'P-000002',
-      email: 'dafydd.evans@notalawfirm.co.uk',
+      email: 'dafydd.evans@notalawfirm.example',
       displayName: 'Dafydd Evans',
       entraRoles: [],
       mappedRoles: ['fee_earner'],

@@ -38,9 +38,24 @@ function logDocumentStoreRouteError(
   );
 }
 
+const VALID_CORRELATION_ID_RE = /^[a-zA-Z0-9._-]{1,64}$/;
+
+function resolveSafeCorrelationId(
+  headerValue: string | null,
+  fallbackPrefix: string,
+): string {
+  const trimmed = headerValue?.trim() ?? '';
+  if (VALID_CORRELATION_ID_RE.test(trimmed)) {
+    return trimmed;
+  }
+  return `${fallbackPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export async function GET(request: NextRequest) {
-  const correlationId =
-    request.headers.get('x-correlation-id') ?? `corr-doc-stores-get-${Date.now()}`;
+  const correlationId = resolveSafeCorrelationId(
+    request.headers.get('x-correlation-id'),
+    'corr-doc-stores-get',
+  );
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
@@ -59,11 +74,15 @@ export async function GET(request: NextRequest) {
         workTypeId,
         userId,
         mfaVerified,
+        correlationId,
       });
       return NextResponse.json({ ok: true, preview });
     }
 
-    const dashboard = getDocumentStoresAdminDashboard(userId, { mfaVerified });
+    const dashboard = getDocumentStoresAdminDashboard(userId, {
+      mfaVerified,
+      correlationId,
+    });
     return NextResponse.json({ ok: true, dashboard });
   } catch (err) {
     const normalised = normaliseDocumentStoreError(err);
@@ -95,8 +114,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const correlationId =
-    request.headers.get('x-correlation-id') ?? `corr-doc-stores-post-${Date.now()}`;
+  const correlationId = resolveSafeCorrelationId(
+    request.headers.get('x-correlation-id'),
+    'corr-doc-stores-post',
+  );
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
@@ -114,9 +135,11 @@ export async function POST(request: NextRequest) {
           storeId,
           userId,
           mfaVerified,
+          correlationId,
         });
         const dashboard = getDocumentStoresAdminDashboard(userId, {
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, result, dashboard });
       }
@@ -129,6 +152,7 @@ export async function POST(request: NextRequest) {
           rawUrlOrPath,
           userId,
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, ...resolved });
       }
@@ -147,6 +171,7 @@ export async function POST(request: NextRequest) {
           matterFolderTemplates: body.matterFolderTemplates as never,
           userId,
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, dashboard });
       }
@@ -160,6 +185,7 @@ export async function POST(request: NextRequest) {
           templatesConfigOverride: body.templatesConfig as never,
           userId,
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, preview });
       }
@@ -167,9 +193,11 @@ export async function POST(request: NextRequest) {
       case 'apply_template_additions': {
         const applied = await applyAdminTemplateAdditionsToOpenMatters(userId, {
           mfaVerified,
+          correlationId,
         });
         const dashboard = getDocumentStoresAdminDashboard(userId, {
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, applied, dashboard });
       }
@@ -182,9 +210,11 @@ export async function POST(request: NextRequest) {
           autoRemediate,
           userId,
           mfaVerified,
+          correlationId,
         });
         const dashboard = getDocumentStoresAdminDashboard(userId, {
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, scan, dashboard });
       }
@@ -195,9 +225,11 @@ export async function POST(request: NextRequest) {
           findingId,
           userId,
           mfaVerified,
+          correlationId,
         });
         const dashboard = getDocumentStoresAdminDashboard(userId, {
           mfaVerified,
+          correlationId,
         });
         return NextResponse.json({ ok: true, finding, dashboard });
       }

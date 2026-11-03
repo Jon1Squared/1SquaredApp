@@ -552,6 +552,111 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       ),
     ).toBe(true);
 
+    // R37 negative case: riskComplianceUser (without matter:restricted:access and not on restrictedAccessUserIds) gets false and is excluded from diary & exceptions
+    expect(
+      canUserAccessMatter(
+        staffMatter,
+        riskComplianceUser.id,
+        riskComplianceUser,
+      ),
+    ).toBe(false);
+    expect(
+      canViewerAccessMatterKeyDates(
+        staffMatter,
+        riskComplianceUser.id,
+        riskComplianceUser,
+        allTestPeople,
+      ),
+    ).toBe(false);
+
+    const staffKeyDate: KeyDate = {
+      id: 'KD-STAFF-R37-R99',
+      matterId: staffMatter.id,
+      keyDateTypeId: 'limitation',
+      category: 'limitation',
+      title: 'Staff Limitation Date',
+      dueDate: '2026-06-10', // past due so past_due_unresolved triggers
+      isCritical: true,
+      status: 'confirmed',
+      source: 'manual',
+      teamId: 'TM-LIT',
+      responsiblePersonIds: ['P-OUTSIDER-NO-ACCESS'],
+      verification: { required: false },
+      createdById: 'P-AUTH-RISK',
+      createdAt: '2026-05-01T00:00:00Z',
+      updatedById: 'P-AUTH-RISK',
+      updatedAt: '2026-06-05T00:00:00Z',
+      version: 1,
+    };
+    const staffReminderStates: KeyDateReminderState[] = [
+      {
+        keyDateId: staffKeyDate.id,
+        taskId: '',
+        idempotencyKey: 'keydate-reminder:tenant-nalf-test:KD-STAFF-R37-R99',
+        reminderScheduleId: 'critical',
+        currentStageDaysBefore: 30,
+        stageEnteredAt: '2026-06-01T08:00:00Z',
+        escalationLevel: 0,
+        lastSkippedReason: 'no_permitted_assignees',
+      },
+    ];
+
+    const privDiary = queryTeamDiaryEntries({
+      viewer: privilegedComplianceUser,
+      query: {},
+      todayIso,
+      config,
+      keyDates: [staffKeyDate],
+      matters: [staffMatter],
+      teams,
+      people: allTestPeople,
+    });
+    expect(privDiary.some((e) => e.keyDateId === staffKeyDate.id)).toBe(true);
+
+    const unprivDiary = queryTeamDiaryEntries({
+      viewer: riskComplianceUser,
+      query: {},
+      todayIso,
+      config,
+      keyDates: [staffKeyDate],
+      matters: [staffMatter],
+      teams,
+      people: allTestPeople,
+    });
+    expect(unprivDiary.some((e) => e.keyDateId === staffKeyDate.id)).toBe(false);
+
+    const privExceptions = computeKeyDateExceptions({
+      viewer: privilegedComplianceUser,
+      todayIso,
+      config,
+      keyDates: [staffKeyDate],
+      reminderStates: staffReminderStates,
+      matters: [staffMatter],
+      teams,
+      people: allTestPeople,
+    });
+    expect(privExceptions.some((e) => e.matterId === staffMatter.id)).toBe(true);
+    // R99: restricted_matter_no_permitted_assignee is reported to permitted viewer when reminder was skipped due to no permitted assignees
+    expect(
+      privExceptions.some(
+        (e) =>
+          e.keyDateId === staffKeyDate.id &&
+          e.kind === 'restricted_matter_no_permitted_assignee',
+      ),
+    ).toBe(true);
+
+    const unprivExceptions = computeKeyDateExceptions({
+      viewer: riskComplianceUser,
+      todayIso,
+      config,
+      keyDates: [staffKeyDate],
+      reminderStates: staffReminderStates,
+      matters: [staffMatter],
+      teams,
+      people: allTestPeople,
+    });
+    expect(unprivExceptions.some((e) => e.matterId === staffMatter.id)).toBe(false);
+
     // R42: After a status label is renamed (e.g. 'Active' -> 'Live Casework'), the exceptions report gives the same results based on stable matterStatusId / systemKey
     const matterWithCustomStatusId = {
       id: 'MAT-CUSTOM-STATUS',
@@ -700,7 +805,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
         (a) =>
           a.recordId === 'KD-R29-NO-ASSIGNEE' &&
           a.action === 'keydate-reminder-escalate' &&
-          a.newValue === 'no_permitted_assignees_on_restricted_matter',
+          a.newValue === 'no_permitted_assignees',
       ),
     ).toBe(true);
     const exceptionsForPartner = getKeyDateExceptionsReportRecord(
@@ -712,7 +817,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       exceptionsForPartner.some(
         (ex) =>
           ex.keyDateId === 'KD-R29-NO-ASSIGNEE' &&
-          ex.kind === 'reminder_escalated_unacknowledged',
+          ex.kind === 'restricted_matter_no_permitted_assignee',
       ),
     ).toBe(true);
 

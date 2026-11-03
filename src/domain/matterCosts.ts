@@ -197,7 +197,7 @@ export function createDefaultMatterCostsConfig(
 
   return {
     clientProfileCode: 'NALF-LLP',
-    clientProfileName: 'Not A Law Firm LLP — Client Configuration (notalawfirm.co.uk)',
+    clientProfileName: 'Not A Law Firm LLP — Client Configuration (notalawfirm.example)',
     sectionTitle: 'Matter Costs',
     rateSourceMode: 'pms_when_linked',
     pmsLinkActive: false,

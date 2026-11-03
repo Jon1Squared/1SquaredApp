@@ -62,6 +62,8 @@ const EXCEPTION_KIND_LABELS: Record<KeyDateExceptionKind, string> = {
   closed_matter_open_dates: 'Closed matter with open key dates',
   calculated_from_unreviewed_rules: 'Calculated from unreviewed rule set',
   reminder_escalated_unacknowledged: 'Reminder escalated without acknowledgement',
+  restricted_matter_no_permitted_assignee:
+    'Restricted matter key date has no permitted assignee',
   calendar_sync_failed: 'Outlook calendar sync failed',
   past_due_unresolved: 'Past due and unresolved',
 };

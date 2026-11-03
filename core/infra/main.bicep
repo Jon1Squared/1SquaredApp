@@ -35,6 +35,18 @@ param defenderMalwareScanCapGbPerMonth int = 500
 @description('Whether to deploy the optional headless LibreOffice PDF converter internal Container App')
 param enablePdfConverterContainerApp bool = false
 
+@description('Microsoft Entra ID application (client) ID for OIDC sign-in')
+param entraClientId string = ''
+
+@description('Microsoft Entra ID directory (tenant) ID for OIDC sign-in')
+param entraTenantId string = subscription().tenantId
+
+@description('Microsoft Entra ID OIDC callback redirect URI')
+param entraRedirectUri string = ''
+
+@description('Tenant configuration package directory relative to application root')
+param tenantPackageDir string = 'client-${tenantSlug}'
+
 var resourceSuffix = '${tenantSlug}-${environment}'
 var sanitizedSlug = replace(tenantSlug, '-', '')
 var storageAccountName = take('st${sanitizedSlug}${environment}', 24)
@@ -66,6 +78,10 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     softDeleteRetentionInDays: 90
     enablePurgeProtection: true
     publicNetworkAccess: 'Disabled'
+    networkAcls: {
+      bypass: 'AzureServices'
+      defaultAction: 'Deny'
+    }
   }
 }
 
@@ -83,10 +99,15 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
 }
 
 var keyVaultSecretAppSettings = {
+  ENTRA_CLIENT_ID: entraClientId
+  ENTRA_TENANT_ID: entraTenantId
+  ENTRA_REDIRECT_URI: entraRedirectUri
   ENTRA_CLIENT_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/entra-client-secret/)'
   AUTH_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/auth-secret/)'
   PLATFORM_BLOB_SIGNING_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/blob-signing-key/)'
   PLATFORM_HOSTING_MODE: hostingMode
+  PLATFORM_ENVIRONMENT: environment
+  PLATFORM_TENANT_PACKAGE_DIR: tenantPackageDir
 }
 
 resource webApp 'Microsoft.Web/sites@2023-01-01' = {
@@ -105,6 +126,18 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
       alwaysOn: true
       appSettings: [
         {
+          name: 'ENTRA_CLIENT_ID'
+          value: keyVaultSecretAppSettings.ENTRA_CLIENT_ID
+        }
+        {
+          name: 'ENTRA_TENANT_ID'
+          value: keyVaultSecretAppSettings.ENTRA_TENANT_ID
+        }
+        {
+          name: 'ENTRA_REDIRECT_URI'
+          value: keyVaultSecretAppSettings.ENTRA_REDIRECT_URI
+        }
+        {
           name: 'ENTRA_CLIENT_SECRET'
           value: keyVaultSecretAppSettings.ENTRA_CLIENT_SECRET
         }
@@ -119,6 +152,14 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
         {
           name: 'PLATFORM_HOSTING_MODE'
           value: keyVaultSecretAppSettings.PLATFORM_HOSTING_MODE
+        }
+        {
+          name: 'PLATFORM_ENVIRONMENT'
+          value: keyVaultSecretAppSettings.PLATFORM_ENVIRONMENT
+        }
+        {
+          name: 'PLATFORM_TENANT_PACKAGE_DIR'
+          value: keyVaultSecretAppSettings.PLATFORM_TENANT_PACKAGE_DIR
         }
       ]
     }

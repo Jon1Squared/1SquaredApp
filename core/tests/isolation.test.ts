@@ -14,16 +14,18 @@ import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json'
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
 import {
-  brandVerifiedSessionActor,
+  getActiveTenantConfiguration,
   resolveCurrentTenantContext,
+  setActiveTenantConfigForTesting,
 } from '../../src/platform/tenantRuntime';
+import { createVerifiedSessionActorFromEntraSession } from '../../src/server/entraAuth';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
     __verifiedByOidcMiddleware: true as const,
     sub: 'user-a1',
     tenantId: 'not-a-law-firm',
-    email: 'partner@notalawfirm.co.uk',
+    email: 'partner@notalawfirm.example',
     name: 'Alice Vance',
     roles: ['partner', 'admin'],
     mfaVerified: true,
@@ -105,7 +107,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // @ts-expect-error R77: resolveCurrentTenantContext requires a branded VerifiedSessionActorInput
       resolveCurrentTenantContext({
         id: 'P-000002',
-        email: 'dafydd.evans@notalawfirm.co.uk',
+        email: 'dafydd.evans@notalawfirm.example',
         name: 'Dafydd Evans',
       }),
     ).toBeDefined();
@@ -113,16 +115,42 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     // R55: resolveCurrentTenantContext rejects a forged tenantId that differs from the active tenant / session
     expect(() =>
       resolveCurrentTenantContext(
-        brandVerifiedSessionActor({
-          id: 'P-000002',
-          email: 'dafydd.evans@notalawfirm.co.uk',
-          name: 'Dafydd Evans',
-          roles: ['fee_earner'],
-          mfaVerified: true,
-          tenantId: 'fictional-chambers-uk',
-        }),
+        createVerifiedSessionActorFromEntraSession(
+          {
+            personId: 'P-000002',
+            oid: '00000000-0000-4000-8000-000000000002',
+            tid: '00000000-0000-4000-8000-000000000000',
+            sub: 'P-000002',
+            email: 'dafydd.evans@notalawfirm.example',
+            displayName: 'Dafydd Evans',
+            entraRoles: ['fee_earner'],
+            mappedRoles: ['fee_earner'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: '2026-10-31T10:00:00Z',
+            expiresAt: '2026-10-31T18:00:00Z',
+          },
+          {
+            tenantId: 'fictional-chambers-uk',
+          },
+        ),
       ),
     ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    // R102: Setting PLATFORM_TENANT_PACKAGE_DIR to a non-existent directory causes getActiveTenantConfiguration() to throw rather than silently returning NALF config
+    const prevDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+    try {
+      setActiveTenantConfigForTesting(null);
+      process.env.PLATFORM_TENANT_PACKAGE_DIR = 'non-existent-tenant-package-dir';
+      expect(() => getActiveTenantConfiguration()).toThrow(/TENANT_CONFIG_ERROR/);
+    } finally {
+      if (prevDir === undefined) {
+        delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+      } else {
+        process.env.PLATFORM_TENANT_PACKAGE_DIR = prevDir;
+      }
+    }
   });
 
   it('supports both single-tenant (Model A) and multi-tenant (Model B) via configuration only', () => {

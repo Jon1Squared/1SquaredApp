@@ -2601,7 +2601,7 @@ export async function POST(req: Request) {
           emails: [
             {
               id: `em-${Date.now()}-fe`,
-              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@notalawfirm.co.uk`,
+              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@notalawfirm.example`,
               typeId: vid('email_type', 'Work'),
               isPrimary: true,
             },

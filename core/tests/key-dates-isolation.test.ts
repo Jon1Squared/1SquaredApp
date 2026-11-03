@@ -438,6 +438,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     const orphanKd: KeyDate = makeSampleKeyDate({
       id: 'KD-ORPHAN-MATTER',
       matterId: 'M-DOES-NOT-EXIST',
+      dueDate: '2026-10-01', // past due relative to todayIso '2026-11-01' so past_due_unresolved would fire if not filtered out
       status: 'confirmed',
       teamId: activeTeam.id,
       responsiblePersonIds: [staffPartner.id],

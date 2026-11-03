@@ -10,10 +10,10 @@ import {
   type PlatformExtension,
 } from '@platform/core';
 import {
-  brandVerifiedSessionActor,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
+import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
 import {
   acknowledgeKeyDateReminderRecord,
   createOrProposeKeyDateRecord,
@@ -811,15 +811,27 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         enabledExtensions: ['ext-keydate-test'],
       });
       const tenantCtx = resolveCurrentTenantContext(
-        brandVerifiedSessionActor({
-          sub: 'P-000001',
-          name: 'Test User',
-          email: 'test@notalawfirm.co.uk',
-          tenantId: tenantConfig.tenantId,
-          roles: ['partner'],
-          mfaVerified: true,
-          correlationId: 'corr-kd-ext-1',
-        }),
+        createVerifiedSessionActorFromEntraSession(
+          {
+            personId: 'P-000001',
+            oid: '00000000-0000-4000-8000-000000000001',
+            tid: '00000000-0000-4000-8000-000000000000',
+            sub: 'P-000001',
+            email: 'test@notalawfirm.example',
+            displayName: 'Test User',
+            entraRoles: ['partner'],
+            mappedRoles: ['partner'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: '2026-10-31T10:00:00Z',
+            expiresAt: '2026-10-31T18:00:00Z',
+          },
+          {
+            tenantId: tenantConfig.tenantId,
+            correlationId: 'corr-kd-ext-1',
+          },
+        ),
       );
 
       const beforeCreateRes = await host.executeKeyDateBeforeCreateHook(

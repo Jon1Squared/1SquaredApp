@@ -27,8 +27,11 @@ For regulatory and professional indemnity compliance, key dates are **immutable 
 If a confirmed due date changes (for example, following a court order, a standstill agreement, or newly discovered facts):
 1. Select **Edit / Supersede** on the confirmed key date.
 2. Enter the **New due date** and a mandatory **Reason for superseding**.
-3. The original record is marked \`superseded\` (with \`supersededById\` pointing to the new record), and the new record links back via \`supersedesId\`.
-4. The existing reminder task is transferred to the new key date — a duplicate task is never created.
+3. If the confirmed date is a **calculated** key date:
+   - Any calculation payload is re-evaluated on the server against the active tenant configuration; unknown or mismatched \`ruleSetId\` / \`ruleId\` pairs are rejected with \`KEY_DATE_VALIDATION_ERROR\`.
+   - Superseding a calculated date to a due date that differs from the calculated date (or superseding a calculated date whose rule set has been removed from configuration) requires the \`keydate:override_calculation\` permission and a mandatory override reason, and writes a \`keydate-override-calculation\` audit entry.
+4. The original record is marked \`superseded\` (with \`supersededByKeyDateId\` pointing to the new record), and the new record links back via \`supersedesKeyDateId\`.
+5. The existing reminder task is transferred to the new key date — a duplicate task is never created.
 
 ## Resolving a key date (Met, Missed, Waived)
 

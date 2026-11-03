@@ -9798,7 +9798,7 @@
       "emails": [
         {
           "id": "e4",
-          "address": "rhian.morgan@notalawfirm.co.uk",
+          "address": "rhian.morgan@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -9977,7 +9977,7 @@
           "networkLogin": "rhian.morgan",
           "buildingPassNumber": "BP-0001",
           "extension": "029 2018 0101",
-          "firmWorkEmail": "rhian.morgan@notalawfirm.co.uk",
+          "firmWorkEmail": "rhian.morgan@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-04-30",
           "amlTrainingCompletedAt": "2024-04-30",
           "infoSecTrainingCompletedAt": "2024-04-30"
@@ -10018,7 +10018,7 @@
       "emails": [
         {
           "id": "e10",
-          "address": "dafydd.evans@notalawfirm.co.uk",
+          "address": "dafydd.evans@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -10196,7 +10196,7 @@
           "networkLogin": "dafydd.evans",
           "buildingPassNumber": "BP-0002",
           "extension": "029 2018 0102",
-          "firmWorkEmail": "dafydd.evans@notalawfirm.co.uk",
+          "firmWorkEmail": "dafydd.evans@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-01",
           "amlTrainingCompletedAt": "2024-05-01",
           "infoSecTrainingCompletedAt": "2024-05-01"
@@ -10237,7 +10237,7 @@
       "emails": [
         {
           "id": "e16",
-          "address": "bethan.rees@notalawfirm.co.uk",
+          "address": "bethan.rees@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -10397,7 +10397,7 @@
           "networkLogin": "bethan.rees",
           "buildingPassNumber": "BP-0003",
           "extension": "029 2018 0103",
-          "firmWorkEmail": "bethan.rees@notalawfirm.co.uk",
+          "firmWorkEmail": "bethan.rees@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-02",
           "amlTrainingCompletedAt": "2024-05-02",
           "infoSecTrainingCompletedAt": "2024-05-02"
@@ -10438,7 +10438,7 @@
       "emails": [
         {
           "id": "e22",
-          "address": "huw.pritchard@notalawfirm.co.uk",
+          "address": "huw.pritchard@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -10603,7 +10603,7 @@
           "networkLogin": "huw.pritchard",
           "buildingPassNumber": "BP-0004",
           "extension": "029 2018 0104",
-          "firmWorkEmail": "huw.pritchard@notalawfirm.co.uk",
+          "firmWorkEmail": "huw.pritchard@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-03",
           "amlTrainingCompletedAt": "2024-05-03",
           "infoSecTrainingCompletedAt": "2024-05-03"
@@ -10644,7 +10644,7 @@
       "emails": [
         {
           "id": "e28",
-          "address": "sian.llewellyn@notalawfirm.co.uk",
+          "address": "sian.llewellyn@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -10823,7 +10823,7 @@
           "networkLogin": "sian.llewellyn",
           "buildingPassNumber": "BP-0005",
           "extension": "0117 496 0105",
-          "firmWorkEmail": "sian.llewellyn@notalawfirm.co.uk",
+          "firmWorkEmail": "sian.llewellyn@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-04",
           "amlTrainingCompletedAt": "2024-05-04",
           "infoSecTrainingCompletedAt": "2024-05-04"
@@ -10864,7 +10864,7 @@
       "emails": [
         {
           "id": "e34",
-          "address": "owain.jenkins@notalawfirm.co.uk",
+          "address": "owain.jenkins@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -11042,7 +11042,7 @@
           "networkLogin": "owain.jenkins",
           "buildingPassNumber": "BP-0006",
           "extension": "020 7946 0106",
-          "firmWorkEmail": "owain.jenkins@notalawfirm.co.uk",
+          "firmWorkEmail": "owain.jenkins@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-05",
           "amlTrainingCompletedAt": "2024-05-05",
           "infoSecTrainingCompletedAt": "2024-05-05"
@@ -11083,7 +11083,7 @@
       "emails": [
         {
           "id": "e40",
-          "address": "catrin.hopkins@notalawfirm.co.uk",
+          "address": "catrin.hopkins@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -11242,7 +11242,7 @@
           "networkLogin": "catrin.hopkins",
           "buildingPassNumber": "BP-0007",
           "extension": "0117 496 0107",
-          "firmWorkEmail": "catrin.hopkins@notalawfirm.co.uk",
+          "firmWorkEmail": "catrin.hopkins@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-06",
           "amlTrainingCompletedAt": "2024-05-06",
           "infoSecTrainingCompletedAt": "2024-05-06"
@@ -11283,7 +11283,7 @@
       "emails": [
         {
           "id": "e46",
-          "address": "lowri.thomas@notalawfirm.co.uk",
+          "address": "lowri.thomas@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -11442,7 +11442,7 @@
           "networkLogin": "lowri.thomas",
           "buildingPassNumber": "BP-0008",
           "extension": "029 2018 0108",
-          "firmWorkEmail": "lowri.thomas@notalawfirm.co.uk",
+          "firmWorkEmail": "lowri.thomas@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-07",
           "amlTrainingCompletedAt": "2024-05-07",
           "infoSecTrainingCompletedAt": "2024-05-07"
@@ -11483,7 +11483,7 @@
       "emails": [
         {
           "id": "e52",
-          "address": "gethin.powell@notalawfirm.co.uk",
+          "address": "gethin.powell@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -11641,7 +11641,7 @@
           "networkLogin": "gethin.powell",
           "buildingPassNumber": "BP-0009",
           "extension": "029 2018 0109",
-          "firmWorkEmail": "gethin.powell@notalawfirm.co.uk",
+          "firmWorkEmail": "gethin.powell@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-08",
           "amlTrainingCompletedAt": "2024-05-08",
           "infoSecTrainingCompletedAt": "2024-05-08"
@@ -11682,7 +11682,7 @@
       "emails": [
         {
           "id": "e58",
-          "address": "nia.edwards@notalawfirm.co.uk",
+          "address": "nia.edwards@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -11845,7 +11845,7 @@
           "networkLogin": "nia.edwards",
           "buildingPassNumber": "BP-0010",
           "extension": "029 2018 0110",
-          "firmWorkEmail": "nia.edwards@notalawfirm.co.uk",
+          "firmWorkEmail": "nia.edwards@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-05-09",
           "amlTrainingCompletedAt": "2024-05-09",
           "infoSecTrainingCompletedAt": "2024-05-09"
@@ -13845,7 +13845,7 @@
       "emails": [
         {
           "id": "e152",
-          "address": "gethin.lloyd@notalawfirm.co.uk",
+          "address": "gethin.lloyd@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -14016,7 +14016,7 @@
           "networkLogin": "gethin.lloyd",
           "buildingPassNumber": "BP-0038",
           "extension": "029 2018 0112",
-          "firmWorkEmail": "gethin.lloyd@notalawfirm.co.uk",
+          "firmWorkEmail": "gethin.lloyd@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-06-18",
           "amlTrainingCompletedAt": "2024-06-18",
           "infoSecTrainingCompletedAt": "2024-06-18"
@@ -14057,7 +14057,7 @@
       "emails": [
         {
           "id": "e155",
-          "address": "aled.thomas@notalawfirm.co.uk",
+          "address": "aled.thomas@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -14227,7 +14227,7 @@
           "networkLogin": "aled.thomas",
           "buildingPassNumber": "BP-0039",
           "extension": "029 2018 0113",
-          "firmWorkEmail": "aled.thomas@notalawfirm.co.uk",
+          "firmWorkEmail": "aled.thomas@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-06-28",
           "amlTrainingCompletedAt": "2024-06-28",
           "infoSecTrainingCompletedAt": "2024-06-28"
@@ -14268,7 +14268,7 @@
       "emails": [
         {
           "id": "e158",
-          "address": "ffion.davies@notalawfirm.co.uk",
+          "address": "ffion.davies@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -14438,7 +14438,7 @@
           "networkLogin": "ffion.davies",
           "buildingPassNumber": "BP-0040",
           "extension": "029 2018 0116",
-          "firmWorkEmail": "ffion.davies@notalawfirm.co.uk",
+          "firmWorkEmail": "ffion.davies@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-07-08",
           "amlTrainingCompletedAt": "2024-07-08",
           "infoSecTrainingCompletedAt": "2024-07-08"
@@ -14479,7 +14479,7 @@
       "emails": [
         {
           "id": "e161",
-          "address": "sarah.cole@notalawfirm.co.uk",
+          "address": "sarah.cole@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -14634,7 +14634,7 @@
           "networkLogin": "sarah.cole",
           "buildingPassNumber": "BP-0041",
           "extension": "029 2018 0121",
-          "firmWorkEmail": "sarah.cole@notalawfirm.co.uk",
+          "firmWorkEmail": "sarah.cole@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-07-18",
           "amlTrainingCompletedAt": "2024-07-18",
           "infoSecTrainingCompletedAt": "2024-07-18"
@@ -14675,7 +14675,7 @@
       "emails": [
         {
           "id": "e164",
-          "address": "lowri.ellis@notalawfirm.co.uk",
+          "address": "lowri.ellis@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -14826,7 +14826,7 @@
           "networkLogin": "lowri.ellis",
           "buildingPassNumber": "BP-0042",
           "extension": "029 2018 0122",
-          "firmWorkEmail": "lowri.ellis@notalawfirm.co.uk",
+          "firmWorkEmail": "lowri.ellis@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-07-23",
           "amlTrainingCompletedAt": "2024-07-23",
           "infoSecTrainingCompletedAt": "2024-07-23"
@@ -14867,7 +14867,7 @@
       "emails": [
         {
           "id": "e167",
-          "address": "nia.jenkins@notalawfirm.co.uk",
+          "address": "nia.jenkins@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -15017,7 +15017,7 @@
           "networkLogin": "nia.jenkins",
           "buildingPassNumber": "BP-0043",
           "extension": "029 2018 0123",
-          "firmWorkEmail": "nia.jenkins@notalawfirm.co.uk",
+          "firmWorkEmail": "nia.jenkins@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2024-07-28",
           "amlTrainingCompletedAt": "2024-07-28",
           "infoSecTrainingCompletedAt": "2024-07-28"
@@ -15058,7 +15058,7 @@
       "emails": [
         {
           "id": "e170",
-          "address": "felicity.fee-earner@notalawfirm.co.uk",
+          "address": "felicity.fee-earner@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -15230,7 +15230,7 @@
           "networkLogin": "felicity.feeearner",
           "buildingPassNumber": "BP-0044",
           "extension": "029 2018 0191",
-          "firmWorkEmail": "felicity.fee-earner@notalawfirm.co.uk",
+          "firmWorkEmail": "felicity.fee-earner@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -15271,7 +15271,7 @@
       "emails": [
         {
           "id": "e173",
-          "address": "patrick.partner@notalawfirm.co.uk",
+          "address": "patrick.partner@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -15444,7 +15444,7 @@
           "networkLogin": "patrick.partner",
           "buildingPassNumber": "BP-0045",
           "extension": "029 2018 0192",
-          "firmWorkEmail": "patrick.partner@notalawfirm.co.uk",
+          "firmWorkEmail": "patrick.partner@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -15485,7 +15485,7 @@
       "emails": [
         {
           "id": "e176",
-          "address": "simone.secretary@notalawfirm.co.uk",
+          "address": "simone.secretary@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -15642,7 +15642,7 @@
           "networkLogin": "simone.secretary",
           "buildingPassNumber": "BP-0046",
           "extension": "029 2018 0193",
-          "firmWorkEmail": "simone.secretary@notalawfirm.co.uk",
+          "firmWorkEmail": "simone.secretary@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -15683,7 +15683,7 @@
       "emails": [
         {
           "id": "e179",
-          "address": "ethel.enquiries@notalawfirm.co.uk",
+          "address": "ethel.enquiries@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -15836,7 +15836,7 @@
           "networkLogin": "ethel.enquiries",
           "buildingPassNumber": "BP-0047",
           "extension": "029 2018 0194",
-          "firmWorkEmail": "ethel.enquiries@notalawfirm.co.uk",
+          "firmWorkEmail": "ethel.enquiries@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -15877,7 +15877,7 @@
       "emails": [
         {
           "id": "e182",
-          "address": "frank.finance@notalawfirm.co.uk",
+          "address": "frank.finance@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -16029,7 +16029,7 @@
           "networkLogin": "frank.finance",
           "buildingPassNumber": "BP-0048",
           "extension": "029 2018 0195",
-          "firmWorkEmail": "frank.finance@notalawfirm.co.uk",
+          "firmWorkEmail": "frank.finance@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -16070,7 +16070,7 @@
       "emails": [
         {
           "id": "e185",
-          "address": "rita.risk@notalawfirm.co.uk",
+          "address": "rita.risk@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -16223,7 +16223,7 @@
           "networkLogin": "rita.risk",
           "buildingPassNumber": "BP-0049",
           "extension": "029 2018 0196",
-          "firmWorkEmail": "rita.risk@notalawfirm.co.uk",
+          "firmWorkEmail": "rita.risk@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -16264,7 +16264,7 @@
       "emails": [
         {
           "id": "e188",
-          "address": "martha.managing-partner@notalawfirm.co.uk",
+          "address": "martha.managing-partner@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -16437,7 +16437,7 @@
           "networkLogin": "martha.managingpartner",
           "buildingPassNumber": "BP-0050",
           "extension": "029 2018 0197",
-          "firmWorkEmail": "martha.managing-partner@notalawfirm.co.uk",
+          "firmWorkEmail": "martha.managing-partner@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -16478,7 +16478,7 @@
       "emails": [
         {
           "id": "e191",
-          "address": "adam.admin@notalawfirm.co.uk",
+          "address": "adam.admin@notalawfirm.example",
           "typeId": "email_type.work",
           "isPrimary": true,
           "firmIssued": true,
@@ -16638,7 +16638,7 @@
           "networkLogin": "adam.admin",
           "buildingPassNumber": "BP-0051",
           "extension": "029 2018 0198",
-          "firmWorkEmail": "adam.admin@notalawfirm.co.uk",
+          "firmWorkEmail": "adam.admin@notalawfirm.example",
           "dataProtectionTrainingCompletedAt": "2026-09-16",
           "amlTrainingCompletedAt": "2026-09-16",
           "infoSecTrainingCompletedAt": "2026-09-16"
@@ -22524,7 +22524,7 @@
         "shortLabel": "Fee earner",
         "purpose": "Today's tasks, enquiries to call back, active matters, key dates and personal WIP.",
         "designNumber": "01",
-        "demoUserEmail": "felicity.fee-earner@notalawfirm.co.uk",
+        "demoUserEmail": "felicity.fee-earner@notalawfirm.example",
         "headlineCardIds": [
           "fe_tasks_due",
           "fe_enquiries_contact",
@@ -22551,7 +22551,7 @@
         "shortLabel": "Partner",
         "purpose": "Matters needing attention, sign-offs, team capacity, WIP to bill, aged debt and key clients.",
         "designNumber": "02",
-        "demoUserEmail": "patrick.partner@notalawfirm.co.uk",
+        "demoUserEmail": "patrick.partner@notalawfirm.example",
         "headlineCardIds": [
           "pt_supervised_matters",
           "pt_team_wip",
@@ -22580,7 +22580,7 @@
         "shortLabel": "Support staff",
         "purpose": "Delegated tasks across supported fee earners, letters to send, matter openings and completions.",
         "designNumber": "03",
-        "demoUserEmail": "simone.secretary@notalawfirm.co.uk",
+        "demoUserEmail": "simone.secretary@notalawfirm.example",
         "headlineCardIds": [
           "ls_tasks_queue",
           "ls_letters_docs",
@@ -22608,7 +22608,7 @@
         "shortLabel": "Business development",
         "purpose": "Inline enquiry capture, live callback SLA countdowns, unassigned queue and conversion funnel.",
         "designNumber": "04",
-        "demoUserEmail": "ethel.enquiries@notalawfirm.co.uk",
+        "demoUserEmail": "ethel.enquiries@notalawfirm.example",
         "headlineCardIds": [
           "ec_callbacks_due",
           "ec_unassigned",
@@ -22637,7 +22637,7 @@
         "shortLabel": "Finance",
         "purpose": "Aged debt bands, credit control chase queue, WIP ready to bill and client account ledger.",
         "designNumber": "05",
-        "demoUserEmail": "frank.finance@notalawfirm.co.uk",
+        "demoUserEmail": "frank.finance@notalawfirm.example",
         "headlineCardIds": [
           "fin_total_debt",
           "fin_overdue_debt",
@@ -22665,7 +22665,7 @@
         "shortLabel": "Risk & compliance",
         "purpose": "AML & CDD queue, conflict checks awaiting decision, high-risk matters and undertakings.",
         "designNumber": "06",
-        "demoUserEmail": "rita.risk@notalawfirm.co.uk",
+        "demoUserEmail": "rita.risk@notalawfirm.example",
         "headlineCardIds": [
           "rc_aml_pending",
           "rc_conflicts_pending",
@@ -22694,7 +22694,7 @@
         "shortLabel": "Practice manager",
         "purpose": "Firm-wide billing vs budget, lockup, departmental performance, conversion and client concentration.",
         "designNumber": "07",
-        "demoUserEmail": "martha.managing-partner@notalawfirm.co.uk",
+        "demoUserEmail": "martha.managing-partner@notalawfirm.example",
         "headlineCardIds": [
           "mp_fees_ytd",
           "mp_cash_month",
@@ -22723,7 +22723,7 @@
         "shortLabel": "System administrator",
         "purpose": "System configuration, role Home page layout management, and full executive overview.",
         "designNumber": "00",
-        "demoUserEmail": "adam.admin@notalawfirm.co.uk",
+        "demoUserEmail": "adam.admin@notalawfirm.example",
         "headlineCardIds": [
           "mp_fees_ytd",
           "mp_cash_month",
@@ -22759,7 +22759,7 @@
   },
   "matterCostsConfig": {
     "clientProfileCode": "NALF-LLP",
-    "clientProfileName": "Not A Law Firm LLP — Client Configuration (notalawfirm.co.uk)",
+    "clientProfileName": "Not A Law Firm LLP — Client Configuration (notalawfirm.example)",
     "sectionTitle": "Matter Costs",
     "rateSourceMode": "pms_when_linked",
     "pmsLinkActive": false,

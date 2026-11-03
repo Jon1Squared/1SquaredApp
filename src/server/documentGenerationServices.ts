@@ -72,12 +72,11 @@ import { personDisplayName } from '@/domain/names';
 import { hasPersonPermission } from '@/domain/rbac';
 import type { Person } from '@/domain/types';
 import {
-  brandVerifiedSessionActor,
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
+import { createVerifiedSessionActorFromEntraSession } from './entraAuth';
 import {
-  DEFAULT_USER_ID,
   getStore,
   nextId,
   saveStore,
@@ -193,12 +192,25 @@ export function resolveTenantContextForStoreUser(
   }
 
   const roles = resolveEmployeeRoles(user, store.teams);
+  const nowIso = new Date().toISOString();
+  const email =
+    user.emails?.[0]?.address ??
+    `${user.id.toLowerCase()}@tenant.example`;
   const ctx = resolveCurrentTenantContext(
-    brandVerifiedSessionActor({
-      id: user.id,
-      name: personDisplayName(user),
-      email: user.emails?.[0]?.address,
-      roles,
+    createVerifiedSessionActorFromEntraSession({
+      personId: user.id,
+      oid: user.entraObjectId ?? user.id,
+      tid: '',
+      sub: user.id,
+      email,
+      displayName: personDisplayName(user),
+      entraRoles: [...roles],
+      mappedRoles: [...roles],
+      entraGroups: [],
+      mfaVerified: false,
+      amr: ['pwd'],
+      authenticatedAt: nowIso,
+      expiresAt: nowIso,
     }),
   );
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -319,11 +319,16 @@ export function MatterProfileClient({
     return 3; // Stage 4 of 6 (0-indexed = 3)
   }, [stageLabel]);
 
-  const [currentStageIdx, setCurrentStageIdx] = useState<number>(initialStageIdx);
-
-  useEffect(() => {
-    setCurrentStageIdx(initialStageIdx);
-  }, [initialStageIdx]);
+  const [stageIdxState, setStageIdxState] = useState<{
+    baseIdx: number;
+    value: number;
+  }>({ baseIdx: initialStageIdx, value: initialStageIdx });
+  const currentStageIdx =
+    stageIdxState.baseIdx === initialStageIdx
+      ? stageIdxState.value
+      : initialStageIdx;
+  const setCurrentStageIdx = (next: number) =>
+    setStageIdxState({ baseIdx: initialStageIdx, value: next });
 
   const stageSteps = useMemo<StageStepItem[]>(() => {
     if (isBrightwaterTribunal || subcatLabel.toLowerCase().includes('tribunal')) {

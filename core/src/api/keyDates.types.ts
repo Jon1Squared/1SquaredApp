@@ -195,6 +195,8 @@ export interface KeyDateReminderState {
   /** 0 = team and responsible people; 1+ = escalation levels from config. */
   escalationLevel: number;
   lastNotifiedAt?: IsoDateTime;
+  /** Reason the reminder task was skipped (e.g. restricted matter with no permitted assignees). */
+  lastSkippedReason?: 'no_permitted_assignees' | 'missing_matter';
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +294,7 @@ export type KeyDateExceptionKind =
   | 'closed_matter_open_dates'
   | 'calculated_from_unreviewed_rules'
   | 'reminder_escalated_unacknowledged'
+  | 'restricted_matter_no_permitted_assignee'
   | 'calendar_sync_failed'
   | 'past_due_unresolved';
 

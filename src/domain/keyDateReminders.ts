@@ -2,7 +2,7 @@
  * Single-Task Non-Stacking Reminder State Machine & Daily Tenant Scheduler (`src/domain/keyDateReminders.ts`).
  *
  * Classification: Core feature (Platform Architecture Standard §14).
- * - One reminder task per confirmed key date (`idempotencyKey = keydate-reminder:${keyDateId}`).
+ * - One reminder task per confirmed key date (`idempotencyKey = keydate-reminder:${tenantId}:${keyDateId}`).
  * - Never stacks tasks: crossing into a closer stage updates the existing Task in place,
  *   resets acknowledgement, and sends a single notification.
  * - Superseding a confirmed date transfers the existing Task to the superseding key date.
@@ -176,10 +176,10 @@ export function filterRecipientsForMatterRestriction(
   if (!isMatterRestrictedForKeyDates(matter)) {
     return unique;
   }
-  if (!matter) return [];
+  if (!matter || !matter.id) return [];
   return unique.filter((pid) =>
     canViewerAccessMatterKeyDates(
-      { ...matter, id: matter.id || 'RESTRICTED-MATTER' },
+      matter,
       pid,
       undefined,
       people,
@@ -221,7 +221,7 @@ export function resolveEscalationRecipientIds(
 }
 
 export interface SyncReminderForConfirmedKeyDateParams {
-  tenantId?: string;
+  tenantId: string;
   keyDate: KeyDate;
   config: KeyDatesConfig;
   tasks: Task[];
@@ -250,7 +250,7 @@ export function syncReminderForConfirmedKeyDate(
   reminderState: KeyDateReminderState;
 } {
   const {
-    tenantId = 'default',
+    tenantId,
     keyDate,
     config,
     tasks,
@@ -283,15 +283,19 @@ export function syncReminderForConfirmedKeyDate(
   const matter = keyDate.matterId
     ? matters.find((m) => m.id === keyDate.matterId)
     : undefined;
-  const permittedAssignees = filterRecipientsForMatterRestriction(
-    keyDate.responsiblePersonIds,
-    matter,
-    people,
-  );
-  // R29: Never fall back to unfiltered responsiblePersonIds on a restricted matter!
+  const isMissingMatter = Boolean(keyDate.matterId && !matter);
+  const permittedAssignees = isMissingMatter
+    ? []
+    : filterRecipientsForMatterRestriction(
+        keyDate.responsiblePersonIds,
+        matter,
+        people,
+      );
+  // R29 & R97: Never fall back to unfiltered responsiblePersonIds on a restricted or missing matter!
   const effectiveAssignees = permittedAssignees;
   const isRestrictedWithNoPermittedAssignees =
-    Boolean(matter && isMatterRestrictedForKeyDates(matter)) &&
+    (isMissingMatter ||
+      Boolean(matter && isMatterRestrictedForKeyDates(matter))) &&
     effectiveAssignees.length === 0;
 
   // Check if there is an existing reminder state for this keyDate OR a superseded keyDate handing over its task
@@ -317,7 +321,6 @@ export function syncReminderForConfirmedKeyDate(
     existingTask = tasks.find(
       (t) =>
         t.idempotencyKey === idempotencyKey ||
-        t.idempotencyKey === `keydate-reminder:${keyDate.id}` ||
         t.linkedKeyDateId === keyDate.id,
     );
   }
@@ -345,9 +348,10 @@ export function syncReminderForConfirmedKeyDate(
         action: 'keydate-reminder-escalate',
         field: 'responsiblePersonIds',
         oldValue: null,
-        newValue: 'no_permitted_assignees_on_restricted_matter',
-        reason:
-          'Skipped reminder task creation because no responsible person is permitted to access the restricted matter.',
+        newValue: 'no_permitted_assignees',
+        reason: isMissingMatter
+          ? 'Skipped reminder task creation because the linked matter was not found.'
+          : 'Skipped reminder task creation because no responsible person is permitted to access the restricted matter.',
       });
     }
   } else if (existingTask) {
@@ -417,6 +421,11 @@ export function syncReminderForConfirmedKeyDate(
     existingState.lastNotifiedAt = isRestrictedWithNoPermittedAssignees
       ? undefined
       : nowIso;
+    existingState.lastSkippedReason = isRestrictedWithNoPermittedAssignees
+      ? isMissingMatter
+        ? 'missing_matter'
+        : 'no_permitted_assignees'
+      : undefined;
   } else {
     existingState = {
       keyDateId: keyDate.id,
@@ -427,6 +436,13 @@ export function syncReminderForConfirmedKeyDate(
       stageEnteredAt: nowIso,
       escalationLevel: isRestrictedWithNoPermittedAssignees ? 1 : 0,
       lastNotifiedAt: isRestrictedWithNoPermittedAssignees ? undefined : nowIso,
+      ...(isRestrictedWithNoPermittedAssignees
+        ? {
+            lastSkippedReason: isMissingMatter
+              ? ('missing_matter' as const)
+              : ('no_permitted_assignees' as const),
+          }
+        : {}),
     };
     reminderStates.push(existingState);
   }
@@ -613,6 +629,7 @@ export function runTenantKeyDateReminderJob(
     const matter = keyDate.matterId
       ? matters.find((m) => m.id === keyDate.matterId)
       : undefined;
+    const isMissingMatter = Boolean(keyDate.matterId && !matter);
 
     let state = reminderStates.find((s) => s.keyDateId === keyDate.id);
     if (!state) {
@@ -632,11 +649,13 @@ export function runTenantKeyDateReminderJob(
       });
       state = synced.reminderState;
       stagesAdvancedCount += 1;
-      const recipients = filterRecipientsForMatterRestriction(
-        keyDate.responsiblePersonIds,
-        matter,
-        people,
-      );
+      const recipients = isMissingMatter
+        ? []
+        : filterRecipientsForMatterRestriction(
+            keyDate.responsiblePersonIds,
+            matter,
+            people,
+          );
       if (recipients.length > 0 && synced.task) {
         notifications.push({
           id: nextNotificationId(),
@@ -653,7 +672,10 @@ export function runTenantKeyDateReminderJob(
           byId: 'SYSTEM',
         });
         notificationsSentCount += 1;
-      } else if (matter && isMatterRestrictedForKeyDates(matter)) {
+      } else if (
+        isMissingMatter ||
+        (matter && isMatterRestrictedForKeyDates(matter))
+      ) {
         audit.push({
           id: nextAuditId(),
           recordType: 'key_date',
@@ -664,8 +686,9 @@ export function runTenantKeyDateReminderJob(
           newValue: 'no_permitted_assignees',
           byId: 'SYSTEM',
           at: nowIso,
-          reason:
-            'Restricted matter reminder skipped task creation because no responsible person is permitted to access the matter.',
+          reason: isMissingMatter
+            ? 'Reminder skipped task creation because the linked matter was not found.'
+            : 'Restricted matter reminder skipped task creation because no responsible person is permitted to access the matter.',
         });
       }
       continue;
@@ -681,13 +704,16 @@ export function runTenantKeyDateReminderJob(
 
     // Did the date cross into a closer stage (e.g. 90 -> 60 days, or 0 -> -1 past due)?
     if (evaluated.stageDaysBefore < state.currentStageDaysBefore) {
-      const permittedAssignees = filterRecipientsForMatterRestriction(
-        keyDate.responsiblePersonIds,
-        matter,
-        people,
-      );
+      const permittedAssignees = isMissingMatter
+        ? []
+        : filterRecipientsForMatterRestriction(
+            keyDate.responsiblePersonIds,
+            matter,
+            people,
+          );
       const isRestrictedWithNoPermitted =
-        Boolean(matter && isMatterRestrictedForKeyDates(matter)) &&
+        (isMissingMatter ||
+          Boolean(matter && isMatterRestrictedForKeyDates(matter))) &&
         permittedAssignees.length === 0;
 
       state.currentStageDaysBefore = evaluated.stageDaysBefore;
@@ -696,6 +722,11 @@ export function runTenantKeyDateReminderJob(
       state.acknowledgedAt = undefined;
       state.escalationLevel = isRestrictedWithNoPermitted ? 1 : 0;
       state.lastNotifiedAt = isRestrictedWithNoPermitted ? undefined : nowIso;
+      state.lastSkippedReason = isRestrictedWithNoPermitted
+        ? isMissingMatter
+          ? 'missing_matter'
+          : 'no_permitted_assignees'
+        : undefined;
 
       if (isRestrictedWithNoPermitted) {
         if (task) {
@@ -712,8 +743,9 @@ export function runTenantKeyDateReminderJob(
           newValue: 'no_permitted_assignees',
           byId: 'SYSTEM',
           at: nowIso,
-          reason:
-            'Restricted matter reminder stage advance skipped task assignment because no responsible person is permitted to access the matter.',
+          reason: isMissingMatter
+            ? 'Reminder stage advance skipped task assignment because the linked matter was not found.'
+            : 'Restricted matter reminder stage advance skipped task assignment because no responsible person is permitted to access the matter.',
         });
       } else if (task) {
         task.title = formatReminderTaskTitle(keyDate, evaluated);

@@ -194,7 +194,7 @@ export function DocumentGenerationModal({
           hostingMode: 'multi_tenant',
           environment: 'dev',
           branding: {
-            primaryDomain: 'notalawfirm.co.uk',
+            primaryDomain: 'notalawfirm.example',
             accentColorHex: '#1f6feb',
             logoAssetKey: 'logo.svg',
           },
