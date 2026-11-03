@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Calendar, Check, FileText, Flag, Phone, Plus, Search } from 'lucide-react';
@@ -9,6 +9,7 @@ import {
   assignEnquiryAction,
   discussSignOffAction,
   flagMatterWriteOffAction,
+  getDocumentGenerationSnapshotAction,
   logEnquiryContactAction,
   prepareEnquiryConversionAction,
   recordInvoiceCreditControlActionAction,
@@ -136,6 +137,26 @@ export function HomeClient({
   // Modal state for Partner sign-off discussion
   const [discussSignOffItem, setDiscussSignOffItem] = useState<SignOffItem | null>(null);
   const [discussNote, setDiscussNote] = useState('');
+  const [pendingTemplateApprovalsCount, setPendingTemplateApprovalsCount] = useState(0);
+  const [canApproveTemplates, setCanApproveTemplates] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void getDocumentGenerationSnapshotAction()
+      .then((snap) => {
+        if (!active) return;
+        setPendingTemplateApprovalsCount(snap.pendingApprovalsCount);
+        setCanApproveTemplates(
+          snap.userPermissions.includes('document_template:approve'),
+        );
+      })
+      .catch(() => {
+        // Ignore if not applicable
+      });
+    return () => {
+      active = false;
+    };
+  }, [currentUser.id]);
 
   const hasDemoSeedData = useMemo(
     () =>
@@ -5595,6 +5616,27 @@ export function HomeClient({
           {greetingPrefix}, {greetingName}
         </h1>
         <HeroHomeSearch searchIndex={searchIndex} />
+        {canApproveTemplates && pendingTemplateApprovalsCount > 0 ? (
+          <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}>
+            <Link
+              href="/admin/document-templates"
+              className="btn btn--secondary btn--sm"
+              style={{
+                borderRadius: 999,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 12.5,
+              }}
+            >
+              <FileText size={13} />
+              <span>
+                {pendingTemplateApprovalsCount} document template{' '}
+                {pendingTemplateApprovalsCount === 1 ? 'version' : 'versions'} awaiting approval
+              </span>
+            </Link>
+          </div>
+        ) : null}
       </div>
 
       {/* Two-column configurable Panel Grid (Main ~65–72%, Summary ~25–28% matching Enquiries layout) */}

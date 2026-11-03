@@ -95,24 +95,56 @@ import {
   updateMatterConflictRecord,
   saveTeamRecord,
   sendEnquiryEmailRecord,
+  requireAuthenticatedActor,
+  switchUserInDemoMode,
   switchViewingRole,
   takeTaskRecord,
   unlinkPmsRecord,
   updateChoiceValue,
   updateEmployeeRolesAndSupports,
   updateEmployeeRoleSetting,
+  updatePersonPermissionOverrides,
+  updateTenantRbacConfig,
   updateWorkTypeProfiles,
-  USER_COOKIE,
+  previewLimitationCalculationRecord,
+  createOrProposeKeyDateRecord,
+  proposeProvisionalKeyDateRecord,
+  verifyProposedKeyDateRecord,
+  rejectProposedKeyDateRecord,
+  supersedeConfirmedKeyDateRecord,
+  resolveKeyDateOutcomeRecord,
+  reassignKeyDateTeamRecord,
+  recordKeyDateNotApplicableRecord,
+  acknowledgeKeyDateReminderRecord,
+  runKeyDateReminderSchedulerRecord,
+  queryKeyDatesTeamDiaryRecord,
+  getKeyDateExceptionsReportRecord,
+  exportKeyDateExceptionsReportRecord,
+  saveKeyDatesConfigRecord,
 } from '@/server/services';
+import type {
+  KeyDateCalculation,
+  KeyDateExceptionKind,
+  KeyDatesConfig,
+  KeyDateSource,
+  StandstillPeriod,
+  TeamDiaryQuery,
+} from '@/domain/keyDates.types';
+import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
+import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
 
 function revalidateAll() {
-  revalidatePath('/', 'layout');
+  try {
+    revalidatePath('/', 'layout');
+  } catch {
+    // Ignore when called outside Next.js static generation / request context in unit tests
+  }
 }
 
 export async function switchUserAction(userId: string) {
-  const jar = await cookies();
-  jar.set(USER_COOKIE, userId, { path: '/', maxAge: 60 * 60 * 24 * 365 });
+  const res = await switchUserInDemoMode(userId);
   revalidateAll();
+  return res;
 }
 
 export async function savePersonAction(
@@ -363,9 +395,12 @@ export async function saveTeamAction(input: {
 }
 
 export async function updateEmployeeRoleAction(personId: string, appRole: AppRole | null) {
-  const byId = await getCurrentUserId();
-  updateEmployeeRoleSetting(personId, appRole, byId);
+  const actor = await requireAuthenticatedActor();
+  const res = updateEmployeeRoleSetting(personId, appRole, actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
   revalidateAll();
+  return res;
 }
 
 export async function saveEnquirySettingsAction(patch: Partial<EnquirySettings>) {
@@ -554,14 +589,7 @@ export async function createRecordFromPmsAction(entityType: PmsEntityType, pmsCo
 
 export async function switchViewingRoleAction(roleKey: string) {
   const userId = await getCurrentUserId();
-  let res = switchViewingRole(userId, roleKey);
-  if (!res.ok && (roleKey === 'risk_compliance' || roleKey === 'fee_earner')) {
-    const { getAppSnapshot: getSnap } = await import('@/server/services');
-    const snap = getSnap(userId);
-    const nextRoles = Array.from(new Set([...snap.currentUserRoles, roleKey]));
-    updateEmployeeRolesAndSupports(userId, { roles: nextRoles }, userId);
-    res = switchViewingRole(userId, roleKey);
-  }
+  const res = switchViewingRole(userId, roleKey);
   revalidateAll();
   return res;
 }
@@ -603,8 +631,38 @@ export async function updateEmployeeRolesAndSupportsAction(
     supportsIds?: string[];
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = updateEmployeeRolesAndSupports(personId, input, byId);
+  const actor = await requireAuthenticatedActor();
+  const res = updateEmployeeRolesAndSupports(personId, input, actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
+  revalidateAll();
+  return res;
+}
+
+export async function updatePersonPermissionOverridesAction(
+  personId: string,
+  input: {
+    grant: PermissionKey[];
+    revoke: PermissionKey[];
+    reason?: string;
+    entraObjectId?: string | null;
+  },
+) {
+  const actor = await requireAuthenticatedActor();
+  const res = updatePersonPermissionOverrides(personId, input, actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
+  revalidateAll();
+  return res;
+}
+
+export async function updateTenantRbacConfigAction(
+  patch: Partial<RbacConfiguration>,
+) {
+  const actor = await requireAuthenticatedActor();
+  const res = updateTenantRbacConfig(patch, actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
   revalidateAll();
   return res;
 }
@@ -812,6 +870,402 @@ export async function syncMatterCostsRatesFromPmsAction() {
   revalidateAll();
   return res;
 }
+
+// ------------------------------------------------------------------ Document Generation Actions
+import {
+  approveTemplateVersionService,
+  deleteGeneratedDocumentService,
+  downloadGeneratedDocumentService,
+  exportTemplatePackageService,
+  generateDocumentService,
+  getDocumentGenerationSnapshotForUser,
+  getTemplateUsageReportService,
+  importTemplatePackageService,
+  previewTemplateService,
+  rejectTemplateVersionService,
+  retireTemplateService,
+  rollbackTemplateVersionService,
+  submitTemplateVersionService,
+  updateDocumentGenerationConfigService,
+  updateTemplateDraftService,
+  uploadTemplateDraftService,
+} from '@/server/documentGenerationServices';
+import type {
+  DocumentGenerationConfig,
+  DocumentOutputFormat,
+  PromptedFieldDefinition,
+  TemplateAvailabilityRules,
+  TemplatePackageManifest,
+  TemplatePlaceholderMapping,
+  TemplateUsageReportFilter,
+} from '@platform/core';
+
+export async function getDocumentGenerationSnapshotAction() {
+  const byId = await getCurrentUserId();
+  return getDocumentGenerationSnapshotForUser(byId);
+}
+
+export async function uploadTemplateDraftAction(input: {
+  templateId?: string;
+  code: string;
+  name: string;
+  description: string;
+  category: string;
+  tags?: string[];
+  outputDocumentType: string;
+  filenamePattern: string;
+  availabilityRules: TemplateAvailabilityRules;
+  fileName: string;
+  docxBase64: string;
+  fieldMappings?: Record<string, TemplatePlaceholderMapping>;
+  promptedFields?: PromptedFieldDefinition[];
+  changeNote?: string;
+}) {
+  const byId = await getCurrentUserId();
+  const res = await uploadTemplateDraftService(input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function updateTemplateDraftAction(input: {
+  versionId: string;
+  fieldMappings: Record<string, TemplatePlaceholderMapping>;
+  promptedFields: PromptedFieldDefinition[];
+  templateMetadata?: {
+    name?: string;
+    description?: string;
+    category?: string;
+    tags?: string[];
+    outputDocumentType?: string;
+    filenamePattern?: string;
+    availabilityRules?: TemplateAvailabilityRules;
+  };
+  changeNote?: string;
+}) {
+  const byId = await getCurrentUserId();
+  const res = await updateTemplateDraftService(input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function submitTemplateVersionAction(
+  versionId: string,
+  changeNote?: string,
+) {
+  const byId = await getCurrentUserId();
+  const res = await submitTemplateVersionService(versionId, changeNote, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function approveTemplateVersionAction(versionId: string) {
+  const byId = await getCurrentUserId();
+  const res = await approveTemplateVersionService(versionId, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function rejectTemplateVersionAction(
+  versionId: string,
+  rejectionReason: string,
+) {
+  const byId = await getCurrentUserId();
+  const res = await rejectTemplateVersionService(
+    versionId,
+    rejectionReason,
+    byId,
+  );
+  revalidateAll();
+  return res;
+}
+
+export async function retireTemplateAction(templateId: string) {
+  const byId = await getCurrentUserId();
+  const res = await retireTemplateService(templateId, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function rollbackTemplateVersionAction(
+  templateId: string,
+  targetVersionId: string,
+) {
+  const byId = await getCurrentUserId();
+  const res = await rollbackTemplateVersionService(
+    templateId,
+    targetVersionId,
+    byId,
+  );
+  revalidateAll();
+  return res;
+}
+
+export async function exportTemplatePackageAction(
+  templateId: string,
+  versionId?: string,
+) {
+  const byId = await getCurrentUserId();
+  return exportTemplatePackageService(templateId, versionId, byId);
+}
+
+export async function importTemplatePackageAction(pkg: TemplatePackageManifest) {
+  const byId = await getCurrentUserId();
+  const res = await importTemplatePackageService(pkg, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function previewTemplateAction(input: {
+  versionId: string;
+  matterId?: string | null;
+  organisationId?: string | null;
+  personId?: string | null;
+  recipientPartyId?: string | null;
+  promptedValues?: Record<string, unknown>;
+  outputFormat?: DocumentOutputFormat;
+}) {
+  const byId = await getCurrentUserId();
+  const res = await previewTemplateService(input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function generateDocumentAction(input: {
+  templateId: string;
+  sourceEntityType: 'matter' | 'client';
+  matterId?: string | null;
+  organisationId?: string | null;
+  personId?: string | null;
+  recipientPartyId?: string | null;
+  recipientPartyEntityType?: 'organisation' | 'person' | null;
+  promptedValues?: Record<string, unknown>;
+  outputFormat?: DocumentOutputFormat;
+}) {
+  const byId = await getCurrentUserId();
+  const res = await generateDocumentService(input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function downloadGeneratedDocumentAction(documentId: string) {
+  const byId = await getCurrentUserId();
+  return downloadGeneratedDocumentService(documentId, byId);
+}
+
+export async function deleteGeneratedDocumentAction(documentId: string) {
+  const byId = await getCurrentUserId();
+  const res = await deleteGeneratedDocumentService(documentId, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function getTemplateUsageReportAction(
+  filter: TemplateUsageReportFilter = {},
+) {
+  const byId = await getCurrentUserId();
+  return getTemplateUsageReportService(filter, byId);
+}
+
+export async function updateDocumentGenerationConfigAction(patch: Partial<DocumentGenerationConfig>) {
+  const byId = await getCurrentUserId();
+  const res = await updateDocumentGenerationConfigService(patch, byId);
+  revalidateAll();
+  return res;
+}
+
+// ============================================================================
+// Key Dates & Limitation Server Actions (§1–§9)
+// ============================================================================
+
+export async function previewLimitationCalculationAction(input: {
+  ruleSetId: string;
+  ruleId: string;
+  triggerValues: Record<string, string>;
+  standstillPeriods?: StandstillPeriod[];
+  calendarCodeOverride?: string;
+}) {
+  const byId = await getCurrentUserId();
+  return previewLimitationCalculationRecord(input, byId);
+}
+
+export async function createOrProposeKeyDateAction(input: {
+  matterId?: string;
+  enquiryId?: string;
+  keyDateTypeId: string;
+  title?: string;
+  dueDate: string;
+  dueTime?: string;
+  isCritical?: boolean;
+  source?: KeyDateSource;
+  teamId?: string;
+  responsiblePersonIds?: string[];
+  calculation?: KeyDateCalculation;
+  notes?: string;
+  sourceDocumentId?: string;
+  intent?: 'provisional' | 'propose';
+}) {
+  const byId = await getCurrentUserId();
+  const res = await createOrProposeKeyDateRecord(input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function proposeProvisionalKeyDateAction(keyDateId: string) {
+  const byId = await getCurrentUserId();
+  const res = await proposeProvisionalKeyDateRecord(keyDateId, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function verifyProposedKeyDateAction(keyDateId: string) {
+  const byId = await getCurrentUserId();
+  const res = await verifyProposedKeyDateRecord(keyDateId, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function rejectProposedKeyDateAction(
+  keyDateId: string,
+  reason: string,
+) {
+  const byId = await getCurrentUserId();
+  const res = await rejectProposedKeyDateRecord(keyDateId, reason, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function supersedeConfirmedKeyDateAction(
+  keyDateId: string,
+  updates: {
+    title?: string;
+    dueDate: string;
+    dueTime?: string;
+    isCritical?: boolean;
+    teamId?: string;
+    responsiblePersonIds?: string[];
+    calculation?: KeyDateCalculation;
+    notes?: string;
+    intent?: 'provisional' | 'propose';
+  },
+  reason: string,
+) {
+  const byId = await getCurrentUserId();
+  const res = await supersedeConfirmedKeyDateRecord(
+    keyDateId,
+    updates,
+    reason,
+    byId,
+  );
+  revalidateAll();
+  return res;
+}
+
+export async function resolveKeyDateOutcomeAction(
+  keyDateId: string,
+  input: {
+    kind: 'met' | 'missed' | 'waived';
+    note?: string;
+    evidenceDocumentId?: string;
+  },
+) {
+  const byId = await getCurrentUserId();
+  const res = await resolveKeyDateOutcomeRecord(keyDateId, input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function reassignKeyDateTeamAction(
+  keyDateId: string,
+  input: {
+    teamId: string;
+    responsiblePersonIds?: string[];
+    reason?: string;
+  },
+) {
+  const byId = await getCurrentUserId();
+  const res = await reassignKeyDateTeamRecord(keyDateId, input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function recordKeyDateNotApplicableAction(input: {
+  matterId: string;
+  keyDateTypeId: string;
+  reason: string;
+}) {
+  const byId = await getCurrentUserId();
+  const res = recordKeyDateNotApplicableRecord(input, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
+  const byId = await getCurrentUserId();
+  const res = acknowledgeKeyDateReminderRecord(keyDateId, byId);
+  revalidateAll();
+  return res;
+}
+
+export async function runKeyDateReminderSchedulerAction() {
+  const actor = await requireAuthenticatedActor();
+  const tenantCtx = resolveCurrentTenantContext({
+    id: actor.personId,
+    name: `${actor.person.firstName} ${actor.person.surname}`,
+    email: actor.session.email,
+    roles: actor.session.mappedRoles,
+    mfaVerified: actor.mfaVerified,
+  });
+  const res = runKeyDateReminderSchedulerRecord({
+    tenantCtx,
+    byId: actor.personId,
+    mfaVerified: actor.mfaVerified,
+  });
+  revalidateAll();
+  return res;
+}
+
+export async function queryKeyDatesTeamDiaryAction(
+  query: TeamDiaryQuery,
+  todayIso?: string,
+) {
+  const byId = await getCurrentUserId();
+  return queryKeyDatesTeamDiaryRecord(query, byId, todayIso);
+}
+
+export async function getKeyDateExceptionsReportAction(
+  filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
+  todayIso?: string,
+) {
+  const byId = await getCurrentUserId();
+  return getKeyDateExceptionsReportRecord(filter, byId, todayIso);
+}
+
+export async function exportKeyDateExceptionsReportAction(
+  filter: {
+    teamIds?: string[];
+    kinds?: KeyDateExceptionKind[];
+    format?: 'csv' | 'json';
+  } = {},
+  todayIso?: string,
+) {
+  const byId = await getCurrentUserId();
+  const res = exportKeyDateExceptionsReportRecord(filter, byId, todayIso);
+  revalidateAll();
+  return res;
+}
+
+export async function saveKeyDatesConfigAction(
+  newConfig: KeyDatesConfig,
+  reason: string,
+) {
+  const actor = await requireAuthenticatedActor();
+  const res = saveKeyDatesConfigRecord(newConfig, reason, actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
+  revalidateAll();
+  return res;
+}
+
 
 
 

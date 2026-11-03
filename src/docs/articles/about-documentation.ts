@@ -11,8 +11,11 @@ This section explains how 1Squared works: what each screen does, the rules behin
 
 ## How it is organised
 
-- **Getting started**: this page and general guidance.
-- **Enquiries**: taking and handling new enquiries, including the [quick conflict check](/docs/quick-conflict-check).
+- **Getting started**: this page, general guidance, and [how matters, enquiries, tasks & navigation work together](/docs/matters-enquiries-tasks-and-navigation).
+- **Architecture, Deployment & Security**: how 1Squared isolates every firm’s data, supports custom code via sandboxed extensions, deploys in either 1Squared UK Cloud or your firm’s own Azure subscription, and governs releases — see [Deployment models, customisation & security architecture](/docs/deployment-and-security) and [Engineering process, quality assurance & release governance](/docs/development-process).
+- **Key dates and limitation**: capturing, calculating, verifying, reminding on, and reporting on limitation and other critical dates across matters and enquiries — start with [Overview: what key dates are, and why the system suggests while people confirm](/docs/key-dates-overview).
+- **Documents & SharePoint DMS**: how 1Squared connects to Microsoft SharePoint Online, provisions matter folder trees by work type, enforces per-user permissions and ethical walls, and detects permission drift — see [SharePoint document store, matter folder templates & permissions](/docs/sharepoint-document-store).
+- **Enquiries**: taking and handling new enquiries, including the [quick conflict check](/docs/quick-conflict-check) and carrying key dates onto matters on conversion.
 - **People & Organisations**: contact records, including [duplicate checks](/docs/duplicate-checks).
 
 ## Finding help on a screen

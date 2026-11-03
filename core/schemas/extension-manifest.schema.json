@@ -26,10 +26,19 @@
         "type": "string",
         "enum": [
           "matter:read",
+          "client:read",
+          "person:read",
+          "finance:view",
+          "document:fields:provide",
+          "document:read",
+          "document:write",
           "matter:costs:validate",
           "matter:open:gate",
           "config:read",
-          "audit:write"
+          "audit:write",
+          "pms:sync",
+          "keydate:read",
+          "keydate:write"
         ]
       }
     },
@@ -41,7 +50,14 @@
           "beforeMatterCostsCalculate",
           "afterMatterCostsCalculate",
           "beforeMatterOpen",
-          "afterMatterOpen"
+          "afterMatterOpen",
+          "onPmsOutboundCommand",
+          "provideDocumentFields",
+          "afterMatterDocumentsProvisioned",
+          "beforeMatterDocumentsClose",
+          "keyDate.beforeCreate",
+          "keyDate.afterStatusChange",
+          "keyDate.calculateCustomRule"
         ]
       }
     },

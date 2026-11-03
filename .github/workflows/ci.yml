@@ -35,6 +35,16 @@ jobs:
       - name: TypeScript typecheck
         run: npx tsc --noEmit
 
+      - name: ESLint check
+        run: npm run lint
+
+      - name: Verify invented-only fixture data in data/
+        run: |
+          if git grep -n -i "1squared\.co\.uk\|c9bd9acf\|72f9[8]8bf" -- data/; then
+            echo "ERROR: Real email domain or corporate Entra tenant/object ID found in data/"
+            exit 1
+          fi
+
       - name: Run unit, contract & two-tenant isolation tests
         run: npx vitest run
 

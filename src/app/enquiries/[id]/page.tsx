@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation';
 import { EnquiryFormClient } from '@/components/EnquiryFormClient';
+import { KeyDatesPanel } from '@/components/KeyDatesPanel';
 import {
   getAppSnapshot,
   getCurrentUserId,
@@ -26,22 +27,35 @@ export default async function EnquiryDetailPage({
   );
 
   return (
-    <EnquiryFormClient
-      mode={enquiry.status === 'Draft' ? 'draft' : 'saved'}
-      enquiry={enquiry}
-      quotes={snap.quotes}
-      tasks={snap.tasks}
-      audit={audit}
-      people={snap.people}
-      organisations={snap.organisations}
-      matters={snap.matters}
-      enquiries={snap.enquiries}
-      teams={snap.teams}
-      values={snap.values}
-      customFields={snap.customFields}
-      enquirySettings={snap.enquirySettings}
-      currentUserId={snap.currentUserId}
-    />
+    <div>
+      <EnquiryFormClient
+        mode={enquiry.status === 'Draft' ? 'draft' : 'saved'}
+        enquiry={enquiry}
+        quotes={snap.quotes}
+        tasks={snap.tasks}
+        audit={audit}
+        people={snap.people}
+        organisations={snap.organisations}
+        matters={snap.matters}
+        enquiries={snap.enquiries}
+        teams={snap.teams}
+        values={snap.values}
+        customFields={snap.customFields}
+        enquirySettings={snap.enquirySettings}
+        currentUserId={snap.currentUserId}
+      />
+      <div style={{ maxWidth: 1240, margin: '0 auto', padding: '0 24px 32px' }}>
+        <KeyDatesPanel
+          enquiry={enquiry}
+          config={snap.keyDatesConfig}
+          keyDates={snap.keyDates}
+          reminderStates={snap.keyDateReminderStates}
+          calendarSyncs={snap.keyDateCalendarSyncs}
+          currentUser={snap.currentUser}
+          teams={snap.teams}
+          employees={snap.employees}
+        />
+      </div>
+    </div>
   );
 }
-

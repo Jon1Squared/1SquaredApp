@@ -365,8 +365,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const penarth = addOrg(1, -700, {
     legalName: 'Penarth Estates Ltd',
-    companyNumber: '09412736',
-    vatNumber: 'GB 318 4471 26',
+    companyNumber: 'DEMO-000001',
+    vatNumber: 'GB 000 0001 01',
     registeredAddress: addr('Marina House, 14 Ferry Road', 'Penarth', 'CF64 1TQ', 'Registered office', '', 'Vale of Glamorgan'),
     correspondenceAddress: addr('Marina House, 14 Ferry Road', 'Penarth', 'CF64 1TQ', 'Correspondence', '', 'Vale of Glamorgan'),
     website: 'https://penarthestates.example',
@@ -384,7 +384,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     legalName: 'Harbourline Housing Association',
     otherNames: [otherName('Harbourline Homes', 'Trading name', 'org_name_type')],
     organisationTypeId: v('organisation_type', 'Non-profit'),
-    companyNumber: 'RS 30214R',
+    companyNumber: 'DEMO-RS0002',
     registeredAddress: addr('Harbour Court, 2 Stuart Street', 'Cardiff', 'CF10 5BW', 'Registered office'),
     website: 'https://harbourline.example',
     mainPhone: '029 2018 0520',
@@ -404,8 +404,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const brightwater = addOrg(3, -400, {
     legalName: 'Brightwater Care Group Ltd',
-    companyNumber: '11870552',
-    vatNumber: 'GB 274 1180 93',
+    companyNumber: 'DEMO-000003',
+    vatNumber: 'GB 000 0003 03',
     registeredAddress: addr('Brightwater House, 40 Whiteladies Road', 'Bristol', 'BS8 2LG', 'Registered office'),
     website: 'https://brightwatercare.example',
     mainPhone: '0117 496 0730',
@@ -424,7 +424,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const bayCafes = addOrg(4, -520, {
     legalName: 'Bay Cafés Ltd',
     otherNames: [otherName('Bay Cafés', 'Trading name', 'org_name_type')],
-    companyNumber: '10933377',
+    companyNumber: 'DEMO-000004',
     registeredAddress: addr('Unit 6, Mermaid Quay', 'Cardiff', 'CF10 5BZ', 'Registered office'),
     mainPhone: '029 2018 0633',
     generalEmail: 'hello@baycafes.example',
@@ -442,8 +442,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const severn = addOrg(5, -650, {
     legalName: 'Severn Holdings plc',
     organisationTypeId: v('organisation_type', 'plc'),
-    companyNumber: '04477120',
-    vatNumber: 'GB 145 7720 18',
+    companyNumber: 'DEMO-000005',
+    vatNumber: 'GB 000 0005 05',
     registeredAddress: addr('Severn House, 1 Temple Quay', 'Bristol', 'BS1 6DZ', 'Registered office'),
     website: 'https://severnholdings.example',
     mainPhone: '0117 496 0810',
@@ -458,7 +458,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const severnLogistics = addOrg(6, -640, {
     legalName: 'Severn Logistics Ltd',
-    companyNumber: '05591834',
+    companyNumber: 'DEMO-000006',
     parentOrganisationId: severn.id,
     registeredAddress: addr('Severn House, 1 Temple Quay', 'Bristol', 'BS1 6DZ', 'Registered office'),
     correspondenceAddress: addr('Avonmouth Distribution Park, Kings Weston Lane', 'Bristol', 'BS11 8AZ', 'Correspondence'),
@@ -472,7 +472,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const severnProperty = addOrg(7, -630, {
     legalName: 'Severn Freight Services Ltd',
     otherNames: [otherName('Severn Property Investments Ltd', 'Former name', 'org_name_type')],
-    companyNumber: '06628419',
+    companyNumber: 'DEMO-000007',
     parentOrganisationId: severn.id,
     registeredAddress: addr('Unit 12, Avonmouth Way', 'Bristol', 'BS11 9HX', 'Registered office'),
     clientReference: 'SEV003',
@@ -483,7 +483,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     legalName: 'Hughes Lloyd Accountants LLP',
     otherNames: [otherName('Hughes Lloyd', 'Trading name', 'org_name_type')],
     organisationTypeId: v('organisation_type', 'LLP'),
-    companyNumber: 'OC398812',
+    companyNumber: 'DEMO-OC0008',
     registeredAddress: addr('7 Windsor Place', 'Cardiff', 'CF10 3BX', 'Registered office'),
     website: 'https://hugheslloyd.example',
     mainPhone: '029 2018 0745',
@@ -524,7 +524,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const cadwyn = addOrg(11, -850, {
     legalName: 'Cadwyn Surveying & Valuation Ltd',
-    companyNumber: '08831240',
+    companyNumber: 'DEMO-000011',
     registeredAddress: addr('Cadwyn House, 55 Cowbridge Road East', 'Cardiff', 'CF11 9AU', 'Registered office'),
     mainPhone: '029 2018 0950',
     relationshipTypeIds: [v('organisation_relationship_type', 'Experts and consultants')],
@@ -536,7 +536,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const castell = addOrg(12, -880, {
     legalName: 'Castell Legal Search Ltd',
     organisationTypeId: v('organisation_type', 'Supplier'),
-    companyNumber: '09177452',
+    companyNumber: 'DEMO-000012',
     registeredAddress: addr('Unit 4, Castell Business Park', 'Caerphilly', 'CF83 3ED', 'Registered office'),
     mainPhone: '029 2018 0977',
     generalEmail: 'orders@castellsearch.example',
@@ -549,7 +549,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const tyGlas = addOrg(13, -20, {
     legalName: 'Tŷ Glas Developments Ltd',
-    companyNumber: '13562077',
+    companyNumber: 'DEMO-000013',
     registeredAddress: addr('Tŷ Glas, 9 Heol y Deri', 'Cardiff', 'CF14 6HF', 'Registered office'),
     website: 'https://tyglas.example',
     mainPhone: '029 2018 0988',
@@ -574,7 +574,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const westernVale = addOrg(14, -45, {
     legalName: 'Western Vale Homes Ltd',
-    companyNumber: '12904415',
+    companyNumber: 'DEMO-000014',
     registeredAddress: addr('Vale Court, 3 Station Road', 'Llantrisant', 'CF72 8EG', 'Registered office'),
     website: 'https://westernvalehomes.example',
     relationshipTypeIds: [v('organisation_relationship_type', 'Prospect')],
@@ -590,7 +590,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const coastline = addOrg(15, -200, {
     legalName: 'Coastline Outdoor Ltd',
-    companyNumber: '10455893',
+    companyNumber: 'DEMO-000015',
     registeredAddress: addr('Coastline House, 12 Ocean Way', 'Cardiff', 'CF24 5PE', 'Registered office'),
     relationshipTypeIds: [v('organisation_relationship_type', 'Counterparty')],
     relationshipStatusId: v('relationship_status', 'Active'),

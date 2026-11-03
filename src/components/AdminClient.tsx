@@ -58,17 +58,27 @@ import type {
   Team,
 } from '@/domain/types';
 import type { PmsAdminSnapshot } from '@/server/services';
+import { DocumentStoresAdminPanel } from './DocumentStoresAdminPanel';
+import { DocumentTemplatesAdminPanel } from './DocumentTemplatesAdminPanel';
 import { HomePagesAdminSection } from './HomePagesAdminSection';
 import { MatterCostsAdminSection } from './MatterCostsAdminSection';
 import { MatterPartiesAdminSection } from './MatterPartiesAdminSection';
 import { PmsLinksAdminSection } from './PmsLinksAdminSection';
+import { RbacAdminSection } from './RbacAdminSection';
+import { KeyDatesAdminPanel } from './KeyDatesAdminPanel';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
+import type { KeyDatePermission, KeyDatesConfig } from '@/domain/keyDates.types';
 
 export type AdminTab =
   | 'home-pages'
+  | 'rbac-and-entra'
   | 'org-structure'
   | 'rates-and-costs'
+  | 'document-templates'
+  | 'document-stores'
+  | 'key-dates'
   | 'lists'
   | 'custom-fields'
   | 'teams'
@@ -161,6 +171,15 @@ interface Props {
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterPartyMigrationReport?: MatterPartyMigrationReport;
   matterCostsConfig?: MatterCostsConfig;
+  currentUserId?: string;
+  currentUserPermissions?: PermissionKey[];
+  rbacConfig?: RbacConfiguration;
+  keyDatesConfig?: KeyDatesConfig;
+  currentUserKeyDatePermissions?: KeyDatePermission[];
+  entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
+  entraEnvStatus?: import('@/server/entraAuth').EntraEnvStatus;
+  authError?: string;
+  authSuccess?: boolean;
 }
 
 export function AdminClient({
@@ -183,6 +202,15 @@ export function AdminClient({
   matterPartyTaxonomy,
   matterPartyMigrationReport,
   matterCostsConfig,
+  currentUserId,
+  currentUserPermissions,
+  rbacConfig,
+  keyDatesConfig,
+  currentUserKeyDatePermissions = [],
+  entraSession,
+  entraEnvStatus,
+  authError,
+  authSuccess,
 }: Props) {
   const { showToast } = useToast();
   const [tab, setTab] = useState<AdminTab>(initialTab);
@@ -1216,6 +1244,24 @@ export function AdminClient({
         <button
           type="button"
           role="tab"
+          aria-selected={tab === 'document-templates'}
+          className={`tab-btn ${tab === 'document-templates' ? 'tab-btn--active' : ''}`}
+          onClick={() => setTab('document-templates')}
+        >
+          Document templates &amp; usage
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'document-stores'}
+          className={`tab-btn ${tab === 'document-stores' ? 'tab-btn--active' : ''}`}
+          onClick={() => setTab('document-stores')}
+        >
+          Document Stores &amp; DMS
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={tab === 'enquiry-settings'}
           className={`tab-btn ${tab === 'enquiry-settings' ? 'tab-btn--active' : ''}`}
           onClick={() => setTab('enquiry-settings')}
@@ -1231,6 +1277,17 @@ export function AdminClient({
         >
           Task settings
         </button>
+        {keyDatesConfig ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'key-dates'}
+            className={`tab-btn ${tab === 'key-dates' ? 'tab-btn--active' : ''}`}
+            onClick={() => setTab('key-dates')}
+          >
+            Key dates &amp; limitation ({keyDatesConfig.keyDateTypes?.length ?? 0} types)
+          </button>
+        ) : null}
         <button
           type="button"
           role="tab"
@@ -1248,6 +1305,15 @@ export function AdminClient({
           onClick={() => setTab('employees')}
         >
           Firm employees ({employees.length})
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'rbac-and-entra'}
+          className={`tab-btn ${tab === 'rbac-and-entra' ? 'tab-btn--active' : ''}`}
+          onClick={() => setTab('rbac-and-entra')}
+        >
+          RBAC &amp; Entra ID
         </button>
         {pmsAdmin ? (
           <button
@@ -1270,6 +1336,30 @@ export function AdminClient({
           Demo data
         </button>
       </div>
+
+      {/* TAB: RBAC & ENTRA ID */}
+      {tab === 'rbac-and-entra' && (
+        <RbacAdminSection
+          currentUserId={currentUserId}
+          currentUserPermissions={currentUserPermissions}
+          rbacConfig={rbacConfig}
+          people={people}
+          teams={teams}
+          orgStructure={orgCatalogue}
+          entraSession={entraSession}
+          entraEnvStatus={entraEnvStatus}
+          authError={authError}
+          authSuccess={authSuccess}
+        />
+      )}
+
+      {/* TAB: KEY DATES & LIMITATION */}
+      {tab === 'key-dates' && keyDatesConfig && (
+        <KeyDatesAdminPanel
+          initialConfig={keyDatesConfig}
+          userPermissions={currentUserKeyDatePermissions}
+        />
+      )}
 
       {/* TAB 1: CHOICE LISTS */}
       {tab === 'lists' && (
@@ -3869,6 +3959,14 @@ export function AdminClient({
         </div>
       )}
 
+      {/* TAB: DOCUMENT TEMPLATES & USAGE */}
+      {tab === 'document-templates' && (
+        <DocumentTemplatesAdminPanel currentUserId={people[0]?.id ?? 'P-0001'} />
+      )}
+
+      {/* TAB: DOCUMENT STORES & DMS */}
+      {tab === 'document-stores' && <DocumentStoresAdminPanel />}
+
       {/* TAB: RATES & MATTER COSTS */}
       {tab === 'rates-and-costs' && (
         <MatterCostsAdminSection
@@ -3884,6 +3982,12 @@ export function AdminClient({
           activeViewingRole={activeViewingRole}
           people={people}
           teams={teams}
+          values={values}
+          onNavigateToEmployeeRoles={() => {
+            setTab('lists');
+            setSelectedListKey('employee_role');
+            setOpenListGroups((prev) => new Set([...prev, 'people']));
+          }}
         />
       )}
 

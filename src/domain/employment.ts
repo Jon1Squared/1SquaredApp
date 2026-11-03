@@ -76,12 +76,14 @@ export const CONTRACT_TYPES: ContractType[] = [
   'Zero hours',
 ];
 
+import {
+  ALL_EMPLOYEE_PERMISSIONS as CORE_ALL_EMPLOYEE_PERMISSIONS,
+  canPersonAccessMatter,
+  resolvePersonPermissionSet,
+} from './rbac';
+
 export const ALL_EMPLOYEE_PERMISSIONS: EmployeePermission[] = [
-  'employee:view_core',
-  'employee:edit_core',
-  'employee:hr_restricted',
-  'employee:payroll',
-  'employee:sensitive',
+  ...CORE_ALL_EMPLOYEE_PERMISSIONS,
 ];
 
 export const DIVERSITY_OPTIONS = {
@@ -147,9 +149,13 @@ export function isFeeEarnerRoleType(
 }
 
 /**
- * Resolves the employee data permissions for a user.
- * If `user.employeePermissions` is explicitly set, returns it directly.
- * Otherwise derives sensible defaults from the user's role / department / line management status.
+ * Resolves the employee data permissions for a user by delegating to the single
+ * central `@platform/core` permission resolver (`resolvePersonPermissionSet`, ADR-0010 & ADR-0011).
+ *
+ * All department grants (`DEPT-HR`, `DEPT-FIN`, `DEPT-RISK`, etc.) and relationship grants
+ * come from tenant configuration (`rbac.departmentGrants` and `rbac.relationshipGrants`).
+ * Supports unified `user.permissionOverrides` (`grant` / `revoke`) as well as transitional
+ * `user.employeePermissions`.
  */
 export function resolveEmployeePermissions(
   user: Person | null | undefined,
@@ -157,76 +163,8 @@ export function resolveEmployeePermissions(
   teams: Team[] = [],
 ): EmployeePermission[] {
   if (!user) return [];
-  if (Array.isArray(user.employeePermissions)) {
-    return user.employeePermissions;
-  }
-
-  const perms = new Set<EmployeePermission>();
-  const roles = user.roles ?? [];
-  const empRole = user.employeeRoleId ?? '';
-  const dept = user.departmentId ?? user.employment?.departmentId ?? '';
-
-  // System administrators & Managing Partners get full HR, payroll, and sensitive permissions
-  if (
-    user.appRole === 'admin' ||
-    roles.includes('admin') ||
-    roles.includes('managing_partner') ||
-    empRole === 'employee_role.system_administrator' ||
-    dept === 'DEPT-HR'
-  ) {
-    return [...ALL_EMPLOYEE_PERMISSIONS];
-  }
-
-  // Partners, Practice Managers, and Risk & Compliance
-  if (
-    roles.includes('partner') ||
-    empRole === 'employee_role.partner' ||
-    empRole === 'employee_role.practice_manager'
-  ) {
-    perms.add('employee:view_core');
-    perms.add('employee:edit_core');
-    perms.add('employee:hr_restricted');
-  }
-
-  if (
-    roles.includes('risk_compliance') ||
-    empRole === 'employee_role.risk_and_compliance' ||
-    dept === 'DEPT-RISK' ||
-    dept === 'department.risk_and_compliance'
-  ) {
-    perms.add('employee:view_core');
-    perms.add('employee:edit_core');
-    perms.add('employee:hr_restricted');
-    perms.add('employee:sensitive');
-  }
-
-  // Finance / Payroll staff
-  if (
-    roles.includes('finance') ||
-    empRole === 'employee_role.finance' ||
-    dept === 'DEPT-FIN' ||
-    dept === 'department.finance'
-  ) {
-    perms.add('employee:view_core');
-    perms.add('employee:payroll');
-  }
-
-  // Line managers & team leads get core view & edit
-  const isLineManager = allPeople.some(
-    (p) => p.employment?.lineManagerId === user.id || p.employment?.supervisingPartnerId === user.id,
-  );
-  const isTeamLead = teams.some((t) => t.active && t.leadIds.includes(user.id));
-  if (isLineManager || isTeamLead || user.appRole === 'team_lead') {
-    perms.add('employee:view_core');
-    perms.add('employee:edit_core');
-  }
-
-  // Default for other employees: view_core
-  if (user.isEmployee || user.employment) {
-    perms.add('employee:view_core');
-  }
-
-  return Array.from(perms);
+  const resolved = resolvePersonPermissionSet(user, { allPeople, teams });
+  return ALL_EMPLOYEE_PERMISSIONS.filter((perm) => resolved.has(perm));
 }
 
 export function hasEmployeePermission(
@@ -694,7 +632,7 @@ export function applyEffectiveDatedEmploymentHistory(
   }
 
   // Effective-dated charge-out rate history for fee earners
-  let feeEarner = incoming.feeEarner ? structuredClone(incoming.feeEarner) : null;
+  const feeEarner = incoming.feeEarner ? structuredClone(incoming.feeEarner) : null;
   if (feeEarner && feeEarner.chargeOutRateGbp !== null && feeEarner.chargeOutRateGbp !== undefined) {
     const rateFrom = feeEarner.chargeOutRateEffectiveFrom || effectiveFrom;
     const prevRate = existing?.feeEarner?.chargeOutRateGbp ?? null;
@@ -775,6 +713,11 @@ export function findOpenMattersWherePersonIsParty(
  * Conversion path 2 (Employee -> Client):
  * Determines if a matter involves a current employee as a client, marking it as a staff matter
  * with restricted access so colleagues cannot browse it by default.
+ *
+ * ADR-0014: `restrictedAccessUserIds` stores ONLY the named matter participants
+ * (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `teamMemberIds`).
+ * Oversight role holders (`admin`, `managing_partner`, `risk_compliance`) are evaluated
+ * dynamically via the `matter:restricted:access` permission rather than stored in the list.
  */
 export function computeStaffMatterStatus(
   matter: {
@@ -799,24 +742,12 @@ export function computeStaffMatterStatus(
     return { isStaffMatter: false, restrictedAccessUserIds: [] };
   }
 
-  // Only the matter team, Risk/Compliance, and System Admins can browse a staff matter by default
   const allowed = new Set<string>();
   if (matter.responsiblePartnerId) allowed.add(matter.responsiblePartnerId);
   if (matter.supervisingPartnerId) allowed.add(matter.supervisingPartnerId);
   if (matter.leadFeeEarnerId) allowed.add(matter.leadFeeEarnerId);
   for (const tid of matter.teamMemberIds ?? []) {
     if (tid) allowed.add(tid);
-  }
-  for (const p of people) {
-    if (
-      p.appRole === 'admin' ||
-      p.roles?.includes('admin') ||
-      p.roles?.includes('risk_compliance') ||
-      p.employeeRoleId === 'employee_role.system_administrator' ||
-      p.employeeRoleId === 'employee_role.risk_and_compliance'
-    ) {
-      allowed.add(p.id);
-    }
   }
 
   return {
@@ -826,36 +757,15 @@ export function computeStaffMatterStatus(
 }
 
 /**
- * Checks whether a user can view a matter (enforces restricted access on staff matters).
+ * Checks whether a user can view a matter (enforces restricted access on staff matters
+ * via `matter:restricted:access` permission + named matter participants, ADR-0014).
  */
 export function canUserAccessMatter(
   matter: Matter,
   userId: string,
   user?: Person | null,
 ): boolean {
-  if (!matter.isStaffMatter) return true;
-  if (
-    user &&
-    (user.appRole === 'admin' ||
-      user.roles?.includes('admin') ||
-      user.roles?.includes('risk_compliance') ||
-      user.employeeRoleId === 'employee_role.system_administrator' ||
-      user.employeeRoleId === 'employee_role.risk_and_compliance')
-  ) {
-    return true;
-  }
-  if (
-    matter.responsiblePartnerId === userId ||
-    matter.supervisingPartnerId === userId ||
-    matter.leadFeeEarnerId === userId ||
-    matter.teamMemberIds.includes(userId)
-  ) {
-    return true;
-  }
-  if (Array.isArray(matter.restrictedAccessUserIds)) {
-    return matter.restrictedAccessUserIds.includes(userId);
-  }
-  return false;
+  return canPersonAccessMatter(matter, userId, user);
 }
 
 /**
@@ -1047,16 +957,25 @@ export function resolveDefaultDepartmentPartnerId(
     sameDeptPartners[0];
   if (primaryPartner) return primaryPartner.id;
 
-  if (deptId === 'DEPT-PC') return 'P-000005';
-  if (deptId === 'DEPT-CORP') {
-    const gethin = allPeople.find(
-      (p) => !p.demo && p.firstName === 'Gethin' && p.surname === 'Lloyd',
+  // Fallback dynamically to any active Managing Partner or Partner in the firm (zero hardcoded DEPT-* or P-00000* IDs)
+  const anyFirmPartner =
+    allPeople.find(
+      (p) =>
+        !p.demo &&
+        !p.mergedIntoId &&
+        (p.isEmployee || p.employment) &&
+        p.roles?.includes('managing_partner'),
+    ) ??
+    allPeople.find(
+      (p) =>
+        !p.demo &&
+        !p.mergedIntoId &&
+        (p.isEmployee || p.employment) &&
+        (p.roles?.includes('partner') ||
+          p.employeeRoleId === 'employee_role.partner' ||
+          p.employment?.roleType === 'Partner/Member'),
     );
-    return gethin?.id ?? 'P-000007';
-  }
-  if (deptId === 'DEPT-EMP') return 'P-000005';
-  if (deptId === 'DEPT-RISK') return 'P-000003';
-  return 'P-000001';
+  return anyFirmPartner?.id ?? allPeople[0]?.id ?? '';
 }
 
 /**

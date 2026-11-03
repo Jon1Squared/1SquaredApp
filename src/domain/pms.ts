@@ -10,6 +10,7 @@
 import { formatDate } from './dates';
 import { resolveLabel } from './lists';
 import { normaliseEmail, normaliseOrgName, normaliseRegNumber, normaliseText } from './normalise';
+import { resolvePersonPermissionSet } from './rbac';
 import { resolveUserAppRole } from './tasks';
 import type {
   AppRole,
@@ -25,7 +26,7 @@ import type {
   PmsFieldMappingEntry,
   PmsOutboundCommand,
   PmsOutboundCommandType,
-} from '../../core/src/api/index';
+} from '@platform/core-api';
 import type { PmsClient, PmsFeeEarner, PmsMatter, PmsMatterFinancials } from '@/pms/types';
 
 /** Format GBP currency with £ and 2 decimal places; negatives in brackets. */
@@ -64,16 +65,13 @@ export function formatPmsAsAtLabel(asAtDate: string = '2026-10-16'): string {
 export function canUserViewFinance(
   user: Person | null | undefined,
   teams: Team[],
-  values: ChoiceValue[],
+  values: ChoiceValue[] = [],
 ): boolean {
   if (!user) return true;
   const appRole: AppRole = resolveUserAppRole(user, teams, values);
   if (appRole === 'call_handler') return false;
-  const empRoleLabel = resolveLabel(values, user.employeeRoleId).toLowerCase();
-  if (empRoleLabel.includes('support staff') && appRole !== 'admin' && appRole !== 'team_lead') {
-    return false;
-  }
-  return true;
+  const perms = resolvePersonPermissionSet(user, { teams });
+  return perms.has('finance:view_matter') || perms.has('finance:view');
 }
 
 export interface PmsSuggestedMatch {

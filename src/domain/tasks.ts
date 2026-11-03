@@ -4,6 +4,11 @@
  */
 import { toIsoDate } from './dates';
 import { resolveLabel } from './lists';
+import {
+  IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY,
+  resolvePersonAuthoritativeRoles,
+  resolvePersonPermissionSet,
+} from './rbac';
 import type {
   AppRole,
   ChoiceValue,
@@ -116,19 +121,41 @@ export function groupMyTasks(
   return { overdue, today, dueToday: today, thisWeek, dueThisWeek: thisWeek, later, done };
 }
 
-/** Resolve effective application role for an employee. */
+/**
+ * Resolve legacy coarse application role (`AppRole`) for an employee from
+ * authoritative RBAC role keys and permissions (never from display labels).
+ * @deprecated Prefer `hasPersonPermission` / `resolvePersonPermissionSet`.
+ */
 export function resolveUserAppRole(
   person: Person | null | undefined,
   teams: Team[],
-  values: ChoiceValue[],
+  _values: ChoiceValue[] = [],
 ): AppRole {
   if (!person) return 'fee_earner';
   if (person.appRole) return person.appRole;
-  const roleLabel = resolveLabel(values, person.employeeRoleId).toLowerCase();
-  if (roleLabel.includes('system administrator')) return 'admin';
+  const roles = resolvePersonAuthoritativeRoles(person, teams);
+  const perms = resolvePersonPermissionSet(person, { teams });
+  if (roles.includes('admin') || person.employeeRoleId === 'employee_role.system_administrator') {
+    return 'admin';
+  }
   if (teams.some((tm) => tm.active && tm.leadIds.includes(person.id))) return 'team_lead';
-  if (roleLabel.includes('partner') || roleLabel.includes('practice manager')) return 'team_lead';
-  if (roleLabel.includes('support staff')) return 'call_handler';
+  if (
+    roles.includes('partner') ||
+    roles.includes('managing_partner') ||
+    (person.employeeRoleId != null &&
+      (IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY[person.employeeRoleId] === 'partner' ||
+        IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY[person.employeeRoleId] === 'managing_partner'))
+  ) {
+    return 'team_lead';
+  }
+  if (
+    roles.includes('enquiries_coordinator') ||
+    roles.includes('intake') ||
+    person.employeeRoleId === 'employee_role.support_staff' ||
+    (!perms.has('finance:view_matter') && !perms.has('finance:view'))
+  ) {
+    return 'call_handler';
+  }
   return 'fee_earner';
 }
 
@@ -143,38 +170,42 @@ export function userTeams(userId: string, teams: Team[]): Team[] {
 }
 
 /**
- * Assignment rule 4: The creator, the assignee, a lead of the assigned team, or an admin can reassign.
+ * Assignment rule 4: The creator, the assignee, a lead of the assigned team, or a holder of `task:reassign_any` can reassign.
  */
 export function canUserReassignTask(
   userId: string,
   task: Task,
   teams: Team[],
   people: Person[],
-  values: ChoiceValue[],
+  _values: ChoiceValue[] = [],
 ): boolean {
   const user = people.find((p) => p.id === userId) ?? null;
-  const role = resolveUserAppRole(user, teams, values);
-  if (role === 'admin') return true;
+  if (user) {
+    const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+    if (perms.has('task:reassign_any')) return true;
+  }
   if (task.createdById === userId || isTaskAssignedToPerson(task, userId)) return true;
   if (isUserTeamLeadFor(userId, task.assignedTeamId, teams)) return true;
   return false;
 }
 
 /**
- * Assignment rule 1: Any member of the assigned team (or admin) can Take an unclaimed team task.
+ * Assignment rule 1: Any member of the assigned team (or a holder of `task:claim_any`) can Take an unclaimed team task.
  */
 export function canUserTakeTask(
   userId: string,
   task: Task,
   teams: Team[],
   people: Person[],
-  values: ChoiceValue[],
+  _values: ChoiceValue[] = [],
 ): boolean {
   if (task.assignedPersonId) return false;
   if (!task.assignedTeamId) return true;
   const user = people.find((p) => p.id === userId) ?? null;
-  const role = resolveUserAppRole(user, teams, values);
-  if (role === 'admin') return true;
+  if (user) {
+    const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+    if (perms.has('task:claim_any')) return true;
+  }
   const team = teams.find((t) => t.id === task.assignedTeamId);
   if (!team) return false;
   return team.memberIds.includes(userId) || team.leadIds.includes(userId);

@@ -1,0 +1,641 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "platform/schemas/config/keyDates.schema.json",
+  "title": "Key dates and limitation configuration",
+  "description": "Tenant configuration for key dates. Owned by the core. Unknown keys are rejected. Changes are additive within a major version.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Feature flag for the key dates module."
+    },
+
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tenant-wide defaults. Each matter type can override these.",
+      "default": {},
+      "properties": {
+        "verification": {
+          "$ref": "#/$defs/verificationPolicy",
+          "default": { "required": false },
+          "description": "Default two-step verification policy when not overridden by a matter type."
+        },
+        "calendarSync": {
+          "$ref": "#/$defs/calendarSyncPolicy",
+          "default": { "enabled": true },
+          "description": "Default external calendar sync policy when not overridden by a matter type."
+        },
+        "reminderScheduleId": {
+          "type": "string",
+          "default": "standard",
+          "description": "Schedule used when a key date type does not name one."
+        },
+        "teamAssignment": {
+          "type": "string",
+          "enum": ["matter_owning_team"],
+          "default": "matter_owning_team",
+          "description": "How the team diary is chosen for a new key date. Users with keydate:edit can change it."
+        }
+      }
+    },
+
+    "keyDateTypes": {
+      "type": "array",
+      "default": [],
+      "description": "Types of key date available to users.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "category"],
+        "description": "Definition of a single key date type.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id",
+            "description": "Unique stable identifier for the key date type."
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Human-readable display label for the key date type."
+          },
+          "category": {
+            "type": "string",
+            "enum": ["limitation", "court_deadline", "contractual", "undertaking", "compliance", "internal_milestone"],
+            "description": "High-level classification category for the key date type."
+          },
+          "defaultCritical": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether new key dates of this type default to critical status."
+          },
+          "reminderScheduleId": {
+            "type": "string",
+            "description": "Overrides defaults.reminderScheduleId."
+          },
+          "allowManualEntry": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether users may manually enter a due date for this key date type."
+          },
+          "allowCalculation": {
+            "type": "boolean",
+            "default": false,
+            "description": "Offer the rule-based calculator for this type."
+          },
+          "active": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether this key date type is active and selectable for new records."
+          }
+        }
+      }
+    },
+
+    "matterTypes": {
+      "type": "array",
+      "default": [],
+      "description": "Per matter type settings. Matter types not listed use the defaults.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["matterTypeId"],
+        "description": "Key date rules and policies for a specific matter type.",
+        "properties": {
+          "matterTypeId": {
+            "type": "string",
+            "description": "ID from the tenant's existing matter type list."
+          },
+          "requiredKeyDateTypeIds": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": [],
+            "description": "Key date types that must be added, or recorded as not applicable with a reason, before the matter can open."
+          },
+          "allowNotApplicable": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether users may record a required key date type as not applicable with a reason."
+          },
+          "blockClosureWithOpenDates": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether matter closure is blocked while unresolved key dates remain on the matter."
+          },
+          "defaultRuleSetIds": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": [],
+            "description": "Limitation rule set IDs offered by default for matters of this type."
+          },
+          "verification": {
+            "$ref": "#/$defs/verificationPolicy",
+            "description": "Matter-type override for the two-step verification policy."
+          },
+          "calendarSync": {
+            "$ref": "#/$defs/calendarSyncPolicy",
+            "description": "Matter-type override for the external calendar sync policy."
+          }
+        }
+      }
+    },
+
+    "reminderSchedules": {
+      "type": "array",
+      "default": [
+        {
+          "id": "standard",
+          "label": "Standard",
+          "stages": [
+            { "daysBefore": 90, "priority": "normal" },
+            { "daysBefore": 60, "priority": "normal" },
+            { "daysBefore": 30, "priority": "high" },
+            { "daysBefore": 14, "priority": "high" },
+            { "daysBefore": 7, "priority": "urgent" },
+            { "daysBefore": 1, "priority": "urgent" },
+            { "daysBefore": 0, "priority": "urgent" }
+          ],
+          "escalation": { "afterUnacknowledgedDays": 2, "levels": ["team_leads", "role:risk_compliance"] }
+        }
+      ],
+      "description": "Stages advance ONE reminder task per key date. A later stage updates the existing task; it never creates another.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "stages"],
+        "description": "Definition of a staged reminder schedule.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id",
+            "description": "Unique stable identifier for the reminder schedule."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable display name for the reminder schedule."
+          },
+          "stages": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Ordered stages at which the single reminder task is advanced.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["daysBefore"],
+              "description": "Single stage threshold within a reminder schedule.",
+              "properties": {
+                "daysBefore": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 730,
+                  "description": "Number of calendar days before the due date at which this stage triggers."
+                },
+                "priority": {
+                  "type": "string",
+                  "enum": ["normal", "high", "urgent"],
+                  "default": "normal",
+                  "description": "Task priority assigned when the reminder enters this stage."
+                }
+              }
+            }
+          },
+          "escalation": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Escalation rules when a reminder stage remains unacknowledged.",
+            "properties": {
+              "afterUnacknowledgedDays": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 2,
+                "description": "Number of days a reminder stage can remain unacknowledged before escalating."
+              },
+              "levels": {
+                "type": "array",
+                "default": ["team_leads"],
+                "description": "In order. 'team_leads' = leads of the key date's team; 'role:<roleKey>' = holders of that role.",
+                "items": { "type": "string", "pattern": "^(team_leads|role:[a-z_]+)$" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "limitationRuleSets": {
+      "type": "array",
+      "default": [],
+      "description": "Firm-owned rule sets. The core ships no statutory periods. Dates calculated from an unreviewed rule set are flagged and cannot skip verification.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version", "label", "jurisdiction", "reviewStatus", "rules"],
+        "description": "Versioned, firm-reviewed limitation rule set.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id",
+            "description": "Unique stable identifier for the limitation rule set."
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Monotonically increasing version number for the rule set."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable name of the limitation rule set."
+          },
+          "jurisdiction": {
+            "type": "string",
+            "enum": ["england_and_wales", "scotland", "northern_ireland", "other"],
+            "description": "Legal jurisdiction to which this limitation rule set applies."
+          },
+          "reviewStatus": {
+            "type": "string",
+            "enum": ["unreviewed", "reviewed"],
+            "default": "unreviewed",
+            "description": "Whether the firm's compliance reviewer has approved this rule set version."
+          },
+          "reviewedBy": {
+            "type": "string",
+            "description": "Name or person ID of the reviewing solicitor."
+          },
+          "reviewedOn": {
+            "type": "string",
+            "format": "date",
+            "description": "ISO date on which the rule set was reviewed and approved."
+          },
+          "rules": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Individual limitation calculation rules within this rule set.",
+            "items": { "$ref": "#/$defs/limitationRule" }
+          }
+        }
+      }
+    },
+
+    "businessCalendars": {
+      "type": "array",
+      "default": [],
+      "description": "Non-working days used for business-day counting and adjustments.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label"],
+        "description": "Business calendar defining weekends and bank holidays.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id",
+            "description": "Unique stable identifier for the business calendar."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable label for the business calendar."
+          },
+          "weekendDays": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0, "maximum": 6 },
+            "default": [0, 6],
+            "description": "0 = Sunday, 6 = Saturday."
+          },
+          "nonWorkingDates": {
+            "type": "array",
+            "items": { "type": "string", "format": "date" },
+            "default": [],
+            "description": "List of ISO calendar dates treated as non-working bank or public holidays."
+          },
+          "source": {
+            "type": "string",
+            "enum": ["manual", "imported"],
+            "default": "manual",
+            "description": "Whether non-working dates were entered manually or imported."
+          }
+        }
+      }
+    },
+
+    "calendarSync": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Provider settings. Whether sync happens is set by defaults.calendarSync and matter type overrides.",
+      "default": {},
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["microsoft_graph"],
+          "default": "microsoft_graph",
+          "description": "External calendar provider adapter."
+        },
+        "targets": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["responsible_persons", "team_calendar"] },
+          "default": ["responsible_persons"],
+          "description": "Calendar targets that receive synchronised key date events."
+        },
+        "eventTitleTemplate": {
+          "type": "string",
+          "default": "{{matterReference}} – {{keyDateTypeLabel}}",
+          "description": "Allowed tokens: matterReference, keyDateTypeLabel, title, category. No client names by default."
+        },
+        "includeMatterDescription": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether non-restricted matter descriptions may be included in calendar event bodies."
+        },
+        "statusesToSync": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["provisional", "awaiting_verification", "confirmed"] },
+          "default": ["confirmed"],
+          "description": "Key date statuses that are synchronised to external calendars."
+        },
+        "teamCalendarMappings": {
+          "type": "array",
+          "default": [],
+          "description": "Mappings between internal team IDs and Microsoft 365 group calendar IDs.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["teamId", "groupId"],
+            "description": "Single team-to-Microsoft-365 group calendar mapping.",
+            "properties": {
+              "teamId": {
+                "type": "string",
+                "description": "Internal team ID in the tenant store."
+              },
+              "groupId": {
+                "type": "string",
+                "description": "Microsoft 365 group ID. Not a secret; credentials are by Key Vault reference only."
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "exceptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "description": "Thresholds for compliance exception detection.",
+      "properties": {
+        "verificationOverdueDays": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Number of calendar days after proposal before an unverified key date is flagged as overdue."
+        },
+        "criticalNoActivityDays": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30,
+          "description": "Number of days without matter activity before an upcoming critical key date raises an exception."
+        },
+        "criticalNoActivityWindowDays": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 90,
+          "description": "Only check activity on critical dates due within this many days."
+        }
+      }
+    },
+
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "description": "Role-to-permission grant mappings for the key dates module.",
+      "properties": {
+        "roleGrants": {
+          "type": "object",
+          "description": "Maps role keys (HomeRoleKey or AppRole) to key date permissions.",
+          "propertyNames": { "pattern": "^[a-z_]+$" },
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "keydate:view",
+                "keydate:view_any_team",
+                "keydate:edit",
+                "keydate:verify",
+                "keydate:resolve",
+                "keydate:waive",
+                "keydate:override_calculation",
+                "keydate:configure"
+              ]
+            }
+          },
+          "default": {
+            "fee_earner": ["keydate:view", "keydate:edit", "keydate:resolve"],
+            "legal_secretary": ["keydate:view", "keydate:edit"],
+            "partner": ["keydate:view", "keydate:edit", "keydate:verify", "keydate:resolve", "keydate:waive", "keydate:override_calculation"],
+            "team_lead": ["keydate:view", "keydate:edit", "keydate:verify", "keydate:resolve", "keydate:waive"],
+            "risk_compliance": ["keydate:view", "keydate:view_any_team", "keydate:verify"],
+            "managing_partner": ["keydate:view", "keydate:view_any_team", "keydate:edit", "keydate:verify", "keydate:resolve", "keydate:waive", "keydate:override_calculation"],
+            "admin": ["keydate:view", "keydate:view_any_team", "keydate:configure"]
+          }
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{1,63}$",
+      "description": "Lowercase alphanumeric identifier with optional underscores, dots, or hyphens."
+    },
+
+    "verificationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required"],
+      "description": "Two-step verification. A second person with keydate:verify must confirm before the date is live.",
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether second-person verification is required before a key date is confirmed."
+        },
+        "appliesTo": {
+          "type": "string",
+          "enum": ["all", "critical_only", "limitation_only"],
+          "default": "all",
+          "description": "Subset of key dates to which the verification requirement applies."
+        }
+      }
+    },
+
+    "calendarSyncPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "description": "Policy controlling whether key dates synchronise to external calendars.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "On by default. Restricted (staff) matters never sync."
+        }
+      }
+    },
+
+    "limitationRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "trigger", "period"],
+      "description": "Single limitation calculation rule within a rule set.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id",
+          "description": "Unique stable identifier for the limitation rule."
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-readable title of the limitation rule."
+        },
+        "claimType": {
+          "type": "string",
+          "description": "Optional category or cause-of-action label for the rule."
+        },
+        "guidanceNote": {
+          "type": "string",
+          "description": "Shown in the calculator. Not legal advice."
+        },
+        "trigger": {
+          "description": "Trigger date selector (single trigger field or later-of multiple trigger fields).",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "field"],
+              "description": "Single trigger date field.",
+              "properties": {
+                "kind": {
+                  "const": "single",
+                  "description": "Uses a single trigger date field."
+                },
+                "field": {
+                  "$ref": "#/$defs/triggerField",
+                  "description": "Trigger field key from which the limitation period starts."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "fields"],
+              "description": "Later of two or more trigger date fields.",
+              "properties": {
+                "kind": {
+                  "const": "later_of",
+                  "description": "Selects the latest date among the specified trigger fields."
+                },
+                "fields": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": { "$ref": "#/$defs/triggerField" },
+                  "description": "Candidate trigger fields compared to determine the latest start date."
+                }
+              }
+            }
+          ]
+        },
+        "period": {
+          "$ref": "#/$defs/period",
+          "description": "Duration added to the effective trigger date."
+        },
+        "countMethod": {
+          "type": "string",
+          "enum": ["calendar", "business_days", "clear_days"],
+          "default": "calendar",
+          "description": "Method used to count the period from the trigger date."
+        },
+        "calendarId": {
+          "type": "string",
+          "description": "Business calendar for counting and adjustment."
+        },
+        "nonWorkingDayAdjustment": {
+          "type": "string",
+          "enum": ["none", "next_working_day", "previous_working_day"],
+          "default": "none",
+          "description": "Adjustment applied when the calculated date falls on a weekend or non-working holiday."
+        },
+        "minorityAdjustment": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Adjustment delaying the start of time until the claimant reaches majority.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether minority postponement is enabled for this rule."
+            },
+            "ageOfMajority": {
+              "type": "integer",
+              "minimum": 16,
+              "maximum": 21,
+              "default": 18,
+              "description": "Age in years at which the claimant reaches majority."
+            }
+          }
+        },
+        "applyStandstillPeriods": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether standstill agreement periods extend the calculated limitation date."
+        },
+        "longstop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["field", "period"],
+          "description": "Optional overriding longstop ceiling measured from a specified trigger field.",
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/triggerField",
+              "description": "Trigger date field from which the longstop period is measured."
+            },
+            "period": {
+              "$ref": "#/$defs/period",
+              "description": "Maximum longstop duration."
+            }
+          }
+        }
+      }
+    },
+
+    "triggerField": {
+      "type": "string",
+      "pattern": "^(accrualDate|dateOfKnowledge|claimantDateOfBirth|dateOfDeath|custom\\.[a-zA-Z][a-zA-Z0-9]{0,40})$",
+      "description": "Built-in or custom trigger date field key."
+    },
+
+    "period": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Calendar or working period expressed in years, months, and days.",
+      "properties": {
+        "years": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Number of whole years in the period."
+        },
+        "months": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Number of whole calendar months in the period."
+        },
+        "days": {
+          "type": "integer",
+          "default": 0,
+          "description": "May be negative, e.g. -1 for 'less one day'."
+        }
+      }
+    }
+  }
+}

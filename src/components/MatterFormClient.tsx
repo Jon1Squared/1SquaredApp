@@ -4326,9 +4326,9 @@ export function MatterFormClient({
         relationshipCode: 'TP',
         capacityCodes: ['CAP_LANDLORD'],
         connectedToPartyId: null,
-        identifiers: { companyNumber: 'RS 30214R', registeredTown: 'Cardiff' },
+        identifiers: { companyNumber: 'DEMO-RS0002', registeredTown: 'Cardiff' },
         linkedRecordId: 'O-000002',
-        subtitle: 'Co. no. RS 30214R · Cardiff',
+        subtitle: 'Co. no. DEMO-RS0002 · Cardiff',
       });
     }
   }
@@ -4701,10 +4701,10 @@ export function MatterFormClient({
       relationshipCode: 'TP',
       capacityCodes: ['CAP_LANDLORD'],
       connectedToPartyId: null,
-      identifiers: { companyNumber: 'RS 30214R', registeredTown: 'Cardiff' },
+      identifiers: { companyNumber: 'DEMO-RS0002', registeredTown: 'Cardiff' },
       alignment: 'third_party',
       linkedRecordId: 'O-000002',
-      subtitle: 'Co. no. RS 30214R · Cardiff',
+      subtitle: 'Co. no. DEMO-RS0002 · Cardiff',
     };
 
     const mCoastline: ConflictCheckMatch = {

@@ -1,0 +1,831 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  CORE_API_VERSION,
+  ExtensionHost,
+  loadAndValidateTenantConfig,
+  PERMISSION_REGISTRY,
+  validateKeyDatesConfig,
+  type PlatformExtension,
+} from '@platform/core';
+import {
+  resolveCurrentTenantContext,
+  setActiveTenantConfigForTesting,
+} from '@/platform/tenantRuntime';
+import {
+  acknowledgeKeyDateReminderRecord,
+  createOrProposeKeyDateRecord,
+  getKeyDatesConfig,
+  previewLimitationCalculationRecord,
+  proposeProvisionalKeyDateRecord,
+  reassignKeyDateTeamRecord,
+  recordKeyDateNotApplicableRecord,
+  rejectProposedKeyDateRecord,
+  resolveKeyDateOutcomeRecord,
+  runKeyDateReminderSchedulerRecord,
+  saveKeyDatesConfigRecord,
+  supersedeConfirmedKeyDateRecord,
+  verifyProposedKeyDateRecord,
+} from '@/server/services';
+import { getStore, resetStore } from '@/server/store';
+import notALawFirmBaseConfig from '../../../client-not-a-law-firm/config/base.json';
+import {
+  canUserVerifyKeyDate,
+  canViewerAccessMatterKeyDates,
+  evaluateMatterKeyDateClosureGate,
+  evaluateMatterKeyDateOpeningGate,
+  hasKeyDatePermission,
+  isVerificationRequiredForKeyDate,
+  resolveKeyDatePermissions,
+  resolveMatterTypeCalendarSyncPolicy,
+  resolveMatterTypeVerificationPolicy,
+} from '../keyDates';
+import type { KeyDate, KeyDatesConfig } from '../keyDates.types';
+import type { Person } from '../types';
+
+function makePerson(overrides: Partial<Person> & { id: string }): Person {
+  return {
+    titleId: null,
+    givenName: 'Test',
+    middleNames: '',
+    familyName: 'User',
+    preferredName: '',
+    previousNames: '',
+    dateOfBirth: null,
+    gender: '',
+    nationality: '',
+    countryOfResidence: '',
+    preferredLanguage: '',
+    occupation: '',
+    employerName: '',
+    niNumber: '',
+    passportNumber: '',
+    drivingLicenceNumber: '',
+    isClient: false,
+    isCounterparty: false,
+    isThirdParty: false,
+    isEmployee: true,
+    clientStatus: 'None',
+    amlStatus: 'Not required',
+    riskRating: 'Low',
+    isPep: false,
+    sanctionsCheckedAt: null,
+    identityVerifiedAt: null,
+    verificationMethod: '',
+    verificationNotes: '',
+    sourceOfFunds: '',
+    sourceOfWealth: '',
+    preferredContactMethod: 'Email',
+    marketingOptIn: false,
+    communicationNotes: '',
+    emails: [],
+    phones: [],
+    addresses: [],
+    bankAccounts: [],
+    emergencyContacts: [],
+    customFields: {},
+    tags: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    createdById: 'P-000001',
+    updatedById: 'P-000001',
+    ...overrides,
+  } as unknown as Person;
+}
+
+describe('Key Dates permissions, config schema validation, and extension contract (Phase 1)', () => {
+  describe('Central PERMISSION_REGISTRY & roleGrants resolution', () => {
+    it('registers all 8 KeyDatePermission keys with requiresMfa=true on keydate:configure', () => {
+      expect(PERMISSION_REGISTRY['keydate:view']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:view_any_team']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:edit']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:verify']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:resolve']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:waive']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:override_calculation']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:configure']).toBeDefined();
+      expect(PERMISSION_REGISTRY['keydate:configure'].requiresMfa).toBe(true);
+    });
+
+    it('resolves default permissions per role (HomeRoleKey and AppRole)', () => {
+      const feeEarner = makePerson({ id: 'P-FE', roles: ['fee_earner'] });
+      expect(resolveKeyDatePermissions(feeEarner)).toEqual([
+        'keydate:view',
+        'keydate:edit',
+        'keydate:resolve',
+      ]);
+      expect(hasKeyDatePermission(feeEarner, 'keydate:verify')).toBe(false);
+
+      const secretary = makePerson({
+        id: 'P-SEC',
+        roles: ['legal_secretary'],
+      });
+      expect(resolveKeyDatePermissions(secretary)).toEqual([
+        'keydate:view',
+        'keydate:edit',
+      ]);
+
+      const partner = makePerson({ id: 'P-PART', roles: ['partner'] });
+      expect(resolveKeyDatePermissions(partner)).toEqual([
+        'keydate:view',
+        'keydate:edit',
+        'keydate:verify',
+        'keydate:resolve',
+        'keydate:waive',
+        'keydate:override_calculation',
+      ]);
+
+      const teamLeadViaAppRole = makePerson({
+        id: 'P-TL',
+        appRole: 'team_lead',
+        roles: ['fee_earner'],
+      });
+      expect(resolveKeyDatePermissions(teamLeadViaAppRole)).toEqual([
+        'keydate:view',
+        'keydate:edit',
+        'keydate:verify',
+        'keydate:resolve',
+        'keydate:waive',
+      ]);
+
+      const riskUser = makePerson({
+        id: 'P-RISK',
+        roles: ['risk_compliance'],
+      });
+      expect(resolveKeyDatePermissions(riskUser)).toEqual([
+        'keydate:view',
+        'keydate:view_any_team',
+        'keydate:verify',
+      ]);
+
+      const managingPartner = makePerson({
+        id: 'P-MP',
+        roles: ['managing_partner'],
+      });
+      expect(resolveKeyDatePermissions(managingPartner)).toEqual([
+        'keydate:view',
+        'keydate:view_any_team',
+        'keydate:edit',
+        'keydate:verify',
+        'keydate:resolve',
+        'keydate:waive',
+        'keydate:override_calculation',
+      ]);
+
+      const adminUser = makePerson({ id: 'P-ADM', roles: ['admin'] });
+      expect(resolveKeyDatePermissions(adminUser)).toEqual([
+        'keydate:view',
+        'keydate:view_any_team',
+        'keydate:configure',
+      ]);
+    });
+
+    it('honours custom keyDates.permissions.roleGrants and per-person permissionOverrides', () => {
+      const customConfig: KeyDatesConfig = {
+        enabled: true,
+        permissions: {
+          roleGrants: {
+            fee_earner: ['keydate:view', 'keydate:edit', 'keydate:verify'],
+          },
+        },
+      };
+
+      const fe = makePerson({
+        id: 'P-FE-CUSTOM',
+        roles: ['fee_earner'],
+        permissionOverrides: {
+          grant: ['keydate:waive'],
+          revoke: ['keydate:edit'],
+        },
+      });
+
+      const perms = resolveKeyDatePermissions(fe, customConfig);
+      expect(perms).toContain('keydate:view');
+      expect(perms).toContain('keydate:verify');
+      expect(perms).toContain('keydate:waive');
+      expect(perms).not.toContain('keydate:edit');
+    });
+
+    it('returns [] for a user with no roles and fails service calls for unknown users without writing audit entries (R36)', async () => {
+      const noRoleUser = makePerson({
+        id: 'P-NO-ROLES',
+        roles: [],
+        appRole: null,
+        employeeRoleId: null,
+      });
+      expect(resolveKeyDatePermissions(noRoleUser)).toEqual([]);
+
+      resetStore();
+      const store = getStore();
+      const auditCountBefore = store.audit.length;
+      const res = await createOrProposeKeyDateRecord(
+        {
+          matterId: store.matters[0]!.id,
+          keyDateTypeId: 'limitation',
+          dueDate: '2028-06-01',
+        },
+        'P-DOES-NOT-EXIST',
+      );
+      expect(res.ok).toBe(false);
+      expect(store.audit.length).toBe(auditCountBefore);
+    });
+  });
+
+  describe('Configuration schema validation (schemas/keyDates.config.schema.json)', () => {
+    it('validates schemas/keyDates.config.example.json cleanly', () => {
+      const examplePath = path.join(
+        process.cwd(),
+        'schemas',
+        'keyDates.config.example.json',
+      );
+      const rawExample = JSON.parse(fs.readFileSync(examplePath, 'utf8'));
+      const validated = validateKeyDatesConfig(rawExample);
+      expect(validated.enabled).toBe(true);
+      expect(validated.keyDateTypes?.length).toBe(6);
+      expect(validated.limitationRuleSets?.[0]?.reviewStatus).toBe('unreviewed');
+    });
+
+    it('defaults keyDates.enabled to false when omitted in tenant config', () => {
+      const rawWithoutKeyDates = {
+        ...(notALawFirmBaseConfig as Record<string, unknown>),
+      };
+      delete rawWithoutKeyDates.keyDates;
+
+      const parsed = loadAndValidateTenantConfig(rawWithoutKeyDates);
+      expect(parsed.keyDates?.enabled).toBe(false);
+      expect(parsed.keyDates?.defaults?.calendarSync?.enabled).toBe(true);
+      expect(parsed.keyDates?.defaults?.verification?.required).toBe(false);
+    });
+
+    it('rejects unknown keys in keyDates configuration at top level and nested objects', () => {
+      expect(() =>
+        validateKeyDatesConfig({
+          enabled: true,
+          unknownTopLevelProperty: 'not-allowed',
+        }),
+      ).toThrow();
+
+      expect(() =>
+        validateKeyDatesConfig({
+          enabled: true,
+          defaults: {
+            verification: { required: true },
+            unknownNestedKey: 123,
+          },
+        }),
+      ).toThrow();
+    });
+
+    it('keeps schemas/keyDates.config.schema.json and core/schemas/keyDates.config.schema.json identical and ensures every property has a description (R45, R47)', () => {
+      const rootSchema = fs.readFileSync(
+        path.join(process.cwd(), 'schemas', 'keyDates.config.schema.json'),
+        'utf8',
+      );
+      const coreSchema = fs.readFileSync(
+        path.join(
+          process.cwd(),
+          'core',
+          'schemas',
+          'keyDates.config.schema.json',
+        ),
+        'utf8',
+      );
+      expect(rootSchema).toBe(coreSchema);
+
+      const parsed = JSON.parse(coreSchema) as Record<string, unknown>;
+      const missingDescriptions: string[] = [];
+      const walk = (node: unknown, curPath: string) => {
+        if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+        const obj = node as Record<string, unknown>;
+        if (obj.properties && typeof obj.properties === 'object') {
+          for (const [k, v] of Object.entries(
+            obj.properties as Record<string, Record<string, unknown>>,
+          )) {
+            const p = `${curPath}.properties.${k}`;
+            if (!v.description) missingDescriptions.push(p);
+            walk(v, p);
+          }
+        }
+        if (obj.$defs && typeof obj.$defs === 'object') {
+          for (const [k, v] of Object.entries(
+            obj.$defs as Record<string, Record<string, unknown>>,
+          )) {
+            const p = `${curPath}.$defs.${k}`;
+            if (!v.description) missingDescriptions.push(p);
+            walk(v, p);
+          }
+        }
+        if (obj.items) walk(obj.items, `${curPath}.items`);
+      };
+      walk(parsed, 'root');
+      expect(missingDescriptions).toEqual([]);
+
+      const tenancyIndex = fs.readFileSync(
+        path.join(process.cwd(), 'core', 'src', 'tenancy', 'index.ts'),
+        'utf8',
+      );
+      const migrationExports = tenancyIndex
+        .split('\n')
+        .filter((l) => l.includes('migrations/index'));
+      expect(migrationExports).toHaveLength(1);
+    });
+
+    it('resolves keyDates from active tenant config and defaults to enabled:false for a tenant without a keyDates block (R33)', () => {
+      resetStore();
+      const secondTenantConfig: Record<string, unknown> = {
+        ...(notALawFirmBaseConfig as Record<string, unknown>),
+        tenantId: 'second-law-firm',
+      };
+      delete secondTenantConfig.keyDates;
+      try {
+        setActiveTenantConfigForTesting(secondTenantConfig, {});
+        const store = getStore();
+        store.keyDatesConfigOverride = undefined;
+        const resolved = getKeyDatesConfig(store);
+        expect(resolved.enabled).toBe(false);
+      } finally {
+        setActiveTenantConfigForTesting(null, undefined);
+      }
+    });
+
+    it('enforces MFA on saveKeyDatesConfigRecord (R27), refuses mutating services when enabled:false (R35), gates scheduler behind keydate:configure + MFA and runTenantBackgroundJob (R25), and enforces preview/acknowledge guards (R34)', async () => {
+      resetStore();
+      const store = getStore();
+      const admin = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          !p.mergedIntoId &&
+          hasKeyDatePermission(p, 'keydate:configure', {
+            config: getKeyDatesConfig(store),
+            allPeople: store.people,
+            teams: store.teams,
+          }),
+      )!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          !p.mergedIntoId &&
+          hasKeyDatePermission(p, 'keydate:edit', {
+            config: getKeyDatesConfig(store),
+            allPeople: store.people,
+            teams: store.teams,
+          }) &&
+          !hasKeyDatePermission(p, 'keydate:configure', {
+            config: getKeyDatesConfig(store),
+            allPeople: store.people,
+            teams: store.teams,
+          }),
+      )!;
+      const currentConfig = getKeyDatesConfig(store);
+
+      // R27: Admin with mfaVerified: false gets ok:false and config is unchanged
+      const saveNoMfa = saveKeyDatesConfigRecord(
+        { ...currentConfig, enabled: false },
+        'Disable without MFA',
+        admin.id,
+        { mfaVerified: false },
+      );
+      expect(saveNoMfa.ok).toBe(false);
+      expect(getKeyDatesConfig(store).enabled).toBe(true);
+
+      // R27: Same admin with MFA succeeds
+      const saveWithMfa = saveKeyDatesConfigRecord(
+        { ...currentConfig, enabled: false },
+        'Disable with MFA',
+        admin.id,
+        { mfaVerified: true },
+      );
+      expect(saveWithMfa.ok).toBe(true);
+      expect(getKeyDatesConfig(store).enabled).toBe(false);
+
+      // R35: With enabled: false, every mutating key-date service returns ok:false and store.keyDates is unchanged
+      const snapshotBefore = JSON.stringify(store.keyDates);
+      const kdId = store.keyDates![0]!.id;
+      const matterId = store.matters[0]!.id;
+      const teamId = store.teams.find((t) => t.active)!.id;
+
+      expect(
+        (
+          await createOrProposeKeyDateRecord(
+            { matterId, keyDateTypeId: 'limitation', dueDate: '2029-01-01' },
+            feeEarner.id,
+          )
+        ).ok,
+      ).toBe(false);
+      expect((await proposeProvisionalKeyDateRecord(kdId, feeEarner.id)).ok).toBe(
+        false,
+      );
+      expect((await verifyProposedKeyDateRecord(kdId, admin.id)).ok).toBe(false);
+      expect(
+        (await rejectProposedKeyDateRecord(kdId, 'Reason', admin.id)).ok,
+      ).toBe(false);
+      expect(
+        (
+          await supersedeConfirmedKeyDateRecord(
+            kdId,
+            { dueDate: '2029-02-01' },
+            'Reason',
+            feeEarner.id,
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        (
+          await resolveKeyDateOutcomeRecord(
+            kdId,
+            { kind: 'met', note: 'Met' },
+            feeEarner.id,
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        (await reassignKeyDateTeamRecord(kdId, { teamId }, feeEarner.id)).ok,
+      ).toBe(false);
+      expect(
+        recordKeyDateNotApplicableRecord(
+          { matterId, keyDateTypeId: 'limitation', reason: 'N/A' },
+          feeEarner.id,
+        ).ok,
+      ).toBe(false);
+      expect(acknowledgeKeyDateReminderRecord(kdId, feeEarner.id).ok).toBe(false);
+      expect(JSON.stringify(store.keyDates)).toBe(snapshotBefore);
+
+      // Re-enable module with MFA
+      saveKeyDatesConfigRecord(
+        { ...currentConfig, enabled: true },
+        'Re-enable with MFA',
+        admin.id,
+        { mfaVerified: true },
+      );
+
+      // R25: Scheduler checks keydate:configure + MFA, ignores caller-supplied tenantId, and throws TENANCY_JOB_ERROR when called with no context
+      expect(() => runKeyDateReminderSchedulerRecord(null)).toThrow(
+        /TENANCY_JOB_ERROR/,
+      );
+      expect(
+        runKeyDateReminderSchedulerRecord('forged-tenant', feeEarner.id, {
+          mfaVerified: true,
+        }).ok,
+      ).toBe(false);
+      expect(
+        runKeyDateReminderSchedulerRecord('forged-tenant', admin.id, {
+          mfaVerified: false,
+        }).ok,
+      ).toBe(false);
+      const schedOk = runKeyDateReminderSchedulerRecord(
+        'forged-tenant-id',
+        admin.id,
+        { mfaVerified: true },
+      );
+      expect(schedOk.ok).toBe(true);
+      expect(schedOk.result?.tenantId).toBe('not-a-law-firm');
+
+      // R34: Preview and acknowledge require keydate:view; acknowledge requires responsible person or team lead and confirmed status
+      const revokedViewer = makePerson({
+        id: 'P-REVOKED-VIEW',
+        firstName: 'No',
+        surname: 'View',
+        roles: [],
+        appRole: null,
+        employeeRoleId: null,
+        permissionOverrides: {
+          grant: [],
+          revoke: ['keydate:view'],
+        },
+      });
+      store.people.push(revokedViewer);
+
+      expect(
+        previewLimitationCalculationRecord(
+          {
+            ruleSetId: 'ew-sample',
+            ruleId: 'contract-simple',
+            triggerValues: { accrualDate: '2022-01-01' },
+          },
+          revokedViewer.id,
+        ).ok,
+      ).toBe(false);
+      expect(
+        acknowledgeKeyDateReminderRecord(kdId, revokedViewer.id).ok,
+      ).toBe(false);
+
+      // A user who is neither a responsible person nor the team lead cannot acknowledge
+      const confirmedKd = store.keyDates!.find((k) => k.status === 'confirmed')!;
+      const owningTeam = store.teams.find((t) => t.id === confirmedKd.teamId)!;
+      const unrelatedFeeEarner = makePerson({
+        id: 'P-UNRELATED-FE',
+        firstName: 'Unrelated',
+        surname: 'Solicitor',
+        roles: ['fee_earner'],
+      });
+      store.people.push(unrelatedFeeEarner);
+      expect(confirmedKd.responsiblePersonIds).not.toContain(
+        unrelatedFeeEarner.id,
+      );
+      expect(owningTeam.leadIds).not.toContain(unrelatedFeeEarner.id);
+      expect(
+        acknowledgeKeyDateReminderRecord(confirmedKd.id, unrelatedFeeEarner.id)
+          .ok,
+      ).toBe(false);
+
+      // Acknowledging a provisional or awaiting_verification date fails and creates no task
+      const unconfirmedKd = store.keyDates!.find(
+        (k) => k.status !== 'confirmed',
+      )!;
+      const tasksBefore = store.tasks.length;
+      const ackUnconfirmed = acknowledgeKeyDateReminderRecord(
+        unconfirmedKd.id,
+        unconfirmedKd.responsiblePersonIds[0]!,
+      );
+      expect(ackUnconfirmed.ok).toBe(false);
+      expect(store.tasks.length).toBe(tasksBefore);
+    });
+  });
+
+  describe('Verification, Calendar Sync, Opening Gate, Closure Gate & Staff Matter Helpers', () => {
+    const sampleConfig: KeyDatesConfig = {
+      enabled: true,
+      defaults: {
+        verification: { required: false, appliesTo: 'all' },
+        calendarSync: { enabled: true },
+      },
+      keyDateTypes: [
+        {
+          id: 'limitation',
+          label: 'Limitation date',
+          category: 'limitation',
+          defaultCritical: true,
+        },
+      ],
+      matterTypes: [
+        {
+          matterTypeId: 'matter_type.litigation',
+          requiredKeyDateTypeIds: ['limitation'],
+          verification: { required: true, appliesTo: 'critical_only' },
+          calendarSync: { enabled: true },
+          blockClosureWithOpenDates: true,
+        },
+        {
+          matterTypeId: 'matter_type.residential_conveyancing',
+          verification: { required: false },
+          calendarSync: { enabled: false },
+        },
+      ],
+    };
+
+    it('resolves verification policy per matter type and forces verification for unreviewed rule sets', () => {
+      expect(
+        resolveMatterTypeVerificationPolicy(
+          sampleConfig,
+          'matter_type.litigation',
+        ),
+      ).toEqual({
+        required: true,
+        appliesTo: 'critical_only',
+      });
+
+      // Non-critical date on litigation does not require verification unless calculated from unreviewed rule set
+      expect(
+        isVerificationRequiredForKeyDate(
+          sampleConfig,
+          'matter_type.litigation',
+          {
+            category: 'internal_milestone',
+            isCritical: false,
+            ruleSetReviewStatus: 'reviewed',
+          },
+        ),
+      ).toBe(false);
+
+      // Unreviewed rule set always forces verification even on conveyancing (where verification.required = false)
+      expect(
+        isVerificationRequiredForKeyDate(
+          sampleConfig,
+          'matter_type.residential_conveyancing',
+          {
+            category: 'contractual',
+            isCritical: false,
+            ruleSetReviewStatus: 'unreviewed',
+          },
+        ),
+      ).toBe(true);
+    });
+
+    it('blocks the proposer from verifying their own key date even with keydate:verify', () => {
+      const partnerA = makePerson({ id: 'P-PART-A', roles: ['partner'] });
+      const partnerB = makePerson({ id: 'P-PART-B', roles: ['partner'] });
+
+      const proposedDate: Pick<
+        KeyDate,
+        'status' | 'verification' | 'createdById'
+      > = {
+        status: 'awaiting_verification',
+        createdById: 'P-PART-A',
+        verification: {
+          required: true,
+          proposedById: 'P-PART-A',
+          proposedAt: '2026-11-03T09:00:00.000Z',
+        },
+      };
+
+      expect(canUserVerifyKeyDate(partnerA, proposedDate).allowed).toBe(false);
+      expect(canUserVerifyKeyDate(partnerB, proposedDate).allowed).toBe(true);
+    });
+
+    it('disables calendar sync unconditionally for restricted (staff) matters', () => {
+      expect(
+        resolveMatterTypeCalendarSyncPolicy(
+          sampleConfig,
+          'matter_type.litigation',
+          false,
+        ).enabled,
+      ).toBe(true);
+      expect(
+        resolveMatterTypeCalendarSyncPolicy(
+          sampleConfig,
+          'matter_type.litigation',
+          true,
+        ).enabled,
+      ).toBe(false);
+    });
+
+    it('enforces strict restrictedAccessUserIds.includes(viewerId) for staff matters', () => {
+      const staffMatter = {
+        isStaffMatter: true,
+        restrictedAccessUserIds: ['P-ALLOWED-1', 'P-ALLOWED-2'],
+      };
+      expect(canViewerAccessMatterKeyDates(staffMatter, 'P-ALLOWED-1')).toBe(
+        true,
+      );
+      expect(canViewerAccessMatterKeyDates(staffMatter, 'P-OTHER')).toBe(false);
+      expect(canViewerAccessMatterKeyDates(staffMatter, null)).toBe(false);
+    });
+
+    it('evaluates matter opening and closure gates accurately', () => {
+      const gateBlocked = evaluateMatterKeyDateOpeningGate(
+        sampleConfig,
+        'matter_type.litigation',
+        [],
+        [],
+      );
+      expect(gateBlocked.canOpen).toBe(false);
+      expect(gateBlocked.missingKeyDateTypes).toEqual([
+        { id: 'limitation', label: 'Limitation date' },
+      ]);
+
+      const gatePassedViaNotApplicable = evaluateMatterKeyDateOpeningGate(
+        sampleConfig,
+        'matter_type.litigation',
+        [],
+        [
+          {
+            matterId: 'M-000001',
+            keyDateTypeId: 'limitation',
+            reason: 'Advisory-only instruction with no contentious claim.',
+            recordedById: 'P-PART-A',
+            recordedAt: '2026-11-03T09:00:00.000Z',
+          },
+        ],
+      );
+      expect(gatePassedViaNotApplicable.canOpen).toBe(true);
+
+      const openDate: KeyDate = {
+        id: 'KD-000001',
+        matterId: 'M-000001',
+        keyDateTypeId: 'limitation',
+        category: 'limitation',
+        title: 'Primary limitation',
+        dueDate: '2027-05-01',
+        isCritical: true,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-PART-A', 'P-PART-B'],
+        verification: { required: false },
+        createdById: 'P-PART-A',
+        createdAt: '2026-11-03T09:00:00.000Z',
+        updatedById: 'P-PART-A',
+        updatedAt: '2026-11-03T09:00:00.000Z',
+        version: 1,
+      };
+
+      expect(
+        evaluateMatterKeyDateClosureGate(
+          sampleConfig,
+          'matter_type.litigation',
+          [openDate],
+        ).canClose,
+      ).toBe(false);
+      expect(
+        evaluateMatterKeyDateClosureGate(
+          sampleConfig,
+          'matter_type.litigation',
+          [{ ...openDate, status: 'met' }],
+        ).canClose,
+      ).toBe(true);
+    });
+  });
+
+  describe('Extension API v1.1.0 Contract Tests', () => {
+    it('supports keydate:read, keydate:write and all 3 KeyDateExtensionPoints with error/timeout isolation', async () => {
+      expect(CORE_API_VERSION).toBe('1.1.0');
+      const host = new ExtensionHost({
+        coreApiVersion: CORE_API_VERSION,
+        defaultHookTimeoutMs: 100,
+      });
+
+      const validExt: PlatformExtension = {
+        manifest: {
+          id: 'ext-keydate-test',
+          name: 'KeyDate Test Extension',
+          version: '1.0.0',
+          description: 'Tests keyDate hooks',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['keydate:read', 'keydate:write'],
+          hooks: [
+            'keyDate.beforeCreate',
+            'keyDate.afterStatusChange',
+            'keyDate.calculateCustomRule',
+          ],
+        },
+        hooks: {
+          'keyDate.beforeCreate': async (_ctx, input) => ({
+            allowProceed: true,
+            enrichedFields: {
+              title: `${input.title} [Checked]`,
+            },
+          }),
+          'keyDate.calculateCustomRule': async () => ({
+            date: '2028-06-15',
+            explanation: ['Custom contractual calculation applied'],
+          }),
+        },
+      };
+
+      host.registerExtension(validExt);
+
+      const tenantConfig = loadAndValidateTenantConfig({
+        ...(notALawFirmBaseConfig as Record<string, unknown>),
+        enabledExtensions: ['ext-keydate-test'],
+      });
+      const tenantCtx = resolveCurrentTenantContext({
+        sub: 'P-000001',
+        name: 'Test User',
+        email: 'test@notalawfirm.co.uk',
+        tenantId: tenantConfig.tenantId,
+        roles: ['partner'],
+        mfaVerified: true,
+        correlationId: 'corr-kd-ext-1',
+      });
+
+      const beforeCreateRes = await host.executeKeyDateBeforeCreateHook(
+        tenantCtx,
+        tenantConfig,
+        {
+          matterId: 'M-000001',
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'Primary Limitation',
+          dueDate: '2028-06-15',
+          isCritical: true,
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-000001', 'P-000002'],
+        },
+      );
+      expect(beforeCreateRes.allowProceed).toBe(true);
+      expect(beforeCreateRes.enrichedInput.title).toBe(
+        'Primary Limitation [Checked]',
+      );
+
+      const customCalcRes = await host.executeKeyDateCalculateCustomRuleHook(
+        tenantCtx,
+        tenantConfig,
+        {
+          ruleSetId: 'ew-sample',
+          ruleId: 'custom-1',
+          triggers: { accrualDate: '2025-06-15' },
+        },
+      );
+      expect(customCalcRes.result?.date).toBe('2028-06-15');
+    });
+
+    it('rejects registration of keyDate.beforeCreate when keydate:write permission is missing', () => {
+      const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+      expect(() =>
+        host.registerExtension({
+          manifest: {
+            id: 'ext-missing-perm',
+            name: 'Missing Write Perm',
+            version: '1.0.0',
+            description: 'Missing keydate:write',
+            supportedCoreApiRange: '^1.0.0',
+            permissions: ['keydate:read'],
+            hooks: ['keyDate.beforeCreate'],
+          },
+          hooks: {},
+        }),
+      ).toThrow(/EXTENSION_PERMISSION_ERROR/);
+    });
+  });
+});

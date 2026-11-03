@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import {
   getAppSnapshot,
   getCurrentUserId,
+  getMatterKeyDatesSnapshot,
   getMatterPmsViewBundle,
   recordRecentlyViewed,
 } from '@/server/services';
@@ -63,6 +64,7 @@ export default async function MatterProfilePage({
   }
 
   const pmsView = getMatterPmsViewBundle(matter.id);
+  const matterKeyDates = getMatterKeyDatesSnapshot(matter.id, userId);
 
   return (
     <MatterProfileClient
@@ -77,6 +79,13 @@ export default async function MatterProfilePage({
       quotes={snap.quotes}
       currentUserId={snap.currentUserId}
       currentUserRole={snap.currentUserRole}
+      currentUser={snap.currentUser}
+      employees={snap.employees}
+      keyDatesConfig={snap.keyDatesConfig}
+      keyDates={matterKeyDates.keyDates}
+      keyDateNotApplicable={matterKeyDates.keyDateNotApplicable}
+      keyDateReminderStates={matterKeyDates.keyDateReminderStates}
+      keyDateCalendarSyncs={matterKeyDates.keyDateCalendarSyncs}
       canViewFinance={snap.canViewFinance}
       pmsView={pmsView}
       notes={snap.notes.filter((n) => n.recordType === 'matter' && n.recordId === matter.id)}

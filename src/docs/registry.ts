@@ -10,8 +10,23 @@
  * > notes, | tables |, **bold**, *italic*, `code` and [links](/docs/other-article).
  */
 import { aboutDocs } from './articles/about-documentation';
+import { authenticationRbacAndMfaArticle } from './articles/authentication-rbac-and-mfa';
+import { deploymentAndSecurityArticle } from './articles/deployment-and-security';
+import { developmentProcessArticle } from './articles/development-process';
+import { documentGenerationArticle } from './articles/document-generation';
 import { duplicateChecks } from './articles/duplicate-checks';
+import { keyDatesAdministrationArticle } from './articles/key-dates-administration';
+import { keyDatesCalendarSyncArticle } from './articles/key-dates-calendar-sync';
+import { keyDatesExceptionsArticle } from './articles/key-dates-exceptions';
+import { keyDatesLimitationCalculatorArticle } from './articles/key-dates-limitation-calculator';
+import { keyDatesManagingArticle } from './articles/key-dates-managing';
+import { keyDatesOverviewArticle } from './articles/key-dates-overview';
+import { keyDatesRemindersArticle } from './articles/key-dates-reminders';
+import { keyDatesTeamDiaryArticle } from './articles/key-dates-team-diary';
+import { keyDatesVerificationArticle } from './articles/key-dates-verification';
+import { mattersEnquiriesTasksNavigationArticle } from './articles/matters-enquiries-tasks-and-navigation';
 import { quickConflictCheck } from './articles/quick-conflict-check';
+import { sharepointDocumentStoreArticle } from './articles/sharepoint-document-store';
 
 export interface DocArticle {
   /** URL slug: /docs/<slug>. Keep stable once published, because screens link to it. */
@@ -29,13 +44,35 @@ export interface DocArticle {
 
 export const DOC_SECTIONS = [
   { key: 'getting-started', title: 'Getting started' },
+  { key: 'architecture-security', title: 'Architecture, Deployment & Security' },
+  { key: 'key-dates-limitation', title: 'Key dates and limitation' },
+  { key: 'documents-dms', title: 'Documents & SharePoint DMS' },
   { key: 'enquiries', title: 'Enquiries' },
   { key: 'people-organisations', title: 'People & Organisations' },
 ] as const;
 
 export type DocSectionKey = (typeof DOC_SECTIONS)[number]['key'];
 
-export const ARTICLES: DocArticle[] = [aboutDocs, quickConflictCheck, duplicateChecks];
+export const ARTICLES: DocArticle[] = [
+  aboutDocs,
+  mattersEnquiriesTasksNavigationArticle,
+  deploymentAndSecurityArticle,
+  authenticationRbacAndMfaArticle,
+  developmentProcessArticle,
+  keyDatesOverviewArticle,
+  keyDatesManagingArticle,
+  keyDatesLimitationCalculatorArticle,
+  keyDatesVerificationArticle,
+  keyDatesTeamDiaryArticle,
+  keyDatesRemindersArticle,
+  keyDatesCalendarSyncArticle,
+  keyDatesExceptionsArticle,
+  keyDatesAdministrationArticle,
+  documentGenerationArticle,
+  sharepointDocumentStoreArticle,
+  quickConflictCheck,
+  duplicateChecks,
+];
 
 export function getDocArticle(slug: string): DocArticle | undefined {
   return ARTICLES.find((a) => a.slug === slug);

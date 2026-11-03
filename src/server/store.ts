@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { migrateEmployeesToEmploymentRecords } from '@/domain/employment';
-import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
+import { createDefaultHomePagesConfig, syncHomeRolesWithEmployeeRoles } from '@/domain/homeConfig';
 import {
   createDefaultMatterCostsConfig,
   syncRateCardsWithPmsFeeEarners,
@@ -12,6 +12,12 @@ import {
 } from '@/domain/matterParties';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { computeAutomaticPmsLinks } from '@/domain/pms';
+import { setRuntimeRbacConfigOverride } from '@/domain/rbac';
+import {
+  getActiveTenantBaseConfigPath,
+  getActiveTenantConfiguration,
+} from '@/platform/tenantRuntime';
+import type { KeyDate } from '@/domain/keyDates.types';
 import type {
   AuditEntry,
   ChoiceList,
@@ -82,16 +88,43 @@ export interface FirmStore {
   mergeHistory: MergeHistory[];
   recentlyViewed: Record<string, string[]>;
   counters: Record<string, number>;
+  documentTemplates?: import('@platform/core').DocumentTemplateRecord[];
+  documentTemplateVersions?: import('@platform/core').DocumentTemplateVersionRecord[];
+  documents?: import('@platform/core').GeneratedDocumentRecord[];
+  documentLinks?: import('@platform/core').DocumentLinkRecord[];
+  templateUsageEvents?: import('@platform/core').TemplateUsageEventRecord[];
+  documentGenerationConfigOverride?: Partial<import('@platform/core').DocumentGenerationConfig>;
+  rbacConfigOverride?: Partial<import('@platform/core').RbacConfiguration>;
+  matterDocumentLocations?: import('@platform/core').MatterDocumentLocationRecord[];
+  documentStoreFolderScopes?: import('@platform/core').DocumentStoreFolderScopeRecord[];
+  documentLifecycleJobs?: import('@platform/core').DocumentLifecycleJobRecord[];
+  documentReconciliationFindings?: import('@platform/core').DocumentReconciliationFindingRecord[];
+  documentStoreAuditEvents?: import('@platform/core').DocumentStoreAuditEventRecord[];
+  documentStoreConfigOverride?: {
+    documentStores?: import('@platform/core').DocumentStoreConfig[];
+    documentRouting?: import('@platform/core').DocumentRoutingRule[];
+    matterFolderNameTemplate?: string;
+    documentAccess?: import('@platform/core').DocumentAccessConfig;
+    matterFolderTemplates?: import('@platform/core').MatterFolderTemplatesConfig;
+  };
+  keyDates?: import('@/domain/keyDates.types').KeyDate[];
+  keyDateNotApplicable?: import('@/domain/keyDates.types').KeyDateNotApplicable[];
+  keyDateReminderStates?: import('@/domain/keyDates.types').KeyDateReminderState[];
+  keyDateCalendarSyncs?: import('@/domain/keyDates.types').KeyDateCalendarSync[];
+  keyDatesConfigOverride?: import('@/domain/keyDates.types').KeyDatesConfig;
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'pembroke-vaughan.json');
-const TENANT_CONFIG_FILE = path.join(
-  process.cwd(),
-  'client-not-a-law-firm',
-  'config',
-  'base.json',
-);
+const TENANT_CONFIG_FILE = getActiveTenantBaseConfigPath();
+
+function resolveActiveFirmId(): string {
+  try {
+    return getActiveTenantConfiguration().tenantId;
+  } catch {
+    return 'default-tenant';
+  }
+}
 
 declare global {
   var __oneSquaredStore: FirmStore | undefined;
@@ -219,7 +252,7 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     today.toISOString(),
   );
   return {
-    firmId: 'not-a-law-firm',
+    firmId: resolveActiveFirmId(),
     firm: FIRM,
     isCleanDeployment: false,
     lists: [...seedLists.lists, ...demo.customLists],
@@ -249,8 +282,141 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     audit: demo.audit,
     mergeHistory: [],
     recentlyViewed: demo.recentlyViewed,
-    counters: { ...demo.counters, PMSL: pmsLinks.length },
+    counters: { ...demo.counters, PMSL: pmsLinks.length, KD: 4 },
+    keyDates: buildSeedKeyDates(partyMigration.matters, demo.teams, today),
+    keyDateNotApplicable: [],
+    keyDateReminderStates: [],
+    keyDateCalendarSyncs: [],
   };
+}
+
+function buildSeedKeyDates(
+  matters: Matter[],
+  teams: Team[],
+  today: Date,
+): KeyDate[] {
+  if (matters.length === 0) return [];
+  const nowIso = today.toISOString();
+  const defaultTeamId = teams.find((t) => t.active)?.id ?? 'TM-000001';
+  const m0 = matters[0]!;
+  const m1 = matters[1] ?? m0;
+  const m2 = matters[2] ?? m0;
+  const addDaysIso = (d: number) => {
+    const dt = new Date(today.getTime());
+    dt.setUTCDate(dt.getUTCDate() + d);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  return [
+    {
+      id: 'KD-000001',
+      matterId: m0.id,
+      keyDateTypeId: 'limitation',
+      category: 'limitation',
+      title: 'Primary Limitation Date (Simple Contract)',
+      dueDate: addDaysIso(45),
+      isCritical: true,
+      status: 'confirmed',
+      source: 'calculated',
+      teamId:
+        teams.find((t) => m0.leadFeeEarnerId && t.memberIds.includes(m0.leadFeeEarnerId))?.id ??
+        defaultTeamId,
+      responsiblePersonIds: Array.from(
+        new Set(
+          [m0.leadFeeEarnerId, m0.responsiblePartnerId].filter((x): x is string => Boolean(x)),
+        ),
+      ),
+      calculation: {
+        ruleSetId: 'ew-sample',
+        ruleSetVersion: 1,
+        ruleSetReviewStatus: 'reviewed',
+        ruleId: 'contract-simple',
+        triggers: { accrualDate: '2020-12-18' },
+        calculatedDate: addDaysIso(45),
+        explanation: [
+          'Rule: Simple contract (Limitation Act 1980 s.5) (v1, status: reviewed)',
+          'Trigger (single): Date cause of action accrued (accrual_date) = 2020-12-18',
+          'Base period (+6 years (calendar)): 2020-12-18 -> ' + addDaysIso(45),
+        ],
+        overridden: false,
+      },
+      verification: {
+        required: true,
+        proposedById: m0.leadFeeEarnerId || 'P-000002',
+        proposedAt: nowIso,
+        verifiedById: m0.responsiblePartnerId || 'P-000001',
+        verifiedAt: nowIso,
+      },
+      notes: 'Confirmed against signed supply agreement.',
+      createdById: m0.leadFeeEarnerId || 'P-000002',
+      createdAt: nowIso,
+      updatedById: m0.responsiblePartnerId || 'P-000001',
+      updatedAt: nowIso,
+      version: 2,
+    },
+    {
+      id: 'KD-000002',
+      matterId: m1.id,
+      keyDateTypeId: 'court_deadline',
+      category: 'court_deadline',
+      title: 'CMC Witness Statements Exchange',
+      dueDate: addDaysIso(14),
+      dueTime: '16:00',
+      isCritical: true,
+      status: 'awaiting_verification',
+      source: 'manual',
+      teamId:
+        teams.find((t) => m1.leadFeeEarnerId && t.memberIds.includes(m1.leadFeeEarnerId))?.id ??
+        defaultTeamId,
+      responsiblePersonIds: Array.from(
+        new Set(
+          [m1.leadFeeEarnerId, m1.responsiblePartnerId].filter((x): x is string => Boolean(x)),
+        ),
+      ),
+      verification: {
+        required: true,
+        proposedById: m1.leadFeeEarnerId || 'P-000002',
+        proposedAt: nowIso,
+      },
+      notes: 'Per sealed Case Management Order.',
+      createdById: m1.leadFeeEarnerId || 'P-000002',
+      createdAt: nowIso,
+      updatedById: m1.leadFeeEarnerId || 'P-000002',
+      updatedAt: nowIso,
+      version: 1,
+    },
+    {
+      id: 'KD-000003',
+      matterId: m2.id,
+      keyDateTypeId: 'contract_date',
+      category: 'contractual',
+      title: 'Longstop Completion Date',
+      dueDate: addDaysIso(28),
+      isCritical: false,
+      status: 'confirmed',
+      source: 'manual',
+      teamId:
+        teams.find((t) => m2.leadFeeEarnerId && t.memberIds.includes(m2.leadFeeEarnerId))?.id ??
+        defaultTeamId,
+      responsiblePersonIds: Array.from(
+        new Set(
+          [m2.leadFeeEarnerId, m2.responsiblePartnerId].filter((x): x is string => Boolean(x)),
+        ),
+      ),
+      verification: {
+        required: false,
+        proposedById: m2.leadFeeEarnerId || 'P-000002',
+        proposedAt: nowIso,
+        verifiedById: m2.leadFeeEarnerId || 'P-000002',
+        verifiedAt: nowIso,
+      },
+      createdById: m2.leadFeeEarnerId || 'P-000002',
+      createdAt: nowIso,
+      updatedById: m2.leadFeeEarnerId || 'P-000002',
+      updatedAt: nowIso,
+      version: 1,
+    },
+  ];
 }
 
 /**
@@ -275,7 +441,7 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
   const matterCostsConfig = createDefaultMatterCostsConfig(partyMigration.values, nowIso);
 
   return {
-    firmId: 'not-a-law-firm',
+    firmId: resolveActiveFirmId(),
     firm: FIRM,
     isCleanDeployment: true,
     lists: seedLists.lists,
@@ -312,6 +478,10 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
     mergeHistory: [],
     recentlyViewed: {},
     counters: {},
+    keyDates: [],
+    keyDateNotApplicable: [],
+    keyDateReminderStates: [],
+    keyDateCalendarSyncs: [],
   };
 }
 
@@ -354,8 +524,9 @@ async function trySyncToFirestore(store: FirmStore): Promise<void> {
 
 function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
   let changed = false;
-  if (store.firmId !== 'not-a-law-firm') {
-    store.firmId = 'not-a-law-firm';
+  const activeFirmId = resolveActiveFirmId();
+  if (store.firmId !== activeFirmId) {
+    store.firmId = activeFirmId;
     changed = true;
   }
   if (!store.firm || store.firm.name !== FIRM.name || store.firm.shortName !== FIRM.shortName) {
@@ -406,6 +577,22 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
     }
   }
   if (store.homePagesConfig && Array.isArray(store.homePagesConfig.roles)) {
+    const syncedRoles = syncHomeRolesWithEmployeeRoles(
+      store.homePagesConfig.roles,
+      store.values ?? [],
+    );
+    if (
+      syncedRoles.length !== store.homePagesConfig.roles.length ||
+      syncedRoles.some(
+        (r, i) =>
+          r.key !== store.homePagesConfig.roles[i]?.key ||
+          r.label !== store.homePagesConfig.roles[i]?.label ||
+          r.employeeRoleId !== store.homePagesConfig.roles[i]?.employeeRoleId,
+      )
+    ) {
+      store.homePagesConfig.roles = syncedRoles;
+      changed = true;
+    }
     for (const r of store.homePagesConfig.roles) {
       if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.co.uk')) {
         r.demoUserEmail = r.demoUserEmail.replace(
@@ -853,6 +1040,23 @@ export function getStore(): FirmStore {
         migrated = true;
       }
 
+      if (!Array.isArray(parsed.keyDates)) {
+        parsed.keyDates = buildSeedKeyDates(parsed.matters, parsed.teams, new Date());
+        migrated = true;
+      }
+      if (!Array.isArray(parsed.keyDateNotApplicable)) {
+        parsed.keyDateNotApplicable = [];
+        migrated = true;
+      }
+      if (!Array.isArray(parsed.keyDateReminderStates)) {
+        parsed.keyDateReminderStates = [];
+        migrated = true;
+      }
+      if (!Array.isArray(parsed.keyDateCalendarSyncs)) {
+        parsed.keyDateCalendarSyncs = [];
+        migrated = true;
+      }
+
       if (migrateFirmBrandingToNotALawFirm(parsed)) {
         migrated = true;
       }
@@ -860,6 +1064,7 @@ export function getStore(): FirmStore {
       if (migrated) {
         saveStore(parsed);
       }
+      setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
       global.__oneSquaredStore = parsed;
       try {
         global.__oneSquaredStoreMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
@@ -878,6 +1083,7 @@ export function getStore(): FirmStore {
 
 export function saveStore(store: FirmStore): void {
   global.__oneSquaredStore = store;
+  setRuntimeRbacConfigOverride(store.rbacConfigOverride);
   if (process.env.VITEST || process.env.NODE_ENV === 'test') {
     return;
   }
@@ -938,7 +1144,7 @@ export function clearStoreToCleanDeployment(): FirmStore {
 
 export function nextId(
   store: FirmStore,
-  prefix: 'P' | 'O' | 'L' | 'N' | 'AU' | 'M' | 'TM' | 'TSK' | 'ENQ' | 'NTF' | 'PMSL' | 'SO',
+  prefix: 'P' | 'O' | 'L' | 'N' | 'AU' | 'M' | 'TM' | 'TSK' | 'ENQ' | 'NTF' | 'PMSL' | 'SO' | 'KD',
 ): string {
   const n = (store.counters[prefix] ?? 0) + 1;
   store.counters[prefix] = n;

@@ -1,0 +1,2163 @@
+/**
+ * Comprehensive Test Suite for External Document Store Integration (`core/tests/document-store.test.ts`).
+ *
+ * Covers Section 11 of the specification:
+ * 1. Unit tests: folder template resolution, extends vs replaces, all 5 operations, template validation,
+ *    routing rule matching, token rendering & sanitisation, permission compilation (standard, cross-team,
+ *    restricted, closed), SharePoint URL parsing, role mapping, error normalisation, and scale warnings.
+ * 2. Contract tests: `DocumentStoreProvider` contract suite against `SharePointDocumentStoreProvider`
+ *    with `MockSharePointGraphBackend` (including large-file resumable upload >= 4 MiB, conflict modes,
+ *    and HTTP 429 retry).
+ * 3. Security tests: user-facing operations never invoke provisioning identity, 1Squared matter access
+ *    blocks before any Graph call, store denial creates a reconciliation finding, restricted matter
+ *    strips department/team groups, OBO token cache is encrypted and isolated per tenant & user.
+ * 4. Two-tenant isolation tests: Tenant A cannot read, list, upload to, or provision into Tenant B's
+ *    store, even with tampered matter IDs, folder IDs, drive IDs, or forged tenant claims.
+ * 5. Lifecycle & reconciliation tests: idempotent retry, partial failure recovery, team/restriction/dept
+ *    changes, closure & reopening, additive template updates on open matters, and permission drift
+ *    detection & remediation.
+ * 6. Static architecture check: zero client names, URLs, or group IDs in `core/`.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  ALLOWED_PATH_TOKENS,
+  CORE_VERSION,
+  DocumentStoreProviderRegistry,
+  DocumentStoreTokenService,
+  GRAPH_RESUMABLE_UPLOAD_THRESHOLD_BYTES,
+  MockSharePointGraphBackend,
+  SHAREPOINT_ROLE_MAPPING,
+   TenantDocumentStoreRepository,
+  TenantMigrationRunner,
+  TenantScopedEncryptedTokenCache,
+  applyTemplateAdditionsToOpenMattersJob,
+  buildDocumentStoreAuditEvent,
+  closeMatterFolderJob,
+  compileDepartmentFolderPermissions,
+  compileMatterFolderPermissions,
+  compileTeamFolderPermissions,
+  computeAdditiveTemplateDiff,
+  evaluateLibraryScopeScaleStatus,
+  executeUserMatterDocumentOperation,
+  findUnknownPathTokens,
+  linkExistingMatterFolderJob,
+  loadAndValidateTenantConfig,
+  normaliseDocumentStoreError,
+  parseSharePointLocationUrl,
+  provisionMatterDocumentsJob,
+  recalculateMatterPermissionsJob,
+  reconcileDocumentStorePermissionsJob,
+  remediateReconciliationFinding,
+  renderBasePath,
+  renderFolderNameTemplate,
+  reopenMatterFolderJob,
+  resolveMatterDocumentRoute,
+  resolveMatterFolderTemplate,
+  resolveTenantFromVerifiedToken,
+  sanitiseFolderNameSegment,
+  PERMISSION_REGISTRY,
+  validateDocumentConfigAgainstTenantData,
+  validateMatterFolderTemplatesConfig,
+  validateRawFolderNameSegment,
+  type DocumentAccessConfig,
+  type DocumentRoutingRule,
+  type DocumentStoreConfig,
+  type MatterFolderTemplatesConfig,
+  type MatterRoutingSubject,
+  type ProvisioningAccessContext,
+  type TenantContext,
+  type UserAccessContext,
+} from '../src/index';
+import {
+  applyAdminTemplateAdditionsToOpenMatters,
+  browseMatterDocumentStoreFolder,
+  buildMatterRoutingSubject,
+  buildTenantContextForUser,
+  downloadMatterStoreDocument,
+  ensureMatterDocumentStoreProvisioned,
+  ensureRepositorySyncedWithStore,
+  getDocumentStoresAdminDashboard,
+  linkExistingMatterDocumentFolder,
+  mutateMatterStoreItem,
+  persistRepositoryToStore,
+  previewAdminMatterFolderTemplate,
+  remediateAdminReconciliationFinding,
+  resetDocumentStoreSingletonsForTesting,
+  resolveAdminSharePointLocationUrl,
+  retryMatterDocumentProvisioning,
+  runAdminDocumentReconciliationScan,
+  saveAdminDocumentStoreConfiguration,
+  testAdminDocumentStoreConnection,
+  uploadMatterStoreDocument,
+} from '@/server/documentStoreServices';
+import { saveMatterRecord } from '@/server/services';
+import { getStore, saveStore } from '@/server/store';
+
+void CORE_VERSION;
+
+function makeTenantContext(overrides: {
+  tenantId: string;
+  actorId?: string;
+  actorName?: string;
+  actorEmail?: string;
+  actorUpn?: string;
+  actorRoles?: string[];
+  actorGroups?: string[];
+  entraObjectId?: string;
+  entraTenantId?: string;
+  mfaVerified?: boolean;
+  correlationId?: string;
+}): TenantContext {
+  return resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: overrides.actorId ?? 'user-1',
+      tenantId: overrides.tenantId,
+      name: overrides.actorName ?? 'Alex Practitioner',
+      email: overrides.actorEmail ?? 'alex@firm-alpha.example',
+      upn: overrides.actorUpn ?? 'alex@firm-alpha.example',
+      roles: overrides.actorRoles ?? ['fee_earner'],
+      groups: overrides.actorGroups ?? ['grp-dept-prop', 'grp-team-res'],
+      entraObjectId:
+        overrides.entraObjectId !== undefined
+          ? overrides.entraObjectId
+          : 'oid-user-alex-001',
+      entraTenantId: overrides.entraTenantId ?? 'entra-tenant-alpha-001',
+      mfaVerified: overrides.mfaVerified ?? true,
+    },
+    hostingMode: 'multi_tenant',
+    environment: 'test',
+    correlationId: overrides.correlationId ?? 'corr-test-001',
+  });
+}
+
+function makeGenericStores(prefix = 'alpha'): DocumentStoreConfig[] {
+  return [
+    {
+      storeId: `${prefix}-sp-primary`,
+      displayName: 'Primary Practice SharePoint Store',
+      providerType: 'sharepoint',
+      isDefault: true,
+      enabled: true,
+      auth: {
+        entraTenantId: `entra-${prefix}-001`,
+        credentialMode: 'client_certificate',
+        clientId: `app-${prefix}-001`,
+        certificateKeyVaultSecretRef: `kv://kv-${prefix}-test/sp-provisioning-cert`,
+        delegatedPermissionScope: 'Files.ReadWrite.All',
+      },
+      sharepoint: {
+        hostname: `${prefix}.sharepoint.com`,
+        siteRelativePath: '/sites/PracticeDMS',
+        siteId: `site-${prefix}-001`,
+        libraries: [
+          {
+            libraryId: 'lib-matters',
+            displayName: 'Matter Repository',
+            libraryUrlSegment: 'Matter Repository',
+            driveId: `drive-${prefix}-matters`,
+          },
+          {
+            libraryId: 'lib-disputes',
+            displayName: 'Disputes Repository',
+            libraryUrlSegment: 'Disputes Repository',
+            driveId: `drive-${prefix}-disputes`,
+          },
+        ],
+      },
+    },
+  ];
+}
+
+function makeGenericRoutingRules(prefix = 'alpha'): DocumentRoutingRule[] {
+  return [
+    {
+      ruleId: 'route-disputes',
+      match: { departmentId: 'DEPT-LIT' },
+      storeId: `${prefix}-sp-primary`,
+      libraryId: 'lib-disputes',
+      basePath: '{departmentCode}/{teamCode}',
+    },
+    {
+      ruleId: 'route-default',
+      match: 'default',
+      storeId: `${prefix}-sp-primary`,
+      libraryId: 'lib-matters',
+      basePath: '{departmentCode}/{teamCode}',
+    },
+  ];
+}
+
+function makeGenericAccessConfig(): DocumentAccessConfig {
+  return {
+    uniqueScopeWarningThreshold: 4000,
+    autoRemediateDrift: false,
+    departmentEntraGroups: {
+      'DEPT-PROP': 'grp-dept-prop',
+      'DEPT-LIT': 'grp-dept-lit',
+      'DEPT-CORP': 'grp-dept-corp',
+    },
+    teamEntraGroups: {
+      'TEAM-RES': 'grp-team-res',
+      'TEAM-COMM': 'grp-team-comm',
+      'TEAM-LIT-A': 'grp-team-lit-a',
+    },
+    defaultPolicy: {
+      libraryRoot: [
+        {
+          groupId: 'grp-dms-admins',
+          level: 'manage',
+          description: 'DMS Administrators',
+        },
+        {
+          groupId: 'grp-risk-oversight',
+          level: 'read',
+          description: 'Risk Oversight',
+        },
+      ],
+      owningDepartment: 'read',
+      owningTeam: 'edit',
+      otherDepartments: 'none',
+      matterTeamOutsider: 'edit',
+      restrictedMatter: {
+        allowedUserLevel: 'edit',
+        groups: [
+          {
+            groupId: 'grp-risk-oversight',
+            level: 'read',
+            description: 'Risk Oversight',
+          },
+        ],
+      },
+      closedMatter: 'read',
+    },
+  };
+}
+
+function makeGenericTemplatesConfig(): MatterFolderTemplatesConfig {
+  return {
+    default: {
+      templateId: 'tpl-default',
+      version: 1,
+      mode: 'replaces',
+      nodes: [
+        { name: '01 Client Care', filingAliases: ['client_care'] },
+        { name: '02 Correspondence', filingAliases: ['correspondence'] },
+        {
+          name: '03 Working Drafts',
+          children: [{ name: 'Internal Notes' }],
+        },
+        { name: '04 Final Documents' },
+        { name: '05 Billing' },
+      ],
+    },
+    byDepartment: {
+      'DEPT-PROP': {
+        templateId: 'tpl-dept-prop',
+        version: 1,
+        mode: 'extends',
+        operations: [
+          {
+            op: 'add',
+            parentPath: '/',
+            node: { name: '03a Searches' },
+          },
+        ],
+      },
+    },
+    byWorkType: {
+      'wt.residential_conveyancing': {
+        templateId: 'tpl-wt-conveyancing',
+        version: 2,
+        mode: 'extends',
+        operations: [
+          {
+            op: 'add',
+            parentPath: '/',
+            node: { name: '03b Title and Contract' },
+          },
+          {
+            op: 'rename',
+            path: '05 Billing',
+            newName: '05 Completion and Billing',
+          },
+        ],
+      },
+      'wt.custom_replacement': {
+        templateId: 'tpl-wt-custom',
+        version: 1,
+        mode: 'replaces',
+        nodes: [
+          { name: 'A Intake' },
+          { name: 'B Execution' },
+        ],
+      },
+    },
+  };
+}
+
+function makeMatterSubject(
+  overrides: Partial<MatterRoutingSubject> = {},
+): MatterRoutingSubject {
+  return {
+    matterId: 'M-1001',
+    matterNumber: 'MAT-2026-0001',
+    clientNumber: 'CLI-001',
+    matterDescription: 'Purchase of 10 High Street',
+    departmentId: 'DEPT-PROP',
+    departmentCode: 'PROP',
+    teamId: 'TEAM-RES',
+    teamCode: 'RES',
+    workTypeId: 'wt.residential_conveyancing',
+    practiceAreaId: 'wt.property',
+    workTypeCode: 'CONV',
+    isRestricted: false,
+    restrictedAccessUserIds: [],
+    owningTeamMemberIds: ['user-1', 'user-2'],
+    matterTeamMemberIds: ['user-1', 'user-2'],
+    isClosed: false,
+    ...overrides,
+  };
+}
+
+describe('External Document Store Integration (Sections 1–14)', () => {
+  // ============================================================================
+  // 1. Unit Tests: Folder Templates, Routing, Security, URL Parser, Role Mapping
+  // ============================================================================
+  describe('1. Unit Tests: Templates, Routing, Security, URL Parser & Error Normalisation', () => {
+    it('resolves folder templates across workType -> department -> default with extends and replaces', () => {
+      const config = makeGenericTemplatesConfig();
+
+      // 1. Default fallback
+      const defaultResolved = resolveMatterFolderTemplate({
+        templatesConfig: config,
+        departmentId: 'DEPT-UNKNOWN',
+        workTypeId: 'wt.unknown',
+      });
+      expect(defaultResolved.templateId).toBe('tpl-default');
+      expect(defaultResolved.resolutionChain).toEqual(['tpl-default']);
+      expect(defaultResolved.flatRelativePaths).toContain('01 Client Care');
+      expect(defaultResolved.flatRelativePaths).toContain(
+        '03 Working Drafts/Internal Notes',
+      );
+
+      // 2. Department + WorkType both extending default
+      const propConvResolved = resolveMatterFolderTemplate({
+        templatesConfig: config,
+        departmentId: 'DEPT-PROP',
+        workTypeId: 'wt.residential_conveyancing',
+      });
+      expect(propConvResolved.templateId).toBe('tpl-wt-conveyancing');
+      expect(propConvResolved.version).toBe(2);
+      expect(propConvResolved.resolutionChain).toEqual([
+        'tpl-default',
+        'tpl-dept-prop',
+        'tpl-wt-conveyancing',
+      ]);
+      expect(propConvResolved.flatRelativePaths).toContain('03a Searches');
+      expect(propConvResolved.flatRelativePaths).toContain(
+        '03b Title and Contract',
+      );
+      expect(propConvResolved.flatRelativePaths).toContain(
+        '05 Completion and Billing',
+      );
+      expect(propConvResolved.flatRelativePaths).not.toContain('05 Billing');
+
+      // 3. WorkType with mode: 'replaces' discards base layers
+      const replacedResolved = resolveMatterFolderTemplate({
+        templatesConfig: config,
+        departmentId: 'DEPT-PROP',
+        workTypeId: 'wt.custom_replacement',
+      });
+      expect(replacedResolved.templateId).toBe('tpl-wt-custom');
+      expect(replacedResolved.resolutionChain).toEqual(['tpl-wt-custom']);
+      expect(replacedResolved.flatRelativePaths).toEqual([
+        'A Intake',
+        'B Execution',
+      ]);
+    });
+
+    it('supports all 5 template operations: add, remove, rename, move, and setAccess (with scale warning)', () => {
+      const config: MatterFolderTemplatesConfig = {
+        default: {
+          templateId: 'tpl-base',
+          version: 1,
+          mode: 'replaces',
+          nodes: [
+            { name: 'Folder A' },
+            { name: 'Folder B' },
+            { name: 'Folder C' },
+          ],
+        },
+        byWorkType: {
+          'wt.ops': {
+            templateId: 'tpl-ops',
+            version: 1,
+            mode: 'extends',
+            operations: [
+              {
+                op: 'add',
+                parentPath: 'Folder A',
+                node: { name: 'Subfolder A1' },
+              },
+              {
+                op: 'remove',
+                path: 'Folder B',
+              },
+              {
+                op: 'rename',
+                path: 'Folder C',
+                newName: 'Folder C Renamed',
+              },
+              {
+                op: 'move',
+                path: 'Folder A/Subfolder A1',
+                newParentPath: 'Folder C Renamed',
+              },
+              {
+                op: 'setAccess',
+                path: 'Folder C Renamed/Subfolder A1',
+                access: {
+                  inherit: false,
+                  grants: [
+                    {
+                      principalType: 'group',
+                      principalId: 'grp-partner-only',
+                      level: 'edit',
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      };
+
+      const resolved = resolveMatterFolderTemplate({
+        templatesConfig: config,
+        workTypeId: 'wt.ops',
+      });
+      expect(resolved.flatRelativePaths).toEqual([
+        'Folder A',
+        'Folder C Renamed',
+        'Folder C Renamed/Subfolder A1',
+      ]);
+      expect(resolved.accessOverrideScopeCount).toBe(1);
+      expect(resolved.scaleWarnings.length).toBe(1);
+      expect(resolved.scaleWarnings[0]).toContain('5,000');
+    });
+
+    it('rejects invalid templates: duplicate sibling names, invalid characters, unknown tokens, missing operation paths, and excessive depth', () => {
+      const badConfig: MatterFolderTemplatesConfig = {
+        default: {
+          templateId: 'tpl-bad',
+          version: 1,
+          mode: 'replaces',
+          nodes: [
+            { name: 'Valid Folder' },
+            { name: 'valid folder' }, // Duplicate sibling (case-insensitive)
+            { name: 'Invalid*Char:Folder' }, // Forbidden SharePoint characters
+            { name: 'Unknown {nonExistentToken} Folder' }, // Unknown token
+          ],
+        },
+        byWorkType: {
+          'wt.bad_op': {
+            templateId: 'tpl-bad-op',
+            version: 1,
+            mode: 'extends',
+            operations: [
+              {
+                op: 'remove',
+                path: 'Does Not Exist',
+              },
+            ],
+          },
+        },
+      };
+
+      const validation = validateMatterFolderTemplatesConfig(badConfig);
+      expect(validation.valid).toBe(false);
+      const messages = validation.errors.map((e) => e.message).join(' | ');
+      expect(messages).toContain('Duplicate sibling');
+      expect(messages).toContain('characters forbidden');
+      expect(messages).toContain('unknown token');
+      expect(messages).toContain('non-existent folder path');
+    });
+
+    it('matches routing rules in order, renders tokens, and sanitises forbidden SharePoint characters and path lengths', () => {
+      expect(ALLOWED_PATH_TOKENS.has('matterNumber')).toBe(true);
+      expect(findUnknownPathTokens('{departmentCode}/{fooToken}')).toEqual([
+        'fooToken',
+      ]);
+      expect(validateRawFolderNameSegment('CON').valid).toBe(false);
+      expect(validateRawFolderNameSegment('.leadingdot').valid).toBe(false);
+      expect(sanitiseFolderNameSegment('Sale: "Plot 4" <Phase 1>?')).toBe(
+        'Sale- -Plot 4- -Phase 1-',
+      );
+
+      const stores = makeGenericStores();
+      const rules = makeGenericRoutingRules();
+
+      // Dispute matter matches rule 0 ('lib-disputes')
+      const litSubject = makeMatterSubject({
+        departmentId: 'DEPT-LIT',
+        departmentCode: 'LIT',
+        teamId: 'TEAM-LIT-A',
+        teamCode: 'LITA',
+        matterDescription: 'Claim: Alpha / Beta *Urgent*',
+      });
+      const litRoute = resolveMatterDocumentRoute({
+        subject: litSubject,
+        stores,
+        routingRules: rules,
+        matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+      });
+      expect(litRoute.libraryId).toBe('lib-disputes');
+      expect(litRoute.renderedBasePath).toBe('LIT/LITA');
+      expect(litRoute.matterFolderName).toBe(
+        'MAT-2026-0001 - Claim- Alpha - Beta -Urgent-',
+      );
+
+      // Property matter falls through to default rule ('lib-matters')
+      const propRoute = resolveMatterDocumentRoute({
+        subject: makeMatterSubject(),
+        stores,
+        routingRules: rules,
+        matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+      });
+      expect(propRoute.libraryId).toBe('lib-matters');
+      expect(propRoute.matterRelativePath).toBe(
+        'PROP/RES/MAT-2026-0001 - Purchase of 10 High Street',
+      );
+      expect( renderBasePath('{departmentCode}/{teamCode}', makeMatterSubject()).segments ).toEqual(['PROP', 'RES']);
+      expect( renderFolderNameTemplate('{clientNumber}_{matterNumber}', makeMatterSubject()) ).toBe('CLI-001_MAT-2026-0001');
+    });
+
+    it('compiles permissions for standard, cross-team outsider, restricted, and closed matters', () => {
+      const accessConfig = makeGenericAccessConfig();
+      const storeId = 'alpha-sp-primary';
+      const resolveUser = (userId: string) => ({
+        entraObjectId: `oid-${userId}`,
+        upn: `${userId}@firm-alpha.example`,
+        displayName: `User ${userId}`,
+      });
+
+      const deptPerms = compileDepartmentFolderPermissions({
+        accessConfig,
+        storeId,
+        departmentId: 'DEPT-PROP',
+      });
+      expect(deptPerms.inherit).toBe(false);
+      expect(
+        deptPerms.grants.some(
+          (g) => g.principal.entraObjectId === 'grp-dept-prop' && g.level === 'read',
+        ),
+      ).toBe(true);
+
+      const teamPerms = compileTeamFolderPermissions({
+        accessConfig,
+        storeId,
+        departmentId: 'DEPT-PROP',
+        teamId: 'TEAM-RES',
+      });
+      expect(teamPerms.inherit).toBe(false);
+      expect(
+        teamPerms.grants.some(
+          (g) => g.principal.entraObjectId === 'grp-team-res' && g.level === 'edit',
+        ),
+      ).toBe(true);
+
+      // 1. Standard matter -> inherits from team folder (0 unique scopes!)
+      const standardPlan = compileMatterFolderPermissions({
+        accessConfig,
+        storeId,
+        subject: makeMatterSubject(),
+        resolveUserEntraObjectId: resolveUser,
+      });
+      expect(standardPlan.inherit).toBe(true);
+      expect(standardPlan.reason).toBe('inherited_standard');
+      expect(standardPlan.consumesUniqueScope).toBe(false);
+
+      // 2. Cross-team outsider on matter team -> breaks inheritance, keeps dept & team groups, adds outsider
+      const outsiderPlan = compileMatterFolderPermissions({
+        accessConfig,
+        storeId,
+        subject: makeMatterSubject({
+          matterTeamMemberIds: ['user-1', 'user-2', 'user-outsider-9'],
+        }),
+        resolveUserEntraObjectId: resolveUser,
+      });
+      expect(outsiderPlan.inherit).toBe(false);
+      expect(outsiderPlan.reason).toBe('matter_team_outsiders');
+      expect(outsiderPlan.consumesUniqueScope).toBe(true);
+      expect(outsiderPlan.outsiderUserIds).toEqual(['user-outsider-9']);
+      expect(
+        outsiderPlan.grants.some(
+          (g) => g.principal.entraObjectId === 'grp-team-res',
+        ),
+      ).toBe(true);
+      expect(
+        outsiderPlan.grants.some(
+          (g) =>
+            g.principal.entraObjectId === 'oid-user-outsider-9' &&
+            g.level === 'edit',
+        ),
+      ).toBe(true);
+
+      // 3. Restricted matter -> breaks inheritance, REMOVES department and team groups, grants only allowed users + oversight group
+      const restrictedPlan = compileMatterFolderPermissions({
+        accessConfig,
+        storeId,
+        subject: makeMatterSubject({
+          isRestricted: true,
+          restrictedAccessUserIds: ['user-1'],
+          matterTeamMemberIds: ['user-1'],
+        }),
+        resolveUserEntraObjectId: resolveUser,
+      });
+      expect(restrictedPlan.inherit).toBe(false);
+      expect(restrictedPlan.reason).toBe('restricted_matter');
+      expect(
+        restrictedPlan.grants.some(
+          (g) => g.principal.entraObjectId === 'grp-dept-prop',
+        ),
+      ).toBe(false);
+      expect(
+        restrictedPlan.grants.some(
+          (g) => g.principal.entraObjectId === 'grp-team-res',
+        ),
+      ).toBe(false);
+      expect(
+        restrictedPlan.grants.some(
+          (g) => g.principal.entraObjectId === 'oid-user-1' && g.level === 'edit',
+        ),
+      ).toBe(true);
+      expect(
+        restrictedPlan.grants.some(
+          (g) =>
+            g.principal.entraObjectId === 'grp-risk-oversight' &&
+            g.level === 'read',
+        ),
+      ).toBe(true);
+
+      // 4. Closed matter -> downgrades write access to 'read'
+      const closedPlan = compileMatterFolderPermissions({
+        accessConfig,
+        storeId,
+        subject: makeMatterSubject({ isClosed: true }),
+        resolveUserEntraObjectId: resolveUser,
+      });
+      expect(closedPlan.inherit).toBe(false);
+      expect(closedPlan.reason).toBe('closed_matter_readonly');
+      const teamGrantOnClosed = closedPlan.grants.find(
+        (g) => g.principal.entraObjectId === 'grp-team-res',
+      );
+      expect(teamGrantOnClosed?.level).toBe('read');
+    });
+
+    it('parses SharePoint URLs including encoded spaces, /Forms/AllItems.aspx, ?id= query parameters, subfolders, and rejects invalid URLs', () => {
+      // Standard library URL with encoded spaces
+      const libParsed = parseSharePointLocationUrl(
+        'https://contoso.sharepoint.com/sites/PracticeDMS/Matter%20Repository',
+      );
+      expect(libParsed.valid).toBe(true);
+      expect(libParsed.hostname).toBe('contoso.sharepoint.com');
+      expect(libParsed.siteRelativePath).toBe('/sites/PracticeDMS');
+      expect(libParsed.libraryUrlSegment).toBe('Matter Repository');
+      expect(libParsed.folderRelativePath).toBe('');
+
+      // View URL with /Forms/AllItems.aspx and ?id= deep folder path
+      const viewParsed = parseSharePointLocationUrl(
+        'https://contoso.sharepoint.com/sites/PracticeDMS/Matter%20Repository/Forms/AllItems.aspx?id=%2Fsites%2FPracticeDMS%2FMatter%20Repository%2FPROP%2FRES%2FMAT-2026-0001&viewid=1234',
+      );
+      expect(viewParsed.valid).toBe(true);
+      expect(viewParsed.libraryUrlSegment).toBe('Matter Repository');
+      expect(viewParsed.folderRelativePath).toBe('PROP/RES/MAT-2026-0001');
+
+      // Direct subfolder path
+      const subParsed = parseSharePointLocationUrl(
+        'https://contoso.sharepoint.com/sites/PracticeDMS/Matter%20Repository/PROP/RES',
+      );
+      expect(subParsed.valid).toBe(true);
+      expect(subParsed.folderRelativePath).toBe('PROP/RES');
+
+      // Invalid URLs
+      expect(parseSharePointLocationUrl('http://contoso.sharepoint.com/sites/A/B').valid).toBe(false);
+      expect(parseSharePointLocationUrl('https://contoso.sharepoint.com/sites/OnlySite').valid).toBe(false);
+      expect(parseSharePointLocationUrl('not-a-url').valid).toBe(false);
+    });
+
+    it('maps roles in one place, normalises errors, and warns on library scope scale limits', () => {
+      expect(SHAREPOINT_ROLE_MAPPING.read.sharePointRoleDefinitionName).toBe('Read');
+      expect(SHAREPOINT_ROLE_MAPPING.contribute.sharePointRoleDefinitionName).toBe('Contribute');
+      expect(SHAREPOINT_ROLE_MAPPING.edit.sharePointRoleDefinitionName).toBe('Edit');
+      expect(SHAREPOINT_ROLE_MAPPING.manage.sharePointRoleDefinitionName).toBe('Full Control');
+
+      expect(normaliseDocumentStoreError(new Error('HTTP 404 Not Found')).code).toBe('not_found');
+      expect(normaliseDocumentStoreError(new Error('HTTP 403 Access Denied')).code).toBe('access_denied');
+      expect(normaliseDocumentStoreError(new Error('HTTP 409 Conflict')).code).toBe('conflict');
+      expect(normaliseDocumentStoreError(new Error('HTTP 429 Throttled')).code).toBe('throttled');
+      expect(normaliseDocumentStoreError(new Error('AADSTS50076 interaction_required')).code).toBe(
+        'reauthentication_required',
+      );
+
+      const scaleStatus = evaluateLibraryScopeScaleStatus({
+        storeId: 'alpha-sp-primary',
+        libraryId: 'lib-matters',
+        warningThreshold: 4000,
+        departmentScopes: 10,
+        teamScopes: 30,
+        matterExceptionScopes: 4100,
+        templateOverrideScopes: 0,
+      });
+      expect(scaleStatus.exceedsWarningThreshold).toBe(true);
+      expect(scaleStatus.warningMessage).toContain('4140');
+    });
+  });
+
+  // ============================================================================
+  // 2. Contract Tests: DocumentStoreProvider against SharePointProvider
+  // ============================================================================
+  describe('2. Contract Tests: SharePointDocumentStoreProvider', () => {
+    it('implements all user-context and provisioning-context operations, chunked uploads, conflict modes, paging, and 429 retry', async () => {
+      const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
+      const stores = makeGenericStores('alpha');
+      const registry = new DocumentStoreProviderRegistry();
+      const provider = registry.createProvider(ctx, stores[0]!);
+
+      const provCtx: ProvisioningAccessContext = {
+        kind: 'provisioning',
+        tenantContext: ctx,
+        triggeredByUserId: ctx.actorId,
+        triggerEvent: 'contract.test',
+      };
+      const userCtx: UserAccessContext = {
+        kind: 'user',
+        tenantContext: ctx,
+        actorUserId: ctx.actorId,
+        entraObjectId: ctx.entraObjectId!,
+        userUpn: ctx.actorUpn,
+        userAssertionToken: 'valid-user-jwt',
+      };
+
+      // 1. testConnection
+      const conn = await provider.testConnection(provCtx);
+      expect(conn.ok).toBe(true);
+      expect(conn.checks.permissionManagementSupported).toBe(true);
+
+      // 2. ensureFolderTree & resolveLocation
+      const containerRef = {
+        storeId: 'alpha-sp-primary',
+        libraryId: 'lib-matters',
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        folderItemId: 'root',
+      };
+      const ensured = await provider.ensureFolderTree(provCtx, containerRef, [
+        {
+          name: 'PROP',
+          relativePath: 'PROP',
+          children: [
+            {
+              name: 'RES',
+              relativePath: 'PROP/RES',
+            },
+          ],
+        },
+      ]);
+      expect(ensured.folderItemMap['PROP/RES']).toBeDefined();
+
+      const resolvedLoc = await provider.resolveLocation(provCtx, {
+        storeId: 'alpha-sp-primary',
+        rawUrlOrPath:
+          'https://alpha.sharepoint.com/sites/PracticeDMS/Matter%20Repository/PROP/RES',
+      });
+      expect(resolvedLoc.resolved).toBe(true);
+      expect(resolvedLoc.folderItemId).toBe(ensured.folderItemMap['PROP/RES']);
+
+      // 3. setPermissions & getPermissions
+      const resFolderId = ensured.folderItemMap['PROP/RES']!;
+      await provider.setPermissions(
+        provCtx,
+        {
+          storeId: 'alpha-sp-primary',
+          siteId: 'site-alpha-001',
+          driveId: 'drive-alpha-matters',
+          itemId: resFolderId,
+        },
+        [
+          {
+            principal: {
+              principalType: 'group',
+              entraObjectId: 'grp-team-res',
+              displayName: 'Residential Team',
+            },
+            level: 'edit',
+          },
+        ],
+        { inherit: false },
+      );
+
+      const perms = await provider.getPermissions(provCtx, {
+        storeId: 'alpha-sp-primary',
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        itemId: resFolderId,
+      });
+      expect(perms.inheritsFromParent).toBe(false);
+      expect(perms.grants).toHaveLength(1);
+
+      // 4. getEffectiveAccess for user in 'grp-team-res'
+      const effAccess = await provider.getEffectiveAccess(userCtx, {
+        storeId: 'alpha-sp-primary',
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        itemId: resFolderId,
+      });
+      expect(effAccess.level).toBe('edit');
+      expect(effAccess.canUpload).toBe(true);
+      expect(effAccess.canDelete).toBe(true);
+
+      // 5. Small file upload, conflict modes ('fail', 'rename', 'replace'), and large file chunked upload (>= 4 MiB)
+      const resContainer = {
+        ...containerRef,
+        folderItemId: resFolderId,
+      };
+      const smallBytes = new TextEncoder().encode('Contract Draft v1');
+      const uploaded1 = await provider.uploadContent(
+        userCtx,
+        resContainer,
+        'Contract.docx',
+        smallBytes,
+        smallBytes.byteLength,
+        { conflictBehavior: 'fail', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+      );
+      expect(uploaded1.name).toBe('Contract.docx');
+
+      // Conflict 'fail' throws 'conflict'
+      await expect(
+        provider.uploadContent(
+          userCtx,
+          resContainer,
+          'Contract.docx',
+          smallBytes,
+          smallBytes.byteLength,
+          { conflictBehavior: 'fail' },
+        ),
+      ).rejects.toMatchObject({ code: 'conflict' });
+
+      // Conflict 'rename' creates 'Contract (1).docx'
+      const uploadedRenamed = await provider.uploadContent(
+        userCtx,
+        resContainer,
+        'Contract.docx',
+        smallBytes,
+        smallBytes.byteLength,
+        { conflictBehavior: 'rename' },
+      );
+      expect(uploadedRenamed.name).toBe('Contract (1).docx');
+
+      // Conflict 'replace' increments version
+      const replacedBytes = new TextEncoder().encode('Contract Draft v2 Updated');
+      const uploadedReplaced = await provider.uploadContent(
+        userCtx,
+        resContainer,
+        'Contract.docx',
+        replacedBytes,
+        replacedBytes.byteLength,
+        { conflictBehavior: 'replace' },
+      );
+      expect(uploadedReplaced.versionLabel).toBe('2.0');
+
+      // Large file upload (>= 4 MiB) uses createUploadSession + uploadChunk
+      const largeBytes = new Uint8Array(GRAPH_RESUMABLE_UPLOAD_THRESHOLD_BYTES + 1024);
+      largeBytes.fill(65);
+      const uploadedLarge = await provider.uploadContent(
+        userCtx,
+        resContainer,
+        'Bundle.pdf',
+        largeBytes,
+        largeBytes.byteLength,
+      );
+      expect(uploadedLarge.sizeBytes).toBe(largeBytes.byteLength);
+      const operationsCalled = registry
+        .getMockBackend()
+        .getCallLog()
+        .map((c) => c.operation);
+      expect(operationsCalled).toContain('createUploadSession');
+      expect(operationsCalled).toContain('uploadChunk');
+
+      // 6. downloadContent, getWebUrl, createFolder, renameItem, moveItem, listItems with paging, deleteItem
+      const downloaded = await provider.downloadContent(userCtx, {
+        storeId: 'alpha-sp-primary',
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        itemId: uploaded1.itemId,
+      });
+      const reader = downloaded.stream.getReader();
+      const { value: dlChunk } = await reader.read();
+      expect(new TextDecoder().decode(dlChunk)).toBe('Contract Draft v2 Updated');
+
+      const webUrlRes = await provider.getWebUrl(userCtx, {
+        storeId: 'alpha-sp-primary',
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        itemId: uploaded1.itemId,
+      });
+      expect(webUrlRes.openInAppUrl).toContain('ms-word:ofe|u|');
+
+      const subFolder = await provider.createFolder(
+        userCtx,
+        resContainer,
+        '01 Subfolder',
+      );
+      const renamedSub = await provider.renameItem(
+        userCtx,
+        {
+          storeId: 'alpha-sp-primary',
+          siteId: 'site-alpha-001',
+          driveId: 'drive-alpha-matters',
+          itemId: subFolder.itemId,
+        },
+        '01 Enquiries',
+      );
+      expect(renamedSub.name).toBe('01 Enquiries');
+
+      // Move 'Contract (1).docx' into '01 Enquiries'
+      const movedFile = await provider.moveItem(
+        userCtx,
+        {
+          storeId: 'alpha-sp-primary',
+          siteId: 'site-alpha-001',
+          driveId: 'drive-alpha-matters',
+          itemId: uploadedRenamed.itemId,
+        },
+        {
+          ...resContainer,
+          folderItemId: renamedSub.itemId,
+        },
+      );
+      expect(movedFile.parentItemId).toBe(renamedSub.itemId);
+
+      // Paging test on listItems
+      const page1 = await provider.listItems(resContainer !== undefined ? userCtx : userCtx, resContainer, {
+        pageSize: 2,
+      });
+      expect(page1.items).toHaveLength(2);
+      expect(page1.nextCursor).toBe('2');
+      const page2 = await provider.listItems(userCtx, resContainer, {
+        pageSize: 2,
+        cursor: page1.nextCursor!,
+      });
+      expect(page2.items.length).toBeGreaterThanOrEqual(1);
+
+      // 7. HTTP 429 throttling retry test
+      registry.getMockBackend().simulateThrottling(2, 5);
+      const itemAfterThrottle = await provider.getItem(userCtx, {
+        storeId: 'alpha-sp-primary',
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        itemId: uploaded1.itemId,
+      });
+      expect(itemAfterThrottle.itemId).toBe(uploaded1.itemId);
+
+      // Delete file
+      await provider.deleteItem(userCtx, {
+        storeId: 'alpha-sp-primary',
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        itemId: movedFile.itemId,
+      });
+    });
+
+    it('rejects reserved Phase 2 providers (azure_blob, imanage, netdocuments) with a clear "not yet supported" message', () => {
+      const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
+      const registry = new DocumentStoreProviderRegistry();
+      const baseStore = makeGenericStores('alpha')[0]!;
+
+      for (const reserved of ['azure_blob', 'imanage', 'netdocuments'] as const) {
+        expect(() =>
+          registry.createProvider(ctx, {
+            ...baseStore,
+            providerType: reserved,
+          }),
+        ).toThrow(/not yet supported/i);
+      }
+    });
+  });
+
+  // ============================================================================
+  // 3. Security Tests: Dual-Identity Separation, Store Denial Finding, Token Cache
+  // ============================================================================
+  describe('3. Security Tests: Dual-Identity Enforcement, Access Gating & Encrypted Token Cache', () => {
+    it('ensures user-facing operations NEVER use the provisioning identity and blocks users without 1Squared matter access before any Graph call', async () => {
+      const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
+      const stores = makeGenericStores('alpha');
+      const registry = new DocumentStoreProviderRegistry();
+      const provider = registry.createProvider(ctx, stores[0]!);
+      const repo = new TenantDocumentStoreRepository();
+
+      // Passing a ProvisioningAccessContext to a user-only provider method is rejected immediately
+      const provCtx: ProvisioningAccessContext = {
+        kind: 'provisioning',
+        tenantContext: ctx,
+        triggerEvent: 'illegal.attempt',
+      };
+      await expect(
+        provider.downloadContent(provCtx as unknown as UserAccessContext, {
+          storeId: 'alpha-sp-primary',
+          siteId: 'site-alpha-001',
+          driveId: 'drive-alpha-matters',
+          itemId: 'root',
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+
+      // User without 1Squared matter access is blocked BEFORE any Graph call is made
+      registry.getMockBackend().clearCallLog();
+      await expect(
+        executeUserMatterDocumentOperation(
+          {
+            ctx,
+            requiredPermission: 'document:view',
+            grantedPermissions: ['document:view'],
+            matterId: 'M-1001',
+            canAccessMatterIn1Squared: false,
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            auditAction: 'document:listed',
+            repository: repo,
+          },
+          async (userCtx) =>
+            provider.listItems(userCtx, {
+              storeId: 'alpha-sp-primary',
+              libraryId: 'lib-matters',
+              siteId: 'site-alpha-001',
+              driveId: 'drive-alpha-matters',
+              folderItemId: 'root',
+            }),
+        ),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+
+      expect(registry.getMockBackend().getCallLog()).toHaveLength(0);
+    });
+
+    it('records a reconciliation finding when 1Squared allows an action on a matter but SharePoint denies the user', async () => {
+      // User belongs to 'grp-other-team', which has no SharePoint grant on the 'TEAM-RES' matter
+      const ctx = makeTenantContext({
+        tenantId: 'firm-alpha',
+        actorId: 'user-mismatch',
+        actorGroups: ['grp-other-team'],
+        entraObjectId: 'oid-user-mismatch',
+      });
+      const stores = makeGenericStores('alpha');
+      const registry = new DocumentStoreProviderRegistry();
+      const repo = new TenantDocumentStoreRepository();
+
+      const deps = {
+        repository: repo,
+        getProvider: (storeId: string) => {
+          const st = stores.find((s) => s.storeId === storeId)!;
+          return registry.createProvider(ctx, st);
+        },
+        stores,
+        routingRules: makeGenericRoutingRules('alpha'),
+        accessConfig: makeGenericAccessConfig(),
+        templatesConfig: makeGenericTemplatesConfig(),
+        matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+        resolveUserEntraObjectId: (_c: TenantContext, uid: string) => ({
+          entraObjectId: `oid-${uid}`,
+        }),
+      };
+
+      const { location } = await provisionMatterDocumentsJob({
+        ctx,
+        deps,
+        subject: makeMatterSubject(),
+      });
+
+      const provider = deps.getProvider(location.storeId);
+
+      // 1Squared allows access (canAccessMatterIn1Squared: true), but SharePoint denies 'oid-user-mismatch'
+      await expect(
+        executeUserMatterDocumentOperation(
+          {
+            ctx,
+            requiredPermission: 'document:view',
+            grantedPermissions: ['document:view'],
+            matterId: 'M-1001',
+            canAccessMatterIn1Squared: true,
+            storeId: location.storeId,
+            libraryId: location.libraryId,
+            providerItemId: location.providerFolderItemId,
+            auditAction: 'document:listed',
+            repository: repo,
+          },
+          async (userCtx) =>
+            provider.listItems(userCtx, {
+              storeId: location.storeId,
+              libraryId: location.libraryId,
+              siteId: location.providerSiteId,
+              driveId: location.providerDriveId,
+              folderItemId: location.providerFolderItemId,
+            }),
+        ),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+
+      // Verify all user-context Graph calls used 'user' identity and OBO token
+      const userCalls = registry
+        .getMockBackend()
+        .getCallLog()
+        .filter((c) => c.operation === 'listItems');
+      expect(userCalls).toHaveLength(1);
+      expect(userCalls[0]!.identityKind).toBe('user');
+      expect(userCalls[0]!.accessTokenPrefix).toContain('obo_tok_');
+
+      // Verify a permission_mismatch_store_denied reconciliation finding was automatically created
+      const findings = repo.listReconciliationFindings(ctx);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.findingType).toBe('permission_mismatch_store_denied');
+      expect(findings[0]!.matterId).toBe('M-1001');
+    });
+
+    it('isolates encrypted OBO token cache by tenant and user and surfaces Conditional Access claims challenges', async () => {
+      const cache = new TenantScopedEncryptedTokenCache();
+      const tokenService = new DocumentStoreTokenService({ cache });
+      const ctxTenantAUser1 = makeTenantContext({
+        tenantId: 'firm-alpha',
+        actorId: 'u1',
+        entraObjectId: 'oid-u1',
+      });
+      const ctxTenantAUser2 = makeTenantContext({
+        tenantId: 'firm-alpha',
+        actorId: 'u2',
+        entraObjectId: 'oid-u2',
+      });
+      const ctxTenantBUser1 = makeTenantContext({
+        tenantId: 'firm-beta',
+        actorId: 'u1',
+        entraObjectId: 'oid-u1',
+      });
+
+      const keyA1 = cache.putUserToken({
+        ctx: ctxTenantAUser1,
+        entraObjectId: 'oid-u1',
+        storeId: 'store-1',
+        scope: 'Files.ReadWrite.All',
+        accessToken: 'secret-obo-token-alpha-u1',
+        expiresInSeconds: 3600,
+      });
+
+      // Encrypted at rest in memory/persistence (raw token never appears in ciphertextHex)
+      const rawEntry = cache.inspectEncryptedEntry(keyA1);
+      expect(rawEntry).not.toBeNull();
+      expect(rawEntry!.ciphertextHex).not.toContain('secret-obo-token');
+
+      // User 1 in Tenant A retrieves their own token
+      expect(
+        cache.getUserToken({
+          ctx: ctxTenantAUser1,
+          entraObjectId: 'oid-u1',
+          storeId: 'store-1',
+          scope: 'Files.ReadWrite.All',
+        }),
+      ).toBe('secret-obo-token-alpha-u1');
+
+      // User 2 in Tenant A gets null (isolated per user)
+      expect(
+        cache.getUserToken({
+          ctx: ctxTenantAUser2,
+          entraObjectId: 'oid-u2',
+          storeId: 'store-1',
+          scope: 'Files.ReadWrite.All',
+        }),
+      ).toBeNull();
+
+      // User 1 in Tenant B gets null (isolated per tenant)
+      expect(
+        cache.getUserToken({
+          ctx: ctxTenantBUser1,
+          entraObjectId: 'oid-u1',
+          storeId: 'store-1',
+          scope: 'Files.ReadWrite.All',
+        }),
+      ).toBeNull();
+
+      // Conditional Access MFA claims challenge returns 'reauthentication_required'
+      await expect(
+        tokenService.acquireDelegatedUserToken({
+          accessContext: {
+            kind: 'user',
+            tenantContext: ctxTenantAUser2,
+            actorUserId: 'u2',
+            entraObjectId: 'oid-u2',
+            userAssertionToken: 'jwt_with_claims_challenge_required',
+          },
+          storeId: 'store-1',
+          authConfig: makeGenericStores('alpha')[0]!.auth,
+        }),
+      ).rejects.toMatchObject({
+        code: 'reauthentication_required',
+      });
+    });
+
+    it('redacts any file names, folder names, paths, URLs, or tokens from audit events', () => {
+      const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
+      const audit = buildDocumentStoreAuditEvent({
+        context: ctx,
+        identityUsed: 'user',
+        triggerEvent: 'test.redaction',
+        action: 'document:uploaded',
+        matterId: 'M-1001',
+        storeId: 'alpha-sp-primary',
+        libraryId: 'lib-matters',
+        providerItemId: 'sp-item-123',
+        outcome: 'succeeded',
+        metadata: {
+          fileName: 'Secret Acquisition Bid.docx',
+          folderName: '01 Confidential',
+          relativePath: 'CORP/MA/Secret Acquisition Bid.docx',
+          accessToken: 'Bearer eyJ...',
+          sizeBytes: 4096,
+        },
+      });
+
+      expect(audit.metadata).toEqual({ sizeBytes: 4096 });
+      expect(JSON.stringify(audit)).not.toContain('Secret Acquisition Bid');
+      expect(JSON.stringify(audit)).not.toContain('eyJ');
+    });
+  });
+
+  // ============================================================================
+  // 4. Two-Tenant Isolation Tests (Section 8 & Section 11)
+  // ============================================================================
+  describe('4. Two-Tenant Isolation Tests', () => {
+    it('prevents Tenant A from reading, listing, uploading to, or provisioning into Tenant B store or repository, including tampered IDs and forged tenant claims', async () => {
+      // 1. Forged tenant claim on request is rejected immediately
+      expect(() =>
+        resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: 'attacker-1',
+            tenantId: 'firm-alpha',
+            name: 'Attacker',
+            email: 'attacker@firm-alpha.example',
+            roles: ['admin'],
+            mfaVerified: false,
+          },
+          hostingMode: 'multi_tenant',
+          environment: 'test',
+          correlationId: 'corr-forged',
+          untrustedRequestTenantOverride: 'firm-beta',
+        }),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+      const ctxA = makeTenantContext({
+        tenantId: 'firm-alpha',
+        actorId: 'user-a',
+        entraObjectId: 'oid-a',
+      });
+      const ctxB = makeTenantContext({
+        tenantId: 'firm-beta',
+        actorId: 'user-b',
+        entraObjectId: 'oid-b',
+      });
+
+      const sharedRepo = new TenantDocumentStoreRepository();
+      const sharedRegistry = new DocumentStoreProviderRegistry();
+      const storesA = makeGenericStores('alpha');
+      const storesB = makeGenericStores('beta');
+
+      const depsB = {
+        repository: sharedRepo,
+        getProvider: (storeId: string) => {
+          const st = storesB.find((s) => s.storeId === storeId)!;
+          return sharedRegistry.createProvider(ctxB, st);
+        },
+        stores: storesB,
+        routingRules: makeGenericRoutingRules('beta'),
+        accessConfig: makeGenericAccessConfig(),
+        templatesConfig: makeGenericTemplatesConfig(),
+        matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+        resolveUserEntraObjectId: (_c: TenantContext, uid: string) => ({
+          entraObjectId: `oid-${uid}`,
+        }),
+      };
+
+      // Provision a matter in Tenant B
+      const { location: locB } = await provisionMatterDocumentsJob({
+        ctx: ctxB,
+        deps: depsB,
+        subject: makeMatterSubject({ matterId: 'M-BETA-999' }),
+      });
+
+      // 2. Tenant A cannot read Tenant B's location record by tampered location ID or matter ID
+      expect(sharedRepo.getMatterLocationById(ctxA, locB.id)).toBeNull();
+      expect(
+        sharedRepo.listMatterLocationsByMatterId(ctxA, 'M-BETA-999'),
+      ).toHaveLength(0);
+
+      // 3. Tenant A cannot write a record claiming Tenant B's tenantId
+      expect(() =>
+        sharedRepo.putMatterLocation(ctxA, locB),
+      ).toThrow(/TENANCY_ISOLATION_ERROR/);
+
+      // 4. Tenant A provider cannot list, read, upload to, or setPermissions on Tenant B's driveId or folderItemId
+      const providerA = sharedRegistry.createProvider(ctxA, storesA[0]!);
+      const userCtxA: UserAccessContext = {
+        kind: 'user',
+        tenantContext: ctxA,
+        actorUserId: ctxA.actorId,
+        entraObjectId: 'oid-a',
+        userAssertionToken: 'token-a',
+      };
+      const provCtxA: ProvisioningAccessContext = {
+        kind: 'provisioning',
+        tenantContext: ctxA,
+        triggerEvent: 'cross-tenant-test',
+      };
+
+      await expect(
+        providerA.listItems(userCtxA, {
+          storeId: locB.storeId,
+          libraryId: locB.libraryId,
+          siteId: locB.providerSiteId,
+          driveId: locB.providerDriveId,
+          folderItemId: locB.providerFolderItemId,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+
+      await expect(
+        providerA.getItem(userCtxA, {
+          storeId: locB.storeId,
+          siteId: locB.providerSiteId,
+          driveId: locB.providerDriveId,
+          itemId: locB.providerFolderItemId,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+
+      await expect(
+        providerA.uploadContent(
+          userCtxA,
+          {
+            storeId: locB.storeId,
+            libraryId: locB.libraryId,
+            siteId: locB.providerSiteId,
+            driveId: locB.providerDriveId,
+            folderItemId: locB.providerFolderItemId,
+          },
+          'tampered.txt',
+          new Uint8Array([1, 2, 3]),
+          3,
+        ),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+
+      await expect(
+        providerA.setPermissions(
+          provCtxA,
+          {
+            storeId: locB.storeId,
+            siteId: locB.providerSiteId,
+            driveId: locB.providerDriveId,
+            itemId: locB.providerFolderItemId,
+          },
+          [],
+          { inherit: true },
+        ),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+    });
+  });
+
+  // ============================================================================
+  // 5. Lifecycle & Reconciliation Tests (Sections 6 & 7)
+  // ============================================================================
+  describe('5. Lifecycle & Reconciliation Tests', () => {
+    it('handles idempotent provisioning retry, partial failure recovery, team/restriction/department changes, closure/reopening, additive template updates, and drift reconciliation', async () => {
+      const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
+      const stores = makeGenericStores('alpha');
+      const registry = new DocumentStoreProviderRegistry();
+      const repo = new TenantDocumentStoreRepository();
+      const templatesConfig = makeGenericTemplatesConfig();
+
+      const deps = {
+        repository: repo,
+        getProvider: (storeId: string) => {
+          const st = stores.find((s) => s.storeId === storeId)!;
+          return registry.createProvider(ctx, st);
+        },
+        stores,
+        routingRules: makeGenericRoutingRules('alpha'),
+        accessConfig: makeGenericAccessConfig(),
+        templatesConfig,
+        matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+        resolveUserEntraObjectId: (_c: TenantContext, uid: string) => ({
+          entraObjectId: `oid-${uid}`,
+          upn: `${uid}@firm-alpha.example`,
+          displayName: `Person ${uid}`,
+        }),
+      };
+
+      const subject = makeMatterSubject();
+
+      // 1. Simulate failure on first provisioning attempt -> status is 'failed', matter still has pending/failed location record
+      registry
+        .getMockBackend()
+        .setSimulateMissingSiteGrant('alpha-sp-primary', true);
+      const failedAttempt = await provisionMatterDocumentsJob({
+        ctx,
+        deps,
+        subject,
+      });
+      expect(failedAttempt.job.status).toBe('failed');
+      expect(failedAttempt.location.provisioningStatus).toBe('failed');
+
+      // 2. Recover from failure and retry idempotently -> succeeds without duplicating folders
+      registry
+        .getMockBackend()
+        .setSimulateMissingSiteGrant('alpha-sp-primary', false);
+      const retryAttempt = await provisionMatterDocumentsJob({
+        ctx,
+        deps,
+        subject,
+        existingJobId: failedAttempt.job.id,
+      });
+      expect(retryAttempt.job.status).toBe('succeeded');
+      expect(retryAttempt.job.attemptCount).toBe(2);
+      expect(retryAttempt.location.provisioningStatus).toBe('provisioned');
+      expect(retryAttempt.location.hasUniquePermissions).toBe(false);
+
+      // Re-running a third time is idempotent and returns identical folderItemIds
+      const secondRun = await provisionMatterDocumentsJob({
+        ctx,
+        deps,
+        subject,
+      });
+      expect(secondRun.location.providerFolderItemId).toBe(
+        retryAttempt.location.providerFolderItemId,
+      );
+      expect(secondRun.location.folderItemMap).toEqual(
+        retryAttempt.location.folderItemMap,
+      );
+
+      // 3. Team change / restriction change: make matter restricted -> breaks inheritance & removes group grants
+      const restrictedSubject = makeMatterSubject({
+        isRestricted: true,
+        restrictedAccessUserIds: ['user-1'],
+        matterTeamMemberIds: ['user-1'],
+      });
+      const recalcRestricted = await recalculateMatterPermissionsJob({
+        ctx,
+        deps,
+        subject: restrictedSubject,
+      });
+      expect(recalcRestricted.locations[0]!.hasUniquePermissions).toBe(true);
+
+      // Lift restriction -> restores inheritance (hasUniquePermissions === false)!
+      const recalcRestored = await recalculateMatterPermissionsJob({
+        ctx,
+        deps,
+        subject,
+      });
+      expect(recalcRestored.locations[0]!.hasUniquePermissions).toBe(false);
+
+      // 4. Department/team change with 'move_folder' moves folder to new path
+      const movedSubject = makeMatterSubject({
+        teamId: 'TEAM-COMM',
+        teamCode: 'COMM',
+      });
+      const movedRes = await recalculateMatterPermissionsJob({
+        ctx,
+        deps,
+        subject: movedSubject,
+        departmentChangeStrategy: 'move_folder',
+      });
+      expect(movedRes.locations[0]!.relativePath).toContain('PROP/COMM/');
+
+      // 5. Close matter -> sets read-only; Reopen matter -> restores inheritance
+      const closedRes = await closeMatterFolderJob({
+        ctx,
+        deps: {
+          ...deps,
+          onBeforeMatterDocumentsClose: () => ({
+            retentionLabelId: 'ret-label-7yr',
+          }),
+        },
+        subject: movedSubject,
+      });
+      expect(closedRes.locations[0]!.hasUniquePermissions).toBe(true);
+      expect(closedRes.locations[0]!.retentionLabelId).toBe('ret-label-7yr');
+
+      const reopenedRes = await reopenMatterFolderJob({
+        ctx,
+        deps,
+        subject: movedSubject,
+      });
+      expect(reopenedRes.locations[0]!.hasUniquePermissions).toBe(false);
+
+      // 6. Apply template additions to open matters (adds new folder without deleting/renaming existing)
+      templatesConfig.byWorkType!['wt.residential_conveyancing'] = {
+        templateId: 'tpl-wt-conveyancing',
+        version: 3,
+        mode: 'extends',
+        operations: [
+          ...(templatesConfig.byWorkType!['wt.residential_conveyancing']!
+            .operations ?? []),
+          {
+            op: 'add',
+            parentPath: '/',
+            node: { name: '06 Post-Completion Archive' },
+          },
+        ],
+      };
+
+      const diffPreview = computeAdditiveTemplateDiff(
+        resolveMatterFolderTemplate({
+          templatesConfig,
+          departmentId: movedSubject.departmentId,
+          workTypeId: movedSubject.workTypeId,
+        }),
+        reopenedRes.locations[0]!.folderItemMap,
+      );
+      expect(diffPreview.missingRelativePaths).toEqual([
+        '06 Post-Completion Archive',
+      ]);
+
+      const additionsRes = await applyTemplateAdditionsToOpenMattersJob({
+        ctx,
+        deps,
+        openMatterSubjects: [movedSubject],
+      });
+      expect(additionsRes.addedFoldersByMatterId['M-1001']).toEqual([
+        '06 Post-Completion Archive',
+      ]);
+      expect(
+        additionsRes.updatedLocations[0]!.folderItemMap[
+          '06 Post-Completion Archive'
+        ],
+      ).toBeDefined();
+
+      // 7. Link existing folder job
+      const linkedSubject = makeMatterSubject({
+        matterId: 'M-1002',
+        matterNumber: 'MAT-2026-0002',
+      });
+      const linkedRes = await linkExistingMatterFolderJob({
+        ctx,
+        deps,
+        subject: linkedSubject,
+        storeId: 'alpha-sp-primary',
+        libraryId: 'lib-matters',
+        folderUrlOrPath:
+          'https://alpha.sharepoint.com/sites/PracticeDMS/Matter%20Repository/PROP/RES',
+      });
+      expect(linkedRes.location.linkMode).toBe('linked_existing');
+
+      // 8. Permission drift detection & remediation
+      // Inject an unexpected sharing link onto the matter folder in SharePoint
+      registry.getMockBackend().injectSharingLinkForTesting({
+        tenantId: ctx.tenantId,
+        siteId: 'site-alpha-001',
+        driveId: 'drive-alpha-matters',
+        itemId: reopenedRes.locations[0]!.providerFolderItemId,
+        link: {
+          linkId: 'lnk-rogue-1',
+          scope: 'anonymous',
+          type: 'view',
+          webUrl: 'https://alpha.sharepoint.com/:b:/g/rogue',
+        },
+      });
+
+      const reconScan = await reconcileDocumentStorePermissionsJob({
+        ctx,
+        deps: {
+          repository: repo,
+          getProvider: deps.getProvider,
+          stores,
+          autoRemediate: false,
+        },
+      });
+      const sharingFinding = reconScan.findings.find(
+        (f) => f.findingType === 'unexpected_sharing_link',
+      );
+      expect(sharingFinding).toBeDefined();
+      expect(sharingFinding!.status).toBe('open');
+
+      const remediated = await remediateReconciliationFinding({
+        ctx,
+        deps: {
+          repository: repo,
+          getProvider: deps.getProvider,
+          stores,
+        },
+        findingId: sharingFinding!.id,
+      });
+      expect(remediated.status).toBe('remediated');
+    });
+
+    it('verifies reversible migration 0002 up, rollback, and re-apply', () => {
+      const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
+      const runner = new TenantMigrationRunner();
+      runner.applyUp(ctx);
+      expect(runner.getActiveTables(ctx)).toContain(
+        'matter_document_locations',
+      );
+      expect(runner.getActiveTables(ctx)).toContain(
+        'document_reconciliation_findings',
+      );
+
+      const rolledBack = runner.rollbackVersion(ctx, '0002');
+      expect(rolledBack).toBe(true);
+      expect(runner.getActiveTables(ctx)).not.toContain(
+        'matter_document_locations',
+      );
+
+      runner.applyUp(ctx);
+      expect(runner.getActiveTables(ctx)).toContain(
+        'matter_document_locations',
+      );
+    });
+  });
+
+  // ============================================================================
+  // 6. Demo Tenant Config Validation & Static No-Client-Names-In-Core Check
+  // ============================================================================
+  describe('6. Client Configuration Validation & Architecture Boundary Check', () => {
+    it('validates the demo tenant configuration (Section 13) cleanly against the core schema and org structure', () => {
+      const baseJsonPath = path.resolve(
+        __dirname,
+        '../../client-not-a-law-firm/config/base.json',
+      );
+      const rawBase = JSON.parse(fs.readFileSync(baseJsonPath, 'utf8'));
+      const validated = loadAndValidateTenantConfig(rawBase);
+
+      expect(validated.documentStores).toHaveLength(1);
+      expect(validated.documentStores![0]!.isDefault).toBe(true);
+      expect(validated.documentRouting).toHaveLength(1);
+      expect(
+        Object.keys(validated.documentAccess?.departmentEntraGroups ?? {}),
+      ).toHaveLength(11);
+      expect(
+        Object.keys(validated.documentAccess?.teamEntraGroups ?? {}),
+      ).toHaveLength(16);
+
+      // Verify Conveyancing and Litigation templates compile cleanly via inheritance
+      const conveyancingResolved = resolveMatterFolderTemplate({
+        templatesConfig: validated.matterFolderTemplates!,
+        workTypeId: 'work_type.real_estate_and_property_residential_conveyancing',
+      });
+      expect(conveyancingResolved.flatRelativePaths).toContain(
+        '01 Client Care',
+      );
+      expect(conveyancingResolved.flatRelativePaths).toContain(
+        '03a Searches and Enquiries',
+      );
+
+      const litigationResolved = resolveMatterFolderTemplate({
+        templatesConfig: validated.matterFolderTemplates!,
+        workTypeId: 'work_type.dispute_resolution_court_pleadings',
+      });
+      expect(litigationResolved.flatRelativePaths).toContain('03a Pleadings');
+      expect(litigationResolved.flatRelativePaths).toContain(
+        '03e Settlement and ADR',
+      );
+
+      // Verify cross-reference helper against tenant catalog
+      const catalogCheck = validateDocumentConfigAgainstTenantData(validated, {
+        departmentIds: Object.keys(
+          validated.documentAccess!.departmentEntraGroups,
+        ),
+        teamIds: Object.keys(validated.documentAccess!.teamEntraGroups),
+        workTypeIds: Object.keys(
+          validated.matterFolderTemplates!.byWorkType ?? {},
+        ),
+      });
+      expect(catalogCheck.valid).toBe(true);
+    });
+
+    it('enforces Platform Architecture Standard Section 4: zero client names, client SharePoint URLs, or client library names in core/', () => {
+      const baseJsonPath = path.resolve(
+        __dirname,
+        '../../client-not-a-law-firm/config/base.json',
+      );
+      const rawClientConfig = JSON.parse(fs.readFileSync(baseJsonPath, 'utf8'));
+      const clientDisplayName: string = rawClientConfig.displayName;
+      const clientHostname: string =
+        rawClientConfig.documentStores[0].sharepoint.hostname;
+      const clientSitePath: string =
+        rawClientConfig.documentStores[0].sharepoint.siteRelativePath;
+
+      const forbiddenTerms = [
+        clientDisplayName,
+        clientHostname,
+        clientSitePath,
+      ];
+
+      function collectCoreFiles(dir: string): string[] {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        const files: string[] = [];
+        for (const entry of entries) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            files.push(...collectCoreFiles(full));
+          } else if (
+            entry.name.endsWith('.ts') ||
+            entry.name.endsWith('.json') ||
+            entry.name.endsWith('.md')
+          ) {
+            files.push(full);
+          }
+        }
+        return files;
+      }
+
+      const coreRoot = path.resolve(__dirname, '..');
+      const allCoreFiles = collectCoreFiles(coreRoot);
+      const violations: string[] = [];
+
+      for (const filePath of allCoreFiles) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        for (const term of forbiddenTerms) {
+          if (content.toLowerCase().includes(term.toLowerCase())) {
+            violations.push(
+              `${path.relative(coreRoot, filePath)} contains forbidden client-specific term "${term}"`,
+            );
+          }
+        }
+      }
+
+      expect(violations).toEqual([]);
+    });
+
+    it('enforces R2: all 8 admin document store functions reject non-admin and non-MFA callers with access_denied', async () => {
+      // P-000002 is a fee earner without admin permissions
+      expect(() =>
+        getDocumentStoresAdminDashboard('P-000002', { mfaVerified: true }),
+      ).toThrow(/PERMISSION_DENIED/);
+      await expect(
+        testAdminDocumentStoreConnection({
+          storeId: 'nalf-sharepoint-primary',
+          userId: 'P-000002',
+          mfaVerified: true,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      await expect(
+        resolveAdminSharePointLocationUrl({
+          rawUrlOrPath: 'https://contoso.sharepoint.com/sites/Test/Documents',
+          userId: 'P-000002',
+          mfaVerified: true,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      expect(() =>
+        saveAdminDocumentStoreConfiguration({
+          section: 'stores',
+          userId: 'P-000002',
+          mfaVerified: true,
+        }),
+      ).toThrow(/PERMISSION_DENIED/);
+      expect(() =>
+        previewAdminMatterFolderTemplate({
+          userId: 'P-000002',
+          mfaVerified: true,
+        }),
+      ).toThrow(/PERMISSION_DENIED/);
+      await expect(
+        applyAdminTemplateAdditionsToOpenMatters('P-000002', {
+          mfaVerified: true,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      await expect(
+        runAdminDocumentReconciliationScan({
+          userId: 'P-000002',
+          mfaVerified: true,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      await expect(
+        remediateAdminReconciliationFinding({
+          findingId: 'finding-1',
+          userId: 'P-000002',
+          mfaVerified: true,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+
+      // P-000001 (admin) with mfaVerified: false is rejected with access_denied
+      expect(() =>
+        getDocumentStoresAdminDashboard('P-000001', { mfaVerified: false }),
+      ).toThrow(/MFA_REQUIRED/);
+      await expect(
+        testAdminDocumentStoreConnection({
+          storeId: 'nalf-sharepoint-primary',
+          userId: 'P-000001',
+          mfaVerified: false,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      await expect(
+        resolveAdminSharePointLocationUrl({
+          rawUrlOrPath: 'https://contoso.sharepoint.com/sites/Test/Documents',
+          userId: 'P-000001',
+          mfaVerified: false,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      expect(() =>
+        saveAdminDocumentStoreConfiguration({
+          section: 'stores',
+          userId: 'P-000001',
+          mfaVerified: false,
+        }),
+      ).toThrow(/MFA_REQUIRED/);
+      expect(() =>
+        previewAdminMatterFolderTemplate({
+          userId: 'P-000001',
+          mfaVerified: false,
+        }),
+      ).toThrow(/MFA_REQUIRED/);
+      await expect(
+        applyAdminTemplateAdditionsToOpenMatters('P-000001', {
+          mfaVerified: false,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      await expect(
+        runAdminDocumentReconciliationScan({
+          userId: 'P-000001',
+          mfaVerified: false,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+      await expect(
+        remediateAdminReconciliationFinding({
+          findingId: 'finding-1',
+          userId: 'P-000001',
+          mfaVerified: false,
+        }),
+      ).rejects.toMatchObject({ code: 'access_denied' });
+    });
+
+    it('enforces R3, R4, R5, R8, R9, R12, R13, R14, R19, R21: cross-matter isolation, pre-provisioning RBAC, lifecycle sync on matter update, append-only audit persistence, and per-tenant hydration', async () => {
+      const store = getStore();
+      const snapshotMatters = structuredClone(store.matters);
+      const snapshotLocations = structuredClone(
+        store.matterDocumentLocations ?? [],
+      );
+      const snapshotScopes = structuredClone(
+        store.documentStoreFolderScopes ?? [],
+      );
+      const snapshotJobs = structuredClone(store.documentLifecycleJobs ?? []);
+      const snapshotFindings = structuredClone(
+        store.documentReconciliationFindings ?? [],
+      );
+      const snapshotAudits = structuredClone(
+        store.documentStoreAuditEvents ?? [],
+      );
+
+      try {
+        resetDocumentStoreSingletonsForTesting();
+
+        // R19: Unknown userId throws UNAUTHENTICATED rather than falling back to P-000001
+        expect(() =>
+          buildTenantContextForUser('P-NON-EXISTENT', store),
+        ).toThrow(/UNAUTHENTICATED/);
+
+        // R5: Employee excluded from a restricted matter calling browseMatterDocumentStoreFolder gets no locations/jobs and does not trigger provisioning
+        const restrictedMatter = store.matters.find((m) => m.id === 'M-000002')!;
+        restrictedMatter.isStaffMatter = true;
+        restrictedMatter.restrictedAccessUserIds = ['P-000001'];
+        restrictedMatter.leadFeeEarnerId = 'P-000001';
+        restrictedMatter.supervisingPartnerId = 'P-000001';
+        restrictedMatter.responsiblePartnerId = 'P-000001';
+        restrictedMatter.teamMemberIds = ['P-000001'];
+
+        // P-000007 is a fee earner in Corporate without matter:restricted:access
+        const excludedBrowse = await browseMatterDocumentStoreFolder({
+          matterId: 'M-000002',
+          userId: 'P-000007',
+        });
+        expect(excludedBrowse.errorCode).toBe('access_denied');
+        expect(excludedBrowse.locations).toEqual([]);
+        expect(excludedBrowse.activeLocation).toBeNull();
+        expect(excludedBrowse.jobs).toEqual([]);
+
+        // R3: Excluded fee earner cannot retry provisioning on restricted Matter B
+        await expect(
+          retryMatterDocumentProvisioning('M-000002', 'P-000007'),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        // Provision Matter A (M-000001, accessible to P-000002) and Matter B (M-000002, restricted to P-000001)
+        const provA = await ensureMatterDocumentStoreProvisioned(
+          'M-000001',
+          'P-000002',
+        );
+        const locA = provA.locations[0]!;
+        const provB = await ensureMatterDocumentStoreProvisioned(
+          'M-000002',
+          'P-000001',
+        );
+        const locB = provB.locations[0]!;
+
+        // R3: Fee earner on Matter A cannot link Matter A to Matter B's folder path
+        await expect(
+          linkExistingMatterDocumentFolder({
+            matterId: 'M-000001',
+            storeId: locB.storeId,
+            libraryId: locB.libraryId,
+            folderUrlOrPath: locB.webUrl,
+            userId: 'P-000002',
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        // R4: User on Matter A calling download, upload, browse, or mutate with Matter A's matterId and Matter B's locationId or itemId is rejected with access_denied
+        await expect(
+          downloadMatterStoreDocument({
+            matterId: 'M-000001',
+            locationId: locB.id,
+            itemId: locB.providerFolderItemId,
+            userId: 'P-000002',
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          downloadMatterStoreDocument({
+            matterId: 'M-000001',
+            locationId: locA.id,
+            itemId: locB.providerFolderItemId,
+            userId: 'P-000002',
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          uploadMatterStoreDocument({
+            matterId: 'M-000001',
+            locationId: locB.id,
+            folderItemId: locB.providerFolderItemId,
+            fileName: 'cross-matter.txt',
+            bytes: new Uint8Array([1, 2, 3]),
+            userId: 'P-000002',
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          uploadMatterStoreDocument({
+            matterId: 'M-000001',
+            locationId: locA.id,
+            folderItemId: locB.providerFolderItemId,
+            fileName: 'cross-matter.txt',
+            bytes: new Uint8Array([1, 2, 3]),
+            userId: 'P-000002',
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          mutateMatterStoreItem({
+            matterId: 'M-000001',
+            locationId: locA.id,
+            action: 'rename',
+            itemId: locB.providerFolderItemId,
+            name: 'Hijacked',
+            userId: 'P-000002',
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        const crossBrowse = await browseMatterDocumentStoreFolder({
+          matterId: 'M-000001',
+          locationId: locB.id,
+          userId: 'P-000002',
+        });
+        expect(crossBrowse.errorCode).toBe('access_denied');
+        expect(crossBrowse.locations).toEqual([]);
+
+        // R12: Colleague in Real Estate (or under defaultMatterVisibility: 'all_employees') can browse non-restricted Matter A
+        const colleagueBrowse = await browseMatterDocumentStoreFolder({
+          matterId: 'M-000001',
+          userId: 'P-000002',
+        });
+        expect(colleagueBrowse.errorCode).toBeUndefined();
+        expect(colleagueBrowse.activeLocation?.id).toBe(locA.id);
+        expect(colleagueBrowse.activeLocation?.hasUniquePermissions).toBe(false);
+
+        // R8: Marking provisioned Matter A as isStaffMatter: true via saveMatterRecord breaks inheritance and strips department/team group grants
+        const targetMatterA = store.matters.find((m) => m.id === 'M-000001')!;
+        saveMatterRecord(
+          {
+            ...targetMatterA,
+            isStaffMatter: true,
+            hasEthicalWall: true,
+            restrictedAccessUserIds: ['P-000002'],
+          },
+          { id: 'M-000001', byId: 'P-000001' },
+        );
+
+        const updatedLocA = (store.matterDocumentLocations ?? []).find(
+          (l) => l.id === locA.id,
+        )!;
+        expect(updatedLocA.hasUniquePermissions).toBe(true);
+        const hasDeptOrTeamGroupGrant = updatedLocA.intendedGrants.some(
+          (g) =>
+            g.principal.principalType === 'group' &&
+            (g.principal.internalId?.startsWith('DEPT-') ||
+              g.principal.internalId?.startsWith('TPG-')),
+        );
+        expect(hasDeptOrTeamGroupGrant).toBe(false);
+
+        // R9: Matter with unconfigured owningDepartmentId fails routing/provisioning with misconfigured error
+        const unmappedSubject = buildMatterRoutingSubject(
+          {
+            ...targetMatterA,
+            id: 'M-UNMAPPED',
+            owningDepartmentId: 'DEPT-NON-EXISTENT-999',
+          },
+          store,
+        );
+        expect(unmappedSubject.departmentId).toBe('');
+        expect(() =>
+          resolveMatterDocumentRoute({
+            subject: unmappedSubject,
+            stores: makeGenericStores('alpha'),
+            routingRules: makeGenericRoutingRules('alpha'),
+            matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+          }),
+        ).toThrow(/no owning department configured/i);
+
+        // R13 & R14: 600 audit events persisted without truncation, and two-tenant hydration/persistence isolation
+        resetDocumentStoreSingletonsForTesting();
+        const ctxAlpha = makeTenantContext({ tenantId: 'firm-alpha' });
+        const ctxBeta = makeTenantContext({ tenantId: 'firm-beta' });
+        const repo = ensureRepositorySyncedWithStore(ctxAlpha, store);
+        ensureRepositorySyncedWithStore(ctxBeta, store);
+
+        for (let i = 0; i < 600; i++) {
+          repo.appendAuditEvent(
+            ctxAlpha,
+            buildDocumentStoreAuditEvent({
+              context: ctxAlpha,
+              identityUsed: 'user',
+              triggerEvent: 'test.bulk',
+              action: 'document:listed',
+              matterId: 'M-BULK',
+              storeId: 'alpha-store',
+              outcome: 'succeeded',
+            }),
+          );
+        }
+        repo.appendAuditEvent(
+          ctxBeta,
+          buildDocumentStoreAuditEvent({
+            context: ctxBeta,
+            identityUsed: 'user',
+            triggerEvent: 'test.beta',
+            action: 'document:listed',
+            matterId: 'M-BETA',
+            storeId: 'beta-store',
+            outcome: 'succeeded',
+          }),
+        );
+
+        persistRepositoryToStore(ctxAlpha, repo, store, { skipDiskSave: true });
+        persistRepositoryToStore(ctxBeta, repo, store, { skipDiskSave: true });
+
+        resetDocumentStoreSingletonsForTesting();
+        const reloadedRepo = ensureRepositorySyncedWithStore(ctxAlpha, store);
+        ensureRepositorySyncedWithStore(ctxBeta, store);
+
+        expect(reloadedRepo.listAuditEvents(ctxAlpha)).toHaveLength(600);
+        expect(reloadedRepo.listAuditEvents(ctxBeta)).toHaveLength(1);
+
+        // R21: Setting SHAREPOINT_LIVE_TEST_ENABLED=1 without live credentials fails token acquisition
+        const prevLiveEnv = process.env.SHAREPOINT_LIVE_TEST_ENABLED;
+        process.env.SHAREPOINT_LIVE_TEST_ENABLED = '1';
+        try {
+          const liveTokenService = new DocumentStoreTokenService();
+          await expect(
+            liveTokenService.acquireProvisioningToken({
+              accessContext: {
+                kind: 'provisioning',
+                tenantContext: ctxAlpha,
+                triggerEvent: 'live.test',
+              },
+              storeId: 'alpha-sp-primary',
+              authConfig: makeGenericStores('alpha')[0]!.auth,
+            }),
+          ).rejects.toThrow(/LIVE_SHAREPOINT_AUTH_ERROR/);
+        } finally {
+          if (prevLiveEnv === undefined) {
+            delete process.env.SHAREPOINT_LIVE_TEST_ENABLED;
+          } else {
+            process.env.SHAREPOINT_LIVE_TEST_ENABLED = prevLiveEnv;
+          }
+        }
+      } finally {
+        store.matters = snapshotMatters;
+        store.matterDocumentLocations = snapshotLocations;
+        store.documentStoreFolderScopes = snapshotScopes;
+        store.documentLifecycleJobs = snapshotJobs;
+        store.documentReconciliationFindings = snapshotFindings;
+        store.documentStoreAuditEvents = snapshotAudits;
+        saveStore(store);
+        resetDocumentStoreSingletonsForTesting();
+      }
+    });
+
+    it('enforces R7, R10, R20, R23: static architecture & documentation permission key checks', () => {
+      // R7: __verifiedByOidcMiddleware: true in src/ appears only in src/platform/tenantRuntime.ts
+      const srcRoot = path.resolve(__dirname, '../../src');
+      function walkTsFiles(dir: string): string[] {
+        const out: string[] = [];
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            out.push(...walkTsFiles(full));
+          } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+            out.push(full);
+          }
+        }
+        return out;
+      }
+
+      const srcFiles = walkTsFiles(srcRoot);
+      const oidcBypassFiles: string[] = [];
+      const deepCoreDomainImports: string[] = [];
+      for (const file of srcFiles) {
+        const rel = path.relative(srcRoot, file).replace(/\\/g, '/');
+        const content = fs.readFileSync(file, 'utf8');
+        if (
+          content.includes('__verifiedByOidcMiddleware: true') &&
+          rel !== 'platform/tenantRuntime.ts'
+        ) {
+          oidcBypassFiles.push(rel);
+        }
+        if (content.includes('core/src/domain/')) {
+          deepCoreDomainImports.push(rel);
+        }
+      }
+      expect(oidcBypassFiles).toEqual([]);
+      expect(deepCoreDomainImports).toEqual([]);
+
+      // R9 & R20: zero hardcoded DEPT-/TPG- or 00000000-0000-0000-0000-000000000101 in src/server/documentStoreServices.ts
+      const docStoreServiceContent = fs.readFileSync(
+        path.join(srcRoot, 'server/documentStoreServices.ts'),
+        'utf8',
+      );
+      expect(docStoreServiceContent).not.toMatch(/DEPT-|TPG-/);
+      expect(docStoreServiceContent).not.toContain(
+        '00000000-0000-0000-0000-000000000101',
+      );
+      expect(docStoreServiceContent).not.toContain(
+        '00000000-0000-0000-0000-000000000104',
+      );
+
+      // R10: every permission key mentioned in src/docs/articles/*.ts exists in PERMISSION_REGISTRY
+      const articlesDir = path.join(srcRoot, 'docs/articles');
+      const unknownDocPermKeys: string[] = [];
+      for (const file of fs.readdirSync(articlesDir)) {
+        if (!file.endsWith('.ts')) continue;
+        const content = fs.readFileSync(path.join(articlesDir, file), 'utf8');
+        const matches = content.match(/`([a-z_]+:[a-z_:-]+)`/g) ?? [];
+        for (const raw of matches) {
+          const key = raw.slice(1, -1);
+          if (!(key in PERMISSION_REGISTRY)) {
+            unknownDocPermKeys.push(`${file}: ${key}`);
+          }
+        }
+      }
+      expect(unknownDocPermKeys).toEqual([]);
+    });
+  });
+});

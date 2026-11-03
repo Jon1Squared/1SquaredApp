@@ -5,6 +5,7 @@
  * - Layer 3: `client-not-a-law-firm/extensions/nalf-matter-costs-governance` (Bespoke Client Extension)
  */
 
+import path from 'node:path';
 import {
   CORE_API_VERSION,
   CORE_VERSION,
@@ -19,6 +20,26 @@ import {
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
+
+let testBaseConfigOverride: Record<string, unknown> | null = null;
+let testDevOverlayOverride: Record<string, unknown> | null | undefined = undefined;
+
+export function setActiveTenantConfigForTesting(
+  baseConfig: Record<string, unknown> | null,
+  devOverlay?: Record<string, unknown> | null,
+): void {
+  testBaseConfigOverride = baseConfig;
+  testDevOverlayOverride = devOverlay;
+}
+
+export function getActiveTenantBaseConfigPath(): string {
+  const folder = process.env.PLATFORM_TENANT_PACKAGE_DIR || 'client-not-a-law-firm';
+  return path.join(process.cwd(), folder, 'config', 'base.json');
+}
+
+export function getActiveTenantRawBaseConfig(): Record<string, unknown> {
+  return (testBaseConfigOverride ?? notALawFirmBaseConfig) as Record<string, unknown>;
+}
 
 export interface PlatformArchitectureSnapshot {
   coreVersion: string;
@@ -41,6 +62,22 @@ export interface PlatformArchitectureSnapshot {
     hooks: string[];
     uiSlots: string[];
   }[];
+}
+
+export interface VerifiedSessionActorInput {
+  id?: string;
+  sub?: string;
+  name: string;
+  email?: string;
+  upn?: string;
+  roles?: readonly string[];
+  groups?: readonly string[];
+  entraObjectId?: string;
+  entraTenantId?: string;
+  mfaVerified?: boolean;
+  tenantId?: string;
+  untrustedRequestTenantOverride?: string;
+  correlationId?: string;
 }
 
 let cachedHost: ExtensionHost | null = null;
@@ -68,43 +105,65 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
   const hostingMode =
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
+  const baseCfg = testBaseConfigOverride ?? notALawFirmBaseConfig;
+  const overlayCfg =
+    testDevOverlayOverride !== undefined
+      ? (testDevOverlayOverride ?? {})
+      : testBaseConfigOverride
+        ? {}
+        : notALawFirmDevOverlay;
   return loadAndValidateTenantConfig(
-    notALawFirmBaseConfig,
-    notALawFirmDevOverlay,
+    baseCfg,
+    overlayCfg,
     env,
     hostingMode,
   );
 }
 
-export function resolveCurrentTenantContext(actor?: {
-  id: string;
-  name: string;
-  email?: string;
-  roles?: string[];
-}): TenantContext {
-  const cfg = getActiveTenantConfiguration();
+export function resolveCurrentTenantContext(
+  actor?: VerifiedSessionActorInput | null,
+  configOverride?: Pick<
+    TenantConfiguration,
+    'tenantId' | 'hostingMode' | 'environment' | 'branding'
+  >,
+): TenantContext {
+  const actorId = (actor?.id ?? actor?.sub ?? '').trim();
+  if (!actor || !actorId) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Missing or unverified OIDC session claims. TenantContext requires an authenticated actor.',
+    );
+  }
+  const cfg = configOverride ?? getActiveTenantConfiguration();
+  const sessionTenantId = cfg.tenantId;
+  if (actor.tenantId && actor.tenantId !== sessionTenantId) {
+    throw new Error(
+      'TENANCY_FORGERY_DETECTED: Request attempted to override authenticated session tenantId.',
+    );
+  }
   return resolveTenantFromVerifiedToken({
     verifiedToken: {
       __verifiedByOidcMiddleware: true,
-      sub: actor?.id ?? 'P-000001',
-      tenantId: cfg.tenantId,
-      email: actor?.email ?? `user@${cfg.branding.primaryDomain}`,
-      name: actor?.name ?? 'Authenticated User',
-      roles: actor?.roles ?? ['fee_earner', 'admin'],
-      mfaVerified: true,
+      sub: actorId,
+      tenantId: sessionTenantId,
+      email: actor.email ?? `user@${cfg.branding.primaryDomain}`,
+      ...(actor.upn ? { upn: actor.upn } : {}),
+      name: actor.name,
+      roles: actor.roles ? [...actor.roles] : [],
+      ...(actor.groups ? { groups: [...actor.groups] } : {}),
+      ...(actor.entraObjectId ? { entraObjectId: actor.entraObjectId } : {}),
+      ...(actor.entraTenantId ? { entraTenantId: actor.entraTenantId } : {}),
+      mfaVerified: actor.mfaVerified ?? false,
     },
     hostingMode: cfg.hostingMode,
     environment: cfg.environment,
-    correlationId: `req-${Date.now()}`,
+    correlationId: actor.correlationId ?? `req-${Date.now()}`,
+    untrustedRequestTenantOverride: actor.untrustedRequestTenantOverride,
   });
 }
 
-export function getPlatformArchitectureSnapshot(actor?: {
-  id: string;
-  name: string;
-  email?: string;
-  roles?: string[];
-}): PlatformArchitectureSnapshot {
+export function getPlatformArchitectureSnapshot(
+  actor: VerifiedSessionActorInput,
+): PlatformArchitectureSnapshot {
   const tenantConfig = getActiveTenantConfiguration();
   const tenantCtx = resolveCurrentTenantContext(actor);
   const pgConfig = resolveTenantPostgresConfig(tenantCtx);

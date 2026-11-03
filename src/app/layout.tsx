@@ -2,7 +2,9 @@ import type { Metadata } from 'next';
 import { Manrope, Source_Sans_3 } from 'next/font/google';
 import './globals.css';
 import { AppShell } from '@/components/AppShell';
+import { LoginScreen } from '@/components/LoginScreen';
 import { ToastProvider } from '@/components/Toast';
+import { getEntraEnvStatus, getEntraSession } from '@/server/entraAuth';
 import { getAppSnapshot, getCurrentUserId } from '@/server/services';
 
 const manrope = Manrope({
@@ -25,6 +27,19 @@ export const metadata: Metadata = {
 export const dynamic = 'force-dynamic';
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const entraSession = await getEntraSession();
+
+  if (!entraSession) {
+    const entraEnvStatus = getEntraEnvStatus();
+    return (
+      <html lang="en-GB" className={`${manrope.variable} ${sourceSans.variable}`}>
+        <body>
+          <LoginScreen entraEnvStatus={entraEnvStatus} />
+        </body>
+      </html>
+    );
+  }
+
   const userId = await getCurrentUserId();
   const snap = getAppSnapshot(userId);
 
@@ -44,6 +59,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             attention={snap.attention}
             tasks={snap.tasks}
             notifications={snap.notifications}
+            entraSession={entraSession}
           >
             {children}
           </AppShell>

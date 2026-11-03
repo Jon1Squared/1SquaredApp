@@ -26,6 +26,9 @@ export type ListGroup =
   | 'tasks'
   | 'custom';
 
+/**
+ * @deprecated Replaced by granular permissions (`task:claim_any`, `task:reassign_any`, `enquiry:intake_view`, `admin:access`) in `PERMISSION_REGISTRY` (ADR-0016).
+ */
 export type AppRole = 'call_handler' | 'fee_earner' | 'team_lead' | 'admin';
 
 export interface ChoiceList {
@@ -239,6 +242,58 @@ export type EmployeePermission =
   | 'employee:hr_restricted'
   | 'employee:payroll'
   | 'employee:sensitive';
+
+export type DocumentPermission =
+  | 'document_template:view'
+  | 'document_template:build'
+  | 'document_template:approve'
+  | 'document_template:view_usage'
+  | 'document_template:view_usage_by_user'
+  | 'document_template:configure'
+  | 'document:generate'
+  | 'document:view'
+  | 'document:download'
+  | 'document:upload'
+  | 'document:edit'
+  | 'document:delete'
+  | 'document:provision'
+  | 'document_store:configure'
+  | 'document_access:review'
+  | 'finance:view';
+
+export type KeyDatePermissionKey =
+  | 'keydate:view'
+  | 'keydate:view_any_team'
+  | 'keydate:edit'
+  | 'keydate:verify'
+  | 'keydate:override_calculation'
+  | 'keydate:resolve'
+  | 'keydate:waive'
+  | 'keydate:configure';
+
+export type PermissionKey =
+  | EmployeePermission
+  | DocumentPermission
+  | KeyDatePermissionKey
+  | 'finance:view_matter'
+  | 'finance:credit_control'
+  | 'finance:manage_links'
+  | 'risk:view'
+  | 'matter:restricted:access'
+  | 'task:claim_any'
+  | 'task:reassign_any'
+  | 'enquiry:intake_view'
+  | 'admin:access'
+  | 'rbac:manage_config'
+  | 'rbac:manage_user_overrides';
+
+export interface PersonPermissionOverrides {
+  grant: PermissionKey[];
+  revoke: PermissionKey[];
+  reason?: string;
+  updatedAt?: string;
+  updatedByUserId?: string;
+}
 
 export interface EmploymentAssignmentHistoryEntry {
   id: string;
@@ -495,7 +550,12 @@ export interface Person extends RecordBase {
   /** Related employment record attached to the person (never a separate duplicate person). */
   employment?: EmploymentRecord | null;
   /** Explicit employee data permissions for this user (overrides role defaults when present). */
+  permissionOverrides?: PersonPermissionOverrides | null;
+  /** Immutable Microsoft Entra ID Object GUID (`oid` claim) for federated OIDC identity matching. */
+  entraObjectId?: string | null;
   employeePermissions?: EmployeePermission[];
+  /** Explicit document generation permissions for this user (overrides role defaults when present). */
+  documentPermissions?: DocumentPermission[];
   /** Explicit app permission role for Enquiries & Tasks (falls back to employeeRole + team lead status). */
   appRole?: AppRole | null;
   /** Role keys for Role-based Home pages (first role is the user's Home role). */
@@ -860,8 +920,14 @@ export interface Matter extends RecordBase {
   conflictCheckRecord?: ConflictCheckRecord | null;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
-  /** User IDs permitted to view/access this matter when isStaffMatter is true. */
+  /** True when an ethical wall / information barrier applies to this matter. */
+  hasEthicalWall?: boolean;
+  /** User IDs permitted to view/access this matter when isStaffMatter or hasEthicalWall is true. */
   restrictedAccessUserIds?: string[];
+  /** Optional explicit owning OrgDepartment ID (e.g. 'DEPT-RE') for document routing & security. */
+  owningDepartmentId?: string | null;
+  /** Optional explicit owning OrgTeamOrPracticeGroup ID (e.g. 'TPG-RE-RES') for document routing & security. */
+  owningTeamId?: string | null;
 }
 
 // ------------------------------------------------------------------ Teams
@@ -920,6 +986,8 @@ export interface Task {
   completedAt: string | null;
   comments: TaskComment[];
   autoTrigger?: AutoTaskTrigger | null;
+  linkedKeyDateId?: string | null;
+  idempotencyKey?: string | null;
 }
 
 // ------------------------------------------------------------------ Enquiries
@@ -1273,7 +1341,22 @@ export type AuditAction =
   | 'view-payroll'
   | 'view-sensitive'
   | 'update-payroll'
-  | 'update-sensitive';
+  | 'update-sensitive'
+  | 'keydate-create'
+  | 'keydate-update'
+  | 'keydate-propose'
+  | 'keydate-verify'
+  | 'keydate-reject'
+  | 'keydate-override-calculation'
+  | 'keydate-supersede'
+  | 'keydate-resolve'
+  | 'keydate-waive'
+  | 'keydate-reassign-team'
+  | 'keydate-not-applicable'
+  | 'keydate-reminder-acknowledge'
+  | 'keydate-reminder-escalate'
+  | 'keydate-config-change'
+  | 'keydate-export';
 
 export interface AuditEntry {
   id: string;
@@ -1288,7 +1371,8 @@ export interface AuditEntry {
     | 'customField'
     | 'system'
     | 'employee_payroll'
-    | 'employee_sensitive';
+    | 'employee_sensitive'
+    | 'key_date';
   recordId: string;
   action: AuditAction;
   field: string | null;
@@ -1296,6 +1380,7 @@ export interface AuditEntry {
   newValue: string | null;
   byId: string;
   at: string;
+  reason?: string | null;
   snapshot?: unknown;
 }
 
@@ -1339,6 +1424,8 @@ export interface PmsLink {
 // ------------------------------------------------------------------ Role-based Home Pages
 export type BuiltInHomeRoleKey =
   | 'fee_earner'
+  | 'supervisor'
+  | 'intake'
   | 'partner'
   | 'legal_secretary'
   | 'enquiries_coordinator'
@@ -1406,6 +1493,8 @@ export type PanelCategory =
   | 'Firm-wide executive';
 
 export interface RoleHomeConfig {
+  /** Linked ChoiceValue ID from `employee_role` in the People taxonomy (`employee_role.<slug>`). */
+  employeeRoleId?: string;
   key: HomeRoleKey;
   label: string;
   shortLabel: string;

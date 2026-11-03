@@ -48,12 +48,6 @@ import {
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
 } from '@/domain/matterOpeningRecord';
-import {
-  assembleClientCareLetter,
-  downloadClientCareDocx,
-  downloadClientCarePdf,
-  type SavedAssembledDocument,
-} from '@/domain/documentAssembly';
 import { hrefForId, personDisplayName } from '@/domain/names';
 import type {
   AppRole,
@@ -70,11 +64,21 @@ import type {
   Team,
 } from '@/domain/types';
 import type { MatterPmsViewBundle } from '@/server/services';
-import { DocumentAssemblyModal } from './DocumentAssemblyModal';
+import { DocumentGenerationModal } from './DocumentGenerationModal';
+import { DocumentListSection } from './DocumentListSection';
+import { KeyDatesPanel } from './KeyDatesPanel';
+import { MatterDocumentStoreSection } from './MatterDocumentStoreSection';
 import { MatterFinanceTab } from './MatterFinanceTab';
 import { RecordTasksSection } from './RecordTasksSection';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import type {
+  KeyDate,
+  KeyDateCalendarSync,
+  KeyDateNotApplicable,
+  KeyDateReminderState,
+  KeyDatesConfig,
+} from '@/domain/keyDates.types';
 
 interface MatterProfileClientProps {
   matter: Matter;
@@ -88,6 +92,13 @@ interface MatterProfileClientProps {
   quotes?: Quote[];
   currentUserId?: string;
   currentUserRole?: AppRole;
+  currentUser?: Person;
+  employees?: Person[];
+  keyDatesConfig?: KeyDatesConfig;
+  keyDates?: KeyDate[];
+  keyDateNotApplicable?: KeyDateNotApplicable[];
+  keyDateReminderStates?: KeyDateReminderState[];
+  keyDateCalendarSyncs?: KeyDateCalendarSync[];
   canViewFinance?: boolean;
   pmsView?: MatterPmsViewBundle;
   notes: Note[];
@@ -174,6 +185,13 @@ export function MatterProfileClient({
   quotes = [],
   currentUserId = 'P-0001',
   currentUserRole = 'admin',
+  currentUser,
+  employees,
+  keyDatesConfig,
+  keyDates = [],
+  keyDateNotApplicable = [],
+  keyDateReminderStates = [],
+  keyDateCalendarSyncs = [],
   canViewFinance = true,
   pmsView,
   notes,
@@ -210,34 +228,6 @@ export function MatterProfileClient({
     ConflictCheckRecord['runs']
   >([]);
   const [docAssemblyOpen, setDocAssemblyOpen] = useState(false);
-  const [editingSavedDoc, setEditingSavedDoc] = useState<SavedAssembledDocument | null>(null);
-  const [localSavedDocs, setLocalSavedDocs] = useState<SavedAssembledDocument[]>(
-    () =>
-      ((matter.fieldValues?.['assembledDocuments'] as
-        | SavedAssembledDocument[]
-        | undefined) ?? []),
-  );
-
-  async function handleSaveAssembledDocument(savedDoc: SavedAssembledDocument) {
-    const nextList = [
-      savedDoc,
-      ...localSavedDocs.filter((d) => d.id !== savedDoc.id),
-    ];
-    setLocalSavedDocs(nextList);
-    await saveMatterAction({
-      ...matter,
-      engagementLetterStatus:
-        matter.engagementLetterStatus === 'Signed'
-          ? 'Signed'
-          : 'Drafted',
-      fieldValues: {
-        ...(matter.fieldValues ?? {}),
-        assembledDocuments: nextList,
-      },
-    });
-    showToast(`Saved ${savedDoc.fileName} to Matter documents`);
-    router.refresh();
-  }
 
   const nameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -1037,7 +1027,6 @@ export function MatterProfileClient({
             type="button"
             className="btn btn--secondary"
             onClick={() => {
-              setEditingSavedDoc(null);
               setDocAssemblyOpen(true);
             }}
           >
@@ -2071,103 +2060,35 @@ export function MatterProfileClient({
 
       {/* ===================== TAB: DOCUMENTS ===================== */}
       {tab === 'documents' ? (
-        <section className="home-panel">
-          <div className="panel-header">
-            <div className="panel-title-group">
-              <h2 className="panel-title">Matter documents</h2>
+        <div className="home-col">
+          <MatterDocumentStoreSection
+            matterId={matter.id}
+            matterNumber={matter.matterNumber}
+          />
+          <DocumentListSection
+            entityType="matter"
+            entityId={matter.id}
+            matter={matter}
+            people={people}
+            organisations={organisations}
+            values={values}
+            currentUserId={currentUserId}
+          />
+          <section className="home-panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2 className="panel-title">Archived &amp; DMS Matter Records</h2>
+              </div>
+              <div className="panel-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <StatusPill
+                  label={isSeededDemoMatter ? 'SharePoint / DMS linked' : 'Matter opening record archived'}
+                  tone="neutral"
+                />
+              </div>
             </div>
-            <div className="panel-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <StatusPill
-                label={isSeededDemoMatter ? 'SharePoint / DMS linked' : 'Matter opening record archived'}
-                tone="neutral"
-              />
-              <button
-                type="button"
-                className="btn btn--primary btn--sm"
-                onClick={() => {
-                  setEditingSavedDoc(null);
-                  setDocAssemblyOpen(true);
-                }}
-              >
-                <FileText size={14} />
-                <span>+ Assemble Client Care Letter</span>
-              </button>
-            </div>
-          </div>
-          <div className="panel-body">
-            <ul className="worklist">
-              {localSavedDocs.map((docItem) => {
-                const assembledDoc = assembleClientCareLetter(docItem.answers);
-                return (
-                  <li key={docItem.id} className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <FileText
-                          size={14}
-                          style={{
-                            display: 'inline',
-                            verticalAlign: 'text-bottom',
-                            marginRight: 6,
-                            color: 'var(--color-primary)',
-                          }}
-                        />
-                        <strong>{docItem.fileName}</strong>
-                      </div>
-                      <div className="worklist-meta">
-                        {docItem.templateName} (v{docItem.version}) · Assembled{' '}
-                        {formatDateTime(docItem.createdAt)} by {docItem.createdByName} ·{' '}
-                        {docItem.answers.feeBasisMode === 'fixed'
-                          ? `Fixed fee (£${docItem.answers.fixedFeeAmount})`
-                          : `Hourly rates (Est. £${docItem.answers.estimateAmount})`}
-                      </div>
-                    </div>
-                    <div
-                      className="worklist-right"
-                      style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                    >
-                      <StatusPill label={`Assembled v${docItem.version}`} tone="positive" />
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        style={{ borderRadius: 999 }}
-                        onClick={() => {
-                          setEditingSavedDoc(docItem);
-                          setDocAssemblyOpen(true);
-                        }}
-                      >
-                        <Edit3 size={13} />
-                        <span>Edit answers</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        style={{ borderRadius: 999 }}
-                        onClick={() => {
-                          downloadClientCareDocx(assembledDoc, docItem.fileName);
-                          showToast(`Downloaded Word document: ${docItem.fileName}`);
-                        }}
-                      >
-                        <Download size={13} />
-                        <span>.docx</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        style={{ borderRadius: 999 }}
-                        onClick={() => {
-                          const pdfName = docItem.fileName.replace(/\.docx$/i, '.pdf');
-                          downloadClientCarePdf(assembledDoc, pdfName);
-                          showToast(`Downloaded PDF: ${pdfName}`);
-                        }}
-                      >
-                        <Download size={13} />
-                        <span>.pdf</span>
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-              <li className="worklist-row">
+            <div className="panel-body">
+              <ul className="worklist">
+                <li className="worklist-row">
                 <div className="worklist-main">
                   <div className="worklist-title">
                     <FileText
@@ -2252,12 +2173,27 @@ export function MatterProfileClient({
               ) : null}
             </ul>
           </div>
-        </section>
+          </section>
+        </div>
       ) : null}
 
       {/* ===================== TAB: TASKS & DATES ===================== */}
       {tab === 'tasks' ? (
         <div className="home-col">
+          {keyDatesConfig && currentUser ? (
+            <KeyDatesPanel
+              matter={matter}
+              config={keyDatesConfig}
+              keyDates={keyDates}
+              notApplicableRecords={keyDateNotApplicable}
+              reminderStates={keyDateReminderStates}
+              calendarSyncs={keyDateCalendarSyncs}
+              currentUser={currentUser}
+              teams={teams}
+              employees={employees ?? people.filter((p) => p.isEmployee)}
+            />
+          ) : null}
+
           <section className="home-panel">
             <div className="panel-header">
               <div className="panel-title-group">
@@ -4053,21 +3989,30 @@ export function MatterProfileClient({
         </div>
       ) : null}
 
-      <DocumentAssemblyModal
+      <DocumentGenerationModal
         open={docAssemblyOpen}
         onClose={() => {
           setDocAssemblyOpen(false);
-          setEditingSavedDoc(null);
         }}
+        sourceEntityType="matter"
         matter={matter}
         people={people}
         organisations={organisations}
         values={values}
-        quotes={quotes}
-        enquiries={enquiries}
         currentUserId={currentUserId}
-        initialSavedDoc={editingSavedDoc}
-        onSaveAssembledDocument={handleSaveAssembledDocument}
+        onDocumentGenerated={(doc) => {
+          if (
+            doc.documentType === 'Client Care Letter' &&
+            matter.engagementLetterStatus !== 'Signed'
+          ) {
+            void saveMatterAction({
+              ...matter,
+              engagementLetterStatus: 'Drafted',
+            });
+          }
+          showToast(`Generated ${doc.fileName}`);
+          router.refresh();
+        }}
       />
     </div>
   );

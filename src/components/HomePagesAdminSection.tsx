@@ -1,33 +1,28 @@
 'use client';
 
-import React, { useMemo, useState, useTransition } from 'react';
+import React, { useEffect, useMemo, useState, useTransition } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  addHomeRoleAction,
   resetHomePagesConfigAction,
   saveHomePagesConfigAction,
-  switchUserAction,
-  switchViewingRoleAction,
 } from '@/app/actions';
 import {
-  cyclePanelPlacement,
-  getPanelPlacement,
   HEADLINE_CARD_DEFINITIONS,
   PANEL_DEFINITIONS,
   resolveEmployeeRoles,
   setRolePanelPlacement,
+  syncHomeRolesWithEmployeeRoles,
 } from '@/domain/homeConfig';
-import { personDisplayName, primaryEmail } from '@/domain/names';
 import type {
+  ChoiceValue,
   HomePagesConfig,
   PanelCategory,
   PanelId,
-  PanelPlacement,
   Person,
   RoleHomeConfig,
   Team,
 } from '@/domain/types';
-import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
 const PANEL_CATEGORIES: PanelCategory[] = [
@@ -45,6 +40,8 @@ interface Props {
   activeViewingRole?: string;
   people: Person[];
   teams: Team[];
+  values?: ChoiceValue[];
+  onNavigateToEmployeeRoles?: () => void;
 }
 
 export function HomePagesAdminSection({
@@ -52,29 +49,38 @@ export function HomePagesAdminSection({
   activeViewingRole,
   people,
   teams,
+  values = [],
+  onNavigateToEmployeeRoles,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
 
-  const [roles, setRoles] = useState<RoleHomeConfig[]>(initialConfig.roles);
-  const [firmSettings, setFirmSettings] = useState(initialConfig.firmSettings);
+  const syncedInitialRoles = useMemo(
+    () => syncHomeRolesWithEmployeeRoles(initialConfig.roles, values),
+    [initialConfig.roles, values],
+  );
+
+  const [roles, setRoles] = useState<RoleHomeConfig[]>(syncedInitialRoles);
+  const [firmSettings, setFirmSettings] = useState(() => ({
+    ...initialConfig.firmSettings,
+    demoMode: false,
+  }));
+
+  // Keep roles in sync when taxonomy `employee_role` values change
+  useEffect(() => {
+    setRoles((prev) => syncHomeRolesWithEmployeeRoles(prev, values));
+  }, [values]);
+
   const [selectedRoleKey, setSelectedRoleKey] = useState<string>(() => {
     if (
       activeViewingRole &&
-      initialConfig.roles.some((r) => r.key === activeViewingRole)
+      syncedInitialRoles.some((r) => r.key === activeViewingRole)
     ) {
       return activeViewingRole;
     }
-    return initialConfig.roles[0]?.key ?? 'fee_earner';
+    return syncedInitialRoles[0]?.key ?? 'fee_earner';
   });
-
-  // Add role modal state
-  const [addRoleOpen, setAddRoleOpen] = useState(false);
-  const [newRoleLabel, setNewRoleLabel] = useState('');
-  const [newRoleShortLabel, setNewRoleShortLabel] = useState('');
-  const [newRolePurpose, setNewRolePurpose] = useState('');
-  const [copyFromRoleKey, setCopyFromRoleKey] = useState('fee_earner');
 
   const persistConfig = (
     nextRoles: RoleHomeConfig[],
@@ -84,7 +90,7 @@ export function HomePagesAdminSection({
     startTransition(async () => {
       await saveHomePagesConfigAction({
         roles: nextRoles,
-        firmSettings: nextSettings,
+        firmSettings: { ...nextSettings, demoMode: false },
       });
       if (toastMessage) {
         showToast(toastMessage);
@@ -94,11 +100,6 @@ export function HomePagesAdminSection({
 
   const realEmployees = useMemo(
     () => people.filter((p) => p.isEmployee && !p.demo && !p.mergedIntoId),
-    [people],
-  );
-
-  const demoEmployees = useMemo(
-    () => people.filter((p) => p.isEmployee && p.demo && !p.mergedIntoId),
     [people],
   );
 
@@ -119,19 +120,68 @@ export function HomePagesAdminSection({
     [roles, selectedRoleKey],
   );
 
-  const handleCycleCell = (roleKey: string, panelId: PanelId) => {
-    const nextRoles = roles.map((r) => {
-      if (r.key !== roleKey) return r;
-      const current = getPanelPlacement(r, panelId);
-      const next = cyclePanelPlacement(current);
-      return setRolePanelPlacement(r, panelId, next);
-    });
+  const handlePurposeChange = (roleKey: string, purpose: string) => {
+    setRoles((prev) => prev.map((r) => (r.key === roleKey ? { ...r, purpose } : r)));
+  };
+
+  // ---------------- Headline KPI strip actions (left-to-right dual list) ----------------
+  const handleAddHeadlineCard = (roleKey: string, cardId: string) => {
+    const currentRole = roles.find((r) => r.key === roleKey);
+    if (!currentRole) return;
+    if (currentRole.headlineCardIds.includes(cardId)) return;
+    if (currentRole.headlineCardIds.length >= 5) {
+      showToast('Up to 5 headline KPI cards can be chosen per role');
+      return;
+    }
+    const nextRoles = roles.map((r) =>
+      r.key === roleKey
+        ? { ...r, headlineCardIds: [...r.headlineCardIds, cardId] }
+        : r,
+    );
     setRoles(nextRoles);
     persistConfig(nextRoles, firmSettings);
   };
 
-  const handlePurposeChange = (roleKey: string, purpose: string) => {
-    setRoles((prev) => prev.map((r) => (r.key === roleKey ? { ...r, purpose } : r)));
+  const handleRemoveHeadlineCard = (roleKey: string, cardId: string) => {
+    const nextRoles = roles.map((r) =>
+      r.key === roleKey
+        ? { ...r, headlineCardIds: r.headlineCardIds.filter((id) => id !== cardId) }
+        : r,
+    );
+    setRoles(nextRoles);
+    persistConfig(nextRoles, firmSettings);
+  };
+
+  const handleMoveHeadlineCard = (
+    roleKey: string,
+    index: number,
+    delta: -1 | 1,
+  ) => {
+    const currentRole = roles.find((r) => r.key === roleKey);
+    if (!currentRole) return;
+    const list = [...currentRole.headlineCardIds];
+    const target = index + delta;
+    if (target < 0 || target >= list.length) return;
+    const [item] = list.splice(index, 1);
+    list.splice(target, 0, item);
+    const nextRoles = roles.map((r) =>
+      r.key === roleKey ? { ...r, headlineCardIds: list } : r,
+    );
+    setRoles(nextRoles);
+    persistConfig(nextRoles, firmSettings);
+  };
+
+  // ---------------- Panel placement & column ordering actions ----------------
+  const handleSetPanelPlacement = (
+    roleKey: string,
+    panelId: PanelId,
+    placement: 'primary' | 'summary' | 'off',
+  ) => {
+    const nextRoles = roles.map((r) =>
+      r.key === roleKey ? setRolePanelPlacement(r, panelId, placement) : r,
+    );
+    setRoles(nextRoles);
+    persistConfig(nextRoles, firmSettings);
   };
 
   const handleMovePanelInRole = (
@@ -158,46 +208,13 @@ export function HomePagesAdminSection({
     persistConfig(nextRoles, firmSettings);
   };
 
-  const handleToggleHeadlineCard = (roleKey: string, cardId: string) => {
-    const currentRole = roles.find((r) => r.key === roleKey);
-    if (!currentRole) return;
-    const exists = currentRole.headlineCardIds.includes(cardId);
-    if (!exists && currentRole.headlineCardIds.length >= 5) {
-      showToast('Up to 5 headline figure cards can be selected per role');
-      return;
-    }
-    const nextRoles = roles.map((r) => {
-      if (r.key !== roleKey) return r;
-      return {
-        ...r,
-        headlineCardIds: exists
-          ? r.headlineCardIds.filter((id) => id !== cardId)
-          : [...r.headlineCardIds, cardId],
-      };
-    });
-    setRoles(nextRoles);
-    persistConfig(nextRoles, firmSettings);
-  };
-
   const handlePreviewRole = (role: RoleHomeConfig) => {
     startTransition(async () => {
       await saveHomePagesConfigAction({
         roles,
-        firmSettings,
+        firmSettings: { ...firmSettings, demoMode: false },
       });
-      // Find matching demo user if available
-      const demoUser = demoEmployees.find(
-        (d) =>
-          (role.demoUserEmail && primaryEmail(d)?.toLowerCase() === role.demoUserEmail.toLowerCase()) ||
-          (d.roles && d.roles[0] === role.key),
-      );
-      if (demoUser && firmSettings.demoMode) {
-        await switchUserAction(demoUser.id);
-        await switchViewingRoleAction(role.key);
-        router.push('/');
-      } else {
-        router.push(`/?previewRole=${encodeURIComponent(role.key)}`);
-      }
+      router.push(`/?previewRole=${encodeURIComponent(role.key)}`);
     });
   };
 
@@ -205,11 +222,11 @@ export function HomePagesAdminSection({
     startTransition(async () => {
       const res = await saveHomePagesConfigAction({
         roles,
-        firmSettings,
+        firmSettings: { ...firmSettings, demoMode: false },
       });
       if (res.config) {
-        setRoles(res.config.roles);
-        setFirmSettings(res.config.firmSettings);
+        setRoles(syncHomeRolesWithEmployeeRoles(res.config.roles, values));
+        setFirmSettings({ ...res.config.firmSettings, demoMode: false });
       }
       showToast('Home pages configuration saved');
     });
@@ -219,545 +236,665 @@ export function HomePagesAdminSection({
     startTransition(async () => {
       const res = await resetHomePagesConfigAction();
       if (res.config) {
-        setRoles(res.config.roles);
-        setFirmSettings(res.config.firmSettings);
+        setRoles(syncHomeRolesWithEmployeeRoles(res.config.roles, values));
+        setFirmSettings({ ...res.config.firmSettings, demoMode: false });
       }
       showToast('Home pages reset to firm defaults');
     });
   };
 
-  const handleAddRoleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newRoleLabel.trim()) return;
-    startTransition(async () => {
-      const res = await addHomeRoleAction({
-        label: newRoleLabel.trim(),
-        shortLabel: newRoleShortLabel.trim() || newRoleLabel.trim(),
-        purpose:
-          newRolePurpose.trim() ||
-          `Tailored Home page for ${newRoleLabel.trim()}.`,
-        copyFromRoleKey,
-      });
-      if (!res.ok || !res.role) {
-        showToast(res.error ?? 'Could not create role');
-        return;
-      }
-      const createdRole = res.role;
-      setRoles((prev) => [...prev, createdRole]);
-      setSelectedRoleKey(createdRole.key);
-      setAddRoleOpen(false);
-      setNewRoleLabel('');
-      setNewRoleShortLabel('');
-      setNewRolePurpose('');
-      showToast(`Role "${createdRole.label}" created`);
-    });
-  };
-
-  const renderPlacementDot = (placement: PanelPlacement) => {
-    if (placement === 'primary') {
-      return (
-        <span
-          className="matrix-dot matrix-dot--primary"
-          aria-hidden="true"
-          title="Primary (main column)"
-        >
-          ●
-        </span>
-      );
-    }
-    if (placement === 'summary') {
-      return (
-        <span
-          className="matrix-dot matrix-dot--summary"
-          aria-hidden="true"
-          title="Summary (right column)"
-        >
-          ○
-        </span>
-      );
-    }
-    return (
-      <span className="matrix-dot matrix-dot--off" aria-hidden="true" title="Off">
-        —
-      </span>
+  const availableHeadlineCards = useMemo(() => {
+    if (!selectedRole) return HEADLINE_CARD_DEFINITIONS;
+    return HEADLINE_CARD_DEFINITIONS.filter(
+      (c) => !selectedRole.headlineCardIds.includes(c.id),
     );
-  };
+  }, [selectedRole]);
+
+  const chosenHeadlineCards = useMemo(() => {
+    if (!selectedRole) return [];
+    return selectedRole.headlineCardIds
+      .map((id) => HEADLINE_CARD_DEFINITIONS.find((c) => c.id === id))
+      .filter((c): c is NonNullable<typeof c> => Boolean(c));
+  }, [selectedRole]);
+
+  const availablePanelsByCategory = useMemo(() => {
+    if (!selectedRole) return [];
+    const chosenSet = new Set<PanelId>([
+      ...selectedRole.primaryPanels,
+      ...selectedRole.summaryPanels,
+    ]);
+    return PANEL_CATEGORIES.map((category) => ({
+      category,
+      panels: PANEL_DEFINITIONS.filter(
+        (p) => p.category === category && !chosenSet.has(p.id),
+      ),
+    })).filter((group) => group.panels.length > 0);
+  }, [selectedRole]);
+
+  const totalAvailablePanelsCount = useMemo(
+    () => availablePanelsByCategory.reduce((acc, g) => acc + g.panels.length, 0),
+    [availablePanelsByCategory],
+  );
+
+  if (!selectedRole) return null;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-      {/* Top Intro & Action Bar */}
-      <div
-        className="subcard"
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          justifyContent: 'space-between',
-          alignItems: 'flex-start',
-          gap: 16,
-        }}
-      >
-        <div style={{ maxWidth: 760 }}>
-          <div className="section-label" style={{ marginBottom: 4 }}>
-            ADMINISTRATION · HOME PAGES &amp; ROLE CONFIGURATION
-          </div>
-          <h2 style={{ fontSize: 24, fontWeight: 800, margin: '0 0 6px' }}>
-            One home page, shaped by role
-          </h2>
-          <p className="muted" style={{ margin: 0, fontSize: 14 }}>
-            Everyone lands on Home. What it leads with depends on the job: a fee earner sees
-            today’s work and their own numbers; a partner sees the team and sign-offs; finance,
-            risk and intake see their queues. People with more than one role switch with{' '}
-            <strong>Viewing as</strong> in the header.
-          </p>
-        </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <button
-            type="button"
-            className="btn btn--secondary btn--sm"
-            disabled={pending}
-            onClick={() => setAddRoleOpen(true)}
-          >
-            + Add role
-          </button>
-          <button
-            type="button"
-            className="btn btn--secondary btn--sm"
-            disabled={pending}
-            onClick={handleResetDefaults}
-          >
-            Reset to defaults
-          </button>
-          <button
-            type="button"
-            className="btn btn--primary btn--sm"
-            disabled={pending}
-            onClick={handleSaveChanges}
-          >
-            Save changes
-          </button>
-        </div>
-      </div>
-
-      {/* Role Cards Grid (matching 00-overview-admin.html) */}
-      <div>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 10,
-          }}
-        >
-          <h3 className="section-label" style={{ margin: 0 }}>
-            FIRM ROLES ({roles.length}) — CLICK A ROLE TO REORDER PANELS OR PICK HEADLINE FIGURES
-          </h3>
-        </div>
-        <div className="role-cards-grid">
-          {roles.map((role, idx) => {
-            const count = userCountByRole[role.key] ?? 0;
-            const isSelected = role.key === selectedRole?.key;
-            const demoPerson = demoEmployees.find(
-              (d) =>
-                (role.demoUserEmail &&
-                  primaryEmail(d)?.toLowerCase() === role.demoUserEmail.toLowerCase()) ||
-                (d.roles && d.roles[0] === role.key),
-            );
-            const showsWorkPerson = demoPerson?.showsWorkOfId
-              ? people.find((p) => p.id === demoPerson.showsWorkOfId)
-              : null;
-
-            return (
-              <div
-                key={role.key}
-                className={`role-card ${isSelected ? 'role-card--active' : ''}`}
-                onClick={() => setSelectedRoleKey(role.key)}
-                style={{ cursor: 'pointer' }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 8,
-                  }}
-                >
-                  <StatusPill
-                    label={role.designNumber || String(idx + 1).padStart(2, '0')}
-                    tone="positive"
-                  />
-                  <span className="pill pill--neutral" style={{ fontSize: 12 }}>
-                    {count} {count === 1 ? 'user' : 'users'}
-                  </span>
-                </div>
-                <div style={{ fontWeight: 800, fontSize: 17, marginTop: 4 }}>{role.label}</div>
-                {showsWorkPerson ? (
-                  <div className="muted" style={{ fontSize: 12.5 }}>
-                    {personDisplayName(showsWorkPerson)} · {showsWorkPerson.jobTitle}
-                  </div>
-                ) : demoPerson ? (
-                  <div className="muted" style={{ fontSize: 12.5 }}>
-                    Demo: {personDisplayName(demoPerson)}
-                  </div>
-                ) : null}
-                <input
-                  type="text"
-                  aria-label={`Purpose for ${role.label}`}
-                  className="field-input"
-                  style={{ fontSize: 12.5, padding: '6px 8px', marginTop: 4 }}
-                  value={role.purpose}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => handlePurposeChange(role.key, e.target.value)}
-                  onBlur={() => persistConfig(roles, firmSettings)}
-                />
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginTop: 'auto',
-                    paddingTop: 8,
-                    fontSize: 12,
-                  }}
-                >
-                  <span className="muted">
-                    {role.primaryPanels.length} primary · {role.summaryPanels.length} summary
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn--secondary btn--sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handlePreviewRole(role);
-                    }}
-                  >
-                    Preview →
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Selected Role Panel Ordering & Headline Figures */}
-      {selectedRole ? (
-        <div className="subcard">
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: 12,
-              marginBottom: 14,
-            }}
-          >
-            <div>
-              <div className="section-label">ROLE LAYOUT &amp; HEADLINE FIGURES</div>
-              <h3 style={{ fontSize: 18, fontWeight: 800, margin: '2px 0 0' }}>
-                Customising: {selectedRole.label}
-              </h3>
-            </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <label className="field-label" style={{ margin: 0 }} htmlFor="select-role-config">
-                Switch role:
-              </label>
-              <select
-                id="select-role-config"
-                className="field-select"
-                style={{ width: 240 }}
-                value={selectedRole.key}
-                onChange={(e) => setSelectedRoleKey(e.target.value)}
-              >
-                {roles.map((r) => (
-                  <option key={r.key} value={r.key}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className="btn btn--primary btn--sm"
-                disabled={pending}
-                onClick={handleSaveChanges}
-              >
-                Save changes
-              </button>
-            </div>
-          </div>
-
-          {/* Headline figure picker (up to 5) */}
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 6 }}>
-              Headline KPI strip cards ({selectedRole.headlineCardIds.length} of 5 selected)
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {HEADLINE_CARD_DEFINITIONS.map((card) => {
-                const active = selectedRole.headlineCardIds.includes(card.id);
-                return (
-                  <button
-                    key={card.id}
-                    type="button"
-                    className={`btn btn--sm ${active ? 'btn--primary' : 'btn--secondary'}`}
-                    onClick={() => handleToggleHeadlineCard(selectedRole.key, card.id)}
-                  >
-                    {active ? '✓ ' : ''}
-                    {card.label}{' '}
-                    <span style={{ opacity: 0.75, fontSize: 11 }}>({card.source})</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Two-column ordering for Primary vs Summary panels */}
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-              gap: 16,
-            }}
-          >
-            <div>
-              <div className="section-label" style={{ marginBottom: 8 }}>
-                ● PRIMARY COLUMN ORDER ({selectedRole.primaryPanels.length})
-              </div>
-              {selectedRole.primaryPanels.length === 0 ? (
-                <p className="muted" style={{ fontSize: 13 }}>
-                  No primary panels enabled for this role. Click a cell in the matrix below to add
-                  one.
-                </p>
-              ) : (
-                selectedRole.primaryPanels.map((pid, idx) => {
-                  const def = PANEL_DEFINITIONS.find((d) => d.id === pid);
-                  return (
-                    <div
-                      key={pid}
-                      className="list-row"
-                      style={{ padding: '8px 10px', marginBottom: 6 }}
-                    >
-                      <div className="list-row__main">
-                        <div style={{ fontWeight: 600, fontSize: 13.5 }}>
-                          {idx + 1}. {def?.name ?? pid}
-                        </div>
-                      </div>
-                      <div className="list-row__aside" style={{ gap: 4 }}>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          aria-label={`Move ${def?.name ?? pid} up`}
-                          disabled={idx === 0}
-                          onClick={() =>
-                            handleMovePanelInRole(selectedRole.key, 'primary', idx, -1)
-                          }
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          aria-label={`Move ${def?.name ?? pid} down`}
-                          disabled={idx === selectedRole.primaryPanels.length - 1}
-                          onClick={() =>
-                            handleMovePanelInRole(selectedRole.key, 'primary', idx, 1)
-                          }
-                        >
-                          ↓
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            <div>
-              <div className="section-label" style={{ marginBottom: 8 }}>
-                ○ SUMMARY / SIDE COLUMN ORDER ({selectedRole.summaryPanels.length})
-              </div>
-              {selectedRole.summaryPanels.length === 0 ? (
-                <p className="muted" style={{ fontSize: 13 }}>
-                  No summary panels enabled for this role.
-                </p>
-              ) : (
-                selectedRole.summaryPanels.map((pid, idx) => {
-                  const def = PANEL_DEFINITIONS.find((d) => d.id === pid);
-                  return (
-                    <div
-                      key={pid}
-                      className="list-row"
-                      style={{ padding: '8px 10px', marginBottom: 6 }}
-                    >
-                      <div className="list-row__main">
-                        <div style={{ fontWeight: 600, fontSize: 13.5 }}>
-                          {idx + 1}. {def?.name ?? pid}
-                        </div>
-                      </div>
-                      <div className="list-row__aside" style={{ gap: 4 }}>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          aria-label={`Move ${def?.name ?? pid} up`}
-                          disabled={idx === 0}
-                          onClick={() =>
-                            handleMovePanelInRole(selectedRole.key, 'summary', idx, -1)
-                          }
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          aria-label={`Move ${def?.name ?? pid} down`}
-                          disabled={idx === selectedRole.summaryPanels.length - 1}
-                          onClick={() =>
-                            handleMovePanelInRole(selectedRole.key, 'summary', idx, 1)
-                          }
-                        >
-                          ↓
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Interactive Panel Configuration Matrix */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* 1. Role Selector Dropdown Bar (linked to People › Employee Roles in Taxonomy) */}
       <div className="subcard">
         <div
           style={{
             display: 'flex',
             flexWrap: 'wrap',
             justifyContent: 'space-between',
+            alignItems: 'flex-end',
+            gap: 16,
+          }}
+        >
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-end', flex: 1 }}>
+            <div style={{ minWidth: 280 }}>
+              <label
+                className="field-label"
+                style={{ marginBottom: 6, display: 'block' }}
+                htmlFor="select-role-config"
+              >
+                Employee role screen to update
+              </label>
+              <select
+                id="select-role-config"
+                className="field-select"
+                style={{ width: '100%' }}
+                value={selectedRole.key}
+                onChange={(e) => setSelectedRoleKey(e.target.value)}
+              >
+                {roles.map((r) => {
+                  const count = userCountByRole[r.key] ?? 0;
+                  return (
+                    <option key={r.key} value={r.key}>
+                      {r.label} ({count} {count === 1 ? 'employee' : 'employees'})
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            <div style={{ flex: 1, minWidth: 260 }}>
+              <label
+                className="field-label"
+                style={{ marginBottom: 6, display: 'block' }}
+                htmlFor="selected-role-purpose"
+              >
+                Role subtitle / purpose
+              </label>
+              <input
+                id="selected-role-purpose"
+                type="text"
+                className="field-input"
+                value={selectedRole.purpose}
+                onChange={(e) => handlePurposeChange(selectedRole.key, e.target.value)}
+                onBlur={() => persistConfig(roles, firmSettings)}
+              />
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            {onNavigateToEmployeeRoles ? (
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={onNavigateToEmployeeRoles}
+                title="Manage Employee roles in Taxonomy › People"
+              >
+                People › Employee roles in Taxonomy →
+              </button>
+            ) : (
+              <Link
+                href="/admin/lists?list=employee_role"
+                className="btn btn--ghost btn--sm"
+              >
+                People › Employee roles in Taxonomy →
+              </Link>
+            )}
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              disabled={pending}
+              onClick={() => handlePreviewRole(selectedRole)}
+            >
+              Preview →
+            </button>
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              disabled={pending}
+              onClick={handleResetDefaults}
+            >
+              Reset to defaults
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              disabled={pending}
+              onClick={handleSaveChanges}
+            >
+              Save changes
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. Headline KPI Strip Section (separated from Column Order; left = Available, right = Chosen) */}
+      <div className="subcard">
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
             alignItems: 'center',
-            gap: 12,
+            flexWrap: 'wrap',
+            gap: 8,
             marginBottom: 14,
           }}
         >
           <div>
-            <div className="section-label">WHAT EACH HOME PAGE LEADS WITH</div>
-            <h3 style={{ fontSize: 18, fontWeight: 800, margin: '2px 0 0' }}>
-              Panel Configuration Matrix ({PANEL_DEFINITIONS.length} panels × {roles.length} roles)
+            <div className="section-label">HEADLINE KPI STRIP · {selectedRole.label.toUpperCase()}</div>
+            <h3 style={{ fontSize: 17, fontWeight: 800, margin: '2px 0 0' }}>
+              Headline KPI strip cards ({chosenHeadlineCards.length} of 5 chosen)
             </h3>
           </div>
-          <div style={{ display: 'flex', gap: 16, fontSize: 13, alignItems: 'center' }}>
-            <span>
-              <strong style={{ color: 'var(--teal)' }}>● Primary</strong> (main column)
-            </span>
-            <span>
-              <strong style={{ color: 'var(--teal)' }}>○ Summary</strong> (right column)
-            </span>
-            <span className="muted">
-              <strong>— Off</strong> (hidden)
-            </span>
-          </div>
+          <span className="muted" style={{ fontSize: 12.5 }}>
+            Move items from Available on the left to Chosen on the right (up to 5 cards).
+          </span>
         </div>
 
-        <div style={{ overflowX: 'auto' }}>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th style={{ minWidth: 280 }}>Panel / Module</th>
-                {roles.map((r) => (
-                  <th key={r.key} style={{ textAlign: 'center', minWidth: 92 }}>
-                    {r.shortLabel || r.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {PANEL_CATEGORIES.map((category) => {
-                const catPanels = PANEL_DEFINITIONS.filter((p) => p.category === category);
-                return (
-                  <React.Fragment key={category}>
-                    <tr>
-                      <td
-                        colSpan={roles.length + 1}
-                        style={{
-                          background: 'var(--surface-soft)',
-                          fontWeight: 800,
-                          fontSize: 11.5,
-                          letterSpacing: '0.07em',
-                          textTransform: 'uppercase',
-                          padding: '8px 10px',
-                        }}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+            gap: 16,
+            alignItems: 'start',
+          }}
+        >
+          {/* Left-hand list: Available KPI options */}
+          <div
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: 12,
+              background: 'var(--surface-soft)',
+            }}
+          >
+            <div className="section-label" style={{ marginBottom: 8 }}>
+              AVAILABLE KPI OPTIONS ({availableHeadlineCards.length})
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+                maxHeight: 320,
+                overflowY: 'auto',
+                paddingRight: 4,
+              }}
+            >
+              {availableHeadlineCards.length === 0 ? (
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  All available KPI options have been chosen.
+                </p>
+              ) : (
+                availableHeadlineCards.map((card) => (
+                  <div
+                    key={card.id}
+                    className="list-row"
+                    style={{
+                      padding: '7px 10px',
+                      marginBottom: 0,
+                      background: 'var(--surface)',
+                    }}
+                  >
+                    <div className="list-row__main">
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>
+                        {card.label}{' '}
+                        <span className="muted" style={{ fontWeight: 400, fontSize: 11.5 }}>
+                          ({card.source})
+                        </span>
+                      </div>
+                    </div>
+                    <div className="list-row__aside">
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        style={{ padding: '3px 10px', fontSize: 12 }}
+                        disabled={chosenHeadlineCards.length >= 5}
+                        aria-label={`Choose ${card.label}`}
+                        onClick={() => handleAddHeadlineCard(selectedRole.key, card.id)}
                       >
-                        {category}
-                      </td>
-                    </tr>
-                    {catPanels.map((panel) => (
-                      <tr key={panel.id}>
-                        <td>
-                          <div style={{ fontWeight: 600 }}>{panel.name}</div>
-                          <div className="muted" style={{ fontSize: 12 }}>
-                            {panel.sourceLabel}
-                          </div>
-                        </td>
-                        {roles.map((role) => {
-                          const placement = getPanelPlacement(role, panel.id);
-                          const placementLabel =
-                            placement === 'primary'
-                              ? 'Primary'
-                              : placement === 'summary'
-                                ? 'Summary'
-                                : 'Off';
-                          return (
-                            <td key={role.key} style={{ textAlign: 'center', verticalAlign: 'middle' }}>
-                              <button
-                                type="button"
-                                className={`matrix-dot-btn matrix-dot-btn--${placement}`}
-                                aria-label={`${panel.name} for ${role.label}: ${placementLabel}. Click to cycle.`}
-                                title={`${role.label}: ${placementLabel} (click to cycle)`}
-                                onClick={() => handleCycleCell(role.key, panel.id)}
-                              >
-                                {renderPlacementDot(placement)}
-                              </button>
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
+                        Choose →
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Right-hand list: Chosen KPI options */}
+          <div
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: 12,
+              background: 'var(--surface-soft)',
+            }}
+          >
+            <div className="section-label" style={{ marginBottom: 8 }}>
+              CHOSEN KPI OPTIONS ({chosenHeadlineCards.length} OF 5)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {chosenHeadlineCards.length === 0 ? (
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  No KPI cards chosen for this role. Select options from the left-hand list.
+                </p>
+              ) : (
+                chosenHeadlineCards.map((card, idx) => (
+                  <div
+                    key={card.id}
+                    className="list-row"
+                    style={{
+                      padding: '7px 10px',
+                      marginBottom: 0,
+                      background: 'var(--surface)',
+                    }}
+                  >
+                    <div className="list-row__main">
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>
+                        {idx + 1}. {card.label}{' '}
+                        <span className="muted" style={{ fontWeight: 400, fontSize: 11.5 }}>
+                          ({card.source})
+                        </span>
+                      </div>
+                    </div>
+                    <div className="list-row__aside" style={{ gap: 4 }}>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        style={{ padding: '2px 6px' }}
+                        aria-label={`Move ${card.label} up`}
+                        disabled={idx === 0}
+                        onClick={() => handleMoveHeadlineCard(selectedRole.key, idx, -1)}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        style={{ padding: '2px 6px' }}
+                        aria-label={`Move ${card.label} down`}
+                        disabled={idx === chosenHeadlineCards.length - 1}
+                        onClick={() => handleMoveHeadlineCard(selectedRole.key, idx, 1)}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        style={{ padding: '2px 8px', fontSize: 12 }}
+                        aria-label={`Remove ${card.label}`}
+                        onClick={() => handleRemoveHeadlineCard(selectedRole.key, card.id)}
+                      >
+                        ← Remove
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Firm settings for Home pages */}
+      {/* 3. Column Order & Panel Selection (Available Options next to Primary Column and Summary Side Column) */}
+      <div className="subcard">
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 8,
+            marginBottom: 14,
+          }}
+        >
+          <div>
+            <div className="section-label">
+              HOME PAGE PANELS &amp; COLUMN ORDER · {selectedRole.label.toUpperCase()}
+            </div>
+            <h3 style={{ fontSize: 17, fontWeight: 800, margin: '2px 0 0' }}>
+              Available panels, Primary column &amp; Summary side column
+            </h3>
+          </div>
+          <span className="muted" style={{ fontSize: 12.5 }}>
+            Add available panels to the Primary column or Summary side column and reorder them in place.
+          </span>
+        </div>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))',
+            gap: 16,
+            alignItems: 'start',
+          }}
+        >
+          {/* Left list: Available options */}
+          <div
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: 12,
+              background: 'var(--surface-soft)',
+            }}
+          >
+            <div className="section-label" style={{ marginBottom: 8 }}>
+              AVAILABLE OPTIONS ({totalAvailablePanelsCount})
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 12,
+                maxHeight: 540,
+                overflowY: 'auto',
+                paddingRight: 4,
+              }}
+            >
+              {availablePanelsByCategory.length === 0 ? (
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  All panels have been added to the Primary or Summary columns.
+                </p>
+              ) : (
+                availablePanelsByCategory.map(({ category, panels }) => (
+                  <div key={category}>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 800,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.06em',
+                        color: 'var(--muted)',
+                        marginBottom: 6,
+                      }}
+                    >
+                      {category}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {panels.map((panel) => (
+                        <div
+                          key={panel.id}
+                          className="list-row"
+                          style={{
+                            padding: '8px 10px',
+                            marginBottom: 0,
+                            background: 'var(--surface)',
+                            flexDirection: 'column',
+                            alignItems: 'stretch',
+                            gap: 6,
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 600, fontSize: 13 }}>{panel.name}</div>
+                            <div className="muted" style={{ fontSize: 11.5 }}>
+                              {panel.sourceLabel}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                            <button
+                              type="button"
+                              className="btn btn--secondary btn--sm"
+                              style={{ padding: '2px 8px', fontSize: 12 }}
+                              aria-label={`Add ${panel.name} to Primary column`}
+                              onClick={() =>
+                                handleSetPanelPlacement(selectedRole.key, panel.id, 'primary')
+                              }
+                            >
+                              + Primary →
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn--secondary btn--sm"
+                              style={{ padding: '2px 8px', fontSize: 12 }}
+                              aria-label={`Add ${panel.name} to Summary side column`}
+                              onClick={() =>
+                                handleSetPanelPlacement(selectedRole.key, panel.id, 'summary')
+                              }
+                            >
+                              + Summary →
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Middle list: Primary column order */}
+          <div
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: 12,
+              background: 'var(--surface-soft)',
+            }}
+          >
+            <div className="section-label" style={{ marginBottom: 8 }}>
+              ● PRIMARY COLUMN ({selectedRole.primaryPanels.length})
+            </div>
+            {selectedRole.primaryPanels.length === 0 ? (
+              <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                No primary panels chosen. Click <strong>+ Primary →</strong> on an available option to add one.
+              </p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {selectedRole.primaryPanels.map((pid, idx) => {
+                  const def = PANEL_DEFINITIONS.find((d) => d.id === pid);
+                  return (
+                    <div
+                      key={pid}
+                      className="list-row"
+                      style={{
+                        padding: '8px 10px',
+                        marginBottom: 0,
+                        background: 'var(--surface)',
+                        flexDirection: 'column',
+                        alignItems: 'stretch',
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>
+                        {idx + 1}. {def?.name ?? pid}
+                      </div>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 4,
+                        }}
+                      >
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            style={{ padding: '2px 6px' }}
+                            aria-label={`Move ${def?.name ?? pid} up`}
+                            disabled={idx === 0}
+                            onClick={() =>
+                              handleMovePanelInRole(selectedRole.key, 'primary', idx, -1)
+                            }
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            style={{ padding: '2px 6px' }}
+                            aria-label={`Move ${def?.name ?? pid} down`}
+                            disabled={idx === selectedRole.primaryPanels.length - 1}
+                            onClick={() =>
+                              handleMovePanelInRole(selectedRole.key, 'primary', idx, 1)
+                            }
+                          >
+                            ↓
+                          </button>
+                        </div>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            style={{ padding: '2px 8px', fontSize: 11.5 }}
+                            title="Move to Summary side column"
+                            onClick={() =>
+                              handleSetPanelPlacement(selectedRole.key, pid, 'summary')
+                            }
+                          >
+                            → Summary
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            style={{ padding: '2px 8px', fontSize: 11.5 }}
+                            aria-label={`Remove ${def?.name ?? pid}`}
+                            onClick={() =>
+                              handleSetPanelPlacement(selectedRole.key, pid, 'off')
+                            }
+                          >
+                            ← Remove
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Right list: Summary side column order */}
+          <div
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: 12,
+              background: 'var(--surface-soft)',
+            }}
+          >
+            <div className="section-label" style={{ marginBottom: 8 }}>
+              ○ SUMMARY / SIDE COLUMN ({selectedRole.summaryPanels.length})
+            </div>
+            {selectedRole.summaryPanels.length === 0 ? (
+              <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                No summary panels chosen. Click <strong>+ Summary →</strong> on an available option to add one.
+              </p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {selectedRole.summaryPanels.map((pid, idx) => {
+                  const def = PANEL_DEFINITIONS.find((d) => d.id === pid);
+                  return (
+                    <div
+                      key={pid}
+                      className="list-row"
+                      style={{
+                        padding: '8px 10px',
+                        marginBottom: 0,
+                        background: 'var(--surface)',
+                        flexDirection: 'column',
+                        alignItems: 'stretch',
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>
+                        {idx + 1}. {def?.name ?? pid}
+                      </div>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 4,
+                        }}
+                      >
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            style={{ padding: '2px 6px' }}
+                            aria-label={`Move ${def?.name ?? pid} up`}
+                            disabled={idx === 0}
+                            onClick={() =>
+                              handleMovePanelInRole(selectedRole.key, 'summary', idx, -1)
+                            }
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            style={{ padding: '2px 6px' }}
+                            aria-label={`Move ${def?.name ?? pid} down`}
+                            disabled={idx === selectedRole.summaryPanels.length - 1}
+                            onClick={() =>
+                              handleMovePanelInRole(selectedRole.key, 'summary', idx, 1)
+                            }
+                          >
+                            ↓
+                          </button>
+                        </div>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            style={{ padding: '2px 8px', fontSize: 11.5 }}
+                            title="Move to Primary column"
+                            onClick={() =>
+                              handleSetPanelPlacement(selectedRole.key, pid, 'primary')
+                            }
+                          >
+                            ← Primary
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            style={{ padding: '2px 8px', fontSize: 11.5 }}
+                            aria-label={`Remove ${def?.name ?? pid}`}
+                            onClick={() =>
+                              handleSetPanelPlacement(selectedRole.key, pid, 'off')
+                            }
+                          >
+                            ← Remove
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 4. Firm settings for Home pages (without Demo Mode) */}
       <div className="subcard">
         <div className="section-label" style={{ marginBottom: 4 }}>
           FIRM SETTINGS FOR HOME PAGES
         </div>
-        <h3 style={{ fontSize: 18, fontWeight: 800, margin: '0 0 14px' }}>
-          Demo mode, chargeable pace &amp; attention thresholds
+        <h3 style={{ fontSize: 17, fontWeight: 800, margin: '0 0 14px' }}>
+          Chargeable pace &amp; attention thresholds
         </h3>
 
         <div className="form-grid">
-          <div className="field-group field-group--full">
-            <label className="checkbox-pill">
-              <input
-                type="checkbox"
-                checked={firmSettings.demoMode}
-                onChange={(e) => {
-                  const nextSettings = { ...firmSettings, demoMode: e.target.checked };
-                  setFirmSettings(nextSettings);
-                  persistConfig(roles, nextSettings);
-                }}
-              />
-              <span>
-                <strong>Demo mode</strong> — show the &ldquo;Switch to demo user&rdquo; menu in the
-                header avatar and display the &ldquo;Demo user: showing &#123;Name&#125;’s work&rdquo;
-                banner when viewing as a demo persona.
-              </span>
-            </label>
-          </div>
-
           <div className="field-group">
             <label className="field-label" htmlFor="home-pace-hours">
               Working day pace (hours / day)
@@ -869,90 +1006,6 @@ export function HomePagesAdminSection({
           </button>
         </div>
       </div>
-
-      {/* Add Role Modal */}
-      {addRoleOpen ? (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal-card">
-            <div className="modal-header">
-              <h2>Add custom Home role</h2>
-            </div>
-            <form onSubmit={handleAddRoleSubmit}>
-              <div className="form-grid">
-                <div className="field-group field-group--full">
-                  <label className="field-label" htmlFor="new-role-label">
-                    Role name *
-                  </label>
-                  <input
-                    id="new-role-label"
-                    type="text"
-                    required
-                    className="field-input"
-                    placeholder="e.g. Business Development or Practice Manager"
-                    value={newRoleLabel}
-                    onChange={(e) => setNewRoleLabel(e.target.value)}
-                  />
-                </div>
-                <div className="field-group">
-                  <label className="field-label" htmlFor="new-role-short">
-                    Short column label
-                  </label>
-                  <input
-                    id="new-role-short"
-                    type="text"
-                    className="field-input"
-                    placeholder="e.g. Bus Dev"
-                    value={newRoleShortLabel}
-                    onChange={(e) => setNewRoleShortLabel(e.target.value)}
-                  />
-                </div>
-                <div className="field-group">
-                  <label className="field-label" htmlFor="copy-from-role">
-                    Copy initial panels from
-                  </label>
-                  <select
-                    id="copy-from-role"
-                    className="field-select"
-                    value={copyFromRoleKey}
-                    onChange={(e) => setCopyFromRoleKey(e.target.value)}
-                  >
-                    {roles.map((r) => (
-                      <option key={r.key} value={r.key}>
-                        {r.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field-group field-group--full">
-                  <label className="field-label" htmlFor="new-role-purpose">
-                    Purpose / subtitle line
-                  </label>
-                  <input
-                    id="new-role-purpose"
-                    type="text"
-                    className="field-input"
-                    placeholder="Short description of what this role leads with..."
-                    value={newRolePurpose}
-                    onChange={(e) => setNewRolePurpose(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn--secondary"
-                  onClick={() => setAddRoleOpen(false)}
-                >
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn--primary" disabled={pending}>
-                  Create role
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }

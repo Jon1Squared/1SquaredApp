@@ -218,6 +218,7 @@ Every pull request must confirm:
 - [ ] Migrations are backward compatible and reversible.
 - [ ] Tests added and CI passes, including security scans.
 - [ ] Documentation and release notes updated.
+- [ ] Help & documentation updated.
 - [ ] Cost and performance impact considered.
 - [ ] Any exception to this standard is recorded as a decision record and approved.
 
@@ -242,6 +243,7 @@ Architecture rules for this project (see Platform Architecture Standard):
 8. Database migrations must be backward compatible and tracked per tenant.
 9. Any change touching data access needs two-tenant isolation tests.
 10. If a request conflicts with these rules, stop and explain before coding.
+11. Every change must create or update the relevant pages in the application's Help & documentation section, in the same pull request.
 ```
 
 ## 16. Decisions to confirm

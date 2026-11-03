@@ -1,4 +1,5 @@
 import { HomeClient } from '@/components/HomeClient';
+import { getEntraSession } from '@/server/entraAuth';
 import { getAppSnapshot, getCurrentUserId } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
@@ -8,6 +9,10 @@ export default async function HomePage({
 }: {
   searchParams?: Promise<{ view?: string; previewRole?: string }>;
 }) {
+  const entraSession = await getEntraSession();
+  if (!entraSession) {
+    return null;
+  }
   const userId = await getCurrentUserId();
   const snap = getAppSnapshot(userId);
   const resolvedParams = searchParams ? await searchParams : {};

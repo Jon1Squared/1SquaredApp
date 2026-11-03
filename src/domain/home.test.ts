@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createDefaultHomePagesConfig,
   createDefaultRoleConfigs,
@@ -9,10 +9,12 @@ import {
   PANEL_DEFINITIONS,
   resolveEmployeeRoles,
   setRolePanelPlacement,
+  syncHomeRolesWithEmployeeRoles,
 } from './homeConfig';
 import { getPmsSource } from '@/pms/pmsSource';
 import { primaryEmail } from './names';
 import {
+  addChoiceValue,
   addHomeRole,
   approveSignOff,
   discussSignOff,
@@ -28,6 +30,10 @@ import {
 
 describe('Role-based Home pages & configuration', () => {
   beforeEach(() => {
+    resetAllDemoData('P-000001');
+  });
+
+  afterAll(() => {
     resetAllDemoData('P-000001');
   });
 
@@ -203,10 +209,14 @@ describe('Role-based Home pages & configuration', () => {
     expect(res.ok).toBe(true);
     expect(res.role?.key).toBe('business_development');
 
+    const adminUser = getAppSnapshot('P-000001').people.find(
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.co.uk',
+    )!;
     const empUpdate = updateEmployeeRolesAndSupports(
       'P-000002',
       { roles: ['fee_earner', 'business_development'] },
-      'P-000001',
+      adminUser.id,
+      { mfaVerified: true },
     );
     expect(empUpdate.ok).toBe(true);
 
@@ -271,5 +281,47 @@ describe('Role-based Home pages & configuration', () => {
     expect(woRes.ok).toBe(true);
     const snapFinal = getAppSnapshot('P-000001');
     expect(snapFinal.signOffs.some((s) => s.matterNumber === 'TGL001-0002')).toBe(true);
+  });
+
+  it('links configurable Home page roles to Employee Roles in the People taxonomy and removes test_role', () => {
+    const snapBefore = getAppSnapshot('P-000001');
+    const synced = syncHomeRolesWithEmployeeRoles(
+      [
+        ...snapBefore.homePagesConfig.roles,
+        {
+          key: 'test_role',
+          label: 'Test Role',
+          shortLabel: 'Test Role',
+          purpose: 'Temporary test role',
+          headlineCardIds: [],
+          primaryPanels: [],
+          summaryPanels: [],
+        },
+      ],
+      snapBefore.values,
+    );
+    expect(synced.some((r) => r.key === 'test_role')).toBe(false);
+    expect(synced.find((r) => r.key === 'fee_earner')?.employeeRoleId).toBe(
+      'employee_role.fee_earner',
+    );
+    expect(synced.find((r) => r.key === 'partner')?.employeeRoleId).toBe(
+      'employee_role.partner',
+    );
+
+    // Adding a new Employee Role in Taxonomy › People › Employee roles automatically creates a configurable Home role
+    addChoiceValue(
+      {
+        listKey: 'employee_role',
+        label: 'Costs Lawyer',
+        description: 'Specialist costs draftsman and litigator',
+      },
+      'P-000001',
+    );
+    const snapAfter = getAppSnapshot('P-000001');
+    const costsRole = snapAfter.homePagesConfig.roles.find(
+      (r) => r.employeeRoleId === 'employee_role.costs_lawyer',
+    );
+    expect(costsRole).toBeDefined();
+    expect(costsRole?.label).toBe('Costs Lawyer');
   });
 });

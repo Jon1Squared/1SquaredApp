@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildPmsDatabaseFromWorkbook, resolveWorkbookPath } from './importPms';
 import { DemoDbPmsSource } from './pmsSource';
@@ -5,21 +8,27 @@ import { openXlsxWorkbook, parseMoney } from './xlsxReader';
 
 describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   it('builds the SQLite database idempotently from 1Squared_PMS_Demo_Data.xlsx', () => {
-    const run1 = buildPmsDatabaseFromWorkbook();
-    const run2 = buildPmsDatabaseFromWorkbook();
-    expect(run1.asAtDate).toBe('2026-10-16');
-    expect(run1.counts).toEqual({
-      fee_earners: 8,
-      clients: 10,
-      matters: 20,
-      fee_estimates: 23,
-      time_entries: 740,
-      disbursements: 16,
-      invoices: 51,
-      payments: 40,
-      client_account: 15,
-    });
-    expect(run2.counts).toEqual(run1.counts);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-test-'));
+    const tmpDbPath = path.join(tmpDir, 'pms-demo.sqlite');
+    try {
+      const run1 = buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
+      const run2 = buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
+      expect(run1.asAtDate).toBe('2026-10-16');
+      expect(run1.counts).toEqual({
+        fee_earners: 8,
+        clients: 10,
+        matters: 20,
+        fee_estimates: 23,
+        time_entries: 740,
+        disbursements: 16,
+        invoices: 51,
+        payments: 40,
+        client_account: 15,
+      });
+      expect(run2.counts).toEqual(run1.counts);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('reproduces every row and total of check_matters via v_matter_financials', () => {

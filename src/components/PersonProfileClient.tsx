@@ -48,6 +48,7 @@ import type {
 } from '@/domain/types';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
+import { DocumentListSection } from './DocumentListSection';
 import {
   AuditAndMergeSection,
   KeyValue,
@@ -66,6 +67,7 @@ const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'works_at_firm', label: 'Works at the firm' },
   { key: 'matters', label: 'Matters' },
+  { key: 'documents', label: 'Documents' },
   { key: 'activity', label: 'Activity' },
   { key: 'finance', label: 'Finance' },
   { key: 'contact', label: 'Contact details' },
@@ -1989,7 +1991,20 @@ export function PersonProfileClient({
           </div>
         )}
 
-        {tab === 'activity' && (
+        {tab === 'documents' && (
+        <DocumentListSection
+          entityType="person"
+          entityId={person.id}
+          person={person}
+          matters={matters}
+          people={allPeople}
+          organisations={organisations}
+          values={values}
+          currentUserId={currentUserId}
+        />
+      )}
+
+      {tab === 'activity' && (
           <div className="client-card">
             <NotesSection
               recordType="person"
@@ -2925,6 +2940,19 @@ export function PersonProfileClient({
           <KeyValue label="Data source">{resolveLabel(values, person.sourceId)}</KeyValue>
           <KeyValue label="Last verified date">{formatDate(person.lastVerifiedAt)}</KeyValue>
         </div>
+      )}
+
+      {tab === 'documents' && (
+        <DocumentListSection
+          entityType="person"
+          entityId={person.id}
+          person={person}
+          matters={matters}
+          people={allPeople}
+          organisations={organisations}
+          values={values}
+          currentUserId={currentUserId}
+        />
       )}
 
       {tab === 'activity' && (

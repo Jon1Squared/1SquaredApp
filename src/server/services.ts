@@ -1,4 +1,5 @@
 import { cookies } from 'next/headers';
+import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import { attentionList } from '@/domain/attention';
 import { diffRecords } from '@/domain/audit';
 import { validateCustomFields } from '@/domain/customFields';
@@ -37,6 +38,7 @@ import {
   getLeftRailVisibility,
   resolveActiveViewingRole,
   resolveEmployeeRoles,
+  syncHomeRolesWithEmployeeRoles,
 } from '@/domain/homeConfig';
 import {
   canDeactivate,
@@ -90,11 +92,98 @@ import {
   syncRateCardsWithPmsFeeEarners,
 } from '@/domain/matterCosts';
 import {
+  canUserReassignTask,
+  canUserTakeTask,
   countMyUrgentBadgeTasks,
   isTaskOpen,
   resolveRoutedTeam,
   resolveUserAppRole,
 } from '@/domain/tasks';
+import {
+  AuthorisationError,
+  getDefaultTenantRbacConfig,
+  isRegisteredPermissionKey,
+  mergeRbacConfigOverlay,
+  PERMISSION_REGISTRY,
+  requirePermission,
+  resolvePersonForEntraClaims,
+  resolvePersonPermissionSet,
+  resolvePersonPermissions,
+  setRuntimeRbacConfigOverride,
+  validateUserOverrideOrRoleMutation,
+  type EntraIdRawTokenClaims,
+  type PermissionKey,
+  type RbacConfiguration,
+  type VerifiedOidcTokenClaims,
+} from '@/domain/rbac';
+import {
+  createSignedEntraSessionCookie,
+  ENTRA_SESSION_COOKIE,
+  getEntraSession,
+  setTestEntraSessionOverride,
+  shouldUseSecureCookies,
+  type EntraSessionPayload,
+} from './entraAuth';
+import {
+  getActiveTenantConfiguration,
+  resolveCurrentTenantContext,
+} from '@/platform/tenantRuntime';
+import {
+  runTenantBackgroundJob,
+  validateKeyDatesConfig,
+  type TenantContext,
+} from '@platform/core';
+import type {
+  CalculationResult,
+  KeyDate,
+  KeyDateCalculation,
+  KeyDateCalendarSync,
+  KeyDateException,
+  KeyDateExceptionKind,
+  KeyDateNotApplicable,
+  KeyDateReminderState,
+  KeyDatesConfig,
+  KeyDateSource,
+  StandstillPeriod,
+  TeamDiaryEntry,
+  TeamDiaryQuery,
+} from '@/domain/keyDates.types';
+import {
+  canViewerAccessMatterKeyDates,
+  carryEnquiryKeyDatesToMatter,
+  createOrProposeKeyDate,
+  evaluateMatterKeyDateClosureGate,
+  evaluateMatterKeyDateOpeningGate,
+  hasKeyDatePermission,
+  proposeProvisionalKeyDate,
+  reassignKeyDateTeamAndOwners,
+  recordKeyDateNotApplicable,
+  rejectProposedKeyDate,
+  resolveKeyDateOutcome,
+  resolveKeyDatePermissions,
+  supersedeConfirmedKeyDate,
+  verifyProposedKeyDate,
+} from '@/domain/keyDates';
+import {
+  calculateLimitationDate,
+  findBusinessCalendar,
+  findLimitationRule,
+} from '@/domain/keyDateCalculator';
+import {
+  acknowledgeKeyDateReminderStage,
+  closeReminderTaskForKeyDate,
+  runTenantKeyDateReminderJob,
+  syncReminderForConfirmedKeyDate,
+} from '@/domain/keyDateReminders';
+import {
+  computeKeyDateExceptions,
+  queryTeamDiaryEntries,
+  resolvePermittedDiaryTeamIds,
+} from '@/domain/keyDateDiary';
+import {
+  syncKeyDateToOutlookCalendar,
+  type GraphCalendarAdapter,
+} from '@/domain/keyDateCalendarSync';
 import type {
   Address,
   AnyRecord,
@@ -257,18 +346,120 @@ const BOOTSTRAP_SESSION_USER: Person = {
   ],
 };
 
+export interface AuthenticatedActorContext {
+  personId: string;
+  person: Person;
+  session: EntraSessionPayload;
+  mfaVerified: boolean;
+}
+
+export async function requireAuthenticatedActor(): Promise<AuthenticatedActorContext> {
+  const entraSession = await getEntraSession();
+  if (!entraSession || !entraSession.personId) {
+    throw new AuthorisationError({
+      code: 'UNAUTHENTICATED',
+      message: 'Authentication is required. Please sign in with Microsoft Entra ID.',
+      tenantId: 'default',
+      correlationId: 'auth-check',
+      actorUserId: 'anonymous',
+    });
+  }
+  const store = getStore();
+  const person = store.people.find(
+    (p) => p.id === entraSession.personId && p.isEmployee && !p.mergedIntoId,
+  );
+  if (!person) {
+    throw new AuthorisationError({
+      code: 'UNAUTHENTICATED',
+      message: 'Authenticated employee record was not found or is inactive.',
+      tenantId: 'default',
+      correlationId: 'auth-check',
+      actorUserId: entraSession.personId,
+    });
+  }
+  return {
+    personId: person.id,
+    person,
+    session: entraSession,
+    mfaVerified: Boolean(entraSession.mfaVerified),
+  };
+}
+
 export async function getCurrentUserId(): Promise<string> {
+  const actor = await requireAuthenticatedActor();
+  return actor.personId;
+}
+
+export async function switchUserInDemoMode(targetUserId: string): Promise<{
+  ok: boolean;
+  personId: string;
+  signedSession: string;
+}> {
+  const actor = await requireAuthenticatedActor();
+  const store = getStore();
+  const demoMode = Boolean(store.homePagesConfig?.firmSettings?.demoMode);
+  if (!demoMode) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message: 'User switching is only permitted when Demo Mode is enabled.',
+      tenantId: 'default',
+      correlationId: 'auth-check',
+      actorUserId: actor.personId,
+    });
+  }
+  const targetPerson = store.people.find(
+    (p) => p.id === targetUserId && p.isEmployee && !p.mergedIntoId,
+  );
+  if (!targetPerson || !targetPerson.demo) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message: 'User switching in Demo Mode is restricted to designated demo users.',
+      tenantId: 'default',
+      correlationId: 'auth-check',
+      actorUserId: actor.personId,
+    });
+  }
+
+  const now = Date.now();
+  const nextSession: EntraSessionPayload = {
+    ...actor.session,
+    personId: targetPerson.id,
+    email: targetPerson.emails?.[0]?.address ?? actor.session.email,
+    displayName: personDisplayName(targetPerson),
+    mappedRoles: resolveEmployeeRoles(targetPerson, store.teams),
+    authenticatedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
+  };
+
+  const signedSession = createSignedEntraSessionCookie(nextSession);
+  if (process.env.NODE_ENV === 'test') {
+    setTestEntraSessionOverride(nextSession);
+  }
   try {
     const jar = await cookies();
-    const val = jar.get(USER_COOKIE)?.value;
-    const store = getStore();
-    if (val && store.people.some((p) => p.id === val && p.isEmployee)) {
-      return val;
-    }
+    jar.set(ENTRA_SESSION_COOKIE, signedSession, {
+      httpOnly: true,
+      secure: shouldUseSecureCookies(),
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 8 * 60 * 60,
+    });
   } catch {
-    // Fallback when called outside request context
+    // Ignore when called outside Next.js request context in unit tests
   }
-  return DEFAULT_USER_ID;
+
+  writeAudit(store, {
+    recordType: 'person',
+    recordId: targetPerson.id,
+    action: 'update',
+    field: 'Demo user switch',
+    oldValue: actor.personId,
+    newValue: targetPerson.id,
+    byId: actor.personId,
+  });
+  saveStore(store);
+
+  return { ok: true, personId: targetPerson.id, signedSession };
 }
 
 export function activeEmployees(store: FirmStore = getStore()): Person[] {
@@ -316,6 +507,15 @@ function writeAudit(
   return full;
 }
 
+export function getKeyDatesConfig(store: FirmStore = getStore()): KeyDatesConfig {
+  const activeTenantConfig = getActiveTenantConfiguration();
+  const raw =
+    store.keyDatesConfigOverride ??
+    activeTenantConfig.keyDates ??
+    { enabled: false };
+  return validateKeyDatesConfig(raw) as unknown as KeyDatesConfig;
+}
+
 export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
   const store = getStore();
   const now = new Date();
@@ -330,6 +530,11 @@ export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
     store.people,
     store.teams,
   );
+  const currentUserPermissions = resolvePersonPermissions(user, {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  const rbacConfig = getDefaultTenantRbacConfig();
   const orgStructure = store.orgStructure ?? buildDefaultOrgStructure();
 
   // Filter employment records on people at the API level based on requesting user's permissions
@@ -347,10 +552,8 @@ export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
     };
   });
 
-  const canSeeSensitive = currentUserEmployeePermissions.includes('employee:sensitive');
-  const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = canSeeSensitive
-    ? structuredClone(store.employeeSensitiveRecords ?? {})
-    : {};
+  // Never bulk-return sensitive HR records in page snapshots (R63); serve only via audited per-person read service.
+  const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
   const leaverOwnedRecords = findRecordsOwnedByLeavers(
     store.people,
@@ -363,7 +566,50 @@ export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
   const homePagesConfig = store.homePagesConfig ?? createDefaultHomePagesConfig(now.toISOString());
   const currentUserRoles = resolveEmployeeRoles(user, store.teams);
   const activeViewingRole = resolveActiveViewingRole(user, homePagesConfig, store.teams);
-  const leftRailVisibility = getLeftRailVisibility(activeViewingRole, currentUserRoles);
+  const keyDatesConfig = getKeyDatesConfig(store);
+  const currentUserKeyDatePermissions = resolveKeyDatePermissions(user, {
+    config: keyDatesConfig,
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  const baseRail = getLeftRailVisibility(activeViewingRole, currentUserRoles);
+  const leftRailVisibility = {
+    ...baseRail,
+    keyDates:
+      Boolean(keyDatesConfig.enabled) &&
+      currentUserKeyDatePermissions.includes('keydate:view'),
+  };
+
+  // Data-layer filtering of key dates for restricted (staff) matters and team scoping (R32, R37):
+  const permittedDiaryTeamIds = new Set(
+    resolvePermittedDiaryTeamIds(user, undefined, store.teams, {
+      config: keyDatesConfig,
+      allPeople: store.people,
+      teams: store.teams,
+    }),
+  );
+  const matterByIdForKd = new Map(store.matters.map((m) => [m.id, m]));
+  const visibleKeyDates: KeyDate[] = currentUserKeyDatePermissions.includes('keydate:view')
+    ? (store.keyDates ?? []).filter((kd) => {
+        if (!permittedDiaryTeamIds.has(kd.teamId)) return false;
+        if (!kd.matterId) return true;
+        const m = matterByIdForKd.get(kd.matterId);
+        return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
+      })
+    : [];
+  const visibleKeyDateIdSet = new Set(visibleKeyDates.map((kd) => kd.id));
+  const visibleKeyDateNotApplicable: KeyDateNotApplicable[] = currentUserKeyDatePermissions.includes('keydate:view')
+    ? (store.keyDateNotApplicable ?? []).filter((na) => {
+        const m = matterByIdForKd.get(na.matterId);
+        return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
+      })
+    : [];
+  const visibleKeyDateReminderStates: KeyDateReminderState[] = (store.keyDateReminderStates ?? []).filter(
+    (rs) => visibleKeyDateIdSet.has(rs.keyDateId),
+  );
+  const visibleKeyDateCalendarSyncs: KeyDateCalendarSync[] = (store.keyDateCalendarSyncs ?? []).filter(
+    (cs) => visibleKeyDateIdSet.has(cs.keyDateId),
+  );
 
   // If the current user is a demo user with showsWorkOfId, resolve the underlying employee for personal panels
   const effectiveWorkPerson: Person =
@@ -517,6 +763,14 @@ export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
     currentUserRole,
     currentUserRoles,
     currentUserEmployeePermissions,
+    currentUserPermissions,
+    currentUserKeyDatePermissions,
+    keyDatesConfig,
+    keyDates: visibleKeyDates,
+    keyDateNotApplicable: visibleKeyDateNotApplicable,
+    keyDateReminderStates: visibleKeyDateReminderStates,
+    keyDateCalendarSyncs: visibleKeyDateCalendarSyncs,
+    rbacConfig,
     orgStructure,
     matterPartyTaxonomy: store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values),
     matterPartyMigrationReport: store.matterPartyMigrationReport,
@@ -1089,8 +1343,12 @@ export function savePersonRecord(
     if (openMatters.length > 0) {
       // Flag to Risk & Compliance so an information barrier can be considered
       const riskOfficerId =
-        store.people.find((p) => p.employeeRoleId === 'employee_role.risk_and_compliance')?.id ??
-        'P-000003';
+        store.people.find(
+          (p) =>
+            p.isEmployee &&
+            (p.roles?.includes('risk_compliance') ||
+              p.employeeRoleId === 'employee_role.risk_and_compliance'),
+        )?.id ?? opts.byId;
       store.notifications.unshift({
         id: nextId(store, 'NTF'),
         recipientId: riskOfficerId,
@@ -1125,8 +1383,6 @@ export function savePersonRecord(
             ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
             ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
             ...(m.teamMemberIds ?? []),
-            riskOfficerId,
-            'P-000004',
           ]);
           m.restrictedAccessUserIds = Array.from(allowed);
         }
@@ -1261,6 +1517,16 @@ export function savePersonRecord(
       ? { employeePermissions: input.employeePermissions }
       : existing?.employeePermissions !== undefined
         ? { employeePermissions: existing.employeePermissions }
+        : {}),
+    ...(input.documentPermissions !== undefined
+      ? { documentPermissions: input.documentPermissions }
+      : existing?.documentPermissions !== undefined
+        ? { documentPermissions: existing.documentPermissions }
+        : {}),
+    ...(input.permissionOverrides !== undefined
+      ? { permissionOverrides: input.permissionOverrides }
+      : existing?.permissionOverrides !== undefined
+        ? { permissionOverrides: existing.permissionOverrides }
         : {}),
     ...(input.appRole !== undefined
       ? { appRole: input.appRole }
@@ -1844,6 +2110,7 @@ export function saveMatterRecord(
     id?: string;
     byId: string;
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
+    enforceKeyDateGates?: boolean;
   },
 ): { matter: Matter; errors?: Record<string, string> } {
   const store = getStore();
@@ -1858,6 +2125,53 @@ export function saveMatterRecord(
     if (!input.clientId) errors.clientId = 'Client (instructing entity or individual) is required.';
     if (!input.practiceAreaId) errors.practiceAreaId = 'Practice area is required.';
     if (!input.workTypeSubcategoryId) errors.workTypeSubcategoryId = 'Work type subcategory is required.';
+  }
+
+  // Enforce Key Dates opening & closure gates (§1)
+  const kdConfig = getKeyDatesConfig(store);
+  if (kdConfig.enabled && !isDraftSave) {
+    const targetMatterId = existing?.id;
+    const targetMatterTypeId =
+      input.matterTypeId ||
+      existing?.matterTypeId ||
+      input.practiceAreaId ||
+      existing?.practiceAreaId;
+    const nextStatusId = input.matterStatusId ?? existing?.matterStatusId ?? '';
+    const nextStatusLabel = resolveLabel(store.values, nextStatusId) || nextStatusId;
+    const isClosing =
+      nextStatusLabel.toLowerCase() === 'closed' ||
+      nextStatusLabel.toLowerCase() === 'archived' ||
+      nextStatusId === 'matter_status.closed';
+
+    if (targetMatterId) {
+      const matterKds = (store.keyDates ?? []).filter(
+        (kd) => kd.matterId === targetMatterId,
+      );
+      const matterNas = (store.keyDateNotApplicable ?? []).filter(
+        (na) => na.matterId === targetMatterId,
+      );
+
+      if (isClosing) {
+        const closeGate = evaluateMatterKeyDateClosureGate(
+          kdConfig,
+          targetMatterTypeId,
+          matterKds,
+        );
+        if (!closeGate.canClose) {
+          errors.keyDates = `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`;
+        }
+      } else if (opts.enforceKeyDateGates) {
+        const openGate = evaluateMatterKeyDateOpeningGate(
+          kdConfig,
+          targetMatterTypeId,
+          matterKds,
+          matterNas,
+        );
+        if (!openGate.canOpen) {
+          errors.keyDates = `Matter cannot open until required key date(s) are recorded or marked not applicable: ${openGate.missingKeyDateTypes.map((t) => t.label).join(', ')}.`;
+        }
+      }
+    }
   }
 
   if (Object.keys(errors).length > 0) {
@@ -2307,6 +2621,14 @@ export function saveMatterRecord(
       ...(input.fieldValues ?? {}),
     },
     conflictCheckRecord: resolvedConflictCheckRecord,
+    owningDepartmentId:
+      input.owningDepartmentId !== undefined
+        ? input.owningDepartmentId
+        : existing?.owningDepartmentId,
+    owningTeamId:
+      input.owningTeamId !== undefined
+        ? input.owningTeamId
+        : existing?.owningTeamId,
     ...computeStaffMatterStatus(
       {
         clientId: effectiveClientId,
@@ -2327,6 +2649,15 @@ export function saveMatterRecord(
       },
       store.people,
     ),
+    ...(input.isStaffMatter !== undefined
+      ? { isStaffMatter: input.isStaffMatter }
+      : {}),
+    ...(input.hasEthicalWall !== undefined
+      ? { hasEthicalWall: input.hasEthicalWall }
+      : {}),
+    ...(input.restrictedAccessUserIds !== undefined
+      ? { restrictedAccessUserIds: input.restrictedAccessUserIds }
+      : {}),
   };
 
   // Ensure full conflict check record, risk assessment snapshot, and immutable matter opening snapshot are persisted
@@ -2534,6 +2865,15 @@ export function saveMatterRecord(
         comments: [],
       });
     }
+  }
+
+  if (existing) {
+    syncMatterLifecycleOnSaveSync({
+      matter,
+      previousMatter: existing,
+      userId: opts.byId,
+      store,
+    });
   }
 
   saveStore(store);
@@ -2820,6 +3160,12 @@ export function addChoiceValue(
     meta: input.meta && Object.keys(input.meta).length > 0 ? input.meta : undefined,
   };
   store.values.push(val);
+  if (input.listKey === 'employee_role' && store.homePagesConfig) {
+    store.homePagesConfig.roles = syncHomeRolesWithEmployeeRoles(
+      store.homePagesConfig.roles,
+      store.values,
+    );
+  }
   writeAudit(store, {
     recordType: 'list',
     recordId: input.listKey,
@@ -2861,6 +3207,14 @@ export function updateChoiceValue(
   if (patch.active !== undefined) val.active = patch.active;
   if (patch.meta !== undefined) {
     val.meta = { ...(val.meta ?? {}), ...patch.meta };
+  }
+  if (val.listKey === 'employee_role' && store.homePagesConfig) {
+    store.homePagesConfig.roles = syncHomeRolesWithEmployeeRoles(
+      store.homePagesConfig.roles,
+      store.values,
+    );
+  }
+  if (false) {
   }
 
   writeAudit(store, {
@@ -3268,24 +3622,74 @@ export function updateEmployeeRoleSetting(
   personId: string,
   appRole: AppRole | null,
   byId: string,
-): void {
+  options: { mfaVerified?: boolean } = {},
+): { ok: boolean; code?: string; error?: string } {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId);
   const person = store.people.find((p) => p.id === personId && p.isEmployee);
-  if (!person) return;
-  const before = person.appRole ?? 'auto';
+  if (!actor) return { ok: false, error: 'Acting user not found.' };
+  if (!person) return { ok: false, error: 'Employee not found.' };
+
+  const rbacConfig = getDefaultTenantRbacConfig();
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: options.mfaVerified ?? false,
+  });
+
+  const addedRoleKeys: string[] =
+    appRole === 'admin'
+      ? [
+          'admin',
+          'managing_partner',
+          'partner',
+          'fee_earner',
+          'legal_secretary',
+          'enquiries_coordinator',
+          'finance',
+          'risk_compliance',
+        ]
+      : appRole === 'team_lead'
+        ? ['partner', 'fee_earner']
+        : appRole === 'call_handler'
+          ? ['enquiries_coordinator']
+          : appRole === 'fee_earner'
+            ? ['fee_earner']
+            : [];
+
+  try {
+    validateUserOverrideOrRoleMutation({
+      actorPermissions: actorPerms,
+      targetPersonId: person.id,
+      addedRoleKeys,
+      rbacConfig,
+    });
+  } catch (err) {
+    const code = err instanceof AuthorisationError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      code,
+      error: code ? `${code}: ${message}` : message,
+    };
+  }
+
+  const beforeJson = JSON.stringify({ appRole: person.appRole ?? null });
   person.appRole = appRole;
   person.updatedAt = new Date().toISOString();
   person.updatedById = byId;
+  const afterJson = JSON.stringify({ appRole: person.appRole ?? null });
   writeAudit(store, {
     recordType: 'person',
     recordId: person.id,
     action: 'update',
     field: 'App role',
-    oldValue: String(before),
-    newValue: String(appRole ?? 'auto'),
+    oldValue: beforeJson,
+    newValue: afterJson,
     byId,
   });
   saveStore(store);
+  return { ok: true };
 }
 
 export function saveEnquirySettingsRecord(
@@ -3627,6 +4031,9 @@ export function takeTaskRecord(taskId: string, byId: string): { task?: Task; err
   const store = getStore();
   const existing = store.tasks.find((t) => t.id === taskId);
   if (!existing) return { error: 'Task not found.' };
+  if (!canUserTakeTask(byId, existing, store.teams, store.people, store.values)) {
+    return { error: 'You do not have permission to claim this task.' };
+  }
   return saveTaskRecord(
     {
       id: existing.id,
@@ -4733,7 +5140,7 @@ export function prepareEnquiryConversion(
 
   // If enquiry was made on behalf of a business, link or create the Organisation and link caller as contact
   let clientId = personId;
-  let instructingContactId: string | null = personId;
+  const instructingContactId: string | null = personId;
 
   if (opts.createForBusiness || enq.callingOnBehalfOf.trim() || opts.useOrganisationId || enq.linkedOrganisationId) {
     let orgId = opts.useOrganisationId || enq.linkedOrganisationId;
@@ -4848,6 +5255,25 @@ function finalizeEnquiryConversionToMatter(
     byId,
     now,
   );
+
+  // Carry enquiry key dates across to the converted matter (`source: 'carried_from_enquiry'`) (§1)
+  const kdConfig = getKeyDatesConfig(store);
+  if (kdConfig.enabled) {
+    store.keyDates = store.keyDates ?? [];
+    carryEnquiryKeyDatesToMatter({
+      enquiry: enq,
+      matter,
+      keyDates: store.keyDates,
+      tasks: store.tasks,
+      teams: store.teams,
+      config: kdConfig,
+      actorId: byId,
+      nowIso: now,
+      nextKeyDateId: () => nextId(store, 'KD'),
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+  }
 
   // Automatic task: Complete matter opening (5 working days) once the matter has a real reference (or if none exists yet)
   const hasCompleteOpeningTask = store.tasks.some(
@@ -5597,6 +6023,7 @@ export function resetHomePagesConfig(byId: string): { ok: boolean; config: HomeP
   defaults.firmSettings.demoMode = preservedDemo;
   defaults.updatedById = byId;
 
+  defaults.roles = syncHomeRolesWithEmployeeRoles(defaults.roles, store.values);
   store.homePagesConfig = defaults;
   writeAudit(store, {
     recordType: 'system',
@@ -5650,6 +6077,19 @@ export function addHomeRole(
     isBuiltIn: false,
   };
 
+  const empRoleId = `employee_role.${key}`;
+  newRole.employeeRoleId = empRoleId;
+  if (!store.values.some((v) => v.id === empRoleId)) {
+    store.values.push({
+      id: empRoleId,
+      listKey: 'employee_role',
+      label: cleanLabel,
+      description: newRole.purpose,
+      parentId: null,
+      sortOrder: nextSortOrder(store.values, 'employee_role'),
+      active: true,
+    });
+  }
   store.homePagesConfig.roles.push(newRole);
   store.homePagesConfig.updatedAt = nowIso;
   store.homePagesConfig.updatedById = byId;
@@ -5676,13 +6116,54 @@ export function updateEmployeeRolesAndSupports(
     supportsIds?: string[];
   },
   byId: string,
-): { ok: boolean; error?: string } {
+  options: { mfaVerified?: boolean } = {},
+): { ok: boolean; code?: string; error?: string } {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId);
   const person = store.people.find((p) => p.id === personId);
+  if (!actor) return { ok: false, error: 'Acting user not found.' };
   if (!person) return { ok: false, error: 'Employee not found.' };
+
+  const rbacConfig = getDefaultTenantRbacConfig();
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: options.mfaVerified ?? false,
+  });
+
+  const prevRoles = new Set<string>(person.roles ?? []);
+  const nextRoles =
+    input.roles !== undefined
+      ? Array.from(new Set(input.roles))
+      : Array.from(prevRoles);
+  const addedRoleKeys = nextRoles.filter((rk) => !prevRoles.has(rk));
+
+  try {
+    validateUserOverrideOrRoleMutation({
+      actorPermissions: actorPerms,
+      targetPersonId: person.id,
+      addedRoleKeys,
+      rbacConfig,
+    });
+  } catch (err) {
+    const code = err instanceof AuthorisationError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      code,
+      error: code ? `${code}: ${message}` : message,
+    };
+  }
+
+  const beforeJson = JSON.stringify({
+    roles: person.roles ?? [],
+    supportsIds: person.supportsIds ?? [],
+  });
 
   if (input.roles && input.roles.length > 0) {
     person.roles = Array.from(new Set(input.roles));
+  } else if (input.roles && input.roles.length === 0) {
+    person.roles = [];
   }
   if (input.supportsIds) {
     person.supportsIds = Array.from(new Set(input.supportsIds));
@@ -5690,18 +6171,232 @@ export function updateEmployeeRolesAndSupports(
   person.updatedAt = new Date().toISOString();
   person.updatedById = byId;
 
+  const afterJson = JSON.stringify({
+    roles: person.roles ?? [],
+    supportsIds: person.supportsIds ?? [],
+  });
+
   writeAudit(store, {
     recordType: 'person',
     recordId: person.id,
     action: 'update',
     field: 'Roles & supported fee earners',
-    oldValue: null,
-    newValue: `roles=[${(person.roles ?? []).join(', ')}], supports=[${(person.supportsIds ?? []).join(', ')}]`,
+    oldValue: beforeJson,
+    newValue: afterJson,
     byId,
   });
 
   saveStore(store);
   return { ok: true };
+}
+
+/**
+ * Updates a target person's unified `permissionOverrides` (`grant` / `revoke`) and/or `entraObjectId`.
+ * Enforces `rbac:manage_user_overrides` + MFA + blocks self-modification + blocks granting unheld permissions,
+ * and writes a before/after audit entry (ADR-0015).
+ */
+export function updatePersonPermissionOverrides(
+  personId: string,
+  input: {
+    grant: PermissionKey[];
+    revoke: PermissionKey[];
+    reason?: string;
+    entraObjectId?: string | null;
+  },
+  byId: string,
+  options: { mfaVerified?: boolean } = {},
+): { ok: boolean; code?: string; error?: string; person?: Person } {
+  const store = getStore();
+  const actor = store.people.find((p) => p.id === byId);
+  const target = store.people.find((p) => p.id === personId);
+  if (!actor) return { ok: false, error: 'Acting user not found.' };
+  if (!target) return { ok: false, error: 'Target employee not found.' };
+
+  const rbacConfig = getDefaultTenantRbacConfig();
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: options.mfaVerified ?? false,
+  });
+
+  const cleanGrant = Array.from(
+    new Set((input.grant ?? []).filter(isRegisteredPermissionKey)),
+  );
+  const cleanRevoke = Array.from(
+    new Set((input.revoke ?? []).filter(isRegisteredPermissionKey)),
+  );
+  const prevGrant = new Set<PermissionKey>(
+    target.permissionOverrides?.grant ?? [],
+  );
+  const newlyAddedPermissions = cleanGrant.filter((p) => !prevGrant.has(p));
+
+  try {
+    validateUserOverrideOrRoleMutation({
+      actorPermissions: actorPerms,
+      targetPersonId: target.id,
+      addedPermissions: newlyAddedPermissions,
+      rbacConfig,
+    });
+  } catch (err) {
+    const code = err instanceof AuthorisationError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      code,
+      error: code ? `${code}: ${message}` : message,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const beforeSummary = JSON.stringify({
+    permissionOverrides: target.permissionOverrides ?? null,
+    entraObjectId: target.entraObjectId ?? null,
+  });
+
+  target.permissionOverrides = {
+    grant: cleanGrant,
+    revoke: cleanRevoke.filter((p) => !cleanGrant.includes(p)),
+    ...(input.reason?.trim() ? { reason: input.reason.trim() } : {}),
+    updatedAt: nowIso,
+    updatedByUserId: byId,
+  };
+  // Clear deprecated override fields once unified permissionOverrides is saved
+  delete target.employeePermissions;
+  delete target.documentPermissions;
+
+  if (input.entraObjectId !== undefined) {
+    target.entraObjectId = input.entraObjectId?.trim() || null;
+  }
+  target.updatedAt = nowIso;
+  target.updatedById = byId;
+
+  const afterSummary = JSON.stringify({
+    permissionOverrides: target.permissionOverrides,
+    entraObjectId: target.entraObjectId ?? null,
+  });
+
+  writeAudit(store, {
+    recordType: 'person',
+    recordId: target.id,
+    action: 'update',
+    field: 'Permission overrides & Entra ID binding',
+    oldValue: beforeSummary,
+    newValue: afterSummary,
+    byId,
+    at: nowIso,
+  });
+
+  saveStore(store);
+  return { ok: true, person: target };
+}
+
+/**
+ * Updates the tenant's RBAC configuration (`roles`, `departmentGrants`, `relationshipGrants`, `identityMapping`).
+ * Enforces `rbac:manage_config` + MFA, validates all permission and role keys, and writes a before/after audit log.
+ */
+export function updateTenantRbacConfig(
+  patch: Partial<RbacConfiguration>,
+  byId: string,
+  options: { mfaVerified?: boolean } = {},
+): { ok: boolean; code?: string; error?: string; rbacConfig?: RbacConfiguration } {
+  const store = getStore();
+  const actor = store.people.find((p) => p.id === byId);
+  if (!actor) return { ok: false, error: 'Acting user not found.' };
+
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: options.mfaVerified ?? false,
+  });
+
+  try {
+    requirePermission(
+      actorPerms,
+      'rbac:manage_config',
+      'update tenant RBAC and Entra ID configuration',
+    );
+  } catch (err) {
+    const code = err instanceof AuthorisationError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      code,
+      error: code ? `${code}: ${message}` : message,
+    };
+  }
+
+  const currentRbac = getDefaultTenantRbacConfig();
+  const knownRoleKeys = new Set<string>([
+    ...Object.keys(currentRbac.roles),
+    ...Object.keys(patch.roles ?? {}),
+  ]);
+
+  // Validate permission keys in roles and departmentGrants
+  for (const [roleKey, roleDef] of Object.entries(patch.roles ?? {})) {
+    for (const perm of roleDef?.permissions ?? []) {
+      if (!isRegisteredPermissionKey(perm)) {
+        return {
+          ok: false,
+          error: `Role "${roleKey}" references unknown permission "${perm}".`,
+        };
+      }
+    }
+  }
+  for (const [deptId, perms] of Object.entries(patch.departmentGrants ?? {})) {
+    for (const perm of perms ?? []) {
+      if (!isRegisteredPermissionKey(perm)) {
+        return {
+          ok: false,
+          error: `Department "${deptId}" references unknown permission "${perm}".`,
+        };
+      }
+    }
+  }
+  if (patch.identityMapping) {
+    for (const [groupKey, rks] of Object.entries(
+      patch.identityMapping.entraGroupToRoleKey ?? {},
+    )) {
+      for (const rk of rks) {
+        if (!knownRoleKeys.has(rk)) {
+          return {
+            ok: false,
+            error: `Entra group "${groupKey}" maps to unknown role key "${rk}".`,
+          };
+        }
+      }
+    }
+    for (const [appRole, rks] of Object.entries(
+      patch.identityMapping.entraAppRoleToRoleKey ?? {},
+    )) {
+      for (const rk of rks) {
+        if (!knownRoleKeys.has(rk)) {
+          return {
+            ok: false,
+            error: `Entra app role "${appRole}" maps to unknown role key "${rk}".`,
+          };
+        }
+      }
+    }
+  }
+
+  const beforeJson = JSON.stringify(currentRbac);
+  const nextRbac = mergeRbacConfigOverlay(currentRbac, patch);
+  store.rbacConfigOverride = nextRbac;
+  setRuntimeRbacConfigOverride(nextRbac);
+
+  writeAudit(store, {
+    recordType: 'system',
+    recordId: 'TENANT-RBAC-CONFIG',
+    action: 'update',
+    field: 'Tenant RBAC & Entra ID Identity Mapping',
+    oldValue: beforeJson,
+    newValue: JSON.stringify(nextRbac),
+    byId,
+    at: new Date().toISOString(),
+  });
+
+  saveStore(store);
+  return { ok: true, rbacConfig: nextRbac };
 }
 
 export function approveSignOff(
@@ -5731,6 +6426,7 @@ export function approveSignOff(
   saveStore(store);
   return { ok: true };
 }
+
 
 export function discussSignOff(
   signOffId: string,
@@ -5764,6 +6460,7 @@ export function discussSignOff(
   saveStore(store);
   return { ok: true };
 }
+
 
 export function requestMatterBill(
   matterCode: string,
@@ -5870,6 +6567,7 @@ export function remindTeamLeadOverdueCompliance(
   return { ok: true };
 }
 
+
 export function recordInvoiceCreditControlAction(
   input: {
     invoiceNumber: string;
@@ -5946,6 +6644,7 @@ export function recordInvoiceCreditControlAction(
   saveStore(store);
   return { ok: true };
 }
+
 
 export function saveOrgStructure(
   nextCatalogue: OrgStructureCatalogue,
@@ -7036,6 +7735,1393 @@ export function syncMatterCostsRatesFromPms(
   saveStore(store);
   return next;
 }
+
+export function resolveOrProvisionEntraEmployee(
+  claims: EntraIdRawTokenClaims & Record<string, unknown>,
+): {
+  person: Person;
+  verifiedToken: VerifiedOidcTokenClaims;
+  rbacConfig: RbacConfiguration;
+} {
+  const store = getStore();
+  const rbacConfig = getDefaultTenantRbacConfig();
+  const { person: matchedPerson, verifiedToken } = resolvePersonForEntraClaims({
+    claims,
+    people: store.people,
+    teams: store.teams,
+    rbacConfig,
+  });
+
+  const now = new Date().toISOString();
+  const oid = claims.oid?.trim() || verifiedToken.sub;
+  const claimEmail = (
+    claims.email ||
+    claims.preferred_username ||
+    claims.upn ||
+    ''
+  ).trim();
+  const authorityMode = rbacConfig.identityMapping?.authorityMode ?? 'hybrid';
+
+  if (matchedPerson) {
+    const prevOid = matchedPerson.entraObjectId?.trim() || null;
+    const matchedByEmailOnly = !prevOid && Boolean(oid);
+    if (matchedByEmailOnly && oid) {
+      matchedPerson.entraObjectId = oid;
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: matchedPerson.id,
+        action: 'update',
+        field: 'Entra ID Email Link',
+        oldValue: 'unlinked',
+        newValue: `Linked email ${claimEmail || 'unknown'} to Entra oid=${oid}`,
+        byId: matchedPerson.id,
+        at: now,
+      });
+    }
+    if (authorityMode === 'token_only') {
+      matchedPerson.roles = [...verifiedToken.roles];
+      matchedPerson.appRole = matchedPerson.roles.includes('admin')
+        ? 'admin'
+        : matchedPerson.roles.length > 0
+          ? 'fee_earner'
+          : null;
+      if (matchedPerson.roles.length === 0) {
+        matchedPerson.employeeRoleId = null;
+      } else if (matchedPerson.roles.includes('admin')) {
+        matchedPerson.employeeRoleId = 'employee_role.system_administrator';
+      }
+    }
+    matchedPerson.updatedAt = now;
+    writeAudit(store, {
+      recordType: 'person',
+      recordId: matchedPerson.id,
+      action: 'update',
+      field: 'Entra ID OIDC Sign-In',
+      oldValue: prevOid ? `oid=${prevOid}` : 'unlinked',
+      newValue: `oid=${oid}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}`,
+      byId: matchedPerson.id,
+      at: now,
+    });
+    saveStore(store);
+    return { person: matchedPerson, verifiedToken, rbacConfig };
+  }
+
+  // Provision a linked employee record for this authenticated Entra user (R52: no default 'admin' or hardcoded 'DEPT-EXEC')
+  const rawName =
+    (typeof claims.name === 'string' && claims.name.trim()) ||
+    claimEmail.split('@')[0] ||
+    'Entra User';
+  const nameParts = rawName.split(/\s+/).filter(Boolean);
+  const firstName = nameParts[0] || 'Entra';
+  const surname = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'User';
+
+  const defaultRoleKeys = rbacConfig.identityMapping?.defaultRoleKeys ?? [];
+  const mappedRoles =
+    verifiedToken.roles.length > 0
+      ? [...verifiedToken.roles]
+      : [...defaultRoleKeys];
+  const isAdmin = mappedRoles.includes('admin');
+  const isPartner =
+    mappedRoles.includes('managing_partner') || mappedRoles.includes('partner');
+
+  const newId = nextId(store, 'P');
+  const newEmployee: Person = {
+    id: newId,
+    recordType: 'person',
+    recordOwnerId: newId,
+    recordStatusId: 'person_record_status.active',
+    createdById: newId,
+    createdAt: now,
+    updatedById: newId,
+    updatedAt: now,
+    sourceId: null,
+    lastVerifiedAt: now,
+    tags: ['entra-id'],
+    duplicateStatusId: 'duplicate_status.none',
+    notDuplicateOf: [],
+    possibleMatchIds: [],
+    mergedIntoId: null,
+    lastInteractionAt: now,
+    customFields: {},
+    titleId: null,
+    firstName,
+    middleNames: '',
+    surname,
+    preferredName: '',
+    dateOfBirth: null,
+    otherNames: [],
+    jobTitle: isAdmin
+      ? 'System Administrator (Entra ID)'
+      : isPartner
+        ? 'Partner (Entra ID)'
+        : mappedRoles.length > 0
+          ? 'Solicitor (Entra ID)'
+          : 'Unassigned Employee (Entra ID)',
+    emails: claimEmail
+      ? [
+          {
+            id: `em-${newId}-1`,
+            address: claimEmail,
+            typeId: 'email_type.work',
+            isPrimary: true,
+          },
+        ]
+      : [],
+    phones: [],
+    preferredContactMethodId: null,
+    preferredLanguageId: null,
+    addresses: [],
+    website: '',
+    relationshipOwnerId: null,
+    relationshipStatusId: null,
+    relationshipStandingId: null,
+    relationshipRoleIds: [],
+    originId: null,
+    firstKnownAt: now.slice(0, 10),
+    engagementLevelId: null,
+    interests: '',
+    relationshipNotes: '',
+    marketingConsentId: null,
+    consentRecord: '',
+    verificationStatusId: null,
+    verifiedAt: null,
+    verificationMethodId: null,
+    verificationReviewerId: null,
+    riskReferences: '',
+    isEmployee: true,
+    employeeRoleId: isAdmin
+      ? 'employee_role.system_administrator'
+      : isPartner
+        ? 'employee_role.partner'
+        : mappedRoles.length > 0
+          ? 'employee_role.solicitor'
+          : null,
+    departmentId: null,
+    appRole: isAdmin ? 'admin' : mappedRoles.length > 0 ? 'fee_earner' : null,
+    roles: mappedRoles,
+    entraObjectId: oid,
+  };
+
+  store.people.push(newEmployee);
+  writeAudit(store, {
+    recordType: 'person',
+    recordId: newEmployee.id,
+    action: 'create',
+    field: 'Entra ID OIDC Provisioned Employee',
+    oldValue: null,
+    newValue: `oid=${oid}; roles=${mappedRoles.join(',')}; mfa=${verifiedToken.mfaVerified}`,
+    byId: newEmployee.id,
+    at: now,
+  });
+  saveStore(store);
+
+  return { person: newEmployee, verifiedToken, rbacConfig };
+}
+
+// ============================================================================
+// Key Dates & Limitation Module Service Functions (§1–§9)
+// ============================================================================
+
+function resolveActorForKeyDates(store: FirmStore, byId: string): Person | null {
+  if (!byId || !byId.trim()) return null;
+  return (
+    store.people.find((p) => p.id === byId && p.isEmployee && !p.mergedIntoId) ??
+    null
+  );
+}
+
+function assertKeyDatesModuleEnabled(
+  config: KeyDatesConfig,
+): { ok: false; error: string } | null {
+  if (!config.enabled) {
+    return {
+      ok: false,
+      error:
+        'KEY_DATES_MODULE_DISABLED: The Key Dates & Limitation module is disabled for this tenant.',
+    };
+  }
+  return null;
+}
+
+export function getMatterKeyDatesSnapshot(
+  matterId: string,
+  userId: string = DEFAULT_USER_ID,
+): {
+  keyDates: KeyDate[];
+  keyDateNotApplicable: KeyDateNotApplicable[];
+  keyDateReminderStates: KeyDateReminderState[];
+  keyDateCalendarSyncs: KeyDateCalendarSync[];
+} {
+  const store = getStore();
+  const user = resolveActorForKeyDates(store, userId);
+  const config = getKeyDatesConfig(store);
+  if (
+    !user ||
+    !hasKeyDatePermission(user, 'keydate:view', {
+      config,
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      keyDates: [],
+      keyDateNotApplicable: [],
+      keyDateReminderStates: [],
+      keyDateCalendarSyncs: [],
+    };
+  }
+  const matter = store.matters.find((m) => m.id === matterId);
+  if (!matter || !canViewerAccessMatterKeyDates(matter, user.id, user, store.people)) {
+    return {
+      keyDates: [],
+      keyDateNotApplicable: [],
+      keyDateReminderStates: [],
+      keyDateCalendarSyncs: [],
+    };
+  }
+  const keyDates = (store.keyDates ?? []).filter((kd) => kd.matterId === matter.id);
+  const keyDateIdSet = new Set(keyDates.map((kd) => kd.id));
+  const keyDateNotApplicable = (store.keyDateNotApplicable ?? []).filter(
+    (na) => na.matterId === matter.id,
+  );
+  const keyDateReminderStates = (store.keyDateReminderStates ?? []).filter((rs) =>
+    keyDateIdSet.has(rs.keyDateId),
+  );
+  const keyDateCalendarSyncs = (store.keyDateCalendarSyncs ?? []).filter((cs) =>
+    keyDateIdSet.has(cs.keyDateId),
+  );
+  return {
+    keyDates,
+    keyDateNotApplicable,
+    keyDateReminderStates,
+    keyDateCalendarSyncs,
+  };
+}
+
+export function previewLimitationCalculationRecord(
+  input: {
+    ruleSetId: string;
+    ruleId: string;
+    triggerValues: Record<string, string>;
+    standstillPeriods?: StandstillPeriod[];
+    calendarCodeOverride?: string;
+  },
+  byId: string = DEFAULT_USER_ID,
+): { ok: boolean; result?: CalculationResult; error?: string } {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    if (
+      !hasKeyDatePermission(actor, 'keydate:view', {
+        config,
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return {
+        ok: false,
+        error:
+          'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to preview limitation calculations.',
+      };
+    }
+    const found = findLimitationRule(config, input.ruleSetId, input.ruleId);
+    if (!found) {
+      return {
+        ok: false,
+        error: `Rule "${input.ruleId}" in rule set "${input.ruleSetId}" was not found.`,
+      };
+    }
+    const calCode =
+      input.calendarCodeOverride ||
+      found.rule.calendarId ||
+      config.businessCalendars?.[0]?.id;
+    const calendar = findBusinessCalendar(config, calCode);
+    const result = calculateLimitationDate(
+      found.rule,
+      {
+        ...input.triggerValues,
+        ...(input.standstillPeriods ? { standstillPeriods: input.standstillPeriods } : {}),
+      },
+      calendar,
+      { ruleSetReviewStatus: found.ruleSet.reviewStatus },
+    );
+    return { ok: true, result };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Calculation failed.',
+    };
+  }
+}
+
+export async function createOrProposeKeyDateRecord(
+  input: {
+    matterId?: string;
+    enquiryId?: string;
+    keyDateTypeId: string;
+    title?: string;
+    dueDate: string;
+    dueTime?: string;
+    isCritical?: boolean;
+    source?: KeyDateSource;
+    teamId?: string;
+    responsiblePersonIds?: string[];
+    calculation?: KeyDateCalculation;
+    notes?: string;
+    sourceDocumentId?: string;
+    intent?: 'provisional' | 'propose';
+  },
+  byId: string = DEFAULT_USER_ID,
+): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
+
+    const matter = input.matterId
+      ? store.matters.find((m) => m.id === input.matterId) ?? null
+      : null;
+    const enquiry = input.enquiryId
+      ? store.enquiries.find((e) => e.id === input.enquiryId) ?? null
+      : null;
+
+    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    store.keyDates = store.keyDates ?? [];
+    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
+    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
+
+    const kd = createOrProposeKeyDate({
+      id: nextId(store, 'KD'),
+      matter,
+      enquiry,
+      keyDateTypeId: input.keyDateTypeId,
+      title: input.title,
+      dueDate: input.dueDate,
+      dueTime: input.dueTime,
+      isCritical: input.isCritical,
+      source: input.source,
+      teamId: input.teamId,
+      responsiblePersonIds: input.responsiblePersonIds,
+      calculation: input.calculation,
+      notes: input.notes,
+      sourceDocumentId: input.sourceDocumentId,
+      intent: input.intent,
+      actor,
+      nowIso,
+      config,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    store.keyDates.unshift(kd);
+
+    if (kd.status === 'confirmed') {
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
+        config,
+        tasks: store.tasks,
+        reminderStates: store.keyDateReminderStates,
+        matters: store.matters,
+        todayIso,
+        nowIso,
+        actorId: actor.id,
+        tenantId: store.firmId,
+        nextTaskId: () => nextId(store, 'TSK'),
+      });
+    }
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: store.keyDateCalendarSyncs,
+      nowIso,
+    });
+
+    saveStore(store);
+    return { ok: true, keyDate: kd };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to create key date.',
+    };
+  }
+}
+
+export async function proposeProvisionalKeyDateRecord(
+  keyDateId: string,
+  byId: string = DEFAULT_USER_ID,
+): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
+
+    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
+    if (!kd) return { ok: false, error: 'Key date not found.' };
+
+    const matter = kd.matterId
+      ? store.matters.find((m) => m.id === kd.matterId) ?? null
+      : null;
+    const enquiry = kd.enquiryId
+      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
+      : null;
+
+    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    proposeProvisionalKeyDate({
+      keyDate: kd,
+      actor,
+      nowIso,
+      config,
+      matter,
+      enquiry,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    if (kd.status === 'confirmed') {
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
+        config,
+        tasks: store.tasks,
+        reminderStates: store.keyDateReminderStates ?? [],
+        matters: store.matters,
+        todayIso,
+        nowIso,
+        actorId: actor.id,
+        tenantId: store.firmId,
+        nextTaskId: () => nextId(store, 'TSK'),
+      });
+    }
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: store.keyDateCalendarSyncs ?? [],
+      nowIso,
+    });
+
+    saveStore(store);
+    return { ok: true, keyDate: kd };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to propose key date.',
+    };
+  }
+}
+
+export async function verifyProposedKeyDateRecord(
+  keyDateId: string,
+  byId: string = DEFAULT_USER_ID,
+): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const verifier = resolveActorForKeyDates(store, byId);
+    if (!verifier) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
+
+    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
+    if (!kd) return { ok: false, error: 'Key date not found.' };
+
+    const matter = kd.matterId
+      ? store.matters.find((m) => m.id === kd.matterId) ?? null
+      : null;
+    const enquiry = kd.enquiryId
+      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
+      : null;
+
+    if (matter && !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    verifyProposedKeyDate({
+      keyDate: kd,
+      verifier,
+      nowIso,
+      config,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
+    syncReminderForConfirmedKeyDate({
+      keyDate: kd,
+      config,
+      tasks: store.tasks,
+      reminderStates: store.keyDateReminderStates,
+      matters: store.matters,
+      todayIso,
+      nowIso,
+      actorId: verifier.id,
+      tenantId: store.firmId,
+      nextTaskId: () => nextId(store, 'TSK'),
+      transferredFromKeyDateId: kd.supersedesKeyDateId,
+    });
+
+    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: store.keyDateCalendarSyncs,
+      nowIso,
+    });
+
+    saveStore(store);
+    return { ok: true, keyDate: kd };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to verify key date.',
+    };
+  }
+}
+
+export async function rejectProposedKeyDateRecord(
+  keyDateId: string,
+  reason: string,
+  byId: string = DEFAULT_USER_ID,
+): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const verifier = resolveActorForKeyDates(store, byId);
+    if (!verifier) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+
+    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
+    if (!kd) return { ok: false, error: 'Key date not found.' };
+
+    const matter = kd.matterId
+      ? store.matters.find((m) => m.id === kd.matterId) ?? null
+      : null;
+    if (matter && !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    rejectProposedKeyDate({
+      keyDate: kd,
+      verifier,
+      reason,
+      nowIso,
+      config,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    saveStore(store);
+    return { ok: true, keyDate: kd };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to reject key date.',
+    };
+  }
+}
+
+export async function supersedeConfirmedKeyDateRecord(
+  keyDateId: string,
+  updates: {
+    title?: string;
+    dueDate: string;
+    dueTime?: string;
+    isCritical?: boolean;
+    teamId?: string;
+    responsiblePersonIds?: string[];
+    calculation?: KeyDateCalculation;
+    notes?: string;
+    intent?: 'provisional' | 'propose';
+  },
+  reason: string,
+  byId: string = DEFAULT_USER_ID,
+): Promise<{
+  ok: boolean;
+  supersededKeyDate?: KeyDate;
+  replacementKeyDate?: KeyDate;
+  error?: string;
+}> {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
+
+    const existing = (store.keyDates ?? []).find((x) => x.id === keyDateId);
+    if (!existing) return { ok: false, error: 'Key date not found.' };
+
+    const matter = existing.matterId
+      ? store.matters.find((m) => m.id === existing.matterId) ?? null
+      : null;
+    const enquiry = existing.enquiryId
+      ? store.enquiries.find((e) => e.id === existing.enquiryId) ?? null
+      : null;
+
+    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
+      existingKeyDate: existing,
+      newKeyDateId: nextId(store, 'KD'),
+      updates,
+      reason,
+      actor,
+      nowIso,
+      config,
+      matter,
+      enquiry,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    store.keyDates = store.keyDates ?? [];
+    store.keyDates.unshift(replacementKeyDate);
+    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
+    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
+
+    // Transfer the single reminder task to the superseding key date (never create a second task)
+    syncReminderForConfirmedKeyDate({
+      keyDate: replacementKeyDate,
+      config,
+      tasks: store.tasks,
+      reminderStates: store.keyDateReminderStates,
+      matters: store.matters,
+      todayIso,
+      nowIso,
+      actorId: actor.id,
+      tenantId: store.firmId,
+      nextTaskId: () => nextId(store, 'TSK'),
+      transferredFromKeyDateId: supersededKeyDate.id,
+    });
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: supersededKeyDate,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: store.keyDateCalendarSyncs,
+      nowIso,
+    });
+    await syncKeyDateToOutlookCalendar({
+      keyDate: replacementKeyDate,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: store.keyDateCalendarSyncs,
+      nowIso,
+    });
+
+    saveStore(store);
+    return { ok: true, supersededKeyDate, replacementKeyDate };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to supersede key date.',
+    };
+  }
+}
+
+export async function resolveKeyDateOutcomeRecord(
+  keyDateId: string,
+  input: {
+    kind: 'met' | 'missed' | 'waived';
+    note?: string;
+    evidenceDocumentId?: string;
+  },
+  byId: string = DEFAULT_USER_ID,
+): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+
+    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
+    if (!kd) return { ok: false, error: 'Key date not found.' };
+
+    const matter = kd.matterId
+      ? store.matters.find((m) => m.id === kd.matterId) ?? null
+      : null;
+    const enquiry = kd.enquiryId
+      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
+      : null;
+
+    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    resolveKeyDateOutcome({
+      keyDate: kd,
+      kind: input.kind,
+      note: input.note,
+      evidenceDocumentId: input.evidenceDocumentId,
+      actor,
+      nowIso,
+      config,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    closeReminderTaskForKeyDate({
+      keyDateId: kd.id,
+      tasks: store.tasks,
+      reminderStates: store.keyDateReminderStates ?? [],
+      nowIso,
+      actorId: actor.id,
+    });
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: store.keyDateCalendarSyncs ?? [],
+      nowIso,
+    });
+
+    saveStore(store);
+    return { ok: true, keyDate: kd };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to resolve key date.',
+    };
+  }
+}
+
+export async function reassignKeyDateTeamRecord(
+  keyDateId: string,
+  input: {
+    teamId: string;
+    responsiblePersonIds?: string[];
+    reason?: string;
+  },
+  byId: string = DEFAULT_USER_ID,
+  options?: { calendarAdapter?: GraphCalendarAdapter },
+): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+
+    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
+    if (!kd) return { ok: false, error: 'Key date not found.' };
+
+    const matter = kd.matterId
+      ? store.matters.find((m) => m.id === kd.matterId) ?? null
+      : null;
+    const enquiry = kd.enquiryId
+      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
+      : null;
+    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    reassignKeyDateTeamAndOwners({
+      keyDate: kd,
+      teamId: input.teamId,
+      responsiblePersonIds: input.responsiblePersonIds,
+      reason: input.reason,
+      actor,
+      nowIso,
+      config,
+      matter,
+      tasks: store.tasks,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: store.keyDateCalendarSyncs,
+      adapter: options?.calendarAdapter,
+      nowIso,
+    });
+
+    saveStore(store);
+    return { ok: true, keyDate: kd };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to reassign team diary.',
+    };
+  }
+}
+
+export function recordKeyDateNotApplicableRecord(
+  input: {
+    matterId: string;
+    keyDateTypeId: string;
+    reason: string;
+  },
+  byId: string = DEFAULT_USER_ID,
+): { ok: boolean; record?: KeyDateNotApplicable; error?: string } {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const nowIso = new Date().toISOString();
+
+    const matter = store.matters.find((m) => m.id === input.matterId);
+    if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    store.keyDateNotApplicable = store.keyDateNotApplicable ?? [];
+    const rec = recordKeyDateNotApplicable({
+      matterId: matter.id,
+      matterTypeId: matter.matterTypeId || matter.practiceAreaId,
+      keyDateTypeId: input.keyDateTypeId,
+      reason: input.reason,
+      actor,
+      nowIso,
+      config,
+      notApplicableList: store.keyDateNotApplicable,
+      teams: store.teams,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    saveStore(store);
+    return { ok: true, record: rec };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Failed to record key date as not applicable.',
+    };
+  }
+}
+
+export function acknowledgeKeyDateReminderRecord(
+  keyDateId: string,
+  byId: string = DEFAULT_USER_ID,
+): { ok: boolean; reminderState?: KeyDateReminderState; error?: string } {
+  try {
+    const store = getStore();
+    const config = getKeyDatesConfig(store);
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    if (
+      !hasKeyDatePermission(actor, 'keydate:view', {
+        config,
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return {
+        ok: false,
+        error:
+          'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to acknowledge key date reminders.',
+      };
+    }
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
+
+    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
+    if (!kd) return { ok: false, error: 'Key date not found.' };
+
+    const matter = kd.matterId
+      ? store.matters.find((m) => m.id === kd.matterId) ?? null
+      : null;
+    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    if (kd.status !== 'confirmed') {
+      return {
+        ok: false,
+        error: `KEY_DATE_INVALID_STATE: Reminders can only be acknowledged for confirmed key dates (current status: "${kd.status}").`,
+      };
+    }
+
+    const owningTeam = store.teams.find((t) => t.id === kd.teamId);
+    const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
+    const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
+    if (!isResponsiblePerson && !isOwningTeamLead) {
+      return {
+        ok: false,
+        error:
+          'KEY_DATE_PERMISSION_DENIED: Only a responsible person on the key date or the owning team lead may acknowledge a reminder stage.',
+      };
+    }
+
+    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
+    if (!store.keyDateReminderStates.some((rs) => rs.keyDateId === keyDateId)) {
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
+        config,
+        tasks: store.tasks,
+        reminderStates: store.keyDateReminderStates,
+        matters: store.matters,
+        todayIso,
+        nowIso,
+        actorId: actor.id,
+        tenantId: store.firmId,
+        nextTaskId: () => nextId(store, 'TSK'),
+      });
+    }
+
+    const state = acknowledgeKeyDateReminderStage({
+      keyDateId,
+      actorId: actor.id,
+      nowIso,
+      reminderStates: store.keyDateReminderStates,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
+    });
+
+    saveStore(store);
+    return { ok: true, reminderState: state };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Failed to acknowledge key date reminder.',
+    };
+  }
+}
+
+export function runKeyDateReminderSchedulerRecord(
+  contextOrOptions?:
+    | {
+        tenantCtx?: TenantContext | null;
+        byId?: string;
+        mfaVerified?: boolean;
+      }
+    | TenantContext
+    | string
+    | null,
+  byIdArg?: string,
+  optionsArg?: { mfaVerified?: boolean },
+): {
+  ok: boolean;
+  result?: ReturnType<typeof runTenantKeyDateReminderJob>;
+  triggeredBy?: string;
+  error?: string;
+} {
+  // If explicitly called with no context (null / undefined / empty string / empty object without tenantCtx or byId), refuse to run via runTenantBackgroundJob
+  if (
+    contextOrOptions === null ||
+    contextOrOptions === undefined ||
+    (typeof contextOrOptions === 'string' && !contextOrOptions.trim())
+  ) {
+    runTenantBackgroundJob(
+      {
+        jobId: 'keydate-reminder-job:missing-context',
+        tenantId: '',
+        correlationId: '',
+        payload: {},
+      },
+      () => undefined,
+    );
+  }
+
+  const store = getStore();
+  const config = getKeyDatesConfig(store);
+
+  let byId = byIdArg ?? DEFAULT_USER_ID;
+  let providedCtx: TenantContext | null = null;
+  let mfaVerified = optionsArg?.mfaVerified;
+
+  if (typeof contextOrOptions === 'object' && contextOrOptions !== null) {
+    if ('tenantId' in contextOrOptions && 'correlationId' in contextOrOptions) {
+      providedCtx = contextOrOptions as TenantContext;
+      byId = byIdArg ?? providedCtx.actorId;
+      if (mfaVerified === undefined) {
+        mfaVerified = providedCtx.mfaVerified;
+      }
+    } else {
+      const opts = contextOrOptions as {
+        tenantCtx?: TenantContext | null;
+        byId?: string;
+        mfaVerified?: boolean;
+      };
+      if (opts.tenantCtx === null || (!opts.tenantCtx && !opts.byId && !byIdArg)) {
+        runTenantBackgroundJob(
+          {
+            jobId: 'keydate-reminder-job:missing-context',
+            tenantId: '',
+            correlationId: '',
+            payload: {},
+          },
+          () => undefined,
+        );
+      }
+      providedCtx = opts.tenantCtx ?? null;
+      if (opts.byId) byId = opts.byId;
+      if (opts.mfaVerified !== undefined) mfaVerified = opts.mfaVerified;
+      if (mfaVerified === undefined && providedCtx) {
+        mfaVerified = providedCtx.mfaVerified;
+      }
+    }
+  }
+
+  const actor = resolveActorForKeyDates(store, byId);
+  if (!actor) {
+    return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+  }
+
+  if (
+    !hasKeyDatePermission(actor, 'keydate:configure', {
+      config,
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      ok: false,
+      error:
+        'KEY_DATE_PERMISSION_DENIED: You need "keydate:configure" permission to trigger the key date reminder scheduler.',
+    };
+  }
+
+  const configurePermDef = PERMISSION_REGISTRY['keydate:configure'];
+  if ((configurePermDef?.requiresMfa ?? true) && mfaVerified !== true) {
+    return {
+      ok: false,
+      error:
+        'MFA_REQUIRED: Multi-factor authentication (MFA) is required to trigger the key date reminder scheduler.',
+    };
+  }
+
+  // Always resolve the tenant context from the authenticated session / active tenant configuration;
+  // any caller-supplied tenantId string is ignored.
+  const effectiveTenantCtx =
+    providedCtx ??
+    resolveCurrentTenantContext({
+      id: actor.id,
+      name: `${actor.firstName} ${actor.surname}`,
+      email: actor.emails?.[0]?.address,
+      roles: actor.roles,
+      mfaVerified: true,
+    });
+
+  const todayIso = toIsoDate(new Date());
+  const nowIso = new Date().toISOString();
+  store.keyDates = store.keyDates ?? [];
+  store.keyDateReminderStates = store.keyDateReminderStates ?? [];
+
+  const result = runTenantBackgroundJob(
+    {
+      jobId: `keydate-reminder-scheduler:${effectiveTenantCtx.tenantId}:${todayIso}`,
+      tenantId: effectiveTenantCtx.tenantId,
+      correlationId: effectiveTenantCtx.correlationId,
+      payload: { todayIso, nowIso },
+    },
+    (job) =>
+      runTenantKeyDateReminderJob({
+        tenantId: job.tenantId,
+        todayIso: job.payload.todayIso,
+        nowIso: job.payload.nowIso,
+        config,
+        keyDates: store.keyDates!,
+        reminderStates: store.keyDateReminderStates!,
+        tasks: store.tasks,
+        matters: store.matters,
+        teams: store.teams,
+        people: store.people,
+        notifications: store.notifications,
+        audit: store.audit,
+        nextTaskId: () => nextId(store, 'TSK'),
+        nextNotificationId: () => nextId(store, 'NTF'),
+        nextAuditId: () => nextId(store, 'AU'),
+      }),
+  );
+
+  saveStore(store);
+  return { ok: true, result, triggeredBy: actor.id };
+}
+
+export function queryKeyDatesTeamDiaryRecord(
+  query: TeamDiaryQuery,
+  byId: string = DEFAULT_USER_ID,
+  todayIso: string = toIsoDate(new Date()),
+): TeamDiaryEntry[] {
+  const store = getStore();
+  const config = getKeyDatesConfig(store);
+  const viewer = resolveActorForKeyDates(store, byId);
+  if (!viewer) return [];
+  return queryTeamDiaryEntries({
+    viewer,
+    query,
+    todayIso,
+    config,
+    keyDates: store.keyDates ?? [],
+    reminderStates: store.keyDateReminderStates ?? [],
+    matters: store.matters,
+    enquiries: store.enquiries,
+    teams: store.teams,
+    people: store.people,
+  });
+}
+
+export function getKeyDateExceptionsReportRecord(
+  filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
+  byId: string = DEFAULT_USER_ID,
+  todayIso: string = toIsoDate(new Date()),
+): KeyDateException[] {
+  const store = getStore();
+  const config = getKeyDatesConfig(store);
+  const viewer = resolveActorForKeyDates(store, byId);
+  if (!viewer) return [];
+  return computeKeyDateExceptions({
+    viewer,
+    todayIso,
+    nowIso: new Date().toISOString(),
+    config,
+    keyDates: store.keyDates ?? [],
+    notApplicable: store.keyDateNotApplicable ?? [],
+    reminderStates: store.keyDateReminderStates ?? [],
+    calendarSyncs: store.keyDateCalendarSyncs ?? [],
+    matters: store.matters,
+    teams: store.teams,
+    people: store.people,
+    values: store.values,
+    filterTeamIds: filter.teamIds,
+    filterKinds: filter.kinds,
+  });
+}
+
+export function exportKeyDateExceptionsReportRecord(
+  filter: {
+    teamIds?: string[];
+    kinds?: KeyDateExceptionKind[];
+    format?: 'csv' | 'json';
+  } = {},
+  byId: string = DEFAULT_USER_ID,
+  todayIso: string = toIsoDate(new Date()),
+): { ok: boolean; content?: string; filename?: string; count?: number; error?: string } {
+  const store = getStore();
+  const config = getKeyDatesConfig(store);
+  const viewer = resolveActorForKeyDates(store, byId);
+  if (!viewer) {
+    return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+  }
+
+  if (
+    !hasKeyDatePermission(viewer, 'keydate:view_any_team', {
+      config,
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      ok: false,
+      error: 'You need "keydate:view_any_team" to view or export compliance exceptions.',
+    };
+  }
+
+  const exceptions = getKeyDateExceptionsReportRecord(filter, byId, todayIso);
+  const format = filter.format ?? 'csv';
+  const nowIso = new Date().toISOString();
+
+  // Audit the compliance exceptions export (§6, R41: action is 'keydate-export')
+  store.audit.unshift({
+    id: nextId(store, 'AU'),
+    recordType: 'key_date',
+    recordId: 'KEY-DATE-EXCEPTIONS-EXPORT',
+    action: 'keydate-export',
+    field: 'Compliance exceptions export',
+    oldValue: null,
+    newValue: `Exported ${exceptions.length} exception(s) as ${format.toUpperCase()}`,
+    byId: viewer.id,
+    at: nowIso,
+    reason: `Filter teams=${filter.teamIds?.join(',') || 'all'} kinds=${filter.kinds?.join(',') || 'all'}`,
+  });
+  saveStore(store);
+
+  if (format === 'json') {
+    return {
+      ok: true,
+      content: JSON.stringify(exceptions, null, 2),
+      filename: `key-date-exceptions-${todayIso}.json`,
+      count: exceptions.length,
+    };
+  }
+
+  const header = 'Kind,TeamId,MatterId,KeyDateId,DetectedAt,Detail';
+  const escapeCsv = (val: string | undefined) =>
+    `"${String(val ?? '').replace(/"/g, '""')}"`;
+  const rows = exceptions.map((ex) =>
+    [
+      escapeCsv(ex.kind),
+      escapeCsv(ex.teamId),
+      escapeCsv(ex.matterId),
+      escapeCsv(ex.keyDateId),
+      escapeCsv(ex.detectedAt),
+      escapeCsv(ex.detail),
+    ].join(','),
+  );
+  return {
+    ok: true,
+    content: [header, ...rows].join('\n'),
+    filename: `key-date-exceptions-${todayIso}.csv`,
+    count: exceptions.length,
+  };
+}
+
+export function saveKeyDatesConfigRecord(
+  newConfigInput: KeyDatesConfig,
+  reason: string,
+  byId: string = DEFAULT_USER_ID,
+  options?: { mfaVerified?: boolean } | boolean,
+): { ok: boolean; config?: KeyDatesConfig; error?: string } {
+  try {
+    const store = getStore();
+    const currentConfig = getKeyDatesConfig(store);
+    const actor = resolveActorForKeyDates(store, byId);
+    if (!actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+
+    if (
+      !hasKeyDatePermission(actor, 'keydate:configure', {
+        config: currentConfig,
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return {
+        ok: false,
+        error: 'You need "keydate:configure" permission to modify Key Dates configuration.',
+      };
+    }
+
+    const mfaVerified =
+      typeof options === 'boolean' ? options : options?.mfaVerified;
+    const configurePermDef = PERMISSION_REGISTRY['keydate:configure'];
+    if ((configurePermDef?.requiresMfa ?? true) && mfaVerified !== true) {
+      return {
+        ok: false,
+        error:
+          'MFA_REQUIRED: Multi-factor authentication (MFA) is required to modify Key Dates configuration.',
+      };
+    }
+
+    const validated = validateKeyDatesConfig(newConfigInput) as unknown as KeyDatesConfig;
+    const nowIso = new Date().toISOString();
+
+    store.keyDatesConfigOverride = validated;
+    store.audit.unshift({
+      id: nextId(store, 'AU'),
+      recordType: 'key_date',
+      recordId: 'FIRM-KEY-DATES-CONFIG',
+      action: 'keydate-config-change',
+      field: 'keyDates',
+      oldValue: `enabled=${currentConfig.enabled}; types=${currentConfig.keyDateTypes?.length ?? 0}; ruleSets=${currentConfig.limitationRuleSets?.length ?? 0}`,
+      newValue: `enabled=${validated.enabled}; types=${validated.keyDateTypes?.length ?? 0}; ruleSets=${validated.limitationRuleSets?.length ?? 0}`,
+      byId: actor.id,
+      at: nowIso,
+      reason: reason?.trim() || 'Updated Key Dates configuration in Admin',
+      snapshot: {
+        before: currentConfig,
+        after: validated,
+      },
+    });
+
+    saveStore(store);
+    return { ok: true, config: validated };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Invalid Key Dates configuration.',
+    };
+  }
+}
+
+
 
 
 

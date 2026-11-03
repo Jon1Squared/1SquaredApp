@@ -150,5 +150,540 @@
   ],
   "enabledExtensions": [
     "nalf-matter-costs-governance"
-  ]
+  ],
+  "rbac": {
+    "departmentGrants": {
+      "DEPT-HR": [
+        "employee:view_core",
+        "employee:edit_core",
+        "employee:hr_restricted",
+        "employee:payroll",
+        "employee:sensitive"
+      ],
+      "DEPT-FIN": [
+        "employee:view_core",
+        "employee:payroll"
+      ],
+      "department.finance": [
+        "employee:view_core",
+        "employee:payroll"
+      ],
+      "DEPT-RISK": [
+        "employee:view_core",
+        "employee:edit_core",
+        "employee:hr_restricted",
+        "employee:sensitive"
+      ],
+      "department.risk_and_compliance": [
+        "employee:view_core",
+        "employee:edit_core",
+        "employee:hr_restricted",
+        "employee:sensitive"
+      ]
+    },
+    "identityMapping": {
+      "authorityMode": "hybrid",
+      "requireMfaForAdminPermissions": true,
+      "entraAppRoleToRoleKey": {
+        "1Squared.Admin": [
+          "admin"
+        ],
+        "1Squared.ManagingPartner": [
+          "managing_partner",
+          "partner"
+        ],
+        "1Squared.Partner": [
+          "partner",
+          "fee_earner"
+        ],
+        "1Squared.RiskCompliance": [
+          "risk_compliance"
+        ],
+        "1Squared.Finance": [
+          "finance"
+        ],
+        "1Squared.FeeEarner": [
+          "fee_earner"
+        ],
+        "1Squared.Supervisor": [
+          "supervisor",
+          "fee_earner"
+        ],
+        "1Squared.LegalSecretary": [
+          "legal_secretary"
+        ],
+        "1Squared.EnquiriesCoordinator": [
+          "enquiries_coordinator"
+        ],
+        "1Squared.Intake": [
+          "intake"
+        ]
+      },
+      "entraGroupToRoleKey": {
+        "00000000-0000-0000-0000-000000000101": [
+          "admin"
+        ],
+        "00000000-0000-0000-0000-000000000102": [
+          "managing_partner",
+          "partner"
+        ],
+        "00000000-0000-0000-0000-000000000103": [
+          "partner",
+          "fee_earner"
+        ],
+        "00000000-0000-0000-0000-000000000104": [
+          "risk_compliance"
+        ],
+        "00000000-0000-0000-0000-000000000105": [
+          "finance"
+        ],
+        "00000000-0000-0000-0000-000000000106": [
+          "fee_earner"
+        ]
+      }
+    }
+  },
+  "documentStores": [
+    {
+      "storeId": "nalf-sharepoint-primary",
+      "displayName": "Not A Law Firm SharePoint DMS",
+      "providerType": "sharepoint",
+      "isDefault": true,
+      "enabled": true,
+      "auth": {
+        "entraTenantId": "11111111-2222-3333-4444-555555555555",
+        "credentialMode": "client_certificate",
+        "clientId": "22222222-3333-4444-5555-666666666666",
+        "certificateKeyVaultSecretRef": "kv://kv-not-a-law-firm-dev/sp-provisioning-cert",
+        "delegatedPermissionScope": "Files.ReadWrite.All"
+      },
+      "sharepoint": {
+        "hostname": "1squared1.sharepoint.com",
+        "siteRelativePath": "/sites/NotALawFirm",
+        "siteId": "1squared1.sharepoint.com,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,ffffffff-0000-1111-2222-333333333333",
+        "libraries": [
+          {
+            "libraryId": "nalf-doc-repo",
+            "displayName": "Not A Law Firm Document Repository",
+            "libraryUrlSegment": "Not A Law Firm Document Repository",
+            "driveId": "b!nalf-document-repository-drive-001"
+          }
+        ]
+      }
+    }
+  ],
+  "documentRouting": [
+    {
+      "ruleId": "route-default-repo",
+      "match": "default",
+      "storeId": "nalf-sharepoint-primary",
+      "libraryId": "nalf-doc-repo",
+      "basePath": "{departmentCode}/{teamCode}"
+    }
+  ],
+  "matterFolderNameTemplate": "{matterNumber} - {matterDescription}",
+  "documentAccess": {
+    "uniqueScopeWarningThreshold": 4000,
+    "autoRemediateDrift": false,
+    "departmentEntraGroups": {
+      "DEPT-RE": "00000000-0000-0000-0000-000000000201",
+      "DEPT-CORP": "00000000-0000-0000-0000-000000000202",
+      "DEPT-DR": "00000000-0000-0000-0000-000000000203",
+      "DEPT-PC": "00000000-0000-0000-0000-000000000204",
+      "DEPT-EMP": "00000000-0000-0000-0000-000000000205",
+      "DEPT-RISK": "00000000-0000-0000-0000-000000000206",
+      "DEPT-FIN": "00000000-0000-0000-0000-000000000207",
+      "DEPT-BD": "00000000-0000-0000-0000-000000000208",
+      "DEPT-OPS": "00000000-0000-0000-0000-000000000209",
+      "DEPT-IT": "00000000-0000-0000-0000-000000000210",
+      "DEPT-HR": "00000000-0000-0000-0000-000000000211"
+    },
+    "teamEntraGroups": {
+      "TPG-RE-COMM": "00000000-0000-0000-0000-000000000301",
+      "TPG-RE-RES": "00000000-0000-0000-0000-000000000302",
+      "TPG-RE-DEV": "00000000-0000-0000-0000-000000000303",
+      "TPG-CORP-MA": "00000000-0000-0000-0000-000000000304",
+      "TPG-CORP-COM": "00000000-0000-0000-0000-000000000305",
+      "TPG-DR-COM": "00000000-0000-0000-0000-000000000306",
+      "TPG-DR-PROP": "00000000-0000-0000-0000-000000000307",
+      "TPG-PC-WILLS": "00000000-0000-0000-0000-000000000308",
+      "TPG-PC-TAX": "00000000-0000-0000-0000-000000000309",
+      "TPG-EMP-ADV": "00000000-0000-0000-0000-000000000310",
+      "TPG-RISK-AML": "00000000-0000-0000-0000-000000000311",
+      "TPG-FIN-OPS": "00000000-0000-0000-0000-000000000312",
+      "TPG-BD-INTAKE": "00000000-0000-0000-0000-000000000313",
+      "TPG-OPS-SEC": "00000000-0000-0000-0000-000000000314",
+      "TPG-IT-SYS": "00000000-0000-0000-0000-000000000315",
+      "TPG-HR-OPS": "00000000-0000-0000-0000-000000000316"
+    },
+    "defaultPolicy": {
+      "libraryRoot": [
+        {
+          "groupId": "00000000-0000-0000-0000-000000000101",
+          "level": "manage",
+          "description": "Firm IT & DMS Administrators"
+        },
+        {
+          "groupId": "00000000-0000-0000-0000-000000000104",
+          "level": "read",
+          "description": "Risk & Compliance Oversight"
+        }
+      ],
+      "owningDepartment": "read",
+      "owningTeam": "edit",
+      "otherDepartments": "none",
+      "matterTeamOutsider": "edit",
+      "restrictedMatter": {
+        "allowedUserLevel": "edit",
+        "groups": [
+          {
+            "groupId": "00000000-0000-0000-0000-000000000104",
+            "level": "read",
+            "description": "Risk & Compliance Oversight"
+          }
+        ]
+      },
+      "closedMatter": "read"
+    }
+  },
+  "matterFolderTemplates": {
+    "default": {
+      "templateId": "tpl-firm-default",
+      "version": 1,
+      "mode": "replaces",
+      "description": "Standard firm matter folder structure",
+      "nodes": [
+        {
+          "name": "01 Client Care",
+          "description": "Engagement letters, terms of business, and AML/CDD records",
+          "filingAliases": ["client_care", "engagement", "cdd"]
+        },
+        {
+          "name": "02 Correspondence",
+          "description": "Inbound and outbound correspondence with clients, counterparties, and third parties",
+          "filingAliases": ["correspondence", "letters", "emails"]
+        },
+        {
+          "name": "03 Drafts",
+          "description": "Working drafts and internal notes",
+          "filingAliases": ["drafts", "working_papers"]
+        },
+        {
+          "name": "04 Final Documents",
+          "description": "Executed agreements, engrossments, and final deliverables",
+          "filingAliases": ["final_documents", "executed"]
+        },
+        {
+          "name": "05 Billing and Finance",
+          "description": "Bills, cost estimates, disbursements, and completion statements",
+          "filingAliases": ["billing", "finance", "invoices"]
+        }
+      ]
+    },
+    "byWorkType": {
+      "work_type.real_estate_and_property": {
+        "templateId": "tpl-conveyancing",
+        "version": 1,
+        "mode": "extends",
+        "description": "Conveyancing and property transaction folder structure extending the firm default",
+        "operations": [
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03a Searches and Enquiries",
+              "description": "Local authority, drainage, environmental searches and CPSE/TA enquiries",
+              "filingAliases": ["searches", "enquiries"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03b Title and Contract",
+              "description": "Official copies, title plans, epitomes, and contract pack",
+              "filingAliases": ["title", "contract", "transfer"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03c Completion and Post-Completion",
+              "description": "Completion undertakings, SDLT/LTT returns, and HM Land Registry AP1 registration",
+              "filingAliases": ["completion", "sdlt", "hmlr"]
+            }
+          }
+        ]
+      },
+      "work_type.real_estate_and_property_residential_conveyancing": {
+        "templateId": "tpl-residential-conveyancing",
+        "version": 1,
+        "mode": "extends",
+        "description": "Residential conveyancing folder structure extending the firm default",
+        "operations": [
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03a Searches and Enquiries",
+              "description": "Local authority, drainage, environmental searches and TA forms",
+              "filingAliases": ["searches", "enquiries"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03b Title and Contract",
+              "description": "Official copies, title plans, and draft contract",
+              "filingAliases": ["title", "contract"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03c Completion and Post-Completion",
+              "description": "Completion statement, SDLT return, and HMLR registration",
+              "filingAliases": ["completion", "post_completion"]
+            }
+          }
+        ]
+      },
+      "work_type.dispute_resolution": {
+        "templateId": "tpl-litigation",
+        "version": 1,
+        "mode": "extends",
+        "description": "Dispute Resolution and Litigation folder structure extending the firm default",
+        "operations": [
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03a Pleadings",
+              "description": "Claim form, particulars of claim, defence, reply, and court orders",
+              "filingAliases": ["pleadings", "statements_of_case", "orders"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03b Disclosure and Evidence",
+              "description": "Disclosure lists, key documents, and inspection bundles",
+              "filingAliases": ["disclosure", "evidence"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03c Witness Statements and Experts",
+              "description": "Fact witness statements, instructions to experts, and expert reports",
+              "filingAliases": ["witness_statements", "experts"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03d Counsel and Hearings",
+              "description": "Briefs to counsel, skeleton arguments, and hearing bundles",
+              "filingAliases": ["counsel", "hearings", "bundles"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03e Settlement and ADR",
+              "description": "Part 36 offers, mediation position statements, and Tomlin orders",
+              "filingAliases": ["settlement", "adr", "mediation"]
+            }
+          }
+        ]
+      },
+      "work_type.dispute_resolution_court_pleadings": {
+        "templateId": "tpl-litigation-pleadings",
+        "version": 1,
+        "mode": "extends",
+        "description": "Court pleadings and civil litigation folder structure extending the firm default",
+        "operations": [
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03a Pleadings",
+              "description": "Claim form, particulars of claim, defence, reply, and court orders",
+              "filingAliases": ["pleadings", "orders"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03b Disclosure and Evidence",
+              "description": "Disclosure lists and evidence bundles",
+              "filingAliases": ["disclosure", "evidence"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03c Witness Statements and Experts",
+              "description": "Witness statements and expert reports",
+              "filingAliases": ["witness_statements", "experts"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03d Counsel and Hearings",
+              "description": "Instructions to counsel and hearing bundles",
+              "filingAliases": ["counsel", "hearings"]
+            }
+          },
+          {
+            "op": "add",
+            "parentPath": "/",
+            "node": {
+              "name": "03e Settlement and ADR",
+              "description": "Part 36 offers, mediation, and settlement agreements",
+              "filingAliases": ["settlement", "adr"]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "keyDates": {
+    "enabled": true,
+    "defaults": {
+      "verification": { "required": false },
+      "calendarSync": { "enabled": true },
+      "reminderScheduleId": "standard",
+      "teamAssignment": "matter_owning_team"
+    },
+    "keyDateTypes": [
+      { "id": "limitation", "label": "Limitation date", "category": "limitation", "defaultCritical": true, "allowCalculation": true, "reminderScheduleId": "limitation" },
+      { "id": "court_deadline", "label": "Court deadline", "category": "court_deadline", "defaultCritical": true },
+      { "id": "contract_date", "label": "Contractual date", "category": "contractual" },
+      { "id": "undertaking", "label": "Undertaking", "category": "undertaking", "defaultCritical": true },
+      { "id": "aml_review", "label": "AML review", "category": "compliance" },
+      { "id": "milestone", "label": "Internal milestone", "category": "internal_milestone" }
+    ],
+    "matterTypes": [
+      {
+        "matterTypeId": "matter_type.litigation",
+        "requiredKeyDateTypeIds": ["limitation"],
+        "verification": { "required": true, "appliesTo": "all" },
+        "calendarSync": { "enabled": true },
+        "defaultRuleSetIds": ["ew-sample"]
+      },
+      {
+        "matterTypeId": "work_type.dispute_resolution",
+        "requiredKeyDateTypeIds": ["limitation"],
+        "verification": { "required": true, "appliesTo": "all" },
+        "calendarSync": { "enabled": true },
+        "defaultRuleSetIds": ["ew-sample"]
+      },
+      {
+        "matterTypeId": "matter_type.personal_injury",
+        "requiredKeyDateTypeIds": ["limitation"],
+        "verification": { "required": true, "appliesTo": "all" },
+        "defaultRuleSetIds": ["ew-sample"]
+      },
+      {
+        "matterTypeId": "matter_type.residential_conveyancing",
+        "verification": { "required": false },
+        "calendarSync": { "enabled": false }
+      }
+    ],
+    "reminderSchedules": [
+      {
+        "id": "standard",
+        "label": "Standard",
+        "stages": [
+          { "daysBefore": 30, "priority": "normal" },
+          { "daysBefore": 7, "priority": "high" },
+          { "daysBefore": 1, "priority": "urgent" },
+          { "daysBefore": 0, "priority": "urgent" }
+        ],
+        "escalation": { "afterUnacknowledgedDays": 2, "levels": ["team_leads"] }
+      },
+      {
+        "id": "limitation",
+        "label": "Limitation",
+        "stages": [
+          { "daysBefore": 90, "priority": "normal" },
+          { "daysBefore": 60, "priority": "normal" },
+          { "daysBefore": 30, "priority": "high" },
+          { "daysBefore": 14, "priority": "high" },
+          { "daysBefore": 7, "priority": "urgent" },
+          { "daysBefore": 1, "priority": "urgent" },
+          { "daysBefore": 0, "priority": "urgent" }
+        ],
+        "escalation": { "afterUnacknowledgedDays": 1, "levels": ["team_leads", "role:risk_compliance"] }
+      }
+    ],
+    "limitationRuleSets": [
+      {
+        "id": "ew-sample",
+        "version": 1,
+        "label": "England & Wales – SAMPLE, requires solicitor review",
+        "jurisdiction": "england_and_wales",
+        "reviewStatus": "unreviewed",
+        "rules": [
+          {
+            "id": "contract-simple",
+            "label": "Simple contract",
+            "claimType": "contract",
+            "guidanceNote": "Sample only. Confirm the period and trigger with a solicitor before relying on this rule.",
+            "trigger": { "kind": "single", "field": "accrualDate" },
+            "period": { "years": 6 },
+            "calendarId": "england-and-wales",
+            "minorityAdjustment": { "enabled": true }
+          },
+          {
+            "id": "personal-injury",
+            "label": "Personal injury",
+            "claimType": "personal_injury",
+            "guidanceNote": "Sample only. Confirm the period, trigger and any discretion with a solicitor.",
+            "trigger": { "kind": "later_of", "fields": ["accrualDate", "dateOfKnowledge"] },
+            "period": { "years": 3 },
+            "calendarId": "england-and-wales",
+            "minorityAdjustment": { "enabled": true }
+          }
+        ]
+      }
+    ],
+    "businessCalendars": [
+      {
+        "id": "england-and-wales",
+        "label": "England and Wales",
+        "weekendDays": [0, 6],
+        "source": "manual",
+        "nonWorkingDates": [
+          "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-04",
+          "2026-05-25", "2026-08-31", "2026-12-25", "2026-12-28"
+        ]
+      }
+    ],
+    "calendarSync": {
+      "provider": "microsoft_graph",
+      "targets": ["responsible_persons", "team_calendar"],
+      "eventTitleTemplate": "{{matterReference}} – {{keyDateTypeLabel}}",
+      "includeMatterDescription": false,
+      "statusesToSync": ["confirmed"],
+      "teamCalendarMappings": []
+    },
+    "exceptions": {
+      "verificationOverdueDays": 3,
+      "criticalNoActivityDays": 30,
+      "criticalNoActivityWindowDays": 90
+    }
+  }
 }

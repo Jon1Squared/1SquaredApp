@@ -27,6 +27,7 @@ import type {
 } from '@/domain/types';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
+import { DocumentListSection } from './DocumentListSection';
 import {
   AuditAndMergeSection,
   KeyValue,
@@ -44,6 +45,7 @@ import { useToast } from './Toast';
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'matters', label: 'Matters' },
+  { key: 'documents', label: 'Documents' },
   { key: 'finance', label: 'Finance' },
   { key: 'people', label: 'People' },
   { key: 'identity', label: 'Identity' },
@@ -1923,6 +1925,20 @@ export function OrganisationProfileClient({
             </div>
           </div>
         </section>
+      )}
+
+      {/* ===================== TAB: DOCUMENTS ===================== */}
+      {tab === 'documents' && (
+        <DocumentListSection
+          entityType="organisation"
+          entityId={organisation.id}
+          organisation={organisation}
+          matters={matters}
+          people={people}
+          organisations={allOrganisations}
+          values={values}
+          currentUserId={currentUserId}
+        />
       )}
 
       {/* ===================== TAB: ACTIVITY ===================== */}

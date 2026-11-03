@@ -1,0 +1,120 @@
+{
+  "enabled": true,
+  "defaults": {
+    "verification": { "required": false },
+    "calendarSync": { "enabled": true },
+    "reminderScheduleId": "standard",
+    "teamAssignment": "matter_owning_team"
+  },
+  "keyDateTypes": [
+    { "id": "limitation", "label": "Limitation date", "category": "limitation", "defaultCritical": true, "allowCalculation": true, "reminderScheduleId": "limitation" },
+    { "id": "court_deadline", "label": "Court deadline", "category": "court_deadline", "defaultCritical": true },
+    { "id": "contract_date", "label": "Contractual date", "category": "contractual" },
+    { "id": "undertaking", "label": "Undertaking", "category": "undertaking", "defaultCritical": true },
+    { "id": "aml_review", "label": "AML review", "category": "compliance" },
+    { "id": "milestone", "label": "Internal milestone", "category": "internal_milestone" }
+  ],
+  "matterTypes": [
+    {
+      "matterTypeId": "matter_type.litigation",
+      "requiredKeyDateTypeIds": ["limitation"],
+      "verification": { "required": true, "appliesTo": "all" },
+      "calendarSync": { "enabled": true },
+      "defaultRuleSetIds": ["ew-sample"]
+    },
+    {
+      "matterTypeId": "matter_type.personal_injury",
+      "requiredKeyDateTypeIds": ["limitation"],
+      "verification": { "required": true, "appliesTo": "all" },
+      "defaultRuleSetIds": ["ew-sample"]
+    },
+    {
+      "matterTypeId": "matter_type.residential_conveyancing",
+      "verification": { "required": false },
+      "calendarSync": { "enabled": false }
+    }
+  ],
+  "reminderSchedules": [
+    {
+      "id": "standard",
+      "label": "Standard",
+      "stages": [
+        { "daysBefore": 30, "priority": "normal" },
+        { "daysBefore": 7, "priority": "high" },
+        { "daysBefore": 1, "priority": "urgent" },
+        { "daysBefore": 0, "priority": "urgent" }
+      ],
+      "escalation": { "afterUnacknowledgedDays": 2, "levels": ["team_leads"] }
+    },
+    {
+      "id": "limitation",
+      "label": "Limitation",
+      "stages": [
+        { "daysBefore": 90, "priority": "normal" },
+        { "daysBefore": 60, "priority": "normal" },
+        { "daysBefore": 30, "priority": "high" },
+        { "daysBefore": 14, "priority": "high" },
+        { "daysBefore": 7, "priority": "urgent" },
+        { "daysBefore": 1, "priority": "urgent" },
+        { "daysBefore": 0, "priority": "urgent" }
+      ],
+      "escalation": { "afterUnacknowledgedDays": 1, "levels": ["team_leads", "role:risk_compliance"] }
+    }
+  ],
+  "limitationRuleSets": [
+    {
+      "id": "ew-sample",
+      "version": 1,
+      "label": "England & Wales – SAMPLE, requires solicitor review",
+      "jurisdiction": "england_and_wales",
+      "reviewStatus": "unreviewed",
+      "rules": [
+        {
+          "id": "contract-simple",
+          "label": "Simple contract",
+          "claimType": "contract",
+          "guidanceNote": "Sample only. Confirm the period and trigger with a solicitor before relying on this rule.",
+          "trigger": { "kind": "single", "field": "accrualDate" },
+          "period": { "years": 6 },
+          "calendarId": "england-and-wales",
+          "minorityAdjustment": { "enabled": true }
+        },
+        {
+          "id": "personal-injury",
+          "label": "Personal injury",
+          "claimType": "personal_injury",
+          "guidanceNote": "Sample only. Confirm the period, trigger and any discretion with a solicitor.",
+          "trigger": { "kind": "later_of", "fields": ["accrualDate", "dateOfKnowledge"] },
+          "period": { "years": 3 },
+          "calendarId": "england-and-wales",
+          "minorityAdjustment": { "enabled": true }
+        }
+      ]
+    }
+  ],
+  "businessCalendars": [
+    {
+      "id": "england-and-wales",
+      "label": "England and Wales",
+      "weekendDays": [0, 6],
+      "source": "manual",
+      "nonWorkingDates": [
+        "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-04",
+        "2026-05-25", "2026-08-31", "2026-12-25", "2026-12-28"
+      ]
+    }
+  ],
+  "calendarSync": {
+    "provider": "microsoft_graph",
+    "targets": ["responsible_persons", "team_calendar"],
+    "eventTitleTemplate": "{{matterReference}} – {{keyDateTypeLabel}}",
+    "includeMatterDescription": false,
+    "statusesToSync": ["confirmed"],
+    "teamCalendarMappings": []
+  },
+  "exceptions": {
+    "verificationOverdueDays": 3,
+    "criticalNoActivityDays": 30,
+    "criticalNoActivityWindowDays": 90
+  }
+}

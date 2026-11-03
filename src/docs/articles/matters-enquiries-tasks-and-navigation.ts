@@ -1,0 +1,36 @@
+import type { DocArticle } from '../registry';
+
+export const mattersEnquiriesTasksNavigationArticle: DocArticle = {
+  slug: 'matters-enquiries-tasks-and-navigation',
+  title: 'Matters, enquiries, tasks & navigation: how key dates integrate across the workspace',
+  section: 'getting-started',
+  summary:
+    'How the Key Dates & Limitation module connects with Enquiries, Matter opening and closure gates, the single-task reminder model, and left-rail navigation.',
+  updated: '2026-11-03',
+  body: `
+This guide explains how **Matters**, **Enquiries**, **Tasks**, and **Navigation** work together across 1Squared, including how the [Key Dates & Limitation](/docs/key-dates-overview) module integrates into each screen.
+
+## Enquiries and conversion to a matter
+
+- On the **Enquiry detail** screen (\`/enquiries/[id]\`), fee earners and call handlers can capture early key dates (such as a provisional limitation date or ACAS early conciliation deadline) in the **Key dates & limitation** panel.
+- When an enquiry is converted into a matter, every non-superseded key date on the enquiry is automatically carried across onto the new matter with \`source: 'carried_from_enquiry'\`, preserving its calculation audit trail and verification state.
+
+## Matters: opening gate, Tasks & Dates tab, and closure gate
+
+- **Matter profile (\`/matters/[id]\`)**: Under the **Tasks & Dates** tab, the **Key dates & limitation** panel sits alongside matter tasks and critical dates.
+- **Matter opening gate**: When a matter type specifies \`requiredKeyDateTypeIds\`, a matter cannot transition from *Pre-open* to *Open* until each required key date type is either added or recorded as **Not applicable** with a mandatory reason.
+- **Matter closure gate**: When \`blockClosureWithOpenDates\` is enabled for the matter type, the matter cannot be closed or archived while any key date remains \`provisional\`, \`awaiting_verification\`, or \`confirmed\`.
+- **Restricted (staff) matters**: Matters with \`restrictedAccessUserIds\` enforce strict data-layer access control (\`matter.restrictedAccessUserIds.includes(viewerId)\`) across the matter profile, team diary, reminders, and compliance exceptions, and never sync to external Outlook calendars.
+
+## Tasks: one reminder task per confirmed key date
+
+- Confirming a key date creates or updates **one** linked \`Task\` in the Tasks workspace (\`/tasks\`) with the deterministic idempotency key \`keydate-reminder:{keyDateId}\`.
+- \`assignedTeamId\` is set to the key date's \`teamId\` (the team diary backup owner) and \`assignedPersonIds\` is set to its \`responsiblePersonIds\`.
+- As the key date crosses countdown stages (e.g. 90 days to 60 days), the daily tenant job updates that **same task** in place rather than stacking duplicate tasks. Standard task rules (\`canUserTakeTask\`, \`canUserReassignTask\`) apply.
+
+## Navigation (\`getLeftRailVisibility\`)
+
+- The left-hand navigation rail includes **Key dates** (\`/key-dates\`), controlled by \`leftRailVisibility.keyDates\` and visible to any user holding the \`keydate:view\` permission.
+- System configuration for key dates is available under **Admin → Key dates & limitation** (\`/admin/key-dates\`) for users holding \`keydate:configure\`.
+`,
+};

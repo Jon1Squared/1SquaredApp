@@ -1,0 +1,1241 @@
+import { describe, expect, it } from 'vitest';
+import {
+  approveTemplateVersion,
+  BasicMergeEngine,
+  buildFullFieldCatalogueForTenant,
+  BuiltInOpenXmlPdfConverter,
+  buildValidDocxArchive,
+  CORE_API_VERSION,
+  CORE_FIELD_CATALOGUE,
+  createOrUploadDraftTemplateVersion,
+  deleteGeneratedDocument,
+  executeUsageRetentionPurgeJob,
+  exportTemplatePackage,
+  exportTemplateUsageReportCsv,
+  ExtensionHost,
+  generateDocumentFromTemplate,
+  getReadableCatalogueFieldsForActor,
+  hasDocumentPermission,
+  importTemplatePackage,
+  isExcludedSensitiveEmployeeFieldKey,
+  listAccessibleDocumentsForEntity,
+  loadAndValidateTenantConfig,
+  LocalTenantStorageProvider,
+  previewTemplateVersion,
+  queryTemplateUsageReport,
+  rejectTemplateVersion,
+  resolveDocumentPermissions,
+   resolveTenantFromVerifiedToken,
+  retireTemplate,
+  rollbackTemplateToVersion,
+  submitTemplateVersionForApproval,
+  TenantDocumentRepository,
+  TenantMigrationRunner,
+  updateDraftTemplateVersion,
+  createDocumentStorageProvider,
+  type PlatformExtension,
+} from '@platform/core';
+import { toMatterAccessSubject } from '@/domain/documentGeneration';
+import {
+  getDocumentGenerationSnapshotForUser,
+  updateDocumentGenerationConfigService,
+} from '@/server/documentGenerationServices';
+import { getStore, saveStore } from '@/server/store';
+import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
+import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
+
+describe('Document Generation — Unit, Contract, Isolation, Record-Access & Security Suite', () => {
+  const baseTenantConfig = loadAndValidateTenantConfig(
+    notALawFirmBaseConfig,
+    notALawFirmDevOverlay,
+    'dev',
+    'multi_tenant',
+  );
+
+  const tenantAAdminToken = {
+    __verifiedByOidcMiddleware: true as const,
+    sub: 'P-ADMIN-1',
+    tenantId: 'not-a-law-firm',
+    email: 'admin@notalawfirm.co.uk',
+    name: 'Alice Vance',
+    roles: ['admin', 'partner'],
+    mfaVerified: true,
+  };
+
+  const tenantBAdminToken = {
+    __verifiedByOidcMiddleware: true as const,
+    sub: 'P-ADMIN-B1',
+    tenantId: 'pembroke-vaughan',
+    email: 'admin@pembrokevaughan.co.uk',
+    name: 'Bernard Sterling',
+    roles: ['admin', 'managing_partner'],
+    mfaVerified: true,
+  };
+
+  const ctxA = resolveTenantFromVerifiedToken({
+    verifiedToken: tenantAAdminToken,
+    hostingMode: 'multi_tenant',
+    environment: 'dev',
+    correlationId: 'corr-docgen-a',
+  });
+
+  const ctxB = resolveTenantFromVerifiedToken({
+    verifiedToken: tenantBAdminToken,
+    hostingMode: 'multi_tenant',
+    environment: 'dev',
+    correlationId: 'corr-docgen-b',
+  });
+
+  const configB = loadAndValidateTenantConfig(
+    {
+      ...notALawFirmBaseConfig,
+      tenantId: 'pembroke-vaughan',
+      displayName: 'Pembroke Vaughan LLP',
+    },
+    notALawFirmDevOverlay,
+    'dev',
+    'multi_tenant',
+  );
+
+  it('1. Coalesces split runs in Word XML, applies all filters, and escapes XML special characters', async () => {
+    const engine = new BasicMergeEngine();
+
+    // Construct a .docx where `{{ matter.reference | upper }}` and `{{ client.name }}` are split across <w:r> runs with <w:proofErr/>
+    const splitRunDocx = buildValidDocxArchive({
+      headerText: 'Ref: {{ matter.reference | upper }}',
+      footerText: 'Generated on {{ date.today | date:"d MMMM yyyy" }}',
+      paragraphs: [
+        {
+          rawRunsXml: [
+            '<w:r><w:rPr><w:b/></w:rPr><w:t>{{</w:t></w:r>',
+            '<w:proofErr w:type="spellStart"/>',
+            '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> client.</w:t></w:r>',
+            '<w:r><w:rPr><w:b/></w:rPr><w:t>name</w:t></w:r>',
+            '<w:proofErr w:type="spellEnd"/>',
+            '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> }}</w:t></w:r>',
+          ].join(''),
+        },
+        {
+          text: 'Fee Estimate: {{ financial.feeEstimate | currency }} ({{ financial.feeEstimate | words }})',
+        },
+        {
+          text: 'Matter Title: {{ matter.title | title }}',
+        },
+        {
+          text: 'Address Single: {{ client.primaryAddress | address_single }}',
+        },
+        {
+          text: 'Address Multi:\n{{ client.primaryAddress | address_multi }}',
+        },
+      ],
+    });
+
+    const extracted = await engine.extractPlaceholders(splitRunDocx);
+    expect(extracted.validationErrors).toHaveLength(0);
+    const ids = extracted.placeholders.map((p) => p.identifier);
+    expect(ids).toContain('matter.reference');
+    expect(ids).toContain('date.today');
+    expect(ids).toContain('client.name');
+    expect(ids).toContain('financial.feeEstimate');
+    expect(ids).toContain('matter.title');
+    expect(ids).toContain('client.primaryAddress');
+
+    const rendered = await engine.render({
+      docxBytes: splitRunDocx,
+      resolvedValues: {
+        'matter.reference': 'pv-2026-0099',
+        'date.today': '2026-04-20',
+        'client.name': 'A & B <Holdings> "UK" Ltd',
+        'financial.feeEstimate': 1250.5,
+        'matter.title': 'share purchase agreement',
+        'client.primaryAddress': {
+          line1: '10 Bishopsgate',
+          city: 'London',
+          postcode: 'EC2N 4BQ',
+        },
+      },
+      mappings: {},
+    });
+
+    expect(rendered.missingRequiredFields).toHaveLength(0);
+    expect(rendered.outputBytes.length).toBeGreaterThan(200);
+
+    // Convert to PDF using BuiltInOpenXmlPdfConverter and verify PDF header & content
+    const pdfConverter = new BuiltInOpenXmlPdfConverter();
+    const pdfBytes = await pdfConverter.convertDocxToPdf({
+      docxBytes: rendered.outputBytes,
+      title: 'Test Letter',
+    });
+    const pdfText = new TextDecoder('latin1').decode(pdfBytes);
+    expect(pdfText.startsWith('%PDF-1.4')).toBe(true);
+    expect(pdfText).toContain('PV-2026-0099');
+    expect(pdfText).toContain('20 April 2026');
+    expect(pdfText).toContain('A & B <Holdings> "UK" Ltd');
+    expect(pdfText).toContain('1,250.50');
+    expect(pdfText).toContain(
+      'one thousand two hundred and fifty pounds and fifty pence',
+    );
+    expect(pdfText).toContain('Share Purchase Agreement');
+    expect(pdfText).toContain('10 Bishopsgate, London, EC2N 4BQ');
+  });
+
+  it('2. Rejects reserved {% ... %} block syntax, .docm macros, and non-ZIP files', async () => {
+    const engine = new BasicMergeEngine();
+
+    const blockDocx = buildValidDocxArchive({
+      paragraphs: [
+        {
+          text: '{% if matter.isHighValue %}High value clause{% endif %}',
+        },
+      ],
+    });
+
+    const extraction = await engine.extractPlaceholders(blockDocx);
+    expect(extraction.validationErrors.length).toBeGreaterThan(0);
+    expect(extraction.validationErrors[0]?.code).toBe(
+      'RESERVED_BLOCK_SYNTAX_UNSUPPORTED',
+    );
+
+    await expect(
+      engine.render({
+        docxBytes: blockDocx,
+        resolvedValues: {},
+        mappings: {},
+      }),
+    ).rejects.toThrow(/RESERVED_BLOCK_SYNTAX_UNSUPPORTED/);
+
+    // Macro archive containing word/vbaProject.bin is rejected
+    const macroDocx = buildValidDocxArchive({
+      paragraphs: [{ text: 'Hello {{ client.name }}' }],
+      extraEntries: [
+        {
+          fileName: 'word/vbaProject.bin',
+          data: new Uint8Array([1, 2, 3, 4]),
+        },
+      ],
+    });
+
+    await expect(engine.extractPlaceholders(macroDocx)).rejects.toThrow(
+      /DOCX_MACRO_REJECTED/,
+    );
+
+    // Non-ZIP bytes rejected
+    await expect(
+      engine.extractPlaceholders(new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04])),
+    ).rejects.toThrow(/DOCX_INVALID_SIGNATURE/);
+  });
+
+  it('3. Excludes all HR, payroll, and sensitive employee fields from the Field Catalogue and extensions', async () => {
+    const forbiddenSamples = [
+      'employee.salary',
+      'feeEarner.payrollId',
+      'feeEarner.bankAccountNumber',
+      'feeEarner.sortCode',
+      'feeEarner.niNumber',
+      'feeEarner.taxCode',
+      'feeEarner.rightToWorkStatus',
+      'feeEarner.emergencyContactName',
+      'feeEarner.homeAddress',
+      'feeEarner.personalEmail',
+      'feeEarner.diversityEthnicity',
+      'feeEarner.disabilityStatus',
+      'feeEarner.reasonableAdjustments',
+      'user.salaryGbp',
+      'user.sicknessDays',
+      'user.disciplinaryRecord',
+    ];
+
+    for (const sample of forbiddenSamples) {
+      expect(isExcludedSensitiveEmployeeFieldKey(sample)).toBe(true);
+    }
+
+    for (const entry of CORE_FIELD_CATALOGUE) {
+      expect(isExcludedSensitiveEmployeeFieldKey(entry.key)).toBe(false);
+      expect(['document:generate', 'finance:view', 'employee:view_core']).toContain(
+        entry.requiredPermission,
+      );
+    }
+
+    // Verify FieldProvider extension host blocks sensitive employee fields and enforces permissions
+    const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+
+    const unauthorizedExt: PlatformExtension = {
+      manifest: {
+        id: 'unauth-field-ext',
+        name: 'Missing Permission Extension',
+        version: '1.0.0',
+        description: 'Tries to provide fields without document:fields:provide',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: ['matter:read'],
+        hooks: ['provideDocumentFields'],
+      },
+      hooks: {},
+    };
+
+    expect(() => host.registerExtension(unauthorizedExt)).toThrow(
+      /EXTENSION_PERMISSION_ERROR/,
+    );
+
+    const validFieldExt: PlatformExtension = {
+      manifest: {
+        id: 'corp-completion-fields',
+        name: 'Corporate Completion Field Provider',
+        version: '1.0.0',
+        description: 'Provides calculated completion fields and tests HR blocklist',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: ['document:fields:provide', 'matter:read'],
+        hooks: ['provideDocumentFields'],
+      },
+      hooks: {
+        provideDocumentFields(_ctx, input) {
+          return {
+            definitions: [
+              {
+                key: 'completionLongStopDate',
+                displayName: 'Completion Long-Stop Date',
+                description: 'Calculated long-stop date from matter opening',
+                group: 'Matter',
+                dataType: 'date',
+                requiredPermission: 'document:generate',
+                requiredEntityPermission: 'matter:read',
+              },
+              {
+                key: 'feeEarner.salary', // Should be blocked by security filter!
+                displayName: 'Leaked Salary',
+                description: 'Should never pass',
+                group: 'Fee Earner',
+                dataType: 'currency',
+                requiredPermission: 'employee:view_core',
+                requiredEntityPermission: 'matter:read',
+              },
+            ],
+            values: {
+              completionLongStopDate: '2026-09-30',
+              'feeEarner.salary': 120000,
+              echoMatterId: input.matterId,
+            },
+          };
+        },
+      },
+    };
+
+    host.registerExtension(validFieldExt);
+    const extResult = await host.executeFieldProviders(
+      ctxA,
+      {
+        ...baseTenantConfig,
+        enabledExtensions: ['corp-completion-fields'],
+      },
+      {
+        sourceEntityType: 'matter',
+        matterId: 'M-0001',
+        matter: { id: 'M-0001' },
+      },
+    );
+
+    expect(extResult.catalogueEntries).toHaveLength(1);
+    expect(extResult.catalogueEntries[0]?.key).toBe(
+      'ext.corp-completion-fields.completionLongStopDate',
+    );
+    expect(
+      extResult.resolvedValues[
+        'ext.corp-completion-fields.completionLongStopDate'
+      ],
+    ).toBe('2026-09-30');
+    expect(
+      extResult.resolvedValues['ext.corp-completion-fields.feeEarner.salary'],
+    ).toBeUndefined();
+    expect(extResult.isolatedErrors[0]).toContain('restricted HR/payroll');
+  });
+
+  it('4. Enforces DocumentPermission resolution from full role set (ignoring Viewing-As role) and finance:view gating', () => {
+    const partnerViewingAsSecretary = {
+      id: 'P-PARTNER-1',
+      roles: ['partner'],
+      activeViewingRole: 'legal_secretary', // UI "Viewing as" switcher
+    };
+
+    const secretaryActor = {
+      id: 'P-SEC-1',
+      roles: ['legal_secretary'],
+    };
+
+    // Partner still holds finance:view and document_template:view_usage despite "Viewing as" legal_secretary
+    const partnerPerms = resolveDocumentPermissions(
+      partnerViewingAsSecretary,
+      baseTenantConfig,
+    );
+    expect(partnerPerms).toContain('finance:view');
+    expect(partnerPerms).toContain('document_template:view_usage');
+
+    // Legal secretary has document:generate and document:view, but NOT finance:view or document_template:build
+    expect(
+      hasDocumentPermission(secretaryActor, 'document:generate', baseTenantConfig),
+    ).toBe(true);
+    expect(
+      hasDocumentPermission(secretaryActor, 'finance:view', baseTenantConfig),
+    ).toBe(false);
+    expect(
+      hasDocumentPermission(
+        secretaryActor,
+        'document_template:build',
+        baseTenantConfig,
+      ),
+    ).toBe(false);
+
+    // Readable catalogue fields exclude Financial group for secretaryActor
+    const secretaryFields = getReadableCatalogueFieldsForActor(
+      secretaryActor,
+      CORE_FIELD_CATALOGUE,
+      baseTenantConfig,
+    );
+    expect(secretaryFields.some((f) => f.group === 'Financial')).toBe(false);
+
+    const partnerFields = getReadableCatalogueFieldsForActor(
+      partnerViewingAsSecretary,
+      CORE_FIELD_CATALOGUE,
+      baseTenantConfig,
+    );
+    expect(partnerFields.some((f) => f.group === 'Financial')).toBe(true);
+  });
+
+  it('5. Enforces approval workflow, blocks unmapped placeholders & self-approval, and supports rollback & package transfer', async () => {
+    const repo = new TenantDocumentRepository();
+    const storage = new LocalTenantStorageProvider({ inMemoryOnly: true });
+    const engine = new BasicMergeEngine();
+    const catalogue = buildFullFieldCatalogueForTenant({
+      customFields: baseTenantConfig.customFields,
+    });
+
+    const builderActor = {
+      id: 'P-BUILDER-1',
+      roles: ['admin', 'managing_partner'],
+    };
+    const secondApproverActor = {
+      id: 'P-APPROVER-2',
+      roles: ['risk_compliance'],
+    };
+
+    const docxV1 = buildValidDocxArchive({
+      paragraphs: [
+        { text: 'Our Ref: {{ matter.reference }}' },
+        { text: 'Client: {{ client.name }}' },
+        { text: 'Custom Unmapped Token: {{ CustomRefToken }}' },
+      ],
+    });
+
+    const draft1 = await createOrUploadDraftTemplateVersion({
+      ctx: ctxA,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: builderActor,
+      config: baseTenantConfig,
+      input: {
+        code: 'ENG-LETTER-01',
+        name: 'Standard Engagement Letter',
+        description: 'Client engagement letter',
+        category: 'Client Care',
+        outputDocumentType: 'client_care',
+        filenamePattern: '{{matter.reference}} - Engagement Letter',
+        availabilityRules: {
+          sourceContexts: ['matter'],
+        },
+        fileName: 'engagement-letter.docx',
+        docxBytes: docxV1,
+      },
+    });
+
+    // `matter.reference` and `client.name` auto-map, while `CustomRefToken` is flagged as unmapped
+    expect(draft1.unmappedPlaceholders).toEqual(['CustomRefToken']);
+
+    // Submitting while `CustomRefToken` is unmapped is blocked
+    expect(() =>
+      submitTemplateVersionForApproval({
+        ctx: ctxA,
+        repo,
+        catalogue,
+        actor: builderActor,
+        config: baseTenantConfig,
+        versionId: draft1.version.id,
+      }),
+    ).toThrow(/TEMPLATE_UNMAPPED_PLACEHOLDERS/);
+
+    // Map `CustomRefToken` as a Prompted Field
+    updateDraftTemplateVersion({
+      ctx: ctxA,
+      repo,
+      catalogue,
+      actor: builderActor,
+      config: baseTenantConfig,
+      versionId: draft1.version.id,
+      promptedFields: [
+        {
+          key: 'specialInstructionNote',
+          label: 'Special Instruction Note',
+          fieldType: 'text',
+          required: true,
+        },
+      ],
+      fieldMappings: {
+        ...draft1.version.fieldMappings,
+        CustomRefToken: {
+          placeholder: 'CustomRefToken',
+          sourceType: 'prompted',
+          promptedKey: 'specialInstructionNote',
+          required: true,
+        },
+      },
+    });
+
+    // Now submit succeeds
+    const submitted1 = submitTemplateVersionForApproval({
+      ctx: ctxA,
+      repo,
+      catalogue,
+      actor: builderActor,
+      config: baseTenantConfig,
+      versionId: draft1.version.id,
+    });
+    expect(submitted1.version.status).toBe('Submitted');
+
+    // Self-approval by `builderActor` is blocked when `allowSelfApproval` is false (default)
+    expect(() =>
+      approveTemplateVersion({
+        ctx: ctxA,
+        repo,
+        actor: builderActor,
+        config: baseTenantConfig,
+        versionId: draft1.version.id,
+      }),
+    ).toThrow(/TEMPLATE_SELF_APPROVAL_FORBIDDEN/);
+
+    // Second approver (`secondApproverActor`) approves v1 -> Active
+    const approved1 = approveTemplateVersion({
+      ctx: ctxA,
+      repo,
+      actor: secondApproverActor,
+      config: baseTenantConfig,
+      versionId: draft1.version.id,
+    });
+    expect(approved1.version.status).toBe('Active');
+    expect(approved1.template.activeVersionId).toBe(approved1.version.id);
+
+    // Upload v2, submit, approve -> v1 becomes Retired, v2 becomes Active
+    const docxV2 = buildValidDocxArchive({
+      paragraphs: [
+        { text: 'Our Ref: {{ matter.reference }} (v2)' },
+        { text: 'Client: {{ client.name }}' },
+      ],
+    });
+    const draft2 = await createOrUploadDraftTemplateVersion({
+      ctx: ctxA,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: builderActor,
+      config: baseTenantConfig,
+      input: {
+        templateId: approved1.template.id,
+        code: 'ENG-LETTER-01',
+        name: 'Standard Engagement Letter',
+        description: 'Client engagement letter v2',
+        category: 'Client Care',
+        outputDocumentType: 'client_care',
+        filenamePattern: '{{matter.reference}} - Engagement Letter',
+        availabilityRules: { sourceContexts: ['matter'] },
+        fileName: 'engagement-letter-v2.docx',
+        docxBytes: docxV2,
+      },
+    });
+    submitTemplateVersionForApproval({
+      ctx: ctxA,
+      repo,
+      catalogue,
+      actor: builderActor,
+      config: baseTenantConfig,
+      versionId: draft2.version.id,
+    });
+    const approved2 = approveTemplateVersion({
+      ctx: ctxA,
+      repo,
+      actor: secondApproverActor,
+      config: baseTenantConfig,
+      versionId: draft2.version.id,
+    });
+    expect(approved2.template.activeVersionId).toBe(draft2.version.id);
+    expect(repo.getTemplateVersionById(ctxA, draft1.version.id)?.status).toBe(
+      'Retired',
+    );
+
+    // Roll back from v2 to v1
+    const rolledBack = rollbackTemplateToVersion({
+      ctx: ctxA,
+      repo,
+      actor: secondApproverActor,
+      config: baseTenantConfig,
+      templateId: approved1.template.id,
+      targetVersionId: draft1.version.id,
+    });
+    expect(rolledBack.template.activeVersionId).toBe(draft1.version.id);
+    expect(rolledBack.activeVersion.status).toBe('Active');
+
+    // Export package from Tenant A and import into Tenant B -> arrives in Tenant B as `Draft`
+    const exportedPkg = await exportTemplatePackage({
+      ctx: ctxA,
+      repo,
+      storage,
+      actor: builderActor,
+      config: baseTenantConfig,
+      templateId: approved1.template.id,
+    });
+    const importedInB = await importTemplatePackage({
+      ctx: ctxB,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: { id: 'P-ADMIN-B1', roles: ['admin'] },
+      config: configB,
+      pkg: exportedPkg,
+    });
+    expect(importedInB.version.status).toBe('Draft');
+    expect(importedInB.template.status).toBe('Draft');
+  });
+
+  it('6. Enforces two-tenant isolation and restricted staff-matter inheritance across Matter and Client screens', async () => {
+    const repo = new TenantDocumentRepository();
+    const storage = new LocalTenantStorageProvider({ inMemoryOnly: true });
+    const engine = new BasicMergeEngine();
+    const catalogue = buildFullFieldCatalogueForTenant();
+
+    const builderA = { id: 'P-BUILD-A', roles: ['admin'] };
+    const approverA = { id: 'P-APP-A', roles: ['risk_compliance'] };
+    const feeEarnerAssigned = { id: 'P-FE-ASSIGNED', roles: ['fee_earner'] };
+    const feeEarnerUnassigned = { id: 'P-FE-OTHER', roles: ['fee_earner'] };
+
+    const docxBytes = buildValidDocxArchive({
+      paragraphs: [
+        { text: 'Matter Ref: {{ matter.reference }}' },
+        { text: 'Client Name: {{ client.name }}' },
+        { text: 'Special Prompt: {{ prompted.specialTerm }}' },
+      ],
+    });
+
+    const created = await createOrUploadDraftTemplateVersion({
+      ctx: ctxA,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: builderA,
+      config: baseTenantConfig,
+      input: {
+        code: 'MATTER-LETTER',
+        name: 'Matter Advice Letter',
+        description: 'General advice letter',
+        category: 'Correspondence',
+        outputDocumentType: 'letter',
+        filenamePattern: '{{matter.reference}} - Advice Letter',
+        availabilityRules: { sourceContexts: ['matter', 'client'] },
+        fileName: 'advice.docx',
+        docxBytes,
+        promptedFields: [
+          {
+            key: 'specialTerm',
+            label: 'Special Term',
+            fieldType: 'text',
+            required: true,
+          },
+        ],
+        fieldMappings: {
+          'matter.reference': {
+            placeholder: 'matter.reference',
+            sourceType: 'catalogue',
+            catalogueKey: 'matter.reference',
+            required: true,
+          },
+          'client.name': {
+            placeholder: 'client.name',
+            sourceType: 'catalogue',
+            catalogueKey: 'client.name',
+            required: true,
+          },
+          'prompted.specialTerm': {
+            placeholder: 'prompted.specialTerm',
+            sourceType: 'prompted',
+            promptedKey: 'specialTerm',
+            required: true,
+          },
+        },
+      },
+    });
+
+    submitTemplateVersionForApproval({
+      ctx: ctxA,
+      repo,
+      catalogue,
+      actor: builderA,
+      config: baseTenantConfig,
+      versionId: created.version.id,
+    });
+    approveTemplateVersion({
+      ctx: ctxA,
+      repo,
+      actor: approverA,
+      config: baseTenantConfig,
+      versionId: created.version.id,
+    });
+
+    const restrictedMatter = {
+      id: 'MAT-STAFF-01',
+      clientId: 'CLI-STAFF-01',
+      isStaffMatter: true,
+      restrictedAccessUserIds: ['P-FE-ASSIGNED'],
+      responsibleSolicitorId: 'P-FE-ASSIGNED',
+    };
+
+    // Unassigned fee earner is blocked from generating on the restricted staff matter
+    await expect(
+      generateDocumentFromTemplate({
+        ctx: ctxA,
+        repo,
+        storage,
+        engine,
+        catalogue,
+        actor: feeEarnerUnassigned,
+        config: baseTenantConfig,
+        templateId: created.template.id,
+        sourceEntityType: 'matter',
+        matterAccessSubject: restrictedMatter,
+        primaryClientId: 'CLI-STAFF-01',
+        primaryClientEntityType: 'person',
+        resolutionContext: {
+          tenantId: ctxA.tenantId,
+          matter: { id: 'MAT-STAFF-01', reference: 'PV-STAFF-01' },
+          client: { id: 'CLI-STAFF-01', name: 'Staff Member Client' },
+          promptedValues: { specialTerm: 'Confidential term' },
+        },
+      }),
+    ).rejects.toThrow(/DOCUMENT_RECORD_ACCESS_DENIED/);
+
+    // Assigned fee earner attempting generation with missing required prompted field gets `blocked_missing_required`
+    const blockedAttempt = await generateDocumentFromTemplate({
+      ctx: ctxA,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: feeEarnerAssigned,
+      config: baseTenantConfig,
+      templateId: created.template.id,
+      sourceEntityType: 'matter',
+      matterAccessSubject: restrictedMatter,
+      primaryClientId: 'CLI-STAFF-01',
+      primaryClientEntityType: 'person',
+      resolutionContext: {
+        tenantId: ctxA.tenantId,
+        matter: { id: 'MAT-STAFF-01', reference: 'PV-STAFF-01' },
+        client: { id: 'CLI-STAFF-01', name: 'Staff Member Client' },
+        promptedValues: { specialTerm: '' }, // Empty required field!
+      },
+    });
+    expect(blockedAttempt.status).toBe('blocked_missing_required');
+    expect(blockedAttempt.missingRequiredFields).toContain(
+      'prompted.specialTerm',
+    );
+
+    // Assigned fee earner generates PDF document with all required fields populated
+    const generatedRes = await generateDocumentFromTemplate({
+      ctx: ctxA,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: feeEarnerAssigned,
+      config: baseTenantConfig,
+      templateId: created.template.id,
+      sourceEntityType: 'matter',
+      matterAccessSubject: restrictedMatter,
+      primaryClientId: 'CLI-STAFF-01',
+      primaryClientEntityType: 'person',
+      practiceAreaId: 'Employment',
+      matterTypeId: 'Executive Severance',
+      teamId: 'TEAM-EMP',
+      outputFormat: 'pdf',
+      resolutionContext: {
+        tenantId: ctxA.tenantId,
+        matter: { id: 'MAT-STAFF-01', reference: 'PV-STAFF-01' },
+        client: { id: 'CLI-STAFF-01', name: 'Staff Member Client' },
+        promptedValues: { specialTerm: 'Agreed settlement clause' },
+      },
+    });
+
+    expect(generatedRes.status).toBe('generated');
+    expect(generatedRes.document?.outputFormat).toBe('pdf');
+    expect(generatedRes.document?.fileName).toBe(
+      'PV-STAFF-01 - Advice Letter.pdf',
+    );
+
+    const resolveMatter = (id: string) =>
+      id === 'MAT-STAFF-01' ? restrictedMatter : null;
+
+    // Assigned fee earner sees the document on BOTH the Matter screen and the Client screen
+    expect(
+      listAccessibleDocumentsForEntity({
+        ctx: ctxA,
+        repo,
+        actor: feeEarnerAssigned,
+        config: baseTenantConfig,
+        entityType: 'matter',
+        entityId: 'MAT-STAFF-01',
+        resolveMatterSubject: resolveMatter,
+      }),
+    ).toHaveLength(1);
+
+    expect(
+      listAccessibleDocumentsForEntity({
+        ctx: ctxA,
+        repo,
+        actor: feeEarnerAssigned,
+        config: baseTenantConfig,
+        entityType: 'person',
+        entityId: 'CLI-STAFF-01',
+        resolveMatterSubject: resolveMatter,
+      }),
+    ).toHaveLength(1);
+
+    // Unassigned fee earner CANNOT see the document on the Matter screen OR on the Client (`person`) screen!
+    expect(
+      listAccessibleDocumentsForEntity({
+        ctx: ctxA,
+        repo,
+        actor: feeEarnerUnassigned,
+        config: baseTenantConfig,
+        entityType: 'matter',
+        entityId: 'MAT-STAFF-01',
+        resolveMatterSubject: resolveMatter,
+      }),
+    ).toHaveLength(0);
+
+    expect(
+      listAccessibleDocumentsForEntity({
+        ctx: ctxA,
+        repo,
+        actor: feeEarnerUnassigned,
+        config: baseTenantConfig,
+        entityType: 'person',
+        entityId: 'CLI-STAFF-01',
+        resolveMatterSubject: resolveMatter,
+      }),
+    ).toHaveLength(0);
+
+    // TWO-TENANT ISOLATION: Tenant B cannot read Tenant A's template, document, blob, or download token
+    expect(repo.getTemplateById(ctxB, created.template.id)).toBeNull();
+    expect(
+      repo.getDocumentById(ctxB, generatedRes.document!.id),
+    ).toBeNull();
+    await expect(
+      storage.getObjectBytes(ctxB, {
+        blobKey: generatedRes.document!.storageKey,
+      }),
+    ).rejects.toThrow(/STORAGE_TENANCY_ISOLATION_ERROR/);
+    await expect(
+      storage.verifyScopedDownloadToken(
+        ctxB,
+        generatedRes.downloadToken!.token,
+      ),
+    ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
+
+    // Usage reporting & dual user-level gate (`document_template:view_usage_by_user` + `showUserLevelDetail`)
+    const partnerActor = { id: 'P-PARTNER-1', roles: ['partner'] };
+    const partnerReport = queryTemplateUsageReport({
+      ctx: ctxA,
+      repo,
+      actor: partnerActor,
+      config: baseTenantConfig,
+    });
+    expect(partnerReport.totalGeneratedCount).toBe(1);
+    expect(partnerReport.totalBlockedMissingRequiredCount).toBe(1);
+    expect(partnerReport.userLevelDetailPermitted).toBe(false);
+    expect(partnerReport.byUser).toBeUndefined();
+
+    const adminReport = queryTemplateUsageReport({
+      ctx: ctxA,
+      repo,
+      actor: builderA, // Admin has `document_template:view_usage_by_user`
+      config: baseTenantConfig,
+    });
+    expect(adminReport.userLevelDetailPermitted).toBe(true);
+    expect(adminReport.byUser).toHaveLength(1);
+    expect(adminReport.byUser?.[0]?.userId).toBe('P-FE-ASSIGNED');
+
+    const csv = exportTemplateUsageReportCsv(adminReport, true);
+    expect(csv).toContain('MATTER-LETTER');
+    expect(csv).toContain('P-FE-ASSIGNED');
+
+    // When `showUserLevelDetail` is false in tenant config, even Admin cannot see `byUser`
+    const adminReportPrivacyOff = queryTemplateUsageReport({
+      ctx: ctxA,
+      repo,
+      actor: builderA,
+      config: {
+        ...baseTenantConfig,
+        documentGeneration: {
+          ...baseTenantConfig.documentGeneration,
+          usage: {
+            ...baseTenantConfig.documentGeneration.usage,
+            showUserLevelDetail: false,
+          },
+        },
+      },
+    });
+    expect(adminReportPrivacyOff.userLevelDetailPermitted).toBe(false);
+    expect(adminReportPrivacyOff.byUser).toBeUndefined();
+
+    // Retention purge background job & delete document
+    const purgeResult = executeUsageRetentionPurgeJob(ctxA, repo, {
+      jobId: 'JOB-RETENTION-1',
+      tenantId: ctxA.tenantId,
+      correlationId: ctxA.correlationId,
+      payload: {
+        retentionMonths: 12,
+        nowIso: '2029-01-01T00:00:00Z',
+      },
+    });
+    expect(purgeResult.purgedEventsCount).toBe(2);
+
+    await deleteGeneratedDocument({
+      ctx: ctxA,
+      repo,
+      storage,
+      actor: builderA,
+      config: baseTenantConfig,
+      documentId: generatedRes.document!.id,
+      resolveMatterSubject: resolveMatter,
+    });
+    expect(
+      repo.getDocumentById(ctxA, generatedRes.document!.id)?.isDeleted,
+    ).toBe(true);
+  });
+
+  it('7. Verifies per-tenant reversible database migrations (up, rollback, re-apply)', () => {
+    const runner = new TenantMigrationRunner();
+
+    const applied = runner.applyUp(ctxA);
+    expect(applied).toHaveLength(3);
+    expect(runner.getActiveTables(ctxA)).toContain('document_templates');
+    expect(runner.getActiveTables(ctxA)).toContain('template_usage_daily_summaries');
+    expect(runner.getActiveTables(ctxA)).toContain('matter_document_locations');
+    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
+    // Tenant B is unaffected until its own migration runs
+    expect(runner.listAppliedMigrations(ctxB)).toHaveLength(0);
+
+    // Roll back migration 0001 on Tenant A
+    const rolledBack = runner.rollbackVersion(ctxA, '0001');
+    expect(rolledBack).toBe(true);
+    expect(runner.getActiveTables(ctxA)).not.toContain('document_templates');
+
+    // Re-apply cleanly
+    const reapplied = runner.applyUp(ctxA);
+    expect(reapplied).toHaveLength(1);
+    expect(runner.getActiveTables(ctxA)).toContain('documents');
+  });
+
+  it('8. Enforces R1, R15, R17, R24: requires explicit signing key, binds download tokens to sub and documentId, uses timingSafeEqual, and rejects unimplemented azure_blob provider', async () => {
+    // R1: Missing or short signing key must throw STORAGE_CONFIG_ERROR
+    expect(() => new LocalTenantStorageProvider('')).toThrow(
+      /STORAGE_CONFIG_ERROR/,
+    );
+    expect(() => new LocalTenantStorageProvider('short-key')).toThrow(
+      /STORAGE_CONFIG_ERROR/,
+    );
+
+    // R15: azure_blob must throw STORAGE_PROVIDER_NOT_SUPPORTED rather than writing to local disk
+    expect(() =>
+      createDocumentStorageProvider(
+        'azure_blob',
+        'test-signing-key-at-least-16-chars',
+      ),
+    ).toThrow(/STORAGE_PROVIDER_NOT_SUPPORTED/);
+
+    // R17 & R24: Scoped download token binds sub (actorId) and documentId, and rejects another user or tampered signature
+    const storage = new LocalTenantStorageProvider({
+      inMemoryOnly: true,
+      tokenSigningKey: 'tenant-a-secret-signing-key-32bytes!',
+    });
+    const ctxUserA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        ...tenantAAdminToken,
+        sub: 'P-USER-A',
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'dev',
+      correlationId: 'corr-dl-a',
+    });
+    const ctxUserB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        ...tenantAAdminToken,
+        sub: 'P-USER-B',
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'dev',
+      correlationId: 'corr-dl-b',
+    });
+
+    const stored = await storage.putObject(ctxUserA, {
+      category: 'documents',
+      objectId: 'DOC-100',
+      fileName: 'letter.docx',
+      contentType:
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      bytes: new Uint8Array([1, 2, 3, 4]),
+    });
+
+    const issued = await storage.issueScopedDownloadToken(
+      ctxUserA,
+      {
+        blobKey: stored.blobKey,
+        fileName: 'letter.docx',
+        documentId: 'DOC-100',
+      },
+      300,
+    );
+
+    const verifiedA = await storage.verifyScopedDownloadToken(
+      ctxUserA,
+      issued.token,
+    );
+    expect(verifiedA.sub).toBe('P-USER-A');
+    expect(verifiedA.documentId).toBe('DOC-100');
+    expect(verifiedA.blobKey).toBe(stored.blobKey);
+
+    // User B in the same tenant cannot redeem User A's download token
+    await expect(
+      storage.verifyScopedDownloadToken(ctxUserB, issued.token),
+    ).rejects.toThrow(/STORAGE_TOKEN_ACTOR_MISMATCH|STORAGE_TOKEN_FORGERY/);
+
+    // Tampered signature of different or same length is rejected
+    const [payloadPart] = issued.token.split('.');
+    await expect(
+      storage.verifyScopedDownloadToken(ctxUserA, `${payloadPart}.deadbeef`),
+    ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
+  });
+
+  it('9. Enforces R6 & R11: custom tenant role config in canActorAccessMatterRecord and hasEthicalWall restriction in document generation', async () => {
+    const repo = new TenantDocumentRepository();
+    const storage = new LocalTenantStorageProvider({
+      inMemoryOnly: true,
+      tokenSigningKey: 'tenant-a-secret-signing-key-32bytes!',
+    });
+    const engine = new BasicMergeEngine();
+    const catalogue = buildFullFieldCatalogueForTenant();
+
+    // R6: Tenant config that removes `matter:restricted:access` from `partner`
+    const partnerPermsWithoutRestricted = (
+      baseTenantConfig.rbac?.roles.partner?.permissions ?? []
+    ).filter((p) => p !== 'matter:restricted:access');
+
+    const customPartnerConfig = {
+      ...baseTenantConfig,
+      rbac: {
+        ...baseTenantConfig.rbac!,
+        roles: {
+          ...baseTenantConfig.rbac!.roles,
+          partner: {
+            ...baseTenantConfig.rbac!.roles.partner!,
+            key: 'partner',
+            label: 'Partner',
+            isBuiltIn: true,
+            permissions: partnerPermsWithoutRestricted,
+          },
+        },
+      },
+    };
+
+    const builder = { id: 'P-ADMIN-1', roles: ['admin'] };
+    const unnamedPartner = { id: 'P-PARTNER-UNNAMED', roles: ['partner'] };
+    const namedPartner = { id: 'P-PARTNER-NAMED', roles: ['partner'] };
+
+    const docxBytes = buildValidDocxArchive({
+      paragraphs: [{ text: 'Hello {{ client.name }}' }],
+    });
+    const created = await createOrUploadDraftTemplateVersion({
+      ctx: ctxA,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: builder,
+      config: customPartnerConfig,
+      input: {
+        code: 'STAFF-CONFIG-TPL',
+        name: 'Staff Matter Template',
+        description: 'Custom RBAC config test template',
+        category: 'General',
+        outputDocumentType: 'letter',
+        filenamePattern: '{{matter.reference}} - Staff Letter',
+        availabilityRules: { sourceContexts: ['matter'] },
+        fileName: 'staff-letter.docx',
+        docxBytes,
+        fieldMappings: {
+          'client.name': {
+            placeholder: 'client.name',
+            sourceType: 'catalogue',
+            catalogueKey: 'client.name',
+            required: true,
+          },
+        },
+      },
+    });
+    submitTemplateVersionForApproval({
+      ctx: ctxA,
+      repo,
+      catalogue,
+      actor: builder,
+      config: customPartnerConfig,
+      versionId: created.version.id,
+    });
+    approveTemplateVersion({
+      ctx: ctxA,
+      repo,
+      actor: { id: 'P-RISK-APPROVER', roles: ['risk_compliance'] },
+      config: customPartnerConfig,
+      versionId: created.version.id,
+    });
+
+    const staffMatterSubject = {
+      id: 'M-STAFF-CFG-1',
+      clientId: 'CLI-1',
+      isStaffMatter: true,
+      restrictedAccessUserIds: ['P-PARTNER-NAMED'],
+      responsiblePartnerId: 'P-PARTNER-NAMED',
+      teamMemberIds: ['P-PARTNER-NAMED'],
+    };
+    const resolveStaffMatter = (matterId: string) =>
+      matterId === 'M-STAFF-CFG-1' ? staffMatterSubject : null;
+
+    // R6: Unnamed partner is refused by previewTemplateVersion and generateDocumentFromTemplate when tenant config removes matter:restricted:access from partner
+    await expect(
+      previewTemplateVersion({
+        ctx: ctxA,
+        repo,
+        storage,
+        engine,
+        catalogue,
+        actor: unnamedPartner,
+        config: customPartnerConfig,
+        versionId: created.version.id,
+        matterAccessSubject: staffMatterSubject,
+        resolutionContext: {
+          tenantId: ctxA.tenantId,
+          matter: { id: 'M-STAFF-CFG-1', reference: 'MAT-STAFF-1' },
+          client: { id: 'CLI-1', name: 'Acme Ltd' },
+        },
+      }),
+    ).rejects.toThrow(/DOCUMENT_RECORD_ACCESS_DENIED/);
+
+    await expect(
+      generateDocumentFromTemplate({
+        ctx: ctxA,
+        repo,
+        storage,
+        engine,
+        catalogue,
+        actor: unnamedPartner,
+        config: customPartnerConfig,
+        templateId: created.template.id,
+        sourceEntityType: 'matter',
+        matterAccessSubject: staffMatterSubject,
+        resolutionContext: {
+          tenantId: ctxA.tenantId,
+          matter: { id: 'M-STAFF-CFG-1', reference: 'MAT-STAFF-1' },
+          client: { id: 'CLI-1', name: 'Acme Ltd' },
+        },
+      }),
+    ).rejects.toThrow(/DOCUMENT_RECORD_ACCESS_DENIED/);
+
+    // Named partner on the staff matter succeeds
+    const genOk = await generateDocumentFromTemplate({
+      ctx: ctxA,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor: namedPartner,
+      config: customPartnerConfig,
+      templateId: created.template.id,
+      sourceEntityType: 'matter',
+      matterAccessSubject: staffMatterSubject,
+      resolutionContext: {
+        tenantId: ctxA.tenantId,
+        matter: { id: 'M-STAFF-CFG-1', reference: 'MAT-STAFF-1' },
+        client: { id: 'CLI-1', name: 'Acme Ltd' },
+      },
+    });
+    expect(genOk.document).toBeDefined();
+
+    // Unnamed partner cannot list or delete the generated document
+    expect(
+      listAccessibleDocumentsForEntity({
+        ctx: ctxA,
+        repo,
+        actor: unnamedPartner,
+        config: customPartnerConfig,
+        entityType: 'matter',
+        entityId: 'M-STAFF-CFG-1',
+        resolveMatterSubject: resolveStaffMatter,
+      }),
+    ).toHaveLength(0);
+
+    await expect(
+      deleteGeneratedDocument({
+        ctx: ctxA,
+        repo,
+        storage,
+        actor: unnamedPartner,
+        config: customPartnerConfig,
+        documentId: genOk.document!.id,
+        resolveMatterSubject: resolveStaffMatter,
+      }),
+    ).rejects.toThrow(/DOCUMENT_RECORD_ACCESS_DENIED/);
+
+    // R11: toMatterAccessSubject maps hasEthicalWall: true to isStaffMatter: true
+    const ethicalWallSubject = toMatterAccessSubject({
+      id: 'M-WALL-1',
+      isStaffMatter: false,
+      hasEthicalWall: true,
+      restrictedAccessUserIds: ['P-PARTNER-NAMED'],
+      leadFeeEarnerId: 'P-PARTNER-NAMED',
+    } as never);
+    expect(ethicalWallSubject?.isStaffMatter).toBe(true);
+  });
+
+  it('10. Enforces R16 & R19: schema validation on updateDocumentGenerationConfigService and UNAUTHENTICATED on unknown userId', async () => {
+    const store = getStore();
+    const snapshotOverride = structuredClone(store.documentGenerationConfigOverride);
+    const snapshotAudit = structuredClone(store.audit);
+    try {
+      await expect(
+        getDocumentGenerationSnapshotForUser('NON-EXISTENT-USER'),
+      ).rejects.toThrow(/UNAUTHENTICATED/);
+
+      await expect(
+        updateDocumentGenerationConfigService(
+          {
+            customDocumentTypes: [
+              { key: 'INVALID UPPERCASE KEY!', label: 'Invalid' },
+            ],
+          },
+          'P-000001',
+        ),
+      ).rejects.toThrow();
+    } finally {
+      store.documentGenerationConfigOverride = snapshotOverride;
+      store.audit = snapshotAudit;
+      saveStore(store);
+    }
+  });
+});
