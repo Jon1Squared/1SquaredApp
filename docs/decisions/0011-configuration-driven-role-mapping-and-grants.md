@@ -1,7 +1,7 @@
 # ADR-0011: Configuration-Driven Role Mapping, Department Grants, and Relationship Grants
 
 - **Date:** 2026-11-01
-- **Status:** Accepted
+- **Status:** Proposed
 - **Supersedes:** Configuration schema aspects of [ADR-0004](./0004-document-permissions-and-finance-view.md)
 
 ## Context

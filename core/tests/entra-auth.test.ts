@@ -1,21 +1,30 @@
 import crypto from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NextRequest } from 'next/server';
 import {
   clearJwksCache,
   createPkceChallenge,
   createSignedEntraSessionCookie,
+  ENTRA_PKCE_COOKIE,
+  ENTRA_SESSION_COOKIE,
+  exchangeCodeForVerifiedEntraClaims,
+  getEntraSession,
   setTestEntraSessionOverride,
+  shouldUseSecureCookies,
   verifyEntraJwtSignatureAndClaims,
   verifyPkceCookie,
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
   getCurrentUserId,
+  requireAuthenticatedActor,
   resetAllDemoData,
   saveHomePagesConfig,
 } from '../../src/server/services';
 import { switchUserAction } from '../../src/app/actions';
+import { GET as callbackGet } from '../../src/app/api/auth/callback/microsoft-entra-id/route';
 import { GET as logoutGet } from '../../src/app/api/auth/logout/route';
+import { POST as extractMatterPost } from '../../src/app/api/matters/extract/route';
 import AdminCatchAllPage from '../../src/app/admin/[[...slug]]/page';
 
 const TEST_TENANT_ID = '00000000-0000-4000-8000-000000000099';
@@ -285,6 +294,19 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         expectedNonce: 'expected-nonce-123',
       }),
     ).rejects.toThrow(/not yet valid/i);
+
+    const futureIatToken = signTestJwt(
+      { alg: 'RS256', kid: TEST_KID, typ: 'JWT' },
+      makeValidPayload({ iat: nowSec + 300 }),
+    );
+    await expect(
+      verifyEntraJwtSignatureAndClaims({
+        idToken: futureIatToken,
+        tenantId: TEST_TENANT_ID,
+        clientId: TEST_CLIENT_ID,
+        expectedNonce: 'expected-nonce-123',
+      }),
+    ).rejects.toThrow(/issued-at \(iat\) is in the future/i);
   });
 
   it('rejects PKCE state mismatch, expiry, and open-redirect returnTo values (R56, R58)', () => {
@@ -292,7 +314,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     const [encodedPart] = signedCookieValue.split('.');
     const decoded = JSON.parse(
       Buffer.from(encodedPart, 'base64url').toString('utf8'),
-    ) as { state: string; returnTo: string; issuedAt: number };
+    ) as { state: string; nonce: string; codeVerifier: string; returnTo: string; issuedAt: number };
 
     // R58: //evil.example is normalised to '/'
     expect(decoded.returnTo).toBe('/');
@@ -310,6 +332,85 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     expect(() => verifyPkceCookie(tamperedCookie, decoded.state)).toThrow(
       /Invalid or expired OIDC sign-in state cookie/i,
     );
+
+    // Expired PKCE cookie (>10 minutes old) rejected even with valid signature
+    const expiredPayloadEncoded = Buffer.from(
+      JSON.stringify({ ...decoded, issuedAt: Date.now() - 11 * 60 * 1000 }),
+      'utf8',
+    ).toString('base64url');
+    const expiredSig = crypto
+      .createHmac('sha256', process.env.AUTH_SECRET!)
+      .update(expiredPayloadEncoded)
+      .digest('base64url');
+    expect(() =>
+      verifyPkceCookie(`${expiredPayloadEncoded}.${expiredSig}`, decoded.state),
+    ).toThrow(/OIDC sign-in request expired/i);
+  });
+
+  it('exchanges an OIDC code for verified claims and sets a Secure signed session cookie in the callback route (R56, R59)', async () => {
+    const { signedCookieValue } = createPkceChallenge('/matters');
+    const [encodedPart] = signedCookieValue.split('.');
+    const pkceDecoded = JSON.parse(
+      Buffer.from(encodedPart, 'base64url').toString('utf8'),
+    ) as { state: string; nonce: string; codeVerifier: string; returnTo: string };
+
+    const validIdToken = signTestJwt(
+      { alg: 'RS256', kid: TEST_KID, typ: 'JWT' },
+      makeValidPayload({ nonce: pkceDecoded.nonce }),
+    );
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/oauth2/v2.0/token')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              id_token: validIdToken,
+              access_token: 'opaque-access-token',
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ keys: [publicJwk] }),
+        };
+      }),
+    );
+
+    const exchanged = await exchangeCodeForVerifiedEntraClaims({
+      code: 'auth-code-xyz',
+      codeVerifier: pkceDecoded.codeVerifier,
+      expectedNonce: pkceDecoded.nonce,
+    });
+    expect(exchanged.rawClaims.oid).toBe('00000000-0000-4000-8000-000000000222');
+
+    // R59: Verify callback route sets Secure on onesquared_entra_session in production
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+    expect(shouldUseSecureCookies()).toBe(true);
+
+    const callbackReq = new NextRequest(
+      `https://app.notalawfirm.co.uk/api/auth/callback/microsoft-entra-id?code=auth-code-xyz&state=${encodeURIComponent(pkceDecoded.state)}`,
+      {
+        headers: {
+          cookie: `${ENTRA_PKCE_COOKIE}=${signedCookieValue}`,
+        },
+      },
+    );
+    const callbackRes = await callbackGet(callbackReq);
+    expect(callbackRes.status).toBe(307);
+    const setCookieHeader = callbackRes.headers.get('set-cookie') ?? '';
+    expect(setCookieHeader).toContain(`${ENTRA_SESSION_COOKIE}=`);
+    expect(setCookieHeader.toLowerCase()).toContain('secure');
+    expect(setCookieHeader.toLowerCase()).toContain('httponly');
+
+    const sessionCookieVal = callbackRes.cookies.get(ENTRA_SESSION_COOKIE)?.value;
+    const verifiedSession = verifySignedEntraSessionCookie(sessionCookieVal);
+    expect(verifiedSession).not.toBeNull();
+    expect(verifiedSession?.oid).toBe('00000000-0000-4000-8000-000000000222');
   });
 
   it('rejects a tampered session cookie and throws in production when AUTH_SECRET is missing (R56, R59)', () => {
@@ -380,6 +481,28 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     // R51: getCurrentUserId() with no session throws UNAUTHENTICATED
     setTestEntraSessionOverride(null);
     await expect(getCurrentUserId()).rejects.toThrow(/Authentication is required/i);
+    await expect(requireAuthenticatedActor()).rejects.toThrow(
+      /Authentication is required/i,
+    );
+
+    // R51 & R56: Unauthenticated POST /api/matters/extract returns 401 even if a forged onesquared_user=P-000001 cookie is sent
+    const unauthExtractReq = new NextRequest(
+      'http://localhost:3000/api/matters/extract',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: 'onesquared_user=P-000001',
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    const unauthExtractRes = await extractMatterPost(unauthExtractReq);
+    expect(unauthExtractRes.status).toBe(401);
+
+    // Without test override, getEntraSession() returns null when no signed onesquared_entra_session cookie exists
+    setTestEntraSessionOverride(undefined);
+    expect(await getEntraSession()).toBeNull();
 
     // R50: Active Entra session for P-000002 always resolves to P-000002
     setTestEntraSessionOverride({

@@ -16,7 +16,6 @@
  */
 
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import type {
   DocumentStorageProvider,
@@ -26,6 +25,16 @@ import type {
   StoredBlobMetadata,
   TenantContext,
 } from '../api/index';
+
+function getNodeFs(): typeof import('node:fs') {
+  const fs = process.getBuiltinModule?.('node:fs') as
+    | typeof import('node:fs')
+    | undefined;
+  if (!fs) {
+    throw new Error('STORAGE_FS_UNAVAILABLE: node:fs is only available in the server runtime.');
+  }
+  return fs;
+}
 
 const EICAR_SIGNATURE =
   'X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*';
@@ -159,6 +168,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
     this.memoryBlobs.set(blobKey, new Uint8Array(input.bytes));
 
     if (!this.inMemoryOnly) {
+      const fs = getNodeFs();
       const fullPath = path.join(this.rootDir, ...blobKey.split('/'));
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(fullPath, input.bytes);
@@ -195,6 +205,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
     }
 
     if (!this.inMemoryOnly) {
+      const fs = getNodeFs();
       const fullPath = path.join(this.rootDir, ...ref.blobKey.split('/'));
       if (fs.existsSync(fullPath)) {
         const buf = fs.readFileSync(fullPath);
@@ -332,6 +343,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
     this.scanStatuses.delete(ref.blobKey);
 
     if (!this.inMemoryOnly) {
+      const fs = getNodeFs();
       const fullPath = path.join(this.rootDir, ...ref.blobKey.split('/'));
       if (fs.existsSync(fullPath)) {
         fs.unlinkSync(fullPath);
@@ -348,6 +360,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
     if (cached) return cached;
 
     if (!this.inMemoryOnly) {
+      const fs = getNodeFs();
       const fullPath = path.join(this.rootDir, ...blobKey.split('/'));
       if (fs.existsSync(fullPath)) {
         const buf = fs.readFileSync(fullPath);

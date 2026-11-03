@@ -1,8 +1,8 @@
 # ADR-0019: Inheritance-Based Permission Model, Scale Guard, and Drift Reconciliation
 
 - **Date:** 2026-11-02
-- **Status:** Accepted
-- **Related:** [ADR-0014](../../../docs/decisions/0014-staff-matter-access-by-permission.md), [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0018](./0018-two-identity-authentication-model.md)
+- **Status:** Proposed
+- **Related:** [ADR-0014](./0014-staff-matter-access-by-permission.md), [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0018](./0018-two-identity-authentication-model.md)
 
 ## Context
 

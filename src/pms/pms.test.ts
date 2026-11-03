@@ -251,7 +251,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { attentionList } = await import('@/domain/attention');
     const { getAppSnapshot } = await import('@/server/services');
 
-    const snap = getAppSnapshot();
+    const snap = getAppSnapshot('P-000001');
     const allRecords = [...snap.people, ...snap.organisations];
     const today = new Date('2026-10-16T10:00:00Z');
 
@@ -291,7 +291,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { getAppSnapshot } = await import('@/server/services');
     const { getActiveTenantConfiguration } = await import('@/platform/tenantRuntime');
 
-    const snap = getAppSnapshot();
+    const snap = getAppSnapshot('P-000001');
     const tenantConfig = getActiveTenantConfiguration();
     const mappings = tenantConfig.integrations.pmsSync?.fieldMappings ?? [];
     expect(mappings.length).toBeGreaterThan(0);
@@ -347,6 +347,52 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
           d.ownership === 'onesquared_master',
       ),
     ).toBe(true);
+  });
+
+  it('enforces Ofcom drama phone ranges and allow-listed invented email domains across imported PMS data and seed (R49, R74)', async () => {
+    const source = new DemoDbPmsSource();
+    const clients = source.listClients();
+    const feeEarners = source.listFeeEarners();
+
+    const ofcomDramaRegex =
+      /^(01632\s?960\d{3}|020\s?7946\s?0\d{3}|029\s?2018\s?0\d{3}|0117\s?496\s?0\d{3}|07700\s?900\d{3}|08081\s?570\d{3}|0909\s?8790\d{3})$/;
+    const allowedDomainRegex =
+      /@(notalawfirm\.co\.uk|example\.(com|org|net)|[a-z0-9.-]+\.(example|test))$/i;
+
+    for (const c of clients) {
+      if (c.phone.trim()) {
+        expect(c.phone.trim()).toMatch(ofcomDramaRegex);
+      }
+      if (c.email.trim()) {
+        expect(c.email.trim()).toMatch(allowedDomainRegex);
+      }
+      if (c.company_number.trim()) {
+        expect(c.company_number.trim()).toMatch(/^DEMO-/);
+      }
+    }
+
+    for (const fe of feeEarners) {
+      expect(fe.email.trim()).toMatch(allowedDomainRegex);
+    }
+
+    const { getAppSnapshot } = await import('@/server/services');
+    const snap = getAppSnapshot('P-000001');
+    for (const p of snap.people) {
+      for (const em of p.emails) {
+        expect(em.address.trim()).toMatch(allowedDomainRegex);
+      }
+      for (const ph of p.phones) {
+        expect(ph.number.trim()).toMatch(ofcomDramaRegex);
+      }
+    }
+    for (const enq of snap.enquiries) {
+      if (enq.email?.trim()) expect(enq.email.trim()).toMatch(allowedDomainRegex);
+      if (enq.phone?.trim()) expect(enq.phone.trim()).toMatch(ofcomDramaRegex);
+    }
+    for (const qte of snap.quotes) {
+      if (qte.prospectEmail?.trim()) expect(qte.prospectEmail.trim()).toMatch(allowedDomainRegex);
+      if (qte.prospectPhone?.trim()) expect(qte.prospectPhone.trim()).toMatch(ofcomDramaRegex);
+    }
   });
 });
 

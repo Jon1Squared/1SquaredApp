@@ -115,8 +115,14 @@ export interface FirmStore {
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data');
-const DATA_FILE = path.join(DATA_DIR, 'pembroke-vaughan.json');
-const TENANT_CONFIG_FILE = getActiveTenantBaseConfigPath();
+const SEED_DATA_FILE = path.join(DATA_DIR, 'seed-not-a-law-firm.json');
+const RUNTIME_DATA_FILE = path.join(DATA_DIR, 'runtime-store.json');
+
+function resolveReadableStorePath(): string | null {
+  if (fs.existsSync(RUNTIME_DATA_FILE)) return RUNTIME_DATA_FILE;
+  if (fs.existsSync(SEED_DATA_FILE)) return SEED_DATA_FILE;
+  return null;
+}
 
 function resolveActiveFirmId(): string {
   try {
@@ -224,6 +230,49 @@ function buildInitialPmsLinks(
   );
 }
 
+function populateMatterOwningDepartmentAndTeam(
+  matters: Matter[],
+  people: Person[],
+  orgStructure: OrgStructureCatalogue,
+): boolean {
+  let changed = false;
+  for (const m of matters) {
+    if (m.owningDepartmentId !== undefined && m.owningTeamId !== undefined) {
+      continue;
+    }
+    const lead = people.find(
+      (p) =>
+        p.id ===
+        (m.leadFeeEarnerId || m.supervisingPartnerId || m.responsiblePartnerId),
+    );
+    const deptId =
+      m.owningDepartmentId ??
+      lead?.employment?.departmentId ??
+      (lead?.departmentId
+        ? orgStructure.departments.find(
+            (d) => d.id === lead.departmentId || d.legacyChoiceValueId === lead.departmentId,
+          )?.id
+        : undefined);
+    if (m.owningDepartmentId === undefined && deptId) {
+      m.owningDepartmentId = deptId;
+      changed = true;
+    }
+    const teamId =
+      m.owningTeamId ??
+      lead?.employment?.teamOrPracticeGroupId ??
+      (deptId
+        ? orgStructure.teamsOrPracticeGroups.find(
+            (t) => t.parentDepartmentId === deptId,
+          )?.id
+        : undefined);
+    if (m.owningTeamId === undefined && teamId) {
+      m.owningTeamId = teamId;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function createSeedStore(today: Date = new Date()): FirmStore {
   const seedLists = buildSeedLists();
   const demo = buildDemoData(today);
@@ -243,6 +292,11 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     demo.matters,
     matterPartyTaxonomy,
     today.toISOString(),
+  );
+  populateMatterOwningDepartmentAndTeam(
+    partyMigration.matters,
+    empMigration.people,
+    orgStructure,
   );
   const pmsFeeEarners = getPmsSource().listFeeEarners();
   const matterCostsConfig = syncRateCardsWithPmsFeeEarners(
@@ -619,9 +673,10 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
 
 export function getStore(): FirmStore {
   const isTestEnv = Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
-  if (!isTestEnv && fs.existsSync(DATA_FILE)) {
+  const activeStorePath = resolveReadableStorePath();
+  if (!isTestEnv && activeStorePath) {
     try {
-      const diskMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
+      const diskMtimeMs = fs.statSync(activeStorePath).mtimeMs;
       if (global.__oneSquaredStore && global.__oneSquaredStoreMtimeMs !== diskMtimeMs) {
         global.__oneSquaredStore = undefined;
       }
@@ -747,9 +802,9 @@ export function getStore(): FirmStore {
     }
     return global.__oneSquaredStore;
   }
-  if (!isTestEnv && fs.existsSync(DATA_FILE)) {
+  if (!isTestEnv && activeStorePath) {
     try {
-      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const raw = fs.readFileSync(activeStorePath, 'utf8');
       const parsed = JSON.parse(raw) as FirmStore;
       let migrated = false;
       const seedLists = buildSeedLists();
@@ -1044,6 +1099,15 @@ export function getStore(): FirmStore {
         parsed.keyDates = buildSeedKeyDates(parsed.matters, parsed.teams, new Date());
         migrated = true;
       }
+      if (
+        populateMatterOwningDepartmentAndTeam(
+          parsed.matters,
+          parsed.people,
+          parsed.orgStructure,
+        )
+      ) {
+        migrated = true;
+      }
       if (!Array.isArray(parsed.keyDateNotApplicable)) {
         parsed.keyDateNotApplicable = [];
         migrated = true;
@@ -1067,7 +1131,10 @@ export function getStore(): FirmStore {
       setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
       global.__oneSquaredStore = parsed;
       try {
-        global.__oneSquaredStoreMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
+        const currentPath = resolveReadableStorePath();
+        if (currentPath) {
+          global.__oneSquaredStoreMtimeMs = fs.statSync(currentPath).mtimeMs;
+        }
       } catch {
         // ignore stat errors
       }
@@ -1089,41 +1156,10 @@ export function saveStore(store: FirmStore): void {
   }
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
-    global.__oneSquaredStoreMtimeMs = fs.statSync(DATA_FILE).mtimeMs;
+    fs.writeFileSync(RUNTIME_DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+    global.__oneSquaredStoreMtimeMs = fs.statSync(RUNTIME_DATA_FILE).mtimeMs;
   } catch {
     // ignore read-only fs errors in serverless environments
-  }
-  try {
-    if (fs.existsSync(TENANT_CONFIG_FILE)) {
-      const rawCfg = JSON.parse(fs.readFileSync(TENANT_CONFIG_FILE, 'utf8')) as Record<
-        string,
-        unknown
-      >;
-      rawCfg.customFields = store.customFields.map((def) => {
-        const opts = def.optionsListKey
-          ? store.values
-              .filter((v) => v.listKey === def.optionsListKey && v.active)
-              .sort((a, b) => a.sortOrder - b.sortOrder)
-              .map((v) => v.label)
-          : undefined;
-        return {
-          id: def.id,
-          recordType: def.recordType,
-          label: def.label,
-          fieldType: def.fieldType,
-          ...(def.optionsListKey ? { optionsListKey: def.optionsListKey } : {}),
-          ...(opts && opts.length > 0 ? { options: opts } : {}),
-          section: def.section,
-          required: def.required,
-          sortOrder: def.sortOrder,
-          active: def.active,
-        };
-      });
-      fs.writeFileSync(TENANT_CONFIG_FILE, `${JSON.stringify(rawCfg, null, 2)}\n`, 'utf8');
-    }
-  } catch {
-    // ignore read-only fs errors
   }
   if (!firestoreSynced) {
     void trySyncToFirestore(store);

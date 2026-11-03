@@ -75,10 +75,6 @@ function resolveMatterStatusKeys(
       }
     }
   }
-  const legacyStatus = (matter as { status?: string }).status?.trim();
-  if (legacyStatus) {
-    keys.push(legacyStatus.toLowerCase());
-  }
   return keys;
 }
 
@@ -239,10 +235,10 @@ export function queryTeamDiaryEntries(
     }
 
     const matter = kd.matterId ? matterById.get(kd.matterId) : undefined;
-    // Data-layer staff matter exclusion: omit completely with no placeholder
+    // Data-layer staff matter & missing matter exclusion: omit completely with no placeholder (R82)
     if (
-      matter &&
-      !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people)
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people))
     ) {
       continue;
     }
@@ -441,10 +437,10 @@ export function computeKeyDateExceptions(
     if (kd.status === 'superseded') continue;
 
     const matter = kd.matterId ? matterById.get(kd.matterId) : undefined;
-    // Enforce restricted (staff) matter omission in the data layer
+    // Enforce restricted (staff) matter and missing matter omission in the data layer (R82)
     if (
-      matter &&
-      !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people)
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people))
     ) {
       continue;
     }

@@ -72,6 +72,7 @@ import { personDisplayName } from '@/domain/names';
 import { hasPersonPermission } from '@/domain/rbac';
 import type { Person } from '@/domain/types';
 import {
+  brandVerifiedSessionActor,
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
@@ -114,14 +115,13 @@ function isTestEnv(): boolean {
   return Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
 }
 
-function resolveTenantBlobSigningKey(tenantId: string): string {
+export function resolveTenantBlobSigningKey(tenantId: string): string {
   const baseSecret =
     process.env.PLATFORM_BLOB_SIGNING_KEY?.trim() ||
-    process.env.AUTH_SECRET?.trim() ||
     (isTestEnv() ? 'test-host-blob-signing-key-from-vault' : '');
   if (!baseSecret || (baseSecret.startsWith('<') && baseSecret.endsWith('>'))) {
     throw new Error(
-      'STORAGE_CONFIG_ERROR: PLATFORM_BLOB_SIGNING_KEY or AUTH_SECRET must be configured in Key Vault / environment.',
+      'STORAGE_CONFIG_ERROR: PLATFORM_BLOB_SIGNING_KEY must be configured in Key Vault / environment.',
     );
   }
   return crypto
@@ -181,7 +181,7 @@ export function getEffectiveTenantConfig(
 
 export function resolveTenantContextForStoreUser(
   store: FirmStore,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): { ctx: TenantContext; user: Person } {
   const user = store.people.find(
     (p) => p.id === userId && p.isEmployee && !p.mergedIntoId,
@@ -193,12 +193,14 @@ export function resolveTenantContextForStoreUser(
   }
 
   const roles = resolveEmployeeRoles(user, store.teams);
-  const ctx = resolveCurrentTenantContext({
-    id: user.id,
-    name: personDisplayName(user),
-    email: user.emails?.[0]?.address ?? 'user@notalawfirm.co.uk',
-    roles,
-  });
+  const ctx = resolveCurrentTenantContext(
+    brandVerifiedSessionActor({
+      id: user.id,
+      name: personDisplayName(user),
+      email: user.emails?.[0]?.address,
+      roles,
+    }),
+  );
 
   return { ctx, user };
 }
@@ -550,7 +552,7 @@ async function ensureSeedDocumentTemplates(
 }
 
 export async function getInitializedDocGenContext(
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<{
   store: FirmStore;
   ctx: TenantContext;
@@ -576,7 +578,7 @@ export async function getInitializedDocGenContext(
 }
 
 export async function getDocumentGenerationSnapshotForUser(
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<DocumentGenerationClientSnapshot> {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -691,7 +693,7 @@ export async function uploadTemplateDraftService(
     promptedFields?: PromptedFieldDefinition[];
     changeNote?: string;
   },
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo, storage } =
     await getInitializedDocGenContext(userId);
@@ -763,7 +765,7 @@ export async function updateTemplateDraftService(
     >;
     changeNote?: string;
   },
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -790,7 +792,7 @@ export async function updateTemplateDraftService(
 export async function submitTemplateVersionService(
   versionId: string,
   changeNote: string | undefined,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -823,7 +825,7 @@ export async function submitTemplateVersionService(
 
 export async function approveTemplateVersionService(
   versionId: string,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -854,7 +856,7 @@ export async function approveTemplateVersionService(
 export async function rejectTemplateVersionService(
   versionId: string,
   rejectionReason: string,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -885,7 +887,7 @@ export async function rejectTemplateVersionService(
 
 export async function retireTemplateService(
   templateId: string,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -916,7 +918,7 @@ export async function retireTemplateService(
 export async function rollbackTemplateVersionService(
   templateId: string,
   targetVersionId: string,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -947,8 +949,8 @@ export async function rollbackTemplateVersionService(
 
 export async function exportTemplatePackageService(
   templateId: string,
-  versionId?: string,
-  userId: string = DEFAULT_USER_ID,
+  versionId: string | undefined,
+  userId: string,
 ): Promise<TemplatePackageManifest> {
   const { ctx, user, config, repo, storage } =
     await getInitializedDocGenContext(userId);
@@ -967,7 +969,7 @@ export async function exportTemplatePackageService(
 
 export async function importTemplatePackageService(
   pkg: TemplatePackageManifest,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ) {
   const { store, ctx, user, config, repo, storage } =
     await getInitializedDocGenContext(userId);
@@ -1012,7 +1014,7 @@ export async function previewTemplateService(
     promptedValues?: Record<string, unknown>;
     outputFormat?: DocumentOutputFormat;
   },
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<{
   fileBase64: string;
   fileName: string;
@@ -1089,7 +1091,7 @@ export async function generateDocumentService(
     promptedValues?: Record<string, unknown>;
     outputFormat?: DocumentOutputFormat;
   },
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<{
   status: 'generated' | 'blocked_missing_required';
   document?: GeneratedDocumentRecord;
@@ -1208,7 +1210,7 @@ export async function generateDocumentService(
 
 export async function downloadGeneratedDocumentService(
   documentId: string,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<{
   fileBase64: string;
   fileName: string;
@@ -1263,7 +1265,7 @@ export async function downloadGeneratedDocumentService(
 
 export async function deleteGeneratedDocumentService(
   documentId: string,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<GeneratedDocumentRecord> {
   const { store, ctx, user, config, repo, storage } =
     await getInitializedDocGenContext(userId);
@@ -1304,7 +1306,7 @@ export interface EnrichedTemplateUsageReportResult
 
 export async function getTemplateUsageReportService(
   filter: TemplateUsageReportFilter = {},
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<EnrichedTemplateUsageReportResult> {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId);
@@ -1342,7 +1344,7 @@ export async function getTemplateUsageReportService(
 
 export async function updateDocumentGenerationConfigService(
   patch: Partial<DocumentGenerationConfig>,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): Promise<DocumentGenerationConfig> {
   const { store, user, config } = await getInitializedDocGenContext(userId);
   const actor = buildDocumentActorFromPerson(user);

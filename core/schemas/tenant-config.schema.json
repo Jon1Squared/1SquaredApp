@@ -65,7 +65,12 @@
       "properties": {
         "enableMatterCostsGovernance": { "type": "boolean", "default": true },
         "enablePmsLiveRateSync": { "type": "boolean", "default": true },
-        "enableAiMatterExtraction": { "type": "boolean", "default": false }
+        "enableAiMatterExtraction": { "type": "boolean", "default": false },
+        "enableDemoMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Demo Mode user switching for designated demo personas in non-live environments"
+        }
       }
     },
     "matterCosts": {

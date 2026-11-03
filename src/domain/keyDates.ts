@@ -457,14 +457,14 @@ export function isMatterRestrictedForKeyDates(
  */
 export function canViewerAccessMatterKeyDates(
   matter:
-    | Pick<Matter, 'isStaffMatter' | 'restrictedAccessUserIds'>
+    | Pick<Matter, 'id' | 'isStaffMatter' | 'restrictedAccessUserIds'>
     | null
     | undefined,
   viewerUserId: PersonId | Person | null | undefined,
   viewerPerson?: Person | null,
   people?: readonly Person[],
 ): boolean {
-  if (!matter) return true;
+  if (!matter || !matter.id) return false;
   if (!viewerUserId) return false;
   const userId =
     typeof viewerUserId === 'string' ? viewerUserId : viewerUserId.id;
@@ -474,10 +474,7 @@ export function canViewerAccessMatterKeyDates(
       ? viewerUserId
       : (viewerPerson ?? people?.find((p) => p.id === userId) ?? null);
   return canUserAccessMatter(
-    {
-      ...matter,
-      id: (matter as { id?: string }).id ?? 'MATTER-KEY-DATE-CHECK',
-    } as Matter,
+    matter as Matter,
     userId,
     resolvedPerson,
   );
@@ -723,6 +720,12 @@ export function createOrProposeKeyDate(
   const isCritical = input.isCritical ?? kdType?.defaultCritical ?? false;
 
   // R28: Server-side recalculation, ruleSetReviewStatus lookup from tenant config, and override permission check
+  if (input.source === 'calculated' && !calculation) {
+    throw new Error(
+      'KEY_DATE_VALIDATION_ERROR: A calculation payload is required when source is "calculated".',
+    );
+  }
+
   let resolvedCalculation: KeyDateCalculation | undefined;
   if (calculation) {
     const foundRule =
@@ -735,26 +738,23 @@ export function createOrProposeKeyDate(
         return undefined;
       })();
 
-    let effectiveCalculatedDate = calculation.calculatedDate;
-    let effectiveReviewStatus: 'reviewed' | 'unreviewed' =
-      foundRule?.ruleSet.reviewStatus ?? calculation.ruleSetReviewStatus ?? 'unreviewed';
-    let effectiveVersion =
-      foundRule?.ruleSet.version ?? calculation.ruleSetVersion ?? 1;
-    let effectiveExplanation = calculation.explanation ?? [];
-
-    if (foundRule) {
-      const calendar = findBusinessCalendar(config, foundRule.rule.calendarId);
-      const calcResult = calculateLimitationDate({
-        rule: foundRule.rule,
-        triggers: calculation.triggers,
-        calendar,
-        ruleSetReviewStatus: foundRule.ruleSet.reviewStatus,
-      });
-      effectiveCalculatedDate = calcResult.date;
-      effectiveReviewStatus = foundRule.ruleSet.reviewStatus;
-      effectiveVersion = foundRule.ruleSet.version;
-      effectiveExplanation = calcResult.explanation;
+    if (!foundRule) {
+      throw new Error(
+        `KEY_DATE_VALIDATION_ERROR: Unknown limitation ruleSetId "${calculation.ruleSetId}" or ruleId "${calculation.ruleId}".`,
+      );
     }
+
+    const calendar = findBusinessCalendar(config, foundRule.rule.calendarId);
+    const calcResult = calculateLimitationDate({
+      rule: foundRule.rule,
+      triggers: calculation.triggers,
+      calendar,
+      ruleSetReviewStatus: foundRule.ruleSet.reviewStatus,
+    });
+    const effectiveCalculatedDate = calcResult.date;
+    const effectiveReviewStatus = foundRule.ruleSet.reviewStatus;
+    const effectiveVersion = foundRule.ruleSet.version;
+    const effectiveExplanation = calcResult.explanation;
 
     const isOverridden = Boolean(
       calculation.overridden || dueDate !== effectiveCalculatedDate,
@@ -779,7 +779,7 @@ export function createOrProposeKeyDate(
       }
       resolvedCalculation = {
         ...calculation,
-        ruleSetId: foundRule?.ruleSet.id ?? calculation.ruleSetId,
+        ruleSetId: foundRule.ruleSet.id,
         ruleSetVersion: effectiveVersion,
         ruleSetReviewStatus: effectiveReviewStatus,
         calculatedDate: effectiveCalculatedDate,
@@ -790,7 +790,7 @@ export function createOrProposeKeyDate(
     } else {
       resolvedCalculation = {
         ...calculation,
-        ruleSetId: foundRule?.ruleSet.id ?? calculation.ruleSetId,
+        ruleSetId: foundRule.ruleSet.id,
         ruleSetVersion: effectiveVersion,
         ruleSetReviewStatus: effectiveReviewStatus,
         calculatedDate: effectiveCalculatedDate,
@@ -1236,11 +1236,15 @@ export function supersedeConfirmedKeyDate(params: {
   }
 
   const beforeOld = structuredClone(existingKeyDate);
-  existingKeyDate.status = 'superseded';
-  existingKeyDate.supersededByKeyDateId = newKeyDateId;
-  existingKeyDate.updatedById = actor.id;
-  existingKeyDate.updatedAt = nowIso;
-  existingKeyDate.version += 1;
+  const carriedCalculation = updates.calculation
+    ? updates.calculation
+    : existingKeyDate.calculation
+      ? {
+          ...existingKeyDate.calculation,
+          overrideReason:
+            existingKeyDate.calculation.overrideReason || cleanReason,
+        }
+      : undefined;
 
   const replacementKeyDate = createOrProposeKeyDate({
     id: newKeyDateId,
@@ -1251,11 +1255,13 @@ export function supersedeConfirmedKeyDate(params: {
     dueDate: updates.dueDate,
     dueTime: updates.dueTime ?? existingKeyDate.dueTime,
     isCritical: updates.isCritical ?? existingKeyDate.isCritical,
-    source: updates.source ?? (updates.calculation ? 'calculated' : existingKeyDate.source),
+    source:
+      updates.source ??
+      (carriedCalculation ? 'calculated' : existingKeyDate.source),
     teamId: updates.teamId ?? existingKeyDate.teamId,
     responsiblePersonIds:
       updates.responsiblePersonIds ?? existingKeyDate.responsiblePersonIds,
-    calculation: updates.calculation,
+    calculation: carriedCalculation,
     notes: updates.notes ?? existingKeyDate.notes,
     sourceDocumentId: existingKeyDate.sourceDocumentId,
     intent: updates.intent ?? 'propose',
@@ -1268,6 +1274,12 @@ export function supersedeConfirmedKeyDate(params: {
     nextAuditId,
   });
   replacementKeyDate.supersedesKeyDateId = existingKeyDate.id;
+
+  existingKeyDate.status = 'superseded';
+  existingKeyDate.supersededByKeyDateId = newKeyDateId;
+  existingKeyDate.updatedById = actor.id;
+  existingKeyDate.updatedAt = nowIso;
+  existingKeyDate.version += 1;
 
   audit.push({
     id: nextAuditId(),

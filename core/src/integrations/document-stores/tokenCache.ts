@@ -486,64 +486,6 @@ async function defaultOboExchangeHandler(
     throw err;
   }
 
-  if (process.env.SHAREPOINT_LIVE_TEST_ENABLED === '1') {
-    const tokenEndpoint = `https://login.microsoftonline.com/${encodeURIComponent(
-      input.entraTenantId,
-    )}/oauth2/v2.0/token`;
-    const clientSecret = process.env.SHAREPOINT_LIVE_CLIENT_SECRET ?? '';
-    const clientAssertion = process.env.SHAREPOINT_LIVE_CLIENT_ASSERTION ?? '';
-    if (!clientSecret && !clientAssertion) {
-      throw createDocumentStoreAuthError(
-        'misconfigured',
-        'LIVE_SHAREPOINT_AUTH_ERROR: Live SharePoint OBO token exchange requires SHAREPOINT_LIVE_CLIENT_SECRET or SHAREPOINT_LIVE_CLIENT_ASSERTION.',
-      );
-    }
-    const body = new URLSearchParams({
-      client_id: input.clientId,
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion: input.userAssertionToken,
-      requested_token_use: 'on_behalf_of',
-      scope: input.scope,
-    });
-    if (clientAssertion) {
-      body.set(
-        'client_assertion_type',
-        'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-      );
-      body.set('client_assertion', clientAssertion);
-    } else {
-      body.set('client_secret', clientSecret);
-    }
-    const response = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-    });
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => '');
-      throw createDocumentStoreAuthError(
-        'reauthentication_required',
-        `LIVE_SHAREPOINT_OBO_FAILED: Entra ID token endpoint returned HTTP ${response.status} (${errBody.slice(0, 200)}).`,
-      );
-    }
-    const json = (await response.json()) as {
-      access_token?: string;
-      expires_in?: number;
-      scope?: string;
-    };
-    if (!json.access_token) {
-      throw createDocumentStoreAuthError(
-        'reauthentication_required',
-        'LIVE_SHAREPOINT_OBO_FAILED: Entra ID response did not include access_token.',
-      );
-    }
-    return {
-      accessToken: json.access_token,
-      expiresInSeconds: Number(json.expires_in ?? 3600),
-      scope: json.scope ?? input.scope,
-    };
-  }
-
   return {
     accessToken: `obo_tok_${input.tenantId}_${input.entraObjectId}_${input.scope}`,
     expiresInSeconds: 3600,
@@ -554,61 +496,6 @@ async function defaultOboExchangeHandler(
 async function defaultAppTokenAcquireHandler(
   input: AppTokenAcquireHandlerInput,
 ): Promise<TokenExchangeResult> {
-  if (process.env.SHAREPOINT_LIVE_TEST_ENABLED === '1') {
-    const tokenEndpoint = `https://login.microsoftonline.com/${encodeURIComponent(
-      input.entraTenantId,
-    )}/oauth2/v2.0/token`;
-    const clientSecret = process.env.SHAREPOINT_LIVE_CLIENT_SECRET ?? '';
-    const clientAssertion = process.env.SHAREPOINT_LIVE_CLIENT_ASSERTION ?? '';
-    if (!input.clientId || (!clientSecret && !clientAssertion)) {
-      throw createDocumentStoreAuthError(
-        'misconfigured',
-        'LIVE_SHAREPOINT_AUTH_ERROR: Live SharePoint provisioning token acquisition requires SHAREPOINT_LIVE_CLIENT_ID and SHAREPOINT_LIVE_CLIENT_SECRET or SHAREPOINT_LIVE_CLIENT_ASSERTION.',
-      );
-    }
-    const body = new URLSearchParams({
-      client_id: input.clientId,
-      grant_type: 'client_credentials',
-      scope: input.scope,
-    });
-    if (clientAssertion) {
-      body.set(
-        'client_assertion_type',
-        'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-      );
-      body.set('client_assertion', clientAssertion);
-    } else {
-      body.set('client_secret', clientSecret);
-    }
-    const response = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-    });
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => '');
-      throw createDocumentStoreAuthError(
-        'access_denied',
-        `LIVE_SHAREPOINT_APP_TOKEN_FAILED: Entra ID token endpoint returned HTTP ${response.status} (${errBody.slice(0, 200)}).`,
-      );
-    }
-    const json = (await response.json()) as {
-      access_token?: string;
-      expires_in?: number;
-    };
-    if (!json.access_token) {
-      throw createDocumentStoreAuthError(
-        'access_denied',
-        'LIVE_SHAREPOINT_APP_TOKEN_FAILED: Entra ID response did not include access_token.',
-      );
-    }
-    return {
-      accessToken: json.access_token,
-      expiresInSeconds: Number(json.expires_in ?? 3600),
-      scope: input.scope,
-    };
-  }
-
   return {
     accessToken: `app_tok_${input.tenantId}_${input.credentialMode}_${input.scope}`,
     expiresInSeconds: 3600,

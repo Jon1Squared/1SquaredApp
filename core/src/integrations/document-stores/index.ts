@@ -23,7 +23,6 @@ import { DocumentStoreTokenService } from './tokenCache';
 
 export * from './sharepointUrlParser';
 export * from './tokenCache';
-export * from './mockSharePointGraph';
 export * from './sharepointProvider';
 
 export const RESERVED_UNSUPPORTED_DOCUMENT_STORE_PROVIDERS = new Set<DocumentStoreProviderType>([

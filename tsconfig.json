@@ -21,6 +21,7 @@
     "paths": {
       "@/*": ["./src/*"],
       "zod": ["./node_modules/zod"],
+      "@platform/core/testing": ["./core/src/testing.ts"],
       "@platform/core": ["./core/src/index.ts"],
       "@platform/core-api": ["./core/src/api/index.ts"]
     }

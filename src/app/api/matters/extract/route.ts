@@ -13,10 +13,11 @@ import {
   type IntakeSourceDocument,
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
+import { AuthorisationError } from '@/domain/rbac';
 import { vid } from '@/seed/lists';
 import {
   createOrUpdateLink,
-  getCurrentUserId,
+  requireAuthenticatedActor,
   saveOrganisationRecord,
   savePersonRecord,
 } from '@/server/services';
@@ -2437,6 +2438,9 @@ function ensureContactInCrm(
 
 export async function POST(req: Request) {
   try {
+    const actor = await requireAuthenticatedActor();
+    const byId = actor.personId;
+
     const body = (await req.json()) as {
       documents?: IntakeSourceDocument[];
       apiKeyOverride?: string;
@@ -2461,7 +2465,6 @@ export async function POST(req: Request) {
     }
 
     const store = getStore();
-    const byId = await getCurrentUserId();
     const employees = store.people.filter((p) => p.isEmployee);
 
     const practiceAreas = store.values.filter(
@@ -2598,7 +2601,7 @@ export async function POST(req: Request) {
           emails: [
             {
               id: `em-${Date.now()}-fe`,
-              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@onesquared.law`,
+              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@notalawfirm.co.uk`,
               typeId: vid('email_type', 'Work'),
               isPrimary: true,
             },
@@ -2640,6 +2643,12 @@ export async function POST(req: Request) {
       links: latestStore.links,
     });
   } catch (err) {
+    if (err instanceof AuthorisationError && err.code === 'UNAUTHENTICATED') {
+      return NextResponse.json(
+        { error: 'Authentication is required.' },
+        { status: 401 },
+      );
+    }
     return NextResponse.json(
       {
         error: err instanceof Error ? err.message : 'Failed to extract from documents.',

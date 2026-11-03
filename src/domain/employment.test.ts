@@ -575,6 +575,69 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(logRes.error).toBeUndefined();
       expect(logRes.auditEntry?.action).toBe('view-payroll');
     });
+
+    it('preserves existing employeeSensitiveRecords[id] when saving a person without sensitiveSubmitted (R76)', () => {
+      const store = getStore();
+      const target = store.people.find((p) => p.id === 'P-000002')!;
+
+      // First save a sensitive record on P-000002 as HR Admin P-000004
+      savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: {
+            reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
+          },
+        },
+      );
+      expect(
+        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+      ).toBe('Ergonomic standing desk and dual monitors');
+
+      const sensitiveAuditCountBefore = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'update-sensitive',
+      ).length;
+
+      // Now save P-000002 again (e.g. updating preferredName) without revealing/submitting sensitive section
+      const updateRes = savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+          preferredName: 'Daf',
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: null,
+        },
+      );
+      expect(updateRes.errors).toBeUndefined();
+      expect(
+        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+      ).toBe('Ergonomic standing desk and dual monitors');
+      const sensitiveAuditCountAfter = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'update-sensitive',
+      ).length;
+      expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);
+
+      // Revealing on demand via getEmployeeDetailsForUser returns the preserved record and logs view-sensitive
+      const revealed = getEmployeeDetailsForUser(target.id, 'P-000004', {
+        logViewSensitive: true,
+      });
+      expect(revealed.sensitive?.reasonableAdjustmentsNeeded).toBe(
+        'Ergonomic standing desk and dual monitors',
+      );
+    });
   });
 
   describe('6. New Matter department pre-selection and department-scoped dropdowns', () => {

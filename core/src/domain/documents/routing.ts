@@ -286,6 +286,14 @@ export function resolveMatterDocumentRoute(params: {
     throw err;
   }
 
+  if (!subject.teamId || !subject.teamId.trim()) {
+    const err = new Error(
+      `DOCUMENT_ROUTING_ERROR: Matter "${subject.matterNumber || subject.matterId}" has no owning team configured for document routing.`,
+    ) as Error & { code: DocumentStoreErrorCode };
+    err.code = 'misconfigured';
+    throw err;
+  }
+
   let matchedIndex = -1;
   let matchedRule: DocumentRoutingRule | undefined;
 

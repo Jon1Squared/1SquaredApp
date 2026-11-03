@@ -17,6 +17,8 @@ import { canViewerAccessMatterKeyDates } from '../keyDates';
 import {
   exportKeyDateExceptionsReportRecord,
   getAppSnapshot,
+  getKeyDateExceptionsReportRecord,
+  verifyProposedKeyDateRecord,
 } from '@/server/services';
 import { getStore, resetStore } from '@/server/store';
 
@@ -119,6 +121,21 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       teamId: 'TM-PROP',
     };
 
+    const mattersForDiary: Matter[] = [
+      {
+        id: 'MAT-LIT-1',
+        reference: 'NALF-LIT-1',
+        title: 'Litigation Matter',
+        isStaffMatter: false,
+      } as unknown as Matter,
+      {
+        id: 'MAT-PROP-1',
+        reference: 'NALF-PROP-1',
+        title: 'Property Matter',
+        isStaffMatter: false,
+      } as unknown as Matter,
+    ];
+
     // Regular fee earner in TM-LIT only sees TM-LIT even if requesting TM-PROP
     const feeEarnerDefault = queryTeamDiaryEntries({
       viewer: litFeeEarner,
@@ -126,6 +143,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       todayIso: '2026-06-01',
       config,
       keyDates: [kdLit, kdProp],
+      matters: mattersForDiary,
       teams,
       people,
     });
@@ -137,6 +155,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       todayIso: '2026-06-01',
       config,
       keyDates: [kdLit, kdProp],
+      matters: mattersForDiary,
       teams,
       people,
     });
@@ -153,6 +172,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       todayIso: '2026-06-01',
       config,
       keyDates: [kdLit, kdProp],
+      matters: mattersForDiary,
       teams,
       people,
     });
@@ -172,6 +192,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       todayIso: '2026-06-01',
       config,
       keyDates: [kdLit, kdProp],
+      matters: mattersForDiary,
       teams,
       people,
     });
@@ -258,7 +279,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       practiceAreaId: 'work_type.dispute_resolution',
       matterTypeId: 'matter_type.litigation',
       owningTeamId: 'TM-LIT',
-      status: 'Active',
+      matterStatusId: 'matter_status.active',
       updatedAt: '2026-06-01T00:00:00Z',
     } as unknown as Matter;
 
@@ -270,7 +291,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       practiceAreaId: 'work_type.conveyancing',
       matterTypeId: 'matter_type.residential_conveyancing',
       owningTeamId: 'TM-PROP',
-      status: 'Closed',
+      matterStatusId: 'matter_status.closed',
       updatedAt: '2026-05-01T00:00:00Z',
     } as unknown as Matter;
 
@@ -282,7 +303,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       practiceAreaId: 'work_type.dispute_resolution',
       matterTypeId: 'matter_type.litigation',
       owningTeamId: 'TM-LIT',
-      status: 'Active',
+      matterStatusId: 'matter_status.active',
       updatedAt: '2026-04-01T00:00:00Z', // > 30 days before todayIso (2026-06-15)
     } as unknown as Matter;
 
@@ -294,7 +315,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       practiceAreaId: 'work_type.dispute_resolution',
       matterTypeId: 'matter_type.litigation',
       owningTeamId: 'TM-LIT',
-      status: 'Active',
+      matterStatusId: 'matter_status.active',
       isStaffMatter: true,
       restrictedAccessUserIds: ['P-AUTH-RISK'],
       updatedAt: '2026-06-01T00:00:00Z',
@@ -482,7 +503,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     );
   });
 
-  it('agrees with canUserAccessMatter for risk_compliance users (R37), compares stable status keys on renamed labels (R42), audits exports as keydate-export (R41), and scopes getAppSnapshot by team (R32)', () => {
+  it('agrees with canUserAccessMatter for risk_compliance users (R37), compares stable status keys on renamed labels (R42), audits exports as keydate-export (R41), and scopes getAppSnapshot by team (R32)', async () => {
     const todayIso = '2026-06-15';
 
     // R37: A risk_compliance user granted matter:restricted:access gets the same answer from canUserAccessMatter and from key dates diary & exceptions
@@ -589,6 +610,36 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       true,
     );
 
+    // R42: A matter with no matterStatusId and a legacy status label of 'Active' is NOT treated as open
+    const matterWithLegacyLabelOnly = {
+      id: 'MAT-LEGACY-LABEL-ONLY',
+      reference: 'NALF-LEGACY-001',
+      title: 'Legacy Label Only Matter',
+      practiceAreaId: 'work_type.dispute_resolution',
+      matterTypeId: 'matter_type.litigation',
+      owningTeamId: 'TM-LIT',
+      matterStatusId: '',
+      status: 'Active',
+      updatedAt: '2026-06-01T00:00:00Z',
+    } as unknown as Matter;
+    const exLegacyLabel = computeKeyDateExceptions({
+      viewer: riskComplianceUser,
+      todayIso,
+      config,
+      keyDates: [],
+      matters: [matterWithLegacyLabelOnly],
+      teams,
+      people: allTestPeople,
+      values: valuesBeforeRename as never,
+    });
+    expect(
+      exLegacyLabel.some(
+        (e) =>
+          e.matterId === 'MAT-LEGACY-LABEL-ONLY' &&
+          e.kind === 'matter_missing_required_date',
+      ),
+    ).toBe(false);
+
     // R41: After exportKeyDateExceptionsReportRecord, an audit entry has action === 'keydate-export'
     resetStore();
     const store = getStore();
@@ -602,6 +653,68 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     );
     expect(exportRes.ok).toBe(true);
     expect(store.audit[0]?.action).toBe('keydate-export');
+
+    // R29: A staff matter with no permitted assignee, updated through the services, writes an audit entry and produces an exceptions-report entry
+    const unpermittedAssignee = store.people.find(
+      (p) => p.isEmployee && !p.mergedIntoId && p.id !== managingPartner.id,
+    )!;
+    const staffMatterNoAssignee: Matter = {
+      ...store.matters[0]!,
+      id: 'M-R29-NO-ASSIGNEE',
+      matterNumber: 'NALF-R29-001',
+      title: 'Staff Matter With Unpermitted Responsible Person',
+      isStaffMatter: true,
+      restrictedAccessUserIds: [managingPartner.id],
+      responsiblePartnerId: managingPartner.id,
+      supervisingPartnerId: managingPartner.id,
+      leadFeeEarnerId: managingPartner.id,
+      teamMemberIds: [managingPartner.id],
+    };
+    store.matters.push(staffMatterNoAssignee);
+    const activeTeamId = store.teams.find((t) => t.active)!.id;
+    store.keyDates = [
+      {
+        ...store.keyDates![0]!,
+        id: 'KD-R29-NO-ASSIGNEE',
+        matterId: staffMatterNoAssignee.id,
+        title: 'Staff Matter Unassignable Deadline',
+        dueDate: '2026-12-01',
+        status: 'awaiting_verification',
+        teamId: activeTeamId,
+        responsiblePersonIds: [unpermittedAssignee.id],
+        verification: {
+          required: true,
+          proposedById: unpermittedAssignee.id,
+          proposedAt: '2026-11-01T10:00:00.000Z',
+        },
+      },
+      ...(store.keyDates ?? []),
+    ];
+    const verifyStaffRes = await verifyProposedKeyDateRecord(
+      'KD-R29-NO-ASSIGNEE',
+      managingPartner.id,
+    );
+    expect(verifyStaffRes.ok).toBe(true);
+    expect(
+      store.audit.some(
+        (a) =>
+          a.recordId === 'KD-R29-NO-ASSIGNEE' &&
+          a.action === 'keydate-reminder-escalate' &&
+          a.newValue === 'no_permitted_assignees_on_restricted_matter',
+      ),
+    ).toBe(true);
+    const exceptionsForPartner = getKeyDateExceptionsReportRecord(
+      {},
+      managingPartner.id,
+      todayIso,
+    );
+    expect(
+      exceptionsForPartner.some(
+        (ex) =>
+          ex.keyDateId === 'KD-R29-NO-ASSIGNEE' &&
+          ex.kind === 'reminder_escalated_unacknowledged',
+      ),
+    ).toBe(true);
 
     // R32: getAppSnapshot for a fee earner without keydate:view_any_team contains no other team's key dates
     const feeEarner = store.people.find(

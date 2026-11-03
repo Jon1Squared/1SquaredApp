@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+import { NextRequest } from 'next/server';
 import { describe, expect, it } from 'vitest';
 import {
   approveTemplateVersion,
@@ -25,7 +27,7 @@ import {
   queryTemplateUsageReport,
   rejectTemplateVersion,
   resolveDocumentPermissions,
-   resolveTenantFromVerifiedToken,
+  resolveTenantFromVerifiedToken,
   retireTemplate,
   rollbackTemplateToVersion,
   submitTemplateVersionForApproval,
@@ -35,11 +37,16 @@ import {
   createDocumentStorageProvider,
   type PlatformExtension,
 } from '@platform/core';
+import { GET as getDocumentDownloadRoute } from '@/app/api/documents/download/route';
+import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
 import { toMatterAccessSubject } from '@/domain/documentGeneration';
 import {
   getDocumentGenerationSnapshotForUser,
+  getInitializedDocGenContext,
+  resolveTenantBlobSigningKey,
   updateDocumentGenerationConfigService,
 } from '@/server/documentGenerationServices';
+import { setTestEntraSessionOverride } from '@/server/entraAuth';
 import { getStore, saveStore } from '@/server/store';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
@@ -1018,10 +1025,68 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     ).rejects.toThrow(/STORAGE_TOKEN_ACTOR_MISMATCH|STORAGE_TOKEN_FORGERY/);
 
     // Tampered signature of different or same length is rejected
-    const [payloadPart] = issued.token.split('.');
+    const [payloadPart, sigPart] = issued.token.split('.');
     await expect(
       storage.verifyScopedDownloadToken(ctxUserA, `${payloadPart}.deadbeef`),
     ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
+
+    // R24: Flipping a single hex character in a valid token's signature (keeping the same length) is rejected
+    const flippedFirstChar = sigPart![0] === 'a' ? 'b' : 'a';
+    const sameLengthTamperedSig = `${flippedFirstChar}${sigPart!.slice(1)}`;
+    expect(sameLengthTamperedSig.length).toBe(sigPart!.length);
+    await expect(
+      storage.verifyScopedDownloadToken(
+        ctxUserA,
+        `${payloadPart}.${sameLengthTamperedSig}`,
+      ),
+    ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
+
+    // R1 & R22: Token hand-signed with the old constant 'platform-scoped-blob-token-key-v1:<tenantId>' is rejected
+    const oldSigningSecret = `platform-scoped-blob-token-key-v1:${ctxUserA.tenantId}`;
+    const forgedSigWithOldKey = crypto
+      .createHmac('sha256', oldSigningSecret)
+      .update(payloadPart!)
+      .digest('hex');
+    await expect(
+      storage.verifyScopedDownloadToken(
+        ctxUserA,
+        `${payloadPart}.${forgedSigWithOldKey}`,
+      ),
+    ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
+
+    // R1: Outside test mode, resolveTenantBlobSigningKey throws when PLATFORM_BLOB_SIGNING_KEY is unset (even if AUTH_SECRET is set)
+    const prevKey = process.env.PLATFORM_BLOB_SIGNING_KEY;
+    const prevAuth = process.env.AUTH_SECRET;
+    const prevVitest = process.env.VITEST;
+    const prevNodeEnv = process.env.NODE_ENV;
+    try {
+      delete process.env.PLATFORM_BLOB_SIGNING_KEY;
+      process.env.AUTH_SECRET = 'some-auth-secret-that-must-not-be-used';
+      delete process.env.VITEST;
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      expect(() => resolveTenantBlobSigningKey('not-a-law-firm')).toThrow(
+        /STORAGE_CONFIG_ERROR/,
+      );
+    } finally {
+      if (prevKey === undefined) delete process.env.PLATFORM_BLOB_SIGNING_KEY;
+      else process.env.PLATFORM_BLOB_SIGNING_KEY = prevKey;
+      if (prevAuth === undefined) delete process.env.AUTH_SECRET;
+      else process.env.AUTH_SECRET = prevAuth;
+      if (prevVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = prevVitest;
+      (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+    }
+
+    // R22: Forged untrustedRequestTenantOverride is rejected with TENANCY_FORGERY_DETECTED
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAAdminToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-forged',
+        untrustedRequestTenantOverride: 'forged-other-tenant',
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
   });
 
   it('9. Enforces R6 & R11: custom tenant role config in canActorAccessMatterRecord and hasEthicalWall restriction in document generation', async () => {
@@ -1211,17 +1276,83 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       leadFeeEarnerId: 'P-PARTNER-NAMED',
     } as never);
     expect(ethicalWallSubject?.isStaffMatter).toBe(true);
+
+    // R11: getDocumentGenerationSnapshotForUser omits a document linked to a matter with hasEthicalWall: true (even when isStaffMatter: false) for an excluded employee
+    const store = getStore();
+    const snapshotMatters = structuredClone(store.matters);
+    try {
+      const wallMatter = store.matters.find((m) => m.id === 'M-000002')!;
+      wallMatter.isStaffMatter = false;
+      wallMatter.hasEthicalWall = true;
+      wallMatter.restrictedAccessUserIds = ['P-000001'];
+      wallMatter.leadFeeEarnerId = 'P-000001';
+      wallMatter.supervisingPartnerId = 'P-000001';
+      wallMatter.responsiblePartnerId = 'P-000001';
+      wallMatter.teamMemberIds = ['P-000001'];
+
+      const { ctx, repo: hostRepo } =
+        await getInitializedDocGenContext('P-000001');
+      const docRecord = {
+        id: 'DOC-WALL-R11',
+        tenantId: ctx.tenantId,
+        templateId: 'TPL-1',
+        templateCode: 'TPL-1',
+        templateVersionId: 'TPLV-1',
+        templateVersionNumber: 1,
+        title: 'Ethical Wall Document',
+        fileName: 'wall.docx',
+        outputFormat: 'docx',
+        mimeType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        sizeBytes: 10,
+        sha256: 'abc',
+        storageProvider: 'local',
+        storageKey: 'key-wall-r11',
+        sourceEntityType: 'matter',
+        sourceEntityId: 'M-000002',
+        primaryMatterId: 'M-000002',
+        matterId: 'M-000002',
+        enquiryId: null,
+        clientPersonId: null,
+        generatedById: 'P-000001',
+        generatedAt: '2026-11-03T10:00:00.000Z',
+        isDeleted: false,
+        deletedAt: null,
+        deletedById: null,
+      } as never;
+      hostRepo.putDocument(ctx, docRecord);
+      store.documents = [...(store.documents ?? []), docRecord];
+
+      // P-000007 is an excluded fee earner (not on M-000002's ethical wall allow-list)
+      const excludedSnap = await getDocumentGenerationSnapshotForUser('P-000007');
+      expect(
+        excludedSnap.documents.some((d) => d.id === 'DOC-WALL-R11'),
+      ).toBe(false);
+
+      // P-000001 (on the allow-list) sees the document
+      const allowedSnap = await getDocumentGenerationSnapshotForUser('P-000001');
+      expect(
+        allowedSnap.documents.some((d) => d.id === 'DOC-WALL-R11'),
+      ).toBe(true);
+    } finally {
+      store.matters = snapshotMatters;
+      saveStore(store);
+    }
   });
 
-  it('10. Enforces R16 & R19: schema validation on updateDocumentGenerationConfigService and UNAUTHENTICATED on unknown userId', async () => {
+  it('10. Enforces R16, R19, R22, R51 & R78: schema validation on updateDocumentGenerationConfigService, UNAUTHENTICATED on unknown userId, and download route soft-delete & auth checks', async () => {
     const store = getStore();
     const snapshotOverride = structuredClone(store.documentGenerationConfigOverride);
     const snapshotAudit = structuredClone(store.audit);
+    const snapshotMatters = structuredClone(store.matters);
     try {
       await expect(
         getDocumentGenerationSnapshotForUser('NON-EXISTENT-USER'),
       ).rejects.toThrow(/UNAUTHENTICATED/);
 
+      const beforeInvalidSave = structuredClone(
+        store.documentGenerationConfigOverride,
+      );
       await expect(
         updateDocumentGenerationConfigService(
           {
@@ -1232,9 +1363,169 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
           'P-000001',
         ),
       ).rejects.toThrow();
+      // R16: Stored settings remain unchanged when validation rejects the update
+      expect(store.documentGenerationConfigOverride).toEqual(beforeInvalidSave);
+
+      await expect(
+        updateDocumentGenerationConfigService(
+          {
+            storageProvider: 'invalid-provider' as never,
+          },
+          'P-000001',
+        ),
+      ).rejects.toThrow();
+      expect(store.documentGenerationConfigOverride).toEqual(beforeInvalidSave);
+
+      // R22: Excluded user calling GET /api/matters/[id]/documents route handler on a staff matter gets access_denied and empty locations
+      const staffMatter = store.matters.find((m) => m.id === 'M-000002')!;
+      staffMatter.isStaffMatter = true;
+      staffMatter.restrictedAccessUserIds = ['P-000001'];
+      setTestEntraSessionOverride({
+        sub: 'P-000007',
+        oid: '00000000-0000-0000-0000-000000000007',
+        tid: '11111111-2222-3333-4444-555555555555',
+        displayName: 'Excluded Solicitor',
+        email: 'excluded@notalawfirm.co.uk',
+        personId: 'P-000007',
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      try {
+        const staffRouteReq = new NextRequest(
+          'http://localhost:3000/api/matters/M-000002/documents',
+          { method: 'GET' },
+        );
+        const staffRouteResp = await getMatterDocumentsRoute(staffRouteReq, {
+          params: Promise.resolve({ id: 'M-000002' }),
+        });
+        const staffRouteBody = (await staffRouteResp.json()) as {
+          errorCode?: string;
+          locations?: unknown[];
+        };
+        expect(staffRouteBody.errorCode).toBe('access_denied');
+        expect(staffRouteBody.locations).toEqual([]);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+      }
+
+      // R78: GET /api/documents/download rejects a valid token for a soft-deleted document (404) and a token without documentId (404)
+      const {
+        ctx,
+        repo: hostRepo,
+        storage: hostStorage,
+      } = await getInitializedDocGenContext('P-000001');
+
+      const storedBlob = await hostStorage.putObject(ctx, {
+        category: 'documents',
+        objectId: 'DOC-SOFT-DEL-78',
+        fileName: 'deleted-doc.docx',
+        contentType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        bytes: new Uint8Array([10, 20, 30]),
+      });
+
+      const deletedDoc = {
+        id: 'DOC-SOFT-DEL-78',
+        tenantId: ctx.tenantId,
+        templateId: 'TPL-1',
+        templateCode: 'TPL-1',
+        templateVersionId: 'TPLV-1',
+        templateVersionNumber: 1,
+        title: 'Deleted Document',
+        fileName: 'deleted-doc.docx',
+        outputFormat: 'docx',
+        mimeType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        sizeBytes: 3,
+        sha256: storedBlob.sha256,
+        storageProvider: 'local',
+        storageKey: storedBlob.blobKey,
+        sourceEntityType: 'matter',
+        sourceEntityId: 'M-000001',
+        primaryMatterId: 'M-000001',
+        matterId: 'M-000001',
+        enquiryId: null,
+        clientPersonId: null,
+        generatedById: 'P-000001',
+        generatedAt: '2026-11-03T10:00:00.000Z',
+        isDeleted: true,
+        deletedAt: '2026-11-03T11:00:00.000Z',
+        deletedById: 'P-000001',
+      } as never;
+      hostRepo.putDocument(ctx, deletedDoc);
+      store.documents = [...(store.documents ?? []), deletedDoc];
+
+      const tokenForDeleted = await hostStorage.issueScopedDownloadToken(
+        ctx,
+        {
+          blobKey: storedBlob.blobKey,
+          fileName: 'deleted-doc.docx',
+          documentId: 'DOC-SOFT-DEL-78',
+        },
+        300,
+      );
+      setTestEntraSessionOverride({
+        sub: 'P-000001',
+        oid: '00000000-0000-0000-0000-000000000001',
+        tid: '11111111-2222-3333-4444-555555555555',
+        displayName: 'Admin User',
+        email: 'admin@notalawfirm.co.uk',
+        personId: 'P-000001',
+        entraRoles: ['admin'],
+        mappedRoles: ['admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      try {
+        const delDlResp = await getDocumentDownloadRoute(
+          new NextRequest(
+            `http://localhost:3000/api/documents/download?token=${encodeURIComponent(tokenForDeleted.token)}`,
+          ),
+        );
+        expect(delDlResp.status).toBe(404);
+
+        const tokenWithoutDocId = await hostStorage.issueScopedDownloadToken(
+          ctx,
+          {
+            blobKey: storedBlob.blobKey,
+            fileName: 'deleted-doc.docx',
+          },
+          300,
+        );
+        const noDocIdResp = await getDocumentDownloadRoute(
+          new NextRequest(
+            `http://localhost:3000/api/documents/download?token=${encodeURIComponent(tokenWithoutDocId.token)}`,
+          ),
+        );
+        expect(noDocIdResp.status).toBe(404);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+      }
+
+      // R51: Calling GET /api/documents/download with no session returns 401
+      setTestEntraSessionOverride(null);
+      try {
+        const unauthDlResp = await getDocumentDownloadRoute(
+          new NextRequest(
+            `http://localhost:3000/api/documents/download?token=${encodeURIComponent(tokenForDeleted.token)}`,
+          ),
+        );
+        expect(unauthDlResp.status).toBe(401);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+      }
     } finally {
       store.documentGenerationConfigOverride = snapshotOverride;
       store.audit = snapshotAudit;
+      store.matters = snapshotMatters;
       saveStore(store);
     }
   });

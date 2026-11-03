@@ -33,7 +33,7 @@ export default async function EditPersonPage({
       currentUserId={userId}
       orgStructure={snap.orgStructure}
       currentUserEmployeePermissions={snap.currentUserEmployeePermissions}
-      existingSensitive={snap.employeeSensitiveRecords?.[person.id] ?? null}
+      existingSensitive={null}
       leaverOwnedRecords={snap.leaverOwnedRecords}
     />
   );

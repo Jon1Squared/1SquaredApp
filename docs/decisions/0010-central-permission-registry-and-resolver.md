@@ -1,7 +1,7 @@
 # ADR-0010: Central Permission Registry and Single Permission Resolver
 
 - **Date:** 2026-11-01
-- **Status:** Accepted
+- **Status:** Proposed
 - **Supersedes:** Permission resolution aspects of [ADR-0004](./0004-document-permissions-and-finance-view.md)
 
 ## Context

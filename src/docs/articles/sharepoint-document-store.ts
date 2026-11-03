@@ -8,7 +8,7 @@ export const sharepointDocumentStoreArticle: DocArticle = {
     'How 1Squared connects to Microsoft SharePoint Online, automatically provisions matter folder trees by work type, enforces per-user permissions and ethical walls, and detects permission drift.',
   updated: '2026-11-03',
   body: `
-1Squared connects directly to your firm’s **Microsoft 365 SharePoint Online** document libraries so fee earners can browse, upload, organise, and co-author matter documents inside 1Squared while all files remain stored and governed in your firm’s own SharePoint tenant.
+1Squared connects to your firm’s **Microsoft 365 SharePoint Online** document store model so fee earners can browse, upload, organise, and co-author matter documents inside 1Squared while all files remain governed by SharePoint library and folder permissions. (In Phase 1, \`SharePointDocumentStoreProvider\` runs against the built-in \`MockSharePointGraphBackend\` contract simulation harness; live Microsoft Graph HTTP transport and Key Vault certificate exchange are scheduled for Phase 2.)
 
 > **Core security principle**: Whenever a user views, uploads, downloads, or deletes a document in 1Squared, the action is performed **as that individual user** via Microsoft Graph On-Behalf-Of (OBO) authentication. SharePoint enforces each user’s own permissions and records their identity in the Microsoft 365 audit trail.
 
@@ -58,11 +58,17 @@ Open any matter and select the **Documents (SharePoint)** tab to work with its f
 
 ## 4. Restricted matters, lifecycle updates & folder moves
 
-### Restricted matters & ethical walls
-When a matter is flagged as a staff/restricted matter or has an ethical wall (\`isStaffMatter\` or \`hasEthicalWall\`), 1Squared breaks permission inheritance on the SharePoint matter folder and restricts access to the matter’s explicit allow-list plus oversight roles granted \`matter:restricted:access\`. When a restriction is lifted, 1Squared automatically restores standard Department/Team folder inheritance.
+### Restricted matters, ethical walls & conflict-on-hire
+When a matter is flagged as a staff/restricted matter or has an ethical wall (\`isStaffMatter\` or \`hasEthicalWall\`), 1Squared breaks permission inheritance on the SharePoint matter folder (\`inheritsFromParent: false\`) and restricts access to the matter’s explicit allow-list (\`restrictedAccessUserIds\`, or the named matter team on an ethical-wall matter) plus oversight roles granted \`matter:restricted:access\`. When a restriction is lifted, 1Squared automatically restores standard Department/Team folder inheritance.
 
-### Moving a matter between teams or departments
-When a matter is reassigned to a different team or department or when its status changes to Closed or Reopened, 1Squared synchronises the matter folder’s permissions (and optionally moves the folder to the new \`{departmentCode}/{teamCode}/{matterFolderName}\` path) while preserving restricted overrides if an ethical wall is active. Users with \`document:provision\` and \`document:edit\` can also retry provisioning or link an existing folder within the routed base path.
+If a person who is an existing client or counterparty on an open matter is subsequently hired as an employee (\`savePersonRecord\`), 1Squared automatically converts the matter to a restricted staff matter (\`isStaffMatter: true\`), locks \`restrictedAccessUserIds\` to the existing matter team (excluding the newly hired employee), and synchronises the SharePoint matter folder to break inheritance and remove broad department and team group grants.
+
+### Lifecycle triggers & permissions for retrying or linking folders
+1Squared automatically runs SharePoint lifecycle jobs on the following events:
+- **Conflict check approval (\`approveMatterConflictCheck\`)**: Triggers initial matter folder provisioning (\`provision_matter_documents\`).
+- **Matter updates (\`saveMatterRecord\`)**: Synchronises SharePoint folder permissions whenever a matter’s restriction status (\`isStaffMatter\`), ethical wall (\`hasEthicalWall\`), \`restrictedAccessUserIds\`, \`teamMemberIds\`, \`leadFeeEarnerId\`, \`supervisingPartnerId\`, \`responsiblePartnerId\`, \`owningDepartmentId\`, \`owningTeamId\`, or closed/reopened status changes.
+- **Manual retry of failed provisioning**: Users with \`document:edit\` or \`document_store:configure\` can retry matter folder provisioning on a matter they can access.
+- **Linking an existing SharePoint folder**: Because linking an existing folder rewrites its SharePoint ACLs and applies missing template subfolders, only administrators with \`document_store:configure\` and a multi-factor authenticated session (\`mfaVerified === true\`) may link an existing folder, and the target folder must be a dedicated subfolder within the matter’s routed \`{departmentCode}/{teamCode}\` path (never a folder already linked to another matter or the shared department/team container itself).
 
 ## 5. Administration & permission drift reconciliation
 

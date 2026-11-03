@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { normaliseDocumentStoreError } from '@platform/core';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   browseMatterDocumentStoreFolder,
   downloadMatterStoreDocument,
@@ -18,13 +19,37 @@ import {
 } from '@/server/documentStoreServices';
 import { requireAuthenticatedActor } from '@/server/services';
 
+function logMatterDocumentsRouteError(
+  method: 'GET' | 'POST',
+  tenantId: string,
+  correlationId: string,
+  code: string,
+): void {
+  console.error(
+    JSON.stringify({
+      level: 'error',
+      event: 'matter_documents.route_error',
+      route: '/api/matters/[id]/documents',
+      method,
+      tenantId,
+      correlationId,
+      code,
+    }),
+  );
+}
+
 export async function GET(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
+  const correlationId =
+    request.headers.get('x-correlation-id') ?? `corr-matter-docs-get-${Date.now()}`;
+  let tenantId = 'unknown';
   try {
+    tenantId = getActiveTenantConfiguration().tenantId;
     const { id: matterId } = await context.params;
     const actor = await requireAuthenticatedActor();
+    tenantId = actor.tenantId || tenantId;
     const userId = actor.personId;
     const { searchParams } = new URL(request.url);
     const action = searchParams.get('action');
@@ -66,10 +91,12 @@ export async function GET(
     const normalised = normaliseDocumentStoreError(err);
     const isUnauth =
       err instanceof Error && err.message.startsWith('UNAUTHENTICATED:');
+    const code = isUnauth ? 'reauthentication_required' : normalised.code;
+    logMatterDocumentsRouteError('GET', tenantId, correlationId, code);
     return NextResponse.json(
       {
         ok: false,
-        code: isUnauth ? 'reauthentication_required' : normalised.code,
+        code,
         error: normalised.userMessage,
         claimsChallenge: normalised.claimsChallenge,
       },
@@ -88,9 +115,14 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
+  const correlationId =
+    request.headers.get('x-correlation-id') ?? `corr-matter-docs-post-${Date.now()}`;
+  let tenantId = 'unknown';
   try {
+    tenantId = getActiveTenantConfiguration().tenantId;
     const { id: matterId } = await context.params;
     const actor = await requireAuthenticatedActor();
+    tenantId = actor.tenantId || tenantId;
     const userId = actor.personId;
     const mfaVerified = actor.mfaVerified;
     const contentType = request.headers.get('content-type') ?? '';
@@ -212,10 +244,12 @@ export async function POST(
     const normalised = normaliseDocumentStoreError(err);
     const isUnauth =
       err instanceof Error && err.message.startsWith('UNAUTHENTICATED:');
+    const code = isUnauth ? 'reauthentication_required' : normalised.code;
+    logMatterDocumentsRouteError('POST', tenantId, correlationId, code);
     return NextResponse.json(
       {
         ok: false,
-        code: isUnauth ? 'reauthentication_required' : normalised.code,
+        code,
         error: normalised.userMessage,
         claimsChallenge: normalised.claimsChallenge,
       },

@@ -2,6 +2,7 @@
 
 - **Date:** 2026-10-31
 - **Status:** Accepted
+- **Accepted by:** Jon Howells (2026-10-31)
 
 ## Context
 
@@ -10,7 +11,7 @@
 During active product development:
 1. Section 4 of `docs/architecture-standard.md` notes: *"A shared repository with strict folder ownership is acceptable in the early stage, but it must be split before any client is given direct access."*
 2. The platform core (`core/`), schema-validated tenant configuration and extensions (`client-not-a-law-firm/`), and Next.js application (`src/`) live within this repository.
-3. While `core/src/tenancy/` provides the canonical OIDC-verified, database-per-tenant isolation layer (`PostgresTenantCluster` and `TenantScopedRepository`), interactive UI and domain prototyping in `src/` currently persists local demo state through `src/server/store.ts` (`data/pembroke-vaughan.json`) seeded with invented test fixtures in `src/seed/demo.ts` (`Not A Law Firm LLP` / `Pembroke Vaughan`).
+3. While `core/src/tenancy/` provides the canonical OIDC-verified, database-per-tenant isolation layer (`PostgresTenantCluster` and `TenantScopedRepository`), interactive UI and domain prototyping in `src/` currently persists local demo state through `src/server/store.ts` (initialised from the tracked seed snapshot `data/seed-not-a-law-firm.json` and written at runtime only to the git-ignored `data/runtime-store.json`) seeded with invented test fixtures in `src/seed/demo.ts` (`Not A Law Firm LLP` / `Pembroke Vaughan`).
 
 ## Decision
 

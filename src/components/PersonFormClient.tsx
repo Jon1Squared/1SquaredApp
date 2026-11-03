@@ -7,6 +7,7 @@ import { ChevronDown, Eye, EyeOff, ShieldAlert } from 'lucide-react';
 import {
   logEmployeeRestrictedAccessAction,
   reassignLeaverOwnedRecordsAction,
+  revealEmployeeSensitiveRecordAction,
   savePersonAction,
 } from '@/app/actions';
 import { findPersonDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
@@ -672,6 +673,7 @@ export function PersonFormClient({
     }),
   );
   const [sensitiveRevealed, setSensitiveRevealed] = useState<boolean>(false);
+  const [sensitiveEdited, setSensitiveEdited] = useState<boolean>(false);
 
   // 8. Systems and access
   const [sysNetworkLogin, setSysNetworkLogin] = useState<string>(
@@ -837,11 +839,14 @@ export function PersonFormClient({
     setSensitiveRevealed(true);
     if (existing?.id) {
       startTransition(async () => {
-        await logEmployeeRestrictedAccessAction(
-          existing.id,
-          'sensitive',
-          'Opened sensitive & diversity monitoring section in UI',
-        );
+        const res = await revealEmployeeSensitiveRecordAction(existing.id);
+        if (res.ok && res.sensitive) {
+          setReasonableAdjustments(res.sensitive.reasonableAdjustmentsNeeded ?? '');
+          setDiversityAnswers({
+            ...emptyDiversityAnswers(),
+            ...(res.sensitive.diversity ?? {}),
+          });
+        }
       });
     }
   };
@@ -1441,7 +1446,7 @@ export function PersonFormClient({
         : null;
 
     const sensitivePayload: Partial<EmployeeSensitiveRecord> | null =
-      isEmployee && canSensitive
+      isEmployee && canSensitive && sensitiveRevealed && sensitiveEdited
         ? {
             reasonableAdjustmentsNeeded: reasonableAdjustments.trim(),
             diversity: diversityAnswers,
@@ -4414,7 +4419,10 @@ export function PersonFormClient({
                                   rows={2}
                                   placeholder="Record any workplace adjustments agreed with the colleague"
                                   value={reasonableAdjustments}
-                                  onChange={(e) => setReasonableAdjustments(e.target.value)}
+                                  onChange={(e) => {
+                                    setReasonableAdjustments(e.target.value);
+                                    setSensitiveEdited(true);
+                                  }}
                                 />
                               </div>
 
@@ -4509,12 +4517,13 @@ export function PersonFormClient({
                                   <select
                                     className="field-select"
                                     value={diversityAnswers[q.key] ?? 'Prefer not to say'}
-                                    onChange={(e) =>
+                                    onChange={(e) => {
                                       setDiversityAnswers({
                                         ...diversityAnswers,
                                         [q.key]: e.target.value,
-                                      })
-                                    }
+                                      });
+                                      setSensitiveEdited(true);
+                                    }}
                                   >
                                     {q.options.map((opt) => (
                                       <option key={opt} value={opt}>

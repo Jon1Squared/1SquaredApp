@@ -1,11 +1,8 @@
 /**
- * Opt-in Live SharePoint Online Integration Test (`core/tests/sharepoint-live.integration.test.ts`).
+ * Phase 1 Contract Harness Suite for SharePoint Document Store (`core/tests/sharepoint-live.integration.test.ts`).
  *
- * Implements Section 11:
- * - Skipped automatically unless `SHAREPOINT_LIVE_TEST_ENABLED=1` and the required environment
- *   variables (`SHAREPOINT_LIVE_HOSTNAME`, `SHAREPOINT_LIVE_SITE_PATH`, `SHAREPOINT_LIVE_LIBRARY_SEGMENT`,
- *   `SHAREPOINT_LIVE_ENTRA_TENANT_ID`, `SHAREPOINT_LIVE_CLIENT_ID`) are set.
- * - Exercises connection test, folder creation, permission assignment, file upload/download, and clean-up.
+ * Note (R21 / R86): In Phase 1, `SharePointDocumentStoreProvider` is mock-backed (`MockSharePointGraphBackend`).
+ * Live Microsoft Graph HTTP transport and Key Vault certificate token exchange are scheduled for Phase 2.
  */
 
 import { describe, expect, it } from 'vitest';

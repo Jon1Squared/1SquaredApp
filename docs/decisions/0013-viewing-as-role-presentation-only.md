@@ -1,7 +1,7 @@
 # ADR-0013: "Viewing As" Role as Presentation Only and Permission-Driven Navigation
 
 - **Date:** 2026-11-01
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

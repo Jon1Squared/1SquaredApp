@@ -1,7 +1,7 @@
 # ADR-0008: Document Storage Provider Abstraction, Transitional Local Tenant Storage, and Azure Blob Isolation
 
 - **Date:** 2026-04-20
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

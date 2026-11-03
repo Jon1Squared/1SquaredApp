@@ -767,6 +767,7 @@ export interface TenantConfiguration {
     enableMatterCostsGovernance: boolean;
     enablePmsLiveRateSync: boolean;
     enableAiMatterExtraction: boolean;
+    enableDemoMode?: boolean;
   };
   matterCosts: {
     rateSourceMode: 'application_table' | 'pms_when_linked';

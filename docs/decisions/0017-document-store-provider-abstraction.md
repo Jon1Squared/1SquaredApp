@@ -1,8 +1,8 @@
 # ADR-0017: External Document Store Provider Abstraction (`DocumentStoreProvider`)
 
 - **Date:** 2026-11-02
-- **Status:** Accepted
-- **Related:** [ADR-0008](../../../docs/decisions/0008-document-storage-provider-abstraction.md)
+- **Status:** Proposed
+- **Related:** [ADR-0008](./0008-document-storage-provider-abstraction.md)
 
 ## Context
 
@@ -122,5 +122,5 @@ To guarantee Phase 2 capabilities require zero breaking changes to `DocumentStor
 ## Consequences
 
 - Domain services and React components depend exclusively on `DocumentStoreProvider` and `DocumentStoreCapabilities`.
-- In local development and deterministic CI test runs, `SharePointDocumentStoreProvider` executes against the in-memory `MockSharePointGraphBackend` contract simulation harness, which enforces tenant partitioning, inheritance vs explicit folder ACLs, resumable chunked uploads, and HTTP 429 retry semantics without external network dependencies. When `SHAREPOINT_LIVE_TEST_ENABLED=1` is set (or custom `oboExchangeHandler` / `appTokenHandler` handlers are wired), `DocumentStoreTokenService` performs real OAuth 2.0 On-Behalf-Of and client-credentials token exchanges against Microsoft Entra ID (`https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token`) and rejects invalid or missing credentials.
+- In Phase 1, `SharePointDocumentStoreProvider` is mock-backed via `MockSharePointGraphBackend`, which enforces tenant partitioning, inheritance vs explicit folder ACLs, resumable chunked uploads, and HTTP 429 retry semantics without external network dependencies. Live Microsoft Graph HTTP transport and certificate/Managed Identity token exchange via Key Vault are scheduled for Phase 2 via injectable `oboExchangeHandler` / `appTokenHandler` and Graph transport adapters.
 - Adding iManage Work, NetDocuments, or Azure Blob Storage in Phase 2 requires only a new adapter class registered in `DocumentStoreRegistry`.

@@ -1,7 +1,7 @@
 # ADR-0007: Document Generation Engine Abstraction and Placeholder Syntax
 
 - **Date:** 2026-04-20
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

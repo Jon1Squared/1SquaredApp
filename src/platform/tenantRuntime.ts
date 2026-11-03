@@ -5,7 +5,6 @@
  * - Layer 3: `client-not-a-law-firm/extensions/nalf-matter-costs-governance` (Bespoke Client Extension)
  */
 
-import path from 'node:path';
 import {
   CORE_API_VERSION,
   CORE_VERSION,
@@ -17,12 +16,13 @@ import {
   type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
-import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
-import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
+import defaultBundledBaseConfig from '../../client-not-a-law-firm/config/base.json';
+import defaultBundledDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
 
 let testBaseConfigOverride: Record<string, unknown> | null = null;
 let testDevOverlayOverride: Record<string, unknown> | null | undefined = undefined;
+const fileJsonCache = new Map<string, Record<string, unknown>>();
 
 export function setActiveTenantConfigForTesting(
   baseConfig: Record<string, unknown> | null,
@@ -34,11 +34,58 @@ export function setActiveTenantConfigForTesting(
 
 export function getActiveTenantBaseConfigPath(): string {
   const folder = process.env.PLATFORM_TENANT_PACKAGE_DIR || 'client-not-a-law-firm';
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    return `${folder}/config/base.json`;
+  }
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
   return path.join(process.cwd(), folder, 'config', 'base.json');
 }
 
+export function getActiveTenantEnvironmentOverlayPath(
+  env: 'dev' | 'test' | 'training' | 'live' = 'dev',
+): string {
+  const folder = process.env.PLATFORM_TENANT_PACKAGE_DIR || 'client-not-a-law-firm';
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    return `${folder}/config/environments/${env}.json`;
+  }
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
+  return path.join(process.cwd(), folder, 'config', 'environments', `${env}.json`);
+}
+
+function readJsonConfigFile(
+  filePath: string,
+  fallback: Record<string, unknown>,
+  optional = false,
+): Record<string, unknown> {
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    return fallback;
+  }
+  const cached = fileJsonCache.get(filePath);
+  if (cached) {
+    return cached;
+  }
+  try {
+    const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+    if (optional && !fs.existsSync(filePath)) {
+      return {};
+    }
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    fileJsonCache.set(filePath, parsed);
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
 export function getActiveTenantRawBaseConfig(): Record<string, unknown> {
-  return (testBaseConfigOverride ?? notALawFirmBaseConfig) as Record<string, unknown>;
+  if (testBaseConfigOverride) {
+    return testBaseConfigOverride;
+  }
+  return readJsonConfigFile(
+    getActiveTenantBaseConfigPath(),
+    defaultBundledBaseConfig as Record<string, unknown>,
+  );
 }
 
 export interface PlatformArchitectureSnapshot {
@@ -64,7 +111,9 @@ export interface PlatformArchitectureSnapshot {
   }[];
 }
 
-export interface VerifiedSessionActorInput {
+export declare const VERIFIED_SESSION_BRAND: unique symbol;
+
+export interface UnbrandedSessionActorInput {
   id?: string;
   sub?: string;
   name: string;
@@ -78,6 +127,20 @@ export interface VerifiedSessionActorInput {
   tenantId?: string;
   untrustedRequestTenantOverride?: string;
   correlationId?: string;
+}
+
+export type VerifiedSessionActorInput = UnbrandedSessionActorInput & {
+  readonly [VERIFIED_SESSION_BRAND]: true;
+};
+
+/**
+ * Stamps a verified session actor input with the internal brand symbol.
+ * Must only be called by the OIDC / Entra session layer (`src/server/entraAuth.ts`) or transitional store adapters.
+ */
+export function brandVerifiedSessionActor(
+  input: UnbrandedSessionActorInput,
+): VerifiedSessionActorInput {
+  return input as VerifiedSessionActorInput;
 }
 
 let cachedHost: ExtensionHost | null = null;
@@ -105,13 +168,17 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
   const hostingMode =
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
-  const baseCfg = testBaseConfigOverride ?? notALawFirmBaseConfig;
+  const baseCfg = getActiveTenantRawBaseConfig();
   const overlayCfg =
     testDevOverlayOverride !== undefined
       ? (testDevOverlayOverride ?? {})
       : testBaseConfigOverride
         ? {}
-        : notALawFirmDevOverlay;
+        : readJsonConfigFile(
+            getActiveTenantEnvironmentOverlayPath(env),
+            env === 'dev' ? (defaultBundledDevOverlay as Record<string, unknown>) : {},
+            true,
+          );
   return loadAndValidateTenantConfig(
     baseCfg,
     overlayCfg,

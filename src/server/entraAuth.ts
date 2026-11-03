@@ -1,12 +1,18 @@
 import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
 import {
+  clearActiveSessionTokenRoles,
   isEntraMfaVerified,
   mapEntraTokenClaimsToVerifiedOidcToken,
+  setActiveSessionTokenRolesForPerson,
   type EntraIdRawTokenClaims,
   type RbacConfiguration,
   type VerifiedOidcTokenClaims,
 } from '@/domain/rbac';
+import {
+  brandVerifiedSessionActor,
+  type VerifiedSessionActorInput,
+} from '@/platform/tenantRuntime';
 
 export const ENTRA_PKCE_COOKIE = 'onesquared_entra_pkce';
 export const ENTRA_SESSION_COOKIE = 'onesquared_entra_session';
@@ -68,6 +74,11 @@ export function setTestEntraSessionOverride(
     throw new Error('setTestEntraSessionOverride is only permitted in test environments.');
   }
   testEntraSessionOverride = session;
+  if (session?.personId) {
+    setActiveSessionTokenRolesForPerson(session.personId, session.mappedRoles);
+  } else {
+    clearActiveSessionTokenRoles();
+  }
 }
 
 export function shouldUseSecureCookies(): boolean {
@@ -437,12 +448,25 @@ export function verifySignedEntraSessionCookie(
 
 export async function getEntraSession(): Promise<EntraSessionPayload | null> {
   if (process.env.NODE_ENV === 'test' && testEntraSessionOverride !== undefined) {
+    if (testEntraSessionOverride?.personId) {
+      setActiveSessionTokenRolesForPerson(
+        testEntraSessionOverride.personId,
+        testEntraSessionOverride.mappedRoles,
+      );
+    }
     return testEntraSessionOverride;
   }
   try {
     const jar = await cookies();
     const raw = jar.get(ENTRA_SESSION_COOKIE)?.value;
-    return verifySignedEntraSessionCookie(raw);
+    const verified = verifySignedEntraSessionCookie(raw);
+    if (verified?.personId) {
+      setActiveSessionTokenRolesForPerson(
+        verified.personId,
+        verified.mappedRoles,
+      );
+    }
+    return verified;
   } catch {
     return null;
   }
@@ -486,6 +510,31 @@ export function buildEntraSessionPayload(params: {
     authenticatedAt: new Date(now).toISOString(),
     expiresAt,
   };
+}
+
+export function createVerifiedSessionActorFromEntraSession(
+  session: EntraSessionPayload,
+  overrides?: {
+    correlationId?: string;
+    tenantId?: string;
+    untrustedRequestTenantOverride?: string;
+  },
+): VerifiedSessionActorInput {
+  return brandVerifiedSessionActor({
+    id: session.personId,
+    sub: session.sub || session.personId,
+    name: session.displayName,
+    email: session.email,
+    upn: session.email,
+    roles: session.mappedRoles,
+    groups: session.entraGroups,
+    entraObjectId: session.oid,
+    entraTenantId: session.tid,
+    mfaVerified: session.mfaVerified,
+    tenantId: overrides?.tenantId,
+    untrustedRequestTenantOverride: overrides?.untrustedRequestTenantOverride,
+    correlationId: overrides?.correlationId,
+  });
 }
 
 export { mapEntraTokenClaimsToVerifiedOidcToken };

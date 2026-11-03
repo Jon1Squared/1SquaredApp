@@ -53,40 +53,36 @@ export interface MicrosoftGraphCalendarAdapter {
 export type GraphCalendarAdapter = MicrosoftGraphCalendarAdapter;
 
 /**
- * Default deterministic Microsoft Graph calendar adapter used when no custom live Graph adapter
- * is injected, authenticating via Managed Identity.
+ * Default unconfigured Microsoft Graph calendar stub adapter used when no live Graph adapter
+ * is injected. Always reports `isConfigured = false` so records are never falsely marked `synced`.
  */
 export class ManagedIdentityGraphCalendarAdapter
   implements MicrosoftGraphCalendarAdapter
 {
   public readonly credentialSource = 'managed_identity' as const;
-  public readonly isConfigured: boolean;
+  public readonly isConfigured: boolean = false;
 
-  constructor(options?: { isConfigured?: boolean }) {
-    this.isConfigured =
-      options?.isConfigured ??
-      Boolean(process.env.GRAPH_CALENDAR_SYNC_ENABLED === 'true');
+  constructor(_options?: { isConfigured?: boolean }) {
+    this.isConfigured = false;
   }
 
-  public async upsertEvent(input: {
+  public async upsertEvent(_input: {
     target: string;
     existingEventId?: string;
     payload: MicrosoftGraphCalendarEventPayload;
   }): Promise<{ eventId: string }> {
-    if (input.existingEventId) {
-      return { eventId: input.existingEventId };
-    }
-    const cleanTarget = input.target.replace(/[^a-zA-Z0-9_-]/g, '_');
-    return {
-      eventId: `graph-evt-${cleanTarget}-${input.payload.dueDate}`,
-    };
+    throw new Error(
+      'GRAPH_ADAPTER_NOT_IMPLEMENTED: Live Microsoft Graph calendar adapter is not configured.',
+    );
   }
 
   public async deleteEvent(_input: {
     target: string;
     eventId: string;
   }): Promise<void> {
-    // No-op in unconfigured managed-identity adapter
+    throw new Error(
+      'GRAPH_ADAPTER_NOT_IMPLEMENTED: Live Microsoft Graph calendar adapter is not configured.',
+    );
   }
 }
 

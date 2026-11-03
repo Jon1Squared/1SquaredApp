@@ -41,6 +41,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# local tenant binary storage (templates & generated documents)
+# local tenant binary storage & runtime JSON store
 /data/storage/
+/data/pembroke-vaughan.json
+/data/runtime-store.json
 

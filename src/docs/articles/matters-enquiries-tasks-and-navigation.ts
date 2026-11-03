@@ -24,7 +24,7 @@ This guide explains how **Matters**, **Enquiries**, **Tasks**, and **Navigation*
 
 ## Tasks: one reminder task per confirmed key date
 
-- Confirming a key date creates or updates **one** linked \`Task\` in the Tasks workspace (\`/tasks\`) with the deterministic idempotency key \`keydate-reminder:{keyDateId}\`.
+- Confirming a key date creates or updates **one** linked \`Task\` in the Tasks workspace (\`/tasks\`) with the deterministic idempotency key \`keydate-reminder:{tenantId}:{keyDateId}\`.
 - \`assignedTeamId\` is set to the key date's \`teamId\` (the team diary backup owner) and \`assignedPersonIds\` is set to its \`responsiblePersonIds\`.
 - As the key date crosses countdown stages (e.g. 90 days to 60 days), the daily tenant job updates that **same task** in place rather than stacking duplicate tasks. Standard task rules (\`canUserTakeTask\`, \`canUserReassignTask\`) apply.
 

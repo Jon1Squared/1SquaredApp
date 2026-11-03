@@ -305,6 +305,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       id: 'KD-ORIG-TASK',
       keyDateTypeId: 'completion',
       category: 'contractual',
+      source: 'manual',
       dueDate: '2026-07-01',
     });
     const tasks: Task[] = [];

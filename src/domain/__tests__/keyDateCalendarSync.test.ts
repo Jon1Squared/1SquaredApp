@@ -202,7 +202,7 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
     );
   });
 
-  it('marks sync state as disabled with the default unconfigured adapter and deletes the old owner event on reassignment (R40)', async () => {
+  it('marks sync state as disabled with the default unconfigured adapter (even when GRAPH_CALENDAR_SYNC_ENABLED=true) and deletes the old owner event on reassignment (R40, R81)', async () => {
     const calendarSyncs: KeyDateCalendarSync[] = [];
     const defaultSync = await syncKeyDateToOutlookCalendar({
       keyDate: makeKeyDate({ id: 'KD-DEFAULT-ADAPTER' }),
@@ -213,6 +213,27 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
     });
     expect(defaultSync.state).not.toBe('synced');
     expect(defaultSync.state).toBe('disabled');
+
+    const prevGraphFlag = process.env.GRAPH_CALENDAR_SYNC_ENABLED;
+    process.env.GRAPH_CALENDAR_SYNC_ENABLED = 'true';
+    try {
+      const flaggedSyncs: KeyDateCalendarSync[] = [];
+      const flaggedSync = await syncKeyDateToOutlookCalendar({
+        keyDate: makeKeyDate({ id: 'KD-FLAGGED-STUB-ADAPTER' }),
+        config,
+        matter: litMatter,
+        calendarSyncs: flaggedSyncs,
+        nowIso: '2026-02-01T10:00:00Z',
+      });
+      expect(flaggedSync.state).not.toBe('synced');
+      expect(flaggedSync.state).toBe('disabled');
+    } finally {
+      if (prevGraphFlag === undefined) {
+        delete process.env.GRAPH_CALENDAR_SYNC_ENABLED;
+      } else {
+        process.env.GRAPH_CALENDAR_SYNC_ENABLED = prevGraphFlag;
+      }
+    }
 
     // Reassignment via reassignKeyDateTeamRecord calls syncKeyDateToOutlookCalendar and deletes the old owner's event
     resetStore();

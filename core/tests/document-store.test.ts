@@ -21,16 +21,18 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { NextRequest } from 'next/server';
+import { describe, expect, it, vi } from 'vitest';
+import * as CoreBarrel from '../src/index';
 import {
   ALLOWED_PATH_TOKENS,
   CORE_VERSION,
   DocumentStoreProviderRegistry,
   DocumentStoreTokenService,
   GRAPH_RESUMABLE_UPLOAD_THRESHOLD_BYTES,
-  MockSharePointGraphBackend,
   SHAREPOINT_ROLE_MAPPING,
-   TenantDocumentStoreRepository,
+  SharePointDocumentStoreProvider,
+  TenantDocumentStoreRepository,
   TenantMigrationRunner,
   TenantScopedEncryptedTokenCache,
   applyTemplateAdditionsToOpenMattersJob,
@@ -65,12 +67,16 @@ import {
   type DocumentAccessConfig,
   type DocumentRoutingRule,
   type DocumentStoreConfig,
+  type MatterDocumentLocationRecord,
   type MatterFolderTemplatesConfig,
   type MatterRoutingSubject,
   type ProvisioningAccessContext,
   type TenantContext,
   type UserAccessContext,
 } from '../src/index';
+import { MockSharePointGraphBackend } from '../src/testing';
+import { POST as postDocumentStoresRoute } from '@/app/api/document-stores/route';
+import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
 import {
   applyAdminTemplateAdditionsToOpenMatters,
   browseMatterDocumentStoreFolder,
@@ -80,6 +86,7 @@ import {
   ensureMatterDocumentStoreProvisioned,
   ensureRepositorySyncedWithStore,
   getDocumentStoresAdminDashboard,
+  getRegistrySingleton,
   linkExistingMatterDocumentFolder,
   mutateMatterStoreItem,
   persistRepositoryToStore,
@@ -90,10 +97,11 @@ import {
   retryMatterDocumentProvisioning,
   runAdminDocumentReconciliationScan,
   saveAdminDocumentStoreConfiguration,
+  syncMatterLifecycleOnSaveSync,
   testAdminDocumentStoreConnection,
   uploadMatterStoreDocument,
 } from '@/server/documentStoreServices';
-import { saveMatterRecord } from '@/server/services';
+import { saveMatterRecord, savePersonRecord } from '@/server/services';
 import { getStore, saveStore } from '@/server/store';
 
 void CORE_VERSION;
@@ -1027,6 +1035,33 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             canAccessMatterIn1Squared: false,
             storeId: 'alpha-sp-primary',
             libraryId: 'lib-matters',
+            location: {
+              id: 'loc-m1001',
+              tenantId: 'firm-alpha',
+              matterId: 'M-1001',
+              storeId: 'alpha-sp-primary',
+              libraryId: 'lib-matters',
+              providerSiteId: 'site-alpha-001',
+              providerDriveId: 'drive-alpha-matters',
+              providerFolderItemId: 'root',
+              relativePath: 'PROP/RES/NALF-2026-1001',
+              webUrl: 'https://contoso.sharepoint.com',
+              provisioningStatus: 'provisioned',
+              linkMode: 'provisioned',
+              routingMismatchNote: null,
+              hasUniquePermissions: false,
+              uniqueScopeCount: 0,
+              intendedGrants: [],
+              folderItemMap: {},
+              templateId: 'default',
+              templateVersion: 1,
+              lastJobId: null,
+              lastErrorCode: null,
+              lastErrorMessage: null,
+              provisionedAt: '2026-11-01T00:00:00Z',
+              updatedAt: '2026-11-01T00:00:00Z',
+            } satisfies MatterDocumentLocationRecord,
+            verifyItemInMatterTree: async () => true,
             auditAction: 'document:listed',
             repository: repo,
           },
@@ -1092,6 +1127,8 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             storeId: location.storeId,
             libraryId: location.libraryId,
             providerItemId: location.providerFolderItemId,
+            location,
+            verifyItemInMatterTree: async () => true,
             auditAction: 'document:listed',
             repository: repo,
           },
@@ -1543,6 +1580,38 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         matterId: 'M-1002',
         matterNumber: 'MAT-2026-0002',
       });
+      await deps.getProvider('alpha-sp-primary').ensureFolderTree(
+        {
+          kind: 'provisioning',
+          tenantContext: ctx,
+          triggerEvent: 'test.seed_existing_folder',
+        },
+        {
+          storeId: 'alpha-sp-primary',
+          libraryId: 'lib-matters',
+          siteId: 'site-alpha-001',
+          driveId: 'drive-alpha-matters',
+          folderItemId: 'root',
+        },
+        [
+          {
+            name: 'PROP',
+            relativePath: 'PROP',
+            children: [
+              {
+                name: 'RES',
+                relativePath: 'PROP/RES',
+                children: [
+                  {
+                    name: 'MAT-2026-0002 - Legacy Folder',
+                    relativePath: 'PROP/RES/MAT-2026-0002 - Legacy Folder',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      );
       const linkedRes = await linkExistingMatterFolderJob({
         ctx,
         deps,
@@ -1550,7 +1619,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         storeId: 'alpha-sp-primary',
         libraryId: 'lib-matters',
         folderUrlOrPath:
-          'https://alpha.sharepoint.com/sites/PracticeDMS/Matter%20Repository/PROP/RES',
+          'https://alpha.sharepoint.com/sites/PracticeDMS/Matter%20Repository/PROP/RES/MAT-2026-0002%20-%20Legacy%20Folder',
       });
       expect(linkedRes.location.linkMode).toBe('linked_existing');
 
@@ -1835,6 +1904,8 @@ describe('External Document Store Integration (Sections 1–14)', () => {
     it('enforces R3, R4, R5, R8, R9, R12, R13, R14, R19, R21: cross-matter isolation, pre-provisioning RBAC, lifecycle sync on matter update, append-only audit persistence, and per-tenant hydration', async () => {
       const store = getStore();
       const snapshotMatters = structuredClone(store.matters);
+      const snapshotPeople = structuredClone(store.people);
+      const snapshotNotifications = structuredClone(store.notifications ?? []);
       const snapshotLocations = structuredClone(
         store.matterDocumentLocations ?? [],
       );
@@ -1867,6 +1938,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         restrictedMatter.teamMemberIds = ['P-000001'];
 
         // P-000007 is a fee earner in Corporate without matter:restricted:access
+        const jobsOnRestrictedBefore = (store.documentLifecycleJobs ?? []).filter(
+          (j) => j.matterId === 'M-000002',
+        ).length;
         const excludedBrowse = await browseMatterDocumentStoreFolder({
           matterId: 'M-000002',
           userId: 'P-000007',
@@ -1875,6 +1949,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(excludedBrowse.locations).toEqual([]);
         expect(excludedBrowse.activeLocation).toBeNull();
         expect(excludedBrowse.jobs).toEqual([]);
+        expect(
+          (store.documentLifecycleJobs ?? []).filter(
+            (j) => j.matterId === 'M-000002',
+          ),
+        ).toHaveLength(jobsOnRestrictedBefore);
 
         // R3: Excluded fee earner cannot retry provisioning on restricted Matter B
         await expect(
@@ -1893,16 +1972,70 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
         const locB = provB.locations[0]!;
 
-        // R3: Fee earner on Matter A cannot link Matter A to Matter B's folder path
-        await expect(
-          linkExistingMatterDocumentFolder({
-            matterId: 'M-000001',
-            storeId: locB.storeId,
-            libraryId: locB.libraryId,
-            folderUrlOrPath: locB.webUrl,
-            userId: 'P-000002',
-          }),
-        ).rejects.toMatchObject({ code: 'access_denied' });
+        // R3: Fee earner on Matter A cannot link Matter A to Matter B's folder path or the department/team folder; non-admin linking on a staff matter gets access_denied; mock setPermissions is never called
+        const mockBackend = getRegistrySingleton().getMockBackend();
+        const setPermSpy = vi.spyOn(
+          SharePointDocumentStoreProvider.prototype,
+          'setPermissions',
+        );
+        try {
+          await expect(
+            linkExistingMatterDocumentFolder({
+              matterId: 'M-000001',
+              storeId: locB.storeId,
+              libraryId: locB.libraryId,
+              folderUrlOrPath: locB.webUrl,
+              userId: 'P-000002',
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+
+          await expect(
+            linkExistingMatterDocumentFolder({
+              matterId: 'M-000001',
+              storeId: locA.storeId,
+              libraryId: locA.libraryId,
+              folderUrlOrPath: 'RE/RE-COM',
+              userId: 'P-000002',
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+
+          await expect(
+            linkExistingMatterDocumentFolder({
+              matterId: 'M-000002',
+              storeId: locB.storeId,
+              libraryId: locB.libraryId,
+              folderUrlOrPath: locB.webUrl,
+              userId: 'P-000007',
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+
+          // Even an admin with MFA cannot link the department or team container folder itself
+          await expect(
+            linkExistingMatterDocumentFolder({
+              matterId: 'M-000001',
+              storeId: locA.storeId,
+              libraryId: locA.libraryId,
+              folderUrlOrPath: 'RE/RE-COM',
+              userId: 'P-000001',
+              mfaVerified: true,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+
+          await expect(
+            linkExistingMatterDocumentFolder({
+              matterId: 'M-000001',
+              storeId: locA.storeId,
+              libraryId: locA.libraryId,
+              folderUrlOrPath: 'RE',
+              userId: 'P-000001',
+              mfaVerified: true,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+
+          expect(setPermSpy).not.toHaveBeenCalled();
+        } finally {
+          setPermSpy.mockRestore();
+        }
 
         // R4: User on Matter A calling download, upload, browse, or mutate with Matter A's matterId and Matter B's locationId or itemId is rejected with access_denied
         await expect(
@@ -1963,27 +2096,41 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         });
         expect(crossBrowse.errorCode).toBe('access_denied');
         expect(crossBrowse.locations).toEqual([]);
+        expect(
+          (store.documentStoreAuditEvents ?? []).some(
+            (e) =>
+              e.matterId === 'M-000001' &&
+              e.outcome === 'denied' &&
+              (e.errorCode === 'location_matter_mismatch' ||
+                e.errorCode === 'item_outside_matter_folder'),
+          ),
+        ).toBe(true);
 
-        // R12: Colleague in Real Estate (or under defaultMatterVisibility: 'all_employees') can browse non-restricted Matter A
+        // R12: Colleague in Real Estate (or under defaultMatterVisibility: 'all_employees') who is NOT named on Matter A can browse non-restricted Matter A
         const colleagueBrowse = await browseMatterDocumentStoreFolder({
           matterId: 'M-000001',
-          userId: 'P-000002',
+          userId: 'P-000003',
         });
         expect(colleagueBrowse.errorCode).toBeUndefined();
         expect(colleagueBrowse.activeLocation?.id).toBe(locA.id);
         expect(colleagueBrowse.activeLocation?.hasUniquePermissions).toBe(false);
 
-        // R8: Marking provisioned Matter A as isStaffMatter: true via saveMatterRecord breaks inheritance and strips department/team group grants
+        // R8 & R80: Making Matter A a staff matter through conflict-on-hire (savePersonRecord) updates the mock backend's folder permissions as well as intendedGrants
         const targetMatterA = store.matters.find((m) => m.id === 'M-000001')!;
-        saveMatterRecord(
+        const clientIdOnMatterA = 'P-000030';
+        targetMatterA.clientId = clientIdOnMatterA;
+        targetMatterA.teamMemberIds = ['P-000002', 'P-000003'];
+        const clientPerson = store.people.find((p) => p.id === clientIdOnMatterA)!;
+        const hireRes = savePersonRecord(
           {
-            ...targetMatterA,
-            isStaffMatter: true,
-            hasEthicalWall: true,
-            restrictedAccessUserIds: ['P-000002'],
+            ...clientPerson,
+            isEmployee: true,
+            employeeRoleId: 'employee_role.solicitor',
+            departmentId: 'DEPT-RE',
           },
-          { id: 'M-000001', byId: 'P-000001' },
+          { id: clientIdOnMatterA, byId: 'P-000001' },
         );
+        expect(hireRes.errors).toBeUndefined();
 
         const updatedLocA = (store.matterDocumentLocations ?? []).find(
           (l) => l.id === locA.id,
@@ -1997,7 +2144,87 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
         expect(hasDeptOrTeamGroupGrant).toBe(false);
 
-        // R9: Matter with unconfigured owningDepartmentId fails routing/provisioning with misconfigured error
+        const { item: mockItemAfterHire } = mockBackend.getItemOrThrow(
+          locA.tenantId,
+          locA.providerSiteId,
+          locA.providerDriveId,
+          locA.providerFolderItemId,
+        );
+        expect(mockItemAfterHire.inheritsFromParent).toBe(false);
+        expect(
+          mockItemAfterHire.directGrants.some(
+            (g) =>
+              g.principal.principalType === 'group' &&
+              (g.principal.internalId?.startsWith('DEPT-') ||
+                g.principal.internalId?.startsWith('TPG-')),
+          ),
+        ).toBe(false);
+        expect(
+          mockItemAfterHire.directGrants.some(
+            (g) => g.principal.internalId === 'P-000003',
+          ),
+        ).toBe(true);
+
+        // R8: Removing a team member from restricted Matter A removes their grant on the mock backend
+        saveMatterRecord(
+          {
+            ...targetMatterA,
+            isStaffMatter: true,
+            hasEthicalWall: true,
+            teamMemberIds: ['P-000002'],
+            restrictedAccessUserIds: ['P-000001', 'P-000002'],
+          },
+          { id: 'M-000001', byId: 'P-000001' },
+        );
+        const { item: mockItemAfterTeamRemoval } = mockBackend.getItemOrThrow(
+          locA.tenantId,
+          locA.providerSiteId,
+          locA.providerDriveId,
+          locA.providerFolderItemId,
+        );
+        expect(
+          mockItemAfterTeamRemoval.directGrants.some(
+            (g) => g.principal.internalId === 'P-000003',
+          ),
+        ).toBe(false);
+
+        // R80: syncMatterLifecycleOnSaveSync fails closed with UNAUTHENTICATED for an unknown user, and logs/records a failed job when the provider fails
+        expect(() =>
+          syncMatterLifecycleOnSaveSync({
+            matter: targetMatterA,
+            userId: 'P-UNKNOWN-ACTOR',
+            store,
+          }),
+        ).toThrow(/UNAUTHENTICATED/);
+
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const failPermSpy = vi
+          .spyOn(SharePointDocumentStoreProvider.prototype, 'setPermissions')
+          .mockRejectedValue(new Error('Simulated Graph 503 failure'));
+        try {
+          syncMatterLifecycleOnSaveSync({
+            matter: targetMatterA,
+            userId: 'P-000001',
+            store,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          expect(errSpy).toHaveBeenCalled();
+          const loggedPayload = String(errSpy.mock.calls[0]?.[0] ?? '');
+          expect(loggedPayload).toContain('correlationId');
+          expect(loggedPayload).toContain('tenantId');
+          const failedJob = (store.documentLifecycleJobs ?? []).find(
+            (j) =>
+              j.matterId === 'M-000001' &&
+              j.jobType === 'recalculate_permissions' &&
+              j.status === 'failed',
+          );
+          expect(failedJob).toBeDefined();
+        } finally {
+          failPermSpy.mockRestore();
+          errSpy.mockRestore();
+        }
+
+        // R9: Matter with unconfigured owningDepartmentId or missing owningTeamId fails routing/provisioning with misconfigured error and never falls back to first team
         const unmappedSubject = buildMatterRoutingSubject(
           {
             ...targetMatterA,
@@ -2015,6 +2242,26 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
           }),
         ).toThrow(/no owning department configured/i);
+
+        const missingTeamSubject = buildMatterRoutingSubject(
+          {
+            ...targetMatterA,
+            id: 'M-NO-TEAM',
+            owningDepartmentId: 'DEPT-RE',
+            owningTeamId: null,
+          },
+          store,
+        );
+        expect(missingTeamSubject.departmentId).toBe('DEPT-RE');
+        expect(missingTeamSubject.teamId).toBe('');
+        expect(() =>
+          resolveMatterDocumentRoute({
+            subject: missingTeamSubject,
+            stores: makeGenericStores('alpha'),
+            routingRules: makeGenericRoutingRules('alpha'),
+            matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+          }),
+        ).toThrow(/no owning team configured/i);
 
         // R13 & R14: 600 audit events persisted without truncation, and two-tenant hydration/persistence isolation
         resetDocumentStoreSingletonsForTesting();
@@ -2060,31 +2307,91 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(reloadedRepo.listAuditEvents(ctxAlpha)).toHaveLength(600);
         expect(reloadedRepo.listAuditEvents(ctxBeta)).toHaveLength(1);
 
-        // R21: Setting SHAREPOINT_LIVE_TEST_ENABLED=1 without live credentials fails token acquisition
-        const prevLiveEnv = process.env.SHAREPOINT_LIVE_TEST_ENABLED;
-        process.env.SHAREPOINT_LIVE_TEST_ENABLED = '1';
+        // R18: Route handlers log structured error with correlationId and tenantId while returning generic message
+        const routeErrSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
         try {
-          const liveTokenService = new DocumentStoreTokenService();
-          await expect(
-            liveTokenService.acquireProvisioningToken({
-              accessContext: {
-                kind: 'provisioning',
-                tenantContext: ctxAlpha,
-                triggerEvent: 'live.test',
+          const badStoreReq = new NextRequest(
+            'http://localhost:3000/api/document-stores',
+            {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-correlation-id': 'corr-r18-docstore-test',
               },
-              storeId: 'alpha-sp-primary',
-              authConfig: makeGenericStores('alpha')[0]!.auth,
+              body: JSON.stringify({
+                action: 'test_connection',
+                storeId: 'non-existent-store-id',
+              }),
+            },
+          );
+          const badStoreResp = await postDocumentStoresRoute(badStoreReq);
+          expect(badStoreResp.status).toBe(400);
+          const badStoreJson = (await badStoreResp.json()) as {
+            ok: boolean;
+            error: string;
+          };
+          expect(badStoreJson.ok).toBe(false);
+          expect(badStoreJson.error).not.toContain('non-existent-store-id');
+          expect(
+            routeErrSpy.mock.calls.some((args) => {
+              const str = String(args[0] ?? '');
+              return (
+                str.includes('corr-r18-docstore-test') &&
+                str.includes('not-a-law-firm')
+              );
             }),
-          ).rejects.toThrow(/LIVE_SHAREPOINT_AUTH_ERROR/);
+          ).toBe(true);
+
+          const matterRouteReq = new NextRequest(
+            'http://localhost:3000/api/matters/M-000001/documents?action=download&locationId=bad-loc&itemId=bad-item',
+            {
+              method: 'GET',
+              headers: {
+                'x-correlation-id': 'corr-r18-matter-docs-test',
+              },
+            },
+          );
+          const matterRouteResp = await getMatterDocumentsRoute(matterRouteReq, {
+            params: Promise.resolve({ id: 'M-000001' }),
+          });
+          expect([400, 403]).toContain(matterRouteResp.status);
+          const matterRouteJson = (await matterRouteResp.json()) as {
+            ok: boolean;
+            error: string;
+          };
+          expect(matterRouteJson.ok).toBe(false);
+          expect(
+            routeErrSpy.mock.calls.some((args) => {
+              const str = String(args[0] ?? '');
+              return (
+                str.includes('corr-r18-matter-docs-test') &&
+                str.includes('not-a-law-firm')
+              );
+            }),
+          ).toBe(true);
         } finally {
-          if (prevLiveEnv === undefined) {
-            delete process.env.SHAREPOINT_LIVE_TEST_ENABLED;
-          } else {
-            process.env.SHAREPOINT_LIVE_TEST_ENABLED = prevLiveEnv;
-          }
+          routeErrSpy.mockRestore();
         }
+
+        // R21 & R86: No SHAREPOINT_LIVE_ references in core/src; SharePointDocumentStoreProvider is mock-backed for Phase 1
+        const tokenCacheSource = fs.readFileSync(
+          path.resolve(
+            __dirname,
+            '../src/integrations/document-stores/tokenCache.ts',
+          ),
+          'utf8',
+        );
+        expect(tokenCacheSource).not.toContain('SHAREPOINT_LIVE_');
+
+        // R23: MockSharePointGraphBackend is exported from @platform/core/testing, not @platform/core
+        expect('MockSharePointGraphBackend' in CoreBarrel).toBe(false);
+        expect(typeof MockSharePointGraphBackend).toBe('function');
       } finally {
         store.matters = snapshotMatters;
+        store.people = snapshotPeople;
+        store.notifications = snapshotNotifications;
         store.matterDocumentLocations = snapshotLocations;
         store.documentStoreFolderScopes = snapshotScopes;
         store.documentLifecycleJobs = snapshotJobs;

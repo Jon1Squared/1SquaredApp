@@ -754,7 +754,8 @@ export async function linkExistingMatterFolderJob(params: {
               .replace(/^\/+|\/+$/g, '');
             if (
               actualLower === otherLower ||
-              actualLower.startsWith(`${otherLower}/`)
+              actualLower.startsWith(`${otherLower}/`) ||
+              otherLower.startsWith(`${actualLower}/`)
             ) {
               return true;
             }
@@ -785,12 +786,46 @@ export async function linkExistingMatterFolderJob(params: {
         throw err;
       }
 
+      const actualNormalized = actualRelPath
+        .toLowerCase()
+        .replace(/^\/+|\/+$/g, '');
+      const expectedBaseNormalized = (expectedRoute.renderedBasePath ?? '')
+        .toLowerCase()
+        .replace(/^\/+|\/+$/g, '');
+
+      // Never allow linking the library root or the routed department/team container folder itself (R3)
+      if (
+        !actualNormalized ||
+        (expectedBaseNormalized &&
+          (actualNormalized === expectedBaseNormalized ||
+            expectedBaseNormalized.startsWith(`${actualNormalized}/`)))
+      ) {
+        deps.repository.appendAuditEvent(
+          ctx,
+          buildDocumentStoreAuditEvent({
+            context: ctx,
+            identityUsed: 'provisioning',
+            triggerEvent,
+            action: 'lifecycle:matter:linked',
+            matterId: subject.matterId,
+            storeId,
+            libraryId,
+            providerItemId: resolvedLoc.folderItemId,
+            outcome: 'denied',
+            errorCode: 'routing_path_mismatch',
+          }),
+        );
+        const err = new Error(
+          `PERMISSION_DENIED: Cannot link the department, team, or library root container folder ("${actualRelPath}") directly to a matter.`,
+        ) as Error & { code: DocumentStoreErrorCode };
+        err.code = 'access_denied';
+        throw err;
+      }
+
       let routingMismatchNote: string | null = null;
       if (
-        expectedRoute.renderedBasePath &&
-        !actualRelPath
-          .toLowerCase()
-          .startsWith(expectedRoute.renderedBasePath.toLowerCase())
+        expectedBaseNormalized &&
+        !actualNormalized.startsWith(`${expectedBaseNormalized}/`)
       ) {
         if (!allowRoutingMismatchOverride || !ctx.mfaVerified) {
           deps.repository.appendAuditEvent(
@@ -1020,17 +1055,102 @@ export async function recalculateMatterPermissionsJob(params: {
           expectedRoute.renderedBasePath.toLowerCase();
         const effectiveInherit = inPlaceDeptMismatch ? false : permPlan.inherit;
 
-        await provider.setPermissions(
-          provCtx,
-          {
+        try {
+          await provider.setPermissions(
+            provCtx,
+            {
+              storeId: loc.storeId,
+              siteId: loc.providerSiteId,
+              driveId: loc.providerDriveId,
+              itemId: loc.providerFolderItemId,
+            },
+            permPlan.grants,
+            { inherit: effectiveInherit },
+          );
+        } catch (err) {
+          const errorCode =
+            ((err as { code?: DocumentStoreErrorCode })?.code as
+              | DocumentStoreErrorCode
+              | undefined) ?? 'unavailable';
+          const errorMessage =
+            err instanceof Error
+              ? err.message
+              : 'Failed to synchronise matter folder permissions.';
+          const now = new Date().toISOString();
+          console.error(
+            JSON.stringify({
+              level: 'error',
+              correlationId: ctx.correlationId,
+              tenantId: ctx.tenantId,
+              matterId: subject.matterId,
+              storeId: loc.storeId,
+              code: errorCode,
+              message: errorMessage,
+            }),
+          );
+          deps.repository.putLifecycleJob(ctx, {
+            id: `job-perm-${randomUUID()}`,
+            tenantId: ctx.tenantId,
+            correlationId: ctx.correlationId,
             storeId: loc.storeId,
-            siteId: loc.providerSiteId,
-            driveId: loc.providerDriveId,
-            itemId: loc.providerFolderItemId,
-          },
-          permPlan.grants,
-          { inherit: effectiveInherit },
-        );
+            matterId: subject.matterId,
+            jobType: 'recalculate_permissions',
+            status: 'failed',
+            attemptCount: 1,
+            maxAttempts: 3,
+            triggeredByUserId: ctx.actorId || null,
+            triggerEvent,
+            payload: {
+              locationId: loc.id,
+              inherit: effectiveInherit,
+              reason: permPlan.reason,
+            },
+            result: null,
+            lastErrorCode: errorCode,
+            lastErrorMessage: errorMessage,
+            createdAt: now,
+            updatedAt: now,
+          });
+          deps.repository.putReconciliationFinding(ctx, {
+            id: `finding-${randomUUID()}`,
+            tenantId: ctx.tenantId,
+            storeId: loc.storeId,
+            libraryId: loc.libraryId,
+            matterId: subject.matterId,
+            providerItemId: loc.providerFolderItemId,
+            scopeIdentifier: subject.matterId,
+            findingType: 'unexpected_grant',
+            severity: 'high',
+            status: 'open',
+            intendedState: {
+              inherit: effectiveInherit,
+              reason: permPlan.reason,
+            },
+            actualState: {
+              errorCode,
+              errorMessage,
+            },
+            detectedAt: now,
+            remediatedAt: null,
+            remediatedByUserId: null,
+          });
+          deps.repository.appendAuditEvent(
+            ctx,
+            buildDocumentStoreAuditEvent({
+              context: ctx,
+              identityUsed: 'provisioning',
+              triggerEvent,
+              action: 'lifecycle:matter:permissions_updated',
+              matterId: subject.matterId,
+              storeId: loc.storeId,
+              libraryId: loc.libraryId,
+              providerItemId: loc.providerFolderItemId,
+              outcome: 'failed',
+              errorCode,
+            }),
+          );
+          throw err;
+        }
 
         const now = new Date().toISOString();
         const matterScopeKey = `MATTER:${subject.matterId}`;

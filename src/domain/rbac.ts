@@ -238,6 +238,30 @@ export function resolvePersonAuthoritativeRoles(
   return ['fee_earner'];
 }
 
+const activeSessionTokenRolesByPersonId = new Map<string, readonly string[]>();
+
+export function setActiveSessionTokenRolesForPerson(
+  personId: string,
+  tokenRoles: readonly string[] | null | undefined,
+): void {
+  if (!personId) return;
+  if (!tokenRoles) {
+    activeSessionTokenRolesByPersonId.delete(personId);
+    return;
+  }
+  activeSessionTokenRolesByPersonId.set(personId, [...tokenRoles]);
+}
+
+export function getActiveSessionTokenRolesForPerson(
+  personId: string,
+): readonly string[] | undefined {
+  return activeSessionTokenRolesByPersonId.get(personId);
+}
+
+export function clearActiveSessionTokenRoles(): void {
+  activeSessionTokenRolesByPersonId.clear();
+}
+
 export interface ResolvePersonPermissionsOptions {
   allPeople?: readonly Person[];
   teams?: readonly Team[];
@@ -319,8 +343,12 @@ export function resolvePersonPermissionSet(
 
   const mfaVerified =
     options.mfaVerified ?? options.context?.mfaVerified ?? false;
+  const sessionTokenRoles = getActiveSessionTokenRolesForPerson(user.id);
   const contextActorRoles =
-    options.context?.actorRoles ?? options.tokenRoles ?? storedRoles;
+    options.context?.actorRoles ??
+    options.tokenRoles ??
+    sessionTokenRoles ??
+    storedRoles;
 
   const resolved = resolvePermissions({
     context: options.context

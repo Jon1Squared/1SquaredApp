@@ -549,22 +549,6 @@ export interface ImportSummary {
   };
 }
 
-const DEMO_CLIENT_DRAMA_OVERRIDES: Record<
-  string,
-  { phone: string; companyNumber: string }
-> = {
-  PEN001: { phone: '029 2018 0410', companyNumber: 'DEMO-000001' },
-  HAR001: { phone: '029 2018 0520', companyNumber: 'DEMO-RS0002' },
-  BRI001: { phone: '0117 496 0730', companyNumber: 'DEMO-000003' },
-  BAY001: { phone: '029 2018 0633', companyNumber: 'DEMO-000004' },
-  SEV001: { phone: '0117 496 0810', companyNumber: 'DEMO-000005' },
-  SEV002: { phone: '0117 496 0822', companyNumber: 'DEMO-000006' },
-  SEV003: { phone: '0117 496 0830', companyNumber: 'DEMO-000007' },
-  PRI001: { phone: '07700 900610', companyNumber: '' },
-  PUG001: { phone: '', companyNumber: '' },
-  SJO001: { phone: '07700 900877', companyNumber: '' },
-};
-
 /**
  * Drops and rebuilds the PMS SQLite database from the Excel workbook.
  * Safe and idempotent to run repeatedly.
@@ -655,14 +639,13 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         'fee_earners',
       );
       clientCodes.add(code);
-      const override = DEMO_CLIENT_DRAMA_OVERRIDES[code];
       insClient.run(
         code,
         r.client_name,
         r.client_type,
-        override ? override.companyNumber : (r.company_number ?? ''),
+        r.company_number ?? '',
         r.email ?? '',
-        override ? override.phone : (r.phone ?? ''),
+        r.phone ?? '',
         r.billing_address ?? '',
         r.postcode ?? '',
         r.client_partner_id,

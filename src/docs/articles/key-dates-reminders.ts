@@ -16,7 +16,7 @@ Traditional practice management systems often generate a brand-new reminder task
 
 Each confirmed key date has:
 - Exactly one \`KeyDateReminderState\`, and
-- Exactly one linked \`Task\` in the tasks domain, keyed by the deterministic idempotency key \`keydate-reminder:{keyDateId}\`.
+- Exactly one linked \`Task\` in the tasks domain, keyed by the deterministic idempotency key \`keydate-reminder:{tenantId}:{keyDateId}\`.
 
 The task's \`assignedTeamId\` is set to the key date's \`teamId\`, and \`assignedPersonIds\` is set to the key date's \`responsiblePersonIds\`. Standard task ownership rules (\`canUserTakeTask\`, \`canUserReassignTask\`) apply.
 

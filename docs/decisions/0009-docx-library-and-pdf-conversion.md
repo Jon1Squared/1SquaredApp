@@ -1,7 +1,7 @@
 # ADR-0009: DOCX Processing Architecture (Split-Run Coalescing), Active PDF Conversion from Day One, and Legacy Removal
 
 - **Date:** 2026-04-20
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

@@ -1,7 +1,7 @@
 # ADR-0020: Storing Document References Rather Than Copies and Zero-PII Telemetry
 
 - **Date:** 2026-11-02
-- **Status:** Accepted
+- **Status:** Proposed
 - **Related:** [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0018](./0018-two-identity-authentication-model.md)
 
 ## Context

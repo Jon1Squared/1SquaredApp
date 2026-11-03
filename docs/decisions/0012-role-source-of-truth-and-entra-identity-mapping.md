@@ -1,7 +1,7 @@
 # ADR-0012: Authoritative Role Source of Truth, Unified `HomeRoleKey`, and Entra ID Identity Mapping
 
 - **Date:** 2026-11-01
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

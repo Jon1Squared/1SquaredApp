@@ -175,28 +175,38 @@ describe('Role-based Home pages & configuration', () => {
     const updatedPartner = setRolePanelPlacement(partnerRole, 'aged_debt_by_age_band', 'summary');
     expect(updatedPartner.summaryPanels).toContain('aged_debt_by_age_band');
 
+    const adminUser = getAppSnapshot('P-000001').people.find(
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.co.uk',
+    )!;
     const updatedRoles = defaults.roles.map((r) => (r.key === 'partner' ? updatedPartner : r));
-    saveHomePagesConfig(
+    const saveRes = saveHomePagesConfig(
       {
         roles: updatedRoles,
         firmSettings: { demoMode: true },
       },
-      'P-000001',
+      adminUser.id,
+      { mfaVerified: true },
     );
+    expect(saveRes.ok).toBe(true);
 
     const snapAfterSave = getAppSnapshot('P-000001');
     const savedPartner = snapAfterSave.homePagesConfig.roles.find((r) => r.key === 'partner')!;
     expect(savedPartner.summaryPanels).toContain('aged_debt_by_age_band');
-    expect(snapAfterSave.homePagesConfig.firmSettings.demoMode).toBe(true);
+    // demoMode comes strictly from schema-validated tenant configuration, never from user-writable store state
+    expect(snapAfterSave.homePagesConfig.firmSettings.demoMode).toBe(false);
 
     // Reset to defaults removes 'aged_debt_by_age_band' from Partner summary
-    resetHomePagesConfig('P-000001');
+    const resetRes = resetHomePagesConfig(adminUser.id, { mfaVerified: true });
+    expect(resetRes.ok).toBe(true);
     const snapAfterReset = getAppSnapshot('P-000001');
     const resetPartner = snapAfterReset.homePagesConfig.roles.find((r) => r.key === 'partner')!;
     expect(resetPartner.summaryPanels).not.toContain('aged_debt_by_age_band');
   });
 
   it('allows adding a custom role in Admin › Home pages and assigning roles/supports to employees', () => {
+    const adminUser = getAppSnapshot('P-000001').people.find(
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.co.uk',
+    )!;
     const res = addHomeRole(
       {
         label: 'Business Development',
@@ -204,14 +214,11 @@ describe('Role-based Home pages & configuration', () => {
         purpose: 'Enquiry pipeline, referral sources and key client relationships.',
         copyFromRoleKey: 'partner',
       },
-      'P-000001',
+      adminUser.id,
+      { mfaVerified: true },
     );
     expect(res.ok).toBe(true);
     expect(res.role?.key).toBe('business_development');
-
-    const adminUser = getAppSnapshot('P-000001').people.find(
-      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.co.uk',
-    )!;
     const empUpdate = updateEmployeeRolesAndSupports(
       'P-000002',
       { roles: ['fee_earner', 'business_development'] },

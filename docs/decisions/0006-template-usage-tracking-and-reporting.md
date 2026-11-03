@@ -1,7 +1,7 @@
 # ADR-0006: Template Usage Tracking, Aggregation, Privacy, and Retention
 
 - **Date:** 2026-04-20
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

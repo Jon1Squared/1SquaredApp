@@ -1144,83 +1144,111 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     options: { inherit: boolean },
   ): Promise<DocumentPermissionSnapshot> {
     const provCtx = this.assertProvisioningContext(context);
-    const caller = await this.resolveCallerIdentity(provCtx);
-    return this.executeWithResilience(() => {
-      const { partition, item } = this.backend.getItemOrThrow(
-        this.tenantContext.tenantId,
-        itemRef.siteId,
-        itemRef.driveId,
-        itemRef.itemId,
-      );
+    const { item: preItem } = this.backend.getItemOrThrow(
+      this.tenantContext.tenantId,
+      itemRef.siteId,
+      itemRef.driveId,
+      itemRef.itemId,
+    );
+    const prevInherits = preItem.inheritsFromParent;
+    const prevDirectGrants = preItem.directGrants.map((g) => ({
+      principal: { ...g.principal },
+      level: g.level,
+    }));
+    const prevSharingLinks = preItem.sharingLinks.map((l) => ({ ...l }));
 
-      if (options.inherit) {
-        // SharePoint REST API: resetroleinheritance
-        this.backend.recordCall(
-          caller,
-          'sp_rest',
-          'resetRoleInheritance',
-          itemRef.driveId,
-          itemRef.itemId,
-        );
-        item.inheritsFromParent = true;
-        item.directGrants = [];
-        item.sharingLinks = [];
-      } else {
-        // SharePoint REST API: breakroleinheritance(copyRoleAssignments=false, clearSubscopes=false)
-        this.backend.recordCall(
-          caller,
-          'sp_rest',
-          'breakRoleInheritance',
-          itemRef.driveId,
-          itemRef.itemId,
-        );
-        // Microsoft Graph v1.0: apply mapped role grants
-        this.backend.recordCall(
-          caller,
-          'graph_v1',
-          'setPermissions',
+    const preMappedGrants: DocumentPermissionGrant[] = [];
+    if (!options.inherit) {
+      for (const grant of intendedGrants) {
+        if (grant.level === 'none') continue;
+        const roleDescriptor = SHAREPOINT_ROLE_MAPPING[grant.level];
+        if (!roleDescriptor) {
+          throw createMockGraphError(
+            'misconfigured',
+            `Unsupported abstract access level "${grant.level}".`,
+          );
+        }
+        preMappedGrants.push({
+          principal: { ...grant.principal },
+          level: roleDescriptor.abstractLevel,
+        });
+      }
+      preItem.inheritsFromParent = false;
+      preItem.directGrants = preMappedGrants;
+      preItem.sharingLinks = [];
+    } else {
+      preItem.inheritsFromParent = true;
+      preItem.directGrants = [];
+      preItem.sharingLinks = [];
+    }
+
+    try {
+      const caller = await this.resolveCallerIdentity(provCtx);
+      return await this.executeWithResilience(() => {
+        const { partition, item } = this.backend.getItemOrThrow(
+          this.tenantContext.tenantId,
+          itemRef.siteId,
           itemRef.driveId,
           itemRef.itemId,
         );
 
-        const mappedGrants: DocumentPermissionGrant[] = [];
-        for (const grant of intendedGrants) {
-          if (grant.level === 'none') continue;
-          // Validate role mapping via single source of truth
-          const roleDescriptor = SHAREPOINT_ROLE_MAPPING[grant.level];
-          if (!roleDescriptor) {
-            throw createMockGraphError(
-              'misconfigured',
-              `Unsupported abstract access level "${grant.level}".`,
-            );
-          }
-          mappedGrants.push({
-            principal: { ...grant.principal },
-            level: roleDescriptor.abstractLevel,
-          });
+        if (options.inherit) {
+          // SharePoint REST API: resetroleinheritance
+          this.backend.recordCall(
+            caller,
+            'sp_rest',
+            'resetRoleInheritance',
+            itemRef.driveId,
+            itemRef.itemId,
+          );
+          item.inheritsFromParent = true;
+          item.directGrants = [];
+          item.sharingLinks = [];
+        } else {
+          // SharePoint REST API: breakroleinheritance(copyRoleAssignments=false, clearSubscopes=false)
+          this.backend.recordCall(
+            caller,
+            'sp_rest',
+            'breakRoleInheritance',
+            itemRef.driveId,
+            itemRef.itemId,
+          );
+          // Microsoft Graph v1.0: apply mapped role grants
+          this.backend.recordCall(
+            caller,
+            'graph_v1',
+            'setPermissions',
+            itemRef.driveId,
+            itemRef.itemId,
+          );
+
+          item.inheritsFromParent = false;
+          item.directGrants = preMappedGrants;
+          item.sharingLinks = [];
         }
 
-        item.inheritsFromParent = false;
-        item.directGrants = mappedGrants;
-        item.sharingLinks = [];
-      }
+        const { grants: effectiveGrants } =
+          this.backend.getEffectiveGrantsForItem(partition, item);
+        const activeGrants = item.inheritsFromParent
+          ? effectiveGrants
+          : item.directGrants;
 
-      const { grants: effectiveGrants } =
-        this.backend.getEffectiveGrantsForItem(partition, item);
-      const activeGrants = item.inheritsFromParent
-        ? effectiveGrants
-        : item.directGrants;
-
-      return {
-        itemId: item.itemId,
-        inheritsFromParent: item.inheritsFromParent,
-        grants: activeGrants.map((g) => ({
-          principal: { ...g.principal },
-          level: g.level,
-        })),
-        sharingLinks: [],
-      };
-    });
+        return {
+          itemId: item.itemId,
+          inheritsFromParent: item.inheritsFromParent,
+          grants: activeGrants.map((g) => ({
+            principal: { ...g.principal },
+            level: g.level,
+          })),
+          sharingLinks: [],
+        };
+      });
+    } catch (err) {
+      preItem.inheritsFromParent = prevInherits;
+      preItem.directGrants = prevDirectGrants;
+      preItem.sharingLinks = prevSharingLinks;
+      throw err;
+    }
   }
 
   public async resolvePrincipal(

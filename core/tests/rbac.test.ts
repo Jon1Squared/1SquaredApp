@@ -65,8 +65,18 @@ import {
   createSignedEntraSessionCookie,
   setTestEntraSessionOverride,
 } from '../../src/server/entraAuth';
-import { resolveCurrentTenantContext } from '../../src/platform/tenantRuntime';
-import { updateTenantRbacConfigAction } from '../../src/app/actions';
+import {
+  getActiveTenantRawBaseConfig,
+  resolveCurrentTenantContext,
+  setActiveTenantConfigForTesting,
+} from '../../src/platform/tenantRuntime';
+import {
+  addHomeRoleAction,
+  resetHomePagesConfigAction,
+  saveHomePagesConfigAction,
+  switchUserAction,
+  updateTenantRbacConfigAction,
+} from '../../src/app/actions';
 import type { ChoiceValue, Matter, Person, Task, Team } from '../../src/domain/types';
 
 function makeBaseTenantConfig(tenantId = 'tenant-alpha'): TenantConfiguration {
@@ -1238,6 +1248,46 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const tokenOnlySnap = getAppSnapshot(secondTokenSignIn.person.id);
       expect(tokenOnlySnap.currentUserPermissions).not.toContain('admin:access');
 
+      // R61 (hybrid mode): Under hybrid authorityMode, token-derived roles apply for the current session
+      // without mutating the stored person.roles on the employee record.
+      updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            authorityMode: 'hybrid',
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      const hybridSignIn = resolveOrProvisionEntraEmployee({
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '00000000-0000-4000-8000-000000000099',
+        sub: 'sub-002',
+        name: 'Dafydd Evans',
+        email: 'dafydd.evans@notalawfirm.co.uk',
+        roles: ['1Squared.RiskCompliance'],
+        amr: ['pwd', 'mfa'],
+      });
+      expect(hybridSignIn.person.id).toBe('P-000002');
+      // Stored employee roles remain ['fee_earner'] and do not permanently gain 'risk_compliance'
+      expect(hybridSignIn.person.roles).toEqual(['fee_earner']);
+      // Yet the active session permission set includes risk_compliance permissions (e.g. 'risk:view')
+      const hybridSnap = getAppSnapshot('P-000002');
+      expect(hybridSnap.currentUserPermissions).toContain('risk:view');
+      // When the subsequent session has no token roles, the user falls back to stored ['fee_earner'] roles only
+      resolveOrProvisionEntraEmployee({
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '00000000-0000-4000-8000-000000000099',
+        sub: 'sub-002',
+        name: 'Dafydd Evans',
+        email: 'dafydd.evans@notalawfirm.co.uk',
+        roles: [],
+        amr: ['pwd', 'mfa'],
+      });
+      const hybridAfterSnap = getAppSnapshot('P-000002');
+      expect(hybridAfterSnap.currentUserPermissions).not.toContain('risk:view');
+
       // R63: getAppSnapshot(riskUser).employeeSensitiveRecords is empty; per-person read writes a view-sensitive audit entry
       const riskSnap = getAppSnapshot('P-000003');
       expect(riskSnap.employeeSensitiveRecords).toEqual({});
@@ -1266,6 +1316,76 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           teams: riskSnap.teams,
         }),
       ).toBe(false);
+
+      // R75: A fee earner calling saveHomePagesConfigAction({ firmSettings: { demoMode: true } }) is rejected and demoMode remains off;
+      // and a fee earner calling switchUserAction('P-000051') in demo mode is refused.
+      setTestEntraSessionOverride({
+        personId: 'P-000002',
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '00000000-0000-4000-8000-000000000099',
+        sub: '00000000-0000-4000-8000-000000000002',
+        email: 'dafydd.evans@notalawfirm.co.uk',
+        displayName: 'Dafydd Evans',
+        entraRoles: [],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      const feeEarnerSaveHomeRes = await saveHomePagesConfigAction({
+        firmSettings: { demoMode: true },
+      });
+      expect(feeEarnerSaveHomeRes.ok).toBe(false);
+      expect(feeEarnerSaveHomeRes.code).toBe('FORBIDDEN');
+      expect(getAppSnapshot('P-000002').homePagesConfig.firmSettings.demoMode).toBe(
+        false,
+      );
+      const feeEarnerResetHomeRes = await resetHomePagesConfigAction();
+      expect(feeEarnerResetHomeRes.ok).toBe(false);
+      const feeEarnerAddRoleRes = await addHomeRoleAction({
+        label: 'Unauthorized Role',
+        purpose: 'Should fail',
+      });
+      expect(feeEarnerAddRoleRes.ok).toBe(false);
+
+      // Reject enableDemoMode: true in live environment
+      const rawBase = getActiveTenantRawBaseConfig();
+      expect(() =>
+        loadAndValidateTenantConfig(
+          {
+            ...rawBase,
+            environment: 'live',
+            featureFlags: {
+              ...(rawBase.featureFlags as Record<string, unknown>),
+              enableDemoMode: true,
+            },
+          },
+          {},
+          'live',
+        ),
+      ).toThrow(/enableDemoMode cannot be true when environment is/);
+
+      // Even when demo mode is enabled in non-live tenant config, a fee earner switching to admin ('P-000051') is refused
+      setActiveTenantConfigForTesting(
+        {
+          ...rawBase,
+          featureFlags: {
+            ...(rawBase.featureFlags as Record<string, unknown>),
+            enableDemoMode: true,
+          },
+        },
+        {},
+      );
+      try {
+        await expect(switchUserAction('P-000051')).rejects.toThrow(
+          /Cannot switch in Demo Mode to a persona holding permission/,
+        );
+      } finally {
+        setActiveTenantConfigForTesting(null, undefined);
+        setTestEntraSessionOverride(undefined);
+      }
 
       resetAllDemoData('P-000001');
     });

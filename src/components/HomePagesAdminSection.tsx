@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState, useTransition } from 'react';
+import React, { useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -61,16 +61,15 @@ export function HomePagesAdminSection({
     [initialConfig.roles, values],
   );
 
-  const [roles, setRoles] = useState<RoleHomeConfig[]>(syncedInitialRoles);
+  const [rawRoles, setRoles] = useState<RoleHomeConfig[]>(syncedInitialRoles);
+  const roles = useMemo(
+    () => syncHomeRolesWithEmployeeRoles(rawRoles, values),
+    [rawRoles, values],
+  );
   const [firmSettings, setFirmSettings] = useState(() => ({
     ...initialConfig.firmSettings,
     demoMode: false,
   }));
-
-  // Keep roles in sync when taxonomy `employee_role` values change
-  useEffect(() => {
-    setRoles((prev) => syncHomeRolesWithEmployeeRoles(prev, values));
-  }, [values]);
 
   const [selectedRoleKey, setSelectedRoleKey] = useState<string>(() => {
     if (

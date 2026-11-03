@@ -1,7 +1,7 @@
 # ADR-0002: Template Storage as Tenant Data and Architectural Layer Separation
 
 - **Date:** 2026-04-20
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

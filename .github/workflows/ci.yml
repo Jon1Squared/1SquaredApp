@@ -40,10 +40,28 @@ jobs:
 
       - name: Verify invented-only fixture data in data/
         run: |
-          if git grep -n -i "1squared\.co\.uk\|c9bd9acf\|72f9[8]8bf" -- data/; then
-            echo "ERROR: Real email domain or corporate Entra tenant/object ID found in data/"
-            exit 1
-          fi
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const fs = require("node:fs");
+            const files = execFileSync("git", ["ls-files", "data/"], { encoding: "utf8" })
+              .split(/\r?\n/)
+              .filter(f => f && /\.(json|sql|csv|txt|md)$/i.test(f));
+            const allowedDomain = /^(notalawfirm\.co\.uk|example\.(com|org|net)|[a-z0-9.-]+\.(example|test))$/i;
+            const emailRe = /[a-zA-Z0-9._%+-]+@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
+            const bad = [];
+            for (const file of files) {
+              const text = fs.readFileSync(file, "utf8");
+              for (const m of text.matchAll(emailRe)) {
+                if (!allowedDomain.test(m[1])) {
+                  bad.push(`${file}: ${m[0]}`);
+                }
+              }
+            }
+            if (bad.length > 0) {
+              console.error("ERROR: Non-allowlisted email domain found in data/:\n" + bad.join("\n"));
+              process.exit(1);
+            }
+          '
 
       - name: Run unit, contract & two-tenant isolation tests
         run: npx vitest run

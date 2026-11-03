@@ -577,6 +577,12 @@ export const TenantConfigurationSchema = z
           .boolean()
           .default(false)
           .describe('Enable AI-assisted matter field extraction'),
+        enableDemoMode: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Enable Demo Mode user switching for designated demo personas in non-live environments',
+          ),
       })
       .strict(),
     matterCosts: z
@@ -1705,6 +1711,15 @@ export const TenantConfigurationSchema = z
   })
   .strict()
   .superRefine((cfg, ctx) => {
+    if (cfg.environment === 'live' && cfg.featureFlags.enableDemoMode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['featureFlags', 'enableDemoMode'],
+        message:
+          'featureFlags.enableDemoMode cannot be true when environment is "live".',
+      });
+    }
+
     // 1. Validate documentStores
     const storeById = new Map<string, NonNullable<typeof cfg.documentStores>[number]>();
     let defaultStoreCount = 0;

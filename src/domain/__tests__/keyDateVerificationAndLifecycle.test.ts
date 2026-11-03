@@ -657,6 +657,93 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
           a.recordId === 'KD-PARTNER-OVERRIDE',
       ),
     ).toBe(true);
+
+    // 4. Creating with a forged unknown ruleSetId / ruleId and 'reviewed' is rejected with KEY_DATE_VALIDATION_ERROR
+    expect(() =>
+      createOrProposeKeyDate({
+        id: 'KD-FORGED-UNKNOWN-RULE',
+        matter: conveyancingMatter,
+        keyDateTypeId: 'completion',
+        dueDate: '2028-05-01',
+        calculation: {
+          ruleSetId: 'forged-unknown-ruleset',
+          ruleSetVersion: 1,
+          ruleSetReviewStatus: 'reviewed',
+          ruleId: 'forged-unknown-rule',
+          triggers: { accrualDate: '2022-05-01' },
+          calculatedDate: '2028-05-01',
+          explanation: ['Forged rule'],
+          overridden: false,
+        },
+        actor: feeEarner,
+        nowIso: '2026-02-01T10:00:00Z',
+        config,
+        teams,
+        people: [feeEarner, supervisor, partner],
+        audit,
+        nextAuditId: () => `AUD-${seq++}`,
+      }),
+    ).toThrow(/KEY_DATE_VALIDATION_ERROR/);
+
+    // 5. Fee earner superseding a calculated date to a different dueDate with no calculation supplied is rejected
+    verifyProposedKeyDate({
+      keyDate: kdForgedStatus,
+      verifier: supervisor,
+      nowIso: '2026-02-02T10:00:00Z',
+      config,
+      teams,
+      people: [feeEarner, supervisor, partner],
+      audit,
+      nextAuditId: () => `AUD-${seq++}`,
+    });
+    expect(kdForgedStatus.status).toBe('confirmed');
+
+    expect(() =>
+      supersedeConfirmedKeyDate({
+        existingKeyDate: kdForgedStatus,
+        newKeyDateId: 'KD-SUPERSEDED-BY-FE',
+        updates: {
+          dueDate: '2030-01-01', // Different from calculated 2028-05-01, with no updates.calculation supplied
+        },
+        reason: 'Trying to move calculated limitation date without override permission.',
+        actor: feeEarner,
+        nowIso: '2026-02-03T10:00:00Z',
+        config,
+        matter: conveyancingMatter,
+        teams,
+        people: [feeEarner, supervisor, partner],
+        audit,
+        nextAuditId: () => `AUD-${seq++}`,
+      }),
+    ).toThrow(/KEY_DATE_PERMISSION_ERROR/);
+    expect(kdForgedStatus.status).toBe('confirmed');
+
+    // Partner superseding a calculated date to a different dueDate with no calculation carries the calculation forward and writes keydate-override-calculation audit entry
+    const { replacementKeyDate: partnerSupersededCalc } = supersedeConfirmedKeyDate({
+      existingKeyDate: kdForgedStatus,
+      newKeyDateId: 'KD-SUPERSEDED-BY-PARTNER',
+      updates: {
+        dueDate: '2028-06-15',
+      },
+      reason: 'Standstill agreement extended limitation by 45 days.',
+      actor: partner,
+      nowIso: '2026-02-03T11:00:00Z',
+      config,
+      matter: conveyancingMatter,
+      teams,
+      people: [feeEarner, supervisor, partner],
+      audit,
+      nextAuditId: () => `AUD-${seq++}`,
+    });
+    expect(partnerSupersededCalc.calculation?.overridden).toBe(true);
+    expect(partnerSupersededCalc.calculation?.calculatedDate).toBe('2028-05-01');
+    expect(
+      audit.some(
+        (a) =>
+          a.action === 'keydate-override-calculation' &&
+          a.recordId === 'KD-SUPERSEDED-BY-PARTNER',
+      ),
+    ).toBe(true);
   });
 
   it('rejects forged/inactive teams and non-employee responsiblePersonIds on create and reassign (R38, R44)', () => {

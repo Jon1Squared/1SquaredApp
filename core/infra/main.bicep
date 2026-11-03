@@ -39,8 +39,19 @@ var resourceSuffix = '${tenantSlug}-${environment}'
 var sanitizedSlug = replace(tenantSlug, '-', '')
 var storageAccountName = take('st${sanitizedSlug}${environment}', 24)
 var keyVaultResourceName = take('kv-${sanitizedSlug}-${environment}', 24)
+var appServicePlanName = take('asp-${resourceSuffix}', 40)
+var webAppResourceName = take('app-${resourceSuffix}', 60)
 var containerName = 'tenant-${resourceSuffix}'
+// Built-in Azure RBAC role: Key Vault Secrets User
+var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  '4633458b-17de-408a-b874-0445c86b69e6'
+)
 
+// Operator-populated Key Vault secrets (never stored in Bicep templates or source control):
+// - entra-client-secret: Microsoft Entra ID confidential client secret (or certificate thumbprint)
+// - auth-secret: 32+ byte HMAC-SHA256 session cookie signing key
+// - blob-signing-key: 32+ byte HMAC-SHA256 scoped blob download token signing key
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultResourceName
   location: location
@@ -54,40 +65,73 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
     enablePurgeProtection: true
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
   }
 }
 
-resource entraClientSecretPlaceholder 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'entra-client-secret'
+resource appServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
+  name: appServicePlanName
+  location: location
+  kind: 'linux'
+  sku: {
+    name: 'P1v3'
+    tier: 'PremiumV3'
+  }
   properties: {
-    contentType: 'text/plain'
-    attributes: {
-      enabled: true
+    reserved: true
+  }
+}
+
+var keyVaultSecretAppSettings = {
+  ENTRA_CLIENT_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/entra-client-secret/)'
+  AUTH_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/auth-secret/)'
+  PLATFORM_BLOB_SIGNING_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/blob-signing-key/)'
+  PLATFORM_HOSTING_MODE: hostingMode
+}
+
+resource webApp 'Microsoft.Web/sites@2023-01-01' = {
+  name: webAppResourceName
+  location: location
+  kind: 'app,linux,container'
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    serverFarmId: appServicePlan.id
+    httpsOnly: true
+    siteConfig: {
+      minTlsVersion: '1.2'
+      ftpsState: 'Disabled'
+      alwaysOn: true
+      appSettings: [
+        {
+          name: 'ENTRA_CLIENT_SECRET'
+          value: keyVaultSecretAppSettings.ENTRA_CLIENT_SECRET
+        }
+        {
+          name: 'AUTH_SECRET'
+          value: keyVaultSecretAppSettings.AUTH_SECRET
+        }
+        {
+          name: 'PLATFORM_BLOB_SIGNING_KEY'
+          value: keyVaultSecretAppSettings.PLATFORM_BLOB_SIGNING_KEY
+        }
+        {
+          name: 'PLATFORM_HOSTING_MODE'
+          value: keyVaultSecretAppSettings.PLATFORM_HOSTING_MODE
+        }
+      ]
     }
   }
 }
 
-resource authSecretPlaceholder 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'auth-secret'
+resource webAppKeyVaultSecretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, webApp.id, '4633458b-17de-408a-b874-0445c86b69e6')
+  scope: keyVault
   properties: {
-    contentType: 'text/plain'
-    attributes: {
-      enabled: true
-    }
-  }
-}
-
-resource blobSigningKeyPlaceholder 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'blob-signing-key'
-  properties: {
-    contentType: 'text/plain'
-    attributes: {
-      enabled: true
-    }
+    roleDefinitionId: keyVaultSecretsUserRoleDefinitionId
+    principalId: webApp.identity.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -161,17 +205,13 @@ resource defenderForStorage 'Microsoft.Security/defenderForStorageSettings@2022-
   }
 }
 
-var keyVaultSecretAppSettings = {
-  ENTRA_CLIENT_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/entra-client-secret/)'
-  AUTH_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/auth-secret/)'
-  PLATFORM_BLOB_SIGNING_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/blob-signing-key/)'
-  PLATFORM_HOSTING_MODE: hostingMode
-}
-
 output hostingModeConfigured string = hostingMode
 output primaryRegion string = location
 output keyVaultName string = keyVault.name
 output keyVaultUri string = keyVault.properties.vaultUri
+output webAppName string = webApp.name
+output webAppPrincipalId string = webApp.identity.principalId
+output keyVaultSecretsUserRoleAssignmentId string = webAppKeyVaultSecretsUserRole.id
 output appSettingsKeyVaultReferences object = keyVaultSecretAppSettings
 output storageContainerName string = containerName
 output postgresDatabaseName string = 'pg_tenant_${replace(tenantSlug, '-', '_')}_${environment}'

@@ -1,7 +1,7 @@
 # ADR-0021: Matter Folder Template Resolution, Inheritance, and Additive Versioning
 
 - **Date:** 2026-11-02
-- **Status:** Accepted
+- **Status:** Proposed
 - **Related:** [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0019](./0019-inheritance-based-document-permission-model.md)
 
 ## Context

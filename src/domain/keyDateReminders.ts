@@ -41,9 +41,14 @@ import type {
 
 export function buildKeyDateReminderIdempotencyKey(
   keyDateId: KeyDateId,
-  tenantId: string = 'default',
+  tenantId: string,
 ): string {
-  const cleanTenant = tenantId?.trim() || 'default';
+  const cleanTenant = tenantId?.trim();
+  if (!cleanTenant) {
+    throw new Error(
+      'TENANCY_JOB_ERROR: Cannot build key date reminder idempotency key without a tenantId.',
+    );
+  }
   return `keydate-reminder:${cleanTenant}:${keyDateId}`;
 }
 
@@ -161,15 +166,24 @@ export function formatReminderTaskDescription(
  */
 export function filterRecipientsForMatterRestriction(
   candidatePersonIds: readonly PersonId[],
-  matter: Pick<Matter, 'isStaffMatter' | 'restrictedAccessUserIds'> | null | undefined,
+  matter:
+    | Pick<Matter, 'id' | 'isStaffMatter' | 'restrictedAccessUserIds'>
+    | null
+    | undefined,
   people?: readonly Person[],
 ): PersonId[] {
   const unique = Array.from(new Set(candidatePersonIds.filter(Boolean)));
   if (!isMatterRestrictedForKeyDates(matter)) {
     return unique;
   }
+  if (!matter) return [];
   return unique.filter((pid) =>
-    canViewerAccessMatterKeyDates(matter, pid, undefined, people),
+    canViewerAccessMatterKeyDates(
+      { ...matter, id: matter.id || 'RESTRICTED-MATTER' },
+      pid,
+      undefined,
+      people,
+    ),
   );
 }
 
@@ -182,7 +196,10 @@ export function resolveEscalationRecipientIds(
   keyDate: Pick<KeyDate, 'teamId'>,
   teams: readonly Team[],
   people: readonly Person[],
-  matter: Pick<Matter, 'isStaffMatter' | 'restrictedAccessUserIds'> | null | undefined,
+  matter:
+    | Pick<Matter, 'id' | 'isStaffMatter' | 'restrictedAccessUserIds'>
+    | null
+    | undefined,
 ): PersonId[] {
   const candidates: PersonId[] = [];
   if (levelSpec === 'team_leads') {
@@ -433,12 +450,10 @@ export function closeReminderTaskForKeyDate(params: {
 }): Task | null {
   const { keyDateId, tasks, reminderStates, nowIso, actorId } = params;
   const state = reminderStates.find((s) => s.keyDateId === keyDateId);
-  const idempotencyKey = buildKeyDateReminderIdempotencyKey(keyDateId);
   const task = state
     ? tasks.find((t) => t.id === state.taskId)
     : tasks.find(
         (t) =>
-          t.idempotencyKey === idempotencyKey ||
           Boolean(t.idempotencyKey?.endsWith(`:${keyDateId}`)) ||
           t.linkedKeyDateId === keyDateId,
       );

@@ -37,33 +37,40 @@ export async function GET(request: Request) {
       );
     }
 
-    const doc = verified.documentId
-      ? repo.getDocumentById(ctx, verified.documentId)
-      : repo
-          .listDocuments(ctx)
-          .find((d) => d.storageKey === verified.blobKey && !d.isDeleted);
+    if (!verified.documentId) {
+      return NextResponse.json(
+        { error: 'Document not found.' },
+        { status: 404 },
+      );
+    }
 
-    if (doc) {
-      const linkedMatters = [];
-      if (doc.primaryMatterId) {
-        const m = store.matters.find((x) => x.id === doc.primaryMatterId);
-        if (m) linkedMatters.push(toMatterAccessSubject(m)!);
-      }
-      for (const link of repo.listLinksForDocument(ctx, doc.id)) {
-        if (link.entityType === 'matter') {
-          const m = store.matters.find((x) => x.id === link.entityId);
-          if (m && !linkedMatters.some((x) => x.id === m.id)) {
-            linkedMatters.push(toMatterAccessSubject(m)!);
-          }
+    const doc = repo.getDocumentById(ctx, verified.documentId);
+    if (!doc || doc.isDeleted || doc.storageKey !== verified.blobKey) {
+      return NextResponse.json(
+        { error: 'Document not found.' },
+        { status: 404 },
+      );
+    }
+
+    const linkedMatters = [];
+    if (doc.primaryMatterId) {
+      const m = store.matters.find((x) => x.id === doc.primaryMatterId);
+      if (m) linkedMatters.push(toMatterAccessSubject(m)!);
+    }
+    for (const link of repo.listLinksForDocument(ctx, doc.id)) {
+      if (link.entityType === 'matter') {
+        const m = store.matters.find((x) => x.id === link.entityId);
+        if (m && !linkedMatters.some((x) => x.id === m.id)) {
+          linkedMatters.push(toMatterAccessSubject(m)!);
         }
       }
-      const docActor = buildDocumentActorFromPerson(user);
-      if (!canActorAccessGeneratedDocument(docActor, doc, linkedMatters, config)) {
-        return NextResponse.json(
-          { error: 'You do not have permission to download this document.' },
-          { status: 403 },
-        );
-      }
+    }
+    const docActor = buildDocumentActorFromPerson(user);
+    if (!canActorAccessGeneratedDocument(docActor, doc, linkedMatters, config)) {
+      return NextResponse.json(
+        { error: 'You do not have permission to download this document.' },
+        { status: 403 },
+      );
     }
 
     const bytes = await storage.getObjectBytes(ctx, {

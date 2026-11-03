@@ -16,6 +16,10 @@ import {
   supersedeConfirmedKeyDateRecord,
   verifyProposedKeyDateRecord,
 } from '../../src/server/services';
+import {
+  computeKeyDateExceptions,
+  queryTeamDiaryEntries,
+} from '../../src/domain/keyDateDiary';
 import { getStore, resetStore } from '../../src/server/store';
 
 function createVerifiedTenantContext(
@@ -327,7 +331,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     ).toThrow(/KEY_DATE_ENTITY_IMMUTABLE/);
   });
 
-  it('rejects unpermitted callers across verify, resolve, reassign, acknowledge, and supersede services on a staff-matter key date with no state change (R30)', async () => {
+  it('rejects unpermitted callers across verify, resolve, reassign, acknowledge, and supersede services on a staff-matter key date with no state change (R30, R82)', async () => {
     resetStore();
     const store = getStore();
     const staffPartner = store.people.find(
@@ -337,9 +341,16 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       (p) =>
         p.isEmployee &&
         p.id !== staffPartner.id &&
-        (p.roles?.includes('partner') || p.roles?.includes('fee_earner')),
+        p.roles?.includes('partner'),
     )!;
     const activeTeam = store.teams.find((t) => t.active)!;
+    // Make unpermittedPartner a lead/member of activeTeam so reassign/acknowledge would succeed if not for the staff-matter gate
+    activeTeam.leadIds = Array.from(
+      new Set([...activeTeam.leadIds, unpermittedPartner.id]),
+    );
+    activeTeam.memberIds = Array.from(
+      new Set([...activeTeam.memberIds, unpermittedPartner.id]),
+    );
 
     const baseMatter = store.matters[0]!;
     const staffMatter = {
@@ -361,7 +372,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       matterId: staffMatter.id,
       status: 'awaiting_verification',
       teamId: activeTeam.id,
-      responsiblePersonIds: [staffPartner.id],
+      responsiblePersonIds: [staffPartner.id, unpermittedPartner.id],
       verification: {
         required: true,
         proposedById: staffPartner.id,
@@ -373,7 +384,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       matterId: staffMatter.id,
       status: 'confirmed',
       teamId: activeTeam.id,
-      responsiblePersonIds: [staffPartner.id],
+      responsiblePersonIds: [staffPartner.id, unpermittedPartner.id],
     });
     store.keyDates = [awaitingKd, confirmedKd, ...(store.keyDates ?? [])];
 
@@ -382,6 +393,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       unpermittedPartner.id,
     );
     expect(verifyRes.ok).toBe(false);
+    expect(verifyRes.error).toMatch(/Matter not found or restricted/i);
     expect(awaitingKd.status).toBe('awaiting_verification');
 
     const resolveRes = await resolveKeyDateOutcomeRecord(
@@ -390,20 +402,27 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       unpermittedPartner.id,
     );
     expect(resolveRes.ok).toBe(false);
+    expect(resolveRes.error).toMatch(/Matter not found or restricted/i);
     expect(confirmedKd.status).toBe('confirmed');
 
     const reassignRes = await reassignKeyDateTeamRecord(
       confirmedKd.id,
-      { teamId: activeTeam.id, responsiblePersonIds: [staffPartner.id] },
+      {
+        teamId: activeTeam.id,
+        responsiblePersonIds: [staffPartner.id, unpermittedPartner.id],
+        reason: 'Attempted by outsider',
+      },
       unpermittedPartner.id,
     );
     expect(reassignRes.ok).toBe(false);
+    expect(reassignRes.error).toMatch(/Matter not found or restricted/i);
 
     const ackRes = acknowledgeKeyDateReminderRecord(
       confirmedKd.id,
       unpermittedPartner.id,
     );
     expect(ackRes.ok).toBe(false);
+    expect(ackRes.error).toMatch(/Matter not found or restricted/i);
 
     const supersedeRes = await supersedeConfirmedKeyDateRecord(
       confirmedKd.id,
@@ -412,6 +431,48 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       unpermittedPartner.id,
     );
     expect(supersedeRes.ok).toBe(false);
+    expect(supersedeRes.error).toMatch(/Matter not found or restricted/i);
     expect(confirmedKd.status).toBe('confirmed');
+
+    // R82: A KeyDate referencing a missing matterId fails closed in services, diary, and exceptions
+    const orphanKd: KeyDate = makeSampleKeyDate({
+      id: 'KD-ORPHAN-MATTER',
+      matterId: 'M-DOES-NOT-EXIST',
+      status: 'confirmed',
+      teamId: activeTeam.id,
+      responsiblePersonIds: [staffPartner.id],
+    });
+    store.keyDates.push(orphanKd);
+
+    const orphanResolve = await resolveKeyDateOutcomeRecord(
+      orphanKd.id,
+      { kind: 'met', note: 'Attempted on orphan matter' },
+      staffPartner.id,
+    );
+    expect(orphanResolve.ok).toBe(false);
+    expect(orphanResolve.error).toMatch(/Matter not found or restricted/i);
+
+    const diaryEntries = queryTeamDiaryEntries({
+      viewer: staffPartner,
+      query: {},
+      todayIso: '2026-11-01',
+      config: { enabled: true },
+      keyDates: store.keyDates,
+      matters: store.matters,
+      people: store.people,
+      teams: store.teams,
+    });
+    expect(diaryEntries.some((e) => e.keyDateId === orphanKd.id)).toBe(false);
+
+    const exceptions = computeKeyDateExceptions({
+      viewer: staffPartner,
+      todayIso: '2026-11-01',
+      config: { enabled: true },
+      keyDates: store.keyDates,
+      matters: store.matters,
+      people: store.people,
+      teams: store.teams,
+    });
+    expect(exceptions.some((e) => e.keyDateId === orphanKd.id)).toBe(false);
   });
 });

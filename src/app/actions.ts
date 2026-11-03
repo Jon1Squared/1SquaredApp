@@ -54,6 +54,7 @@ import {
   executeMerge,
   flagMatterWriteOff,
   getCurrentUserId,
+  getEmployeeDetailsForUser,
   linkPmsRecord,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
@@ -131,6 +132,7 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
+import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
 import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
 
 function revalidateAll() {
@@ -184,6 +186,17 @@ export async function logEmployeeRestrictedAccessAction(
   const res = logEmployeeRestrictedAccess(personId, section, byId, fieldDetail);
   revalidateAll();
   return res;
+}
+
+export async function revealEmployeeSensitiveRecordAction(personId: string) {
+  const byId = await getCurrentUserId();
+  const res = getEmployeeDetailsForUser(personId, byId, { logViewSensitive: true });
+  revalidateAll();
+  return {
+    ok: !res.errors?.sensitivePermission && !res.errors?.notFound,
+    sensitive: res.sensitive,
+    errors: res.errors,
+  };
 }
 
 export async function reassignLeaverOwnedRecordsAction(
@@ -598,15 +611,19 @@ export async function saveHomePagesConfigAction(input: {
   roles?: RoleHomeConfig[];
   firmSettings?: Partial<HomeFirmSettings>;
 }) {
-  const byId = await getCurrentUserId();
-  const res = saveHomePagesConfig(input, byId);
+  const actor = await requireAuthenticatedActor();
+  const res = saveHomePagesConfig(input, actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
   revalidateAll();
   return res;
 }
 
 export async function resetHomePagesConfigAction() {
-  const byId = await getCurrentUserId();
-  const res = resetHomePagesConfig(byId);
+  const actor = await requireAuthenticatedActor();
+  const res = resetHomePagesConfig(actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
   revalidateAll();
   return res;
 }
@@ -618,8 +635,10 @@ export async function addHomeRoleAction(input: {
   purpose: string;
   copyFromRoleKey?: string;
 }) {
-  const byId = await getCurrentUserId();
-  const res = addHomeRole(input, byId);
+  const actor = await requireAuthenticatedActor();
+  const res = addHomeRole(input, actor.personId, {
+    mfaVerified: actor.mfaVerified,
+  });
   revalidateAll();
   return res;
 }
@@ -1208,13 +1227,9 @@ export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
 
 export async function runKeyDateReminderSchedulerAction() {
   const actor = await requireAuthenticatedActor();
-  const tenantCtx = resolveCurrentTenantContext({
-    id: actor.personId,
-    name: `${actor.person.firstName} ${actor.person.surname}`,
-    email: actor.session.email,
-    roles: actor.session.mappedRoles,
-    mfaVerified: actor.mfaVerified,
-  });
+  const tenantCtx = resolveCurrentTenantContext(
+    createVerifiedSessionActorFromEntraSession(actor.session),
+  );
   const res = runKeyDateReminderSchedulerRecord({
     tenantCtx,
     byId: actor.personId,

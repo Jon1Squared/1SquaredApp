@@ -1,7 +1,7 @@
 # ADR 0022: Key Dates and Limitation Module
 
 - **Date:** 2026-11-03
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 
@@ -35,7 +35,7 @@ The Key Dates & Limitation module is implemented as a **Core feature** (Section 
 
 In alignment with Rule 4 and Rule 8 of the Platform Architecture Standard and ADR-0001:
 
-- **PostgreSQL Tenant Data Layer (`core/src/tenancy/`):** We add reversible, expand-first migration `0003` (`name: '0003_key_dates_expand'`) creating tenant-scoped tables (`key_dates`, `key_date_not_applicable`, `key_date_reminder_states`, `key_date_calendar_syncs`, and `key_date_audit_events`). Although domain DTOs (`KeyDate`, `KeyDateReminderState`, `KeyDateCalendarSync`, `KeyDateNotApplicable`) do not require `tenantId` on client-facing payloads, every persistence row carries `tenant_id TEXT NOT NULL` and is accessed exclusively through `TenantContext` (`fromVerifiedToken`) so `PostgresTenantCluster` and `TenantKeyDateRepository` enforce defence-in-depth tenant isolation and matter visibility checks on every read and write.
+- **PostgreSQL Tenant Data Layer (`core/src/tenancy/`):** We add reversible, expand-first migration `0003` (`name: '0003_key_dates_expand'`) creating tenant-scoped tables (`key_dates`, `key_date_not_applicable`, `key_date_reminder_states`, `key_date_calendar_syncs`, and `key_date_audit_events`), together with `TenantKeyDateRepository` (validated in `core/tests/key-dates-isolation.test.ts` for the target PostgreSQL database-per-tenant architecture). In the current transitional phase (per ADR-0001), the running Next.js application in `src/server/services.ts` reads and writes key date records through the transitional `FirmStore` (`src/server/store.ts`) rather than `TenantKeyDateRepository`; full cut-over of `src/server/services.ts` to `TenantKeyDateRepository` is scheduled alongside the broader `FirmStore` → PostgreSQL cut-over.
 - **Rollback Procedure for Migration `0003`:** Calling `rollbackVersion(ctx, '0003')` (or `'0003_key_dates_expand'`) drops the operational tables (`key_date_calendar_syncs`, `key_date_reminder_states`, `key_date_not_applicable`, `key_dates`) while **retaining `key_date_audit_events`** intact so immutable compliance audit history is never destroyed during a schema rollback.
 - **Transitional Host Store (`src/server/store.ts` & `src/server/services.ts`):** During the ADR-0001 transitional phase, the Next.js host persists `keyDates`, `keyDateNotApplicable`, `keyDateReminderStates`, and `keyDateCalendarSyncs` in `FirmStore` (normalised safely on load), while `src/server/services.ts` resolves `keyDates` configuration through `getActiveTenantConfiguration()` in `src/platform/tenantRuntime.ts`, enforces matter access (`canViewerAccessMatterKeyDates`) and team diary scoping (`resolvePermittedDiaryTeamIds`) before returning snapshots or mutating state, and runs the reminder scheduler through `runTenantBackgroundJob`.
 - **Immutability & Superseding:** Key dates are never deleted. Modifying the date of a `confirmed` record creates a new `KeyDate` record (`supersedesKeyDateId` pointing to the prior record) and transitions the old record to `superseded` with a mandatory `supersededByKeyDateId` and `supersededReason`.

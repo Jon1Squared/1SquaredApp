@@ -10,6 +10,7 @@ import {
   type PlatformExtension,
 } from '@platform/core';
 import {
+  brandVerifiedSessionActor,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
@@ -41,6 +42,7 @@ import {
   resolveMatterTypeCalendarSyncPolicy,
   resolveMatterTypeVerificationPolicy,
 } from '../keyDates';
+import { buildKeyDateReminderIdempotencyKey } from '../keyDateReminders';
 import type { KeyDate, KeyDatesConfig } from '../keyDates.types';
 import type { Person } from '../types';
 
@@ -173,12 +175,22 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         'keydate:override_calculation',
       ]);
 
-      const adminUser = makePerson({ id: 'P-ADM', roles: ['admin'] });
+      const adminUser = makePerson({
+        id: 'P-ADM',
+        appRole: 'admin',
+        roles: ['admin'],
+      });
       expect(resolveKeyDatePermissions(adminUser)).toEqual([
         'keydate:view',
         'keydate:view_any_team',
         'keydate:configure',
       ]);
+      // R37: Admin does not get operational keydate:edit, keydate:verify, or keydate:override_calculation
+      expect(hasKeyDatePermission(adminUser, 'keydate:edit')).toBe(false);
+      expect(hasKeyDatePermission(adminUser, 'keydate:verify')).toBe(false);
+      expect(
+        hasKeyDatePermission(adminUser, 'keydate:override_calculation'),
+      ).toBe(false);
     });
 
     it('honours custom keyDates.permissions.roleGrants and per-person permissionOverrides', () => {
@@ -459,34 +471,40 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         { mfaVerified: true },
       );
 
-      // R25: Scheduler checks keydate:configure + MFA, ignores caller-supplied tenantId, and throws TENANCY_JOB_ERROR when called with no context
+      // R25 & R84: Scheduler accepts only { tenantCtx, byId, mfaVerified }, checks keydate:configure + MFA, and throws TENANCY_JOB_ERROR when called with no context
       expect(() => runKeyDateReminderSchedulerRecord(null)).toThrow(
         /TENANCY_JOB_ERROR/,
       );
+      expect(() =>
+        // @ts-expect-error R84: Old positional/string arguments are rejected at compile time
+        runKeyDateReminderSchedulerRecord('forged-tenant-id'),
+      ).toThrow(/TENANCY_JOB_ERROR/);
       expect(
-        runKeyDateReminderSchedulerRecord('forged-tenant', feeEarner.id, {
+        runKeyDateReminderSchedulerRecord({
+          byId: feeEarner.id,
           mfaVerified: true,
         }).ok,
       ).toBe(false);
       expect(
-        runKeyDateReminderSchedulerRecord('forged-tenant', admin.id, {
+        runKeyDateReminderSchedulerRecord({
+          byId: admin.id,
           mfaVerified: false,
         }).ok,
       ).toBe(false);
-      const schedOk = runKeyDateReminderSchedulerRecord(
-        'forged-tenant-id',
-        admin.id,
-        { mfaVerified: true },
-      );
+      const schedOk = runKeyDateReminderSchedulerRecord({
+        byId: admin.id,
+        mfaVerified: true,
+      });
       expect(schedOk.ok).toBe(true);
       expect(schedOk.result?.tenantId).toBe('not-a-law-firm');
 
       // R34: Preview and acknowledge require keydate:view; acknowledge requires responsible person or team lead and confirmed status
+      const confirmedKd = store.keyDates!.find((k) => k.status === 'confirmed')!;
       const revokedViewer = makePerson({
         id: 'P-REVOKED-VIEW',
         firstName: 'No',
         surname: 'View',
-        roles: [],
+        roles: ['fee_earner'],
         appRole: null,
         employeeRoleId: null,
         permissionOverrides: {
@@ -495,6 +513,11 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         },
       });
       store.people.push(revokedViewer);
+      // Put revokedViewer on confirmedKd.responsiblePersonIds so the ONLY reason acknowledge fails is missing keydate:view
+      confirmedKd.responsiblePersonIds = [
+        ...confirmedKd.responsiblePersonIds,
+        revokedViewer.id,
+      ];
 
       expect(
         previewLimitationCalculationRecord(
@@ -506,12 +529,19 @@ describe('Key Dates permissions, config schema validation, and extension contrac
           revokedViewer.id,
         ).ok,
       ).toBe(false);
-      expect(
-        acknowledgeKeyDateReminderRecord(kdId, revokedViewer.id).ok,
-      ).toBe(false);
+      const ackRevoked = acknowledgeKeyDateReminderRecord(
+        confirmedKd.id,
+        revokedViewer.id,
+      );
+      expect(ackRevoked.ok).toBe(false);
+      expect(ackRevoked.error).toMatch(/keydate:view/i);
+
+      // R43: buildKeyDateReminderIdempotencyKey throws TENANCY_JOB_ERROR on empty tenantId
+      expect(() => buildKeyDateReminderIdempotencyKey('KD-1', '')).toThrow(
+        /TENANCY_JOB_ERROR/,
+      );
 
       // A user who is neither a responsible person nor the team lead cannot acknowledge
-      const confirmedKd = store.keyDates!.find((k) => k.status === 'confirmed')!;
       const owningTeam = store.teams.find((t) => t.id === confirmedKd.teamId)!;
       const unrelatedFeeEarner = makePerson({
         id: 'P-UNRELATED-FE',
@@ -650,8 +680,9 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       ).toBe(false);
     });
 
-    it('enforces strict restrictedAccessUserIds.includes(viewerId) for staff matters', () => {
+    it('enforces strict restrictedAccessUserIds.includes(viewerId) for staff matters and fails closed when matter or id is missing (R82, R85)', () => {
       const staffMatter = {
+        id: 'M-STAFF-TEST',
         isStaffMatter: true,
         restrictedAccessUserIds: ['P-ALLOWED-1', 'P-ALLOWED-2'],
       };
@@ -660,6 +691,16 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       );
       expect(canViewerAccessMatterKeyDates(staffMatter, 'P-OTHER')).toBe(false);
       expect(canViewerAccessMatterKeyDates(staffMatter, null)).toBe(false);
+      expect(canViewerAccessMatterKeyDates(null, 'P-ALLOWED-1')).toBe(false);
+      expect(canViewerAccessMatterKeyDates(undefined, 'P-ALLOWED-1')).toBe(
+        false,
+      );
+      expect(
+        canViewerAccessMatterKeyDates(
+          { id: '', isStaffMatter: false },
+          'P-ALLOWED-1',
+        ),
+      ).toBe(false);
     });
 
     it('evaluates matter opening and closure gates accurately', () => {
@@ -769,15 +810,17 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         ...(notALawFirmBaseConfig as Record<string, unknown>),
         enabledExtensions: ['ext-keydate-test'],
       });
-      const tenantCtx = resolveCurrentTenantContext({
-        sub: 'P-000001',
-        name: 'Test User',
-        email: 'test@notalawfirm.co.uk',
-        tenantId: tenantConfig.tenantId,
-        roles: ['partner'],
-        mfaVerified: true,
-        correlationId: 'corr-kd-ext-1',
-      });
+      const tenantCtx = resolveCurrentTenantContext(
+        brandVerifiedSessionActor({
+          sub: 'P-000001',
+          name: 'Test User',
+          email: 'test@notalawfirm.co.uk',
+          tenantId: tenantConfig.tenantId,
+          roles: ['partner'],
+          mfaVerified: true,
+          correlationId: 'corr-kd-ext-1',
+        }),
+      );
 
       const beforeCreateRes = await host.executeKeyDateBeforeCreateHook(
         tenantCtx,

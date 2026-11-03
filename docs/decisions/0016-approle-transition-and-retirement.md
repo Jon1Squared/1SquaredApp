@@ -1,7 +1,7 @@
 # ADR-0016: Transition and Retirement of `AppRole`
 
 - **Date:** 2026-11-01
-- **Status:** Accepted
+- **Status:** Proposed
 
 ## Context
 

@@ -1,7 +1,7 @@
 # ADR-0015: Unified Per-Person Permission Overrides, Self-Modification Prevention, and MFA Controls
 
 - **Date:** 2026-11-01
-- **Status:** Accepted
+- **Status:** Proposed
 - **Supersedes:** Override aspects of [ADR-0004](./0004-document-permissions-and-finance-view.md)
 
 ## Context

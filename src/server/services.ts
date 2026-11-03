@@ -109,6 +109,7 @@ import {
   resolvePersonForEntraClaims,
   resolvePersonPermissionSet,
   resolvePersonPermissions,
+  setActiveSessionTokenRolesForPerson,
   setRuntimeRbacConfigOverride,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
@@ -125,6 +126,7 @@ import {
   type EntraSessionPayload,
 } from './entraAuth';
 import {
+  brandVerifiedSessionActor,
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
@@ -275,91 +277,22 @@ import {
 
 export const USER_COOKIE = 'onesquared_user';
 
-const BOOTSTRAP_SESSION_USER: Person = {
-  id: 'P-BOOTSTRAP-ADMIN',
-  recordType: 'person',
-  recordOwnerId: 'P-BOOTSTRAP-ADMIN',
-  recordStatusId: 'person_record_status.active',
-  createdById: 'system',
-  createdAt: '2026-01-01T00:00:00.000Z',
-  updatedById: 'system',
-  updatedAt: '2026-01-01T00:00:00.000Z',
-  sourceId: null,
-  lastVerifiedAt: null,
-  tags: [],
-  duplicateStatusId: 'duplicate_status.none',
-  notDuplicateOf: [],
-  possibleMatchIds: [],
-  mergedIntoId: null,
-  lastInteractionAt: null,
-  customFields: {},
-  titleId: null,
-  firstName: 'System',
-  middleNames: '',
-  surname: 'Administrator',
-  preferredName: '',
-  dateOfBirth: null,
-  otherNames: [],
-  jobTitle: 'New Client Deployment · System Administrator',
-  emails: [
-    {
-      id: 'em-bootstrap',
-      address: 'admin@notalawfirm.co.uk',
-      typeId: null,
-      isPrimary: true,
-    },
-  ],
-  phones: [],
-  preferredContactMethodId: null,
-  preferredLanguageId: null,
-  addresses: [],
-  website: '',
-  relationshipOwnerId: null,
-  relationshipStatusId: null,
-  relationshipStandingId: null,
-  relationshipRoleIds: [],
-  originId: null,
-  firstKnownAt: null,
-  engagementLevelId: null,
-  interests: '',
-  relationshipNotes: '',
-  marketingConsentId: null,
-  consentRecord: '',
-  verificationStatusId: null,
-  verifiedAt: null,
-  verificationMethodId: null,
-  verificationReviewerId: null,
-  riskReferences: '',
-  isEmployee: true,
-  employeeRoleId: 'employee_role.system_administrator',
-  departmentId: null,
-  appRole: 'admin',
-  roles: [
-    'admin',
-    'managing_partner',
-    'partner',
-    'fee_earner',
-    'legal_secretary',
-    'enquiries_coordinator',
-    'finance',
-    'risk_compliance',
-  ],
-};
-
 export interface AuthenticatedActorContext {
   personId: string;
   person: Person;
   session: EntraSessionPayload;
   mfaVerified: boolean;
+  tenantId: string;
 }
 
 export async function requireAuthenticatedActor(): Promise<AuthenticatedActorContext> {
+  const tenantId = getActiveTenantConfiguration().tenantId;
   const entraSession = await getEntraSession();
   if (!entraSession || !entraSession.personId) {
     throw new AuthorisationError({
       code: 'UNAUTHENTICATED',
       message: 'Authentication is required. Please sign in with Microsoft Entra ID.',
-      tenantId: 'default',
+      tenantId,
       correlationId: 'auth-check',
       actorUserId: 'anonymous',
     });
@@ -372,22 +305,35 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
     throw new AuthorisationError({
       code: 'UNAUTHENTICATED',
       message: 'Authenticated employee record was not found or is inactive.',
-      tenantId: 'default',
+      tenantId,
       correlationId: 'auth-check',
       actorUserId: entraSession.personId,
     });
   }
+  setActiveSessionTokenRolesForPerson(person.id, entraSession.mappedRoles);
   return {
     personId: person.id,
     person,
     session: entraSession,
     mfaVerified: Boolean(entraSession.mfaVerified),
+    tenantId,
   };
 }
 
 export async function getCurrentUserId(): Promise<string> {
   const actor = await requireAuthenticatedActor();
   return actor.personId;
+}
+
+export function isDemoModeEnabled(): boolean {
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  const activeTenantConfig = getActiveTenantConfiguration();
+  if (activeTenantConfig.environment === 'live') {
+    return false;
+  }
+  return Boolean(activeTenantConfig.featureFlags?.enableDemoMode);
 }
 
 export async function switchUserInDemoMode(targetUserId: string): Promise<{
@@ -397,12 +343,12 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
 }> {
   const actor = await requireAuthenticatedActor();
   const store = getStore();
-  const demoMode = Boolean(store.homePagesConfig?.firmSettings?.demoMode);
-  if (!demoMode) {
+  const tenantId = getActiveTenantConfiguration().tenantId;
+  if (!isDemoModeEnabled()) {
     throw new AuthorisationError({
       code: 'FORBIDDEN',
-      message: 'User switching is only permitted when Demo Mode is enabled.',
-      tenantId: 'default',
+      message: 'User switching is only permitted when Demo Mode is enabled in tenant configuration (featureFlags.enableDemoMode).',
+      tenantId,
       correlationId: 'auth-check',
       actorUserId: actor.personId,
     });
@@ -414,7 +360,33 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     throw new AuthorisationError({
       code: 'FORBIDDEN',
       message: 'User switching in Demo Mode is restricted to designated demo users.',
-      tenantId: 'default',
+      tenantId,
+      correlationId: 'auth-check',
+      actorUserId: actor.personId,
+    });
+  }
+
+  const actorPerson = store.people.find((p) => p.id === actor.personId) ?? null;
+  const actorPerms = resolvePersonPermissionSet(actorPerson, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: actor.mfaVerified,
+    tokenRoles: actor.session.mappedRoles,
+  });
+  const targetPerms = resolvePersonPermissionSet(targetPerson, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: true,
+  });
+  const missingPerm = targetPerms.permissionList.find(
+    (perm) => !actorPerms.permissions.has(perm),
+  );
+  if (missingPerm) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message: `Cannot switch in Demo Mode to a persona holding permission '${missingPerm}' not held by the current actor.`,
+      requiredPermission: missingPerm,
+      tenantId,
       correlationId: 'auth-check',
       actorUserId: actor.personId,
     });
@@ -516,13 +488,24 @@ export function getKeyDatesConfig(store: FirmStore = getStore()): KeyDatesConfig
   return validateKeyDatesConfig(raw) as unknown as KeyDatesConfig;
 }
 
-export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
+export function getAppSnapshot(
+  userId: string,
+  options?: { tokenRoles?: readonly string[] },
+) {
   const store = getStore();
   const now = new Date();
-  const user =
-    store.people.find((p) => p.id === userId) ??
-    store.people[0] ??
-    BOOTSTRAP_SESSION_USER;
+  const user = store.people.find(
+    (p) => p.id === userId && !p.mergedIntoId,
+  );
+  if (!user) {
+    throw new AuthorisationError({
+      code: 'UNAUTHENTICATED',
+      message: `Authenticated user "${userId}" was not found or is inactive.`,
+      tenantId: getActiveTenantConfiguration().tenantId,
+      correlationId: 'app-snapshot',
+      actorUserId: userId || 'anonymous',
+    });
+  }
   const employees = activeEmployees(store);
   const currentUserRole = resolveUserAppRole(user, store.teams, store.values);
   const currentUserEmployeePermissions = resolveEmployeePermissions(
@@ -533,6 +516,7 @@ export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
   const currentUserPermissions = resolvePersonPermissions(user, {
     allPeople: store.people,
     teams: store.teams,
+    tokenRoles: options?.tokenRoles,
   });
   const rbacConfig = getDefaultTenantRbacConfig();
   const orgStructure = store.orgStructure ?? buildDefaultOrgStructure();
@@ -563,7 +547,14 @@ export function getAppSnapshot(userId: string = DEFAULT_USER_ID) {
     store.enquiries,
   );
 
-  const homePagesConfig = store.homePagesConfig ?? createDefaultHomePagesConfig(now.toISOString());
+  const rawHomePagesConfig = store.homePagesConfig ?? createDefaultHomePagesConfig(now.toISOString());
+  const homePagesConfig: HomePagesConfig = {
+    ...rawHomePagesConfig,
+    firmSettings: {
+      ...rawHomePagesConfig.firmSettings,
+      demoMode: isDemoModeEnabled(),
+    },
+  };
   const currentUserRoles = resolveEmployeeRoles(user, store.teams);
   const activeViewingRole = resolveActiveViewingRole(user, homePagesConfig, store.teams);
   const keyDatesConfig = getKeyDatesConfig(store);
@@ -1376,6 +1367,7 @@ export function savePersonRecord(
       // Also if the person is a client on any of those open matters, mark them as staff matters with restricted access
       for (const m of openMatters) {
         if (m.clientId === targetPersonId || m.additionalClientIds?.includes(targetPersonId)) {
+          const prevMatter = structuredClone(m);
           m.isStaffMatter = true;
           const allowed = new Set<string>([
             ...(m.restrictedAccessUserIds ?? []),
@@ -1385,6 +1377,12 @@ export function savePersonRecord(
             ...(m.teamMemberIds ?? []),
           ]);
           m.restrictedAccessUserIds = Array.from(allowed);
+          syncMatterLifecycleOnSaveSync({
+            matter: m,
+            previousMatter: prevMatter,
+            userId: opts.byId,
+            store,
+          });
         }
       }
     }
@@ -2624,11 +2622,25 @@ export function saveMatterRecord(
     owningDepartmentId:
       input.owningDepartmentId !== undefined
         ? input.owningDepartmentId
-        : existing?.owningDepartmentId,
+        : existing?.owningDepartmentId ??
+          store.people.find(
+            (p) =>
+              p.id ===
+              (input.leadFeeEarnerId ??
+                existing?.leadFeeEarnerId ??
+                opts.byId),
+          )?.employment?.departmentId,
     owningTeamId:
       input.owningTeamId !== undefined
         ? input.owningTeamId
-        : existing?.owningTeamId,
+        : existing?.owningTeamId ??
+          store.people.find(
+            (p) =>
+              p.id ===
+              (input.leadFeeEarnerId ??
+                existing?.leadFeeEarnerId ??
+                opts.byId),
+          )?.employment?.teamOrPracticeGroupId,
     ...computeStaffMatterStatus(
       {
         clientId: effectiveClientId,
@@ -2890,10 +2902,28 @@ export function updateMatterConflictRecord(
   const today = toIsoDate(new Date());
   const matter = store.matters.find((m) => m.id === matterId);
   if (!matter) return { matter: null };
+  const prevMatter = structuredClone(matter);
 
   matter.conflictCheckRecord = record;
   matter.updatedAt = now;
   matter.updatedById = byId;
+
+  const hasBarrierCondition = (record.matches ?? []).some(
+    (m) => m.reviewerConditionType === 'information_barrier',
+  );
+  if (hasBarrierCondition) {
+    matter.hasEthicalWall = true;
+    const allowed = new Set<string>(
+      [
+        ...(matter.restrictedAccessUserIds ?? []),
+        matter.responsiblePartnerId,
+        matter.supervisingPartnerId,
+        matter.leadFeeEarnerId,
+        ...(matter.teamMemberIds ?? []),
+      ].filter((id): id is string => Boolean(id)),
+    );
+    matter.restrictedAccessUserIds = Array.from(allowed);
+  }
 
   if (record.status === 'Approved' || record.status === 'Cleared') {
     matter.conflictCheckStatus =
@@ -2923,6 +2953,13 @@ export function updateMatterConflictRecord(
     newValue: `${record.status} — ${record.outcomeLabel}`,
     byId,
     at: now,
+  });
+
+  syncMatterLifecycleOnSaveSync({
+    matter,
+    previousMatter: prevMatter,
+    userId: byId,
+    store,
   });
 
   saveStore(store);
@@ -5969,10 +6006,36 @@ export function saveHomePagesConfig(
     firmSettings?: Partial<HomeFirmSettings>;
   },
   byId: string,
-): { ok: boolean; config: HomePagesConfig } {
+  options: { mfaVerified?: boolean } = {},
+): { ok: boolean; code?: string; error?: string; config: HomePagesConfig } {
   const store = getStore();
   const nowIso = new Date().toISOString();
   const current = store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso);
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const rbacConfig = getDefaultTenantRbacConfig();
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: options.mfaVerified ?? false,
+  });
+  try {
+    requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
+  } catch (err) {
+    const code = err instanceof AuthorisationError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      code,
+      error: code ? `${code}: ${message}` : message,
+      config: {
+        ...current,
+        firmSettings: {
+          ...current.firmSettings,
+          demoMode: isDemoModeEnabled(),
+        },
+      },
+    };
+  }
 
   const nextRoles = input.roles
     ? input.roles.map((r) => ({
@@ -5985,9 +6048,12 @@ export function saveHomePagesConfig(
       }))
     : current.roles;
 
+  const sanitizedFirmSettings = { ...(input.firmSettings ?? {}) };
+  delete sanitizedFirmSettings.demoMode;
   const nextSettings: HomeFirmSettings = {
     ...current.firmSettings,
-    ...(input.firmSettings ?? {}),
+    ...sanitizedFirmSettings,
+    demoMode: isDemoModeEnabled(),
   };
 
   store.homePagesConfig = {
@@ -6013,14 +6079,43 @@ export function saveHomePagesConfig(
   return { ok: true, config: store.homePagesConfig };
 }
 
-export function resetHomePagesConfig(byId: string): { ok: boolean; config: HomePagesConfig } {
+export function resetHomePagesConfig(
+  byId: string,
+  options: { mfaVerified?: boolean } = {},
+): { ok: boolean; code?: string; error?: string; config: HomePagesConfig } {
   const store = getStore();
   const nowIso = new Date().toISOString();
+  const current = store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso);
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const rbacConfig = getDefaultTenantRbacConfig();
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: options.mfaVerified ?? false,
+  });
+  try {
+    requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
+  } catch (err) {
+    const code = err instanceof AuthorisationError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      code,
+      error: code ? `${code}: ${message}` : message,
+      config: {
+        ...current,
+        firmSettings: {
+          ...current.firmSettings,
+          demoMode: isDemoModeEnabled(),
+        },
+      },
+    };
+  }
+
   const preservedViewing = store.homePagesConfig?.lastViewingRoleByUserId ?? {};
-  const preservedDemo = store.homePagesConfig?.firmSettings?.demoMode ?? false;
   const defaults = createDefaultHomePagesConfig(nowIso);
   defaults.lastViewingRoleByUserId = preservedViewing;
-  defaults.firmSettings.demoMode = preservedDemo;
+  defaults.firmSettings.demoMode = isDemoModeEnabled();
   defaults.updatedById = byId;
 
   defaults.roles = syncHomeRolesWithEmployeeRoles(defaults.roles, store.values);
@@ -6048,9 +6143,29 @@ export function addHomeRole(
     copyFromRoleKey?: string;
   },
   byId: string,
-): { ok: boolean; error?: string; role?: RoleHomeConfig } {
+  options: { mfaVerified?: boolean } = {},
+): { ok: boolean; code?: string; error?: string; role?: RoleHomeConfig } {
   const store = getStore();
   const nowIso = new Date().toISOString();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const rbacConfig = getDefaultTenantRbacConfig();
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    mfaVerified: options.mfaVerified ?? false,
+  });
+  try {
+    requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
+  } catch (err) {
+    const code = err instanceof AuthorisationError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      code,
+      error: code ? `${code}: ${message}` : message,
+    };
+  }
+
   if (!store.homePagesConfig) {
     store.homePagesConfig = createDefaultHomePagesConfig(nowIso);
   }
@@ -7682,7 +7797,7 @@ function finalizeQuoteConversionToMatter(
 
 export function saveMatterCostsConfig(
   config: MatterCostsConfig,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): MatterCostsConfig {
   const store = getStore();
   const now = new Date().toISOString();
@@ -7707,7 +7822,7 @@ export function saveMatterCostsConfig(
 }
 
 export function syncMatterCostsRatesFromPms(
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): MatterCostsConfig {
   const store = getStore();
   const pms = getPmsSource();
@@ -7802,6 +7917,7 @@ export function resolveOrProvisionEntraEmployee(
       byId: matchedPerson.id,
       at: now,
     });
+    setActiveSessionTokenRolesForPerson(matchedPerson.id, verifiedToken.roles);
     saveStore(store);
     return { person: matchedPerson, verifiedToken, rbacConfig };
   }
@@ -7945,7 +8061,7 @@ function assertKeyDatesModuleEnabled(
 
 export function getMatterKeyDatesSnapshot(
   matterId: string,
-  userId: string = DEFAULT_USER_ID,
+  userId: string,
 ): {
   keyDates: KeyDate[];
   keyDateNotApplicable: KeyDateNotApplicable[];
@@ -8006,7 +8122,7 @@ export function previewLimitationCalculationRecord(
     standstillPeriods?: StandstillPeriod[];
     calendarCodeOverride?: string;
   },
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): { ok: boolean; result?: CalculationResult; error?: string } {
   try {
     const store = getStore();
@@ -8075,7 +8191,7 @@ export async function createOrProposeKeyDateRecord(
     sourceDocumentId?: string;
     intent?: 'provisional' | 'propose';
   },
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     const store = getStore();
@@ -8096,7 +8212,10 @@ export async function createOrProposeKeyDateRecord(
       ? store.enquiries.find((e) => e.id === input.enquiryId) ?? null
       : null;
 
-    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+    if (
+      input.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8138,6 +8257,9 @@ export async function createOrProposeKeyDateRecord(
         tasks: store.tasks,
         reminderStates: store.keyDateReminderStates,
         matters: store.matters,
+        people: store.people,
+        audit: store.audit,
+        nextAuditId: () => nextId(store, 'AU'),
         todayIso,
         nowIso,
         actorId: actor.id,
@@ -8167,7 +8289,7 @@ export async function createOrProposeKeyDateRecord(
 
 export async function proposeProvisionalKeyDateRecord(
   keyDateId: string,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     const store = getStore();
@@ -8191,7 +8313,10 @@ export async function proposeProvisionalKeyDateRecord(
       ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
       : null;
 
-    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+    if (
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8215,6 +8340,9 @@ export async function proposeProvisionalKeyDateRecord(
         tasks: store.tasks,
         reminderStates: store.keyDateReminderStates ?? [],
         matters: store.matters,
+        people: store.people,
+        audit: store.audit,
+        nextAuditId: () => nextId(store, 'AU'),
         todayIso,
         nowIso,
         actorId: actor.id,
@@ -8244,7 +8372,7 @@ export async function proposeProvisionalKeyDateRecord(
 
 export async function verifyProposedKeyDateRecord(
   keyDateId: string,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     const store = getStore();
@@ -8268,7 +8396,10 @@ export async function verifyProposedKeyDateRecord(
       ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
       : null;
 
-    if (matter && !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people)) {
+    if (
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8290,6 +8421,9 @@ export async function verifyProposedKeyDateRecord(
       tasks: store.tasks,
       reminderStates: store.keyDateReminderStates,
       matters: store.matters,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
       todayIso,
       nowIso,
       actorId: verifier.id,
@@ -8321,7 +8455,7 @@ export async function verifyProposedKeyDateRecord(
 export async function rejectProposedKeyDateRecord(
   keyDateId: string,
   reason: string,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     const store = getStore();
@@ -8340,7 +8474,10 @@ export async function rejectProposedKeyDateRecord(
     const matter = kd.matterId
       ? store.matters.find((m) => m.id === kd.matterId) ?? null
       : null;
-    if (matter && !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people)) {
+    if (
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8380,7 +8517,7 @@ export async function supersedeConfirmedKeyDateRecord(
     intent?: 'provisional' | 'propose';
   },
   reason: string,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): Promise<{
   ok: boolean;
   supersededKeyDate?: KeyDate;
@@ -8409,7 +8546,10 @@ export async function supersedeConfirmedKeyDateRecord(
       ? store.enquiries.find((e) => e.id === existing.enquiryId) ?? null
       : null;
 
-    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+    if (
+      existing.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8441,6 +8581,9 @@ export async function supersedeConfirmedKeyDateRecord(
       tasks: store.tasks,
       reminderStates: store.keyDateReminderStates,
       matters: store.matters,
+      people: store.people,
+      audit: store.audit,
+      nextAuditId: () => nextId(store, 'AU'),
       todayIso,
       nowIso,
       actorId: actor.id,
@@ -8483,7 +8626,7 @@ export async function resolveKeyDateOutcomeRecord(
     note?: string;
     evidenceDocumentId?: string;
   },
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     const store = getStore();
@@ -8506,7 +8649,10 @@ export async function resolveKeyDateOutcomeRecord(
       ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
       : null;
 
-    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+    if (
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8558,7 +8704,7 @@ export async function reassignKeyDateTeamRecord(
     responsiblePersonIds?: string[];
     reason?: string;
   },
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
   options?: { calendarAdapter?: GraphCalendarAdapter },
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
@@ -8581,7 +8727,10 @@ export async function reassignKeyDateTeamRecord(
     const enquiry = kd.enquiryId
       ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
       : null;
-    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+    if (
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8628,7 +8777,7 @@ export function recordKeyDateNotApplicableRecord(
     keyDateTypeId: string;
     reason: string;
   },
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): { ok: boolean; record?: KeyDateNotApplicable; error?: string } {
   try {
     const store = getStore();
@@ -8677,7 +8826,7 @@ export function recordKeyDateNotApplicableRecord(
 
 export function acknowledgeKeyDateReminderRecord(
   keyDateId: string,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
 ): { ok: boolean; reminderState?: KeyDateReminderState; error?: string } {
   try {
     const store = getStore();
@@ -8710,7 +8859,10 @@ export function acknowledgeKeyDateReminderRecord(
     const matter = kd.matterId
       ? store.matters.find((m) => m.id === kd.matterId) ?? null
       : null;
-    if (matter && !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+    if (
+      kd.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+    ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -8740,6 +8892,9 @@ export function acknowledgeKeyDateReminderRecord(
         tasks: store.tasks,
         reminderStates: store.keyDateReminderStates,
         matters: store.matters,
+        people: store.people,
+        audit: store.audit,
+        nextAuditId: () => nextId(store, 'AU'),
         todayIso,
         nowIso,
         actorId: actor.id,
@@ -8771,29 +8926,18 @@ export function acknowledgeKeyDateReminderRecord(
 }
 
 export function runKeyDateReminderSchedulerRecord(
-  contextOrOptions?:
-    | {
-        tenantCtx?: TenantContext | null;
-        byId?: string;
-        mfaVerified?: boolean;
-      }
-    | TenantContext
-    | string
-    | null,
-  byIdArg?: string,
-  optionsArg?: { mfaVerified?: boolean },
+  options?: {
+    tenantCtx?: TenantContext | null;
+    byId: string;
+    mfaVerified: boolean;
+  } | null,
 ): {
   ok: boolean;
   result?: ReturnType<typeof runTenantKeyDateReminderJob>;
   triggeredBy?: string;
   error?: string;
 } {
-  // If explicitly called with no context (null / undefined / empty string / empty object without tenantCtx or byId), refuse to run via runTenantBackgroundJob
-  if (
-    contextOrOptions === null ||
-    contextOrOptions === undefined ||
-    (typeof contextOrOptions === 'string' && !contextOrOptions.trim())
-  ) {
+  if (!options || options.tenantCtx === null || (!options.tenantCtx && !options.byId)) {
     runTenantBackgroundJob(
       {
         jobId: 'keydate-reminder-job:missing-context',
@@ -8808,42 +8952,9 @@ export function runKeyDateReminderSchedulerRecord(
   const store = getStore();
   const config = getKeyDatesConfig(store);
 
-  let byId = byIdArg ?? DEFAULT_USER_ID;
-  let providedCtx: TenantContext | null = null;
-  let mfaVerified = optionsArg?.mfaVerified;
-
-  if (typeof contextOrOptions === 'object' && contextOrOptions !== null) {
-    if ('tenantId' in contextOrOptions && 'correlationId' in contextOrOptions) {
-      providedCtx = contextOrOptions as TenantContext;
-      byId = byIdArg ?? providedCtx.actorId;
-      if (mfaVerified === undefined) {
-        mfaVerified = providedCtx.mfaVerified;
-      }
-    } else {
-      const opts = contextOrOptions as {
-        tenantCtx?: TenantContext | null;
-        byId?: string;
-        mfaVerified?: boolean;
-      };
-      if (opts.tenantCtx === null || (!opts.tenantCtx && !opts.byId && !byIdArg)) {
-        runTenantBackgroundJob(
-          {
-            jobId: 'keydate-reminder-job:missing-context',
-            tenantId: '',
-            correlationId: '',
-            payload: {},
-          },
-          () => undefined,
-        );
-      }
-      providedCtx = opts.tenantCtx ?? null;
-      if (opts.byId) byId = opts.byId;
-      if (opts.mfaVerified !== undefined) mfaVerified = opts.mfaVerified;
-      if (mfaVerified === undefined && providedCtx) {
-        mfaVerified = providedCtx.mfaVerified;
-      }
-    }
-  }
+  const byId = options?.byId ?? '';
+  const providedCtx = options?.tenantCtx ?? null;
+  const mfaVerified = options?.mfaVerified ?? providedCtx?.mfaVerified ?? false;
 
   const actor = resolveActorForKeyDates(store, byId);
   if (!actor) {
@@ -8873,17 +8984,18 @@ export function runKeyDateReminderSchedulerRecord(
     };
   }
 
-  // Always resolve the tenant context from the authenticated session / active tenant configuration;
-  // any caller-supplied tenantId string is ignored.
+  // Always resolve the tenant context from the authenticated session / active tenant configuration
   const effectiveTenantCtx =
     providedCtx ??
-    resolveCurrentTenantContext({
-      id: actor.id,
-      name: `${actor.firstName} ${actor.surname}`,
-      email: actor.emails?.[0]?.address,
-      roles: actor.roles,
-      mfaVerified: true,
-    });
+    resolveCurrentTenantContext(
+      brandVerifiedSessionActor({
+        id: actor.id,
+        name: `${actor.firstName} ${actor.surname}`,
+        email: actor.emails?.[0]?.address,
+        roles: actor.roles,
+        mfaVerified,
+      }),
+    );
 
   const todayIso = toIsoDate(new Date());
   const nowIso = new Date().toISOString();
@@ -8923,7 +9035,7 @@ export function runKeyDateReminderSchedulerRecord(
 
 export function queryKeyDatesTeamDiaryRecord(
   query: TeamDiaryQuery,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
   todayIso: string = toIsoDate(new Date()),
 ): TeamDiaryEntry[] {
   const store = getStore();
@@ -8946,7 +9058,7 @@ export function queryKeyDatesTeamDiaryRecord(
 
 export function getKeyDateExceptionsReportRecord(
   filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
   todayIso: string = toIsoDate(new Date()),
 ): KeyDateException[] {
   const store = getStore();
@@ -8977,7 +9089,7 @@ export function exportKeyDateExceptionsReportRecord(
     kinds?: KeyDateExceptionKind[];
     format?: 'csv' | 'json';
   } = {},
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
   todayIso: string = toIsoDate(new Date()),
 ): { ok: boolean; content?: string; filename?: string; count?: number; error?: string } {
   const store = getStore();
@@ -9052,7 +9164,7 @@ export function exportKeyDateExceptionsReportRecord(
 export function saveKeyDatesConfigRecord(
   newConfigInput: KeyDatesConfig,
   reason: string,
-  byId: string = DEFAULT_USER_ID,
+  byId: string,
   options?: { mfaVerified?: boolean } | boolean,
 ): { ok: boolean; config?: KeyDatesConfig; error?: string } {
   try {

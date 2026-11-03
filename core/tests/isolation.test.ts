@@ -13,7 +13,10 @@ import {
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
-import { resolveCurrentTenantContext } from '../../src/platform/tenantRuntime';
+import {
+  brandVerifiedSessionActor,
+  resolveCurrentTenantContext,
+} from '../../src/platform/tenantRuntime';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
@@ -97,16 +100,28 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     // R55: resolveCurrentTenantContext() with no argument throws TENANCY_AUTH_ERROR
     expect(() => resolveCurrentTenantContext()).toThrow(/TENANCY_AUTH_ERROR/);
 
-    // R55: resolveCurrentTenantContext rejects a forged tenantId that differs from the active tenant / session
+    // R77: Plain unbranded object is rejected at compile time by tsc
     expect(() =>
+      // @ts-expect-error R77: resolveCurrentTenantContext requires a branded VerifiedSessionActorInput
       resolveCurrentTenantContext({
         id: 'P-000002',
         email: 'dafydd.evans@notalawfirm.co.uk',
         name: 'Dafydd Evans',
-        roles: ['fee_earner'],
-        mfaVerified: true,
-        tenantId: 'fictional-chambers-uk',
       }),
+    ).toBeDefined();
+
+    // R55: resolveCurrentTenantContext rejects a forged tenantId that differs from the active tenant / session
+    expect(() =>
+      resolveCurrentTenantContext(
+        brandVerifiedSessionActor({
+          id: 'P-000002',
+          email: 'dafydd.evans@notalawfirm.co.uk',
+          name: 'Dafydd Evans',
+          roles: ['fee_earner'],
+          mfaVerified: true,
+          tenantId: 'fictional-chambers-uk',
+        }),
+      ),
     ).toThrow(/TENANCY_FORGERY_DETECTED/);
   });
 

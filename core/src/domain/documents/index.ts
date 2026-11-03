@@ -41,9 +41,9 @@ export interface UserMatterDocumentGuardInput {
   libraryId: string;
   providerItemId?: string | null;
   locationId?: string | null;
-  location?: MatterDocumentLocationRecord | null;
+  location: MatterDocumentLocationRecord | null;
   targetItemIds?: readonly (string | null | undefined)[];
-  verifyItemInMatterTree?: (
+  verifyItemInMatterTree: (
     userCtx: UserAccessContext,
     itemId: string,
     location: MatterDocumentLocationRecord,
@@ -112,8 +112,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
   if (
     isRestrictedMatter &&
     !isUserOnRestrictedAllowlist &&
-    !permSet.has('matter:restricted:access') &&
-    !permSet.has('matter:access_staff')
+    !permSet.has('matter:restricted:access')
   ) {
     repository.appendAuditEvent(
       ctx,
@@ -163,16 +162,12 @@ export async function executeUserMatterDocumentOperation<TResult>(
 
   // 4. Verify location belongs to the requested matter and target items do not belong to another matter
   const resolvedLocation =
-    guard.location !== undefined
-      ? guard.location
-      : guard.locationId
-        ? repository.getMatterLocationById(ctx, guard.locationId)
-        : undefined;
+    guard.location ??
+    (guard.locationId
+      ? repository.getMatterLocationById(ctx, guard.locationId)
+      : null);
 
-  if (
-    (guard.location !== undefined || guard.locationId !== undefined) &&
-    (!resolvedLocation || resolvedLocation.matterId !== matterId)
-  ) {
+  if (!resolvedLocation || resolvedLocation.matterId !== matterId) {
     repository.appendAuditEvent(
       ctx,
       buildDocumentStoreAuditEvent({
@@ -265,11 +260,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
     userAssertionToken: userBearerToken,
   });
 
-  if (
-    resolvedLocation &&
-    guard.verifyItemInMatterTree &&
-    itemIdsToCheck.length > 0
-  ) {
+  if (itemIdsToCheck.length > 0) {
     const knownMatterIds = new Set<string>([
       resolvedLocation.providerFolderItemId,
       ...Object.values(resolvedLocation.folderItemMap ?? {}),

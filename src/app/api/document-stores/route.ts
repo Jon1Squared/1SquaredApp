@@ -5,6 +5,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { normaliseDocumentStoreError } from '@platform/core';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   applyAdminTemplateAdditionsToOpenMatters,
   getDocumentStoresAdminDashboard,
@@ -17,9 +18,34 @@ import {
 } from '@/server/documentStoreServices';
 import { requireAuthenticatedActor } from '@/server/services';
 
+function logDocumentStoreRouteError(
+  route: string,
+  method: 'GET' | 'POST',
+  tenantId: string,
+  correlationId: string,
+  code: string,
+): void {
+  console.error(
+    JSON.stringify({
+      level: 'error',
+      event: 'document_store.route_error',
+      route,
+      method,
+      tenantId,
+      correlationId,
+      code,
+    }),
+  );
+}
+
 export async function GET(request: NextRequest) {
+  const correlationId =
+    request.headers.get('x-correlation-id') ?? `corr-doc-stores-get-${Date.now()}`;
+  let tenantId = 'unknown';
   try {
+    tenantId = getActiveTenantConfiguration().tenantId;
     const actor = await requireAuthenticatedActor();
+    tenantId = actor.tenantId || tenantId;
     const userId = actor.personId;
     const mfaVerified = actor.mfaVerified;
     const { searchParams } = new URL(request.url);
@@ -43,10 +69,18 @@ export async function GET(request: NextRequest) {
     const normalised = normaliseDocumentStoreError(err);
     const isUnauth =
       err instanceof Error && err.message.startsWith('UNAUTHENTICATED:');
+    const code = isUnauth ? 'reauthentication_required' : normalised.code;
+    logDocumentStoreRouteError(
+      '/api/document-stores',
+      'GET',
+      tenantId,
+      correlationId,
+      code,
+    );
     return NextResponse.json(
       {
         ok: false,
-        code: isUnauth ? 'reauthentication_required' : normalised.code,
+        code,
         error: normalised.userMessage,
       },
       {
@@ -61,8 +95,13 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const correlationId =
+    request.headers.get('x-correlation-id') ?? `corr-doc-stores-post-${Date.now()}`;
+  let tenantId = 'unknown';
   try {
+    tenantId = getActiveTenantConfiguration().tenantId;
     const actor = await requireAuthenticatedActor();
+    tenantId = actor.tenantId || tenantId;
     const userId = actor.personId;
     const mfaVerified = actor.mfaVerified;
     const body = (await request.json()) as Record<string, unknown>;
@@ -173,10 +212,18 @@ export async function POST(request: NextRequest) {
     const normalised = normaliseDocumentStoreError(err);
     const isUnauth =
       err instanceof Error && err.message.startsWith('UNAUTHENTICATED:');
+    const code = isUnauth ? 'reauthentication_required' : normalised.code;
+    logDocumentStoreRouteError(
+      '/api/document-stores',
+      'POST',
+      tenantId,
+      correlationId,
+      code,
+    );
     return NextResponse.json(
       {
         ok: false,
-        code: isUnauth ? 'reauthentication_required' : normalised.code,
+        code,
         error: normalised.userMessage,
       },
       {

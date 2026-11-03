@@ -16,7 +16,7 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
 - **Cryptographic Token Verification**: On callback (\`/api/auth/callback/microsoft-entra-id\`), 1Squared exchanges the authorization code for an ID token and verifies its RS256 signature against Microsoft Entra’s JWKS discovery endpoint, along with \`aud\`, \`tid\`, \`iss\`, \`nonce\`, \`exp\`, \`nbf\`, and \`iat\` claims.
 - **Signed Session Cookie**: Once verified, 1Squared issues an HMAC-SHA256 signed \`httpOnly\` session cookie (\`onesquared_entra_session\`). The acting user identity is resolved exclusively from this verified session—never from client-writable cookies, URL parameters, or form fields.
 - **CSRF-Safe Sign-Out**: Signing out from the account menu submits a \`POST\` request to \`/api/auth/logout\` (\`GET\` requests return \`405 Method Not Allowed\`), clearing the session cookie immediately.
-- **Demo Mode User Switching**: Switching between seeded personas is disabled in production and permitted only when **Demo Mode** is explicitly enabled in firm settings for designated demo accounts.
+- **Demo Mode User Switching**: Switching between seeded personas is blocked in production (\`NODE_ENV === 'production'\`) and in \`live\` tenant environments (\`enableDemoMode\` cannot be \`true\` when \`environment === 'live'\`). Even in non-live demo environments where both \`featureFlags.enableDemoMode\` and \`firmSettings.demoMode\` are enabled, a signed-in user can only switch to a persona whose permissions are a subset of the permissions the signed-in user already holds.
 
 ## 2. Employee matching, provisioning & authority modes
 
