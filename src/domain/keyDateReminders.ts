@@ -193,7 +193,7 @@ export function filterRecipientsForMatterRestriction(
  */
 export function resolveEscalationRecipientIds(
   levelSpec: string,
-  keyDate: Pick<KeyDate, 'teamId'>,
+  keyDate: Pick<KeyDate, 'teamId'> & { matterId?: string },
   teams: readonly Team[],
   people: readonly Person[],
   matter:
@@ -201,6 +201,9 @@ export function resolveEscalationRecipientIds(
     | null
     | undefined,
 ): PersonId[] {
+  if (keyDate.matterId && !matter) {
+    return [];
+  }
   const candidates: PersonId[] = [];
   if (levelSpec === 'team_leads') {
     const team = teams.find((t) => t.id === keyDate.teamId);
@@ -459,19 +462,24 @@ export function syncReminderForConfirmedKeyDate(
  */
 export function closeReminderTaskForKeyDate(params: {
   keyDateId: KeyDateId;
+  tenantId?: string;
   tasks: Task[];
   reminderStates: KeyDateReminderState[];
   nowIso: IsoDateTime;
   actorId: PersonId;
 }): Task | null {
-  const { keyDateId, tasks, reminderStates, nowIso, actorId } = params;
+  const { keyDateId, tenantId, tasks, reminderStates, nowIso, actorId } = params;
   const state = reminderStates.find((s) => s.keyDateId === keyDateId);
+  const expectedIdempotencyKey = tenantId?.trim()
+    ? buildKeyDateReminderIdempotencyKey(keyDateId, tenantId.trim())
+    : state?.idempotencyKey ?? null;
   const task = state
     ? tasks.find((t) => t.id === state.taskId)
     : tasks.find(
         (t) =>
-          Boolean(t.idempotencyKey?.endsWith(`:${keyDateId}`)) ||
-          t.linkedKeyDateId === keyDateId,
+          (expectedIdempotencyKey !== null &&
+            t.idempotencyKey === expectedIdempotencyKey) ||
+          (!t.idempotencyKey && t.linkedKeyDateId === keyDateId),
       );
 
   if (!task) return null;
@@ -788,8 +796,13 @@ export function runTenantKeyDateReminderJob(
       continue;
     }
 
-    // Same stage: check if unacknowledged and due for escalation
-    if (!state.acknowledgedAt && schedule?.escalation) {
+    // Same stage: check if unacknowledged and due for escalation (skip when linked matter is missing, R97)
+    if (
+      !isMissingMatter &&
+      state.lastSkippedReason !== 'missing_matter' &&
+      !state.acknowledgedAt &&
+      schedule?.escalation
+    ) {
       const stageEnteredDate = state.stageEnteredAt.slice(0, 10);
       const daysUnacknowledged = diffCalendarDays(stageEnteredDate, todayIso);
       const afterDays = schedule.escalation.afterUnacknowledgedDays ?? 2;
@@ -847,12 +860,14 @@ export function runTenantKeyDateReminderJob(
 
           escalationsTriggeredCount += 1;
 
-          const notifyTarget =
-            escalatedRecipients[0] ??
-            filterRecipientsForMatterRestriction(
-              keyDate.responsiblePersonIds,
-              matter,
-            )[0];
+          const notifyTarget = isMissingMatter
+            ? undefined
+            : (escalatedRecipients[0] ??
+              filterRecipientsForMatterRestriction(
+                keyDate.responsiblePersonIds,
+                matter,
+                people,
+              )[0]);
           if (notifyTarget) {
             notifications.push({
               id: nextNotificationId(),

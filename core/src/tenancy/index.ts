@@ -26,6 +26,7 @@ export * from './migrations/index';
 export * from './blobStorage';
 export * from './documentRepository';
 export * from './documentStoreRepository';
+export * from './keyDateRepository';
 export {
   isEntraMfaVerified,
   mapEntraTokenClaimsToVerifiedOidcToken,

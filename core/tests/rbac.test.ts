@@ -48,12 +48,14 @@ import {
   canPersonAccessMatter,
   clearActiveSessionTokenRoles,
   getDefaultTenantRbacConfig,
+  getStoredActorSessionForPerson,
   resolvePersonForEntraClaims,
   resolvePersonPermissions,
   runWithActiveActorSession,
   setActiveSessionTokenRolesForPerson,
   setRuntimeRbacConfigOverride,
 } from '../../src/domain/rbac';
+import { buildDemoData } from '../../src/seed/demo';
 import { NextRequest } from 'next/server';
 import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
 import {
@@ -209,11 +211,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('reproduces the exact baseline permission matrix across all built-in roles', () => {
       const config = makeBaseTenantConfig();
 
+      const defaultCtx = {
+        tenantId: 'tenant-alpha',
+        correlationId: 'corr-matrix',
+        actorId: 'u-role',
+        actorRoles: [] as string[],
+        mfaVerified: false,
+      };
       const resolveForRole = (role: string) =>
         resolvePermissions({
+          context: { ...defaultCtx, actorId: `u-${role}`, actorRoles: [role] },
           actor: { userId: `u-${role}`, roles: [role] },
           config,
         });
+
+      // R119: Calling resolvePermissions with an empty tenantId throws
+      expect(() =>
+        resolvePermissions({
+          context: { ...defaultCtx, tenantId: '' },
+          actor: { userId: 'u-admin', roles: ['admin'] },
+          config,
+        }),
+      ).toThrow(/RBAC_TENANT_REQUIRED/);
 
       // Admin holds all 25 permissions
       const adminPerms = resolveForRole('admin');
@@ -273,9 +292,17 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('applies tenant-configured departmentGrants (DEPT-HR, DEPT-FIN, DEPT-RISK) and relationshipGrants', () => {
       const config = makeBaseTenantConfig();
+      const baseCtx = {
+        tenantId: 'tenant-alpha',
+        correlationId: 'corr-dept',
+        actorId: 'u-dept',
+        actorRoles: ['fee_earner'],
+        mfaVerified: false,
+      };
 
       // Fee earner in DEPT-HR receives HR + payroll + sensitive permissions from tenant config
       const hrUserPerms = resolvePermissions({
+        context: { ...baseCtx, actorId: 'u-hr' },
         actor: {
           userId: 'u-hr',
           roles: ['fee_earner'],
@@ -290,6 +317,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // Fee earner in DEPT-FIN receives employee:payroll from tenant config, while DEPT-RISK receives employee:sensitive
       const finDeptPerms = resolvePermissions({
+        context: { ...baseCtx, actorId: 'u-fin-dept' },
         actor: {
           userId: 'u-fin-dept',
           roles: ['fee_earner'],
@@ -300,6 +328,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(finDeptPerms.has('employee:payroll')).toBe(true);
 
       const riskDeptPerms = resolvePermissions({
+        context: { ...baseCtx, actorId: 'u-risk-dept' },
         actor: {
           userId: 'u-risk-dept',
           roles: ['fee_earner'],
@@ -311,6 +340,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // Line manager receives employee:edit_core for their direct report via relationshipGrants
       const lineMgrPerms = resolvePermissions({
+        context: { ...baseCtx, actorId: 'u-mgr' },
         actor: {
           userId: 'u-mgr',
           roles: ['fee_earner'],
@@ -388,6 +418,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(deprecationWarnings[0]).toContain('rbac.roles');
 
       const intakePerms = resolvePermissions({
+        context: {
+          tenantId: 'tenant-alpha',
+          correlationId: 'corr-intake',
+          actorId: 'u-intake',
+          actorRoles: ['intake'],
+          mfaVerified: false,
+        },
         actor: { userId: 'u-intake', roles: ['intake'] },
         config,
       });
@@ -400,6 +437,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('enforces explicit revoke over role, department, relationship, and grant', () => {
       const config = makeBaseTenantConfig();
       const perms = resolvePermissions({
+        context: {
+          tenantId: 'tenant-alpha',
+          correlationId: 'corr-revoke',
+          actorId: 'u-partner-revoked',
+          actorRoles: ['partner'],
+          mfaVerified: false,
+        },
         actor: {
           userId: 'u-partner-revoked',
           roles: ['partner'],
@@ -1433,71 +1477,134 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
 
       const dafydd = getAppSnapshot('P-000002').people.find((p) => p.id === 'P-000002')!;
+      const carys = getAppSnapshot('P-000001').people.find((p) => p.id === 'P-000001')!;
       expect(dafydd.roles).toEqual(['fee_earner']);
 
       setActiveSessionTokenRolesForPerson('P-000002', ['admin'], {
         tenantId: 'tenant-a',
       });
 
-      const permsInTenantA = resolvePersonPermissions(dafydd, {
-        context: {
+      // 1a. Outside runWithActiveActorSession, resolvePersonPermissions(person) returns stored roles only
+      expect(resolvePersonPermissions(dafydd)).not.toContain('admin:access');
+      expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
+
+      // 1b. Inside runWithActiveActorSession for tenant-a, token roles apply to tenant-a and never leak to tenant-b
+      const permsInTenantA = runWithActiveActorSession(
+        {
           tenantId: 'tenant-a',
-          correlationId: 'r100-tenant-a',
-          actorId: 'P-000002',
-          actorRoles: ['fee_earner'],
-          mfaVerified: true,
+          personId: 'P-000002',
+          tokenRoles: ['admin'],
+          expiresAtMs: Date.now() + 3600_000,
         },
-      });
+        () =>
+          resolvePersonPermissions(dafydd, {
+            context: {
+              tenantId: 'tenant-a',
+              correlationId: 'r100-tenant-a',
+              actorId: 'P-000002',
+              actorRoles: ['fee_earner'],
+              mfaVerified: true,
+            },
+          }),
+      );
       expect(permsInTenantA).toContain('admin:access');
 
-      const permsInTenantB = resolvePersonPermissions(dafydd, {
-        context: {
-          tenantId: 'tenant-b',
-          correlationId: 'r100-tenant-b',
-          actorId: 'P-000002',
-          actorRoles: ['fee_earner'],
-          mfaVerified: true,
+      const permsInTenantB = runWithActiveActorSession(
+        {
+          tenantId: 'tenant-a',
+          personId: 'P-000002',
+          tokenRoles: ['admin'],
+          expiresAtMs: Date.now() + 3600_000,
         },
-      });
+        () =>
+          resolvePersonPermissions(dafydd, {
+            context: {
+              tenantId: 'tenant-b',
+              correlationId: 'r100-tenant-b',
+              actorId: 'P-000002',
+              actorRoles: ['fee_earner'],
+              mfaVerified: true,
+            },
+          }),
+      );
       expect(permsInTenantB).not.toContain('admin:access');
 
-      // 2. Sign-out clears token roles: after POST /api/auth/logout, resolvePersonPermissions(person) returns stored roles only
-      setActiveSessionTokenRolesForPerson('P-000002', ['risk_compliance'], {
-        tenantId: 'not-a-law-firm',
-      });
-      expect(resolvePersonPermissions(dafydd)).toContain('risk:view');
+      // 2. Two overlapping async requests (A and B, with an await between setting and checking) see only their own token roles
+      const [overlapA, overlapB] = await Promise.all([
+        runWithActiveActorSession(
+          {
+            tenantId: 'not-a-law-firm',
+            personId: 'P-000002',
+            tokenRoles: ['risk_compliance'],
+            expiresAtMs: Date.now() + 3600_000,
+          },
+          async () => {
+            setActiveSessionTokenRolesForPerson('P-000002', ['risk_compliance'], {
+              tenantId: 'not-a-law-firm',
+            });
+            await new Promise((resolve) => setTimeout(resolve, 15));
+            return {
+              selfPerms: resolvePersonPermissions(dafydd),
+              otherPerms: resolvePersonPermissions(carys),
+            };
+          },
+        ),
+        runWithActiveActorSession(
+          {
+            tenantId: 'not-a-law-firm',
+            personId: 'P-000001',
+            tokenRoles: ['finance'],
+            expiresAtMs: Date.now() + 3600_000,
+          },
+          async () => {
+            setActiveSessionTokenRolesForPerson('P-000001', ['finance'], {
+              tenantId: 'not-a-law-firm',
+            });
+            await new Promise((resolve) => setTimeout(resolve, 15));
+            return {
+              selfPerms: resolvePersonPermissions(carys),
+              otherPerms: resolvePersonPermissions(dafydd),
+            };
+          },
+        ),
+      ]);
+      expect(overlapA.selfPerms).toContain('risk:view');
+      expect(overlapA.selfPerms).not.toContain('finance:credit_control');
+      expect(overlapB.selfPerms).toContain('finance:credit_control');
+      // Request B evaluating Dafydd (user A) sees Dafydd's stored roles only (no risk:view from request A)
+      expect(overlapB.otherPerms).not.toContain('risk:view');
 
+      // Outside runWithActiveActorSession, resolvePersonPermissions returns stored roles only
+      expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
+
+      // 3. Signing out user A clears user A's session entry and leaves user B's entry intact
+      const userASignedCookie = createSignedEntraSessionCookie({
+        personId: 'P-000002',
+        tenantId: 'not-a-law-firm',
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: 'P-000002',
+        email: 'dafydd.evans@notalawfirm.example',
+        displayName: 'Dafydd Evans',
+        entraRoles: ['risk_compliance'],
+        mappedRoles: ['risk_compliance'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
       const logoutReq = new NextRequest('http://localhost:3000/api/auth/logout', {
         method: 'POST',
+        headers: {
+          cookie: `onesquared_entra_session=${encodeURIComponent(userASignedCookie)}`,
+        },
       });
       const logoutRes = await logoutPost(logoutReq);
       expect(logoutRes.status).toBe(303);
-      expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
-
-      // 3. Cross-user check: while user A (P-000002) has ['risk_compliance'] token roles in their session,
-      // permission checks made by user B (P-000001) about user A return A's stored roles only
-      setActiveSessionTokenRolesForPerson('P-000002', ['risk_compliance'], {
-        tenantId: 'not-a-law-firm',
-      });
-      expect(resolvePersonPermissions(dafydd)).toContain('risk:view');
-
-      // When user B (P-000001) becomes the active actor, evaluating user A (dafydd) uses A's stored roles only
-      setActiveSessionTokenRolesForPerson('P-000001', ['partner', 'fee_earner'], {
-        tenantId: 'not-a-law-firm',
-      });
-      expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
-
-      // Also when explicitly passing actorId: 'P-000001' in context or running inside user B's AsyncLocalStorage scope
-      const permsSeenByUserB = runWithActiveActorSession(
-        {
-          tenantId: 'not-a-law-firm',
-          personId: 'P-000001',
-          tokenRoles: ['partner', 'fee_earner'],
-          expiresAtMs: Date.now() + 3600_000,
-        },
-        () => resolvePersonPermissions(dafydd),
-      );
-      expect(permsSeenByUserB).not.toContain('risk:view');
+      expect(getStoredActorSessionForPerson('P-000002', 'not-a-law-firm')).toBeUndefined();
+      expect(getStoredActorSessionForPerson('P-000001', 'not-a-law-firm')).toBeDefined();
+      expect(getStoredActorSessionForPerson('P-000001', 'not-a-law-firm')?.tokenRoles).toContain('finance');
 
       setRuntimeRbacConfigOverride(null, 'tenant-a');
       setRuntimeRbacConfigOverride(null, 'tenant-b');
@@ -1564,34 +1671,83 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('refuses Demo Mode persona switching to an employee with access to a restricted/staff matter not accessible to the signed-in actor (R104)', async () => {
       resetAllDemoData('P-000001');
-      const store = getStore();
-      // Mark the first matter as a restricted staff matter where P-000002 is on restrictedAccessUserIds, and P-000006 (another fee_earner) is not
-      const staffMatter = store.matters[0]!;
-      staffMatter.isStaffMatter = true;
-      staffMatter.restrictedAccessUserIds = ['P-000001', 'P-000002'];
-
-      // Sign in as P-000006 (Owain Jenkins, fee_earner, not on restrictedAccessUserIds)
-      setTestEntraSessionOverride({
-        personId: 'P-000006',
-        oid: '00000000-0000-4000-8000-000000000006',
-        tid: '11111111-2222-3333-4444-000000000000',
-        sub: 'P-000006',
-        email: 'owain.jenkins@notalawfirm.example',
-        displayName: 'Owain Jenkins',
-        entraRoles: ['fee_earner'],
-        mappedRoles: ['fee_earner'],
-        entraGroups: [],
-        mfaVerified: true,
-        amr: ['pwd', 'mfa'],
-        authenticatedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      const rawBase = getActiveTenantRawBaseConfig();
+      setActiveTenantConfigForTesting({
+        ...rawBase,
+        featureFlags: {
+          ...((rawBase.featureFlags as Record<string, unknown>) ?? {}),
+          enableDemoMode: true,
+        },
       });
 
-      // Attempting to switch in Demo Mode from P-000006 to P-000002 (same fee_earner role, but named on restrictedAccessUserIds) is refused with FORBIDDEN
-      await expect(switchUserAction('P-000002')).rejects.toThrow(/FORBIDDEN|restricted or staff matters/i);
+      try {
+        const store = getStore();
+        // Use a demo: true target persona (P-000002 marked demo: true with equal fee_earner permissions)
+        const targetPersona = store.people.find((p) => p.id === 'P-000002')!;
+        targetPersona.demo = true;
+        targetPersona.roles = ['fee_earner'];
+        targetPersona.appRole = 'fee_earner';
 
-      setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+        const signedInFeeEarner = store.people.find((p) => p.id === 'P-000006')!;
+        signedInFeeEarner.roles = ['fee_earner'];
+        signedInFeeEarner.appRole = 'fee_earner';
+
+        // Mark the first matter as a restricted staff matter where P-000002 is on restrictedAccessUserIds, and P-000006 is not
+        const staffMatter = store.matters[0]!;
+        staffMatter.isStaffMatter = true;
+        staffMatter.restrictedAccessUserIds = ['P-000001', 'P-000002'];
+
+        // Sign in as P-000006 (Owain Jenkins, fee_earner, not on restrictedAccessUserIds)
+        setTestEntraSessionOverride({
+          personId: 'P-000006',
+          oid: '00000000-0000-4000-8000-000000000006',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000006',
+          email: 'owain.jenkins@notalawfirm.example',
+          displayName: 'Owain Jenkins',
+          entraRoles: ['fee_earner'],
+          mappedRoles: ['fee_earner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+
+        // Attempting to switch in Demo Mode from P-000006 to P-000002 (demo: true, equal permissions, but named on restrictedAccessUserIds) is refused with the exact R104 message
+        await expect(switchUserAction('P-000002')).rejects.toThrow(
+          /Cannot switch in Demo Mode to a persona who has access to restricted or staff matters not accessible to the current actor/,
+        );
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        setActiveTenantConfigForTesting(null);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('omits synthetic test-token entraObjectId values from seeded people when demo/test mode is disabled (R117)', () => {
+      const rawBase = getActiveTenantRawBaseConfig();
+      const prevNodeEnv = process.env.NODE_ENV;
+      try {
+        (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+        setActiveTenantConfigForTesting({
+          ...rawBase,
+          environment: 'live',
+          featureFlags: {
+            ...((rawBase.featureFlags as Record<string, unknown>) ?? {}),
+            enableDemoMode: false,
+          },
+        });
+
+        const seeded = buildDemoData();
+        expect(seeded.people.length).toBeGreaterThan(0);
+        for (const p of seeded.people) {
+          expect(p.entraObjectId).toBeUndefined();
+        }
+      } finally {
+        (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+        setActiveTenantConfigForTesting(null);
+      }
     });
   });
 });

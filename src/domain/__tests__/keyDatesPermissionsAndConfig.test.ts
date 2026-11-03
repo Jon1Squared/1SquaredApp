@@ -13,7 +13,11 @@ import {
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
-import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
+import {
+  createSignedEntraSessionCookie,
+  createVerifiedSessionActorFromEntraSession,
+  verifySignedEntraSessionCookie,
+} from '@/server/entraAuth';
 import {
   acknowledgeKeyDateReminderRecord,
   createOrProposeKeyDateRecord,
@@ -491,9 +495,27 @@ describe('Key Dates permissions, config schema validation, and extension contrac
           mfaVerified: false,
         }).ok,
       ).toBe(false);
+      const signedAdminSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: admin.id,
+          oid: admin.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+          tid: '00000000-0000-4000-8000-000000000000',
+          sub: admin.id,
+          email: admin.emails?.[0]?.address ?? 'admin@notalawfirm.example',
+          displayName: `${admin.firstName} ${admin.surname}`,
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: '2026-10-31T10:00:00Z',
+          expiresAt: '2099-10-31T18:00:00Z',
+        }),
+      )!;
       const schedOk = runKeyDateReminderSchedulerRecord({
         byId: admin.id,
         mfaVerified: true,
+        session: signedAdminSession,
       });
       expect(schedOk.ok).toBe(true);
       expect(schedOk.result?.tenantId).toBe('not-a-law-firm');
@@ -810,23 +832,26 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         ...(notALawFirmBaseConfig as Record<string, unknown>),
         enabledExtensions: ['ext-keydate-test'],
       });
+      const signedSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '00000000-0000-4000-8000-000000000000',
+          sub: 'P-000001',
+          email: 'test@notalawfirm.example',
+          displayName: 'Test User',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: '2026-10-31T10:00:00Z',
+          expiresAt: '2099-10-31T18:00:00Z',
+        }),
+      )!;
       const tenantCtx = resolveCurrentTenantContext(
         createVerifiedSessionActorFromEntraSession(
-          {
-            personId: 'P-000001',
-            oid: '00000000-0000-4000-8000-000000000001',
-            tid: '00000000-0000-4000-8000-000000000000',
-            sub: 'P-000001',
-            email: 'test@notalawfirm.example',
-            displayName: 'Test User',
-            entraRoles: ['partner'],
-            mappedRoles: ['partner'],
-            entraGroups: [],
-            mfaVerified: true,
-            amr: ['pwd', 'mfa'],
-            authenticatedAt: '2026-10-31T10:00:00Z',
-            expiresAt: '2026-10-31T18:00:00Z',
-          },
+          signedSession,
           {
             tenantId: tenantConfig.tenantId,
             correlationId: 'corr-kd-ext-1',

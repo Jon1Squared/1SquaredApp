@@ -1450,6 +1450,7 @@ export function resolveKeyDateOutcome(params: {
  */
 export function reassignKeyDateTeamAndOwners(params: {
   keyDate: KeyDate;
+  tenantId?: string;
   teamId: TeamId;
   responsiblePersonIds?: PersonId[];
   reason?: string;
@@ -1465,6 +1466,7 @@ export function reassignKeyDateTeamAndOwners(params: {
 }): KeyDate {
   const {
     keyDate,
+    tenantId,
     teamId,
     responsiblePersonIds,
     reason,
@@ -1540,10 +1542,13 @@ export function reassignKeyDateTeamAndOwners(params: {
   keyDate.version += 1;
 
   // Sync linked reminder task's assignedTeamId and assignedPersonIds (filtered for restricted matter access)
+  const expectedReminderKey = tenantId?.trim()
+    ? `keydate-reminder:${tenantId.trim()}:${keyDate.id}`
+    : null;
   const linkedTask = tasks.find(
     (t) =>
-      t.linkedKeyDateId === keyDate.id ||
-      Boolean(t.idempotencyKey?.endsWith(`:${keyDate.id}`)),
+      (expectedReminderKey !== null && t.idempotencyKey === expectedReminderKey) ||
+      (!t.idempotencyKey && t.linkedKeyDateId === keyDate.id),
   );
   if (linkedTask) {
     const permittedTaskAssignees = matter
@@ -1671,6 +1676,7 @@ export function recordKeyDateNotApplicable(params: {
 export function carryEnquiryKeyDatesToMatter(params: {
   enquiry: Pick<Enquiry, 'id' | 'keyDate' | 'keyDateLabel'>;
   matter: Matter;
+  tenantId?: string;
   keyDates: KeyDate[];
   tasks?: Task[];
   teams: readonly Team[];
@@ -1684,6 +1690,7 @@ export function carryEnquiryKeyDatesToMatter(params: {
   const {
     enquiry,
     matter,
+    tenantId,
     keyDates,
     tasks = [],
     teams,
@@ -1718,10 +1725,13 @@ export function carryEnquiryKeyDatesToMatter(params: {
     kd.version += 1;
 
     // Update linked reminder task to point to the matter
+    const expectedReminderKey = tenantId?.trim()
+      ? `keydate-reminder:${tenantId.trim()}:${kd.id}`
+      : null;
     const linkedTask = tasks.find(
       (t) =>
-        t.linkedKeyDateId === kd.id ||
-        Boolean(t.idempotencyKey?.endsWith(`:${kd.id}`)),
+        (expectedReminderKey !== null && t.idempotencyKey === expectedReminderKey) ||
+        (!t.idempotencyKey && t.linkedKeyDateId === kd.id),
     );
     if (linkedTask) {
       linkedTask.linkedRecords = [{ recordType: 'matter', recordId: matter.id }];

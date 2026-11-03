@@ -422,7 +422,36 @@ export class TenantKeyDateRepository {
     if (existing) {
       this.assertRowTenant(ctx, existing.tenantId, 'KeyDateReminderState');
     }
-    const copy: KeyDateReminderState = { ...state };
+    if (
+      state.lastSkippedReason !== undefined &&
+      state.lastSkippedReason !== 'no_permitted_assignees' &&
+      state.lastSkippedReason !== 'missing_matter'
+    ) {
+      throw new Error(
+        `KEY_DATE_VALIDATION_ERROR: Invalid lastSkippedReason "${String(state.lastSkippedReason)}"; expected 'no_permitted_assignees' or 'missing_matter'.`,
+      );
+    }
+    const copy: KeyDateReminderState = {
+      keyDateId: state.keyDateId,
+      taskId: state.taskId,
+      idempotencyKey: state.idempotencyKey,
+      reminderScheduleId: state.reminderScheduleId,
+      currentStageDaysBefore: state.currentStageDaysBefore,
+      stageEnteredAt: state.stageEnteredAt,
+      ...(state.acknowledgedById !== undefined
+        ? { acknowledgedById: state.acknowledgedById }
+        : {}),
+      ...(state.acknowledgedAt !== undefined
+        ? { acknowledgedAt: state.acknowledgedAt }
+        : {}),
+      escalationLevel: state.escalationLevel,
+      ...(state.lastNotifiedAt !== undefined
+        ? { lastNotifiedAt: state.lastNotifiedAt }
+        : {}),
+      ...(state.lastSkippedReason !== undefined
+        ? { lastSkippedReason: state.lastSkippedReason }
+        : {}),
+    };
     db.reminderStates.set(copy.keyDateId, {
       tenantId: ctx.tenantId,
       record: copy,

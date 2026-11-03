@@ -35,14 +35,16 @@ param defenderMalwareScanCapGbPerMonth int = 500
 @description('Whether to deploy the optional headless LibreOffice PDF converter internal Container App')
 param enablePdfConverterContainerApp bool = false
 
-@description('Microsoft Entra ID application (client) ID for OIDC sign-in')
-param entraClientId string = ''
+@description('Microsoft Entra ID application (client) ID for OIDC sign-in (required; no empty default)')
+@minLength(1)
+param entraClientId string
 
 @description('Microsoft Entra ID directory (tenant) ID for OIDC sign-in')
 param entraTenantId string = subscription().tenantId
 
-@description('Microsoft Entra ID OIDC callback redirect URI')
-param entraRedirectUri string = ''
+@description('Microsoft Entra ID OIDC callback redirect URI (required; no empty default)')
+@minLength(1)
+param entraRedirectUri string
 
 @description('Tenant configuration package directory relative to application root')
 param tenantPackageDir string = 'client-${tenantSlug}'
@@ -53,6 +55,7 @@ var storageAccountName = take('st${sanitizedSlug}${environment}', 24)
 var keyVaultResourceName = take('kv-${sanitizedSlug}-${environment}', 24)
 var appServicePlanName = take('asp-${resourceSuffix}', 40)
 var webAppResourceName = take('app-${resourceSuffix}', 60)
+var vnetResourceName = take('vnet-${resourceSuffix}', 60)
 var containerName = 'tenant-${resourceSuffix}'
 // Built-in Azure RBAC role: Key Vault Secrets User
 var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId(
@@ -60,10 +63,49 @@ var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId(
   '4633458b-17de-408a-b874-0445c86b69e6'
 )
 
+resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
+  name: vnetResourceName
+  location: location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.24.0.0/16'
+      ]
+    }
+    subnets: [
+      {
+        name: 'snet-appservice'
+        properties: {
+          addressPrefix: '10.24.1.0/24'
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.KeyVault'
+              locations: [
+                location
+              ]
+            }
+          ]
+          delegations: [
+            {
+              name: 'delegation-web-serverfarms'
+              properties: {
+                serviceName: 'Microsoft.Web/serverFarms'
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+
 // Operator-populated Key Vault secrets (never stored in Bicep templates or source control):
 // - entra-client-secret: Microsoft Entra ID confidential client secret (or certificate thumbprint)
 // - auth-secret: 32+ byte HMAC-SHA256 session cookie signing key
 // - blob-signing-key: 32+ byte HMAC-SHA256 scoped blob download token signing key
+// Network design (R68): publicNetworkAccess is Enabled with networkAcls defaultAction: 'Deny',
+// bypass: 'AzureServices', and virtualNetworkRules bound to the App Service regional VNet integration
+// subnet (snet-appservice) so Azure App Service can resolve @Microsoft.KeyVault(...) secret references.
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultResourceName
   location: location
@@ -77,10 +119,16 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
     enablePurgeProtection: true
-    publicNetworkAccess: 'Disabled'
+    publicNetworkAccess: 'Enabled'
     networkAcls: {
       bypass: 'AzureServices'
       defaultAction: 'Deny'
+      virtualNetworkRules: [
+        {
+          id: '${vnet.id}/subnets/snet-appservice'
+          ignoreMissingVnetServiceEndpoint: false
+        }
+      ]
     }
   }
 }
@@ -120,6 +168,9 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
   properties: {
     serverFarmId: appServicePlan.id
     httpsOnly: true
+    virtualNetworkSubnetId: '${vnet.id}/subnets/snet-appservice'
+    vnetRouteAllEnabled: true
+    vnetContentShareEnabled: true
     siteConfig: {
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'

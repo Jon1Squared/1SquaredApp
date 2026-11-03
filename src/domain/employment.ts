@@ -2,6 +2,7 @@
  * Domain logic for Employment records, permissions, effective dating,
  * conversion paths (contact/client <-> employee <-> leaver), and migration.
  */
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { addDays, toIsoDate } from './dates';
 import { resolveLabel } from './lists';
 import { personDisplayName } from './names';
@@ -810,6 +811,29 @@ export function getRightToWorkEvidenceOnFile(person: Person | null | undefined):
  * applies HR retention rules to employment data separately from contact data,
  * and keeps the person record as a contact if they have other roles or the user chooses to.
  */
+function resolveConfiguredFirmPrimaryDomain(): string {
+  if (typeof window !== 'undefined') {
+    return 'firm.example';
+  }
+  try {
+    return (getActiveTenantConfiguration().branding.primaryDomain || 'firm.example')
+      .trim()
+      .toLowerCase();
+  } catch {
+    return 'firm.example';
+  }
+}
+
+function isConfiguredFirmDomainEmail(address: string, firmWorkEmail?: string | null): boolean {
+  const lower = address.trim().toLowerCase();
+  if (!lower) return false;
+  if (firmWorkEmail && lower === firmWorkEmail.trim().toLowerCase()) {
+    return true;
+  }
+  const primaryDomain = resolveConfiguredFirmPrimaryDomain();
+  return lower.endsWith(`@${primaryDomain}`);
+}
+
 export function applyLeaverEffects(
   person: {
     emails: Email[];
@@ -831,10 +855,7 @@ export function applyLeaverEffects(
   const updatedEmails = person.emails.map((em) => {
     const isFirmDomain =
       em.firmIssued ||
-      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
-      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.co.uk') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.example');
+      isConfiguredFirmDomainEmail(em.address, employment.systems?.firmWorkEmail);
     if (isFirmDomain) {
       return { ...em, firmIssued: true, active: false, isPrimary: false };
     }
@@ -1046,12 +1067,13 @@ export function createDefaultEmploymentRecord(opts: {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]/g, '');
 
+  const configuredDomain = resolveConfiguredFirmPrimaryDomain();
   const firmEmail =
     opts.person.emails?.find(
       (e) =>
-        e.address.toLowerCase().includes('@notalawfirm') ||
-        e.address.toLowerCase().includes('@pembrokevaughan'),
-    )?.address ?? `${slugFirst}.${slugSurname}@notalawfirm.example`;
+        e.firmIssued ||
+        isConfiguredFirmDomainEmail(e.address),
+    )?.address ?? `${slugFirst}.${slugSurname}@${configuredDomain}`;
   const firmPhone = opts.person.phones?.[0]?.number ?? '';
 
   const record: EmploymentRecord = {
@@ -1377,12 +1399,7 @@ export function syncPersonWorkContactFlags(
   const emails = (person.emails ?? []).map((em) => {
     const isFirm =
       em.firmIssued ||
-      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
-      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.co.uk') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.example') ||
-      (emp.systems?.firmWorkEmail &&
-        em.address.toLowerCase() === emp.systems.firmWorkEmail.toLowerCase());
+      isConfiguredFirmDomainEmail(em.address, emp.systems?.firmWorkEmail);
     if (isFirm) {
       return {
         ...em,
@@ -1704,3 +1721,31 @@ export function resolveNewMatterDepartmentDefaults(opts: {
     leadFeeEarnerId,
   };
 }
+
+/**
+ * Builds the sensitive information submission payload for `savePersonAction` / `savePersonRecord` (R76).
+ * Returns `null` unless the person works at the firm, the actor has `employee:sensitive`,
+ * and the sensitive section was both opened (`sensitiveRevealed`) and edited (`sensitiveEdited`).
+ */
+export function buildSensitiveSubmissionPayload(params: {
+  isEmployee: boolean;
+  canSensitive: boolean;
+  sensitiveRevealed: boolean;
+  sensitiveEdited: boolean;
+  reasonableAdjustments: string;
+  diversityAnswers: DiversityMonitoringAnswers;
+}): Partial<EmployeeSensitiveRecord> | null {
+  if (
+    !params.isEmployee ||
+    !params.canSensitive ||
+    !params.sensitiveRevealed ||
+    !params.sensitiveEdited
+  ) {
+    return null;
+  }
+  return {
+    reasonableAdjustmentsNeeded: params.reasonableAdjustments.trim(),
+    diversity: params.diversityAnswers,
+  };
+}
+

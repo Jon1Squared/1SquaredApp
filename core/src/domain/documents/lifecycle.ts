@@ -621,14 +621,12 @@ export async function provisionMatterDocumentsJob(params: {
         const failedAt = new Date().toISOString();
         const errorCode =
           (err as { code?: string })?.code ?? 'unavailable';
-        const errorMessage =
-          err instanceof Error ? err.message : 'Provisioning failed.';
 
         locationRecord = deps.repository.putMatterLocation(ctx, {
           ...locationRecord,
           provisioningStatus: 'failed',
           lastErrorCode: errorCode,
-          lastErrorMessage: errorMessage,
+          lastErrorMessage: errorCode,
           updatedAt: failedAt,
         });
 
@@ -636,7 +634,7 @@ export async function provisionMatterDocumentsJob(params: {
           ...jobRecord,
           status: 'failed',
           lastErrorCode: errorCode,
-          lastErrorMessage: errorMessage,
+          lastErrorMessage: errorCode,
           updatedAt: failedAt,
         });
 
@@ -793,10 +791,6 @@ export async function linkExistingMatterFolderJob(params: {
       const expectedBaseNormalized = (expectedRoute.renderedBasePath ?? '')
         .toLowerCase()
         .replace(/^\/+|\/+$/g, '');
-      const actualSegments = actualNormalized.split('/').filter(Boolean);
-      const expectedBaseSegments = expectedBaseNormalized
-        .split('/')
-        .filter(Boolean);
 
       const matchesContainerScope = deps.repository
         .listFolderScopes(ctx)
@@ -820,15 +814,14 @@ export async function linkExistingMatterFolderJob(params: {
         );
       });
 
-      // Never allow linking the library root or any configured department/team container folder itself (R3, R92)
+      // Never allow linking the library root or any configured department/team container folder itself (R3, R92, R114)
       if (
         !actualNormalized ||
         matchesContainerScope ||
         matchesProtectedContainerPath ||
         (expectedBaseNormalized &&
           (actualNormalized === expectedBaseNormalized ||
-            expectedBaseNormalized.startsWith(`${actualNormalized}/`) ||
-            actualSegments.length <= expectedBaseSegments.length))
+            expectedBaseNormalized.startsWith(`${actualNormalized}/`)))
       ) {
         deps.repository.appendAuditEvent(
           ctx,
@@ -1111,10 +1104,6 @@ export async function recalculateMatterPermissionsJob(params: {
             ((err as { code?: DocumentStoreErrorCode })?.code as
               | DocumentStoreErrorCode
               | undefined) ?? 'unavailable';
-          const errorMessage =
-            err instanceof Error
-              ? err.message
-              : 'Failed to synchronise matter folder permissions.';
           const now = new Date().toISOString();
           console.error(
             JSON.stringify({
@@ -1144,7 +1133,7 @@ export async function recalculateMatterPermissionsJob(params: {
             },
             result: null,
             lastErrorCode: errorCode,
-            lastErrorMessage: errorMessage,
+            lastErrorMessage: errorCode,
             createdAt: now,
             updatedAt: now,
           });
@@ -1165,7 +1154,6 @@ export async function recalculateMatterPermissionsJob(params: {
             },
             actualState: {
               errorCode,
-              errorMessage,
             },
             detectedAt: now,
             remediatedAt: null,

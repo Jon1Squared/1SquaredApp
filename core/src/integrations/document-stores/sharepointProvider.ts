@@ -420,15 +420,14 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
   }
 
   public async uploadContent(
-    context: UserAccessContext,
+    context: DocumentAccessContext,
     containerRef: DocumentStoreContainerRef,
     name: string,
     stream: ReadableStream<Uint8Array> | Uint8Array,
     sizeBytes: number,
     options?: DocumentUploadOptions,
   ): Promise<DocumentStoreItem> {
-    const userCtx = this.assertUserContext(context);
-    const caller = await this.resolveCallerIdentity(userCtx);
+    const caller = await this.resolveCallerIdentity(context);
 
     // Collect stream bytes into memory buffer (chunked if >= 4 MiB)
     let fullBytes: Uint8Array;
@@ -510,7 +509,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
 
       const now = new Date().toISOString();
       const actorDisplay =
-        caller.callerDisplayName ?? userCtx.tenantContext.actorName;
+        caller.callerDisplayName ?? context.tenantContext.actorName;
 
       if (existing) {
         if (conflictBehavior === 'fail') {
@@ -963,7 +962,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
       }
 
       const siteId = sp?.siteId ?? `site-${this.storeId}`;
-      const matchedLib = sp?.libraries.find(
+      const directMatchedLib = sp?.libraries.find(
         (l) =>
           l.libraryUrlSegment.toLowerCase() ===
             parsed.libraryUrlSegment!.toLowerCase() ||
@@ -972,6 +971,16 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
           l.libraryId.toLowerCase() ===
             parsed.libraryUrlSegment!.toLowerCase(),
       );
+      const isRelativeInput = !/^https?:\/\//i.test(input.rawUrlOrPath.trim());
+      const matchedLib =
+        directMatchedLib ??
+        (isRelativeInput && sp?.libraries?.length ? sp.libraries[0] : undefined);
+      const effectiveFolderRelativePath =
+        !directMatchedLib && matchedLib
+          ? [parsed.libraryUrlSegment, parsed.folderRelativePath]
+              .filter(Boolean)
+              .join('/')
+          : parsed.folderRelativePath;
 
       const libraryId =
         matchedLib?.libraryId ??
@@ -991,7 +1000,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
           matchedLib?.libraryUrlSegment ?? parsed.libraryUrlSegment,
       });
 
-      if (!parsed.folderRelativePath) {
+      if (!effectiveFolderRelativePath) {
         const rootItem = partition.items.get('root')!;
         return {
           resolved: true,
@@ -1006,7 +1015,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
 
       const folderItem = this.backend.findFolderByRelativePath(
         partition,
-        parsed.folderRelativePath,
+        effectiveFolderRelativePath,
       );
       if (!folderItem) {
         return {
@@ -1015,7 +1024,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
           driveId,
           libraryName: matchedLib?.displayName ?? parsed.libraryUrlSegment,
           errorCode: 'not_found',
-          errorMessage: `Folder "${parsed.folderRelativePath}" does not exist in library "${parsed.libraryUrlSegment}".`,
+          errorMessage: `Folder "${effectiveFolderRelativePath}" does not exist in library "${matchedLib?.libraryUrlSegment ?? parsed.libraryUrlSegment}".`,
         };
       }
 

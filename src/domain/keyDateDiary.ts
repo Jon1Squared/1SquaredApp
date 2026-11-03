@@ -437,10 +437,27 @@ export function computeKeyDateExceptions(
     if (kd.status === 'superseded') continue;
 
     const matter = kd.matterId ? matterById.get(kd.matterId) : undefined;
-    // Enforce restricted (staff) matter and missing matter omission in the data layer (R82)
+    // Enforce restricted (staff) matter and missing matter omission in the data layer (R82, R115)
+    if (kd.matterId && !matter) {
+      const reminder = reminderByKeyDateId.get(kd.id);
+      if (
+        reminder?.lastSkippedReason === 'missing_matter' &&
+        hasKeyDatePermission(viewer, 'keydate:configure', permOpts)
+      ) {
+        pushException({
+          kind: 'orphan_key_date_missing_matter',
+          teamId: kd.teamId,
+          keyDateId: kd.id,
+          detectedAt: nowIso,
+          detail: `Orphan key date ${kd.id} references a missing matter record.`,
+        });
+      }
+      continue;
+    }
     if (
       kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people))
+      matter &&
+      !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people)
     ) {
       continue;
     }
@@ -529,6 +546,7 @@ export function computeKeyDateExceptions(
     if (
       kd.status === 'confirmed' &&
       reminder &&
+      !reminder.lastSkippedReason &&
       reminder.escalationLevel > 0 &&
       !reminder.acknowledgedAt
     ) {

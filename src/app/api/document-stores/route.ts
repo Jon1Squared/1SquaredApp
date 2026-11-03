@@ -16,7 +16,7 @@ import {
   saveAdminDocumentStoreConfiguration,
   testAdminDocumentStoreConnection,
 } from '@/server/documentStoreServices';
-import { requireAuthenticatedActor } from '@/server/services';
+import { withAuthenticatedActor } from '@/server/services';
 
 function logDocumentStoreRouteError(
   route: string,
@@ -59,31 +59,34 @@ export async function GET(request: NextRequest) {
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
-    const actor = await requireAuthenticatedActor();
-    tenantId = actor.tenantId || tenantId;
-    const userId = actor.personId;
-    const mfaVerified = actor.mfaVerified;
-    const { searchParams } = new URL(request.url);
-    const mode = searchParams.get('mode');
+    return await withAuthenticatedActor(async (actor) => {
+      tenantId = actor.tenantId || tenantId;
+      const userId = actor.personId;
+      const mfaVerified = actor.mfaVerified;
+      const { searchParams } = new URL(request.url);
+      const mode = searchParams.get('mode');
 
-    if (mode === 'preview_template') {
-      const departmentId = searchParams.get('departmentId') || undefined;
-      const workTypeId = searchParams.get('workTypeId') || undefined;
-      const preview = previewAdminMatterFolderTemplate({
-        departmentId,
-        workTypeId,
-        userId,
+      if (mode === 'preview_template') {
+        const departmentId = searchParams.get('departmentId') || undefined;
+        const workTypeId = searchParams.get('workTypeId') || undefined;
+        const preview = previewAdminMatterFolderTemplate({
+          departmentId,
+          workTypeId,
+          userId,
+          session: actor.session,
+          mfaVerified,
+          correlationId,
+        });
+        return NextResponse.json({ ok: true, preview });
+      }
+
+      const dashboard = getDocumentStoresAdminDashboard(userId, {
+        session: actor.session,
         mfaVerified,
         correlationId,
       });
-      return NextResponse.json({ ok: true, preview });
-    }
-
-    const dashboard = getDocumentStoresAdminDashboard(userId, {
-      mfaVerified,
-      correlationId,
+      return NextResponse.json({ ok: true, dashboard });
     });
-    return NextResponse.json({ ok: true, dashboard });
   } catch (err) {
     const normalised = normaliseDocumentStoreError(err);
     const isUnauth =
@@ -121,125 +124,138 @@ export async function POST(request: NextRequest) {
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
-    const actor = await requireAuthenticatedActor();
-    tenantId = actor.tenantId || tenantId;
-    const userId = actor.personId;
-    const mfaVerified = actor.mfaVerified;
-    const body = (await request.json()) as Record<string, unknown>;
-    const action = String(body.action ?? '');
+    return await withAuthenticatedActor(async (actor) => {
+      tenantId = actor.tenantId || tenantId;
+      const userId = actor.personId;
+      const mfaVerified = actor.mfaVerified;
+      const session = actor.session;
+      const body = (await request.json()) as Record<string, unknown>;
+      const action = String(body.action ?? '');
 
-    switch (action) {
-      case 'test_connection': {
-        const storeId = String(body.storeId ?? '');
-        const result = await testAdminDocumentStoreConnection({
-          storeId,
-          userId,
-          mfaVerified,
-          correlationId,
-        });
-        const dashboard = getDocumentStoresAdminDashboard(userId, {
-          mfaVerified,
-          correlationId,
-        });
-        return NextResponse.json({ ok: true, result, dashboard });
+      switch (action) {
+        case 'test_connection': {
+          const storeId = String(body.storeId ?? '');
+          const result = await testAdminDocumentStoreConnection({
+            storeId,
+            userId,
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          const dashboard = getDocumentStoresAdminDashboard(userId, {
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, result, dashboard });
+        }
+
+        case 'resolve_location': {
+          const rawUrlOrPath = String(body.rawUrlOrPath ?? '');
+          const storeId = body.storeId ? String(body.storeId) : undefined;
+          const resolved = await resolveAdminSharePointLocationUrl({
+            storeId,
+            rawUrlOrPath,
+            userId,
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, ...resolved });
+        }
+
+        case 'save_config': {
+          const section = body.section as
+            | 'stores'
+            | 'routing_and_access'
+            | 'templates';
+          const dashboard = saveAdminDocumentStoreConfiguration({
+            section,
+            documentStores: body.documentStores as never,
+            documentRouting: body.documentRouting as never,
+            matterFolderNameTemplate: body.matterFolderNameTemplate as never,
+            documentAccess: body.documentAccess as never,
+            matterFolderTemplates: body.matterFolderTemplates as never,
+            userId,
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, dashboard });
+        }
+
+        case 'preview_template': {
+          const preview = previewAdminMatterFolderTemplate({
+            departmentId: body.departmentId
+              ? String(body.departmentId)
+              : undefined,
+            workTypeId: body.workTypeId ? String(body.workTypeId) : undefined,
+            templatesConfigOverride: body.templatesConfig as never,
+            userId,
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, preview });
+        }
+
+        case 'apply_template_additions': {
+          const applied = await applyAdminTemplateAdditionsToOpenMatters(userId, {
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          const dashboard = getDocumentStoresAdminDashboard(userId, {
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, applied, dashboard });
+        }
+
+        case 'run_reconciliation': {
+          const storeId = body.storeId ? String(body.storeId) : undefined;
+          const autoRemediate = Boolean(body.autoRemediate);
+          const scan = await runAdminDocumentReconciliationScan({
+            storeId,
+            autoRemediate,
+            userId,
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          const dashboard = getDocumentStoresAdminDashboard(userId, {
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, scan, dashboard });
+        }
+
+        case 'remediate_finding': {
+          const findingId = String(body.findingId ?? '');
+          const finding = await remediateAdminReconciliationFinding({
+            findingId,
+            userId,
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          const dashboard = getDocumentStoresAdminDashboard(userId, {
+            session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, finding, dashboard });
+        }
+
+        default:
+          return NextResponse.json(
+            { ok: false, error: `Unknown action "${action}".` },
+            { status: 400 },
+          );
       }
-
-      case 'resolve_location': {
-        const rawUrlOrPath = String(body.rawUrlOrPath ?? '');
-        const storeId = body.storeId ? String(body.storeId) : undefined;
-        const resolved = await resolveAdminSharePointLocationUrl({
-          storeId,
-          rawUrlOrPath,
-          userId,
-          mfaVerified,
-          correlationId,
-        });
-        return NextResponse.json({ ok: true, ...resolved });
-      }
-
-      case 'save_config': {
-        const section = body.section as
-          | 'stores'
-          | 'routing_and_access'
-          | 'templates';
-        const dashboard = saveAdminDocumentStoreConfiguration({
-          section,
-          documentStores: body.documentStores as never,
-          documentRouting: body.documentRouting as never,
-          matterFolderNameTemplate: body.matterFolderNameTemplate as never,
-          documentAccess: body.documentAccess as never,
-          matterFolderTemplates: body.matterFolderTemplates as never,
-          userId,
-          mfaVerified,
-          correlationId,
-        });
-        return NextResponse.json({ ok: true, dashboard });
-      }
-
-      case 'preview_template': {
-        const preview = previewAdminMatterFolderTemplate({
-          departmentId: body.departmentId
-            ? String(body.departmentId)
-            : undefined,
-          workTypeId: body.workTypeId ? String(body.workTypeId) : undefined,
-          templatesConfigOverride: body.templatesConfig as never,
-          userId,
-          mfaVerified,
-          correlationId,
-        });
-        return NextResponse.json({ ok: true, preview });
-      }
-
-      case 'apply_template_additions': {
-        const applied = await applyAdminTemplateAdditionsToOpenMatters(userId, {
-          mfaVerified,
-          correlationId,
-        });
-        const dashboard = getDocumentStoresAdminDashboard(userId, {
-          mfaVerified,
-          correlationId,
-        });
-        return NextResponse.json({ ok: true, applied, dashboard });
-      }
-
-      case 'run_reconciliation': {
-        const storeId = body.storeId ? String(body.storeId) : undefined;
-        const autoRemediate = Boolean(body.autoRemediate);
-        const scan = await runAdminDocumentReconciliationScan({
-          storeId,
-          autoRemediate,
-          userId,
-          mfaVerified,
-          correlationId,
-        });
-        const dashboard = getDocumentStoresAdminDashboard(userId, {
-          mfaVerified,
-          correlationId,
-        });
-        return NextResponse.json({ ok: true, scan, dashboard });
-      }
-
-      case 'remediate_finding': {
-        const findingId = String(body.findingId ?? '');
-        const finding = await remediateAdminReconciliationFinding({
-          findingId,
-          userId,
-          mfaVerified,
-          correlationId,
-        });
-        const dashboard = getDocumentStoresAdminDashboard(userId, {
-          mfaVerified,
-          correlationId,
-        });
-        return NextResponse.json({ ok: true, finding, dashboard });
-      }
-
-      default:
-        return NextResponse.json(
-          { ok: false, error: `Unknown action "${action}".` },
-          { status: 400 },
-        );
-    }
+    });
   } catch (err) {
     const normalised = normaliseDocumentStoreError(err);
     const isUnauth =

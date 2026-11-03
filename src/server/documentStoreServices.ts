@@ -63,13 +63,19 @@ import {
 import { toMatterAccessSubject } from '@/domain/documentGeneration';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { personDisplayName } from '@/domain/names';
-import { resolvePersonPermissions } from '@/domain/rbac';
+import {
+  getStoredActorSessionForPerson,
+  resolvePersonPermissions,
+} from '@/domain/rbac';
 import type { Matter, Person } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
-import { createVerifiedSessionActorFromEntraSession } from './entraAuth';
+import {
+  createVerifiedSessionActorFromEntraSession,
+  type VerifiedEntraSessionPayload,
+} from './entraAuth';
 import { type FirmStore, getStore, saveStore } from './store';
 
 declare global {
@@ -180,10 +186,11 @@ export function resolvePersonEntraIdentity(
   upn: string;
   groups: string[];
 } {
-  const primaryEmail =
+  const primaryEmail = (
     person.emails?.find((e) => e.isPrimary)?.address ||
     person.emails?.[0]?.address ||
-    `${person.id.toLowerCase()}@${config.branding.primaryDomain}`;
+    ''
+  ).trim();
 
   // Allow explicit opt-out tag to test/demonstrate the "no Entra identity" state
   if (person.tags?.includes('no-entra-id') || person.entraObjectId === '') {
@@ -249,6 +256,7 @@ export function resolvePersonEntraIdentity(
 }
 
 export interface BuildTenantContextOptions {
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }
@@ -288,33 +296,33 @@ export function buildTenantContextForUser(
       ? [...ALL_PERMISSION_KEYS]
       : resolvedPerms;
 
-  const nowIso = new Date().toISOString();
+  const verifiedSession =
+    options?.session ??
+    (getStoredActorSessionForPerson(user.id)?.verifiedSession as
+      | VerifiedEntraSessionPayload
+      | undefined);
+  if (!verifiedSession) {
+    const err = new Error(
+      `UNAUTHENTICATED: Verified Entra ID session is required for employee "${user.id}".`,
+    ) as Error & { code: DocumentStoreErrorCode };
+    err.code = 'reauthentication_required';
+    throw err;
+  }
+
   const ctx = resolveCurrentTenantContext(
-    createVerifiedSessionActorFromEntraSession(
-      {
-        personId: user.id,
-        oid: entraInfo.entraObjectId ?? '',
-        tid: config.documentStores?.[0]?.auth.entraTenantId ?? '',
-        sub: user.id,
-        email: entraInfo.upn,
-        displayName: personDisplayName(user),
-        entraRoles: roles.length > 0 ? [...roles] : ['fee_earner'],
-        mappedRoles: roles.length > 0 ? [...roles] : ['fee_earner'],
-        entraGroups: entraInfo.groups,
-        mfaVerified: options?.mfaVerified ?? false,
-        amr: options?.mfaVerified ? ['pwd', 'mfa'] : ['pwd'],
-        authenticatedAt: nowIso,
-        expiresAt: nowIso,
-      },
-      {
-        tenantId: config.tenantId,
-        correlationId: options?.correlationId ?? `corr-${randomUUID()}`,
-      },
-    ),
+    createVerifiedSessionActorFromEntraSession(verifiedSession, {
+      tenantId: config.tenantId,
+      correlationId: options?.correlationId ?? `corr-${randomUUID()}`,
+      groups: entraInfo.groups,
+    }),
     config,
   );
+  const effectiveCtx =
+    options?.mfaVerified === false
+      ? Object.freeze({ ...ctx, mfaVerified: false })
+      : ctx;
 
-  return { ctx, user, grantedPermissions };
+  return { ctx: effectiveCtx, user, grantedPermissions };
 }
 
 /**
@@ -572,7 +580,7 @@ export function buildLifecycleDependencies(
       const p = store.people.find((person) => person.id === userId);
       if (!p) return null;
       const info = resolvePersonEntraIdentity(p, config);
-      if (!info.entraObjectId) return null;
+      if (!info.entraObjectId || !info.upn) return null;
       return {
         entraObjectId: info.entraObjectId,
         upn: info.upn,
@@ -710,66 +718,69 @@ async function seedSampleDocumentsForMatterLocation(
       return;
     }
 
-    const mockBackend = getRegistrySingleton().getMockBackend();
-    const seedFile = (
+    const seedFile = async (
       folderItemId: string,
       fileName: string,
       text: string,
       mimeType: string,
     ) => {
-      const { partition, item: parentFolder } = mockBackend.getItemOrThrow(
-        ctx.tenantId,
-        location.providerSiteId,
-        location.providerDriveId,
+      const folderListing = await provider.listItems(provCtx, {
+        storeId: location.storeId,
+        libraryId: location.libraryId,
+        siteId: location.providerSiteId,
+        driveId: location.providerDriveId,
         folderItemId,
-      );
-      if (mockBackend.findChildByName(partition, parentFolder.itemId, fileName)) {
+      });
+      if (folderListing.items.some((item) => item.name === fileName)) {
         return;
       }
       const bytes = new TextEncoder().encode(text);
-      const itemId = `sp-file-${randomUUID()}`;
-      const now = new Date().toISOString();
-      partition.items.set(itemId, {
-        itemId,
-        tenantId: partition.tenantId,
-        storeId: partition.storeId,
-        siteId: partition.siteId,
-        driveId: partition.driveId,
-        parentItemId: parentFolder.itemId,
-        itemType: 'file',
-        name: fileName,
-        relativePath: parentFolder.relativePath
-          ? `${parentFolder.relativePath}/${fileName}`
-          : fileName,
-        webUrl: `${parentFolder.webUrl}/${encodeURIComponent(fileName)}`,
-        sizeBytes: bytes.byteLength,
-        mimeType,
-        eTag: `"etag-${itemId}-1"`,
-        versionLabel: '1.0',
-        createdAt: now,
-        createdByDisplayName: '1Squared Demo Seed',
-        lastModifiedAt: now,
-        lastModifiedByDisplayName: '1Squared Demo Seed',
-        contentBytes: bytes,
-        inheritsFromParent: true,
-        directGrants: [],
-        sharingLinks: [],
-      });
+      const uploaded = await provider.uploadContent(
+        provCtx,
+        {
+          storeId: location.storeId,
+          libraryId: location.libraryId,
+          siteId: location.providerSiteId,
+          driveId: location.providerDriveId,
+          folderItemId,
+        },
+        fileName,
+        bytes,
+        bytes.byteLength,
+        {
+          conflictBehavior: 'replace',
+          mimeType,
+        },
+      );
+      deps.repository.appendAuditEvent(
+        ctx,
+        buildDocumentStoreAuditEvent({
+          context: ctx,
+          identityUsed: 'provisioning',
+          triggerEvent: 'matter.documents.demo_seed',
+          action: 'document:uploaded',
+          matterId: matter.id,
+          storeId: location.storeId,
+          libraryId: location.libraryId,
+          providerItemId: uploaded.itemId,
+          outcome: 'succeeded',
+        }),
+      );
     };
 
-    seedFile(
+    await seedFile(
       clientCareFolderId,
       `${matter.matterNumber} - Client Care & Engagement Letter.docx`,
       `Client Care & Engagement Letter for ${matter.matterNumber} — ${matter.title}`,
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     );
-    seedFile(
+    await seedFile(
       correspondenceFolderId,
       `${matter.matterNumber} - Initial Attendance Note.docx`,
       `Initial Client Attendance Note for ${matter.matterNumber} — ${matter.title}`,
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     );
-    seedFile(
+    await seedFile(
       draftsFolderId,
       `${matter.matterNumber} - Working Issues List.xlsx`,
       `Working Issues List & Draft Schedule for ${matter.matterNumber}`,
@@ -786,13 +797,14 @@ async function seedSampleDocumentsForMatterLocation(
 export async function ensureMatterDocumentStoreProvisioned(
   matterId: string,
   userId: string,
+  options?: BuildTenantContextOptions,
 ): Promise<{
   locations: MatterDocumentLocationRecord[];
   jobs: DocumentLifecycleJobRecord[];
 }> {
   const store = getStore();
   const config = loadActiveDocumentTenantConfig(store);
-  const { ctx } = buildTenantContextForUser(userId, store, config);
+  const { ctx } = buildTenantContextForUser(userId, store, config, options);
   const deps = buildLifecycleDependencies(ctx, store, config);
 
   const matter = store.matters.find((m) => m.id === matterId);
@@ -873,7 +885,7 @@ export async function ensureMatterDocumentStoreProvisioned(
 export async function retryMatterDocumentProvisioning(
   matterId: string,
   userId: string,
-  options?: { mfaVerified?: boolean; correlationId?: string },
+  options?: BuildTenantContextOptions,
 ): Promise<{
   location: MatterDocumentLocationRecord;
   job: DocumentLifecycleJobRecord;
@@ -952,6 +964,7 @@ export async function linkExistingMatterDocumentFolder(params: {
   applyMissingTemplateFolders?: boolean;
   allowRoutingMismatchOverride?: boolean;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }): Promise<{
@@ -964,7 +977,11 @@ export async function linkExistingMatterDocumentFolder(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
+    {
+      session: params.session,
+      mfaVerified: params.mfaVerified,
+      correlationId: params.correlationId,
+    },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
 
@@ -1096,11 +1113,16 @@ export function syncMatterLifecycleOnSaveSync(params: {
   previousMatter?: Matter | null;
   departmentChangeStrategy?: DepartmentChangeStrategy;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
+  correlationId?: string;
   store?: FirmStore;
 }): Promise<void> {
   const store = params.store ?? getStore();
   const config = loadActiveDocumentTenantConfig(store);
-  const { ctx } = buildTenantContextForUser(params.userId ?? '', store, config);
+  const { ctx } = buildTenantContextForUser(params.userId ?? '', store, config, {
+    session: params.session,
+    correlationId: params.correlationId,
+  });
   const deps = buildLifecycleDependencies(ctx, store, config);
   const existingLocs = deps.repository.listMatterLocationsByMatterId(
     ctx,
@@ -1110,19 +1132,25 @@ export function syncMatterLifecycleOnSaveSync(params: {
     return Promise.resolve();
   }
 
-  const subject = buildMatterRoutingSubject(params.matter, store);
-  const prevClosed = params.previousMatter
-    ? buildMatterRoutingSubject(params.previousMatter, store).isClosed
-    : false;
-  const event: 'updated' | 'closed' | 'reopened' =
-    !prevClosed && subject.isClosed
-      ? 'closed'
-      : prevClosed && !subject.isClosed
-        ? 'reopened'
-        : 'updated';
-
   const runPromise = (async () => {
+    const jobIdsBefore = new Set(
+      deps.repository
+        .listLifecycleJobs(ctx, params.matter.id)
+        .map((j) => j.id),
+    );
+    let event: 'updated' | 'closed' | 'reopened' = 'updated';
     try {
+      const subject = buildMatterRoutingSubject(params.matter, store);
+      const prevClosed = params.previousMatter
+        ? buildMatterRoutingSubject(params.previousMatter, store).isClosed
+        : false;
+      event =
+        !prevClosed && subject.isClosed
+          ? 'closed'
+          : prevClosed && !subject.isClosed
+            ? 'reopened'
+            : 'updated';
+
       if (event === 'closed') {
         await closeMatterFolderJob({ ctx, deps, subject });
       } else if (event === 'reopened') {
@@ -1136,8 +1164,52 @@ export function syncMatterLifecycleOnSaveSync(params: {
             params.departmentChangeStrategy ?? 'repermission_in_place',
         });
       }
-    } catch {
-      // Provider failure is already logged and recorded by recalculateMatterPermissionsJob
+    } catch (err) {
+      const normalised = normaliseDocumentStoreError(err);
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'document_store.lifecycle_sync_failed',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          code: normalised.code,
+        }),
+      );
+      const jobsAfter = deps.repository.listLifecycleJobs(
+        ctx,
+        params.matter.id,
+      );
+      const hasNewFailedJob = jobsAfter.some(
+        (j) => !jobIdsBefore.has(j.id) && j.status === 'failed',
+      );
+      if (!hasNewFailedJob) {
+        const nowIso = new Date().toISOString();
+        const jobType =
+          event === 'closed'
+            ? 'close_matter_folder'
+            : event === 'reopened'
+              ? 'reopen_matter_folder'
+              : 'recalculate_permissions';
+        deps.repository.putLifecycleJob(ctx, {
+          id: `job-lifecycle-fail-${randomUUID()}`,
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          storeId: existingLocs[0]?.storeId ?? 'default',
+          matterId: params.matter.id,
+          jobType,
+          status: 'failed',
+          attemptCount: 1,
+          maxAttempts: 3,
+          triggeredByUserId: ctx.actorId ?? null,
+          triggerEvent: `matter.lifecycle.${event}`,
+          payload: { event },
+          result: null,
+          lastErrorCode: normalised.code,
+          lastErrorMessage: normalised.code,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+      }
     } finally {
       persistRepositoryToStore(ctx, deps.repository, store);
     }
@@ -1207,6 +1279,7 @@ export async function browseMatterDocumentStoreFolder(params: {
   cursor?: string;
   pageSize?: number;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   correlationId?: string;
 }): Promise<{
   requiresEntraSignIn?: boolean;
@@ -1229,7 +1302,7 @@ export async function browseMatterDocumentStoreFolder(params: {
     params.userId ?? '',
     store,
     config,
-    { correlationId: params.correlationId },
+    { session: params.session, correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
 
@@ -1314,6 +1387,10 @@ export async function browseMatterDocumentStoreFolder(params: {
   const { locations, jobs } = await ensureMatterDocumentStoreProvisioned(
     params.matterId,
     user.id,
+    {
+      session: params.session,
+      correlationId: ctx.correlationId,
+    },
   );
 
   const requestedLocation = params.locationId
@@ -1462,6 +1539,7 @@ export async function uploadMatterStoreDocument(params: {
   mimeType?: string;
   conflictBehavior?: DocumentConflictBehavior;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   correlationId?: string;
 }): Promise<DocumentStoreItem> {
   const store = getStore();
@@ -1470,7 +1548,7 @@ export async function uploadMatterStoreDocument(params: {
     params.userId ?? '',
     store,
     config,
-    { correlationId: params.correlationId },
+    { session: params.session, correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
   const matter = store.matters.find((m) => m.id === params.matterId);
@@ -1544,6 +1622,7 @@ export async function downloadMatterStoreDocument(params: {
   locationId: string;
   itemId: string;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   correlationId?: string;
 }): Promise<{
   bytes: Uint8Array;
@@ -1556,7 +1635,7 @@ export async function downloadMatterStoreDocument(params: {
     params.userId ?? '',
     store,
     config,
-    { correlationId: params.correlationId },
+    { session: params.session, correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
   const matter = store.matters.find((m) => m.id === params.matterId);
@@ -1647,6 +1726,7 @@ export async function mutateMatterStoreItem(params: {
   destinationFolderItemId?: string;
   name?: string;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   correlationId?: string;
 }): Promise<{
   item?: DocumentStoreItem;
@@ -1659,7 +1739,7 @@ export async function mutateMatterStoreItem(params: {
     params.userId ?? '',
     store,
     config,
-    { correlationId: params.correlationId },
+    { session: params.session, correlationId: params.correlationId },
   );
   const deps = buildLifecycleDependencies(ctx, store, config);
   const matter = store.matters.find((m) => m.id === params.matterId);
@@ -1836,7 +1916,7 @@ export interface DocumentStoresAdminDashboardData {
 
 export function getDocumentStoresAdminDashboard(
   userId: string,
-  options?: { mfaVerified?: boolean; correlationId?: string },
+  options?: BuildTenantContextOptions,
 ): DocumentStoresAdminDashboardData {
   const store = getStore();
   const config = loadActiveDocumentTenantConfig(store);
@@ -1918,6 +1998,7 @@ export function getDocumentStoresAdminDashboard(
 export async function testAdminDocumentStoreConnection(params: {
   storeId: string;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }): Promise<DocumentStoreConnectionTestResult> {
@@ -1927,7 +2008,11 @@ export async function testAdminDocumentStoreConnection(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
+    {
+      session: params.session,
+      mfaVerified: params.mfaVerified,
+      correlationId: params.correlationId,
+    },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_store:configure',
@@ -1963,6 +2048,7 @@ export async function resolveAdminSharePointLocationUrl(params: {
   storeId?: string;
   rawUrlOrPath: string;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }): Promise<{
@@ -1975,7 +2061,11 @@ export async function resolveAdminSharePointLocationUrl(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
+    {
+      session: params.session,
+      mfaVerified: params.mfaVerified,
+      correlationId: params.correlationId,
+    },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_store:configure',
@@ -2031,6 +2121,7 @@ export function saveAdminDocumentStoreConfiguration(params: {
   documentAccess?: DocumentAccessConfig;
   matterFolderTemplates?: MatterFolderTemplatesConfig;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }): DocumentStoresAdminDashboardData {
@@ -2040,7 +2131,11 @@ export function saveAdminDocumentStoreConfiguration(params: {
     params.userId ?? '',
     store,
     configOrFallback(currentConfig),
-    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
+    {
+      session: params.session,
+      mfaVerified: params.mfaVerified,
+      correlationId: params.correlationId,
+    },
   );
 
   if (params.section === 'stores' || params.section === 'routing_and_access') {
@@ -2116,6 +2211,7 @@ export function saveAdminDocumentStoreConfiguration(params: {
   persistRepositoryToStore(ctx, repo, store);
 
   return getDocumentStoresAdminDashboard(params.userId ?? '', {
+    session: params.session,
     mfaVerified: params.mfaVerified,
   });
 }
@@ -2129,6 +2225,7 @@ export function previewAdminMatterFolderTemplate(params: {
   workTypeId?: string;
   templatesConfigOverride?: MatterFolderTemplatesConfig;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }): ResolvedMatterFolderTemplate & {
@@ -2140,7 +2237,11 @@ export function previewAdminMatterFolderTemplate(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
+    {
+      session: params.session,
+      mfaVerified: params.mfaVerified,
+      correlationId: params.correlationId,
+    },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_template:configure',
@@ -2172,7 +2273,7 @@ export function previewAdminMatterFolderTemplate(params: {
 
 export async function applyAdminTemplateAdditionsToOpenMatters(
   userId: string,
-  options?: { mfaVerified?: boolean; correlationId?: string },
+  options?: BuildTenantContextOptions,
 ): Promise<{
   job: DocumentLifecycleJobRecord;
   updatedMatterCount: number;
@@ -2213,6 +2314,7 @@ export async function runAdminDocumentReconciliationScan(params: {
   storeId?: string;
   autoRemediate?: boolean;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }): Promise<{
@@ -2225,7 +2327,11 @@ export async function runAdminDocumentReconciliationScan(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
+    {
+      session: params.session,
+      mfaVerified: params.mfaVerified,
+      correlationId: params.correlationId,
+    },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_access:review',
@@ -2251,6 +2357,7 @@ export async function runAdminDocumentReconciliationScan(params: {
 export async function remediateAdminReconciliationFinding(params: {
   findingId: string;
   userId?: string;
+  session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
 }): Promise<DocumentReconciliationFindingRecord> {
@@ -2260,7 +2367,11 @@ export async function remediateAdminReconciliationFinding(params: {
     params.userId ?? '',
     store,
     config,
-    { mfaVerified: params.mfaVerified, correlationId: params.correlationId },
+    {
+      session: params.session,
+      mfaVerified: params.mfaVerified,
+      correlationId: params.correlationId,
+    },
   );
   assertAdminPermissionAndMfa(ctx, grantedPermissions, [
     'document_access:review',

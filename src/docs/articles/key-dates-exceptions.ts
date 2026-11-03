@@ -5,14 +5,14 @@ export const keyDatesExceptionsArticle: DocArticle = {
   title: 'Exceptions report (compliance)',
   section: 'key-dates-limitation',
   summary:
-    'How risk, compliance, and managing partners monitor all 8 key date exception kinds across teams and export audited reports.',
+    'How risk, compliance, and managing partners monitor all 10 key date exception kinds (9 matter/diary compliance kinds plus the admin data-integrity orphan check) across teams and export audited reports.',
   updated: '2026-11-03',
   body: `
 The **Compliance exceptions** tab in the [Key Dates & Limitation Diary](/key-dates) gives Risk & Compliance officers, Managing Partners, and Administrators (\`keydate:view_any_team\`) a real-time view of every key date governance exception across the firm.
 
-## The eight exception kinds
+## The nine compliance exception kinds (plus admin data-integrity check)
 
-The exceptions engine continuously evaluates open and closed matters against tenant configuration and surfaces eight \`KeyDateExceptionKind\` categories:
+The exceptions engine continuously evaluates open and closed matters against tenant configuration and surfaces every \`KeyDateExceptionKind\` category:
 
 | Exception kind | When it triggers |
 | --- | --- |
@@ -21,7 +21,9 @@ The exceptions engine continuously evaluates open and closed matters against ten
 | \`critical_date_no_recent_activity\` | A confirmed critical key date is due within 90 days on a matter with no recorded activity in the last 30 days. |
 | \`closed_matter_open_dates\` | A closed or archived matter still has key dates in \`provisional\`, \`awaiting_verification\`, or \`confirmed\` status. |
 | \`calculated_from_unreviewed_rules\` | An active key date was calculated from a limitation rule set whose \`reviewStatus\` is \`'unreviewed'\`. |
-| \`reminder_escalated_unacknowledged\` | A key date reminder stage has escalated (\`escalationLevel > 0\`) and remains unacknowledged. |
+| \`reminder_escalated_unacknowledged\` | A key date reminder stage has escalated (\`escalationLevel > 0\`, without \`lastSkippedReason\`) and remains unacknowledged. |
+| \`restricted_matter_no_permitted_assignee\` | A confirmed key date on a restricted/staff matter has no responsible person permitted to access the matter (\`lastSkippedReason: 'no_permitted_assignees'\`); reminder task creation was skipped to prevent disclosure. |
+| \`orphan_key_date_missing_matter\` | Admin-only (\`keydate:configure\`) data-integrity exception when a key date references a missing matter record (\`lastSkippedReason: 'missing_matter'\`), reporting only the \`keyDateId\`. |
 | \`calendar_sync_failed\` | One-way synchronisation to Microsoft Outlook failed (\`lastSyncStatus: 'failed'\`). |
 | \`past_due_unresolved\` | A confirmed key date has passed its \`dueDate\` without being resolved as \`met\`, \`missed\`, or \`waived\`. |
 

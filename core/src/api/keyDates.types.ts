@@ -295,6 +295,7 @@ export type KeyDateExceptionKind =
   | 'calculated_from_unreviewed_rules'
   | 'reminder_escalated_unacknowledged'
   | 'restricted_matter_no_permitted_assignee'
+  | 'orphan_key_date_missing_matter'
   | 'calendar_sync_failed'
   | 'past_due_unresolved';
 

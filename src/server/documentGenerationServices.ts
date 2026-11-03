@@ -67,15 +67,19 @@ import {
   buildSeedGeneralCorrespondenceDocxBytes,
   toMatterAccessSubject,
 } from '@/domain/documentGeneration';
-import { resolveEmployeeRoles } from '@/domain/homeConfig';
-import { personDisplayName } from '@/domain/names';
-import { hasPersonPermission } from '@/domain/rbac';
+import {
+  getStoredActorSessionForPerson,
+  hasPersonPermission,
+} from '@/domain/rbac';
 import type { Person } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
-import { createVerifiedSessionActorFromEntraSession } from './entraAuth';
+import {
+  createVerifiedSessionActorFromEntraSession,
+  type VerifiedEntraSessionPayload,
+} from './entraAuth';
 import {
   getStore,
   nextId,
@@ -181,6 +185,7 @@ export function getEffectiveTenantConfig(
 export function resolveTenantContextForStoreUser(
   store: FirmStore,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): { ctx: TenantContext; user: Person } {
   const user = store.people.find(
     (p) => p.id === userId && p.isEmployee && !p.mergedIntoId,
@@ -191,27 +196,19 @@ export function resolveTenantContextForStoreUser(
     );
   }
 
-  const roles = resolveEmployeeRoles(user, store.teams);
-  const nowIso = new Date().toISOString();
-  const email =
-    user.emails?.[0]?.address ??
-    `${user.id.toLowerCase()}@tenant.example`;
+  const verifiedSession =
+    session ??
+    (getStoredActorSessionForPerson(user.id)?.verifiedSession as
+      | VerifiedEntraSessionPayload
+      | undefined);
+  if (!verifiedSession) {
+    throw new Error(
+      `UNAUTHENTICATED: Verified Entra ID session is required for user "${user.id}".`,
+    );
+  }
+
   const ctx = resolveCurrentTenantContext(
-    createVerifiedSessionActorFromEntraSession({
-      personId: user.id,
-      oid: user.entraObjectId ?? user.id,
-      tid: '',
-      sub: user.id,
-      email,
-      displayName: personDisplayName(user),
-      entraRoles: [...roles],
-      mappedRoles: [...roles],
-      entraGroups: [],
-      mfaVerified: false,
-      amr: ['pwd'],
-      authenticatedAt: nowIso,
-      expiresAt: nowIso,
-    }),
+    createVerifiedSessionActorFromEntraSession(verifiedSession),
   );
 
   return { ctx, user };
@@ -565,6 +562,7 @@ async function ensureSeedDocumentTemplates(
 
 export async function getInitializedDocGenContext(
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<{
   store: FirmStore;
   ctx: TenantContext;
@@ -575,7 +573,11 @@ export async function getInitializedDocGenContext(
 }> {
   const store = getStore();
   const config = getEffectiveTenantConfig(store);
-  const { ctx, user } = resolveTenantContextForStoreUser(store, userId);
+  const { ctx, user } = resolveTenantContextForStoreUser(
+    store,
+    userId,
+    session,
+  );
 
   if (!global.__oneSquaredDocRepo) {
     global.__oneSquaredDocRepo = new TenantDocumentRepository();
@@ -1337,7 +1339,7 @@ export async function getTemplateUsageReportService(
     for (const u of report.byUser) {
       const found = store.people.find((p) => p.id === u.userId);
       userDisplayNamesById[u.userId] = found
-        ? personDisplayName(found)
+        ? `${found.firstName} ${found.surname}`.trim() || found.id
         : u.userId;
     }
   }

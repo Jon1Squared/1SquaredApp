@@ -595,12 +595,14 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
     ).toBe(true);
 
     const missingJobAudit: AuditEntry[] = [];
+    const persistentMissingStates: KeyDateReminderState[] = [];
+    // Window 1: creates skipped reminder state (lastSkippedReason: 'missing_matter', escalationLevelReached: 1)
     runTenantKeyDateReminderJob({
       tenantId: 'tenant-nalf-test',
       todayIso: '2026-08-01',
       config,
       keyDates: [missingMatterKd],
-      reminderStates: [],
+      reminderStates: persistentMissingStates,
       tasks: missingTasks,
       matters: [restrictedMatter],
       teams,
@@ -611,6 +613,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
     });
     expect(missingTasks).toHaveLength(0);
     expect(missingNotifications).toHaveLength(0);
+    expect(persistentMissingStates[0]?.lastSkippedReason).toBe('missing_matter');
     expect(
       missingJobAudit.some(
         (a) =>
@@ -618,5 +621,64 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
           a.newValue === 'no_permitted_assignees',
       ),
     ).toBe(true);
+
+    // Window 2 (4 days later, past afterUnacknowledgedDays): still sends zero notifications for a missing matter (R97)
+    runTenantKeyDateReminderJob({
+      tenantId: 'tenant-nalf-test',
+      todayIso: '2026-08-05',
+      config,
+      keyDates: [missingMatterKd],
+      reminderStates: persistentMissingStates,
+      tasks: missingTasks,
+      matters: [restrictedMatter],
+      teams,
+      people,
+      notifications: missingNotifications,
+      audit: missingJobAudit,
+      nextTaskId: () => 'TSK-MISSING-SHOULD-NOT-EXIST-3',
+    });
+    expect(missingTasks).toHaveLength(0);
+    expect(missingNotifications).toHaveLength(0);
+
+    // R116: A task in another tenant with the same key date ID is never matched or mutated
+    const otherTenantTask: Task = {
+      id: 'TSK-OTHER-TENANT-999',
+      reference: 'TSK-OTHER-TENANT-999',
+      title: 'Other Tenant Reminder Task',
+      description: 'Must not be matched by tenant-nalf-test',
+      taskTypeId: 'task_type.key_date_reminder',
+      priorityId: 'task_priority.normal',
+      dueAt: '2026-08-31',
+      assignedTeamId: 'TM-LIT',
+      assignedPersonId: 'P-LEAD',
+      status: 'To do',
+      linkedRecords: [{ recordType: 'matter', recordId: restrictedMatter.id }],
+      idempotencyKey: `keydate-reminder:other-tenant:${keyDate.id}`,
+      createdById: 'P-LEAD',
+      createdAt: '2026-06-01T00:00:00Z',
+      updatedById: 'P-LEAD',
+      updatedAt: '2026-06-01T00:00:00Z',
+      completedById: null,
+      completedAt: null,
+      comments: [],
+    };
+    const crossTenantTasks: Task[] = [otherTenantTask];
+    const crossTenantStates: KeyDateReminderState[] = [];
+    const crossTenantSync = syncReminderForConfirmedKeyDate({
+      tenantId: 'tenant-nalf-test',
+      keyDate,
+      config,
+      tasks: crossTenantTasks,
+      reminderStates: crossTenantStates,
+      matters: [restrictedMatter],
+      people,
+      audit: [],
+      todayIso: '2026-06-02',
+      nowIso: '2026-06-02T08:00:00Z',
+      actorId: 'P-LEAD',
+      nextTaskId: () => 'TSK-NALF-NEW-001',
+    });
+    expect(crossTenantSync.task?.id).toBe('TSK-NALF-NEW-001');
+    expect(otherTenantTask.title).toBe('Other Tenant Reminder Task');
   });
 });

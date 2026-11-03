@@ -5,6 +5,7 @@
  */
 import { addDays, calculateFirstContactDue, toIsoDate } from '@/domain/dates';
 import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type {
   Address,
   AuditEntry,
@@ -185,10 +186,31 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     departmentId: null,
   });
 
+  const includeSyntheticEntraOids = (() => {
+    if (process.env.NODE_ENV === 'production') {
+      return false;
+    }
+    try {
+      const cfg = getActiveTenantConfiguration();
+      if (cfg.environment === 'live') {
+        return false;
+      }
+      if (cfg.featureFlags?.enableDemoMode === true) {
+        return true;
+      }
+      if (cfg.featureFlags?.enableDemoMode === false) {
+        return false;
+      }
+      return process.env.NODE_ENV === 'test';
+    } catch {
+      return process.env.NODE_ENV === 'test';
+    }
+  })();
+
   const people: Person[] = [];
   const addPerson = (id: string, createdOffset: number, fields: Partial<Person>) => {
     const defaultEntraOid =
-      fields.isEmployee && fields.entraObjectId === undefined
+      includeSyntheticEntraOids && fields.isEmployee && fields.entraObjectId === undefined
         ? `00000000-0000-4000-8000-${id.replace(/[^0-9]/g, '').padStart(12, '0')}`
         : undefined;
     const p = {

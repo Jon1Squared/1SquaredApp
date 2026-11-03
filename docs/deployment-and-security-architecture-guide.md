@@ -93,7 +93,7 @@ flowchart LR
    - The active tenant is resolved **exclusively** from the cryptographically verified Microsoft Entra ID OIDC token (`tid` / `tenantId`), **never** from a URL parameter, HTTP header, or form field that a user could tamper with. Any mismatch between the token and request immediately throws `TENANCY_FORGERY_DETECTED`.
 4. **Dedicated Storage Container & Encryption Keys Per Client:**
    - Templates and generated snapshots live in a dedicated Azure Blob Storage container per tenant (`tenant-<slug>-<env>`) protected by Microsoft Defender for Storage on-upload malware scanning and short-lived, tenant-bound download tokens.
-   - Each tenant has separate secrets and encryption keys in Azure Key Vault (`kv-<slug>-<env>`), with support for **Customer-Managed Keys (CMK)**.
+   - Each tenant has separate secrets and encryption keys in Azure Key Vault (`kv-<slug>-<env>`), with support for **Customer-Managed Keys (CMK)**. In `core/infra/main.bicep`, Key Vault uses RBAC authorisation (`Key Vault Secrets User`), `publicNetworkAccess: 'Enabled'` with `networkAcls.defaultAction: 'Deny'`, `bypass: 'AzureServices'`, and `virtualNetworkRules` locked to the App Service regional VNet integration subnet (`snet-appservice` with `Microsoft.KeyVault` service endpoint) so Azure App Service can securely resolve `@Microsoft.KeyVault(...)` secret references at runtime; `entraClientId` and `entraRedirectUri` are mandatory deployment parameters with no empty defaults.
 5. **Zero-Copy External Document Store (SharePoint Online / DMS):**
    - Matter documents remain inside **the law firm's own SharePoint Online tenancy**.
    - 1Squared stores only folder references (`siteId`, `driveId`, `itemId`)—never copies of your client files.

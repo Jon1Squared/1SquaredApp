@@ -18,6 +18,7 @@ export default async function TasksPage() {
       quotes={snap.quotes}
       values={snap.values}
       currentUserId={snap.currentUserId}
+      currentUserRole={snap.currentUserRole}
     />
   );
 }

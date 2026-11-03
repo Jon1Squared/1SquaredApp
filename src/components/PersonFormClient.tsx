@@ -12,6 +12,7 @@ import {
 } from '@/app/actions';
 import { findPersonDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
 import {
+  buildSensitiveSubmissionPayload,
   calculateHrRetentionDate,
   calculateProbationEndDate,
   CONTRACT_TYPES,
@@ -29,7 +30,6 @@ import {
    type LeaverOwnedRecordItem,
   maskBankDetails,
   maskNationalInsuranceNumber,
-  resolveEmployeePermissions,
   validateNationalInsuranceNumber,
 } from '@/domain/employment';
 import {
@@ -208,12 +208,10 @@ export function PersonFormClient({
     [allPeople, currentUserId],
   );
 
-  const userPerms = useMemo<Set<EmployeePermission>>(() => {
-    if (Array.isArray(currentUserEmployeePermissions)) {
-      return new Set(currentUserEmployeePermissions);
-    }
-    return new Set(resolveEmployeePermissions(currentUser, allPeople));
-  }, [currentUserEmployeePermissions, currentUser, allPeople]);
+  const userPerms = useMemo<Set<EmployeePermission>>(
+    () => new Set(currentUserEmployeePermissions ?? []),
+    [currentUserEmployeePermissions],
+  );
 
   const canViewCore = userPerms.has('employee:view_core');
   const canEditCore = userPerms.has('employee:edit_core');
@@ -1446,12 +1444,14 @@ export function PersonFormClient({
         : null;
 
     const sensitivePayload: Partial<EmployeeSensitiveRecord> | null =
-      isEmployee && canSensitive && sensitiveRevealed && sensitiveEdited
-        ? {
-            reasonableAdjustmentsNeeded: reasonableAdjustments.trim(),
-            diversity: diversityAnswers,
-          }
-        : null;
+      buildSensitiveSubmissionPayload({
+        isEmployee,
+        canSensitive,
+        sensitiveRevealed,
+        sensitiveEdited,
+        reasonableAdjustments,
+        diversityAnswers,
+      });
 
     const mappedLegacyRoleId = isEmployee
       ? mapRoleTypeToLegacyEmployeeRoleId(empRoleType, employeeRoleId)
@@ -1525,6 +1525,8 @@ export function PersonFormClient({
           worksAtFirm: isEmployee,
           employmentSubmitted: employmentPayload,
           sensitiveSubmitted: sensitivePayload,
+          sensitiveSectionOpened: sensitiveRevealed,
+          sensitiveSectionEdited: sensitiveEdited,
           keepAsContactOnLeave: empKeepAsContactOnLeave,
           initialLink:
             !existing && linkOrgId

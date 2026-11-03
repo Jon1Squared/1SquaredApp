@@ -17,9 +17,9 @@ import { AuthorisationError } from '@/domain/rbac';
 import { vid } from '@/seed/lists';
 import {
   createOrUpdateLink,
-  requireAuthenticatedActor,
   saveOrganisationRecord,
   savePersonRecord,
+  withAuthenticatedActor,
 } from '@/server/services';
 import { getStore } from '@/server/store';
 
@@ -2438,13 +2438,13 @@ function ensureContactInCrm(
 
 export async function POST(req: Request) {
   try {
-    const actor = await requireAuthenticatedActor();
-    const byId = actor.personId;
+    return await withAuthenticatedActor(async (actor) => {
+      const byId = actor.personId;
 
-    const body = (await req.json()) as {
-      documents?: IntakeSourceDocument[];
-      apiKeyOverride?: string;
-    };
+      const body = (await req.json()) as {
+        documents?: IntakeSourceDocument[];
+        apiKeyOverride?: string;
+      };
     const documents = body.documents ?? [];
     if (!Array.isArray(documents) || documents.length === 0) {
       return NextResponse.json(
@@ -2635,12 +2635,13 @@ export async function POST(req: Request) {
       }
     }
 
-    const latestStore = getStore();
-    return NextResponse.json({
-      extraction: enriched,
-      organisations: latestStore.organisations,
-      people: latestStore.people,
-      links: latestStore.links,
+      const latestStore = getStore();
+      return NextResponse.json({
+        extraction: enriched,
+        organisations: latestStore.organisations,
+        people: latestStore.people,
+        links: latestStore.links,
+      });
     });
   } catch (err) {
     if (err instanceof AuthorisationError && err.code === 'UNAUTHENTICATED') {

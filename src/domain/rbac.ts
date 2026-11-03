@@ -151,6 +151,9 @@ export function setRuntimeRbacConfigOverride(
 }
 
 export function getDefaultTenantRbacConfig(tenantId?: string): RbacConfiguration {
+  if (typeof window !== 'undefined') {
+    return createDefaultRbacConfig();
+  }
   const activeCfg = getActiveTenantConfiguration();
   const targetTenantId = tenantId?.trim() || activeCfg.tenantId;
   const cached = tenantRbacConfigCacheByTenant.get(targetTenantId);
@@ -243,6 +246,7 @@ export interface ActiveActorTokenSession {
   readonly personId: string;
   readonly tokenRoles: readonly string[];
   readonly expiresAtMs: number;
+  readonly verifiedSession?: unknown;
 }
 
 type AsyncLocalStorageLike<T> = {
@@ -273,7 +277,6 @@ function getActorSessionAsyncStorage(): AsyncLocalStorageLike<ActiveActorTokenSe
   return actorSessionStorage;
 }
 
-let currentActorTokenSession: ActiveActorTokenSession | null = null;
 const sessionTokenRolesByTenantAndPerson = new Map<
   string,
   ActiveActorTokenSession
@@ -297,13 +300,7 @@ export function runWithActiveActorSession<R>(
   if (storage) {
     return storage.run(session, fn);
   }
-  const previous = currentActorTokenSession;
-  currentActorTokenSession = session;
-  try {
-    return fn();
-  } finally {
-    currentActorTokenSession = previous;
-  }
+  return fn();
 }
 
 export function setActiveSessionTokenRolesForPerson(
@@ -312,23 +309,17 @@ export function setActiveSessionTokenRolesForPerson(
   options?: {
     tenantId?: string;
     expiresAt?: string | number;
+    verifiedSession?: unknown;
   },
 ): void {
   const tenantId =
     options?.tenantId?.trim() || getActiveTenantConfiguration().tenantId;
   if (!personId) {
-    currentActorTokenSession = null;
     return;
   }
   const key = makeTenantPersonSessionKey(tenantId, personId);
   if (!tokenRoles) {
     sessionTokenRolesByTenantAndPerson.delete(key);
-    if (
-      currentActorTokenSession?.tenantId === tenantId &&
-      currentActorTokenSession?.personId === personId
-    ) {
-      currentActorTokenSession = null;
-    }
     return;
   }
   const rawExpires = options?.expiresAt;
@@ -344,23 +335,52 @@ export function setActiveSessionTokenRolesForPerson(
 
   if (expiresAtMs <= Date.now()) {
     sessionTokenRolesByTenantAndPerson.delete(key);
-    if (
-      currentActorTokenSession?.tenantId === tenantId &&
-      currentActorTokenSession?.personId === personId
-    ) {
-      currentActorTokenSession = null;
-    }
     return;
   }
 
+  const existing = sessionTokenRolesByTenantAndPerson.get(key);
   const entry: ActiveActorTokenSession = {
     tenantId,
     personId,
     tokenRoles: [...tokenRoles],
     expiresAtMs,
+    ...(options?.verifiedSession !== undefined
+      ? { verifiedSession: options.verifiedSession }
+      : existing?.verifiedSession !== undefined
+        ? { verifiedSession: existing.verifiedSession }
+        : {}),
   };
   sessionTokenRolesByTenantAndPerson.set(key, entry);
-  currentActorTokenSession = entry;
+}
+
+export function getStoredActorSessionForPerson(
+  personId: string,
+  tenantId?: string,
+): ActiveActorTokenSession | undefined {
+  if (!personId) return undefined;
+  const activeActor = getActorSessionAsyncStorage()?.getStore();
+  const targetTenantId =
+    tenantId?.trim() ||
+    activeActor?.tenantId ||
+    getActiveTenantConfiguration().tenantId;
+  const key = makeTenantPersonSessionKey(targetTenantId, personId);
+  const cached = sessionTokenRolesByTenantAndPerson.get(key);
+  if (cached) {
+    if (cached.expiresAtMs <= Date.now()) {
+      sessionTokenRolesByTenantAndPerson.delete(key);
+      return undefined;
+    }
+    return cached;
+  }
+  if (
+    activeActor &&
+    activeActor.personId === personId &&
+    activeActor.tenantId === targetTenantId &&
+    activeActor.expiresAtMs > Date.now()
+  ) {
+    return activeActor;
+  }
+  return undefined;
 }
 
 export function getActiveSessionTokenRolesForPerson(
@@ -368,37 +388,34 @@ export function getActiveSessionTokenRolesForPerson(
   tenantId?: string,
 ): readonly string[] | undefined {
   if (!personId) return undefined;
+  const activeActor = getActorSessionAsyncStorage()?.getStore();
+  // Token roles apply ONLY inside an active request scope (runWithActiveActorSession) for that exact (tenantId, personId)
+  if (!activeActor || activeActor.personId !== personId) {
+    return undefined;
+  }
   const targetTenantId =
-    tenantId?.trim() || getActiveTenantConfiguration().tenantId;
-  const scoped = getActorSessionAsyncStorage()?.getStore();
-  const activeActor = scoped !== undefined ? scoped : currentActorTokenSession;
-  // Token roles apply ONLY when evaluating the currently active request actor in the same tenant
-  if (
-    !activeActor ||
-    activeActor.tenantId !== targetTenantId ||
-    activeActor.personId !== personId
-  ) {
+    tenantId?.trim() ||
+    activeActor.tenantId ||
+    getActiveTenantConfiguration().tenantId;
+  if (activeActor.tenantId !== targetTenantId) {
     return undefined;
   }
   if (activeActor.expiresAtMs <= Date.now()) {
     sessionTokenRolesByTenantAndPerson.delete(
       makeTenantPersonSessionKey(targetTenantId, personId),
     );
-    if (scoped === undefined) {
-      currentActorTokenSession = null;
-    }
     return undefined;
   }
-  const cached = sessionTokenRolesByTenantAndPerson.get(
-    makeTenantPersonSessionKey(targetTenantId, personId),
-  );
-  if (cached && cached.expiresAtMs <= Date.now()) {
-    sessionTokenRolesByTenantAndPerson.delete(
-      makeTenantPersonSessionKey(targetTenantId, personId),
-    );
+  const key = makeTenantPersonSessionKey(targetTenantId, personId);
+  const cached = sessionTokenRolesByTenantAndPerson.get(key);
+  if (!cached) {
     return undefined;
   }
-  return (cached ?? activeActor).tokenRoles;
+  if (cached.expiresAtMs <= Date.now()) {
+    sessionTokenRolesByTenantAndPerson.delete(key);
+    return undefined;
+  }
+  return cached.tokenRoles;
 }
 
 export function clearActiveSessionTokenRoles(
@@ -411,16 +428,9 @@ export function clearActiveSessionTokenRoles(
     sessionTokenRolesByTenantAndPerson.delete(
       makeTenantPersonSessionKey(targetTenantId, personId),
     );
-    if (
-      currentActorTokenSession?.tenantId === targetTenantId &&
-      currentActorTokenSession?.personId === personId
-    ) {
-      currentActorTokenSession = null;
-    }
     return;
   }
   sessionTokenRolesByTenantAndPerson.clear();
-  currentActorTokenSession = null;
 }
 
 export interface ResolvePersonPermissionsOptions {
@@ -451,6 +461,17 @@ export interface ResolvePersonPermissionsOptions {
   tokenRoles?: readonly string[];
 }
 
+export function resolveActiveTenantIdForRbac(
+  explicitTenantId?: string,
+): string {
+  if (explicitTenantId && explicitTenantId.trim().length > 0) {
+    return explicitTenantId.trim();
+  }
+  return typeof window !== 'undefined'
+    ? 'browser-client'
+    : getActiveTenantConfiguration().tenantId;
+}
+
 /**
  * Resolves the complete `ResolvedPermissionSet` for a `Person` using the central `@platform/core`
  * `resolvePermissions` engine.
@@ -459,14 +480,24 @@ export function resolvePersonPermissionSet(
   user: Person | null | undefined,
   options: ResolvePersonPermissionsOptions = {},
 ): ResolvedPermissionSet {
+  const activeTenantId = resolveActiveTenantIdForRbac(
+    options.context?.tenantId,
+  );
   if (!user?.id) {
-    return resolvePermissions({ actor: null });
+    return resolvePermissions({
+      context: {
+        tenantId: activeTenantId,
+        correlationId: options.context?.correlationId ?? '',
+        actorId: '',
+        actorRoles: [],
+        mfaVerified: false,
+      },
+      actor: null,
+    });
   }
 
   const teams = options.teams ?? [];
   const allPeople = options.allPeople ?? [];
-  const activeTenantId =
-    options.context?.tenantId || getActiveTenantConfiguration().tenantId;
   const rbacConfig =
     options.config?.rbac ?? getDefaultTenantRbacConfig(activeTenantId);
   const storedRoles = resolvePersonAuthoritativeRoles(

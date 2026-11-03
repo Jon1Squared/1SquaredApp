@@ -112,7 +112,7 @@ export interface Email {
   address: string;
   typeId: string | null;
   isPrimary: boolean;
-  /** True when issued by the firm (e.g. @pembrokevaughan.co.uk); marked inactive when the person leaves. */
+  /** True when issued by the firm (e.g. @notalawfirm.example); marked inactive when the person leaves. */
   firmIssued?: boolean;
   /** Defaults to true; set to false when deactivated on leaving the firm. */
   active?: boolean;

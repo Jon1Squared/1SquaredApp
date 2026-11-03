@@ -64,7 +64,7 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import { resolveOrgDepartment } from '@/domain/orgStructure';
+import { buildDefaultOrgStructure, resolveOrgDepartment } from '@/domain/orgStructure';
 import {
   calculateDisbursementsTotal,
   createDefaultMatterCostsConfig,
@@ -120,6 +120,7 @@ import type {
   MatterPartyIdentifiers,
   MatterPartyTaxonomy,
   Organisation,
+  OrgStructureCatalogue,
   Person,
   PersonOrganisationLink,
   Quote,
@@ -154,6 +155,7 @@ interface MatterFormClientProps {
   customFields?: CustomFieldDefinition[];
   employees: Person[];
   currentUser: Person;
+  orgStructure?: OrgStructureCatalogue;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterCostsConfig?: MatterCostsConfig;
 }
@@ -555,12 +557,18 @@ export function MatterFormClient({
   customFields = [],
   employees: initialEmployees,
   currentUser,
+  orgStructure: orgStructureProp,
   matterPartyTaxonomy,
   matterCostsConfig,
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
   const today = toIsoDate(new Date());
+
+  const orgStructure = useMemo(
+    () => orgStructureProp ?? buildDefaultOrgStructure(),
+    [orgStructureProp],
+  );
 
   const costsConfig = useMemo(
     () => matterCostsConfig ?? createDefaultMatterCostsConfig(values),
@@ -770,6 +778,31 @@ export function MatterFormClient({
       initialEnquiry?.practiceAreaId ??
       initialSubcatVal?.parentId ??
       userMatterDefaults.practiceAreaId,
+  );
+  const [owningDepartmentId, setOwningDepartmentId] = useState<string>(
+    () =>
+      existing?.owningDepartmentId ??
+      resolveOrgDepartment(
+        existing?.practiceAreaId ??
+          initialQuote?.practiceAreaId ??
+          initialEnquiry?.practiceAreaId ??
+          initialSubcatVal?.parentId ??
+          userMatterDefaults.practiceAreaId,
+        orgStructure,
+      )?.id ??
+      '',
+  );
+  const [owningTeamId, setOwningTeamId] = useState<string>(
+    () => existing?.owningTeamId ?? '',
+  );
+  const availableOwningTeams = useMemo(
+    () =>
+      orgStructure.teamsOrPracticeGroups.filter(
+        (t) =>
+          t.active &&
+          (!owningDepartmentId || t.parentDepartmentId === owningDepartmentId),
+      ),
+    [orgStructure, owningDepartmentId],
   );
   const [workTypeSubcategoryId, setWorkTypeSubcategoryId] = useState<string>(() => {
     if (existing?.workTypeSubcategoryId) return existing.workTypeSubcategoryId;
@@ -5049,6 +5082,8 @@ export function MatterFormClient({
             (initialEnquiry?.receivedAt ? initialEnquiry.receivedAt.slice(0, 10) : undefined),
           practiceAreaId,
           workTypeSubcategoryId,
+          owningDepartmentId: owningDepartmentId || undefined,
+          owningTeamId: owningTeamId || undefined,
           typeBadge,
           matterTypeId,
           billingBasisId,
@@ -5151,6 +5186,8 @@ export function MatterFormClient({
                 : undefined),
             practiceAreaId,
             workTypeSubcategoryId,
+            owningDepartmentId: owningDepartmentId || undefined,
+            owningTeamId: owningTeamId || undefined,
             typeBadge,
             matterTypeId,
             billingBasisId,
@@ -5407,6 +5444,8 @@ export function MatterFormClient({
           additionalClientIds: clientIds.slice(1),
           practiceAreaId,
           workTypeSubcategoryId,
+          owningDepartmentId: owningDepartmentId || undefined,
+          owningTeamId: owningTeamId || undefined,
           typeBadge,
           matterTypeId,
           billingBasisId,
@@ -5519,6 +5558,8 @@ export function MatterFormClient({
             matterStatusId: cmiIncompleteStatusId,
             practiceAreaId,
             workTypeSubcategoryId,
+            owningDepartmentId: owningDepartmentId || undefined,
+            owningTeamId: owningTeamId || undefined,
             typeBadge,
             matterTypeId,
             billingBasisId,
@@ -5596,6 +5637,8 @@ export function MatterFormClient({
             enquiryReceivedAt: resolvedEnquiryReceivedAt,
             practiceAreaId,
             workTypeSubcategoryId,
+            owningDepartmentId: owningDepartmentId || undefined,
+            owningTeamId: owningTeamId || undefined,
             typeBadge,
             matterTypeId,
             billingBasisId,
@@ -7244,6 +7287,17 @@ export function MatterFormClient({
                   onChange={(e) => {
                     const nextPa = e.target.value;
                     setPracticeAreaId(nextPa);
+                    const nextOrgDept = resolveOrgDepartment(nextPa, orgStructure);
+                    const nextOwningDeptId = nextOrgDept?.id ?? '';
+                    setOwningDepartmentId(nextOwningDeptId);
+                    if (
+                      owningTeamId &&
+                      !orgStructure.teamsOrPracticeGroups.some(
+                        (t) => t.id === owningTeamId && t.parentDepartmentId === nextOwningDeptId,
+                      )
+                    ) {
+                      setOwningTeamId('');
+                    }
                     const firstSub = values
                       .filter(
                         (v) =>
@@ -7324,6 +7378,59 @@ export function MatterFormClient({
                   {subcategoriesForPractice.map((sub) => (
                     <option key={sub.id} value={sub.id}>
                       {sub.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field-group">
+                <label className="field-label" htmlFor="nm-owning-department">
+                  Owning department (document routing)
+                </label>
+                <select
+                  id="nm-owning-department"
+                  className="field-select"
+                  value={owningDepartmentId}
+                  disabled={isReadOnlyFeeEarner}
+                  onChange={(e) => {
+                    const nextDeptId = e.target.value;
+                    setOwningDepartmentId(nextDeptId);
+                    if (
+                      owningTeamId &&
+                      !orgStructure.teamsOrPracticeGroups.some(
+                        (t) => t.id === owningTeamId && t.parentDepartmentId === nextDeptId,
+                      )
+                    ) {
+                      setOwningTeamId('');
+                    }
+                  }}
+                >
+                  <option value="">Select owning department…</option>
+                  {orgStructure.departments
+                    .filter((d) => d.active)
+                    .map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name} ({d.code})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="field-group">
+                <label className="field-label" htmlFor="nm-owning-team">
+                  Owning team / practice group (document routing)
+                </label>
+                <select
+                  id="nm-owning-team"
+                  className="field-select"
+                  value={owningTeamId}
+                  disabled={isReadOnlyFeeEarner}
+                  onChange={(e) => setOwningTeamId(e.target.value)}
+                >
+                  <option value="">Select owning team…</option>
+                  {availableOwningTeams.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name} ({t.code})
                     </option>
                   ))}
                 </select>

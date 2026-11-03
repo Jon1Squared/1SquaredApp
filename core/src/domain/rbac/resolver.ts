@@ -386,7 +386,12 @@ export function migrateLegacyPersonOverrides(params: {
 export function resolvePermissions(
   input: ResolvePermissionsInput,
 ): ResolvedPermissionSet {
-  const tenantId = input.context?.tenantId || 'default-tenant';
+  const tenantId = input.context?.tenantId?.trim() ?? '';
+  if (!tenantId) {
+    throw new Error(
+      'RBAC_TENANT_REQUIRED: resolvePermissions requires a non-empty tenantId in context.',
+    );
+  }
   const correlationId = input.context?.correlationId || '';
   const actor = input.actor;
   const actorUserId = actor?.userId || input.context?.actorId || '';

@@ -2,10 +2,12 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import {
   applyEffectiveDatedEmploymentHistory,
   applyLeaverEffects,
+  buildSensitiveSubmissionPayload,
   calculateHrRetentionDate,
   calculateProbationEndDate,
   canUserAccessMatter,
   computeStaffMatterStatus,
+  emptyDiversityAnswers,
   filterEmployeesForMatterDepartment,
   filterEmploymentForUser,
   findOpenMattersWherePersonIsParty,
@@ -605,6 +607,68 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         (a) => a.recordId === target.id && a.action === 'update-sensitive',
       ).length;
 
+      // Form helper sends null unless the sensitive section was both revealed and edited
+      expect(
+        buildSensitiveSubmissionPayload({
+          isEmployee: true,
+          canSensitive: true,
+          sensitiveRevealed: false,
+          sensitiveEdited: false,
+          reasonableAdjustments: '',
+          diversityAnswers: emptyDiversityAnswers(),
+        }),
+      ).toBeNull();
+      expect(
+        buildSensitiveSubmissionPayload({
+          isEmployee: true,
+          canSensitive: true,
+          sensitiveRevealed: true,
+          sensitiveEdited: false,
+          reasonableAdjustments: 'Opened but not edited',
+          diversityAnswers: emptyDiversityAnswers(),
+        }),
+      ).toBeNull();
+      expect(
+        buildSensitiveSubmissionPayload({
+          isEmployee: true,
+          canSensitive: true,
+          sensitiveRevealed: true,
+          sensitiveEdited: true,
+          reasonableAdjustments: 'Screen reader licence',
+          diversityAnswers: emptyDiversityAnswers(),
+        }),
+      ).toEqual({
+        reasonableAdjustmentsNeeded: 'Screen reader licence',
+        diversity: emptyDiversityAnswers(),
+      });
+
+      // Server enforcement: even if a caller sends a blank sensitiveSubmitted payload without opening/editing
+      // the sensitive section, savePersonRecord refuses to overwrite the existing sensitive record
+      const uneditedServerAttempt = savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+          preferredName: 'Daf',
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: {
+            reasonableAdjustmentsNeeded: '',
+            diversity: emptyDiversityAnswers(),
+          },
+          sensitiveSectionOpened: false,
+          sensitiveSectionEdited: false,
+        },
+      );
+      expect(uneditedServerAttempt.errors).toBeUndefined();
+      expect(
+        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+      ).toBe('Ergonomic standing desk and dual monitors');
+
       // Now save P-000002 again (e.g. updating preferredName) without revealing/submitting sensitive section
       const updateRes = savePersonRecord(
         {
@@ -629,6 +693,26 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         (a) => a.recordId === target.id && a.action === 'update-sensitive',
       ).length;
       expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);
+
+      // When both sensitiveSectionOpened and sensitiveSectionEdited are true, server applies the update
+      savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: {
+            reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
+          },
+          sensitiveSectionOpened: true,
+          sensitiveSectionEdited: true,
+        },
+      );
 
       // R103 & R76: Calling getEmployeeDetailsForUser without logViewSensitive: true returns sensitive: null and writes no view-sensitive audit entry
       const viewAuditCountBefore = store.audit.filter(

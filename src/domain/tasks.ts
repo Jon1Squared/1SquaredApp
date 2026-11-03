@@ -178,11 +178,17 @@ export function canUserReassignTask(
   teams: Team[],
   people: Person[],
   _values: ChoiceValue[] = [],
+  userPermissions?: Iterable<string>,
 ): boolean {
-  const user = people.find((p) => p.id === userId) ?? null;
-  if (user) {
-    const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+  if (userPermissions) {
+    const perms = new Set(userPermissions);
     if (perms.has('task:reassign_any')) return true;
+  } else {
+    const user = people.find((p) => p.id === userId) ?? null;
+    if (user) {
+      const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+      if (perms.has('task:reassign_any')) return true;
+    }
   }
   if (task.createdById === userId || isTaskAssignedToPerson(task, userId)) return true;
   if (isUserTeamLeadFor(userId, task.assignedTeamId, teams)) return true;
@@ -198,13 +204,19 @@ export function canUserTakeTask(
   teams: Team[],
   people: Person[],
   _values: ChoiceValue[] = [],
+  userPermissions?: Iterable<string>,
 ): boolean {
   if (task.assignedPersonId) return false;
   if (!task.assignedTeamId) return true;
-  const user = people.find((p) => p.id === userId) ?? null;
-  if (user) {
-    const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+  if (userPermissions) {
+    const perms = new Set(userPermissions);
     if (perms.has('task:claim_any')) return true;
+  } else {
+    const user = people.find((p) => p.id === userId) ?? null;
+    if (user) {
+      const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+      if (perms.has('task:claim_any')) return true;
+    }
   }
   const team = teams.find((t) => t.id === task.assignedTeamId);
   if (!team) return false;

@@ -64,6 +64,8 @@ const EXCEPTION_KIND_LABELS: Record<KeyDateExceptionKind, string> = {
   reminder_escalated_unacknowledged: 'Reminder escalated without acknowledgement',
   restricted_matter_no_permitted_assignee:
     'Restricted matter key date has no permitted assignee',
+  orphan_key_date_missing_matter:
+    'Orphan key date (missing matter record)',
   calendar_sync_failed: 'Outlook calendar sync failed',
   past_due_unresolved: 'Past due and unresolved',
 };

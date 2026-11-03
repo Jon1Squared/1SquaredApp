@@ -475,10 +475,31 @@ DROP TABLE IF EXISTS key_dates;
 `.trim(),
 };
 
+export const KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004: TenantMigrationDefinition = {
+  version: '0004_key_date_reminder_last_skipped_reason_expand',
+  name: 'key_date_reminder_last_skipped_reason_expand',
+  description:
+    'Adds nullable last_skipped_reason column with CHECK constraint to key_date_reminder_states so skipped reminder reasons (no_permitted_assignees, missing_matter) persist across tenant databases.',
+  tablesChanged: ['key_date_reminder_states'],
+  upSql: `
+ALTER TABLE key_date_reminder_states
+  ADD COLUMN IF NOT EXISTS last_skipped_reason TEXT NULL
+  CONSTRAINT chk_key_date_reminder_states_last_skipped_reason
+  CHECK (last_skipped_reason IS NULL OR last_skipped_reason IN ('no_permitted_assignees', 'missing_matter'));
+`.trim(),
+  downSql: `
+ALTER TABLE key_date_reminder_states
+  DROP CONSTRAINT IF EXISTS chk_key_date_reminder_states_last_skipped_reason;
+ALTER TABLE key_date_reminder_states
+  DROP COLUMN IF EXISTS last_skipped_reason;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
   KEY_DATES_MIGRATION_0003,
+  KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
 ];
 
 export function computeMigrationChecksum(migration: TenantMigrationDefinition): string {

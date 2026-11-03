@@ -547,10 +547,7 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
     for (const p of store.people) {
       if (Array.isArray(p.emails)) {
         for (const em of p.emails) {
-          if (em.address.toLowerCase().includes('@pembrokevaughan.co.uk')) {
-            em.address = em.address.replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.example');
-            changed = true;
-          } else if (em.address.toLowerCase().includes('@pembrokevaughan.example')) {
+          if (em.address.toLowerCase().includes('@pembrokevaughan.example')) {
             em.address = em.address.replace(
               /@pembrokevaughan\.example/gi,
               '@notalawfirm.example',
@@ -568,9 +565,10 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
         });
       }
       if (p.employment?.systems?.firmWorkEmail?.toLowerCase().includes('@pembrokevaughan')) {
-        p.employment.systems.firmWorkEmail = p.employment.systems.firmWorkEmail
-          .replace(/@pembrokevaughan\.co\.uk/gi, '@notalawfirm.example')
-          .replace(/@pembrokevaughan\.example/gi, '@notalawfirm.example');
+        p.employment.systems.firmWorkEmail = p.employment.systems.firmWorkEmail.replace(
+          /@pembrokevaughan\.example/gi,
+          '@notalawfirm.example',
+        );
         changed = true;
       }
     }
@@ -593,9 +591,9 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
       changed = true;
     }
     for (const r of store.homePagesConfig.roles) {
-      if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.co.uk')) {
+      if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.example')) {
         r.demoUserEmail = r.demoUserEmail.replace(
-          /@pembrokevaughan\.co\.uk/gi,
+          /@pembrokevaughan\.example/gi,
           '@notalawfirm.example',
         );
         changed = true;

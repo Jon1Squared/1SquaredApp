@@ -8,7 +8,7 @@ import { enquiryDisplayName } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { hrefForId, personDisplayName } from '@/domain/names';
 import { quoteClientDisplayName } from '@/domain/quotes';
-import { canUserReassignTask, canUserTakeTask, isTaskOpen, isTaskOverdue } from '@/domain/tasks';
+import { isTaskOpen, isTaskOverdue } from '@/domain/tasks';
 import type {
   AuditEntry,
   ChoiceValue,
@@ -37,6 +37,8 @@ interface Props {
   values: ChoiceValue[];
   audit: AuditEntry[];
   currentUserId: string;
+  canTake?: boolean;
+  canReassign?: boolean;
 }
 
 export function TaskDetailClient({
@@ -50,6 +52,8 @@ export function TaskDetailClient({
   values,
   audit,
   currentUserId,
+  canTake = false,
+  canReassign = false,
 }: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
@@ -158,8 +162,8 @@ export function TaskDetailClient({
   }, [linkRecordType, enquiries, quotes, matters, people, organisations]);
 
   const overdue = isTaskOverdue(task);
-  const canTake = canUserTakeTask(currentUserId, task, teams, people, values);
-  const canReassign = canUserReassignTask(currentUserId, task, teams, people, values);
+
+
   const prioLabel = resolveLabel(values, task.priorityId) || 'Normal';
   const typeLabel = resolveLabel(values, task.taskTypeId) || 'General';
 

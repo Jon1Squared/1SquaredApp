@@ -99,6 +99,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     process.env.ENTRA_TENANT_ID = TEST_TENANT_ID;
     process.env.ENTRA_CLIENT_SECRET = 'test-dummy-secret-not-real';
     process.env.AUTH_SECRET = 'test-auth-secret-32-bytes-minimum-length';
+    process.env.PLATFORM_TENANT_PACKAGE_DIR = 'client-not-a-law-firm';
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({

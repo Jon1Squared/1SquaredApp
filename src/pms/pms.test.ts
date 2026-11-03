@@ -393,6 +393,49 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       if (qte.prospectEmail?.trim()) expect(qte.prospectEmail.trim()).toMatch(allowedDomainRegex);
       if (qte.prospectPhone?.trim()) expect(qte.prospectPhone.trim()).toMatch(ofcomDramaRegex);
     }
+
+    // R49: Verify both xlsx workbooks (data/pms and docs) and raw src/seed/demo.ts source text
+    const workbookPaths = [
+      path.join(process.cwd(), 'data', 'pms', '1Squared_PMS_Demo_Data.xlsx'),
+      path.join(process.cwd(), 'docs', '1Squared_PMS_Demo_Data.xlsx'),
+    ];
+    for (const wbPath of workbookPaths) {
+      expect(fs.existsSync(wbPath)).toBe(true);
+      const wb = openXlsxWorkbook(wbPath);
+      const feRows = wb.getSheetRows('fee_earners');
+      expect(feRows.length).toBeGreaterThan(0);
+      for (const row of feRows) {
+        if (row.email?.trim()) {
+          expect(row.email.trim(), `${wbPath} fee_earners email`).toMatch(allowedDomainRegex);
+        }
+      }
+      const clientRows = wb.getSheetRows('clients');
+      expect(clientRows.length).toBeGreaterThan(0);
+      for (const row of clientRows) {
+        if (row.email?.trim()) {
+          expect(row.email.trim(), `${wbPath} clients email`).toMatch(allowedDomainRegex);
+        }
+        if (row.phone?.trim()) {
+          expect(row.phone.trim(), `${wbPath} clients phone`).toMatch(ofcomDramaRegex);
+        }
+      }
+    }
+
+    const seedSourceText = fs.readFileSync(
+      path.join(process.cwd(), 'src', 'seed', 'demo.ts'),
+      'utf8',
+    );
+    const phoneFieldRe =
+      /(?:["']?(?:phone|mobile|directPhone|mainPhone|prospectPhone|number)["']?\s*:\s*["']([^"']+)["']|\bphone\(\s*["']([^"']+)["'])/g;
+    const matchedSeedPhones: string[] = [];
+    for (const m of seedSourceText.matchAll(phoneFieldRe)) {
+      const ph = (m[1] ?? m[2] ?? '').trim();
+      if (ph && !ph.includes('${')) {
+        matchedSeedPhones.push(ph);
+        expect(ph, 'src/seed/demo.ts phone literal').toMatch(ofcomDramaRegex);
+      }
+    }
+    expect(matchedSeedPhones.length).toBeGreaterThan(20);
   });
 });
 

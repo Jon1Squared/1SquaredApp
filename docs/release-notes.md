@@ -40,17 +40,23 @@
 
 ### Breaking & Operational Changes
 - **Demo Mode (`featureFlags.enableDemoMode`):**
-  - `featureFlags.enableDemoMode` now defaults to `false` in `base.json` and is enabled only in `config/environments/dev.json`.
+  - `featureFlags.enableDemoMode` defaults to `false` in `base.json` and environment overlays (`config/environments/dev.json`), and must be explicitly enabled in a non-live tenant configuration.
   - Schema and runtime validation reject `featureFlags.enableDemoMode: true` whenever `environment === 'live'`.
-  - Demo Mode persona switching requires `featureFlags.enableDemoMode === true`, `environment !== 'live'`, `NODE_ENV !== 'production'`, `firmSettings.demoMode === true`, and verifies that the signed-in actor holds every permission of the target persona and can access every restricted/staff matter (`restrictedAccessUserIds`) accessible to the target persona.
+  - Demo Mode persona switching requires `isDemoModeEnabled() === true` (`featureFlags.enableDemoMode === true`, `environment !== 'live'`, and `NODE_ENV !== 'production'`; `homePagesConfig.firmSettings.demoMode` is derived from `isDemoModeEnabled()` and is not a separate setting), requires a target persona marked `demo: true`, and verifies that the signed-in actor holds every permission of the target persona and can access every restricted/staff matter (`restrictedAccessUserIds`) accessible to the target persona.
+- **Tenant Package Resolution & Dynamic Extension Registration (`PLATFORM_TENANT_PACKAGE_DIR`):**
+  - `PLATFORM_TENANT_PACKAGE_DIR` must be explicitly configured outside `NODE_ENV === 'test'`; `resolveTenantPackageDir()` throws `TENANT_CONFIG_ERROR` when unset rather than falling back to the first `client-*` directory.
+  - `getPlatformExtensionHost()` dynamically discovers and registers client extensions declared under `<PLATFORM_TENANT_PACKAGE_DIR>/extensions/*/manifest.json` at startup without static client imports in core or host code.
+- **Infrastructure (`core/infra/main.bicep`):**
+  - `entraClientId` and `entraRedirectUri` are now required Bicep parameters (no empty-string defaults).
+  - Key Vault network ACLs are configured so Azure App Service can resolve `@Microsoft.KeyVault(...)` secret references at runtime.
 - **Scoped Blob Download Token Signing (`PLATFORM_BLOB_SIGNING_KEY`):**
   - `PLATFORM_BLOB_SIGNING_KEY` must be configured in Key Vault / environment in non-test environments (`resolveTenantBlobSigningKey`). The legacy static fallback key has been removed, and signature verification uses constant-time `crypto.timingSafeEqual`.
 - **Transitional Local Store (`data/runtime-store.json`):**
   - Local runtime state writes to the git-ignored `data/runtime-store.json` (bootstrapped from the tracked seed snapshot `data/seed-not-a-law-firm.json`), preventing dirty working trees during development and testing.
   - All invented employee and client fixture email addresses now use RFC 2606 reserved domains (`notalawfirm.example`, `*.example`, `example.com`) and Ofcom drama telephone ranges.
 - **Entra ID Session & RBAC Isolation:**
-  - `TenantContext` requires a branded `VerifiedSessionActorInput` minted exclusively by `src/server/entraAuth.ts`.
-  - In `hybrid` authority mode, token-derived roles are scoped strictly per `(tenantId, personId)` to the active session/request and cleared on `POST /api/auth/logout`.
+  - `TenantContext` requires a branded `VerifiedSessionActorInput` minted exclusively from a cryptographically verified `VerifiedEntraSessionPayload` in `src/server/entraAuth.ts`, and rejects actors missing `email` or `entraObjectId`.
+  - In `hybrid` authority mode, token-derived roles are stored per `(tenantId, personId)` with the verified session's expiry, resolved only inside an active `runWithActiveActorSession` (`AsyncLocalStorage`) request scope for that exact `(tenantId, personId)`, and cleared only for the signing-out `(tenantId, personId)` on `POST /api/auth/logout`.
   - `getEmployeeDetailsForUser` returns `sensitive: null` unless `logViewSensitive: true` is passed (which records a `view-sensitive` audit entry).
 - **Key Dates & Limitation Governance:**
   - Limitation date calculations are verified server-side against the `(ruleSetId, ruleId)` pair in tenant configuration.

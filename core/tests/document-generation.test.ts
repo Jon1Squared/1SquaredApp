@@ -40,16 +40,57 @@ import {
 import { GET as getDocumentDownloadRoute } from '@/app/api/documents/download/route';
 import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
 import { toMatterAccessSubject } from '@/domain/documentGeneration';
+import { resolveEmployeeRoles } from '@/domain/homeConfig';
+import { setActiveSessionTokenRolesForPerson } from '@/domain/rbac';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   getDocumentGenerationSnapshotForUser,
   getInitializedDocGenContext,
   resolveTenantBlobSigningKey,
   updateDocumentGenerationConfigService,
 } from '@/server/documentGenerationServices';
-import { setTestEntraSessionOverride } from '@/server/entraAuth';
+import {
+  createSignedEntraSessionCookie,
+  setTestEntraSessionOverride,
+  verifySignedEntraSessionCookie,
+} from '@/server/entraAuth';
 import { getStore, saveStore } from '@/server/store';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
+
+function registerTestSessionForEmployee(personId: string): void {
+  const store = getStore();
+  const tenantId = getActiveTenantConfiguration().tenantId;
+  const emp = store.people.find((p) => p.id === personId);
+  if (!emp) return;
+  const nowIso = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+  const roles = resolveEmployeeRoles(emp, store.teams);
+  const signed = createSignedEntraSessionCookie({
+    personId: emp.id,
+    oid: emp.entraObjectId ?? `00000000-0000-4000-8000-${emp.id.replace(/\D/g, '').padStart(12, '0')}`,
+    tid: '00000000-0000-4000-8000-000000000099',
+    tenantId,
+    sub: emp.id,
+    email: emp.emails?.[0]?.address ?? `${emp.id.toLowerCase()}@notalawfirm.example`,
+    displayName: `${emp.firstName ?? ''} ${emp.surname ?? ''}`.trim() || emp.id,
+    entraRoles: roles,
+    mappedRoles: roles,
+    entraGroups: [],
+    mfaVerified: true,
+    amr: ['pwd', 'mfa'],
+    authenticatedAt: nowIso,
+    expiresAt,
+  });
+  const verified = verifySignedEntraSessionCookie(signed);
+  if (verified) {
+    setActiveSessionTokenRolesForPerson(emp.id, roles, {
+      tenantId,
+      expiresAt,
+      verifiedSession: verified,
+    });
+  }
+}
 
 describe('Document Generation — Unit, Contract, Isolation, Record-Access & Security Suite', () => {
   const baseTenantConfig = loadAndValidateTenantConfig(
@@ -73,7 +114,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     __verifiedByOidcMiddleware: true as const,
     sub: 'P-ADMIN-B1',
     tenantId: 'pembroke-vaughan',
-    email: 'admin@pembrokevaughan.co.uk',
+    email: 'admin@pembrokevaughan.example',
     name: 'Bernard Sterling',
     roles: ['admin', 'managing_partner'],
     mfaVerified: true,
@@ -932,7 +973,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     const runner = new TenantMigrationRunner();
 
     const applied = runner.applyUp(ctxA);
-    expect(applied).toHaveLength(3);
+    expect(applied).toHaveLength(4);
     expect(runner.getActiveTables(ctxA)).toContain('document_templates');
     expect(runner.getActiveTables(ctxA)).toContain('template_usage_daily_summaries');
     expect(runner.getActiveTables(ctxA)).toContain('matter_document_locations');
@@ -1054,6 +1095,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       ),
     ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
 
+    registerTestSessionForEmployee('P-000004');
     const hostInit = await getInitializedDocGenContext('P-000004');
     const hostIssued = await hostInit.storage.issueScopedDownloadToken(
       hostInit.ctx,
@@ -1315,6 +1357,8 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       wallMatter.responsiblePartnerId = 'P-000001';
       wallMatter.teamMemberIds = ['P-000001'];
 
+      registerTestSessionForEmployee('P-000001');
+      registerTestSessionForEmployee('P-000007');
       const { ctx, repo: hostRepo } =
         await getInitializedDocGenContext('P-000001');
       const docRecord = {
@@ -1375,6 +1419,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         getDocumentGenerationSnapshotForUser('NON-EXISTENT-USER'),
       ).rejects.toThrow(/UNAUTHENTICATED/);
 
+      registerTestSessionForEmployee('P-000001');
       const beforeInvalidSave = structuredClone(
         store.documentGenerationConfigOverride,
       );

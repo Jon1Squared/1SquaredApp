@@ -858,6 +858,60 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
           a.recordId === 'KD-REMOVED-RULESET-PARTNER',
       ),
     ).toBe(true);
+
+    // 8. R94 (legacy branch): Superseding a legacy calculated key date (source: 'calculated' with no calculation object) without providing a new calculation requires keydate:override_calculation, converts replacement to manual, and logs keydate-override-calculation
+    const legacyCalculatedKd = {
+      ...partnerReplacedAfterRuleRemoved,
+      id: 'KD-LEGACY-CALC-NO-OBJ',
+      status: 'confirmed' as const,
+      source: 'calculated' as const,
+      calculation: undefined,
+    };
+    expect(() =>
+      supersedeConfirmedKeyDate({
+        existingKeyDate: legacyCalculatedKd,
+        newKeyDateId: 'KD-LEGACY-CALC-FE-DENIED',
+        updates: {
+          dueDate: '2028-08-01',
+        },
+        reason: 'Fee earner attempting to supersede legacy calculated date without calculation',
+        actor: feeEarner,
+        nowIso: '2026-02-05T12:00:00Z',
+        config,
+        matter: conveyancingMatter,
+        teams,
+        people: [feeEarner, supervisor, partner],
+        audit,
+        nextAuditId: () => `AUD-${seq++}`,
+      }),
+    ).toThrow(/KEY_DATE_PERMISSION_ERROR/);
+
+    const { replacementKeyDate: legacyReplacedByPartner } =
+      supersedeConfirmedKeyDate({
+        existingKeyDate: legacyCalculatedKd,
+        newKeyDateId: 'KD-LEGACY-CALC-PARTNER-OK',
+        updates: {
+          dueDate: '2028-08-01',
+        },
+        reason: 'Partner converting legacy calculated date to manual override.',
+        actor: partner,
+        nowIso: '2026-02-05T12:30:00Z',
+        config,
+        matter: conveyancingMatter,
+        teams,
+        people: [feeEarner, supervisor, partner],
+        audit,
+        nextAuditId: () => `AUD-${seq++}`,
+      });
+    expect(legacyReplacedByPartner.source).toBe('manual');
+    expect(legacyReplacedByPartner.calculation).toBeUndefined();
+    expect(
+      audit.some(
+        (a) =>
+          a.action === 'keydate-override-calculation' &&
+          a.recordId === 'KD-LEGACY-CALC-PARTNER-OK',
+      ),
+    ).toBe(true);
   });
 
   it('rejects forged/inactive teams and non-employee responsiblePersonIds on create and reassign (R38, R44)', () => {

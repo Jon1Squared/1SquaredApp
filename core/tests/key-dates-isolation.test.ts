@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CORE_TENANT_MIGRATIONS,
   KEY_DATES_MIGRATION_0003,
+  KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
   resolveTenantFromVerifiedToken,
   runTenantBackgroundJob,
   TenantKeyDateRepository,
@@ -85,10 +86,25 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(
       appliedA.some((m) => m.version === KEY_DATES_MIGRATION_0003.version),
     ).toBe(true);
+    expect(
+      appliedA.some(
+        (m) =>
+          m.version ===
+          KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.version,
+      ),
+    ).toBe(true);
     expect(runner.getActiveTables(ctxA)).toContain('key_dates');
     expect(runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
     expect(runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
     expect(runner.getActiveTables(ctxB)).not.toContain('key_dates');
+
+    // R110: Reversible rollback of 0004_key_date_reminder_last_skipped_reason_expand
+    const rolledBack0004 = runner.rollbackVersion(
+      ctxA,
+      '0004_key_date_reminder_last_skipped_reason_expand',
+    );
+    expect(rolledBack0004).toBe(true);
+    expect(runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
 
     // Reversible rollback on tenant-alpha (matching either version '0003' or name '0003_key_dates_expand')
     const rolledBack = runner.rollbackVersion(
@@ -126,7 +142,11 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       currentStageDaysBefore: 90,
       stageEnteredAt: '2026-11-03T00:00:00.000Z',
       escalationLevel: 0,
+      lastSkippedReason: 'no_permitted_assignees',
     });
+    expect(repo.getReminderState(ctxA, kdAlpha.id)?.lastSkippedReason).toBe(
+      'no_permitted_assignees',
+    );
     repo.putCalendarSync(ctxA, {
       keyDateId: kdAlpha.id,
       externalEvents: [{ target: 'person:P-ALPHA-1', eventId: 'evt-alpha-1' }],

@@ -15,6 +15,13 @@ import {
   getDocumentGenerationSnapshotForUser,
   getTemplateUsageReportService,
 } from '@/server/documentGenerationServices';
+import { resolveEmployeeRoles } from '@/domain/homeConfig';
+import { setActiveSessionTokenRolesForPerson } from '@/domain/rbac';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import {
+  createSignedEntraSessionCookie,
+  verifySignedEntraSessionCookie,
+} from '@/server/entraAuth';
 import { getStore, resetStore } from '@/server/store';
 
 describe('Host Document Generation Domain & Server Services', () => {
@@ -93,6 +100,34 @@ describe('Host Document Generation Domain & Server Services', () => {
       values: store.values,
     });
     expect(ctx.matter?.reference).toBe(matter.matterNumber);
+
+    const tenantId = getActiveTenantConfiguration().tenantId;
+    const emp = store.people.find((p) => p.id === 'P-000001')!;
+    const roles = resolveEmployeeRoles(emp, store.teams);
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+    const signed = createSignedEntraSessionCookie({
+      personId: emp.id,
+      oid: emp.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+      tid: '00000000-0000-4000-8000-000000000099',
+      tenantId,
+      sub: emp.id,
+      email: emp.emails?.[0]?.address ?? 'p1@notalawfirm.example',
+      displayName: `${emp.firstName ?? ''} ${emp.surname ?? ''}`.trim() || emp.id,
+      entraRoles: roles,
+      mappedRoles: roles,
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: nowIso,
+      expiresAt,
+    });
+    const verified = verifySignedEntraSessionCookie(signed)!;
+    setActiveSessionTokenRolesForPerson(emp.id, roles, {
+      tenantId,
+      expiresAt,
+      verifiedSession: verified,
+    });
 
     const snap = await getDocumentGenerationSnapshotForUser('P-000001');
     expect(snap.templates.length).toBeGreaterThanOrEqual(2);

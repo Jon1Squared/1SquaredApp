@@ -34,7 +34,11 @@ function resolveTenantPackageDir(): string {
   if (configured) {
     return configured;
   }
-  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+  if (
+    process.env.NODE_ENV !== 'test' ||
+    typeof window !== 'undefined' ||
+    typeof process.getBuiltinModule !== 'function'
+  ) {
     throw new Error(
       'TENANT_CONFIG_ERROR: PLATFORM_TENANT_PACKAGE_DIR must be configured to resolve tenant configuration.',
     );
@@ -166,11 +170,69 @@ export type VerifiedSessionActorInput = UnbrandedSessionActorInput & {
 };
 
 let cachedHost: ExtensionHost | null = null;
+let cachedHostPackageDir: string | null = null;
 let cachedCluster: PostgresTenantCluster | null = null;
 
+function isPlatformExtensionCandidate(
+  value: unknown,
+): value is import('@platform/core-api').PlatformExtension {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.manifest === 'object' &&
+    candidate.manifest !== null &&
+    typeof (candidate.manifest as Record<string, unknown>).id === 'string' &&
+    typeof candidate.hooks === 'object' &&
+    candidate.hooks !== null
+  );
+}
+
+function loadTenantPackageExtensions(host: ExtensionHost, packageDir: string): void {
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    return;
+  }
+  const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
+  const nodeModule = process.getBuiltinModule('node:module') as typeof import('node:module');
+  const extensionsRoot = path.join(process.cwd(), packageDir, 'extensions');
+  if (!fs.existsSync(extensionsRoot)) {
+    return;
+  }
+  const req = nodeModule.createRequire(path.join(process.cwd(), 'package.json'));
+  const entries = fs
+    .readdirSync(extensionsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  for (const extDirName of entries) {
+    const extDir = path.join(extensionsRoot, extDirName);
+    const manifestPath = path.join(extDir, 'manifest.json');
+    const entryCandidates = [
+      path.join(extDir, 'src', 'index.ts'),
+      path.join(extDir, 'src', 'index.js'),
+      path.join(extDir, 'index.ts'),
+      path.join(extDir, 'index.js'),
+    ];
+    const entryPath = entryCandidates.find((candidate) => fs.existsSync(candidate));
+    if (!fs.existsSync(manifestPath) || !entryPath) {
+      continue;
+    }
+    const loadedModule = req(entryPath) as Record<string, unknown>;
+    for (const exportedValue of Object.values(loadedModule)) {
+      if (isPlatformExtensionCandidate(exportedValue)) {
+        host.registerExtension(exportedValue);
+      }
+    }
+  }
+}
+
 export function getPlatformExtensionHost(): ExtensionHost {
-  if (!cachedHost) {
-    cachedHost = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+  const packageDir = resolveTenantPackageDir();
+  if (!cachedHost || cachedHostPackageDir !== packageDir) {
+    const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+    loadTenantPackageExtensions(host, packageDir);
+    cachedHost = host;
+    cachedHostPackageDir = packageDir;
   }
   return cachedHost;
 }
@@ -224,6 +286,12 @@ export function resolveCurrentTenantContext(
   if (!actorEmail) {
     throw new Error(
       'TENANCY_AUTH_ERROR: Verified OIDC session actor is missing required email/UPN claim.',
+    );
+  }
+  const actorOid = (actor.entraObjectId ?? '').trim();
+  if (!actorOid) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session actor is missing required entraObjectId (oid) claim.',
     );
   }
   const cfg = configOverride ?? getActiveTenantConfiguration();

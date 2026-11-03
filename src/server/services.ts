@@ -103,6 +103,7 @@ import {
   AuthorisationError,
   canPersonAccessMatter,
   getDefaultTenantRbacConfig,
+  getStoredActorSessionForPerson,
   isRegisteredPermissionKey,
   mergeRbacConfigOverlay,
   PERMISSION_REGISTRY,
@@ -110,6 +111,7 @@ import {
   resolvePersonForEntraClaims,
   resolvePersonPermissionSet,
   resolvePersonPermissions,
+  runWithActiveActorSession,
   setActiveSessionTokenRolesForPerson,
   setRuntimeRbacConfigOverride,
   validateUserOverrideOrRoleMutation,
@@ -126,6 +128,7 @@ import {
   setTestEntraSessionOverride,
   shouldUseSecureCookies,
   type EntraSessionPayload,
+  type VerifiedEntraSessionPayload,
 } from './entraAuth';
 import {
   getActiveTenantConfiguration,
@@ -280,7 +283,7 @@ export const USER_COOKIE = 'onesquared_user';
 export interface AuthenticatedActorContext {
   personId: string;
   person: Person;
-  session: EntraSessionPayload;
+  session: VerifiedEntraSessionPayload;
   mfaVerified: boolean;
   tenantId: string;
 }
@@ -310,14 +313,35 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
       actorUserId: entraSession.personId,
     });
   }
-  setActiveSessionTokenRolesForPerson(person.id, entraSession.mappedRoles);
+  const resolvedTenantId = entraSession.tenantId || tenantId;
+  setActiveSessionTokenRolesForPerson(person.id, entraSession.mappedRoles, {
+    tenantId: resolvedTenantId,
+    expiresAt: entraSession.expiresAt,
+    verifiedSession: entraSession,
+  });
   return {
     personId: person.id,
     person,
     session: entraSession,
     mfaVerified: Boolean(entraSession.mfaVerified),
-    tenantId,
+    tenantId: resolvedTenantId,
   };
+}
+
+export async function withAuthenticatedActor<R>(
+  fn: (actor: AuthenticatedActorContext) => Promise<R> | R,
+): Promise<R> {
+  const actor = await requireAuthenticatedActor();
+  return runWithActiveActorSession(
+    {
+      tenantId: actor.tenantId,
+      personId: actor.personId,
+      tokenRoles: actor.session.mappedRoles,
+      expiresAtMs: new Date(actor.session.expiresAt).getTime(),
+      verifiedSession: actor.session,
+    },
+    () => fn(actor),
+  );
 }
 
 export async function getCurrentUserId(): Promise<string> {
@@ -518,6 +542,20 @@ export function getKeyDatesConfig(store: FirmStore = getStore()): KeyDatesConfig
 }
 
 export function getAppSnapshot(
+  userId: string,
+  options?: { tokenRoles?: readonly string[] },
+) {
+  const activeTenantId = getActiveTenantConfiguration().tenantId;
+  const storedActorSession = getStoredActorSessionForPerson(
+    userId,
+    activeTenantId,
+  );
+  return runWithActiveActorSession(storedActorSession ?? null, () =>
+    getAppSnapshotInScope(userId, options),
+  );
+}
+
+function getAppSnapshotInScope(
   userId: string,
   options?: { tokenRoles?: readonly string[] },
 ) {
@@ -1047,6 +1085,8 @@ export function savePersonRecord(
     worksAtFirm?: boolean;
     employmentSubmitted?: Partial<EmploymentRecord> | null;
     sensitiveSubmitted?: Partial<EmployeeSensitiveRecord> | null;
+    sensitiveSectionOpened?: boolean;
+    sensitiveSectionEdited?: boolean;
     keepAsContactOnLeave?: boolean;
     initialLink?: {
       organisationId: string;
@@ -1419,11 +1459,19 @@ export function savePersonRecord(
             ...(m.teamMemberIds ?? []),
           ]);
           m.restrictedAccessUserIds = Array.from(allowed);
-          syncMatterLifecycleOnSaveSync({
+          void syncMatterLifecycleOnSaveSync({
             matter: m,
             previousMatter: prevMatter,
             userId: opts.byId,
             store,
+          }).catch((err) => {
+            console.error(
+              JSON.stringify({
+                level: 'error',
+                event: 'document_store.lifecycle_sync_unhandled',
+                code: (err as { code?: string })?.code ?? 'unavailable',
+              }),
+            );
           });
         }
       }
@@ -1619,8 +1667,18 @@ export function savePersonRecord(
     }
   }
 
-  // Store & audit sensitive information separately from main employment record
-  if (opts.sensitiveSubmitted) {
+  // Store & audit sensitive information separately from main employment record (R76).
+  // Require the sensitive section to be explicitly opened and edited when updating an existing record
+  // or when sensitiveSectionOpened / sensitiveSectionEdited flags are supplied.
+  const canApplySensitiveSubmission =
+    Boolean(opts.sensitiveSubmitted) &&
+    opts.sensitiveSectionOpened !== false &&
+    opts.sensitiveSectionEdited !== false &&
+    (!store.employeeSensitiveRecords?.[person.id] ||
+      (opts.sensitiveSectionOpened === true &&
+        opts.sensitiveSectionEdited === true));
+
+  if (canApplySensitiveSubmission && opts.sensitiveSubmitted) {
     if (!store.employeeSensitiveRecords) {
       store.employeeSensitiveRecords = {};
     }
@@ -2897,11 +2955,19 @@ export function saveMatterRecord(
   }
 
   if (existing) {
-    syncMatterLifecycleOnSaveSync({
+    void syncMatterLifecycleOnSaveSync({
       matter,
       previousMatter: existing,
       userId: opts.byId,
       store,
+    }).catch((err) => {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'document_store.lifecycle_sync_unhandled',
+          code: (err as { code?: string })?.code ?? 'unavailable',
+        }),
+      );
     });
   }
 
@@ -2972,11 +3038,19 @@ export function updateMatterConflictRecord(
     at: now,
   });
 
-  syncMatterLifecycleOnSaveSync({
+  void syncMatterLifecycleOnSaveSync({
     matter,
     previousMatter: prevMatter,
     userId: byId,
     store,
+  }).catch((err) => {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        event: 'document_store.lifecycle_sync_unhandled',
+        code: (err as { code?: string })?.code ?? 'unavailable',
+      }),
+    );
   });
 
   saveStore(store);
@@ -5317,6 +5391,7 @@ function finalizeEnquiryConversionToMatter(
     carryEnquiryKeyDatesToMatter({
       enquiry: enq,
       matter,
+      tenantId: store.firmId || getActiveTenantConfiguration().tenantId,
       keyDates: store.keyDates,
       tasks: store.tasks,
       teams: store.teams,
@@ -7934,7 +8009,14 @@ export function resolveOrProvisionEntraEmployee(
       byId: matchedPerson.id,
       at: now,
     });
-    setActiveSessionTokenRolesForPerson(matchedPerson.id, verifiedToken.roles);
+    const tokenExpiresAtMs =
+      typeof claims.exp === 'number'
+        ? claims.exp * 1000
+        : Date.now() + 8 * 60 * 60 * 1000;
+    setActiveSessionTokenRolesForPerson(matchedPerson.id, verifiedToken.roles, {
+      tenantId: verifiedToken.tenantId,
+      expiresAt: tokenExpiresAtMs,
+    });
     saveStore(store);
     return { person: matchedPerson, verifiedToken, rbacConfig };
   }
@@ -8689,6 +8771,7 @@ export async function resolveKeyDateOutcomeRecord(
 
     closeReminderTaskForKeyDate({
       keyDateId: kd.id,
+      tenantId: store.firmId || getActiveTenantConfiguration().tenantId,
       tasks: store.tasks,
       reminderStates: store.keyDateReminderStates ?? [],
       nowIso,
@@ -8753,6 +8836,7 @@ export async function reassignKeyDateTeamRecord(
 
     reassignKeyDateTeamAndOwners({
       keyDate: kd,
+      tenantId: store.firmId || getActiveTenantConfiguration().tenantId,
       teamId: input.teamId,
       responsiblePersonIds: input.responsiblePersonIds,
       reason: input.reason,
@@ -8945,6 +9029,7 @@ export function acknowledgeKeyDateReminderRecord(
 export function runKeyDateReminderSchedulerRecord(
   options?: {
     tenantCtx?: TenantContext | null;
+    session?: VerifiedEntraSessionPayload | null;
     byId: string;
     mfaVerified: boolean;
   } | null,
@@ -9001,30 +9086,30 @@ export function runKeyDateReminderSchedulerRecord(
     };
   }
 
-  // Always resolve the tenant context from the authenticated session / active tenant configuration
   const nowIso = new Date().toISOString();
-  const actorEmail =
-    actor.emails?.[0]?.address ??
-    `${actor.id.toLowerCase()}@tenant.example`;
+  const verifiedSession =
+    options?.session ??
+    (getStoredActorSessionForPerson(actor.id)?.verifiedSession as
+      | VerifiedEntraSessionPayload
+      | undefined);
   const effectiveTenantCtx =
     providedCtx ??
-    resolveCurrentTenantContext(
-      createVerifiedSessionActorFromEntraSession({
-        personId: actor.id,
-        oid: actor.entraObjectId ?? actor.id,
-        tid: '',
-        sub: actor.id,
-        email: actorEmail,
-        displayName: `${actor.firstName} ${actor.surname}`,
-        entraRoles: [...(actor.roles ?? [])],
-        mappedRoles: [...(actor.roles ?? [])],
-        entraGroups: [],
-        mfaVerified: mfaVerified === true,
-        amr: mfaVerified === true ? ['pwd', 'mfa'] : ['pwd'],
-        authenticatedAt: nowIso,
-        expiresAt: nowIso,
-      }),
+    (verifiedSession
+      ? resolveCurrentTenantContext(
+          createVerifiedSessionActorFromEntraSession(verifiedSession),
+        )
+      : null);
+  if (!effectiveTenantCtx) {
+    runTenantBackgroundJob(
+      {
+        jobId: 'keydate-reminder-job:missing-context',
+        tenantId: '',
+        correlationId: '',
+        payload: {},
+      },
+      () => undefined,
     );
+  }
 
   const todayIso = toIsoDate(new Date());
   store.keyDates = store.keyDates ?? [];
@@ -9032,9 +9117,9 @@ export function runKeyDateReminderSchedulerRecord(
 
   const result = runTenantBackgroundJob(
     {
-      jobId: `keydate-reminder-scheduler:${effectiveTenantCtx.tenantId}:${todayIso}`,
-      tenantId: effectiveTenantCtx.tenantId,
-      correlationId: effectiveTenantCtx.correlationId,
+      jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
+      tenantId: effectiveTenantCtx!.tenantId,
+      correlationId: effectiveTenantCtx!.correlationId,
       payload: { todayIso, nowIso },
     },
     (job) =>

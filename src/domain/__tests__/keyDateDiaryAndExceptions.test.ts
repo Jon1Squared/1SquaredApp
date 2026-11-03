@@ -636,14 +636,70 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       people: allTestPeople,
     });
     expect(privExceptions.some((e) => e.matterId === staffMatter.id)).toBe(true);
-    // R99: restricted_matter_no_permitted_assignee is reported to permitted viewer when reminder was skipped due to no permitted assignees
+    // R99 & R115: restricted_matter_no_permitted_assignee is reported to permitted viewer when reminder was skipped due to no permitted assignees, and NOT duplicated as reminder_escalated_unacknowledged
     expect(
-      privExceptions.some(
+      privExceptions.filter(
         (e) =>
           e.keyDateId === staffKeyDate.id &&
           e.kind === 'restricted_matter_no_permitted_assignee',
       ),
-    ).toBe(true);
+    ).toHaveLength(1);
+    expect(
+      privExceptions.some(
+        (e) =>
+          e.keyDateId === staffKeyDate.id &&
+          e.kind === 'reminder_escalated_unacknowledged',
+      ),
+    ).toBe(false);
+
+    // R115: An orphan key date whose matter is missing appears once under orphan_key_date_missing_matter for an admin (keydate:configure) with keyDateId only, and is omitted for non-admins
+    const orphanKeyDate: KeyDate = {
+      ...staffKeyDate,
+      id: 'KD-ORPHAN-MISSING-MATTER',
+      matterId: 'MAT-DOES-NOT-EXIST',
+    };
+    const orphanReminderState = {
+      ...staffReminderStates[0]!,
+      keyDateId: orphanKeyDate.id,
+      lastSkippedReason: 'missing_matter' as const,
+      escalationLevelReached: 1,
+    };
+    const adminViewer: Person = {
+      ...privilegedComplianceUser,
+      id: 'P-ADMIN-VIEWER',
+      roles: ['admin'],
+      appRole: 'admin',
+    };
+    const adminOrphanExceptions = computeKeyDateExceptions({
+      viewer: adminViewer,
+      todayIso,
+      config,
+      keyDates: [orphanKeyDate],
+      reminderStates: [orphanReminderState],
+      matters: [staffMatter],
+      teams,
+      people: [...allTestPeople, adminViewer],
+    });
+    const orphanMatches = adminOrphanExceptions.filter(
+      (e) => e.keyDateId === orphanKeyDate.id,
+    );
+    expect(orphanMatches).toHaveLength(1);
+    expect(orphanMatches[0]?.kind).toBe('orphan_key_date_missing_matter');
+    expect(orphanMatches[0]?.matterId).toBeUndefined();
+
+    const nonAdminOrphanExceptions = computeKeyDateExceptions({
+      viewer: riskComplianceUser,
+      todayIso,
+      config,
+      keyDates: [orphanKeyDate],
+      reminderStates: [orphanReminderState],
+      matters: [staffMatter],
+      teams,
+      people: allTestPeople,
+    });
+    expect(
+      nonAdminOrphanExceptions.some((e) => e.keyDateId === orphanKeyDate.id),
+    ).toBe(false);
 
     const unprivExceptions = computeKeyDateExceptions({
       viewer: riskComplianceUser,

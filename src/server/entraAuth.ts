@@ -10,6 +10,7 @@ import {
   type VerifiedOidcTokenClaims,
 } from '@/domain/rbac';
 import {
+  getActiveTenantConfiguration,
   type UnbrandedSessionActorInput,
   type VerifiedSessionActorInput,
 } from '@/platform/tenantRuntime';
@@ -23,11 +24,17 @@ function brandVerifiedSessionActor(
   return input as VerifiedSessionActorInput;
 }
 
+declare const VERIFIED_ENTRA_SESSION_BRAND: unique symbol;
+const VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL = Symbol.for(
+  'onesquared.verifiedEntraSessionPayload',
+);
+
 export const ENTRA_PKCE_COOKIE = 'onesquared_entra_pkce';
 export const ENTRA_SESSION_COOKIE = 'onesquared_entra_session';
 
 export interface EntraSessionPayload {
   personId: string;
+  tenantId?: string;
   oid: string;
   tid: string;
   sub: string;
@@ -40,6 +47,34 @@ export interface EntraSessionPayload {
   amr: string[];
   authenticatedAt: string;
   expiresAt: string;
+}
+
+export type VerifiedEntraSessionPayload = EntraSessionPayload & {
+  readonly [VERIFIED_ENTRA_SESSION_BRAND]: true;
+};
+
+function markAsVerifiedEntraSession(
+  session: EntraSessionPayload,
+): VerifiedEntraSessionPayload {
+  Object.defineProperty(session, VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL, {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return session as VerifiedEntraSessionPayload;
+}
+
+export function isVerifiedEntraSessionPayload(
+  session: unknown,
+): session is VerifiedEntraSessionPayload {
+  return Boolean(
+    session &&
+      typeof session === 'object' &&
+      (session as Record<symbol, unknown>)[
+        VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL
+      ] === true,
+  );
 }
 
 export interface EntraEnvStatus {
@@ -70,7 +105,7 @@ interface JwkKey {
 
 let cachedJwks: { tenantId: string; fetchedAt: number; keys: JwkKey[] } | null = null;
 const JWKS_CACHE_TTL_MS = 15 * 60 * 1000;
-let testEntraSessionOverride: EntraSessionPayload | null | undefined = undefined;
+let testEntraSessionOverride: VerifiedEntraSessionPayload | null | undefined = undefined;
 
 export function clearJwksCache(): void {
   cachedJwks = null;
@@ -82,13 +117,26 @@ export function setTestEntraSessionOverride(
   if (process.env.NODE_ENV !== 'test') {
     throw new Error('setTestEntraSessionOverride is only permitted in test environments.');
   }
-  testEntraSessionOverride = session;
-  if (session?.personId) {
-    setActiveSessionTokenRolesForPerson(session.personId, session.mappedRoles, {
-      expiresAt: session.expiresAt,
+  const previous = testEntraSessionOverride;
+  if (session === undefined || session === null) {
+    testEntraSessionOverride = session;
+    if (previous?.personId) {
+      clearActiveSessionTokenRoles(
+        previous.personId,
+        previous.tenantId || getActiveTenantConfiguration().tenantId,
+      );
+    }
+    return;
+  }
+  const signed = createSignedEntraSessionCookie(session);
+  const verified = verifySignedEntraSessionCookie(signed);
+  testEntraSessionOverride = verified;
+  if (verified?.personId) {
+    setActiveSessionTokenRolesForPerson(verified.personId, verified.mappedRoles, {
+      tenantId: verified.tenantId || getActiveTenantConfiguration().tenantId,
+      expiresAt: verified.expiresAt,
+      verifiedSession: verified,
     });
-  } else {
-    clearActiveSessionTokenRoles();
   }
 }
 
@@ -448,25 +496,29 @@ export function createSignedEntraSessionCookie(payload: EntraSessionPayload): st
 
 export function verifySignedEntraSessionCookie(
   rawCookieValue: string | undefined,
-): EntraSessionPayload | null {
+): VerifiedEntraSessionPayload | null {
   const session = verifySignedPayload<EntraSessionPayload>(rawCookieValue);
   if (!session) return null;
   if (new Date(session.expiresAt).getTime() < Date.now()) {
     return null;
   }
-  return session;
+  return markAsVerifiedEntraSession(session);
 }
 
-export async function getEntraSession(): Promise<EntraSessionPayload | null> {
+export async function getEntraSession(): Promise<VerifiedEntraSessionPayload | null> {
   if (process.env.NODE_ENV === 'test' && testEntraSessionOverride !== undefined) {
     if (testEntraSessionOverride?.personId) {
       setActiveSessionTokenRolesForPerson(
         testEntraSessionOverride.personId,
         testEntraSessionOverride.mappedRoles,
-        { expiresAt: testEntraSessionOverride.expiresAt },
+        {
+          tenantId:
+            testEntraSessionOverride.tenantId ||
+            getActiveTenantConfiguration().tenantId,
+          expiresAt: testEntraSessionOverride.expiresAt,
+          verifiedSession: testEntraSessionOverride,
+        },
       );
-    } else {
-      clearActiveSessionTokenRoles();
     }
     return testEntraSessionOverride;
   }
@@ -478,14 +530,16 @@ export async function getEntraSession(): Promise<EntraSessionPayload | null> {
       setActiveSessionTokenRolesForPerson(
         verified.personId,
         verified.mappedRoles,
-        { expiresAt: verified.expiresAt },
+        {
+          tenantId:
+            verified.tenantId || getActiveTenantConfiguration().tenantId,
+          expiresAt: verified.expiresAt,
+          verifiedSession: verified,
+        },
       );
-    } else {
-      clearActiveSessionTokenRoles();
     }
     return verified;
   } catch {
-    clearActiveSessionTokenRoles();
     return null;
   }
 }
@@ -513,6 +567,7 @@ export function buildEntraSessionPayload(params: {
 
   return {
     personId,
+    tenantId: verifiedToken.tenantId,
     oid: rawClaims.oid ?? verifiedToken.sub,
     tid: rawClaims.tid ?? '',
     sub: verifiedToken.sub,
@@ -531,25 +586,46 @@ export function buildEntraSessionPayload(params: {
 }
 
 export function createVerifiedSessionActorFromEntraSession(
-  session: EntraSessionPayload,
+  session: VerifiedEntraSessionPayload,
   overrides?: {
     correlationId?: string;
     tenantId?: string;
     untrustedRequestTenantOverride?: string;
+    groups?: readonly string[];
   },
 ): VerifiedSessionActorInput {
+  if (!session || !isVerifiedEntraSessionPayload(session)) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Session payload was not produced by verifySignedEntraSessionCookie or getEntraSession.',
+    );
+  }
+  const email = (session.email ?? '').trim();
+  if (!email) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session is missing required email/UPN claim.',
+    );
+  }
+  const oid = (session.oid ?? '').trim();
+  if (!oid) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session is missing required Entra Object ID (oid) claim.',
+    );
+  }
+  const mergedGroups = overrides?.groups
+    ? Array.from(new Set([...(session.entraGroups ?? []), ...overrides.groups]))
+    : session.entraGroups;
   return brandVerifiedSessionActor({
     id: session.personId,
     sub: session.sub || session.personId,
     name: session.displayName,
-    email: session.email,
-    upn: session.email,
+    email,
+    upn: email,
     roles: session.mappedRoles,
-    groups: session.entraGroups,
-    entraObjectId: session.oid,
+    groups: mergedGroups,
+    entraObjectId: oid,
     entraTenantId: session.tid,
     mfaVerified: session.mfaVerified,
-    tenantId: overrides?.tenantId,
+    tenantId: overrides?.tenantId ?? session.tenantId,
     untrustedRequestTenantOverride: overrides?.untrustedRequestTenantOverride,
     correlationId: overrides?.correlationId,
   });

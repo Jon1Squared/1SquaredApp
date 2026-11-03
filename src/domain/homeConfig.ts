@@ -11,6 +11,7 @@ import {
 } from './types';
 import {
   getDefaultTenantRbacConfig,
+  resolveActiveTenantIdForRbac,
   resolvePermissions,
   resolvePersonAuthoritativeRoles,
 } from './rbac';
@@ -786,13 +787,28 @@ export interface LeftRailVisibility {
  * Matches docs/role-home-pages.md and docs/designs/home/01..07.
  */
 export function getLeftRailVisibility(activeRole: string, userRoles: string[] = [activeRole]): LeftRailVisibility {
-  const config = { rbac: getDefaultTenantRbacConfig() };
+  const activeTenantId = resolveActiveTenantIdForRbac();
+  const config = { rbac: getDefaultTenantRbacConfig(activeTenantId) };
   const authoritativeRoles = userRoles.length > 0 ? userRoles : [activeRole];
   const userPerms = resolvePermissions({
+    context: {
+      tenantId: activeTenantId,
+      correlationId: '',
+      actorId: '__rail_user__',
+      actorRoles: authoritativeRoles,
+      mfaVerified: false,
+    },
     actor: { userId: '__rail_user__', roles: authoritativeRoles },
     config,
   });
   const activeRolePerms = resolvePermissions({
+    context: {
+      tenantId: activeTenantId,
+      correlationId: '',
+      actorId: '__rail_active_role__',
+      actorRoles: [activeRole],
+      mfaVerified: false,
+    },
     actor: { userId: '__rail_active_role__', roles: [activeRole] },
     config,
   });

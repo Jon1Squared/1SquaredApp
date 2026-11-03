@@ -33,6 +33,8 @@ export { ALL_DOCUMENT_PERMISSIONS };
 
 export interface DocumentPermissionActor {
   readonly id: string;
+  /** Optional tenant ID for tenant-scoped RBAC resolution. */
+  readonly tenantId?: string;
   /** Full set of assigned role keys for the user (from verified token or Person.roles). */
   readonly roles?: readonly string[];
   /** Unified per-person permission overrides (`grant` / `revoke`, ADR-0015). */
@@ -116,6 +118,25 @@ export function normaliseActorHomeRoles(
   return authoritative.filter((r) => validRoleSet.has(r)) as HomeRoleKey[];
 }
 
+function resolveDocGenTenantId(
+  actor: DocumentPermissionActor | null | undefined,
+  config?: DocumentRbacConfigInput,
+): string {
+  if (actor?.tenantId && actor.tenantId.trim()) {
+    return actor.tenantId.trim();
+  }
+  if (
+    config &&
+    typeof config === 'object' &&
+    'tenantId' in config &&
+    typeof (config as { tenantId?: unknown }).tenantId === 'string' &&
+    ((config as { tenantId: string }).tenantId.trim().length > 0)
+  ) {
+    return (config as { tenantId: string }).tenantId.trim();
+  }
+  return 'doc-gen-scope';
+}
+
 /**
  * Resolves the effective `DocumentPermission` set for an actor by delegating to the
  * single central `resolvePermissions` engine (`core/src/domain/rbac/resolver.ts`).
@@ -131,6 +152,13 @@ export function resolveDocumentPermissions(
   }
 
   const resolved = resolvePermissions({
+    context: {
+      tenantId: resolveDocGenTenantId(actor, config),
+      correlationId: '',
+      actorId: actor.id,
+      actorRoles: actor.roles ?? [],
+      mfaVerified: Boolean(actor.mfaVerified),
+    },
     config: normaliseConfigForResolver(config),
     actor: {
       userId: actor.id,
@@ -152,6 +180,13 @@ export function hasDocumentPermission(
 ): boolean {
   if (!actor?.id) return false;
   const resolved = resolvePermissions({
+    context: {
+      tenantId: resolveDocGenTenantId(actor, config),
+      correlationId: '',
+      actorId: actor.id,
+      actorRoles: actor.roles ?? [],
+      mfaVerified: Boolean(actor.mfaVerified),
+    },
     config: normaliseConfigForResolver(config),
     actor: {
       userId: actor.id,
@@ -179,6 +214,13 @@ export function canActorAccessMatterRecord(
   }
 
   const resolved = resolvePermissions({
+    context: {
+      tenantId: resolveDocGenTenantId(actor, config),
+      correlationId: '',
+      actorId: actor.id,
+      actorRoles: actor.roles ?? [],
+      mfaVerified: Boolean(actor.mfaVerified),
+    },
     config: normaliseConfigForResolver(config),
     actor: {
       userId: actor.id,

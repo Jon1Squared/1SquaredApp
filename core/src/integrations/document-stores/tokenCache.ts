@@ -371,11 +371,11 @@ export class DocumentStoreTokenService {
       process.env.PLATFORM_ENVIRONMENT;
     if (
       this.oboExchangeHandler === defaultOboExchangeHandler &&
-      envName === 'live'
+      !(envName === 'dev' || envName === 'test')
     ) {
       throw createDocumentStoreAuthError(
         'misconfigured',
-        'LIVE_TOKEN_HANDLER_REQUIRED: Default mock OBO token exchange handler cannot be used when environment is "live".',
+        'LIVE_TOKEN_HANDLER_REQUIRED: Default mock OBO token exchange handler is permitted only when environment is "dev" or "test".',
       );
     }
 
@@ -480,11 +480,11 @@ export class DocumentStoreTokenService {
       process.env.PLATFORM_ENVIRONMENT;
     if (
       this.appTokenHandler === defaultAppTokenAcquireHandler &&
-      envName === 'live'
+      !(envName === 'dev' || envName === 'test')
     ) {
       throw createDocumentStoreAuthError(
         'misconfigured',
-        'LIVE_TOKEN_HANDLER_REQUIRED: Default mock application token handler cannot be used when environment is "live".',
+        'LIVE_TOKEN_HANDLER_REQUIRED: Default mock application token handler is permitted only when environment is "dev" or "test".',
       );
     }
 

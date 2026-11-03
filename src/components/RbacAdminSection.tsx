@@ -278,6 +278,7 @@ export function RbacAdminSection({
         allPeople: people,
         teams,
         config: { rbac: localRbac },
+        context: { tenantId: 'preview' },
       }),
     );
   }, [selectedEmployee, overrideGrant, overrideRevoke, people, teams, localRbac]);

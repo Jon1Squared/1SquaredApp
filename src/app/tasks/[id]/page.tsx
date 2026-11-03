@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation';
 import { TaskDetailClient } from '@/components/TaskDetailClient';
+import { canUserReassignTask, canUserTakeTask } from '@/domain/tasks';
 import { getAppSnapshot, getCurrentUserId } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
@@ -16,6 +17,22 @@ export default async function TaskDetailPage({
   if (!task) notFound();
 
   const audit = snap.audit.filter((a) => a.recordType === 'task' && a.recordId === task.id);
+  const canTake = canUserTakeTask(
+    snap.currentUserId,
+    task,
+    snap.teams,
+    snap.people,
+    snap.values,
+    snap.currentUserPermissions,
+  );
+  const canReassign = canUserReassignTask(
+    snap.currentUserId,
+    task,
+    snap.teams,
+    snap.people,
+    snap.values,
+    snap.currentUserPermissions,
+  );
 
   return (
     <TaskDetailClient
@@ -29,6 +46,8 @@ export default async function TaskDetailPage({
       values={snap.values}
       audit={audit}
       currentUserId={snap.currentUserId}
+      canTake={canTake}
+      canReassign={canReassign}
     />
   );
 }

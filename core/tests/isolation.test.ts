@@ -15,10 +15,15 @@ import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environmen
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
 import {
   getActiveTenantConfiguration,
+  getPlatformExtensionHost,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '../../src/platform/tenantRuntime';
-import { createVerifiedSessionActorFromEntraSession } from '../../src/server/entraAuth';
+import {
+  createSignedEntraSessionCookie,
+  createVerifiedSessionActorFromEntraSession,
+  verifySignedEntraSessionCookie,
+} from '../../src/server/entraAuth';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
@@ -102,7 +107,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     // R55: resolveCurrentTenantContext() with no argument throws TENANCY_AUTH_ERROR
     expect(() => resolveCurrentTenantContext()).toThrow(/TENANCY_AUTH_ERROR/);
 
-    // R77: Plain unbranded object is rejected at compile time by tsc
+    // R77: Plain unbranded object is rejected at compile time by tsc on both resolveCurrentTenantContext and createVerifiedSessionActorFromEntraSession
     expect(() =>
       // @ts-expect-error R77: resolveCurrentTenantContext requires a branded VerifiedSessionActorInput
       resolveCurrentTenantContext({
@@ -112,37 +117,62 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }),
     ).toBeDefined();
 
+    expect(() =>
+      // @ts-expect-error R77: createVerifiedSessionActorFromEntraSession requires a branded VerifiedEntraSessionPayload
+      createVerifiedSessionActorFromEntraSession({
+        personId: 'P-000002',
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '00000000-0000-4000-8000-000000000000',
+        sub: 'P-000002',
+        email: 'dafydd.evans@notalawfirm.example',
+        displayName: 'Dafydd Evans',
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: '2026-10-31T10:00:00Z',
+        expiresAt: '2099-10-31T18:00:00Z',
+      }),
+    ).toThrow(/TENANCY_AUTH_ERROR/);
+
     // R55: resolveCurrentTenantContext rejects a forged tenantId that differs from the active tenant / session
+    const signedSession = verifySignedEntraSessionCookie(
+      createSignedEntraSessionCookie({
+        personId: 'P-000002',
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '00000000-0000-4000-8000-000000000000',
+        sub: 'P-000002',
+        email: 'dafydd.evans@notalawfirm.example',
+        displayName: 'Dafydd Evans',
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: '2026-10-31T10:00:00Z',
+        expiresAt: '2099-10-31T18:00:00Z',
+      }),
+    )!;
     expect(() =>
       resolveCurrentTenantContext(
-        createVerifiedSessionActorFromEntraSession(
-          {
-            personId: 'P-000002',
-            oid: '00000000-0000-4000-8000-000000000002',
-            tid: '00000000-0000-4000-8000-000000000000',
-            sub: 'P-000002',
-            email: 'dafydd.evans@notalawfirm.example',
-            displayName: 'Dafydd Evans',
-            entraRoles: ['fee_earner'],
-            mappedRoles: ['fee_earner'],
-            entraGroups: [],
-            mfaVerified: true,
-            amr: ['pwd', 'mfa'],
-            authenticatedAt: '2026-10-31T10:00:00Z',
-            expiresAt: '2026-10-31T18:00:00Z',
-          },
-          {
-            tenantId: 'fictional-chambers-uk',
-          },
-        ),
+        createVerifiedSessionActorFromEntraSession(signedSession, {
+          tenantId: 'fictional-chambers-uk',
+        }),
       ),
     ).toThrow(/TENANCY_FORGERY_DETECTED/);
 
-    // R102: Setting PLATFORM_TENANT_PACKAGE_DIR to a non-existent directory causes getActiveTenantConfiguration() to throw rather than silently returning NALF config
+    // R102: Setting PLATFORM_TENANT_PACKAGE_DIR to a non-existent directory or leaving it unset in production causes getActiveTenantConfiguration() to throw
     const prevDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+    const prevNodeEnv = process.env.NODE_ENV;
     try {
       setActiveTenantConfigForTesting(null);
       process.env.PLATFORM_TENANT_PACKAGE_DIR = 'non-existent-tenant-package-dir';
+      expect(() => getActiveTenantConfiguration()).toThrow(/TENANT_CONFIG_ERROR/);
+
+      setActiveTenantConfigForTesting(null);
+      delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
       expect(() => getActiveTenantConfiguration()).toThrow(/TENANT_CONFIG_ERROR/);
     } finally {
       if (prevDir === undefined) {
@@ -150,6 +180,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       } else {
         process.env.PLATFORM_TENANT_PACKAGE_DIR = prevDir;
       }
+      (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
     }
   });
 
@@ -246,6 +277,26 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(blockedResult.requiresPartnerSignOff).toBe(true);
     expect(blockedResult.allowProceed).toBe(false);
     expect(blockedResult.governanceWarnings[0]).toContain('£25,000');
+
+    // R108: Verify getPlatformExtensionHost() dynamically loads and registers tenant extensions from disk
+    const platformHost = getPlatformExtensionHost();
+    expect(
+      platformHost.getActiveExtensionsForTenant(config).map((ext) => ext.manifest.id),
+    ).toContain('nalf-matter-costs-governance');
+    const platformHookRes = await platformHost.executeMatterCostsHook(
+      'beforeMatterOpen',
+      ctx,
+      config,
+      {
+        matterId: 'M-000011',
+        workBasis: 'capped',
+        estimatedFeeGbp: 27984,
+        disbursementsTotalGbp: 500,
+        partnerSignOffCompleted: false,
+      },
+    );
+    expect(platformHookRes.requiresPartnerSignOff).toBe(true);
+    expect(platformHookRes.allowProceed).toBe(false);
 
     // Verify extension error isolation does not crash the core
     const faultyExtension: PlatformExtension = {

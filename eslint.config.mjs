@@ -5,6 +5,7 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  // Technical debt (Owner: Platform Frontend Team / @platform-ui-maintainers, ADR-0001 transitional host):
   // Legacy UI components predating this branch contain pre-existing React Compiler warnings;
   // keep those rules as 'error' across all new/updated components (including HomePagesAdminSection.tsx).
   {

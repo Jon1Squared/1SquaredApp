@@ -48,6 +48,7 @@ interface Props {
   quotes?: Quote[];
   values: ChoiceValue[];
   currentUserId: string;
+  currentUserRole?: import('@/domain/types').AppRole;
 }
 
 type TasksTab = 'my' | 'team' | 'created' | 'all';
@@ -114,6 +115,7 @@ export function TasksListClient({
   quotes = [],
   values,
   currentUserId,
+  currentUserRole,
 }: Props) {
   const router = useRouter();
 
@@ -122,8 +124,8 @@ export function TasksListClient({
     [people, currentUserId],
   );
   const appRole = useMemo(
-    () => resolveUserAppRole(currentUser, teams, values),
-    [currentUser, teams, values],
+    () => currentUserRole ?? resolveUserAppRole(currentUser, teams, values),
+    [currentUserRole, currentUser, teams, values],
   );
   const myTeams = useMemo(() => userTeams(currentUserId, teams), [currentUserId, teams]);
   const myTeamIds = useMemo(() => new Set(myTeams.map((t) => t.id)), [myTeams]);

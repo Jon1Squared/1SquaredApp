@@ -6,7 +6,7 @@ import { saveTaskAction, takeTaskAction } from '@/app/actions';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName } from '@/domain/names';
-import { canUserTakeTask, isTaskOpen, isTaskOverdue, tasksForRecord } from '@/domain/tasks';
+import { isTaskOpen, isTaskOverdue, tasksForRecord } from '@/domain/tasks';
 import type {
   ChoiceValue,
   Person,
@@ -34,6 +34,7 @@ interface Props {
   people: Person[];
   values: ChoiceValue[];
   currentUserId: string;
+  canClaimAnyTask?: boolean;
 }
 
 export function RecordTasksSection({
@@ -47,6 +48,7 @@ export function RecordTasksSection({
   people,
   values,
   currentUserId,
+  canClaimAnyTask = false,
 }: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
@@ -201,7 +203,15 @@ export function RecordTasksSection({
     ]
       .filter(Boolean)
       .join(' · ');
-    const canTake = canUserTakeTask(currentUserId, t, teams, people, values);
+    const canTake =
+      !t.assignedPersonId &&
+      (!t.assignedTeamId ||
+        canClaimAnyTask ||
+        teams.some(
+          (tm) =>
+            tm.id === t.assignedTeamId &&
+            (tm.memberIds.includes(currentUserId) || tm.leadIds.includes(currentUserId)),
+        ));
 
     return (
       <div key={t.id} className="list-row">

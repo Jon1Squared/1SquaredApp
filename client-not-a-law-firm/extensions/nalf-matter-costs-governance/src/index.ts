@@ -12,7 +12,7 @@ import type {
   MatterCostsHookResult,
   PlatformExtension,
 } from '@platform/core-api';
-import manifestJson from '../manifest.json';
+import manifestJson from '../manifest.json' with { type: 'json' };
 
 function evaluatePartnerCostGovernance(
   ctx: ExtensionExecutionContext,

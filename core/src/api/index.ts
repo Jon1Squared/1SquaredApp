@@ -1070,7 +1070,7 @@ export interface DocumentStoreProvider {
   }>;
 
   uploadContent(
-    ctx: UserAccessContext,
+    ctx: DocumentAccessContext,
     containerRef: DocumentStoreContainerRef,
     name: string,
     stream: ReadableStream<Uint8Array> | Uint8Array,
