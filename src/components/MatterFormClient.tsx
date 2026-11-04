@@ -4796,7 +4796,7 @@ export function MatterFormClient({
       reviewerNote:
         'Unrelated subject matter to HAR001-0003; written informed consent obtained from both Penarth Estates Ltd and Harbourline Housing Association.',
       reviewedById: currentUser.id,
-      reviewedByName: 'Bethan Rees',
+      reviewedByName: personDisplayName(currentUser),
       reviewedAt: '22 Oct 2026, 17:50',
     };
 
@@ -4805,7 +4805,7 @@ export function MatterFormClient({
       setMatches([mCoastline]);
       setHasRunSearch(true);
       setLastRunAtDisplay('22 Oct 2026, 17:42');
-      setLastRunByName('Bethan R.');
+      setLastRunByName(personDisplayName(currentUser));
       setPartiesChangedSinceSearch(false);
       setDeclarationConfirmed(true);
       setReviewerMessage('');
@@ -4817,7 +4817,7 @@ export function MatterFormClient({
           id: 'run-fast-1',
           runAtDisplay: '22 Oct 2026, 17:42',
           runById: currentUser.id,
-          runByName: 'Bethan R.',
+          runByName: personDisplayName(currentUser),
           searchTerms: ['Penarth Estates Ltd', 'Alun Davies', 'Coastline Outdoor Ltd'],
           partiesCount: 3,
           matchesCount: 1,
@@ -4831,14 +4831,14 @@ export function MatterFormClient({
     setOtherParties([pCoastline, pMorganPrice, pHarbourline]);
     setHasRunSearch(true);
     setLastRunAtDisplay('22 Oct 2026, 17:42');
-    setLastRunByName('Bethan R.');
+    setLastRunByName(personDisplayName(currentUser));
     setPartiesChangedSinceSearch(false);
     setSearchRuns([
       {
         id: 'run-full-1',
         runAtDisplay: '22 Oct 2026, 17:42',
         runById: currentUser.id,
-        runByName: 'Bethan R.',
+        runByName: personDisplayName(currentUser),
         searchTerms: [
           'Penarth Estates Ltd',
           'Alun Davies',
@@ -4948,7 +4948,7 @@ export function MatterFormClient({
             : null,
       approvedByName:
         statusToUse === 'Approved'
-          ? `${personDisplayName(currentUser)} (COLP)`
+          ? personDisplayName(currentUser)
           : statusToUse === 'Cleared'
             ? 'Cleared by fee earner'
             : null,
@@ -5015,14 +5015,15 @@ export function MatterFormClient({
       );
     }
 
-    // Include COLP
-    const colpEmp =
-      employees.find((e) => e.employeeRoleId === 'employee_role.risk_and_compliance') ??
-      employees.find((e) =>
-        (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('colp'),
-      );
+    // Include Risk & Compliance reviewer
+    const colpEmp = employees.find(
+      (e) =>
+        e.employeeRoleId === 'employee_role.risk_and_compliance' ||
+        e.roles?.includes('risk_compliance') ||
+        e.roles?.includes('managing_partner'),
+    );
     if (colpEmp) {
-      addPerson(colpEmp.id, 'COLP');
+      addPerson(colpEmp.id, 'Risk & Compliance');
     }
 
     // Include Practice Manager (e.g. Catrin Hopkins)
@@ -5741,10 +5742,11 @@ export function MatterFormClient({
     const added: ConflictReviewerComment = {
       id: `c-${Date.now()}`,
       authorId: currentUser.id,
-      authorName: isReviewerMode ? 'Bethan Rees' : personDisplayName(currentUser),
-      authorRole: isReviewerMode
-        ? 'Head of Risk & Compliance (COLP)'
-        : currentUser.jobTitle || 'Fee earner',
+      authorName: personDisplayName(currentUser),
+      authorRole:
+        currentUser.employment?.jobTitle ||
+        currentUser.jobTitle ||
+        (isReviewerMode ? 'Risk & Compliance' : 'Fee earner'),
       atDisplay: '22 Oct 2026, 17:49',
       text: newCommentText.trim(),
     };
@@ -10856,7 +10858,7 @@ export function MatterFormClient({
                     }}
                   >
                     Last run {lastRunAtDisplay || '22 Oct 2026, 17:42'} by{' '}
-                    {lastRunByName || 'Bethan R.'}
+                    {lastRunByName || personDisplayName(currentUser) || 'Fee earner'}
                   </div>
                 ) : null}
               </div>
@@ -11105,7 +11107,7 @@ export function MatterFormClient({
                                   <span className="conflict-reviewer-box__title">
                                     <ShieldCheck size={14} />
                                     <span>
-                                      Risk / Compliance Reviewer Decision (COLP)
+                                      Risk / Compliance Reviewer Decision
                                     </span>
                                   </span>
                                   <div

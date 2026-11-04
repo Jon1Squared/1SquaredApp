@@ -80,7 +80,7 @@ import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents
 import {
   hasPersonPermission,
   runWithActiveActorSession,
-} from '@/domain/rbac';
+} from '@/server/rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   buildEntraSessionPayload,
@@ -3879,43 +3879,46 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         }
 
         // R136 (b) & R135: Permitted user saves an information_barrier match -> hasEthicalWall becomes true; liftMatterRestriction enforces matter:restriction:lift (refusing partner), MFA, and reason, writes matter-restriction-lift audit, and persists across subsequent saves until a new barrier match is added
-        const barrierRes = runAsStoreEmployee('P-000001', () =>
-          updateMatterConflictRecord(
-            openMatter.id,
-            {
-              status: 'Approved',
-              outcomeLabel: 'Approved with conditions',
-              declarationConfirmed: true,
-              reviewerMessage: '',
-              lastRunAtDisplay: '2026-11-01',
-              lastRunById: 'P-000001',
-              lastRunByName: 'Carys Hughes',
-              parties: [],
-              matches: [
-                {
-                  id: 'CM-BARRIER-1',
-                  partyId: 'pt-1',
-                  partyName: 'Barrier Party',
-                  matchedRecordId: openMatter.clientId,
-                  matchedRecordName: 'Barrier Party',
-                  matchedRecordType: 'organisation',
-                  strength: 'Exact',
-                  whereFound: 'Matter',
-                  responsiblePartnerId: 'P-000001',
-                  responsiblePartnerName: 'Carys Hughes',
-                  dateLabel: '2026-11-01',
-                  disposition: 'potential_conflict',
-                  note: 'Prior instruction',
-                  reviewerDecision: 'approve_with_conditions',
-                  reviewerConditionType: 'information_barrier',
-                  reviewerNote: 'Ethical wall established',
-                },
-              ],
-              runs: [],
-              comments: [],
-            },
-            'P-000001',
-          ),
+        const barrierRes = runAsStoreEmployee(
+          'P-000001',
+          () =>
+            updateMatterConflictRecord(
+              openMatter.id,
+              {
+                status: 'Approved',
+                outcomeLabel: 'Approved with conditions',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '2026-11-01',
+                lastRunById: 'P-000001',
+                lastRunByName: 'Carys Hughes',
+                parties: [],
+                matches: [
+                  {
+                    id: 'CM-BARRIER-1',
+                    partyId: 'pt-1',
+                    partyName: 'Barrier Party',
+                    matchedRecordId: openMatter.clientId,
+                    matchedRecordName: 'Barrier Party',
+                    matchedRecordType: 'organisation',
+                    strength: 'Exact',
+                    whereFound: 'Matter',
+                    responsiblePartnerId: 'P-000001',
+                    responsiblePartnerName: 'Carys Hughes',
+                    dateLabel: '2026-11-01',
+                    disposition: 'potential_conflict',
+                    note: 'Prior instruction',
+                    reviewerDecision: 'approve_with_conditions',
+                    reviewerConditionType: 'information_barrier',
+                    reviewerNote: 'Ethical wall established',
+                  },
+                ],
+                runs: [],
+                comments: [],
+              },
+              'P-000001',
+            ),
+          { rolesOverride: ['partner', 'risk_compliance'] },
         );
         expect(barrierRes.matter?.hasEthicalWall).toBe(true);
 

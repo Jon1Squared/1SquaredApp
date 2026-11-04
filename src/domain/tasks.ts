@@ -8,6 +8,7 @@ import {
   IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY,
   resolvePersonAuthoritativeRoles,
   resolvePersonPermissionSet,
+  type ResolvePersonPermissionsOptions,
 } from './rbac';
 import type {
   AppRole,
@@ -130,11 +131,15 @@ export function resolveUserAppRole(
   person: Person | null | undefined,
   teams: Team[],
   _values: ChoiceValue[] = [],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): AppRole {
   if (!person) return 'fee_earner';
   if (person.appRole) return person.appRole;
   const roles = resolvePersonAuthoritativeRoles(person, teams);
-  const perms = resolvePersonPermissionSet(person, { teams });
+  const perms = resolvePersonPermissionSet(person, {
+    ...rbacOptions,
+    teams,
+  });
   if (roles.includes('admin') || person.employeeRoleId === 'employee_role.system_administrator') {
     return 'admin';
   }
@@ -179,6 +184,7 @@ export function canUserReassignTask(
   people: Person[],
   _values: ChoiceValue[] = [],
   userPermissions?: Iterable<string>,
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
   if (userPermissions) {
     const perms = new Set(userPermissions);
@@ -186,7 +192,11 @@ export function canUserReassignTask(
   } else {
     const user = people.find((p) => p.id === userId) ?? null;
     if (user) {
-      const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+      const perms = resolvePersonPermissionSet(user, {
+        ...rbacOptions,
+        allPeople: people,
+        teams,
+      });
       if (perms.has('task:reassign_any')) return true;
     }
   }
@@ -205,6 +215,7 @@ export function canUserTakeTask(
   people: Person[],
   _values: ChoiceValue[] = [],
   userPermissions?: Iterable<string>,
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
   if (task.assignedPersonId) return false;
   if (!task.assignedTeamId) return true;
@@ -214,7 +225,11 @@ export function canUserTakeTask(
   } else {
     const user = people.find((p) => p.id === userId) ?? null;
     if (user) {
-      const perms = resolvePersonPermissionSet(user, { allPeople: people, teams });
+      const perms = resolvePersonPermissionSet(user, {
+        ...rbacOptions,
+        allPeople: people,
+        teams,
+      });
       if (perms.has('task:claim_any')) return true;
     }
   }

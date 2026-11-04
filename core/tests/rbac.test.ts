@@ -32,28 +32,34 @@ import {
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import {
   computeStaffMatterStatus,
-  canUserAccessMatter,
-  resolveEmployeePermissions,
+  resolveEmployeePermissions as domainResolveEmployeePermissions,
 } from '../../src/domain/employment';
 import {
-  getLeftRailVisibility,
+  getLeftRailVisibility as domainGetLeftRailVisibility,
   resolveEmployeeRoles,
 } from '../../src/domain/homeConfig';
 import {
-  canUserReassignTask,
-  canUserTakeTask,
-  resolveUserAppRole,
-} from '../../src/domain/tasks';
+  resolvePersonPermissionSet as domainResolvePersonPermissionSet,
+  resolvePersonForEntraClaims as domainResolvePersonForEntraClaims,
+} from '../../src/domain/rbac';
 import {
   canPersonAccessMatter,
+  canUserAccessMatter,
+  canUserReassignTask,
+  canUserTakeTask,
   getDefaultTenantRbacConfig,
+  getLeftRailVisibility,
   getStoredActorSessionForPerson,
+  hasEmployeePermission,
   hasPersonPermission,
+  resolveEmployeePermissions,
   resolvePersonForEntraClaims,
   resolvePersonPermissions,
+  resolveUserAppRole,
   runWithActiveActorSession,
   setRuntimeRbacConfigOverride,
 } from '../../src/server/rbacRuntime';
+import { saveStore } from '../../src/server/store';
 import { buildDemoData } from '../../src/seed/demo';
 import { NextRequest } from 'next/server';
 import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
@@ -1855,8 +1861,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('omits synthetic test-token entraObjectId values from seeded people when demo/test mode is disabled (R117)', () => {
       const rawBase = getActiveTenantRawBaseConfig();
       const prevNodeEnv = process.env.NODE_ENV;
+      const prevPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
       try {
-        (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+        process.env.PLATFORM_TENANT_PACKAGE_DIR = 'client-not-a-law-firm';
         setActiveTenantConfigForTesting({
           ...rawBase,
           environment: 'live',
@@ -1865,6 +1872,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             enableDemoMode: false,
           },
         });
+        (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
 
         const seeded = buildDemoData();
         expect(seeded.people.length).toBeGreaterThan(0);
@@ -1873,6 +1881,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
       } finally {
         (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+        if (prevPkgDir === undefined) {
+          delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+        } else {
+          process.env.PLATFORM_TENANT_PACKAGE_DIR = prevPkgDir;
+        }
         setActiveTenantConfigForTesting(null);
       }
     });
@@ -2005,6 +2018,116 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(previewInvalidConfig.error).toMatch(/RBAC_CONFIG_INVALID/);
       } finally {
         resetAllDemoData('P-000001');
+      }
+    });
+
+    it('enforces explicit config.rbac and tenantId in domain helpers and honours tenant-only departmentGrants/revocations even after saveStore(undefined) (R148)', async () => {
+      const store = getStore();
+      const dafydd = store.people.find((p) => p.id === 'P-000002')!;
+
+      // Domain functions must fail closed with RBAC_CONFIG_REQUIRED when config.rbac or tenantId is omitted
+      expect(() => domainResolvePersonPermissionSet(dafydd)).toThrow(
+        /RBAC_CONFIG_REQUIRED/,
+      );
+      expect(() =>
+        domainResolvePersonPermissionSet(dafydd, {
+          config: { rbac: createDefaultRbacConfig() },
+        }),
+      ).toThrow(/RBAC_CONFIG_REQUIRED/);
+      expect(() => domainResolveEmployeePermissions(dafydd)).toThrow(
+        /RBAC_CONFIG_REQUIRED/,
+      );
+      expect(() => domainGetLeftRailVisibility('fee_earner', ['fee_earner'])).toThrow(
+        /RBAC_CONFIG_REQUIRED/,
+      );
+      expect(() =>
+        domainResolvePersonForEntraClaims({
+          claims: { oid: 'oid-1', tid: 'tid-1', sub: 'sub-1', email: 'a@b.c' },
+          people: [dafydd],
+        }),
+      ).toThrow(/RBAC_CONFIG_REQUIRED/);
+
+      // Configure a tenant-only departmentGrants entry ('DEPT-CUSTOM-IT') and revoke 'matter:create' from 'fee_earner'
+      const customConfig = structuredClone(
+        notALawFirmBaseConfig,
+      ) as unknown as TenantConfiguration;
+      const defaultRbac = createDefaultRbacConfig();
+      const feeEarnerPerms = (
+        customConfig.rbac?.roles?.['fee_earner']?.permissions ??
+        defaultRbac.roles['fee_earner']!.permissions
+      ).filter((p) => p !== 'matter:create');
+      customConfig.rbac = {
+        ...defaultRbac,
+        ...customConfig.rbac,
+        roles: {
+          ...defaultRbac.roles,
+          ...(customConfig.rbac?.roles ?? {}),
+          fee_earner: {
+            ...defaultRbac.roles['fee_earner']!,
+            permissions: feeEarnerPerms,
+          },
+        },
+        departmentGrants: {
+          ...defaultRbac.departmentGrants,
+          ...(customConfig.rbac?.departmentGrants ?? {}),
+          'DEPT-CUSTOM-IT': ['employee:edit_core'],
+        },
+      };
+
+      try {
+        setActiveTenantConfigForTesting(
+          customConfig as unknown as Record<string, unknown>,
+        );
+        setRuntimeRbacConfigOverride(undefined);
+        // Also simulate saveStore when store has no runtime rbac override
+        saveStore(store);
+
+        const customItPerson = {
+          ...dafydd,
+          id: 'P-CUSTOM-IT',
+          departmentId: 'DEPT-CUSTOM-IT',
+          employment: {
+            ...dafydd.employment!,
+            departmentId: 'DEPT-CUSTOM-IT',
+          },
+        };
+
+        // Outside session: tenant-only departmentGrants is honoured and revoked 'matter:create' is denied
+        expect(
+          hasEmployeePermission(
+            customItPerson,
+            'employee:edit_core',
+            [customItPerson],
+            store.teams,
+          ),
+        ).toBe(true);
+        expect(hasPersonPermission(customItPerson, 'matter:create')).toBe(false);
+
+        // Inside session: tenant-only departmentGrants is honoured and revoked 'matter:create' is denied
+        await runWithActiveActorSession(
+          {
+            personId: customItPerson.id,
+            tenantId: customConfig.tenantId,
+            tokenRoles: ['fee_earner'],
+            expiresAtMs: Date.now() + 3600_000,
+          },
+          async () => {
+            expect(
+              hasEmployeePermission(
+                customItPerson,
+                'employee:edit_core',
+                [customItPerson],
+                store.teams,
+              ),
+            ).toBe(true);
+            expect(hasPersonPermission(customItPerson, 'matter:create')).toBe(
+              false,
+            );
+          },
+        );
+      } finally {
+        setActiveTenantConfigForTesting(null);
+        setRuntimeRbacConfigOverride(undefined);
       }
     });
   });

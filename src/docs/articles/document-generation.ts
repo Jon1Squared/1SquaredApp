@@ -6,7 +6,7 @@ export const documentGenerationArticle: DocArticle = {
   section: 'documents-dms',
   summary:
     'How to author .docx precedent templates, map Field Catalogue placeholders, approve template versions with separation of duties, generate merged documents, and review template usage.',
-  updated: '2026-11-03',
+  updated: '2026-11-04',
   body: `
 1Squared includes a built-in **Document Generation & Precedent Management** engine that merges live client, matter, party, fee earner, and financial data into Word (\`.docx\`) templates while enforcing role-based field permissions, restricted-matter controls, and two-person template approval.
 
@@ -33,6 +33,7 @@ Generated documents are stored in the tenant’s isolated document storage conta
 Template authors with \`document_template:view\` and \`document_template:build\` permissions can create and update templates under **Administration → Document Templates**:
 
 - **Canonical Field Catalogue**: Placeholders use \`{{ group.field | filter }}\` syntax (for example \`{{ client.name }}\`, \`{{ matter.reference }}\`, \`{{ feeEarner.fullName }}\`, \`{{ financial.feeEstimate | currency }}\`, or \`{{ date.today | date:"d MMMM yyyy" }}\`).
+- **Firm Contact Details (\`firm.contactEmail\` & \`firm.website\`)**: Document headers and footers can reference \`{{ firm.contactEmail }}\` and \`{{ firm.website }}\`, which are populated from the tenant configuration keys \`firm.contactEmail\` and \`firm.website\` (validated as email and hostname/URL formats respectively). For backward compatibility, deprecated \`branding.contactEmail\` and \`branding.website\` values act as fallbacks when \`firm.*\` is unset, and both merge fields resolve to blank strings (\`""\`) if neither is configured.
 - **Automatic Placeholder Extraction**: Uploading a \`.docx\` file extracts all placeholders across the document body, headers, and footers, automatically maps known Field Catalogue keys, and highlights any unmapped placeholders before submission.
 - **Portable Template Packages**: Templates and their placeholder mappings can be exported and imported across environments (\`dev\`, \`test\`, \`training\`, \`live\`) as schema-validated template packages.
 

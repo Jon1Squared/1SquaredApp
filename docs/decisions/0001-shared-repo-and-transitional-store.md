@@ -22,7 +22,7 @@ During active product development:
 3. **Transitional Store Coexistence:** Feature development in the Next.js application (`src/app/`, `src/components/`, `src/domain/`, `src/server/store.ts`, `src/server/services.ts`) may continue to read and write through `src/server/store.ts` while domain modules are progressively migrated to `core/src/tenancy/`, provided that:
    - All new features in `src/` remain configuration-driven (Layer 1/2) rather than hardcoding firm-specific rules.
    - Any change to `core/src/tenancy/` or multi-tenant data access is covered by two-tenant isolation tests in `core/tests/`.
-   - Asynchronous matter saves (`saveMatterRecord`) check for concurrent updates (`updatedAt`) after awaiting extension hooks and never roll back monotonic ID counters on a hook veto; when cutting over to per-tenant PostgreSQL in hosted/single-tenant deployments, matter updates must enforce optimistic concurrency (row versioning / `updated_at` check) or `SELECT ... FOR UPDATE`.
+   - **Amendment (pending approval, 4 November 2026):** Asynchronous matter saves (`saveMatterRecord`) check for concurrent updates (`updatedAt`) after awaiting extension hooks and never roll back monotonic ID counters on a hook veto; when cutting over to per-tenant PostgreSQL in hosted/single-tenant deployments, matter updates must enforce optimistic concurrency (row versioning / `updated_at` check) or `SELECT ... FOR UPDATE`.
 
 ## Alternatives Considered
 

@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AdminClient, type AdminTab } from '@/components/AdminClient';
 import { createDefaultRoleConfigs } from '@/domain/homeConfig';
-import { hasPersonPermission } from '@/domain/rbac';
+import { hasPersonPermission } from '@/server/rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { getEntraEnvStatus } from '@/server/entraAuth';
 import { getAppSnapshot, getPmsAdminSnapshot, withPageActor } from '@/server/services';

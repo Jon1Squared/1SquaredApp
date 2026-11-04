@@ -504,6 +504,24 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
 ];
 
+export function validateMigrationCatalogueOrder(
+  migrations: readonly TenantMigrationDefinition[],
+): void {
+  const seenVersions = new Set<string>();
+  for (const migration of migrations) {
+    for (const depVersion of migration.dependsOn ?? []) {
+      if (!seenVersions.has(depVersion)) {
+        throw new Error(
+          `MIGRATION_CATALOGUE_ORDER_ERROR: Migration "${migration.version}" declares dependsOn "${depVersion}", which does not appear earlier in the migration catalogue.`,
+        );
+      }
+    }
+    seenVersions.add(migration.version);
+  }
+}
+
+validateMigrationCatalogueOrder(CORE_TENANT_MIGRATIONS);
+
 export function computeMigrationChecksum(migration: TenantMigrationDefinition): string {
   return crypto
     .createHash('sha256')
@@ -596,16 +614,30 @@ export class TenantMigrationRunner {
       return false;
     }
 
+    const combinedByVersion = new Map<string, TenantMigrationDefinition>();
+    for (const m of CORE_TENANT_MIGRATIONS) {
+      combinedByVersion.set(m.version, m);
+    }
+    for (const m of migrations) {
+      combinedByVersion.set(m.version, m);
+    }
+    const allKnownMigrations = Array.from(combinedByVersion.values());
+
     const targetIndex = migrations.findIndex(
       (m) => m.version === version || m.name === version,
     );
-    const definition = targetIndex >= 0 ? migrations[targetIndex] : undefined;
+    const definition =
+      targetIndex >= 0
+        ? migrations[targetIndex]
+        : allKnownMigrations.find(
+            (m) => m.version === version || m.name === version,
+          );
     const targetVersion = definition?.version ?? version;
     if (!dbMigrations.has(targetVersion)) {
       return false;
     }
 
-    const dependants = migrations.filter(
+    const dependants = allKnownMigrations.filter(
       (m) =>
         dbMigrations.has(m.version) &&
         (m.dependsOn ?? []).includes(targetVersion),

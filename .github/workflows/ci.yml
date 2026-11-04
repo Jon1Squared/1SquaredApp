@@ -18,6 +18,9 @@ jobs:
   verify:
     name: TypeScript, Isolation Tests & Build
     runs-on: ubuntu-latest
+    env:
+      PLATFORM_TENANT_PACKAGE_DIR: client-not-a-law-firm
+      PLATFORM_ENVIRONMENT: test
 
     steps:
       - name: Checkout repository
@@ -34,8 +37,6 @@ jobs:
 
       - name: Generate extension registry
         run: npm run generate:extensions
-        env:
-          PLATFORM_TENANT_PACKAGE_DIR: client-not-a-law-firm
 
       - name: TypeScript typecheck
         run: npx tsc --noEmit
@@ -76,10 +77,14 @@ jobs:
             }
           '
 
+      - name: Verify generated extension registry contains bundled extension
+        run: grep -q "extModule_0" src/platform/generated/extensionRegistry.ts
+
       - name: Run unit, contract & two-tenant isolation tests
-        run: npx vitest run
+        run: npm test
 
       - name: Verify production build
         env:
           PLATFORM_TENANT_PACKAGE_DIR: client-not-a-law-firm
+          PLATFORM_ENVIRONMENT: live
         run: npm run build

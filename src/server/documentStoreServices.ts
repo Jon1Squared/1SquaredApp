@@ -66,7 +66,7 @@ import { personDisplayName } from '@/domain/names';
 import {
   getActiveActorSession,
   resolvePersonPermissions,
-} from '@/domain/rbac';
+} from './rbacRuntime';
 import type { Matter, Person } from '@/domain/types';
 import {
   getActiveTenantConfiguration,

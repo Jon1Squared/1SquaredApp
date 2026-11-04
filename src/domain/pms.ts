@@ -10,7 +10,10 @@
 import { formatDate } from './dates';
 import { resolveLabel } from './lists';
 import { normaliseEmail, normaliseRegNumber, normaliseText } from './normalise';
-import { resolvePersonPermissionSet } from './rbac';
+import {
+  resolvePersonPermissionSet,
+  type ResolvePersonPermissionsOptions,
+} from './rbac';
 import { resolveUserAppRole } from './tasks';
 import type {
   AppRole,
@@ -66,11 +69,12 @@ export function canUserViewFinance(
   user: Person | null | undefined,
   teams: Team[],
   values: ChoiceValue[] = [],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
   if (!user) return true;
-  const appRole: AppRole = resolveUserAppRole(user, teams, values);
+  const appRole: AppRole = resolveUserAppRole(user, teams, values, rbacOptions);
   if (appRole === 'call_handler') return false;
-  const perms = resolvePersonPermissionSet(user, { teams });
+  const perms = resolvePersonPermissionSet(user, { ...rbacOptions, teams });
   return perms.has('finance:view_matter') || perms.has('finance:view');
 }
 

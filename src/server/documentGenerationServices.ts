@@ -71,9 +71,10 @@ import {
   toMatterAccessSubject,
 } from '@/domain/documentGeneration';
 import {
+  canPersonAccessMatter,
   getActiveActorSession,
   hasPersonPermission,
-} from '@/domain/rbac';
+} from './rbacRuntime';
 import type { Person } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
@@ -1080,9 +1081,24 @@ export async function previewTemplateService(
   const engine = new BasicMergeEngine();
   const pdfConverter = new BuiltInOpenXmlPdfConverter();
 
+  const accessibleMatters = store.matters.filter((m) =>
+    canPersonAccessMatter(m, user.id, user, {
+      allPeople: store.people,
+      teams: store.teams,
+      config,
+    }),
+  );
+  if (input.matterId) {
+    const requestedMatter = accessibleMatters.find(
+      (m) => m.id === input.matterId,
+    );
+    if (!requestedMatter) {
+      throw new Error('Matter not found or restricted.');
+    }
+  }
   const matter = input.matterId
-    ? store.matters.find((m) => m.id === input.matterId)
-    : store.matters.find((m) => !m.isStaffMatter) ?? store.matters[0];
+    ? accessibleMatters.find((m) => m.id === input.matterId)
+    : accessibleMatters.find((m) => !m.isStaffMatter) ?? accessibleMatters[0];
   const organisation = input.organisationId
     ? store.organisations.find((o) => o.id === input.organisationId)
     : undefined;

@@ -6,9 +6,9 @@ export const mattersEnquiriesTasksNavigationArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the Key Dates & Limitation module connects with Enquiries, Matter opening and closure gates, the single-task reminder model, and left-rail navigation.',
-  updated: '2026-11-03',
+  updated: '2026-11-04',
   body: `
-This guide explains how **Matters**, **Enquiries**, **Tasks**, and **Navigation** work together across 1Squared, including how the [Key Dates & Limitation](/docs/key-dates-overview) module integrates into each screen.
+This guide explains how **Matters**, **Enquiries**, **Tasks**, and **Navigation** work together across 1Squared, including how the [Key Dates & Limitation](/docs/key-dates-overview) module and conflict review routing integrate into each screen.
 
 ## Enquiries and conversion to a matter
 
@@ -18,9 +18,18 @@ This guide explains how **Matters**, **Enquiries**, **Tasks**, and **Navigation*
 ## Matters: opening gate, Tasks & Dates tab, and closure gate
 
 - **Matter profile (\`/matters/[id]\`)**: Under the **Tasks & Dates** tab, the **Key dates & limitation** panel sits alongside matter tasks and critical dates.
-- **Matter opening gate**: When a matter type specifies \`requiredKeyDateTypeIds\`, a matter cannot transition from *Pre-open* to *Open* until each required key date type is either added or recorded as **Not applicable** with a mandatory reason.
+- **Matter opening gate**: When a matter type specifies \`requiredKeyDateTypeIds\`, a matter cannot transition from *Pre-open* to *Open* until each required key date type is either added or recorded as **Not applicable** with a mandatory reason. In addition, transitioning a draft matter to open (whether from the matter form or when clearing a referred conflict check via \`updateMatterConflictRecord\`) runs any enabled \`beforeMatterOpen\` extension gate and requires all configured extension manifests to load cleanly.
 - **Matter closure gate**: When \`blockClosureWithOpenDates\` is enabled for the matter type, the matter cannot be closed or archived while any key date remains \`provisional\`, \`awaiting_verification\`, or \`confirmed\`.
-- **Restricted (staff) matters**: Matters with \`restrictedAccessUserIds\` enforce strict data-layer access control (\`matter.restrictedAccessUserIds.includes(viewerId)\`) across the matter profile, team diary, reminders, and compliance exceptions, and never sync to external Outlook calendars.
+- **Restricted (staff) & ethical-wall matters**: Matters with \`isStaffMatter\`, \`hasEthicalWall\`, or \`restrictedAccessUserIds\` enforce strict server-side access control (\`canPersonAccessMatter\`) across \`getAppSnapshot\`, matter lists, linked tasks, enquiries, quotes, notes, audit entries, PMS summary views, team diaries, reminders, and compliance exceptions, and never sync to external Outlook calendars.
+
+## Referred conflict review routing (\`conflictReview\`)
+
+- When a matter is saved with a referred conflict check (\`submit_referred\`), 1Squared creates or updates a conflict review task using the tenant configuration section \`conflictReview\`:
+  - \`conflictReview.assigneeTeamKey\`: Exact team identifier (\`id\`, \`code\`, or \`name\`) of the team that receives referred conflict reviews (for example \`"TM-000009"\`).
+  - \`conflictReview.assigneeRoleKey\`: Optional stable role key (\`employee_role.*\` or \`HomeRoleKey\`, such as \`"employee_role.risk_and_compliance"\`) used to select an assignee within that team.
+- Candidate assignees are filtered by \`canPersonAccessMatter\` so a restricted or staff matter is never assigned to someone outside its allow-list.
+- When \`conflictReview.assigneeTeamKey\` is not configured or no permitted assignee matches, the task is left unassigned in the team queue (\`assignedPersonIds: []\`) and a structured \`conflict_review_task_unassigned\` warning is logged. On restricted or staff matters with no permitted reviewer, the task uses a generic title (\`[Ref] Conflict review required (restricted matter)\`) that omits client and matter names.
+- Recording an \`Approved\` or \`Declined\` conflict decision via \`updateMatterConflictRecord\` requires the \`risk:view\` permission in addition to \`matter:edit\`, and records \`conflictClearedById\` / \`approvedById\` from the authenticated server caller.
 
 ## Tasks: one reminder task per confirmed key date
 

@@ -279,7 +279,11 @@ export class ExtensionHost {
           typeof (maybePromise as Promise<MatterCostsHookResult>).then ===
             'function'
         ) {
-          continue;
+          // Attach a no-op rejection handler to avoid unhandled rejection if the promise later rejects
+          void (maybePromise as Promise<MatterCostsHookResult>).catch(() => undefined);
+          throw new Error(
+            `Extension "${ext.manifest.id}" returned an async Promise from "${hookName}" during synchronous execution.`,
+          );
         }
         const elapsedMs = Date.now() - startedAt;
         if (elapsedMs > timeoutMs) {

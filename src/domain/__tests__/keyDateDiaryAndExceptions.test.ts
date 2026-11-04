@@ -12,7 +12,7 @@ import {
   computeKeyDateExceptions,
   queryTeamDiaryEntries,
 } from '../keyDateDiary';
-import { canUserAccessMatter } from '../employment';
+import { canUserAccessMatter } from '@/server/rbacRuntime';
 import { canViewerAccessMatterKeyDates } from '../keyDates';
 import {
   exportKeyDateExceptionsReportRecord,

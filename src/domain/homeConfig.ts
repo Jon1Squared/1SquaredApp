@@ -10,9 +10,9 @@ import {
   Team,
 } from './types';
 import {
-  getCachedOrDefaultRbacConfig,
   resolvePermissions,
   resolvePersonAuthoritativeRoles,
+  type RbacConfiguration,
 } from './rbac';
 
 export interface PanelDefinition {
@@ -793,9 +793,19 @@ export interface LeftRailVisibility {
  * Compute left-rail item visibility based on the user's active viewing role and full role list.
  * Matches docs/role-home-pages.md and docs/designs/home/01..07.
  */
-export function getLeftRailVisibility(activeRole: string, userRoles: string[] = [activeRole]): LeftRailVisibility {
-  const activeTenantId = 'default';
-  const config = { rbac: getCachedOrDefaultRbacConfig(activeTenantId) };
+export function getLeftRailVisibility(
+  activeRole: string,
+  userRoles: string[] = [activeRole],
+  options?: { config?: { rbac: RbacConfiguration }; tenantId?: string },
+): LeftRailVisibility {
+  const activeTenantId = options?.tenantId?.trim() || '';
+  const rbacConfig = options?.config?.rbac;
+  if (!rbacConfig || !activeTenantId) {
+    throw new Error(
+      'RBAC_CONFIG_REQUIRED: getLeftRailVisibility needs config.rbac and tenantId.',
+    );
+  }
+  const config = { rbac: rbacConfig };
   const authoritativeRoles = userRoles.length > 0 ? userRoles : [activeRole];
   const userPerms = resolvePermissions({
     context: {

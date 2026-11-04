@@ -4,20 +4,30 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildTenantCacheKey,
+   collectConfigDeprecationWarnings,
+  ConflictReviewConfigSubSchema,
   CORE_API_VERSION,
+  CORE_TENANT_MIGRATIONS,
+  DOCUMENT_GENERATION_MIGRATION_0001,
+  DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
   ExtensionHookPointSchema,
   ExtensionHost,
   ExtensionManifestSchema,
   ExtensionPermissionSchema,
+  FirmConfigSubSchema,
+  KEY_DATES_MIGRATION_0003,
   loadAndValidateTenantConfig,
   PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
   runTenantBackgroundJob,
+  TenantMigrationRunner,
   validateExtensionManifest,
+  validateMigrationCatalogueOrder,
   type PlatformExtension,
 } from '@platform/core';
 import extensionManifestJsonSchema from '../schemas/extension-manifest.schema.json';
+import tenantConfigJsonSchema from '../schemas/tenant-config.schema.json';
 import { generateExtensionRegistry } from '../../scripts/generate-extension-registry';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
@@ -42,8 +52,14 @@ import {
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
+  createOrProposeKeyDateRecord,
+  getAppSnapshot,
+  getMatterPmsViewBundle,
+  liftMatterRestriction,
+  markEngagementLetterDrafted,
   resetAllDemoData,
   saveMatterRecord,
+  savePersonRecord,
   updateMatterConflictRecord,
 } from '../../src/server/services';
 import { getStore } from '../../src/server/store';
@@ -882,8 +898,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           ),
       );
       expect(throwSaveRes.matter).toBeNull();
-      expect(throwSaveRes.errors?.costsGovernance).toMatch(
-        /Unhandled hook crash on open/i,
+      expect(throwSaveRes.errors?.costsGovernance).toBe(
+        'A required costs check could not run. Please contact your administrator.',
       );
 
       // Now configure an enabled extension that is not in the generated registry (so it records an ExtensionLoadError for beforeMatterOpen)
@@ -1492,6 +1508,835 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           'Confidential Staff Disciplinary Matter',
         );
       }
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R152: getAppSnapshot and server endpoints filter out staff and ethical-wall matters, linked tasks, links, notes, audit, and PMS rows for non-participants and block tampered matter IDs', async () => {
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const outsiderFeeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== carys.id &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const staffClient = store.people.find(
+        (p) =>
+          p.isEmployee && p.id !== carys.id && p.id !== outsiderFeeEarner.id,
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+      const carysSession = {
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession,
+      };
+
+      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      void _omittedId;
+
+      // Create a staff matter and an ethical-wall matter owned by Carys (outsiderFeeEarner is NOT a participant)
+      const staffRes = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...matterTemplate,
+            title: 'R152 Secret Staff Matter',
+            clientId: staffClient.id,
+            responsiblePartnerId: carys.id,
+            supervisingPartnerId: carys.id,
+            leadFeeEarnerId: carys.id,
+            teamMemberIds: [carys.id],
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+          },
+          { byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(staffRes.matter?.isStaffMatter).toBe(true);
+      const staffMatterId = staffRes.matter!.id;
+
+      const wallRes = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...matterTemplate,
+            title: 'R152 Secret Ethical Wall Matter',
+            responsiblePartnerId: carys.id,
+            supervisingPartnerId: carys.id,
+            leadFeeEarnerId: carys.id,
+            teamMemberIds: [carys.id],
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            conflictCheckRecord: {
+              status: 'Cleared',
+              outcomeLabel: 'Cleared by fee earner',
+              declarationConfirmed: true,
+              reviewerMessage: '',
+              lastRunAtDisplay: '04 Nov 2026',
+              lastRunById: carys.id,
+              lastRunByName: 'Carys Hughes',
+              submittedAtDisplay: null,
+              submittedById: null,
+              submittedByName: null,
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [
+                {
+                  id: 'm-wall-152',
+                  partyId: 'pt-wall-1',
+                  partyName: 'Barrier Match',
+                  matchedRecordType: 'organisation',
+                  matchedRecordId: 'O-000001',
+                  matchedRecordName: 'Barrier Match',
+                  strength: 'Exact',
+                  whereFound: 'Organisation register',
+                  responsiblePartnerId: carys.id,
+                  responsiblePartnerName: 'Carys Hughes',
+                  dateLabel: '04 Nov 2026',
+                  disposition: 'potential_conflict',
+                  note: 'Ethical wall required',
+                  reviewerDecision: 'approve_with_conditions',
+                  reviewerConditionType: 'information_barrier',
+                  reviewerNote: 'Ethical wall required',
+                  reviewedById: carys.id,
+                  reviewedByName: 'Carys Hughes',
+                  reviewedAt: '04 Nov 2026',
+                },
+              ],
+              comments: [],
+              runs: [],
+            },
+          },
+          { byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(wallRes.matter?.hasEthicalWall).toBe(true);
+      const wallMatterId = wallRes.matter!.id;
+
+      // Participant (Carys) sees both matters in getAppSnapshot
+      const carysSnap = runWithActiveActorSession(carysSession, () =>
+        getAppSnapshot(carys.id),
+      );
+      expect(carysSnap.matters.some((m) => m.id === staffMatterId)).toBe(true);
+      expect(carysSnap.matters.some((m) => m.id === wallMatterId)).toBe(true);
+
+      // Non-participant fee earner does NOT see either matter, nor linked tasks, links, notes, audit, or PMS summary rows
+      const outsiderCookie = createSignedEntraSessionCookie({
+        personId: outsiderFeeEarner.id,
+        tenantId: 'not-a-law-firm',
+        oid:
+          outsiderFeeEarner.entraObjectId ??
+          '00000000-0000-4000-8000-000000000099',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: outsiderFeeEarner.id,
+        email:
+          outsiderFeeEarner.emails[0]?.address ??
+          'outsider@notalawfirm.example',
+        displayName: 'Outsider Fee Earner',
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const outsiderVerified = verifySignedEntraSessionCookie(outsiderCookie)!;
+      const outsiderSession = {
+        personId: outsiderFeeEarner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: ['fee_earner'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: outsiderVerified,
+      };
+
+      const outsiderSnap = runWithActiveActorSession(outsiderSession, () =>
+        getAppSnapshot(outsiderFeeEarner.id),
+      );
+      expect(outsiderSnap.matters.some((m) => m.id === staffMatterId)).toBe(
+        false,
+      );
+      expect(outsiderSnap.matters.some((m) => m.id === wallMatterId)).toBe(
+        false,
+      );
+      expect(
+        outsiderSnap.tasks.some((t) =>
+          t.linkedRecords.some(
+            (r) => r.recordId === staffMatterId || r.recordId === wallMatterId,
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        outsiderSnap.audit.some(
+          (a) => a.recordId === staffMatterId || a.recordId === wallMatterId,
+        ),
+      ).toBe(false);
+      expect(
+        outsiderSnap.pmsSummaryByMatterId[staffMatterId],
+      ).toBeUndefined();
+      expect(outsiderSnap.pmsSummaryByMatterId[wallMatterId]).toBeUndefined();
+
+      // Direct PMS bundle lookup and tampered-ID actions by non-participant fail closed
+      const outsiderPmsView = runWithActiveActorSession(outsiderSession, () =>
+        getMatterPmsViewBundle(staffMatterId, outsiderFeeEarner.id),
+      );
+      expect(outsiderPmsView.matterBundle).toBeNull();
+      expect(outsiderPmsView.link).toBeNull();
+      expect(
+        runWithActiveActorSession(outsiderSession, () =>
+          markEngagementLetterDrafted(staffMatterId, outsiderFeeEarner.id),
+        ).matter,
+      ).toBeNull();
+      expect(
+        runWithActiveActorSession(outsiderSession, () =>
+          liftMatterRestriction(
+            staffMatterId,
+            'staff_matter',
+            'Tampered ID attempt',
+            outsiderFeeEarner.id,
+          ),
+        ).matter,
+      ).toBeNull();
+      const kdTampered = await runWithActiveActorSession(outsiderSession, () =>
+        createOrProposeKeyDateRecord(
+          {
+            matterId: staffMatterId,
+            keyDateTypeId: 'court_hearing',
+            title: 'Tampered Key Date',
+            dueDate: '2027-01-15',
+            teamId: 'TM-000001',
+            responsiblePersonIds: [outsiderFeeEarner.id],
+          },
+          outsiderFeeEarner.id,
+        ),
+      );
+      expect(kdTampered.keyDate).toBeUndefined();
+      expect(kdTampered.error).toMatch(/Forbidden|not found/i);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R144, R153 & R159: concurrent client hire during hook wait triggers errors.conflict, updateMatterConflictRecord enforces beforeMatterOpen and risk:view, and staff_matter restriction lift persists via isWorkingAtFirm', async () => {
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== carys.id &&
+          (p.roles ?? []).includes('fee_earner') &&
+          !(p.roles ?? []).includes('risk_compliance') &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin'),
+      )!;
+      const externalClient = store.people.find(
+        (p) => !p.isEmployee && !p.employment,
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+      const carysSession = {
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession,
+      };
+
+      const rawBaseCfg = getActiveTenantRawBaseConfig();
+      setActiveTenantConfigForTesting({
+        ...rawBaseCfg,
+        enabledExtensions: ['nalf-hire-race-ext'],
+      });
+      const activeHost = getPlatformExtensionHost();
+      let allowOpenGate = true;
+      activeHost.registerExtension({
+        manifest: {
+          id: 'nalf-hire-race-ext',
+          name: 'Hire Race & Open Gate Extension',
+          version: '1.0.0',
+          description: 'Tests concurrent hire during save and updateMatterConflictRecord gate',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['matter:open:gate'],
+          hooks: ['beforeMatterOpen'],
+        },
+        hooks: {
+          beforeMatterOpen: () => ({
+            allowProceed: allowOpenGate,
+            requiresPartnerSignOff: !allowOpenGate,
+            governanceWarnings: allowOpenGate
+              ? []
+              : ['Gate vetoed draft opening'],
+          }),
+        },
+      });
+
+      // (1) R153: Create a draft matter, then verify updateMatterConflictRecord cannot transition an unopened DRAFT matter to open/Active (bypassing beforeMatterOpen)
+      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      void _omittedId;
+      const draftRes = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...matterTemplate,
+            matterNumber: 'DRAFT',
+            openedAt: null,
+            fieldValues: {},
+            title: 'R153 Draft Matter',
+            clientId: externalClient.id,
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+          },
+          { byId: carys.id, saveMode: 'draft' },
+        ),
+      );
+      const draftMatter = draftRes.matter!;
+      expect(draftMatter.matterNumber).toMatch(/^DRAFT/);
+
+      allowOpenGate = false;
+      const draftConflictRes = runWithActiveActorSession(carysSession, () =>
+        updateMatterConflictRecord(
+          draftMatter.id,
+          {
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+            declarationConfirmed: true,
+            reviewerMessage: 'Approved conflict record on draft matter',
+            lastRunAtDisplay: '04 Nov 2026',
+            lastRunById: carys.id,
+            lastRunByName: 'Carys Hughes',
+            submittedAtDisplay: '04 Nov 2026',
+            submittedById: carys.id,
+            submittedByName: 'Carys Hughes',
+            approvedAtDisplay: '04 Nov 2026',
+            approvedById: carys.id,
+            approvedByName: 'Carys Hughes',
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
+          carys.id,
+        ),
+      );
+      // Draft matter remains unopened (matterNumber is still DRAFT and matterStatusId is not Active) because it has not passed saveMatterRecord's opening gate
+      expect(draftConflictRes.matter?.matterNumber).toMatch(/^DRAFT/);
+      expect(draftConflictRes.matter?.matterStatusId).not.toBe(
+        'matter_status.active',
+      );
+
+      // (2) R153: A fee earner with matter:edit but without risk:view cannot set conflict status to 'Approved' or 'Declined'
+      allowOpenGate = true;
+      const feCookie = createSignedEntraSessionCookie({
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        oid: feeEarner.entraObjectId ?? '00000000-0000-4000-8000-000000000088',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: feeEarner.id,
+        email: feeEarner.emails[0]?.address ?? 'fe@notalawfirm.example',
+        displayName: 'Fee Earner',
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const feSession = {
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: ['fee_earner'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(feCookie)!,
+      };
+      const unauthorizedApprove = runWithActiveActorSession(feSession, () =>
+        updateMatterConflictRecord(
+          draftMatter.id,
+          {
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+            declarationConfirmed: true,
+            reviewerMessage: 'Self-approving without risk:view',
+            lastRunAtDisplay: '04 Nov 2026',
+            lastRunById: feeEarner.id,
+            lastRunByName: 'Fee Earner',
+            submittedAtDisplay: '04 Nov 2026',
+            submittedById: feeEarner.id,
+            submittedByName: 'Fee Earner',
+            approvedAtDisplay: '04 Nov 2026',
+            approvedById: 'P-FORGED',
+            approvedByName: 'Forged Approver',
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
+          feeEarner.id,
+        ),
+      );
+      expect(unauthorizedApprove.matter).toBeNull();
+      expect(unauthorizedApprove.errors?.permission).toMatch(/risk:view/i);
+
+      // Authorised caller (Carys) with risk:view can approve, and server sets conflictClearedById and approvedById from byId
+      const authorizedApprove = runWithActiveActorSession(carysSession, () =>
+        updateMatterConflictRecord(
+          draftMatter.id,
+          {
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+            declarationConfirmed: true,
+            reviewerMessage: 'Approved by authorised reviewer',
+            lastRunAtDisplay: '04 Nov 2026',
+            lastRunById: carys.id,
+            lastRunByName: 'Carys Hughes',
+            submittedAtDisplay: '04 Nov 2026',
+            submittedById: feeEarner.id,
+            submittedByName: 'Fee Earner',
+            approvedAtDisplay: '04 Nov 2026',
+            approvedById: 'P-FORGED',
+            approvedByName: 'Forged Approver (COLP)',
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
+          carys.id,
+        ),
+      );
+      expect(authorizedApprove.matter).not.toBeNull();
+      expect(authorizedApprove.matter!.conflictClearedById).toBe(carys.id);
+      expect(
+        authorizedApprove.matter!.conflictCheckRecord?.approvedById,
+      ).toBe(carys.id);
+      expect(
+        authorizedApprove.matter!.conflictCheckRecord?.approvedByName,
+      ).not.toContain('(COLP)');
+
+      // (3) R159: Lifting staff_matter restriction persists across subsequent saveMatterRecord calls and re-applies when a new employee participant is added
+      const empClient1 = store.people.find(
+        (p) => p.isEmployee && p.id !== carys.id,
+      )!;
+      const empClient2 = store.people.find(
+        (p) => p.isEmployee && p.id !== carys.id && p.id !== empClient1.id,
+      )!;
+      const staffMatterRes = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...matterTemplate,
+            title: 'R159 Staff Matter Lift Persistence',
+            clientId: empClient1.id,
+            responsiblePartnerId: carys.id,
+            supervisingPartnerId: carys.id,
+            leadFeeEarnerId: carys.id,
+            teamMemberIds: [carys.id],
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+          },
+          { byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      const staffMatter = staffMatterRes.matter!;
+      expect(staffMatter.isStaffMatter).toBe(true);
+
+      const liftedRes = runWithActiveActorSession(carysSession, () =>
+        liftMatterRestriction(
+          staffMatter.id,
+          'staff_matter',
+          'Approved lift for R159 test',
+          carys.id,
+        ),
+      );
+      expect(liftedRes.matter?.isStaffMatter).toBe(false);
+
+      // Re-saving the matter with the same employee participant keeps isStaffMatter === false
+      const resaveSameEmp = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...liftedRes.matter!,
+            title: 'R159 Staff Matter After Lift Resave',
+          },
+          { id: staffMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(resaveSameEmp.matter?.isStaffMatter).toBe(false);
+
+      // Adding a new working employee client re-applies isStaffMatter === true
+      const resaveNewEmp = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...resaveSameEmp.matter!,
+            additionalClientIds: [empClient2.id],
+          },
+          { id: staffMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(resaveNewEmp.matter?.isStaffMatter).toBe(true);
+
+      // (4) R144: Hiring the external client via savePersonRecord while beforeMatterOpen is awaiting causes saveMatterRecord to return errors.conflict and preserves isStaffMatter: true
+      setActiveTenantConfigForTesting({
+        ...rawBaseCfg,
+        enabledExtensions: ['nalf-slow-hire-race-ext'],
+      });
+      getPlatformExtensionHost().registerExtension({
+        manifest: {
+          id: 'nalf-slow-hire-race-ext',
+          name: 'Slow Hire Race Extension',
+          version: '1.0.0',
+          description: 'Waits 50ms during beforeMatterOpen for client hire race',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['matter:open:gate'],
+          hooks: ['beforeMatterOpen'],
+        },
+        hooks: {
+          beforeMatterOpen: async () => {
+            await new Promise((r) => setTimeout(r, 50));
+            return {
+              allowProceed: true,
+              requiresPartnerSignOff: false,
+              governanceWarnings: [],
+            };
+          },
+        },
+      });
+      const hireRaceSavePromise = runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...draftMatter,
+            title: 'R144 Concurrent Client Hire Matter',
+            conflictClearedById: null,
+          },
+          { id: draftMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      await new Promise((r) => setTimeout(r, 15));
+      const hireRes = savePersonRecord(
+        {
+          ...externalClient,
+          firstName: externalClient.firstName,
+          surname: externalClient.surname,
+          dateOfBirth: externalClient.dateOfBirth || '1988-04-10',
+          isEmployee: true,
+        },
+        {
+          id: externalClient.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: {
+            ...carys.employment!,
+            employeeNumber: 'EMP-HIRE-144',
+            status: 'Active',
+            feeEarner: carys.employment?.feeEarner
+              ? {
+                  ...carys.employment.feeEarner,
+                  timekeeperCode: 'FE-HIRE-144',
+                }
+              : null,
+          },
+        },
+      );
+      expect(hireRes.errors).toBeUndefined();
+      const hireRaceSaveRes = await hireRaceSavePromise;
+      expect(hireRaceSaveRes.matter).toBeNull();
+      expect(hireRaceSaveRes.errors?.conflict).toMatch(
+        /changed by someone else while you were saving/i,
+      );
+      expect(
+        store.matters.find((m) => m.id === draftMatter.id)!.isStaffMatter,
+      ).toBe(true);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R108, R155, R157, R160 & R161: bad manifest JSON or unregistered enabled extensions record declaredHooks: null and block submit_cleared, store preserves multi-role risk officers, test config overrides refuse production, and schema/migration parity holds', async () => {
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+      const carysSession = {
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession,
+      };
+
+      // (1) R108: Enabled extension ID with no folder / bad manifest JSON records declaredHooks: null and blocks submit_cleared
+      const rawBaseCfg = getActiveTenantRawBaseConfig();
+      const tmpBadExtDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'nalf-bad-ext-'),
+      );
+      const prevPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+      try {
+        fs.mkdirSync(path.join(tmpBadExtDir, 'config'), { recursive: true });
+        const badJsonSubDir = path.join(
+          tmpBadExtDir,
+          'extensions',
+          'bad-json-ext',
+        );
+        fs.mkdirSync(badJsonSubDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(badJsonSubDir, 'manifest.json'),
+          '{ invalid json',
+          'utf8',
+        );
+        fs.writeFileSync(
+          path.join(tmpBadExtDir, 'config', 'base.json'),
+          JSON.stringify({
+            ...rawBaseCfg,
+            enabledExtensions: ['bad-json-ext', 'enabled-no-folder-ext'],
+          }),
+          'utf8',
+        );
+        process.env.PLATFORM_TENANT_PACKAGE_DIR = tmpBadExtDir;
+        setActiveTenantConfigForTesting(null);
+        getPlatformExtensionHost();
+        const loadErrors = getExtensionHostLoadErrors();
+        expect(
+          loadErrors.some(
+            (e) =>
+              e.extensionId === 'bad-json-ext' && e.declaredHooks === null,
+          ),
+        ).toBe(true);
+        expect(
+          loadErrors.some(
+            (e) =>
+              e.extensionId === 'enabled-no-folder-ext' &&
+              e.declaredHooks === null,
+          ),
+        ).toBe(true);
+
+        const blockedRes = await runWithActiveActorSession(carysSession, () =>
+          saveMatterRecord(
+            {
+              ...baseMatter,
+              conflictClearedById: null,
+            },
+            { id: baseMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
+          ),
+        );
+        expect(blockedRes.matter).toBeNull();
+        expect(blockedRes.errors?.costsGovernance).toBe(
+          'A required costs check could not run. Please contact your administrator.',
+        );
+      } finally {
+        if (prevPkgDir === undefined) {
+          delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+        } else {
+          process.env.PLATFORM_TENANT_PACKAGE_DIR = prevPkgDir;
+        }
+        setActiveTenantConfigForTesting(null);
+        fs.rmSync(tmpBadExtDir, { recursive: true, force: true });
+      }
+
+      // (2) R155: A risk officer with ['risk_compliance', 'partner', 'fee_earner'] keeps all 3 roles in order after getStore()
+      const multiRolePerson = store.people.find((p) => p.id === 'P-000009')!;
+      multiRolePerson.roles = ['risk_compliance', 'partner', 'fee_earner'];
+      const reloadedStore = getStore();
+      const reloadedPerson = reloadedStore.people.find(
+        (p) => p.id === 'P-000009',
+      )!;
+      expect(reloadedPerson.roles).toEqual([
+        'risk_compliance',
+        'partner',
+        'fee_earner',
+      ]);
+
+      // (3) R157: Setting globalThis.__oneSquaredTenantTestBaseConfig has no effect, and setActiveTenantConfigForTesting throws SECURITY_ERROR in production
+      (globalThis as Record<string, unknown>).__oneSquaredTenantTestBaseConfig =
+        {
+          tenantId: 'injected-via-globalthis',
+        };
+      expect(getActiveTenantConfiguration().tenantId).toBe('not-a-law-firm');
+      delete (globalThis as Record<string, unknown>)
+        .__oneSquaredTenantTestBaseConfig;
+
+      const prevNodeEnv = process.env.NODE_ENV;
+      try {
+        (process.env as Record<string, string | undefined>).NODE_ENV =
+          'production';
+        expect(() => setActiveTenantConfigForTesting(rawBaseCfg)).toThrow(
+          /SECURITY_ERROR/,
+        );
+      } finally {
+        (process.env as Record<string, string | undefined>).NODE_ENV =
+          prevNodeEnv;
+      }
+
+      // (4) R160: executeMatterCostsHookSync fails closed when a beforeMatterOpen hook returns a Promise
+      const syncHost = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+      syncHost.registerExtension({
+        manifest: {
+          id: 'async-in-sync-ext',
+          name: 'Async Hook In Sync Caller',
+          version: '1.0.0',
+          description: 'Returns a Promise from beforeMatterOpen',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['matter:open:gate'],
+          hooks: ['beforeMatterOpen'],
+        },
+        hooks: {
+          beforeMatterOpen: (() =>
+            Promise.resolve({
+              allowProceed: true,
+              requiresPartnerSignOff: false,
+              governanceWarnings: [],
+            })) as unknown as NonNullable<
+            PlatformExtension['hooks']['beforeMatterOpen']
+          >,
+        },
+      });
+      const syncCtx = resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-sync-promise-001',
+      });
+      const syncOutcome = syncHost.executeMatterCostsHookSync(
+        'beforeMatterOpen',
+        syncCtx,
+        {
+          ...getActiveTenantConfiguration(),
+          enabledExtensions: ['async-in-sync-ext'],
+        },
+        {
+          matterId: 'M-000011',
+          workBasis: 'capped',
+          estimatedFeeGbp: 5000,
+          disbursementsTotalGbp: 0,
+          partnerSignOffCompleted: true,
+        },
+      );
+      expect(syncOutcome.allowProceed).toBe(false);
+
+      // (5) R161: Schema parity for conflictReview and firm, deprecation warnings for branding.contactEmail/website, and migration rollback dependsOn check against CORE_TENANT_MIGRATIONS
+      const crJsonProps = tenantConfigJsonSchema.properties.conflictReview.properties;
+      expect(crJsonProps.assigneeTeamKey.minLength).toBe(1);
+      expect(crJsonProps.assigneeRoleKey.minLength).toBe(1);
+      expect(() =>
+        ConflictReviewConfigSubSchema.parse({
+          assigneeTeamKey: '',
+          assigneeRoleKey: null,
+        }),
+      ).toThrow();
+      expect(() =>
+        ConflictReviewConfigSubSchema.parse({
+          assigneeTeamKey: 'TM-000009',
+          assigneeRoleKey: 'INVALID UPPERCASE ROLE',
+        }),
+      ).toThrow();
+      expect(() =>
+        FirmConfigSubSchema.parse({
+          contactEmail: 'not-an-email',
+          website: '',
+        }),
+      ).toThrow();
+      expect(() =>
+        FirmConfigSubSchema.parse({
+          contactEmail: 'enquiries@notalawfirm.example',
+          website: 'not a website',
+        }),
+      ).toThrow();
+      const depWarnings = collectConfigDeprecationWarnings({
+        branding: {
+          contactEmail: 'legacy@notalawfirm.example',
+          website: 'www.notalawfirm.example',
+        },
+      });
+      expect(depWarnings).toHaveLength(2);
+
+      // Migration catalogue order validation and partial-list rollback protection
+      expect(() =>
+        validateMigrationCatalogueOrder(CORE_TENANT_MIGRATIONS),
+      ).not.toThrow();
+      expect(() =>
+        validateMigrationCatalogueOrder([
+          {
+            ...KEY_DATES_MIGRATION_0003,
+            version: '0004',
+            dependsOn: ['0003'],
+          },
+          KEY_DATES_MIGRATION_0003,
+        ]),
+      ).toThrow(/MIGRATION_CATALOGUE_ORDER_ERROR/);
+
+      const migRunner = new TenantMigrationRunner();
+      migRunner.applyUp(syncCtx, CORE_TENANT_MIGRATIONS);
+      // Even when caller passes a partial list omitting 0004, rolling back 0003 is refused because 0004 in CORE_TENANT_MIGRATIONS is applied and depends on 0003
+      expect(() =>
+        migRunner.rollbackVersion(syncCtx, '0003', [
+          DOCUMENT_GENERATION_MIGRATION_0001,
+          DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
+          KEY_DATES_MIGRATION_0003,
+        ]),
+      ).toThrow(/MIGRATION_ROLLBACK_ORDER_ERROR/);
     } finally {
       setActiveTenantConfigForTesting(null);
       resetAllDemoData('P-000001');

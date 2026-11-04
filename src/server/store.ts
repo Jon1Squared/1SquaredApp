@@ -16,7 +16,10 @@ import {
 } from '@/domain/matterParties';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { computeAutomaticPmsLinks } from '@/domain/pms';
-import { setRuntimeRbacConfigOverride } from './rbacRuntime';
+import {
+  resolveConfiguredFirmPrimaryDomain,
+  setRuntimeRbacConfigOverride,
+} from './rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type { KeyDate } from '@/domain/keyDates.types';
 import type {
@@ -231,13 +234,17 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
   const seedLists = buildSeedLists();
   const demo = buildDemoData(today);
   const pmsLinks = buildInitialPmsLinks(demo.organisations, demo.people, demo.matters);
-  const orgStructure = buildDefaultOrgStructure();
+  const tenantCfg = getActiveTenantConfiguration();
+  const orgStructure = buildDefaultOrgStructure({
+    legalName: tenantCfg.displayName,
+  });
   const rawValues = [...seedLists.values, ...demo.customValues];
   const empMigration = migrateEmployeesToEmploymentRecords(
     demo.people,
     rawValues,
     orgStructure,
     pmsLinks,
+    resolveConfiguredFirmPrimaryDomain(tenantCfg),
     today.toISOString(),
   );
   const matterPartyTaxonomy = buildDefaultMatterPartyTaxonomy(rawValues);
@@ -248,7 +255,6 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     today.toISOString(),
   );
   const pmsFeeEarners = getPmsSource().listFeeEarners();
-  const tenantCfg = getActiveTenantConfiguration();
   const matterCostsConfig = syncRateCardsWithPmsFeeEarners(
     createDefaultMatterCostsConfig(partyMigration.values, today.toISOString(), {
       clientProfileCode: tenantCfg.tenantId,
@@ -436,7 +442,10 @@ function buildSeedKeyDates(
 export function createCleanDeploymentStore(today: Date = new Date()): FirmStore {
   const nowIso = today.toISOString();
   const seedLists = buildSeedLists();
-  const orgStructure = buildDefaultOrgStructure();
+  const tenantCfg = getActiveTenantConfiguration();
+  const orgStructure = buildDefaultOrgStructure({
+    legalName: tenantCfg.displayName,
+  });
   const matterPartyTaxonomy = buildDefaultMatterPartyTaxonomy(seedLists.values);
   const partyMigration = migrateMatterPartiesToTwoFieldModel(
     seedLists.values,
@@ -444,7 +453,6 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
     matterPartyTaxonomy,
     nowIso,
   );
-  const tenantCfg = getActiveTenantConfiguration();
   const homePagesConfig = createDefaultHomePagesConfig(
     nowIso,
     tenantCfg.branding.primaryDomain,
@@ -554,7 +562,9 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
     changed = true;
   }
   if (store.orgStructure && Array.isArray(store.orgStructure.legalEntities)) {
-    const defaultEntities = buildDefaultOrgStructure().legalEntities;
+    const defaultEntities = buildDefaultOrgStructure({
+      legalName: getActiveTenantConfiguration().displayName,
+    }).legalEntities;
     for (const defLe of defaultEntities) {
       const existingLe = store.orgStructure.legalEntities.find((le) => le.id === defLe.id);
       if (existingLe && existingLe.name.includes('Pembroke Vaughan')) {
@@ -685,28 +695,10 @@ export function getStore(): FirmStore {
         }
       }
     }
-    const memRiskOfficer = global.__oneSquaredStore.people.find(
-      (p) =>
-        p.employeeRoleId === 'employee_role.risk_and_compliance' &&
-        Array.isArray(p.roles) &&
-        p.roles[0] === 'risk_compliance' &&
-        p.roles.length > 2,
-    );
-    if (memRiskOfficer && Array.isArray(memRiskOfficer.roles)) {
-      memRiskOfficer.roles = [
-        'fee_earner',
-        ...memRiskOfficer.roles.filter((r) => r !== 'fee_earner'),
-      ];
-      if (global.__oneSquaredStore.homePagesConfig) {
-        global.__oneSquaredStore.homePagesConfig.lastViewingRoleByUserId = {
-          ...(global.__oneSquaredStore.homePagesConfig.lastViewingRoleByUserId ?? {}),
-          [memRiskOfficer.id]: 'fee_earner',
-        };
-      }
-      addedSeedItems = true;
-    }
     if (!global.__oneSquaredStore.orgStructure) {
-      global.__oneSquaredStore.orgStructure = buildDefaultOrgStructure();
+      global.__oneSquaredStore.orgStructure = buildDefaultOrgStructure({
+        legalName: getActiveTenantConfiguration().displayName,
+      });
       addedSeedItems = true;
     }
     if (!global.__oneSquaredStore.employeeSensitiveRecords) {
@@ -726,6 +718,7 @@ export function getStore(): FirmStore {
         global.__oneSquaredStore.values,
         global.__oneSquaredStore.orgStructure,
         global.__oneSquaredStore.pmsLinks,
+        resolveConfiguredFirmPrimaryDomain(),
       );
       global.__oneSquaredStore.people = empMig.people;
       global.__oneSquaredStore.employeeMigrationReport = empMig.report;
@@ -1009,7 +1002,9 @@ export function getStore(): FirmStore {
       }
 
       if (!parsed.orgStructure) {
-        parsed.orgStructure = buildDefaultOrgStructure();
+        parsed.orgStructure = buildDefaultOrgStructure({
+          legalName: getActiveTenantConfiguration().displayName,
+        });
         migrated = true;
       }
       if (!parsed.employeeSensitiveRecords) {
@@ -1029,6 +1024,7 @@ export function getStore(): FirmStore {
           parsed.values,
           parsed.orgStructure,
           parsed.pmsLinks,
+          resolveConfiguredFirmPrimaryDomain(),
         );
         parsed.people = empMig.people;
         parsed.employeeMigrationReport = empMig.report;

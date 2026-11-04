@@ -74,22 +74,6 @@ export const IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY: Readonly<
   'employee_role.system_administrator': 'admin',
 };
 
-const tenantRbacConfigCacheByTenant = new Map<string, RbacConfiguration>();
-const runtimeRbacConfigOverrideByTenant = new Map<
-  string,
-  Partial<RbacConfiguration>
->();
-
-export function getRbacRuntimeCacheMaps(): {
-  tenantRbacConfigCacheByTenant: Map<string, RbacConfiguration>;
-  runtimeRbacConfigOverrideByTenant: Map<string, Partial<RbacConfiguration>>;
-} {
-  return {
-    tenantRbacConfigCacheByTenant,
-    runtimeRbacConfigOverrideByTenant,
-  };
-}
-
 export function mergeRbacConfigOverlay(
   base: RbacConfiguration,
   overlay?: Partial<RbacConfiguration> | null,
@@ -135,19 +119,6 @@ export function mergeRbacConfigOverlay(
         }
       : base.identityMapping,
   };
-}
-
-export function getCachedOrDefaultRbacConfig(
-  tenantId = 'default',
-): RbacConfiguration {
-  const targetTenantId = tenantId.trim() || 'default';
-  const cached = tenantRbacConfigCacheByTenant.get(targetTenantId);
-  if (cached) {
-    return cached;
-  }
-  const base = createDefaultRbacConfig();
-  const runtimeOverride = runtimeRbacConfigOverrideByTenant.get(targetTenantId);
-  return mergeRbacConfigOverlay(base, runtimeOverride);
 }
 
 /**
@@ -328,6 +299,7 @@ export interface ResolvePersonPermissionsOptions {
         documentGeneration?: TenantConfiguration['documentGeneration'];
       }
     | null;
+  tenantId?: string;
   context?:
     | (Partial<
         Pick<
@@ -353,9 +325,15 @@ export function resolvePersonPermissionSet(
   options: ResolvePersonPermissionsOptions = {},
 ): ResolvedPermissionSet {
   const activeTenantId =
-    options.context?.tenantId?.trim() ||
-    getActiveActorSession()?.tenantId ||
-    'default';
+    options?.tenantId?.trim() ||
+    options?.context?.tenantId?.trim() ||
+    '';
+  const rbacConfig = options?.config?.rbac;
+  if (!rbacConfig || !activeTenantId) {
+    throw new Error(
+      'RBAC_CONFIG_REQUIRED: resolvePersonPermissionSet needs config.rbac and tenantId.',
+    );
+  }
   if (!user?.id) {
     return resolvePermissions({
       context: {
@@ -365,14 +343,13 @@ export function resolvePersonPermissionSet(
         actorRoles: [],
         mfaVerified: false,
       },
+      config: { rbac: rbacConfig },
       actor: null,
     });
   }
 
   const teams = options.teams ?? [];
   const allPeople = options.allPeople ?? [];
-  const rbacConfig =
-    options.config?.rbac ?? getCachedOrDefaultRbacConfig(activeTenantId);
   const storedRoles = resolvePersonAuthoritativeRoles(
     user,
     teams,
@@ -604,12 +581,17 @@ export function resolvePersonForEntraClaims(params: {
   verifiedToken: VerifiedOidcTokenClaims;
   permissions: ResolvedPermissionSet;
 } {
-  const activeTenantId = params.tenantId?.trim() || 'default';
+  const activeTenantId = params.tenantId?.trim() || '';
+  const rbacConfig = params.rbacConfig;
+  if (!rbacConfig || !activeTenantId) {
+    throw new Error(
+      'RBAC_CONFIG_REQUIRED: resolvePersonForEntraClaims needs rbacConfig and tenantId.',
+    );
+  }
   const {
     claims,
     people,
     teams = [],
-    rbacConfig = getCachedOrDefaultRbacConfig(activeTenantId),
   } = params;
 
   const oid = claims.oid?.trim();

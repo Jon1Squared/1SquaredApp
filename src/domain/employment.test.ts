@@ -5,11 +5,9 @@ import {
   buildSensitiveSubmissionPayload,
   calculateHrRetentionDate,
   calculateProbationEndDate,
-  canUserAccessMatter,
   computeStaffMatterStatus,
   emptyDiversityAnswers,
   filterEmployeesForMatterDepartment,
-  filterEmploymentForUser,
   findOpenMattersWherePersonIsParty,
   findRecordsOwnedByLeavers,
   formatEmployeeSelectorOptionLabel,
@@ -20,11 +18,15 @@ import {
   maskBankDetails,
   maskNationalInsuranceNumber,
   migrateEmployeesToEmploymentRecords,
-  resolveEmployeePermissions,
   resolveNewMatterDepartmentDefaults,
   validateEmploymentRecord,
   validateNationalInsuranceNumber,
 } from './employment';
+import {
+  canUserAccessMatter,
+  filterEmploymentForUser,
+  resolveEmployeePermissions,
+} from '../server/rbacRuntime';
 import {
   buildDefaultOrgStructure,
   mapLegacyEmployeeRoleToRoleType,
@@ -214,6 +216,8 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         [...store.people, customPerson],
         store.values,
         store.orgStructure,
+        store.pmsLinks,
+        'notalawfirm.example',
       );
 
       expect(migration.report.migratedCount).toBeGreaterThanOrEqual(1);
@@ -507,6 +511,42 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(firmEmail?.active).toBe(false);
       expect(keptPersonal?.active).toBe(true);
       expect(leaverUpdated.marketingConsentId).toBe('marketing_consent.opted_in');
+
+      // R154: An email on the configured primaryDomain is deactivated on leave even if firmIssued was false, whereas a personal domain is never inferred as the firm's
+      const unflaggedFirmDomainEmail = {
+        id: 'em-unflagged-firm-5',
+        address: 'unflagged.work@notalawfirm.example',
+        typeId: 'email_type.other',
+        isPrimary: false,
+        firmIssued: false,
+        active: true,
+      };
+      const secondLeaverSave = savePersonRecord(
+        {
+          ...leaverUpdated,
+          emails: [...leaverUpdated.emails, unflaggedFirmDomainEmail],
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          keepAsContactOnLeave: true,
+          employmentSubmitted: {
+            ...leaverUpdated.employment!,
+            status: 'Leaver',
+          },
+        },
+      );
+      expect(
+        secondLeaverSave.person.emails.find(
+          (e) => e.address === 'unflagged.work@notalawfirm.example',
+        )?.active,
+      ).toBe(false);
+      expect(
+        secondLeaverSave.person.emails.find(
+          (e) => e.address === 'personal.contact@example.com',
+        )?.active,
+      ).toBe(true);
 
       // Selector rules: Leaver is no longer selectable, and existing references show "Left"
       expect(isSelectableInEmployeeDropdown(leaverUpdated)).toBe(false);

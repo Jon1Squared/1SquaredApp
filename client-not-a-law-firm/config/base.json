@@ -7,9 +7,7 @@
   "branding": {
     "primaryDomain": "notalawfirm.example",
     "accentColorHex": "#1f6feb",
-    "logoAssetKey": "nalf-logo.svg",
-    "contactEmail": "enquiries@notalawfirm.example",
-    "website": "www.notalawfirm.example"
+    "logoAssetKey": "nalf-logo.svg"
   },
   "firm": {
     "contactEmail": "enquiries@notalawfirm.example",

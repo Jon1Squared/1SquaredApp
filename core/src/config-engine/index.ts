@@ -563,31 +563,51 @@ export const TenantConfigurationSchema = z
           .default('default-logo.svg')
           .describe('Tenant-scoped asset key for the firm logo'),
         contactEmail: z
-          .string()
+          .union([
+            z.literal(''),
+            z
+              .string()
+              .email()
+              .regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/),
+          ])
           .default('')
           .optional()
           .describe(
-            'Optional public contact email address for document headers and footers',
+            'Deprecated: use firm.contactEmail instead. Optional public contact email address for document headers and footers',
           ),
         website: z
           .string()
+          .regex(
+            /^$|^(https?:\/\/)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(\/\S*)?$/,
+            'Invalid website hostname or URL',
+          )
           .default('')
           .optional()
           .describe(
-            'Optional public website URL or hostname for document headers and footers',
+            'Deprecated: use firm.website instead. Optional public website URL or hostname for document headers and footers',
           ),
       })
       .strict(),
     firm: z
       .object({
         contactEmail: z
-          .string()
+          .union([
+            z.literal(''),
+            z
+              .string()
+              .email()
+              .regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/),
+          ])
           .default('')
           .describe(
             'Public firm contact email address for document headers and footers (blank if not set)',
           ),
         website: z
           .string()
+          .regex(
+            /^$|^(https?:\/\/)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(\/\S*)?$/,
+            'Invalid website hostname or URL',
+          )
           .default('')
           .describe(
             'Public firm website URL or hostname for document headers and footers (blank if not set)',
@@ -605,6 +625,10 @@ export const TenantConfigurationSchema = z
         assigneeTeamKey: z
           .string()
           .min(1)
+          .regex(
+            /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/,
+            'Invalid assigneeTeamKey format',
+          )
           .nullable()
           .default(null)
           .describe(
@@ -613,6 +637,10 @@ export const TenantConfigurationSchema = z
         assigneeRoleKey: z
           .string()
           .min(1)
+          .regex(
+            /^[a-z][a-z0-9_.:-]{1,63}$/,
+            'Invalid assigneeRoleKey format',
+          )
           .nullable()
           .default(null)
           .describe(
@@ -1943,6 +1971,43 @@ export function collectConfigDeprecationWarnings(
       '[DEPRECATED_CONFIG_KEY] documentGeneration.permissions.roleDefaults is deprecated and replaced by rbac.roles (ADR-0011). It has no effect when rbac.roles is configured and will be removed in v2.0.0.',
     );
   }
+
+  const baseBranding = baseConfig.branding as
+    | Record<string, unknown>
+    | undefined;
+  const overlayBranding = environmentOverlay.branding as
+    | Record<string, unknown>
+    | undefined;
+  if (
+    typeof baseBranding?.contactEmail === 'string' &&
+    baseBranding.contactEmail.trim() !== ''
+  ) {
+    warnings.push(
+      '[DEPRECATED_CONFIG_KEY] branding.contactEmail is deprecated; use firm.contactEmail instead.',
+    );
+  } else if (
+    typeof overlayBranding?.contactEmail === 'string' &&
+    overlayBranding.contactEmail.trim() !== ''
+  ) {
+    warnings.push(
+      '[DEPRECATED_CONFIG_KEY] branding.contactEmail is deprecated; use firm.contactEmail instead.',
+    );
+  }
+  if (
+    typeof baseBranding?.website === 'string' &&
+    baseBranding.website.trim() !== ''
+  ) {
+    warnings.push(
+      '[DEPRECATED_CONFIG_KEY] branding.website is deprecated; use firm.website instead.',
+    );
+  } else if (
+    typeof overlayBranding?.website === 'string' &&
+    overlayBranding.website.trim() !== ''
+  ) {
+    warnings.push(
+      '[DEPRECATED_CONFIG_KEY] branding.website is deprecated; use firm.website instead.',
+    );
+  }
   return warnings;
 }
 
@@ -2146,6 +2211,9 @@ export function loadAndValidateTenantConfig(
 
 export const KeyDatesConfigSubSchema = TenantConfigurationSchema.shape.keyDates;
 export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
+export const ConflictReviewConfigSubSchema =
+  TenantConfigurationSchema.shape.conflictReview;
+export const FirmConfigSubSchema = TenantConfigurationSchema.shape.firm;
 
 /**
  * Validates a standalone `keyDates` configuration object against `keyDates.config.schema.json`

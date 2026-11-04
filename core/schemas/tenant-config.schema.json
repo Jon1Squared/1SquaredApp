@@ -55,12 +55,16 @@
         "contactEmail": {
           "type": "string",
           "default": "",
-          "description": "Optional public contact email address for document headers and footers"
+          "deprecated": true,
+          "pattern": "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+          "description": "Deprecated: use firm.contactEmail instead. Optional public contact email address for document headers and footers"
         },
         "website": {
           "type": "string",
           "default": "",
-          "description": "Optional public website URL or hostname for document headers and footers"
+          "deprecated": true,
+          "pattern": "^$|^(https?://)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(/\\S*)?$",
+          "description": "Deprecated: use firm.website instead. Optional public website URL or hostname for document headers and footers"
         }
       }
     },
@@ -72,11 +76,13 @@
         "contactEmail": {
           "type": "string",
           "default": "",
+          "pattern": "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
           "description": "Public firm contact email address for document headers and footers (blank if not set)"
         },
         "website": {
           "type": "string",
           "default": "",
+          "pattern": "^$|^(https?://)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(/\\S*)?$",
           "description": "Public firm website URL or hostname for document headers and footers (blank if not set)"
         }
       }
@@ -88,13 +94,17 @@
       "properties": {
         "assigneeTeamKey": {
           "type": ["string", "null"],
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
           "default": null,
-          "description": "Stable key of the team that receives referred conflict reviews"
+          "description": "Stable key or ID of the team that receives referred conflict reviews"
         },
         "assigneeRoleKey": {
           "type": ["string", "null"],
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.:-]{1,63}$",
           "default": null,
-          "description": "Optional employee_role.* key used to pick an assignee within the team"
+          "description": "Optional role key or employee_role.* key used to pick an assignee within the team"
         }
       }
     },

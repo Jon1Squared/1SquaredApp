@@ -3,7 +3,6 @@ import {
   createDefaultHomePagesConfig,
   createDefaultRoleConfigs,
   cyclePanelPlacement,
-  getLeftRailVisibility,
   getPanelPlacement,
   HEADLINE_CARD_DEFINITIONS,
   PANEL_DEFINITIONS,
@@ -11,6 +10,7 @@ import {
   setRolePanelPlacement,
   syncHomeRolesWithEmployeeRoles,
 } from './homeConfig';
+import { getLeftRailVisibility } from '../server/rbacRuntime';
 import { getPmsSource } from '@/pms/pmsSource';
 import { primaryEmail } from './names';
 import {

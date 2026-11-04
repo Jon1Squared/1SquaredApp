@@ -80,6 +80,7 @@ import {
   ALL_EMPLOYEE_PERMISSIONS as CORE_ALL_EMPLOYEE_PERMISSIONS,
   canPersonAccessMatter,
   resolvePersonPermissionSet,
+  type ResolvePersonPermissionsOptions,
 } from './rbac';
 
 export const ALL_EMPLOYEE_PERMISSIONS: EmployeePermission[] = [
@@ -161,9 +162,14 @@ export function resolveEmployeePermissions(
   user: Person | null | undefined,
   allPeople: Person[] = [],
   teams: Team[] = [],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): EmployeePermission[] {
   if (!user) return [];
-  const resolved = resolvePersonPermissionSet(user, { allPeople, teams });
+  const resolved = resolvePersonPermissionSet(user, {
+    ...rbacOptions,
+    allPeople,
+    teams,
+  });
   return ALL_EMPLOYEE_PERMISSIONS.filter((perm) => resolved.has(perm));
 }
 
@@ -172,8 +178,14 @@ export function hasEmployeePermission(
   perm: EmployeePermission,
   allPeople: Person[] = [],
   teams: Team[] = [],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
-  return resolveEmployeePermissions(user, allPeople, teams).includes(perm);
+  return resolveEmployeePermissions(
+    user,
+    allPeople,
+    teams,
+    rbacOptions,
+  ).includes(perm);
 }
 
 /**
@@ -186,9 +198,12 @@ export function filterEmploymentForUser(
   allPeople: Person[] = [],
   teams: Team[] = [],
   orgStructure?: OrgStructureCatalogue,
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): EmploymentRecord | null {
   if (!employment) return null;
-  const perms = new Set(resolveEmployeePermissions(user, allPeople, teams));
+  const perms = new Set(
+    resolveEmployeePermissions(user, allPeople, teams, rbacOptions),
+  );
   if (!perms.has('employee:view_core')) {
     return null;
   }
@@ -764,8 +779,9 @@ export function canUserAccessMatter(
   matter: Matter,
   userId: string,
   user?: Person | null,
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
-  return canPersonAccessMatter(matter, userId, user);
+  return canPersonAccessMatter(matter, userId, user, rbacOptions);
 }
 
 /**
@@ -834,11 +850,7 @@ function isConfiguredFirmDomainEmail(
   if (firmWorkEmail && lower === firmWorkEmail.trim().toLowerCase()) {
     return true;
   }
-  const normalizedDomain =
-    primaryDomain?.trim().toLowerCase() ||
-    (firmWorkEmail?.includes('@')
-      ? firmWorkEmail.trim().toLowerCase().split('@')[1]
-      : '');
+  const normalizedDomain = primaryDomain?.trim().toLowerCase() ?? '';
   if (!normalizedDomain) return false;
   return lower.endsWith(`@${normalizedDomain}`);
 }
@@ -859,6 +871,9 @@ export function applyLeaverEffects(
   relationshipRoleIds: string[];
   employment: EmploymentRecord;
 } {
+  const configuredDomain = resolveConfiguredFirmPrimaryDomain({
+    branding: { primaryDomain: primaryDomain ?? undefined },
+  });
   const endDt = leavingDate || new Date().toISOString().slice(0, 10);
 
   // Deactivate firm-issued emails and phones
@@ -868,7 +883,7 @@ export function applyLeaverEffects(
       isConfiguredFirmDomainEmail(
         em.address,
         employment.systems?.firmWorkEmail,
-        primaryDomain,
+        configuredDomain,
       );
     if (isFirmDomain) {
       return { ...em, firmIssued: true, active: false, isPrimary: false };
@@ -1082,21 +1097,15 @@ export function createDefaultEmploymentRecord(opts: {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]/g, '');
 
-  const inferredDomain =
-    opts.primaryDomain?.trim().toLowerCase() ||
-    opts.allPeople
-      .flatMap((p) => (p.isEmployee || p.employment ? (p.emails ?? []) : []))
-      .find((e) => e.address?.includes('@'))
-      ?.address.trim()
-      .toLowerCase()
-      .split('@')[1] ||
-    'example.invalid';
+  const configuredDomain = resolveConfiguredFirmPrimaryDomain({
+    branding: { primaryDomain: opts.primaryDomain ?? undefined },
+  });
   const firmEmail =
     opts.person.emails?.find(
       (e) =>
         e.firmIssued ||
-        isConfiguredFirmDomainEmail(e.address, null, inferredDomain),
-    )?.address ?? `${slugFirst}.${slugSurname}@${inferredDomain}`;
+        isConfiguredFirmDomainEmail(e.address, null, configuredDomain),
+    )?.address ?? `${slugFirst}.${slugSurname}@${configuredDomain}`;
   const firmPhone = opts.person.phones?.[0]?.number ?? '';
 
   const record: EmploymentRecord = {
@@ -1259,6 +1268,7 @@ export function migrateEmployeesToEmploymentRecords(
   values: ChoiceValue[],
   orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
   pmsLinks: PmsLink[] = [],
+  primaryDomain?: string | null,
   nowIso: string = new Date().toISOString(),
 ): { people: Person[]; report: EmployeeMigrationReport } {
   const unmappedRecords: UnmappedEmployeeMigrationItem[] = [];
@@ -1311,6 +1321,7 @@ export function migrateEmployeesToEmploymentRecords(
       const synced = syncPersonWorkContactFlags(
         { ...person, employment: patchedEmp },
         orgStructure,
+        primaryDomain,
       );
       updatedPeople.push(synced);
       continue;
@@ -1355,6 +1366,7 @@ export function migrateEmployeesToEmploymentRecords(
       byId: person.updatedById || 'P-000004',
       nowIso,
       status: 'Active',
+      primaryDomain,
     });
 
     if (mappedRole) {
@@ -1385,6 +1397,7 @@ export function migrateEmployeesToEmploymentRecords(
         employment: emp,
       },
       orgStructure,
+      primaryDomain,
     );
 
     updatedPeople.push(migratedPerson);
@@ -1408,6 +1421,7 @@ export function migrateEmployeesToEmploymentRecords(
 export function syncPersonWorkContactFlags(
   person: Person,
   orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  primaryDomain?: string | null,
 ): Person {
   const emp = person.employment;
   if (!emp) {
@@ -1422,7 +1436,11 @@ export function syncPersonWorkContactFlags(
   const emails = (person.emails ?? []).map((em) => {
     const isFirm =
       em.firmIssued ||
-      isConfiguredFirmDomainEmail(em.address, emp.systems?.firmWorkEmail);
+      isConfiguredFirmDomainEmail(
+        em.address,
+        emp.systems?.firmWorkEmail,
+        primaryDomain,
+      );
     if (isFirm) {
       return {
         ...em,

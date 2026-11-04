@@ -4,10 +4,8 @@
   "private": true,
   "scripts": {
     "generate:extensions": "tsx scripts/generate-extension-registry.ts",
-    "predev": "tsx scripts/generate-extension-registry.ts",
     "prebuild": "tsx scripts/generate-extension-registry.ts",
     "pretest": "tsx scripts/generate-extension-registry.ts --all-fixtures",
-    "prelint": "tsx scripts/generate-extension-registry.ts",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

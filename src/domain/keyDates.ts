@@ -41,6 +41,7 @@ import type {
 import {
   IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY,
   resolvePersonPermissionSet,
+  type ResolvePersonPermissionsOptions,
 } from './rbac';
 import type { AuditEntry, Enquiry, Matter, Person, Task, Team } from './types';
 
@@ -106,6 +107,7 @@ export interface ResolveKeyDatePermissionsOptions {
   roleGrants?: Record<string, readonly KeyDatePermission[]> | null;
   allPeople?: readonly Person[];
   teams?: readonly Team[];
+  rbac?: ResolvePersonPermissionsOptions;
 }
 
 function normalizeOptions(
@@ -241,12 +243,14 @@ export function resolveKeyDatePermissions(
   }
 
   // If no custom roleGrants override was provided and the user has at least one role or department/relationship,
-  // also honour central RBAC relationship/department grants
+  // also honour central RBAC relationship/department grants when RBAC config is provided
   if (
     !customRoleGrants &&
+    opts.rbac?.config?.rbac &&
     (roleKeys.length > 0 || Boolean(user.departmentId))
   ) {
     const centralSet = resolvePersonPermissionSet(user, {
+      ...opts.rbac,
       allPeople: opts.allPeople,
       teams,
     });
@@ -476,6 +480,7 @@ export function canViewerAccessMatterKeyDates(
   viewerUserId: PersonId | Person | null | undefined,
   viewerPerson?: Person | null,
   people?: readonly Person[],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
   if (!matter || !matter.id) return false;
   if (!viewerUserId) return false;
@@ -486,11 +491,49 @@ export function canViewerAccessMatterKeyDates(
     typeof viewerUserId === 'object'
       ? viewerUserId
       : (viewerPerson ?? people?.find((p) => p.id === userId) ?? null);
-  return canUserAccessMatter(
-    matter as Matter,
-    userId,
-    resolvedPerson,
-  );
+  if (rbacOptions?.config?.rbac) {
+    return canUserAccessMatter(
+      matter as Matter,
+      userId,
+      resolvedPerson,
+      rbacOptions,
+    );
+  }
+  if (!isMatterRestrictedForKeyDates(matter)) {
+    return true;
+  }
+  const m = matter as Partial<Matter>;
+  if (
+    m.responsiblePartnerId === userId ||
+    m.supervisingPartnerId === userId ||
+    m.leadFeeEarnerId === userId ||
+    (Array.isArray(m.teamMemberIds) && m.teamMemberIds.includes(userId)) ||
+    (Array.isArray(matter.restrictedAccessUserIds) &&
+      matter.restrictedAccessUserIds.includes(userId))
+  ) {
+    return true;
+  }
+  if (resolvedPerson) {
+    const revoked = Boolean(
+      resolvedPerson.permissionOverrides?.revoke?.includes(
+        'matter:restricted:access',
+      ),
+    );
+    if (!revoked) {
+      if (
+        resolvedPerson.permissionOverrides?.grant?.includes(
+          'matter:restricted:access',
+        )
+      ) {
+        return true;
+      }
+      const roles = resolveUserRoleKeysForKeyDates(resolvedPerson);
+      if (roles.includes('managing_partner') || roles.includes('admin')) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**

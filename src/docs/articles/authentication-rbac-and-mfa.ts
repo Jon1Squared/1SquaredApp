@@ -48,7 +48,7 @@ Permissions are grouped into built-in and custom roles in the tenant RBAC config
 
 ### Per-person permission overrides & escalation guards
 
-In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_overrides\` can grant or revoke individual permissions on a specific employee record (with live debounced effective-permission previews computed on the server via \`previewRbacOverridesAction\` and \`resolvePersonPermissions\`, requiring \`rbac:manage_user_overrides\` or \`rbac:manage_config\`, \`mfaVerified === true\`, and schema-valid \`rbacConfig\`) and bind their Entra Object ID. Three mandatory security invariants apply to all role and override changes:
+In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_overrides\` can grant or revoke individual permissions on a specific employee record (with live debounced effective-permission previews computed on the server via \`previewRbacOverridesAction\` and \`resolvePersonPermissions\`, requiring \`rbac:manage_user_overrides\`, \`rbac:manage_config\`, or \`admin:access\`, \`mfaVerified === true\`, and schema-valid \`rbacConfig\`) and bind their Entra Object ID. Three mandatory security invariants apply to all role and override changes:
 
 1. **No Self-Modification**: No user—including a System Administrator—can modify their own roles or permission overrides.
 2. **No Granting Unheld Permissions**: A user cannot grant a permission or assign a role containing a permission that the acting user does not themselves hold.

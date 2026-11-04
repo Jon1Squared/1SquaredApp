@@ -19,26 +19,41 @@ import type {
 
 export const DEFAULT_LEGAL_ENTITY_ID = 'LE-PV-LLP';
 
-export function buildDefaultOrgStructure(): OrgStructureCatalogue {
+export function buildDefaultOrgStructure(options?: {
+  legalName?: string;
+  shortCode?: string;
+}): OrgStructureCatalogue {
+  const legalName = options?.legalName?.trim() || 'Primary Legal Entity LLP';
+  const baseName =
+    legalName.replace(/\s+(LLP|Ltd|Limited|PLC)$/i, '').trim() || legalName;
+  const codePrefix = (
+    options?.shortCode?.trim() ||
+    baseName
+      .split(/\s+/)
+      .map((w) => w[0] ?? '')
+      .join('')
+      .toUpperCase() ||
+    'FIRM'
+  ).slice(0, 4);
   const legalEntities: OrgLegalEntity[] = [
     {
       id: 'LE-PV-LLP',
-      name: 'Not A Law Firm LLP',
-      code: 'NALFLLP',
+      name: legalName,
+      code: `${codePrefix}LLP`,
       isDefault: true,
       active: true,
     },
     {
       id: 'LE-PV-SERV',
-      name: 'Not A Law Firm Services Ltd',
-      code: 'NALFSRV',
+      name: `${baseName} Services Ltd`,
+      code: `${codePrefix}SRV`,
       isDefault: false,
       active: true,
     },
     {
       id: 'LE-PV-TRUST',
-      name: 'Not A Law Firm Trustees Ltd',
-      code: 'NALFTRU',
+      name: `${baseName} Trustees Ltd`,
+      code: `${codePrefix}TRU`,
       isDefault: false,
       active: true,
     },

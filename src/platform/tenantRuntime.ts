@@ -23,10 +23,9 @@ import {
 import type { PlatformExtension } from '@platform/core-api';
 import { BUNDLED_TENANT_EXTENSIONS } from './generated/extensionRegistry';
 
-declare global {
-  var __oneSquaredTenantTestBaseConfig: Record<string, unknown> | null | undefined;
-  var __oneSquaredTenantTestDevOverlay: Record<string, unknown> | null | undefined;
-}
+let testBaseConfigOverride: Record<string, unknown> | null = null;
+let testDevOverlayOverride: Record<string, unknown> | null | undefined =
+  undefined;
 
 const fileJsonCache = new Map<string, Record<string, unknown>>();
 
@@ -34,10 +33,16 @@ export function setActiveTenantConfigForTesting(
   baseConfig: Record<string, unknown> | null,
   devOverlay?: Record<string, unknown> | null,
 ): void {
-  globalThis.__oneSquaredTenantTestBaseConfig = baseConfig;
-  globalThis.__oneSquaredTenantTestDevOverlay = devOverlay;
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setActiveTenantConfigForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  testBaseConfigOverride = baseConfig;
+  testDevOverlayOverride = devOverlay;
   cachedHost = null;
   cachedHostKey = null;
+  cachedHostLoadErrors = [];
 }
 
 function resolveTenantPackageDir(): string {
@@ -137,8 +142,8 @@ function readJsonConfigFile(
 }
 
 export function getActiveTenantRawBaseConfig(): Record<string, unknown> {
-  if (globalThis.__oneSquaredTenantTestBaseConfig) {
-    return globalThis.__oneSquaredTenantTestBaseConfig;
+  if (process.env.NODE_ENV === 'test' && testBaseConfigOverride) {
+    return testBaseConfigOverride;
   }
   return readJsonConfigFile(getActiveTenantBaseConfigPath(), false);
 }
@@ -192,7 +197,7 @@ export interface ExtensionLoadError {
   tenantId: string;
   extensionDir: string;
   extensionId?: string;
-  declaredHooks?: readonly string[];
+  declaredHooks: readonly string[] | null;
   error: string;
 }
 
@@ -202,7 +207,23 @@ let cachedHostLoadErrors: ExtensionLoadError[] = [];
 let cachedCluster: PostgresTenantCluster | null = null;
 
 export function getExtensionHostLoadErrors(): readonly ExtensionLoadError[] {
-  return cachedHostLoadErrors;
+  if (!cachedHost) {
+    return cachedHostLoadErrors;
+  }
+  const tenantConfig = getActiveTenantConfiguration();
+  const registeredIds = new Set(
+    cachedHost
+      .getActiveExtensionsForTenant(tenantConfig)
+      .map((ext) => ext.manifest.id),
+  );
+  return cachedHostLoadErrors.filter(
+    (err) =>
+      !(
+        err.error.startsWith('EXTENSION_NOT_REGISTERED:') &&
+        err.extensionId &&
+        registeredIds.has(err.extensionId)
+      ),
+  );
 }
 
 function isPlatformExtensionCandidate(
@@ -260,24 +281,45 @@ function loadTenantPackageExtensions(
   const nodeCrypto = process.getBuiltinModule('node:crypto') as typeof import('node:crypto');
   const packageRoot = path.resolve(process.cwd(), packageDir);
   const extensionsRoot = path.join(packageRoot, 'extensions');
-  if (!fs.existsSync(extensionsRoot)) {
-    return loadErrors;
-  }
   const enabledSet = new Set(tenantConfig.enabledExtensions ?? []);
   const req = nodeModule.createRequire(path.join(process.cwd(), 'package.json'));
-  const entries = fs
-    .readdirSync(extensionsRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort();
+  const entries = fs.existsSync(extensionsRoot)
+    ? fs
+        .readdirSync(extensionsRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort()
+    : [];
   for (const extDirName of entries) {
     const extDir = path.join(extensionsRoot, extDirName);
     const manifestPath = path.join(extDir, 'manifest.json');
     if (!fs.existsSync(manifestPath)) {
+      if (enabledSet.size > 0) {
+        const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
+        const message = `EXTENSION_MANIFEST_NOT_FOUND: manifest.json is missing in "${extDir}".`;
+        loadErrors.push({
+          tenantId: tenantConfig.tenantId,
+          extensionDir: extDirName,
+          extensionId: extDirName,
+          declaredHooks: null,
+          error: message,
+        });
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'extension_load_failed',
+            tenantId: tenantConfig.tenantId,
+            correlationId: loadCorrelationId,
+            extensionDir: extDirName,
+            extensionId: extDirName,
+            error: message,
+          }),
+        );
+      }
       continue;
     }
     let resolvedExtensionId = extDirName;
-    let declaredHooks: readonly string[] = [];
+    let declaredHooks: readonly string[] | null = null;
     try {
       const rawManifestJson = JSON.parse(
         fs.readFileSync(manifestPath, 'utf8'),
@@ -287,11 +329,6 @@ function loadTenantPackageExtensions(
           ? rawManifestJson.id.trim()
           : extDirName;
       resolvedExtensionId = candidateId;
-      if (Array.isArray(rawManifestJson?.hooks)) {
-        declaredHooks = rawManifestJson.hooks.filter(
-          (h): h is string => typeof h === 'string',
-        );
-      }
       if (!enabledSet.has(candidateId) && !enabledSet.has(extDirName)) {
         continue;
       }
@@ -379,6 +416,43 @@ function loadTenantPackageExtensions(
       );
     }
   }
+
+  const registeredIds = new Set(
+    host
+      .getActiveExtensionsForTenant(tenantConfig as TenantConfiguration)
+      .map((ext) => ext.manifest.id),
+  );
+  for (const enabledId of enabledSet) {
+    if (
+      !registeredIds.has(enabledId) &&
+      !loadErrors.some(
+        (err) =>
+          err.extensionId === enabledId || err.extensionDir === enabledId,
+      )
+    ) {
+      const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
+      const message = `EXTENSION_NOT_REGISTERED: Enabled extension "${enabledId}" was not found or failed to register.`;
+      loadErrors.push({
+        tenantId: tenantConfig.tenantId,
+        extensionDir: enabledId,
+        extensionId: enabledId,
+        declaredHooks: null,
+        error: message,
+      });
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'extension_load_failed',
+          tenantId: tenantConfig.tenantId,
+          correlationId: loadCorrelationId,
+          extensionDir: enabledId,
+          extensionId: enabledId,
+          error: message,
+        }),
+      );
+    }
+  }
+
   return loadErrors;
 }
 
@@ -414,10 +488,11 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
   const baseCfg = getActiveTenantRawBaseConfig();
+  const isTestEnv = process.env.NODE_ENV === 'test';
   const overlayCfg =
-    globalThis.__oneSquaredTenantTestDevOverlay !== undefined
-      ? (globalThis.__oneSquaredTenantTestDevOverlay ?? {})
-      : globalThis.__oneSquaredTenantTestBaseConfig
+    isTestEnv && testDevOverlayOverride !== undefined
+      ? (testDevOverlayOverride ?? {})
+      : isTestEnv && testBaseConfigOverride
         ? {}
         : readJsonConfigFile(
             getActiveTenantEnvironmentOverlayPath(env),

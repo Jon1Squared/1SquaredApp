@@ -4,6 +4,7 @@ import './globals.css';
 import { AppShell } from '@/components/AppShell';
 import { LoginScreen } from '@/components/LoginScreen';
 import { ToastProvider } from '@/components/Toast';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { getEntraEnvStatus, getEntraSession } from '@/server/entraAuth';
 import { getAppSnapshot, withPageActor } from '@/server/services';
 
@@ -19,10 +20,14 @@ const sourceSans = Source_Sans_3({
   weight: ['400', '600', '700'],
 });
 
-export const metadata: Metadata = {
-  title: '1Squared · Not A Law Firm LLP',
-  description: 'People & Organisations · Client inception, relationships and risk management',
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const displayName = getActiveTenantConfiguration().displayName;
+  return {
+    title: displayName ? `1Squared · ${displayName}` : '1Squared',
+    description:
+      'People & Organisations · Client inception, relationships and risk management',
+  };
+}
 
 export const dynamic = 'force-dynamic';
 
