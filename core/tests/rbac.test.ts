@@ -53,7 +53,7 @@ import {
   resolvePersonPermissions,
   runWithActiveActorSession,
   setRuntimeRbacConfigOverride,
-} from '../../src/domain/rbac';
+} from '../../src/server/rbacRuntime';
 import { buildDemoData } from '../../src/seed/demo';
 import { NextRequest } from 'next/server';
 import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
@@ -170,8 +170,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 43 canonical permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(43);
+    it('defines all 44 canonical permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(44);
       for (const key of ALL_PERMISSION_KEYS) {
         const entry = PERMISSION_REGISTRY[key];
         expect(entry).toBeDefined();
@@ -190,6 +190,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(PERMISSION_REGISTRY['admin:access'].requiresMfa).toBe(true);
       expect(PERMISSION_REGISTRY['rbac:manage_config'].requiresMfa).toBe(true);
       expect(PERMISSION_REGISTRY['rbac:manage_user_overrides'].requiresMfa).toBe(true);
+      expect(PERMISSION_REGISTRY['matter:restriction:lift'].requiresMfa).toBe(true);
     });
 
     it('enforces CI contract: every Field Catalogue entry references a registered PermissionKey', () => {
@@ -1956,7 +1957,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(dafyddAsTeamLeadPerms).toContain('task:claim_any');
         expect(dafyddAsTeamLeadPerms).not.toContain('matter:reassign_ownership');
 
-        // R141: previewRbacOverrides resolves draft grant/revoke overrides on the server via resolvePersonPermissions
+        // R141: previewRbacOverrides enforces rbac:manage_user_overrides / rbac:manage_config, MFA, and schema validation on draft rbacConfig
         const previewRes = previewRbacOverrides(
           'P-000002',
           {
@@ -1964,10 +1965,44 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             revoke: ['matter:create'],
           },
           'P-000004',
+          { mfaVerified: true },
         );
         expect(previewRes.ok).toBe(true);
         expect(previewRes.permissions).toContain('risk:view');
         expect(previewRes.permissions).not.toContain('matter:create');
+
+        // Fee earner (P-000002) is refused
+        const previewFeeEarner = previewRbacOverrides(
+          'P-000002',
+          { grant: ['risk:view'], revoke: [] },
+          'P-000002',
+          { mfaVerified: true },
+        );
+        expect(previewFeeEarner.ok).toBe(false);
+
+        // Missing MFA (mfaVerified: false) is refused with MFA_REQUIRED
+        const previewNoMfa = previewRbacOverrides(
+          'P-000002',
+          { grant: ['risk:view'], revoke: [] },
+          'P-000004',
+          { mfaVerified: false },
+        );
+        expect(previewNoMfa.ok).toBe(false);
+        expect(previewNoMfa.error).toMatch(/MFA_REQUIRED/);
+
+        // Invalid rbacConfig is refused by validateRbacConfig
+        const previewInvalidConfig = previewRbacOverrides(
+          'P-000002',
+          {
+            grant: [],
+            revoke: [],
+            rbacConfig: 'not-an-object' as unknown as import('@/domain/rbac').RbacConfiguration,
+          },
+          'P-000004',
+          { mfaVerified: true },
+        );
+        expect(previewInvalidConfig.ok).toBe(false);
+        expect(previewInvalidConfig.error).toMatch(/RBAC_CONFIG_INVALID/);
       } finally {
         resetAllDemoData('P-000001');
       }

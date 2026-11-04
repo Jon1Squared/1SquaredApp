@@ -41,14 +41,14 @@ Permissions are grouped into built-in and custom roles in the tenant RBAC config
 
 - **Core Administration & RBAC**: \`admin:access\`, \`rbac:manage_config\`, \`rbac:manage_user_overrides\`
 - **Employee & HR Records**: \`employee:view_core\`, \`employee:edit_core\`, \`employee:hr_restricted\`, \`employee:payroll\`, \`employee:sensitive\`
-- **Matters & Restricted Matters**: \`matter:create\`, \`matter:edit\`, \`matter:reassign_ownership\` (granted to \`partner\`, \`managing_partner\`, and \`admin\`, and not granted automatically to team leads via \`is_team_lead_of_any_team\`), \`matter:restricted:access\`
+- **Matters & Restricted Matters**: \`matter:create\`, \`matter:edit\`, \`matter:reassign_ownership\` (granted to \`supervisor\`, \`partner\`, \`managing_partner\`, and \`admin\`, and not granted automatically to team leads via \`is_team_lead_of_any_team\`), \`matter:restricted:access\`, \`matter:restriction:lift\` (granted to \`managing_partner\`, \`risk_compliance\`, and \`admin\`, requiring MFA)
 - **Finance & Risk**: \`finance:view\`, \`finance:view_matter\`, \`finance:credit_control\`, \`finance:manage_links\`, \`risk:view\`
 - **Document Templates & SharePoint DMS**: \`document_template:view\`, \`document_template:build\`, \`document_template:approve\`, \`document_template:view_usage\`, \`document_template:view_usage_by_user\`, \`document_template:configure\`, \`document:generate\`, \`document:view\`, \`document:download\`, \`document:upload\`, \`document:edit\`, \`document:delete\`, \`document:provision\`, \`document_store:configure\`, \`document_access:review\`
 - **Key Dates & Limitation**: \`keydate:view\`, \`keydate:view_any_team\`, \`keydate:edit\`, \`keydate:verify\`, \`keydate:override_calculation\`, \`keydate:resolve\`, \`keydate:waive\`, \`keydate:configure\`
 
 ### Per-person permission overrides & escalation guards
 
-In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_overrides\` can grant or revoke individual permissions on a specific employee record (with live effective-permission previews computed on the server via \`previewRbacOverridesAction\` and \`resolvePersonPermissions\`) and bind their Entra Object ID. Three mandatory security invariants apply to all role and override changes:
+In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_overrides\` can grant or revoke individual permissions on a specific employee record (with live debounced effective-permission previews computed on the server via \`previewRbacOverridesAction\` and \`resolvePersonPermissions\`, requiring \`rbac:manage_user_overrides\` or \`rbac:manage_config\`, \`mfaVerified === true\`, and schema-valid \`rbacConfig\`) and bind their Entra Object ID. Three mandatory security invariants apply to all role and override changes:
 
 1. **No Self-Modification**: No user—including a System Administrator—can modify their own roles or permission overrides.
 2. **No Granting Unheld Permissions**: A user cannot grant a permission or assign a role containing a permission that the acting user does not themselves hold.
@@ -64,7 +64,7 @@ Even if a user holds an administrative or partner role, **MFA verification (\`mf
 - Modifying tenant RBAC roles or Entra ID mappings (\`rbac:manage_config\`)
 - Changing an employee’s roles or permission overrides (\`rbac:manage_user_overrides\`)
 - Viewing or editing payroll and sensitive HR records (\`employee:payroll\`, \`employee:sensitive\`)
-- Accessing staff or restricted matters (\`matter:restricted:access\`), or lifting a staff/ethical-wall restriction on a matter (\`liftMatterRestriction\`, requiring \`admin:access\` or \`matter:restricted:access\`, \`mfaVerified === true\`, and a mandatory audit reason)
+- Accessing staff or restricted matters (\`matter:restricted:access\`), or lifting a staff/ethical-wall restriction on a matter (\`liftMatterRestriction\`, requiring \`matter:restriction:lift\`, \`mfaVerified === true\`, and a mandatory audit reason)
 - Approving document templates or configuring SharePoint stores (\`document_template:approve\`, \`document_template:configure\`, \`document_store:configure\`)
 - Overriding limitation calculations, waiving key dates, or changing key date rules (\`keydate:override_calculation\`, \`keydate:waive\`, \`keydate:configure\`)
 `,

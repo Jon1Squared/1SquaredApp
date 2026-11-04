@@ -1697,13 +1697,13 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         'document_reconciliation_findings',
       );
 
-      expect(runner.rollbackVersion(ctx, '0004')).toBe(true);
-      expect(runner.rollbackVersion(ctx, '0003')).toBe(true);
       const rolledBack = runner.rollbackVersion(ctx, '0002');
       expect(rolledBack).toBe(true);
       expect(runner.getActiveTables(ctx)).not.toContain(
         'matter_document_locations',
       );
+      expect(runner.getActiveTables(ctx)).toContain('key_dates');
+      expect(runner.getActiveTables(ctx)).toContain('key_date_reminder_states');
 
       runner.applyUp(ctx);
       expect(runner.getActiveTables(ctx)).toContain(
@@ -3469,7 +3469,8 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             store.documentStoreConfigOverride = prevDocStoreOverride;
           }
           expect(saveRes.errors).toBeUndefined();
-          expect(saveRes.matter.title).toBe(updatedTitle);
+          expect(saveRes.matter).not.toBeNull();
+          expect(saveRes.matter!.title).toBe(updatedTitle);
           expect(
             getStore().matters.find((m) => m.id === 'M-000001')?.title,
           ).toBe(updatedTitle);
@@ -3840,10 +3841,19 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           otherInactiveDept.active = prevOtherDeptActive;
         }
 
-        // R136: updateMatterConflictRecord requires matter:edit (a user with risk:view only gets { matter: null })
-        const riskViewOnlyRes = runAsStoreEmployee(
-          'P-000009',
-          () =>
+        // R136 (a1): updateMatterConflictRecord requires matter:edit even when the user IS on the matter (canPersonAccessMatter === true) and holds risk:view
+        const onMatterFeeEarner = store.people.find((p) => p.id === 'P-000002')!;
+        const prevTeamMemberIds = [...(openMatter.teamMemberIds ?? [])];
+        const prevOverrides = onMatterFeeEarner.permissionOverrides;
+        try {
+          if (!openMatter.teamMemberIds.includes('P-000002')) {
+            openMatter.teamMemberIds = [...openMatter.teamMemberIds, 'P-000002'];
+          }
+          onMatterFeeEarner.permissionOverrides = {
+            grant: ['risk:view'],
+            revoke: ['matter:edit'],
+          };
+          const riskViewOnlyOnMatterRes = runAsStoreEmployee('P-000002', () =>
             updateMatterConflictRecord(
               openMatter.id,
               {
@@ -3852,20 +3862,23 @@ describe('External Document Store Integration (Sections 1–14)', () => {
                 declarationConfirmed: true,
                 reviewerMessage: '',
                 lastRunAtDisplay: '2026-11-01',
-                lastRunById: 'P-000009',
-                lastRunByName: 'Finance User',
+                lastRunById: 'P-000002',
+                lastRunByName: 'Owain Pritchard',
                 parties: [],
                 matches: [],
                 runs: [],
                 comments: [],
               },
-              'P-000009',
+              'P-000002',
             ),
-          { rolesOverride: ['finance'] },
-        );
-        expect(riskViewOnlyRes.matter).toBeNull();
+          );
+          expect(riskViewOnlyOnMatterRes.matter).toBeNull();
+        } finally {
+          openMatter.teamMemberIds = prevTeamMemberIds;
+          onMatterFeeEarner.permissionOverrides = prevOverrides;
+        }
 
-        // R136 (b) & R135: Permitted user saves an information_barrier match -> hasEthicalWall becomes true; liftMatterRestriction enforces permission, MFA, and reason, and writes matter-restriction-lift audit
+        // R136 (b) & R135: Permitted user saves an information_barrier match -> hasEthicalWall becomes true; liftMatterRestriction enforces matter:restriction:lift (refusing partner), MFA, and reason, writes matter-restriction-lift audit, and persists across subsequent saves until a new barrier match is added
         const barrierRes = runAsStoreEmployee('P-000001', () =>
           updateMatterConflictRecord(
             openMatter.id,
@@ -3906,8 +3919,34 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
         expect(barrierRes.matter?.hasEthicalWall).toBe(true);
 
-        // Lifting without permission (P-000002 fee_earner) is refused
-        const liftNoPerm = runAsStoreEmployee('P-000002', () =>
+        // R136 (a2): updateMatterConflictRecord also requires canPersonAccessMatter even when the user holds matter:edit (P-000006 is a fee earner with matter:edit who is outside openMatter's ethical wall)
+        expect(openMatter.restrictedAccessUserIds).not.toContain('P-000006');
+        const matterEditButNotOnRestrictedMatterRes = runAsStoreEmployee(
+          'P-000006',
+          () =>
+            updateMatterConflictRecord(
+              openMatter.id,
+              {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '2026-11-01',
+                lastRunById: 'P-000006',
+                lastRunByName: 'Outside Fee Earner',
+                parties: [],
+                matches: [],
+                runs: [],
+                comments: [],
+              },
+              'P-000006',
+            ),
+          { rolesOverride: ['fee_earner'] },
+        );
+        expect(matterEditButNotOnRestrictedMatterRes.matter).toBeNull();
+
+        // Lifting by a fee earner (P-000002) or a standard partner (P-000001 with ['partner'] only) is refused because matter:restriction:lift is granted only to managing_partner, risk_compliance, and admin
+        const liftFeeEarner = runAsStoreEmployee('P-000002', () =>
           liftMatterRestriction(
             openMatter.id,
             'ethical_wall',
@@ -3915,38 +3954,66 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             'P-000002',
           ),
         );
-        expect(liftNoPerm.matter).toBeNull();
-        expect(liftNoPerm.errors?.permission).toBeDefined();
+        expect(liftFeeEarner.matter).toBeNull();
+        expect(liftFeeEarner.errors?.permission).toMatch(
+          /matter:restriction:lift/,
+        );
 
-        // Lifting without MFA (P-000001 partner with mfaVerified: false) is refused
+        const carysEmp = store.people.find((p) => p.id === 'P-000001')!;
+        const prevCarysRoles = [...(carysEmp.roles ?? [])];
+        try {
+          carysEmp.roles = ['partner'];
+          const liftPartnerOnly = runAsStoreEmployee(
+            'P-000001',
+            () =>
+              liftMatterRestriction(
+                openMatter.id,
+                'ethical_wall',
+                'Attempt by standard partner without managing_partner/risk_compliance',
+                'P-000001',
+              ),
+            { rolesOverride: ['partner'], mfaVerified: true },
+          );
+          expect(liftPartnerOnly.matter).toBeNull();
+          expect(liftPartnerOnly.errors?.permission).toMatch(
+            /matter:restriction:lift/,
+          );
+        } finally {
+          carysEmp.roles = prevCarysRoles;
+        }
+
+        // Lifting without MFA (P-000003 risk_compliance with mfaVerified: false) is refused
         const liftNoMfa = runAsStoreEmployee(
-          'P-000001',
+          'P-000003',
           () =>
             liftMatterRestriction(
               openMatter.id,
               'ethical_wall',
               'Attempt without MFA',
-              'P-000001',
+              'P-000003',
             ),
-          { mfaVerified: false },
+          { rolesOverride: ['risk_compliance'], mfaVerified: false },
         );
         expect(liftNoMfa.matter).toBeNull();
         expect(liftNoMfa.errors?.mfa).toMatch(/MFA_REQUIRED/);
 
-        // Lifting with permission, MFA, and non-empty reason clears hasEthicalWall and records matter-restriction-lift audit
+        // Lifting with matter:restriction:lift (P-000003 risk_compliance), MFA, and non-empty reason clears hasEthicalWall and records matter-restriction-lift audit
         const liftOk = runAsStoreEmployee(
-          'P-000001',
+          'P-000003',
           () =>
             liftMatterRestriction(
               openMatter.id,
               'ethical_wall',
               'Counterparty instruction concluded and COLP approved lifting barrier',
-              'P-000001',
+              'P-000003',
             ),
-          { mfaVerified: true },
+          { rolesOverride: ['risk_compliance'], mfaVerified: true },
         );
         expect(liftOk.errors).toBeUndefined();
         expect(liftOk.matter?.hasEthicalWall).toBe(false);
+        expect(
+          liftOk.matter?.restrictionLift?.ethicalWall?.liftedBarrierMatchIds,
+        ).toContain('CM-BARRIER-1');
         expect(
           store.audit.some(
             (a) =>
@@ -3954,6 +4021,52 @@ describe('External Document Store Integration (Sections 1–14)', () => {
               a.action === 'matter-restriction-lift',
           ),
         ).toBe(true);
+
+        // Subsequent saveMatterRecord editing the matter's title preserves hasEthicalWall === false
+        const postLiftSave = await runAsStoreEmployee('P-000001', () =>
+          saveMatterRecord(
+            {
+              ...openMatter,
+              title: `${openMatter.title} (Title edited after lift)`,
+            },
+            { id: openMatter.id, byId: 'P-000001', saveMode: 'draft' },
+          ),
+        );
+        expect(postLiftSave.errors).toBeUndefined();
+        expect(postLiftSave.matter?.hasEthicalWall).toBe(false);
+
+        // Adding a NEW information_barrier match ID (CM-BARRIER-2) reinstates hasEthicalWall === true
+        const newBarrierRes = runAsStoreEmployee('P-000001', () =>
+          updateMatterConflictRecord(
+            openMatter.id,
+            {
+              ...(openMatter.conflictCheckRecord!),
+              matches: [
+                ...(openMatter.conflictCheckRecord?.matches ?? []),
+                {
+                  id: 'CM-BARRIER-2',
+                  partyId: 'pt-2',
+                  partyName: 'Second Barrier Party',
+                  matchedRecordId: openMatter.clientId,
+                  matchedRecordName: 'Second Barrier Party',
+                  matchedRecordType: 'organisation',
+                  strength: 'Exact',
+                  whereFound: 'Matter',
+                  responsiblePartnerId: 'P-000001',
+                  responsiblePartnerName: 'Carys Hughes',
+                  dateLabel: '2026-11-04',
+                  disposition: 'potential_conflict',
+                  note: 'New conflicting instruction',
+                  reviewerDecision: 'approve_with_conditions',
+                  reviewerConditionType: 'information_barrier',
+                  reviewerNote: 'New ethical wall required',
+                },
+              ],
+            },
+            'P-000001',
+          ),
+        );
+        expect(newBarrierRes.matter?.hasEthicalWall).toBe(true);
       } finally {
         store.matters = snapshotMatters;
         store.people = snapshotPeople;

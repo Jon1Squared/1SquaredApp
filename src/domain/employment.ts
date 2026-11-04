@@ -79,7 +79,6 @@ export const CONTRACT_TYPES: ContractType[] = [
 import {
   ALL_EMPLOYEE_PERMISSIONS as CORE_ALL_EMPLOYEE_PERMISSIONS,
   canPersonAccessMatter,
-  getServerTenantConfiguration,
   resolvePersonPermissionSet,
 } from './rbac';
 
@@ -814,8 +813,9 @@ export function getRightToWorkEvidenceOnFile(person: Person | null | undefined):
 export function resolveConfiguredFirmPrimaryDomain(
   configOverride?: { branding?: { primaryDomain?: string } } | null,
 ): string {
-  const config = configOverride ?? getServerTenantConfiguration();
-  const primaryDomain = config?.branding?.primaryDomain?.trim().toLowerCase();
+  const primaryDomain = configOverride?.branding?.primaryDomain
+    ?.trim()
+    .toLowerCase();
   if (!primaryDomain) {
     throw new Error(
       'TENANT_CONFIG_ERROR: Tenant configuration is missing branding.primaryDomain.',
@@ -824,14 +824,23 @@ export function resolveConfiguredFirmPrimaryDomain(
   return primaryDomain;
 }
 
-function isConfiguredFirmDomainEmail(address: string, firmWorkEmail?: string | null): boolean {
+function isConfiguredFirmDomainEmail(
+  address: string,
+  firmWorkEmail?: string | null,
+  primaryDomain?: string | null,
+): boolean {
   const lower = address.trim().toLowerCase();
   if (!lower) return false;
   if (firmWorkEmail && lower === firmWorkEmail.trim().toLowerCase()) {
     return true;
   }
-  const primaryDomain = resolveConfiguredFirmPrimaryDomain();
-  return lower.endsWith(`@${primaryDomain}`);
+  const normalizedDomain =
+    primaryDomain?.trim().toLowerCase() ||
+    (firmWorkEmail?.includes('@')
+      ? firmWorkEmail.trim().toLowerCase().split('@')[1]
+      : '');
+  if (!normalizedDomain) return false;
+  return lower.endsWith(`@${normalizedDomain}`);
 }
 
 export function applyLeaverEffects(
@@ -843,6 +852,7 @@ export function applyLeaverEffects(
   employment: EmploymentRecord,
   leavingDate: string,
   keepAsContact: boolean = true,
+  primaryDomain?: string | null,
 ): {
   emails: Email[];
   phones: Phone[];
@@ -855,7 +865,11 @@ export function applyLeaverEffects(
   const updatedEmails = person.emails.map((em) => {
     const isFirmDomain =
       em.firmIssued ||
-      isConfiguredFirmDomainEmail(em.address, employment.systems?.firmWorkEmail);
+      isConfiguredFirmDomainEmail(
+        em.address,
+        employment.systems?.firmWorkEmail,
+        primaryDomain,
+      );
     if (isFirmDomain) {
       return { ...em, firmIssued: true, active: false, isPrimary: false };
     }
@@ -1009,6 +1023,7 @@ export function createDefaultEmploymentRecord(opts: {
   byId: string;
   nowIso?: string;
   status?: EmploymentStatus;
+  primaryDomain?: string | null;
 }): EmploymentRecord {
   const orgStructure = opts.orgStructure ?? buildDefaultOrgStructure();
   const nowIso = opts.nowIso ?? new Date().toISOString();
@@ -1067,13 +1082,21 @@ export function createDefaultEmploymentRecord(opts: {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]/g, '');
 
-  const configuredDomain = resolveConfiguredFirmPrimaryDomain();
+  const inferredDomain =
+    opts.primaryDomain?.trim().toLowerCase() ||
+    opts.allPeople
+      .flatMap((p) => (p.isEmployee || p.employment ? (p.emails ?? []) : []))
+      .find((e) => e.address?.includes('@'))
+      ?.address.trim()
+      .toLowerCase()
+      .split('@')[1] ||
+    'example.invalid';
   const firmEmail =
     opts.person.emails?.find(
       (e) =>
         e.firmIssued ||
-        isConfiguredFirmDomainEmail(e.address),
-    )?.address ?? `${slugFirst}.${slugSurname}@${configuredDomain}`;
+        isConfiguredFirmDomainEmail(e.address, null, inferredDomain),
+    )?.address ?? `${slugFirst}.${slugSurname}@${inferredDomain}`;
   const firmPhone = opts.person.phones?.[0]?.number ?? '';
 
   const record: EmploymentRecord = {

@@ -5,7 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildTenantCacheKey,
   CORE_API_VERSION,
+  ExtensionHookPointSchema,
   ExtensionHost,
+  ExtensionManifestSchema,
+  ExtensionPermissionSchema,
   loadAndValidateTenantConfig,
   PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
@@ -15,13 +18,16 @@ import {
   type PlatformExtension,
 } from '@platform/core';
 import extensionManifestJsonSchema from '../schemas/extension-manifest.schema.json';
+import { generateExtensionRegistry } from '../../scripts/generate-extension-registry';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
-import { resolveConfiguredFirmPrimaryDomain } from '../../src/domain/employment';
 import { syncHomeRolesWithEmployeeRoles } from '../../src/domain/homeConfig';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
-import { runWithActiveActorSession } from '../../src/domain/rbac';
+import {
+  resolveConfiguredFirmPrimaryDomain,
+  runWithActiveActorSession,
+} from '../../src/server/rbacRuntime';
 import {
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
@@ -35,7 +41,11 @@ import {
   createVerifiedSessionActorFromEntraSession,
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
-import { resetAllDemoData, saveMatterRecord } from '../../src/server/services';
+import {
+  resetAllDemoData,
+  saveMatterRecord,
+  updateMatterConflictRecord,
+} from '../../src/server/services';
 import { getStore } from '../../src/server/store';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
@@ -342,7 +352,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       },
     );
 
-    expect(isolatedResult.allowProceed).toBe(true);
+    expect(isolatedResult.allowProceed).toBe(false);
     expect(isolatedResult.governanceWarnings[0]).toContain(
       'Extension isolated error: faulty-ext',
     );
@@ -639,7 +649,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // Inline-created party was NOT pushed to store.people when beforeMatterOpen vetoed the save
       expect(store.people.length).toBe(peopleCountBeforeVeto);
 
-      // (c) In draft mode, beforeFeeEstimateSave records governance warnings without blocking pre-open draft save
+      // (c) In draft mode, beforeMatterCostsCalculate records governance warnings without blocking pre-open draft save
       const preOpenRes = await runWithActiveActorSession(
         {
           personId: carys.id,
@@ -765,7 +775,196 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       },
     );
     expect(timeoutOutcome.allowProceed).toBe(false);
-    expect(timeoutOutcome.governanceWarnings[0]).toMatch(/timed out after/i);
+    expect(timeoutOutcome.governanceWarnings[0]).toMatch(/timeout-gate-ext/i);
+
+    // R108 (4): When a beforeMatterOpen hook throws an unhandled error, executeMatterCostsHook fails closed (allowProceed === false)
+    const throwingHost = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+    throwingHost.registerExtension({
+      manifest: {
+        id: 'throwing-gate-ext',
+        name: 'Throwing Gate Extension',
+        version: '1.0.0',
+        description: 'Throws during beforeMatterOpen',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: ['matter:open:gate'],
+        hooks: ['beforeMatterOpen'],
+        hookTimeoutMs: 500,
+      },
+      hooks: {
+        beforeMatterOpen: async () => {
+          throw new Error('Simulated extension database crash');
+        },
+      },
+    });
+    const throwingOutcome = await throwingHost.executeMatterCostsHook(
+      'beforeMatterOpen',
+      asyncCtx,
+      {
+        ...config,
+        enabledExtensions: ['throwing-gate-ext'],
+      },
+      {
+        matterId: 'M-000011',
+        workBasis: 'capped',
+        estimatedFeeGbp: 10000,
+        disbursementsTotalGbp: 0,
+        partnerSignOffCompleted: true,
+      },
+    );
+    expect(throwingOutcome.allowProceed).toBe(false);
+    expect(throwingOutcome.governanceWarnings[0]).toMatch(
+      /Simulated extension database crash/i,
+    );
+
+    // R108 (5): When an enabled extension declaring beforeMatterOpen fails to load, saveMatterRecord refuses to open the matter
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+
+      // Temporarily register a throwing beforeMatterOpen hook on the active ExtensionHost and verify saveMatterRecord blocks
+      const rawBaseCfg = getActiveTenantRawBaseConfig();
+      setActiveTenantConfigForTesting({
+        ...rawBaseCfg,
+        enabledExtensions: ['nalf-throwing-open-gate'],
+      });
+      const activeHost = getPlatformExtensionHost();
+      activeHost.registerExtension({
+        manifest: {
+          id: 'nalf-throwing-open-gate',
+          name: 'NALF Throwing Open Gate',
+          version: '1.0.0',
+          description: 'Throws on beforeMatterOpen',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['matter:open:gate'],
+          hooks: ['beforeMatterOpen'],
+        },
+        hooks: {
+          beforeMatterOpen: () => {
+            throw new Error('Unhandled hook crash on open');
+          },
+        },
+      });
+      const throwSaveRes = await runWithActiveActorSession(
+        {
+          personId: carys.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: verifiedSession.mappedRoles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession,
+        },
+        () =>
+          saveMatterRecord(
+            {
+              ...baseMatter,
+              conflictClearedById: null,
+            },
+            { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(throwSaveRes.matter).toBeNull();
+      expect(throwSaveRes.errors?.costsGovernance).toMatch(
+        /Unhandled hook crash on open/i,
+      );
+
+      // Now configure an enabled extension that is not in the generated registry (so it records an ExtensionLoadError for beforeMatterOpen)
+      setActiveTenantConfigForTesting(null);
+      const tmpLoadFailDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'nalf-load-fail-'),
+      );
+      const prevPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+      try {
+        fs.mkdirSync(path.join(tmpLoadFailDir, 'config'), { recursive: true });
+        const extSubDir = path.join(
+          tmpLoadFailDir,
+          'extensions',
+          'missing-open-gate',
+        );
+        fs.mkdirSync(extSubDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(tmpLoadFailDir, 'config', 'base.json'),
+          JSON.stringify({
+            ...rawBaseCfg,
+            enabledExtensions: ['missing-open-gate'],
+          }),
+          'utf8',
+        );
+        fs.writeFileSync(
+          path.join(extSubDir, 'manifest.json'),
+          JSON.stringify({
+            id: 'missing-open-gate',
+            name: 'Missing Open Gate',
+            version: '1.0.0',
+            description: 'Registered in manifest but missing from generated registry',
+            supportedCoreApiRange: '^1.0.0',
+            permissions: ['matter:open:gate'],
+            hooks: ['beforeMatterOpen'],
+          }),
+          'utf8',
+        );
+        process.env.PLATFORM_TENANT_PACKAGE_DIR = tmpLoadFailDir;
+        setActiveTenantConfigForTesting(null);
+        getPlatformExtensionHost();
+        expect(
+          getExtensionHostLoadErrors().some(
+            (e) =>
+              e.extensionId === 'missing-open-gate' &&
+              e.declaredHooks?.includes('beforeMatterOpen'),
+          ),
+        ).toBe(true);
+
+        const loadErrSaveRes = await runWithActiveActorSession(
+          {
+            personId: carys.id,
+            tenantId: 'not-a-law-firm',
+            tokenRoles: verifiedSession.mappedRoles,
+            expiresAtMs: Date.parse(expiresAt),
+            verifiedSession,
+          },
+          () =>
+            saveMatterRecord(
+              {
+                ...baseMatter,
+                conflictClearedById: null,
+              },
+              { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
+            ),
+        );
+        expect(loadErrSaveRes.matter).toBeNull();
+        expect(loadErrSaveRes.errors?.costsGovernance).toBe(
+          'A required costs check could not run. Please contact your administrator.',
+        );
+      } finally {
+        if (prevPkgDir === undefined) {
+          delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+        } else {
+          process.env.PLATFORM_TENANT_PACKAGE_DIR = prevPkgDir;
+        }
+        fs.rmSync(tmpLoadFailDir, { recursive: true, force: true });
+      }
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
 
     // R106: Domain helpers (syncHomeRolesWithEmployeeRoles, createDefaultMatterCostsConfig) succeed in browser window mode without reading tenant configuration
     const storeValues = getStore().values;
@@ -789,11 +988,17 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     }
 
-    // R143 (7): Manifest schema parity between core/schemas/extension-manifest.schema.json and validateExtensionManifest
+    // R143 (7) & R151: Two-way manifest schema parity between core/schemas/extension-manifest.schema.json and ExtensionManifestSchema
     const schemaPerms =
       extensionManifestJsonSchema.properties.permissions.items.enum;
     const schemaHooks =
       extensionManifestJsonSchema.properties.hooks.items.enum;
+    expect(ExtensionPermissionSchema.options).toEqual(schemaPerms);
+    expect(ExtensionHookPointSchema.options).toEqual(schemaHooks);
+    const zodRequiredKeys = Object.entries(ExtensionManifestSchema.shape)
+      .filter(([, fieldSchema]) => !fieldSchema.isOptional())
+      .map(([key]) => key);
+    expect(zodRequiredKeys).toEqual(extensionManifestJsonSchema.required);
     for (const perm of schemaPerms) {
       expect(() =>
         validateExtensionManifest({
@@ -858,6 +1063,438 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
     } finally {
       setActiveTenantConfigForTesting(null);
+    }
+  });
+
+  it('R132 & R151: generateExtensionRegistry writes an empty registry when PLATFORM_TENANT_PACKAGE_DIR is unset, throws on missing package or duplicate ID, and emits one import for a valid package', () => {
+    const tmpOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-reg-out-'));
+    try {
+      // (a) Unset PLATFORM_TENANT_PACKAGE_DIR and no --all-fixtures -> empty registry with zero imports
+      const emptyRes = generateExtensionRegistry({
+        repoRoot: process.cwd(),
+        env: {},
+        argv: [],
+        outDir: tmpOutDir,
+      });
+      expect(emptyRes.bundledExtensionIds).toEqual([]);
+      const emptySrc = fs.readFileSync(emptyRes.writtenFile, 'utf8');
+      expect(emptySrc).not.toMatch(/^import \* as /m);
+      expect(emptySrc).toContain('export const BUNDLED_TENANT_EXTENSIONS');
+
+      // (b) Missing package directory -> throws TENANT_CONFIG_ERROR
+      expect(() =>
+        generateExtensionRegistry({
+          repoRoot: process.cwd(),
+          env: { PLATFORM_TENANT_PACKAGE_DIR: 'client-does-not-exist' },
+          argv: [],
+          outDir: tmpOutDir,
+        }),
+      ).toThrow(/TENANT_CONFIG_ERROR/);
+
+      // (c) Valid package -> writes one import
+      const validRes = generateExtensionRegistry({
+        repoRoot: process.cwd(),
+        env: { PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm' },
+        argv: [],
+        outDir: tmpOutDir,
+      });
+      expect(validRes.bundledExtensionIds).toEqual([
+        'nalf-matter-costs-governance',
+      ]);
+
+      // (d) Duplicate extension ID across two folders -> throws DUPLICATE_EXTENSION_ID
+      const tmpPkgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-dup-pkg-'));
+      try {
+        fs.mkdirSync(path.join(tmpPkgDir, 'config'), { recursive: true });
+        fs.writeFileSync(
+          path.join(tmpPkgDir, 'config', 'base.json'),
+          JSON.stringify({
+            ...notALawFirmBaseConfig,
+            enabledExtensions: ['dup-ext-id'],
+          }),
+          'utf8',
+        );
+        for (const sub of ['ext-a', 'ext-b']) {
+          const dir = path.join(tmpPkgDir, 'extensions', sub, 'src');
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(tmpPkgDir, 'extensions', sub, 'manifest.json'),
+            JSON.stringify({
+              id: 'dup-ext-id',
+              name: `Dup ${sub}`,
+              version: '1.0.0',
+              description: 'Duplicate ID test',
+              supportedCoreApiRange: '^1.0.0',
+              permissions: ['matter:read'],
+              hooks: ['beforeMatterOpen'],
+            }),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(dir, 'index.ts'),
+            'export default {};\n',
+            'utf8',
+          );
+        }
+        expect(() =>
+          generateExtensionRegistry({
+            repoRoot: process.cwd(),
+            env: { PLATFORM_TENANT_PACKAGE_DIR: tmpPkgDir },
+            argv: [],
+            outDir: tmpOutDir,
+          }),
+        ).toThrow(/DUPLICATE_EXTENSION_ID/);
+      } finally {
+        fs.rmSync(tmpPkgDir, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(tmpOutDir, { recursive: true, force: true });
+    }
+  });
+
+  it('R144: async saveMatterRecord never reissues IDs on veto and preserves concurrent conflict-record updates (rejecting stale concurrent matter saves)', async () => {
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const targetMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+      const actorSession = {
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession,
+      };
+
+      const rawBaseCfg = getActiveTenantRawBaseConfig();
+      setActiveTenantConfigForTesting({
+        ...rawBaseCfg,
+        enabledExtensions: ['nalf-slow-concurrency-ext'],
+      });
+      const activeHost = getPlatformExtensionHost();
+      let hookMode: 'veto_after_50ms' | 'allow_after_50ms' = 'veto_after_50ms';
+      activeHost.registerExtension({
+        manifest: {
+          id: 'nalf-slow-concurrency-ext',
+          name: 'Slow Concurrency Extension',
+          version: '1.0.0',
+          description: 'Waits 50ms during beforeMatterOpen',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['matter:open:gate'],
+          hooks: ['beforeMatterOpen'],
+        },
+        hooks: {
+          beforeMatterOpen: async () => {
+            await new Promise((r) => setTimeout(r, 50));
+            return {
+              allowProceed: hookMode === 'allow_after_50ms',
+              requiresPartnerSignOff: hookMode === 'veto_after_50ms',
+              governanceWarnings:
+                hookMode === 'veto_after_50ms'
+                  ? ['Slow veto after 50ms']
+                  : [],
+            };
+          },
+        },
+      });
+
+      // Start slow vetoed save that allocates an inline party ID before awaiting the hook
+      const slowVetoPromise = runWithActiveActorSession(actorSession, () =>
+        saveMatterRecord(
+          {
+            ...targetMatter,
+            conflictClearedById: null,
+            parties: [
+              ...(targetMatter.parties ?? []),
+              {
+                id: 'pt-slow-veto',
+                name: 'Slow Veto Counterparty',
+                role: 'Counterparty',
+                linkedRecordId: null,
+                entityType: 'person',
+              },
+            ],
+          },
+          { id: targetMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+
+      // While slowVetoPromise is awaiting the 50ms hook, create a new matter (with an inline party) and update targetMatter's conflict record
+      await new Promise((r) => setTimeout(r, 15));
+      const { id: _omittedTargetId, ...newMatterTemplate } = targetMatter;
+      void _omittedTargetId;
+      const concurrentNewMatterRes = await runWithActiveActorSession(
+        actorSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...newMatterTemplate,
+              title: 'Concurrent Draft Matter During Hook Wait',
+              parties: [
+                {
+                  id: 'pt-concurrent-draft',
+                  name: 'Concurrent Created Person',
+                  role: 'Counterparty',
+                  linkedRecordId: null,
+                  entityType: 'person',
+                },
+              ],
+            },
+            { byId: carys.id, saveMode: 'draft' },
+          ),
+      );
+      expect(concurrentNewMatterRes.errors).toBeUndefined();
+      expect(concurrentNewMatterRes.matter).not.toBeNull();
+
+      const baseConflict = targetMatter.conflictCheckRecord ?? {
+        status: 'In progress' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '04 Nov 2026',
+        lastRunById: carys.id,
+        lastRunByName: 'Carys Hughes',
+        submittedAtDisplay: '04 Nov 2026',
+        submittedById: carys.id,
+        submittedByName: 'Carys Hughes',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      };
+      const concurrentConflictUpdate = updateMatterConflictRecord(
+        targetMatter.id,
+        {
+          ...baseConflict,
+          reviewerMessage: 'Updated concurrently while hook was waiting',
+        },
+        carys.id,
+      );
+      expect(concurrentConflictUpdate.matter).not.toBeNull();
+
+      const slowVetoRes = await slowVetoPromise;
+      expect(slowVetoRes.matter).toBeNull();
+
+      // Create another matter after the veto and verify no Matter or Person ID was issued twice
+      const postVetoMatterRes = await runWithActiveActorSession(
+        actorSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...newMatterTemplate,
+              title: 'Post-Veto Draft Matter',
+              parties: [
+                {
+                  id: 'pt-post-veto',
+                  name: 'Post Veto Created Person',
+                  role: 'Counterparty',
+                  linkedRecordId: null,
+                  entityType: 'person',
+                },
+              ],
+            },
+            { byId: carys.id, saveMode: 'draft' },
+          ),
+      );
+      expect(postVetoMatterRes.errors).toBeUndefined();
+      expect(postVetoMatterRes.matter).not.toBeNull();
+      expect(postVetoMatterRes.matter!.id).not.toBe(
+        concurrentNewMatterRes.matter!.id,
+      );
+
+      const allMatterIds = store.matters.map((m) => m.id);
+      expect(new Set(allMatterIds).size).toBe(allMatterIds.length);
+      const allPersonIds = store.people.map((p) => p.id);
+      expect(new Set(allPersonIds).size).toBe(allPersonIds.length);
+
+      // Verify the concurrent conflict-record update on targetMatter is still intact
+      const refreshedTarget = store.matters.find(
+        (m) => m.id === targetMatter.id,
+      )!;
+      expect(refreshedTarget.conflictCheckRecord?.reviewerMessage).toBe(
+        'Updated concurrently while hook was waiting',
+      );
+
+      // Now verify that when a hook allows proceed after 50ms, a concurrent update to the same matter causes saveMatterRecord to refuse with errors.conflict
+      hookMode = 'allow_after_50ms';
+      const staleSavePromise = runWithActiveActorSession(actorSession, () =>
+        saveMatterRecord(
+          {
+            ...refreshedTarget,
+            title: 'Stale Overwrite Attempt',
+            conflictClearedById: null,
+          },
+          { id: refreshedTarget.id, byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      await new Promise((r) => setTimeout(r, 15));
+      updateMatterConflictRecord(
+        refreshedTarget.id,
+        {
+          ...baseConflict,
+          reviewerMessage: 'Second concurrent update during allow hook',
+        },
+        carys.id,
+      );
+      const staleSaveRes = await staleSavePromise;
+      expect(staleSaveRes.matter).toBeNull();
+      expect(staleSaveRes.errors?.conflict).toMatch(
+        /changed by someone else while you were saving/i,
+      );
+      expect(
+        store.matters.find((m) => m.id === refreshedTarget.id)!.title,
+      ).not.toBe('Stale Overwrite Attempt');
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R147: referred conflict reviews route via conflictReview config, stay unassigned when unconfigured, and never assign or leak staff matter titles outside restrictedAccessUserIds', async () => {
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+      const actorSession = {
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession,
+      };
+
+      const rawBaseCfg = getActiveTenantRawBaseConfig();
+
+      // (a) With conflictReview unconfigured (assigneeTeamKey: null, assigneeRoleKey: null), the review task is unassigned
+      setActiveTenantConfigForTesting({
+        ...rawBaseCfg,
+        conflictReview: {
+          assigneeTeamKey: null,
+          assigneeRoleKey: null,
+        },
+      });
+      const unconfiguredRes = await runWithActiveActorSession(
+        actorSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...baseMatter,
+              title: 'Unconfigured Conflict Review Matter',
+              agreedFeeCapGbp: 5000,
+              feeEstimateGbp: 5000,
+            },
+            { id: baseMatter.id, byId: carys.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(unconfiguredRes.errors).toBeUndefined();
+      expect(unconfiguredRes.matter).not.toBeNull();
+      const unconfiguredTask = store.tasks.find(
+        (t) =>
+          t.linkedRecords.some((r) => r.recordId === baseMatter.id) &&
+          t.title.includes('Unconfigured Conflict Review Matter'),
+      );
+      expect(unconfiguredTask).toBeDefined();
+      expect(unconfiguredTask?.assignedPersonId).toBeNull();
+      expect(unconfiguredTask?.assignedTeamId).toBeNull();
+
+      // (b) On a staff matter where no risk team member is in restrictedAccessUserIds (and matter:restricted:access is revoked on risk team members), the task is never assigned to someone outside restrictedAccessUserIds and omits the client name and matter title
+      setActiveTenantConfigForTesting(null);
+      const staffEmployeeClient = store.people.find(
+        (p) => p.isEmployee && p.id !== carys.id,
+      )!;
+      for (const p of store.people) {
+        if (p.id !== carys.id) {
+          p.permissionOverrides = {
+            grant: p.permissionOverrides?.grant ?? [],
+            revoke: ['matter:restricted:access'],
+          };
+        }
+      }
+
+      const { id: _omittedBaseId, ...staffMatterTemplate } = baseMatter;
+      void _omittedBaseId;
+      const staffReferredRes = await runWithActiveActorSession(
+        actorSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...staffMatterTemplate,
+              title: 'Confidential Staff Disciplinary Matter',
+              clientId: staffEmployeeClient.id,
+              agreedFeeCapGbp: 5000,
+              feeEstimateGbp: 5000,
+              responsiblePartnerId: carys.id,
+              supervisingPartnerId: carys.id,
+              leadFeeEarnerId: carys.id,
+              teamMemberIds: [carys.id],
+            },
+            { byId: carys.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(staffReferredRes.errors).toBeUndefined();
+      expect(staffReferredRes.matter).not.toBeNull();
+      expect(staffReferredRes.matter!.isStaffMatter).toBe(true);
+      const staffTask = store.tasks.find((t) =>
+        t.linkedRecords.some((r) => r.recordId === staffReferredRes.matter!.id),
+      );
+      expect(staffTask).toBeDefined();
+      if (staffTask?.assignedPersonId) {
+        expect(staffReferredRes.matter!.restrictedAccessUserIds).toContain(
+          staffTask.assignedPersonId,
+        );
+      } else {
+        expect(staffTask?.assignedPersonId).toBeNull();
+        expect(staffTask?.title).not.toContain(
+          'Confidential Staff Disciplinary Matter',
+        );
+        expect(staffTask?.title).not.toContain(staffEmployeeClient.surname);
+        expect(staffTask?.description).not.toContain(
+          'Confidential Staff Disciplinary Matter',
+        );
+      }
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
     }
   });
 });

@@ -16,7 +16,7 @@ import {
 } from '@/domain/matterParties';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { computeAutomaticPmsLinks } from '@/domain/pms';
-import { setRuntimeRbacConfigOverride } from '@/domain/rbac';
+import { setRuntimeRbacConfigOverride } from './rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type { KeyDate } from '@/domain/keyDates.types';
 import type {
@@ -628,9 +628,9 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
       store.matterCostsConfig.clientProfileName.includes('Pembroke Vaughan') ||
       store.matterCostsConfig.clientProfileName.includes('Standard Base Platform'))
   ) {
-    store.matterCostsConfig.clientProfileCode = 'NALF-LLP';
-    store.matterCostsConfig.clientProfileName =
-      'Not A Law Firm LLP — Client Configuration (notalawfirm.example)';
+    const tenantCfg = getActiveTenantConfiguration();
+    store.matterCostsConfig.clientProfileCode = tenantCfg.tenantId;
+    store.matterCostsConfig.clientProfileName = `${tenantCfg.displayName} — Client Configuration (${tenantCfg.branding.primaryDomain})`;
     changed = true;
   }
   return changed;
@@ -685,21 +685,22 @@ export function getStore(): FirmStore {
         }
       }
     }
-    const memBethan = global.__oneSquaredStore.people.find((p) => p.id === 'P-000003');
-    if (
-      memBethan &&
-      Array.isArray(memBethan.roles) &&
-      memBethan.roles[0] === 'risk_compliance' &&
-      memBethan.roles.length > 2
-    ) {
-      memBethan.roles = [
+    const memRiskOfficer = global.__oneSquaredStore.people.find(
+      (p) =>
+        p.employeeRoleId === 'employee_role.risk_and_compliance' &&
+        Array.isArray(p.roles) &&
+        p.roles[0] === 'risk_compliance' &&
+        p.roles.length > 2,
+    );
+    if (memRiskOfficer && Array.isArray(memRiskOfficer.roles)) {
+      memRiskOfficer.roles = [
         'fee_earner',
-        ...memBethan.roles.filter((r) => r !== 'fee_earner'),
+        ...memRiskOfficer.roles.filter((r) => r !== 'fee_earner'),
       ];
       if (global.__oneSquaredStore.homePagesConfig) {
         global.__oneSquaredStore.homePagesConfig.lastViewingRoleByUserId = {
           ...(global.__oneSquaredStore.homePagesConfig.lastViewingRoleByUserId ?? {}),
-          'P-000003': 'fee_earner',
+          [memRiskOfficer.id]: 'fee_earner',
         };
       }
       addedSeedItems = true;

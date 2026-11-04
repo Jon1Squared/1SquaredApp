@@ -101,6 +101,7 @@ interface Props {
   existingSensitive?: EmployeeSensitiveRecord | null;
   leaverOwnedRecords?: LeaverOwnedRecordItem[];
   firmPrimaryDomain?: string;
+  firmName?: string;
   embeddedInModal?: boolean;
   nameOnlyMandatory?: boolean;
   modalTitle?: string;
@@ -179,6 +180,7 @@ export function PersonFormClient({
   existingSensitive = null,
   leaverOwnedRecords: leaverOwnedRecordsProp,
   firmPrimaryDomain,
+  firmName = 'Firm',
   embeddedInModal = false,
   nameOnlyMandatory = false,
   modalTitle,
@@ -2128,7 +2130,7 @@ export function PersonFormClient({
                           disabled
                           value={
                             isEmployee
-                              ? 'Not A Law Firm LLP (Employee)'
+                              ? `${firmName} (Employee)`
                               : 'Manage on person record'
                           }
                         />
@@ -2483,7 +2485,7 @@ export function PersonFormClient({
                   ) : (
                     <p className="muted" style={{ margin: 0, fontSize: '0.88rem' }}>
                       {isEmployee
-                        ? 'This person is marked as an employee of Not A Law Firm LLP.'
+                        ? `This person is marked as an employee of ${firmName}.`
                         : 'Organisation links can be managed from the person record page.'}
                     </p>
                   )}

@@ -132,7 +132,7 @@ export function RecordTasksSection({
       addPerson(leadEmp.employment.supervisingPartnerId, 'Supervising partner');
     }
     const colpEmp =
-      employees.find((e) => e.id === 'P-000003') ??
+      employees.find((e) => e.employeeRoleId === 'employee_role.risk_and_compliance') ??
       employees.find((e) =>
         (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('colp'),
       );

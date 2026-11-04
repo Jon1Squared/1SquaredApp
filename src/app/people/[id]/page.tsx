@@ -87,6 +87,7 @@ export default async function PersonProfilePage({
         duplicateCandidates={duplicateCandidates}
         mergedFromId={mergedFrom ?? null}
         initialTab={tab}
+        firmName={snap.firm.name}
       />
     );
   });

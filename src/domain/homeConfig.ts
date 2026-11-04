@@ -10,8 +10,7 @@ import {
   Team,
 } from './types';
 import {
-  getDefaultTenantRbacConfig,
-  resolveActiveTenantIdForRbac,
+  getCachedOrDefaultRbacConfig,
   resolvePermissions,
   resolvePersonAuthoritativeRoles,
 } from './rbac';
@@ -795,8 +794,8 @@ export interface LeftRailVisibility {
  * Matches docs/role-home-pages.md and docs/designs/home/01..07.
  */
 export function getLeftRailVisibility(activeRole: string, userRoles: string[] = [activeRole]): LeftRailVisibility {
-  const activeTenantId = resolveActiveTenantIdForRbac();
-  const config = { rbac: getDefaultTenantRbacConfig(activeTenantId) };
+  const activeTenantId = 'default';
+  const config = { rbac: getCachedOrDefaultRbacConfig(activeTenantId) };
   const authoritativeRoles = userRoles.length > 0 ? userRoles : [activeRole];
   const userPerms = resolvePermissions({
     context: {

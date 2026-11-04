@@ -67,6 +67,7 @@ import {
   buildFullCatalogueFromStoreCustomFields,
   buildSeedClientCareTemplateDocxBytes,
   buildSeedGeneralCorrespondenceDocxBytes,
+  isTemplateAvailableInContext,
   toMatterAccessSubject,
 } from '@/domain/documentGeneration';
 import {
@@ -664,30 +665,17 @@ export async function getDocumentGenerationSnapshotForUser(
   }
 
   const versionById = new Map(versions.map((v) => [v.id, v]));
-  const actorRoles = new Set(normaliseActorHomeRoles(actor, config));
-  const canViewFinance = hasDocumentPermission(actor, 'finance:view', config);
   const permittedTemplateIds = templates
     .filter((t) => {
-      if (t.availabilityRules.allowedRoleKeys?.length) {
-        const hasRole = t.availabilityRules.allowedRoleKeys.some((r) =>
-          actorRoles.has(r),
-        );
-        if (!hasRole) return false;
-      }
       const activeVer = t.activeVersionId
         ? versionById.get(t.activeVersionId)
         : null;
-      if (activeVer) {
-        const usesFinancialField = Object.values(activeVer.fieldMappings).some(
-          (m) =>
-            m.sourceType === 'catalogue' &&
-            m.catalogueKey?.startsWith('financial.'),
-        );
-        if (usesFinancialField && !canViewFinance) {
-          return false;
-        }
-      }
-      return true;
+      return isTemplateAvailableInContext({
+        template: t,
+        version: activeVer,
+        actor,
+        config,
+      }).available;
     })
     .map((t) => t.id);
 
@@ -1116,8 +1104,8 @@ export async function previewTemplateService(
     firm: {
       name: store.firm.shortName,
       legalName: store.firm.name,
-      email: `enquiries@${config.branding.primaryDomain}`,
-      website: `www.${config.branding.primaryDomain}`,
+      email: config.firm?.contactEmail || config.branding.contactEmail || '',
+      website: config.firm?.website || config.branding.website || '',
     },
   });
 
@@ -1220,8 +1208,8 @@ export async function generateDocumentService(
     firm: {
       name: store.firm.shortName,
       legalName: store.firm.name,
-      email: `enquiries@${config.branding.primaryDomain}`,
-      website: `www.${config.branding.primaryDomain}`,
+      email: config.firm?.contactEmail || config.branding.contactEmail || '',
+      website: config.firm?.website || config.branding.website || '',
     },
   });
 

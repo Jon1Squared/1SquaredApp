@@ -76,7 +76,6 @@ import {
   isWorkingAtFirm,
   maskBankDetails,
   maskNationalInsuranceNumber,
-  resolveConfiguredFirmPrimaryDomain,
   resolveEmployeePermissions,
   syncPersonWorkContactFlags,
   validateEmploymentRecord,
@@ -101,6 +100,7 @@ import {
   canUserTakeTask,
   countMyUrgentBadgeTasks,
   isTaskOpen,
+  isUserTeamLeadFor,
   resolveRoutedTeam,
   resolveUserAppRole,
 } from '@/domain/tasks';
@@ -114,6 +114,7 @@ import {
   mergeRbacConfigOverlay,
   PERMISSION_REGISTRY,
   requirePermission,
+  resolveConfiguredFirmPrimaryDomain,
   resolvePersonForEntraClaims,
   resolvePersonPermissionSet,
   resolvePersonPermissions,
@@ -124,7 +125,7 @@ import {
   type PermissionKey,
   type RbacConfiguration,
   type VerifiedOidcTokenClaims,
-} from '@/domain/rbac';
+} from './rbacRuntime';
 import {
   createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,
@@ -137,12 +138,14 @@ import {
 } from './entraAuth';
 import {
   getActiveTenantConfiguration,
+  getExtensionHostLoadErrors,
   getPlatformExtensionHost,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
   runTenantBackgroundJob,
   validateKeyDatesConfig,
+  validateRbacConfig,
   type TenantContext,
 } from '@platform/core';
 import type {
@@ -299,7 +302,7 @@ export interface AuthenticatedActorContext {
 export async function requireAuthenticatedActor(): Promise<AuthenticatedActorContext> {
   const tenantId = getActiveTenantConfiguration().tenantId;
   const entraSession = await getEntraSession();
-  if (!entraSession || !entraSession.personId) {
+  if (!entraSession || !entraSession.personId || !entraSession.tenantId?.trim()) {
     throw new AuthorisationError({
       code: 'UNAUTHENTICATED',
       message: 'Authentication is required. Please sign in with Microsoft Entra ID.',
@@ -321,7 +324,7 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
       actorUserId: entraSession.personId,
     });
   }
-  const resolvedTenantId = entraSession.tenantId || tenantId;
+  const resolvedTenantId = entraSession.tenantId.trim();
   return {
     personId: person.id,
     person,
@@ -329,6 +332,15 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
     mfaVerified: Boolean(entraSession.mfaVerified),
     tenantId: resolvedTenantId,
   };
+}
+
+function nextMonotonicIsoTimestamp(previousIso?: string | null): string {
+  const nowMs = Date.now();
+  const prevMs = previousIso ? Date.parse(previousIso) : NaN;
+  if (!Number.isNaN(prevMs) && nowMs <= prevMs) {
+    return new Date(prevMs + 1).toISOString();
+  }
+  return new Date(nowMs).toISOString();
 }
 
 export async function withAuthenticatedActor<R>(
@@ -2287,15 +2299,17 @@ export async function saveMatterRecord(
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
     enforceKeyDateGates?: boolean;
   },
-): Promise<{ matter: Matter; errors?: Record<string, string> }> {
+): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
   const store = getStore();
-  const now = new Date().toISOString();
+  const existingRef = opts.id ? store.matters.find((m) => m.id === opts.id) ?? null : null;
+  const existing = existingRef ? structuredClone(existingRef) : null;
+  const existingUpdatedAt = existing?.updatedAt ?? null;
+  const now = nextMonotonicIsoTimestamp(existing?.updatedAt);
   const today = toIsoDate(new Date());
-  const existing = opts.id ? store.matters.find((m) => m.id === opts.id) ?? null : null;
   const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
   if (!actingUser || !actingUser.isEmployee) {
     return {
-      matter: null as unknown as Matter,
+      matter: null,
       errors: {
         access: 'Matter not found or restricted.',
         permission: 'Matter not found or restricted.',
@@ -2307,15 +2321,32 @@ export async function saveMatterRecord(
     | undefined;
   if (!activeVerifiedSession || activeVerifiedSession.personId !== actingUser.id) {
     return {
-      matter: null as unknown as Matter,
+      matter: null,
       errors: {
         access: 'UNAUTHENTICATED: Your session has expired. Please sign in again.',
       },
     };
   }
+  const tenantCfg = getActiveTenantConfiguration();
+  let extensionCtx: TenantContext;
+  try {
+    extensionCtx = resolveCurrentTenantContext(
+      createVerifiedSessionActorFromEntraSession(activeVerifiedSession, {
+        correlationId: `matter-save-${randomUUID()}`,
+      }),
+      tenantCfg,
+    );
+  } catch {
+    return {
+      matter: null,
+      errors: {
+        access: 'UNAUTHENTICATED: Your session is invalid for this tenant. Please sign in again.',
+      },
+    };
+  }
   if ((input as { id?: string }).id && !opts.id) {
     return {
-      matter: null as unknown as Matter,
+      matter: null,
       errors: {
         id: 'Cannot save an existing matter payload without passing opts.id.',
       },
@@ -2330,7 +2361,7 @@ export async function saveMatterRecord(
       })
     ) {
       return {
-        matter: null as unknown as Matter,
+        matter: null,
         errors: {
           access: 'Matter not found or restricted.',
           permission: 'Matter not found or restricted.',
@@ -2344,7 +2375,7 @@ export async function saveMatterRecord(
       })
     ) {
       return {
-        matter: null as unknown as Matter,
+        matter: null,
         errors: {
           permission: 'You do not have permission (matter:edit) to edit matters.',
         },
@@ -2358,7 +2389,7 @@ export async function saveMatterRecord(
       })
     ) {
       return {
-        matter: null as unknown as Matter,
+        matter: null,
         errors: {
           permission: 'You do not have permission (matter:create) to create matters.',
         },
@@ -2487,10 +2518,9 @@ export async function saveMatterRecord(
   }
 
   if (Object.keys(errors).length > 0) {
-    return { matter: null as unknown as Matter, errors };
+    return { matter: null, errors };
   }
 
-  const countersSnapshot = { ...store.counters };
   const pendingPeople: Person[] = [];
   const pendingOrganisations: Organisation[] = [];
   const pendingEnquiryLinks: Array<{ enquiry: Enquiry; linkedPersonId: string }> = [];
@@ -2856,10 +2886,15 @@ export async function saveMatterRecord(
       ? input.leadFeeEarnerId
       : existing?.leadFeeEarnerId ?? opts.byId;
   const effectiveTeamMemberIds = input.teamMemberIds ?? existing?.teamMemberIds ?? [];
+  const resolvedAdditionalClientIds = (
+    input.additionalClientIds ??
+    existing?.additionalClientIds ??
+    []
+  ).map((cid) => promoteEnquiryPersonId(cid) || cid);
   const computedStaffStatus = computeStaffMatterStatus(
     {
       clientId: effectiveClientId,
-      additionalClientIds: input.additionalClientIds ?? existing?.additionalClientIds ?? [],
+      additionalClientIds: resolvedAdditionalClientIds,
       responsiblePartnerId: effectiveResponsiblePartnerId,
       supervisingPartnerId: effectiveSupervisingPartnerId,
       leadFeeEarnerId: effectiveLeadFeeEarnerId,
@@ -2867,15 +2902,39 @@ export async function saveMatterRecord(
     },
     allPeopleWithPending,
   );
-  const hasBarrierCondition = (resolvedConflictCheckRecord?.matches ?? []).some(
-    (m) => m.reviewerConditionType === 'information_barrier',
+  const currentStaffParticipantIds = Array.from(
+    new Set(
+      [effectiveClientId, ...resolvedAdditionalClientIds].filter((cid): cid is string =>
+        Boolean(cid && allPeopleWithPending.some((p) => p.id === cid && p.isEmployee)),
+      ),
+    ),
   );
-  const effectiveIsStaffMatter = Boolean(
-    computedStaffStatus.isStaffMatter || existing?.isStaffMatter,
+  const priorStaffLift = existing?.restrictionLift?.staffMatter;
+  const staffLiftStillApplies =
+    Boolean(priorStaffLift) &&
+    currentStaffParticipantIds.every((pid) =>
+      priorStaffLift!.liftedParticipantIds.includes(pid),
+    );
+  const effectiveIsStaffMatter = staffLiftStillApplies
+    ? false
+    : Boolean(computedStaffStatus.isStaffMatter || existing?.isStaffMatter);
+
+  const currentBarrierMatchIds = (resolvedConflictCheckRecord?.matches ?? [])
+    .filter((m) => m.reviewerConditionType === 'information_barrier')
+    .map((m) => m.id);
+  const priorWallLift = existing?.restrictionLift?.ethicalWall;
+  const hasUnliftedBarrierCondition = currentBarrierMatchIds.some(
+    (mid) => !(priorWallLift?.liftedBarrierMatchIds ?? []).includes(mid),
   );
-  const effectiveHasEthicalWall = Boolean(
-    existing?.hasEthicalWall || hasBarrierCondition,
-  );
+  const wallLiftStillApplies =
+    Boolean(priorWallLift) && !hasUnliftedBarrierCondition;
+  const effectiveHasEthicalWall = wallLiftStillApplies
+    ? false
+    : Boolean(existing?.hasEthicalWall || currentBarrierMatchIds.length > 0);
+  const nextRestrictionLift: Matter['restrictionLift'] = {
+    ...(staffLiftStillApplies && priorStaffLift ? { staffMatter: priorStaffLift } : {}),
+    ...(wallLiftStillApplies && priorWallLift ? { ethicalWall: priorWallLift } : {}),
+  };
   const effectiveRestrictedAccessUserIds =
     effectiveIsStaffMatter || effectiveHasEthicalWall
       ? Array.from(
@@ -2918,9 +2977,7 @@ export async function saveMatterRecord(
     title: (input.title !== undefined ? input.title : existing?.title ?? '').trim(),
     shortDescription: (input.shortDescription ?? existing?.shortDescription ?? '').trim(),
     clientId: effectiveClientId,
-    additionalClientIds: (input.additionalClientIds ?? existing?.additionalClientIds ?? []).map(
-      (cid) => promoteEnquiryPersonId(cid) || cid,
-    ),
+    additionalClientIds: resolvedAdditionalClientIds,
     parentMatterId: input.parentMatterId !== undefined ? input.parentMatterId : existing?.parentMatterId ?? null,
     relatedMatterIds: input.relatedMatterIds ?? existing?.relatedMatterIds ?? [],
     matterStatusId:
@@ -3015,6 +3072,9 @@ export async function saveMatterRecord(
     isStaffMatter: effectiveIsStaffMatter,
     hasEthicalWall: effectiveHasEthicalWall,
     restrictedAccessUserIds: effectiveRestrictedAccessUserIds,
+    ...(Object.keys(nextRestrictionLift).length > 0
+      ? { restrictionLift: nextRestrictionLift }
+      : {}),
   };
 
   // Ensure full conflict check record, risk assessment snapshot, and immutable matter opening snapshot are persisted
@@ -3039,8 +3099,24 @@ export async function saveMatterRecord(
     !existing.fieldValues?.['matterOpeningSnapshot'];
 
   // R108 & R131: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
-  const tenantCfg = getActiveTenantConfiguration();
   const host = getPlatformExtensionHost();
+  const loadErrors = getExtensionHostLoadErrors();
+  const enabledExtSet = new Set(tenantCfg.enabledExtensions ?? []);
+  const gateLoadFailure = loadErrors.find(
+    (err) =>
+      err.tenantId === tenantCfg.tenantId &&
+      (enabledExtSet.has(err.extensionId ?? '') || enabledExtSet.has(err.extensionDir)) &&
+      (err.declaredHooks ?? []).includes('beforeMatterOpen'),
+  );
+  if (isOpeningEvent && !isDraftSave && gateLoadFailure) {
+    return {
+      matter: null,
+      errors: {
+        costsGovernance:
+          'A required costs check could not run. Please contact your administrator.',
+      },
+    };
+  }
   const costsConfig =
     store.matterCostsConfig ??
     createDefaultMatterCostsConfig(store.values, {
@@ -3064,12 +3140,6 @@ export async function saveMatterRecord(
   const partnerSignOffCompleted = Boolean(
     matter.fieldValues['partnerCostSignOffCompleted'] ||
       matter.conflictClearedById,
-  );
-  const extensionCtx: TenantContext = resolveCurrentTenantContext(
-    createVerifiedSessionActorFromEntraSession(activeVerifiedSession, {
-      correlationId: `matter-save-${randomUUID()}`,
-    }),
-    tenantCfg,
   );
   const costsHookInput = {
     matterId: matter.id,
@@ -3095,15 +3165,27 @@ export async function saveMatterRecord(
       : null;
 
   if (openGovernance && !openGovernance.allowProceed) {
-    store.counters = countersSnapshot;
     return {
-      matter: null as unknown as Matter,
+      matter: null,
       errors: {
         costsGovernance:
           openGovernance.governanceWarnings[0] ??
           'This matter needs partner sign-off on costs before it can be opened.',
       },
     };
+  }
+
+  if (existing) {
+    const current = store.matters.find((m) => m.id === existing.id);
+    if (!current || current.updatedAt !== existingUpdatedAt) {
+      return {
+        matter: null,
+        errors: {
+          conflict:
+            'This matter was changed by someone else while you were saving. Please reload and try again.',
+        },
+      };
+    }
   }
 
   for (const person of pendingPeople) {
@@ -3276,22 +3358,98 @@ export async function saveMatterRecord(
     }
     if (opts.saveMode === 'submit_referred') {
       const riskTaskId = nextId(store, 'TSK');
-      const riskTeam = store.teams.find((tm) => tm.name.toLowerCase().includes('risk') || tm.name.toLowerCase().includes('compliance'));
+      const configuredTeamKey = tenantCfg.conflictReview?.assigneeTeamKey?.trim() || null;
+      const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
+      let resolvedRiskTeam: Team | undefined;
+      if (configuredTeamKey) {
+        resolvedRiskTeam = store.teams.find(
+          (tm) => tm.active && tm.id === configuredTeamKey,
+        );
+        if (!resolvedRiskTeam) {
+          const matchedOrgTeam = store.orgStructure?.teamsOrPracticeGroups?.find(
+            (ot) =>
+              ot.active &&
+              (ot.id === configuredTeamKey || ot.code === configuredTeamKey),
+          );
+          if (matchedOrgTeam) {
+            resolvedRiskTeam = store.teams.find(
+              (tm) =>
+                tm.active &&
+                tm.memberIds.some((mid) => {
+                  const mp = store.people.find((p) => p.id === mid);
+                  return mp?.employment?.teamOrPracticeGroupId === matchedOrgTeam.id;
+                }),
+            );
+          }
+        }
+      }
+
+      let assignedReviewerId: string | null = null;
+      if (resolvedRiskTeam) {
+        const teamCandidates = store.people
+          .filter(
+            (p) =>
+              p.isEmployee &&
+              !p.mergedIntoId &&
+              resolvedRiskTeam!.memberIds.includes(p.id),
+          )
+          .filter((p) => {
+            if (!configuredRoleKey) return true;
+            if (p.employeeRoleId === configuredRoleKey) return true;
+            const roles = resolveEmployeeRoles(p, store.teams);
+            return roles.includes(configuredRoleKey);
+          })
+          .filter((p) =>
+            canPersonAccessMatter(matter, p.id, p, {
+              allPeople: store.people,
+              teams: store.teams,
+            }),
+          );
+        teamCandidates.sort((a, b) => {
+          const aLead = isUserTeamLeadFor(a.id, resolvedRiskTeam!.id, store.teams) ? 0 : 1;
+          const bLead = isUserTeamLeadFor(b.id, resolvedRiskTeam!.id, store.teams) ? 0 : 1;
+          return aLead - bLead || a.id.localeCompare(b.id);
+        });
+        assignedReviewerId = teamCandidates[0]?.id ?? null;
+      }
+
+      if (!assignedReviewerId) {
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            event: 'conflict_review_task_unassigned',
+            tenantId: extensionCtx.tenantId,
+            correlationId: extensionCtx.correlationId,
+            matterId: matter.id,
+            configuredTeamKey,
+            configuredRoleKey,
+            assignedTeamId: resolvedRiskTeam?.id ?? null,
+          }),
+        );
+      }
+
+      const isRestrictedMatter = Boolean(matter.isStaffMatter || matter.hasEthicalWall);
+      const canIncludeMatterNames = !isRestrictedMatter || Boolean(assignedReviewerId);
       const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
-      if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
-      else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
+      if (canIncludeMatterNames) {
+        if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
+        else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
+      }
       store.tasks.unshift({
         id: riskTaskId,
         reference: riskTaskId,
-        title: `Conflict review · ${clientLabel} — ${matter.title}`,
-        description:
-          matter.conflictCheckRecord?.reviewerMessage ||
-          `Referred to Risk & Compliance for conflict review on ${clientLabel}.`,
+        title: canIncludeMatterNames
+          ? `Conflict review · ${clientLabel} — ${matter.title}`
+          : `Conflict review required: ${matter.id}`,
+        description: canIncludeMatterNames
+          ? matter.conflictCheckRecord?.reviewerMessage ||
+            `Referred to Risk & Compliance for conflict review on ${clientLabel}.`
+          : `Referred for conflict review on restricted matter ${matter.id}.`,
         taskTypeId: vid('task_type', 'Conflict check'),
         priorityId: vid('task_priority', 'High'),
         dueAt: today,
-        assignedTeamId: riskTeam?.id ?? null,
-        assignedPersonId: 'P-000003', // Bethan Rees (COLP)
+        assignedTeamId: resolvedRiskTeam?.id ?? null,
+        assignedPersonId: assignedReviewerId,
         status: 'To do',
         linkedRecords,
         createdById: opts.byId,
@@ -3412,21 +3570,16 @@ export function liftMatterRestriction(
       },
     };
   }
-  const canLift =
-    hasPersonPermission(actingUser, 'admin:access', {
-      allPeople: store.people,
-      teams: store.teams,
-    }) ||
-    hasPersonPermission(actingUser, 'matter:restricted:access', {
-      allPeople: store.people,
-      teams: store.teams,
-    });
+  const canLift = hasPersonPermission(actingUser, 'matter:restriction:lift', {
+    allPeople: store.people,
+    teams: store.teams,
+  });
   if (!canLift) {
     return {
       matter: null,
       errors: {
         permission:
-          'You do not have permission (admin:access or matter:restricted:access) to lift matter restrictions.',
+          'You do not have permission (matter:restriction:lift) to lift matter restrictions.',
       },
     };
   }
@@ -3452,7 +3605,7 @@ export function liftMatterRestriction(
   }
 
   const prevMatter = structuredClone(existing);
-  const now = new Date().toISOString();
+  const now = nextMonotonicIsoTimestamp(existing.updatedAt);
   const fieldLabel =
     restriction === 'staff_matter' ? 'Staff matter restriction' : 'Information barrier';
   const oldVal =
@@ -3461,9 +3614,36 @@ export function liftMatterRestriction(
       : String(Boolean(existing.hasEthicalWall));
 
   if (restriction === 'staff_matter') {
+    const staffParticipantIds = Array.from(
+      new Set(
+        [existing.clientId, ...(existing.additionalClientIds ?? [])].filter(
+          (cid): cid is string =>
+            Boolean(cid && store.people.some((p) => p.id === cid && p.isEmployee)),
+        ),
+      ),
+    );
     existing.isStaffMatter = false;
+    existing.restrictionLift = {
+      ...(existing.restrictionLift ?? {}),
+      staffMatter: {
+        liftedAt: now,
+        byId,
+        liftedParticipantIds: staffParticipantIds,
+      },
+    };
   } else {
+    const barrierMatchIds = (existing.conflictCheckRecord?.matches ?? [])
+      .filter((m) => m.reviewerConditionType === 'information_barrier')
+      .map((m) => m.id);
     existing.hasEthicalWall = false;
+    existing.restrictionLift = {
+      ...(existing.restrictionLift ?? {}),
+      ethicalWall: {
+        liftedAt: now,
+        byId,
+        liftedBarrierMatchIds: barrierMatchIds,
+      },
+    };
   }
   if (!existing.isStaffMatter && !existing.hasEthicalWall) {
     existing.restrictedAccessUserIds = [];
@@ -3509,9 +3689,9 @@ export function updateMatterConflictRecord(
   byId: string,
 ): { matter: Matter | null } {
   const store = getStore();
-  const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const matter = store.matters.find((m) => m.id === matterId);
+  const now = nextMonotonicIsoTimestamp(matter?.updatedAt);
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
   if (
     !matter ||
@@ -3534,11 +3714,20 @@ export function updateMatterConflictRecord(
   matter.updatedAt = now;
   matter.updatedById = byId;
 
-  const hasBarrierCondition = (record.matches ?? []).some(
-    (m) => m.reviewerConditionType === 'information_barrier',
+  const currentBarrierMatchIds = (record.matches ?? [])
+    .filter((m) => m.reviewerConditionType === 'information_barrier')
+    .map((m) => m.id);
+  const priorWallLift = matter.restrictionLift?.ethicalWall;
+  const hasUnliftedBarrierCondition = currentBarrierMatchIds.some(
+    (mid) => !(priorWallLift?.liftedBarrierMatchIds ?? []).includes(mid),
   );
-  if (hasBarrierCondition) {
+  if (hasUnliftedBarrierCondition) {
     matter.hasEthicalWall = true;
+    if (matter.restrictionLift?.ethicalWall) {
+      const nextLift = { ...matter.restrictionLift };
+      delete nextLift.ethicalWall;
+      matter.restrictionLift = Object.keys(nextLift).length > 0 ? nextLift : undefined;
+    }
     const allowed = new Set<string>(
       [
         ...(matter.restrictedAccessUserIds ?? []),
@@ -6607,7 +6796,9 @@ export async function createRecordFromPms(
       },
       { byId },
     );
-    if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
+    if (res.errors || !res.matter) {
+      return { ok: false, error: res.errors ? Object.values(res.errors).join(' ') : 'Matter could not be saved.' };
+    }
 
     linkPmsRecord('matter', res.matter.id, pmsCode, byId);
     return { ok: true, createdId: res.matter.id };
@@ -6974,7 +7165,8 @@ export function previewRbacOverrides(
     rbacConfig?: RbacConfiguration;
   },
   byId: string,
-): { ok: boolean; error?: string; permissions: PermissionKey[] } {
+  options?: { mfaVerified?: boolean },
+): { ok: boolean; code?: string; error?: string; permissions: PermissionKey[] } {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId);
   const target = store.people.find((p) => p.id === personId);
@@ -6998,10 +7190,34 @@ export function previewRbacOverrides(
   ) {
     return {
       ok: false,
+      code: 'RBAC_PERMISSION_DENIED',
       error:
         'RBAC_PERMISSION_DENIED: You do not have permission to preview RBAC overrides.',
       permissions: [],
     };
+  }
+  if (options?.mfaVerified !== true) {
+    return {
+      ok: false,
+      code: 'MFA_REQUIRED',
+      error:
+        'MFA_REQUIRED: Multi-factor authentication is required to preview RBAC overrides.',
+      permissions: [],
+    };
+  }
+
+  let validatedRbacConfig: RbacConfiguration | undefined;
+  if (draftOverrides.rbacConfig !== undefined) {
+    try {
+      validatedRbacConfig = validateRbacConfig(draftOverrides.rbacConfig);
+    } catch (err) {
+      return {
+        ok: false,
+        code: 'RBAC_CONFIG_INVALID',
+        error: err instanceof Error ? err.message : String(err),
+        permissions: [],
+      };
+    }
   }
 
   const cleanGrant = Array.from(
@@ -7026,8 +7242,8 @@ export function previewRbacOverrides(
   const permissions = resolvePersonPermissions(syntheticTarget, {
     allPeople: store.people,
     teams: store.teams,
-    ...(draftOverrides.rbacConfig
-      ? { config: { rbac: draftOverrides.rbacConfig } }
+    ...(validatedRbacConfig
+      ? { config: { rbac: validatedRbacConfig } }
       : {}),
   });
 

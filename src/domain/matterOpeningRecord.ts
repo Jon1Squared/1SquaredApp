@@ -659,13 +659,13 @@ export function resolveMatterConflictCheckRecord(
     declarationConfirmed: true,
     reviewerMessage: matter.conflictNotes || '',
     lastRunAtDisplay: formatDate(matter.conflictCheckDate) || '22 Oct 2026, 17:42',
-    lastRunById: matter.conflictClearedById || matter.leadFeeEarnerId || 'P-000003',
+    lastRunById: matter.conflictClearedById || matter.leadFeeEarnerId || matter.responsiblePartnerId || '',
     lastRunByName: clearedByName,
     submittedAtDisplay: formatDate(matter.conflictCheckDate) || '22 Oct 2026, 17:46',
-    submittedById: matter.leadFeeEarnerId || 'P-000003',
+    submittedById: matter.leadFeeEarnerId || matter.responsiblePartnerId || '',
     submittedByName: clearedByName,
     approvedAtDisplay: formatDate(matter.conflictCheckDate) || '22 Oct 2026, 17:46',
-    approvedById: matter.conflictClearedById || 'P-000003',
+    approvedById: matter.conflictClearedById || matter.responsiblePartnerId || '',
     approvedByName: `${clearedByName} (Cleared by fee earner)`,
     parties: [
       ...(matter.clientId
@@ -712,7 +712,7 @@ export function resolveMatterConflictCheckRecord(
       {
         id: 'run-init-1',
         runAtDisplay: formatDate(matter.conflictCheckDate) || '22 Oct 2026, 17:42',
-        runById: matter.conflictClearedById || matter.leadFeeEarnerId || 'P-000003',
+        runById: matter.conflictClearedById || matter.leadFeeEarnerId || matter.responsiblePartnerId || '',
         runByName: clearedByName,
         searchTerms: [
           clientLabel,

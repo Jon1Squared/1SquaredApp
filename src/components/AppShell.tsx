@@ -51,6 +51,7 @@ interface AppShellProps {
   attention: AttentionItem[];
   tasks: Task[];
   notifications: NotificationItem[];
+  firmName?: string;
   entraSession?: EntraSessionPayload | null;
   children: React.ReactNode;
 }
@@ -67,6 +68,7 @@ export function AppShell({
   attention,
   tasks,
   notifications,
+  firmName = 'Firm',
   entraSession = null,
   children,
 }: AppShellProps) {
@@ -661,7 +663,7 @@ export function AppShell({
                   <div className="popover-menu__header">
                     <div className="popover-menu__title">{userName}</div>
                     <div className="popover-menu__sub">
-                      {currentUser.jobTitle || 'Not A Law Firm LLP'}
+                      {currentUser.jobTitle || firmName}
                     </div>
                   </div>
                   <Link

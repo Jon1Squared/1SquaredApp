@@ -17,6 +17,7 @@ export interface TenantMigrationDefinition {
   readonly upSql: string;
   readonly downSql: string;
   readonly tablesChanged: readonly string[];
+  readonly dependsOn?: readonly string[];
 }
 
 export interface AppliedTenantMigrationRecord {
@@ -481,6 +482,7 @@ export const KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004: TenantMigrat
   description:
     'Adds nullable last_skipped_reason column with CHECK constraint to key_date_reminder_states so skipped reminder reasons (no_permitted_assignees, missing_matter) persist across tenant databases.',
   tablesChanged: ['key_date_reminder_states'],
+  dependsOn: ['0003'],
   upSql: `
 ALTER TABLE key_date_reminder_states
   ADD COLUMN IF NOT EXISTS last_skipped_reason TEXT NULL
@@ -554,6 +556,15 @@ export class TenantMigrationRunner {
         continue;
       }
 
+      const missingDeps = (migration.dependsOn ?? []).filter(
+        (depVersion) => !dbMigrations.has(depVersion),
+      );
+      if (missingDeps.length > 0) {
+        throw new Error(
+          `MIGRATION_DEPENDENCY_ERROR: Cannot apply migration "${migration.version}" before prerequisite migration(s) ${missingDeps.map((d) => `"${d}"`).join(', ')} are applied.`,
+        );
+      }
+
       for (const table of migration.tablesChanged) {
         tables.add(table);
       }
@@ -594,15 +605,15 @@ export class TenantMigrationRunner {
       return false;
     }
 
-    if (targetIndex >= 0) {
-      for (let i = migrations.length - 1; i > targetIndex; i--) {
-        const laterMigration = migrations[i]!;
-        if (dbMigrations.has(laterMigration.version)) {
-          throw new Error(
-            `MIGRATION_ROLLBACK_ORDER_ERROR: Cannot roll back migration "${targetVersion}" while later migration "${laterMigration.version}" is still applied. Roll back in reverse order.`,
-          );
-        }
-      }
+    const dependants = migrations.filter(
+      (m) =>
+        dbMigrations.has(m.version) &&
+        (m.dependsOn ?? []).includes(targetVersion),
+    );
+    if (dependants.length > 0) {
+      throw new Error(
+        `MIGRATION_ROLLBACK_ORDER_ERROR: Cannot roll back "${targetVersion}" while ${dependants.map((d) => `"${d.version}"`).join(', ')} still depend on it.`,
+      );
     }
 
     if (!definition || !definition.downSql.trim()) {

@@ -184,6 +184,7 @@ interface Props {
   entraEnvStatus?: import('@/server/entraAuth').EntraEnvStatus;
   authError?: string;
   authSuccess?: boolean;
+  firmName?: string;
 }
 
 export function AdminClient({
@@ -219,6 +220,7 @@ export function AdminClient({
   entraEnvStatus,
   authError,
   authSuccess,
+  firmName = 'Firm',
 }: Props) {
   const { showToast } = useToast();
   const [tab, setTab] = useState<AdminTab>(initialTab);
@@ -3027,7 +3029,7 @@ export function AdminClient({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <div className="list-section__header" style={{ marginBottom: 4 }}>
             <p className="muted" style={{ margin: 0 }}>
-              Managed reference tables for Not A Law Firm LLP&apos;s hierarchical organisation
+              Managed reference tables for {firmName}&apos;s hierarchical organisation
               structure: <strong>Legal Entity → Division → Department → Team / Practice Group</strong>,
               plus <strong>Offices</strong>, <strong>Cost Centres</strong>, and{' '}
               <strong>Profit Centres</strong>. Selecting a Department on an employee record
@@ -3798,7 +3800,7 @@ export function AdminClient({
         <div>
           <div className="list-section__header" style={{ marginBottom: 14 }}>
             <p className="muted">
-              Firm employees of Not A Law Firm LLP. Each employee has a multi-role array (the
+              Firm employees of {firmName}. Each employee has a multi-role array (the
               first role is their Home page role, additional roles appear in &ldquo;Viewing as&rdquo;),
               optional supported fee earners (for Legal secretaries), and an application permission
               role.
@@ -4043,7 +4045,7 @@ export function AdminClient({
 
           <div className="subcard">
             <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
-              Load Not A Law Firm LLP demo dataset
+              Load {firmName} demo dataset
             </h2>
             <p className="muted" style={{ marginBottom: 16 }}>
               Restores the seeded people, employees, organisations, links, matters, teams, enquiries,

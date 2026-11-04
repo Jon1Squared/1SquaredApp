@@ -743,7 +743,9 @@ export async function previewRbacOverridesAction(
   },
 ) {
   return withAuthenticatedActor((actor) =>
-    previewRbacOverrides(personId, draftOverrides, actor.personId),
+    previewRbacOverrides(personId, draftOverrides, actor.personId, {
+      mfaVerified: actor.session.mfaVerified === true,
+    }),
   );
 }
 

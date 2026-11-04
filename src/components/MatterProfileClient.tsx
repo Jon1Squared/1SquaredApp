@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import {
   addNoteAction,
+  liftMatterRestrictionAction,
   markEngagementLetterDraftedAction,
   saveMatterAction,
   saveTaskAction,
@@ -105,6 +106,7 @@ interface MatterProfileClientProps {
   canVerifyByKeyDateId?: Record<string, { allowed: boolean; reason?: string }>;
   canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
+  canLiftRestriction?: boolean;
   pmsView?: MatterPmsViewBundle;
   notes: Note[];
   audit: AuditEntry[];
@@ -201,6 +203,7 @@ export function MatterProfileClient({
   canVerifyByKeyDateId,
   canTakeByTaskId,
   canViewFinance = true,
+  canLiftRestriction = false,
   pmsView,
   notes,
   audit,
@@ -223,6 +226,13 @@ export function MatterProfileClient({
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [savingNote, setSavingNote] = useState(false);
+  const [liftOpen, setLiftOpen] = useState(false);
+  const [liftType, setLiftType] = useState<'ethical_wall' | 'staff_matter'>(
+    matter.hasEthicalWall ? 'ethical_wall' : 'staff_matter',
+  );
+  const [liftReason, setLiftReason] = useState('');
+  const [liftingRestriction, setLiftingRestriction] = useState(false);
+  const [liftError, setLiftError] = useState<string | null>(null);
   const [completedDemoTaskIds, setCompletedDemoTaskIds] = useState<Set<string>>(() => new Set());
 
   const isBrightwaterTribunal = matter.matterNumber === 'BRI001-0003';
@@ -1052,6 +1062,20 @@ export function MatterProfileClient({
             <FileText size={16} />
             <span>Generate document</span>
           </button>
+          {canLiftRestriction && (matter.isStaffMatter || matter.hasEthicalWall) ? (
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                setLiftType(matter.hasEthicalWall ? 'ethical_wall' : 'staff_matter');
+                setLiftError(null);
+                setLiftOpen((o) => !o);
+              }}
+            >
+              <ShieldCheck size={16} />
+              <span>Lift restriction</span>
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn btn--secondary"
@@ -1066,6 +1090,120 @@ export function MatterProfileClient({
           </Link>
         </div>
       </div>
+
+      {/* Lift Restriction Drawer */}
+      {liftOpen && canLiftRestriction && (matter.isStaffMatter || matter.hasEthicalWall) ? (
+        <div
+          className="home-panel"
+          style={{ padding: '18px 22px', marginBottom: 22 }}
+        >
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+            Lift matter restriction
+          </div>
+          {matter.isStaffMatter && matter.hasEthicalWall ? (
+            <div style={{ marginBottom: 10 }}>
+              <label className="field-label" htmlFor="lift-restriction-type">
+                Restriction to lift
+              </label>
+              <select
+                id="lift-restriction-type"
+                className="field-select"
+                value={liftType}
+                onChange={(e) =>
+                  setLiftType(e.target.value as 'ethical_wall' | 'staff_matter')
+                }
+                style={{ marginTop: 4 }}
+              >
+                <option value="ethical_wall">Information barrier (ethical wall)</option>
+                <option value="staff_matter">Staff matter restriction</option>
+              </select>
+            </div>
+          ) : null}
+          <label className="field-label" htmlFor="lift-restriction-reason">
+            Written reason (recorded in the audit trail)
+          </label>
+          <textarea
+            id="lift-restriction-reason"
+            rows={2}
+            className="field-textarea"
+            placeholder="Record the compliance approval and reason for lifting this restriction…"
+            value={liftReason}
+            onChange={(e) => setLiftReason(e.target.value)}
+            style={{ marginTop: 6, marginBottom: 10 }}
+          />
+          {liftError ? (
+            <div
+              role="alert"
+              style={{
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: 'rgba(220, 38, 38, 0.08)',
+                border: '1px solid var(--status-alert)',
+                color: 'var(--status-alert)',
+                fontSize: 12,
+                marginBottom: 10,
+              }}
+            >
+              {liftError}
+            </div>
+          ) : null}
+          <div className="btn-row" style={{ justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => {
+                setLiftOpen(false);
+                setLiftError(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              disabled={liftingRestriction}
+              onClick={async () => {
+                setLiftingRestriction(true);
+                setLiftError(null);
+                try {
+                  const res = await liftMatterRestrictionAction(
+                    matter.id,
+                    liftType,
+                    liftReason,
+                  );
+                  setLiftingRestriction(false);
+                  if (res.errors && Object.keys(res.errors).length > 0) {
+                    const msg =
+                      res.errors.mfa ||
+                      res.errors.permission ||
+                      res.errors.reason ||
+                      res.errors.access ||
+                      Object.values(res.errors)[0] ||
+                      'Could not lift matter restriction.';
+                    setLiftError(msg);
+                    showToast(msg);
+                    return;
+                  }
+                  setLiftOpen(false);
+                  setLiftReason('');
+                  showToast('Matter restriction lifted');
+                  router.refresh();
+                } catch (err) {
+                  setLiftingRestriction(false);
+                  const msg =
+                    err instanceof Error
+                      ? err.message
+                      : 'Could not lift matter restriction.';
+                  setLiftError(msg);
+                  showToast(msg);
+                }
+              }}
+            >
+              {liftingRestriction ? 'Lifting…' : 'Confirm lift restriction'}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {/* Add Note Drawer */}
       {noteOpen ? (

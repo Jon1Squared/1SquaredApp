@@ -66,6 +66,7 @@ export type PermissionKey =
   | 'matter:edit'
   | 'matter:reassign_ownership'
   | 'matter:restricted:access'
+  | 'matter:restriction:lift'
   | 'task:claim_any'
   | 'task:reassign_any'
   | 'enquiry:intake_view'
@@ -765,6 +766,16 @@ export interface TenantConfiguration {
     primaryDomain: string;
     accentColorHex: string;
     logoAssetKey: string;
+    contactEmail?: string;
+    website?: string;
+  };
+  firm?: {
+    contactEmail?: string;
+    website?: string;
+  };
+  conflictReview?: {
+    assigneeTeamKey?: string | null;
+    assigneeRoleKey?: string | null;
   };
   featureFlags: {
     enableMatterCostsGovernance: boolean;

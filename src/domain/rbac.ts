@@ -35,7 +35,6 @@ import {
   requirePermission,
   resolveAuthoritativeRoles,
   resolvePermissions,
-  validateRbacConfig,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
   type PermissionKey,
@@ -49,35 +48,6 @@ import {
   type VerifiedOidcTokenClaims,
 } from '@platform/core';
 import type { Matter, Person, Team } from './types';
-
-type ServerTenantConfigReader = () => Pick<
-  TenantConfiguration,
-  'tenantId' | 'displayName' | 'branding' | 'rbac'
->;
-
-let serverTenantConfigReader: ServerTenantConfigReader | null = null;
-
-/**
- * Registers the server-only tenant configuration reader from `src/platform/tenantRuntime.ts`.
- * Never registered in browser bundles (`src/platform/tenantRuntime.ts` is guarded by `import 'server-only'`).
- */
-export function registerServerTenantConfigReader(
-  reader: ServerTenantConfigReader,
-): void {
-  serverTenantConfigReader = reader;
-}
-
-export function getServerTenantConfiguration(): Pick<
-  TenantConfiguration,
-  'tenantId' | 'displayName' | 'branding' | 'rbac'
-> {
-  if (typeof window !== 'undefined' || !serverTenantConfigReader) {
-    throw new Error(
-      'TENANT_CONFIG_ERROR: Tenant configuration is server-only and is not available in this context.',
-    );
-  }
-  return serverTenantConfigReader();
-}
 
 /**
  * Immutable taxonomy ID mapping (`employee_role.<slug>` -> canonical `HomeRoleKey`).
@@ -109,6 +79,16 @@ const runtimeRbacConfigOverrideByTenant = new Map<
   string,
   Partial<RbacConfiguration>
 >();
+
+export function getRbacRuntimeCacheMaps(): {
+  tenantRbacConfigCacheByTenant: Map<string, RbacConfiguration>;
+  runtimeRbacConfigOverrideByTenant: Map<string, Partial<RbacConfiguration>>;
+} {
+  return {
+    tenantRbacConfigCacheByTenant,
+    runtimeRbacConfigOverrideByTenant,
+  };
+}
 
 export function mergeRbacConfigOverlay(
   base: RbacConfiguration,
@@ -157,43 +137,17 @@ export function mergeRbacConfigOverlay(
   };
 }
 
-export function setRuntimeRbacConfigOverride(
-  override: Partial<RbacConfiguration> | null | undefined,
-  tenantId?: string,
-): void {
-  const activeCfg = getServerTenantConfiguration();
-  const activeTenantId = tenantId?.trim() || activeCfg.tenantId;
-  if (!override) {
-    runtimeRbacConfigOverrideByTenant.delete(activeTenantId);
-  } else {
-    const baseCfg =
-      activeTenantId === activeCfg.tenantId
-        ? activeCfg.rbac
-        : createDefaultRbacConfig();
-    const merged = mergeRbacConfigOverlay(baseCfg, override);
-    const validated = validateRbacConfig(merged);
-    runtimeRbacConfigOverrideByTenant.set(activeTenantId, validated);
-  }
-  tenantRbacConfigCacheByTenant.delete(activeTenantId);
-  clearPermissionRequestCache();
-}
-
-export function getDefaultTenantRbacConfig(tenantId?: string): RbacConfiguration {
-  const activeCfg = getServerTenantConfiguration();
-  const targetTenantId = tenantId?.trim() || activeCfg.tenantId;
+export function getCachedOrDefaultRbacConfig(
+  tenantId = 'default',
+): RbacConfiguration {
+  const targetTenantId = tenantId.trim() || 'default';
   const cached = tenantRbacConfigCacheByTenant.get(targetTenantId);
   if (cached) {
     return cached;
   }
-
-  const base =
-    targetTenantId === activeCfg.tenantId
-      ? activeCfg.rbac
-      : createDefaultRbacConfig();
+  const base = createDefaultRbacConfig();
   const runtimeOverride = runtimeRbacConfigOverrideByTenant.get(targetTenantId);
-  const withRuntime = mergeRbacConfigOverlay(base, runtimeOverride);
-  tenantRbacConfigCacheByTenant.set(targetTenantId, withRuntime);
-  return withRuntime;
+  return mergeRbacConfigOverlay(base, runtimeOverride);
 }
 
 /**
@@ -339,10 +293,7 @@ export function getStoredActorSessionForPerson(
   if (!activeActor || activeActor.personId !== personId) {
     return undefined;
   }
-  const targetTenantId =
-    tenantId?.trim() ||
-    activeActor.tenantId ||
-    getServerTenantConfiguration().tenantId;
+  const targetTenantId = tenantId?.trim() || activeActor.tenantId;
   if (activeActor.tenantId !== targetTenantId) {
     return undefined;
   }
@@ -358,10 +309,7 @@ export function getActiveSessionTokenRolesForPerson(
   if (!activeActor || activeActor.personId !== personId) {
     return undefined;
   }
-  const targetTenantId =
-    tenantId?.trim() ||
-    activeActor.tenantId ||
-    getServerTenantConfiguration().tenantId;
+  const targetTenantId = tenantId?.trim() || activeActor.tenantId;
   if (activeActor.tenantId !== targetTenantId) {
     return undefined;
   }
@@ -396,15 +344,6 @@ export interface ResolvePersonPermissionsOptions {
   tokenRoles?: readonly string[];
 }
 
-export function resolveActiveTenantIdForRbac(
-  explicitTenantId?: string,
-): string {
-  if (explicitTenantId && explicitTenantId.trim().length > 0) {
-    return explicitTenantId.trim();
-  }
-  return getServerTenantConfiguration().tenantId;
-}
-
 /**
  * Resolves the complete `ResolvedPermissionSet` for a `Person` using the central `@platform/core`
  * `resolvePermissions` engine.
@@ -413,9 +352,10 @@ export function resolvePersonPermissionSet(
   user: Person | null | undefined,
   options: ResolvePersonPermissionsOptions = {},
 ): ResolvedPermissionSet {
-  const activeTenantId = resolveActiveTenantIdForRbac(
-    options.context?.tenantId,
-  );
+  const activeTenantId =
+    options.context?.tenantId?.trim() ||
+    getActiveActorSession()?.tenantId ||
+    'default';
   if (!user?.id) {
     return resolvePermissions({
       context: {
@@ -432,7 +372,7 @@ export function resolvePersonPermissionSet(
   const teams = options.teams ?? [];
   const allPeople = options.allPeople ?? [];
   const rbacConfig =
-    options.config?.rbac ?? getDefaultTenantRbacConfig(activeTenantId);
+    options.config?.rbac ?? getCachedOrDefaultRbacConfig(activeTenantId);
   const storedRoles = resolvePersonAuthoritativeRoles(
     user,
     teams,
@@ -664,13 +604,12 @@ export function resolvePersonForEntraClaims(params: {
   verifiedToken: VerifiedOidcTokenClaims;
   permissions: ResolvedPermissionSet;
 } {
-  const activeTenantId =
-    params.tenantId?.trim() || getServerTenantConfiguration().tenantId;
+  const activeTenantId = params.tenantId?.trim() || 'default';
   const {
     claims,
     people,
     teams = [],
-    rbacConfig = getDefaultTenantRbacConfig(activeTenantId),
+    rbacConfig = getCachedOrDefaultRbacConfig(activeTenantId),
   } = params;
 
   const oid = claims.oid?.trim();

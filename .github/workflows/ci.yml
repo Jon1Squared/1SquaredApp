@@ -32,6 +32,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate extension registry
+        run: npm run generate:extensions
+        env:
+          PLATFORM_TENANT_PACKAGE_DIR: client-not-a-law-firm
+
       - name: TypeScript typecheck
         run: npx tsc --noEmit
 

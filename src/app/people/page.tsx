@@ -15,6 +15,7 @@ export default async function PeoplePage() {
         employees={snap.employees}
         enquiries={snap.enquiries}
         currentUserId={snap.currentUserId}
+        firmName={snap.firm.name}
       />
     );
   });

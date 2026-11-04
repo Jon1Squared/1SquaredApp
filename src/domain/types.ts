@@ -283,6 +283,7 @@ export type PermissionKey =
   | 'matter:edit'
   | 'matter:reassign_ownership'
   | 'matter:restricted:access'
+  | 'matter:restriction:lift'
   | 'task:claim_any'
   | 'task:reassign_any'
   | 'enquiry:intake_view'
@@ -927,6 +928,19 @@ export interface Matter extends RecordBase {
   hasEthicalWall?: boolean;
   /** User IDs permitted to view/access this matter when isStaffMatter or hasEthicalWall is true. */
   restrictedAccessUserIds?: string[];
+  /** Recorded restriction lifts so ordinary saves do not reinstate lifted restrictions unless a new trigger occurs. */
+  restrictionLift?: {
+    ethicalWall?: {
+      liftedAt: string;
+      byId: string;
+      liftedBarrierMatchIds: string[];
+    };
+    staffMatter?: {
+      liftedAt: string;
+      byId: string;
+      liftedParticipantIds: string[];
+    };
+  };
   /** Optional explicit owning OrgDepartment ID (e.g. 'DEPT-RE') for document routing & security. */
   owningDepartmentId?: string | null;
   /** Optional explicit owning OrgTeamOrPracticeGroup ID (e.g. 'TPG-RE-RES') for document routing & security. */

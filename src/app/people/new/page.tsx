@@ -23,6 +23,7 @@ export default async function NewPersonPage() {
         currentUserEmployeePermissions={snap.currentUserEmployeePermissions}
         leaverOwnedRecords={snap.leaverOwnedRecords}
         firmPrimaryDomain={snap.firmPrimaryDomain}
+        firmName={snap.firm.name}
       />
     );
   });

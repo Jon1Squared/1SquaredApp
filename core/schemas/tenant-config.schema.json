@@ -51,7 +51,51 @@
       "properties": {
         "primaryDomain": { "type": "string" },
         "accentColorHex": { "type": "string", "default": "#1f6feb" },
-        "logoAssetKey": { "type": "string", "default": "default-logo.svg" }
+        "logoAssetKey": { "type": "string", "default": "default-logo.svg" },
+        "contactEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Optional public contact email address for document headers and footers"
+        },
+        "website": {
+          "type": "string",
+          "default": "",
+          "description": "Optional public website URL or hostname for document headers and footers"
+        }
+      }
+    },
+    "firm": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Firm contact details for generated documents",
+      "properties": {
+        "contactEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Public firm contact email address for document headers and footers (blank if not set)"
+        },
+        "website": {
+          "type": "string",
+          "default": "",
+          "description": "Public firm website URL or hostname for document headers and footers (blank if not set)"
+        }
+      }
+    },
+    "conflictReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Routing configuration for referred matter conflict review tasks",
+      "properties": {
+        "assigneeTeamKey": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Stable key of the team that receives referred conflict reviews"
+        },
+        "assigneeRoleKey": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Optional employee_role.* key used to pick an assignee within the team"
+        }
       }
     },
     "featureFlags": {

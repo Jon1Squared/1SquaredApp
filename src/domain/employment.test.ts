@@ -443,13 +443,14 @@ describe('Employee section, conversion paths, migration & permissions', () => {
           ),
       );
       expect(matterRes.errors).toBeUndefined();
-      expect(matterRes.matter.isStaffMatter).toBe(true);
+      expect(matterRes.matter).not.toBeNull();
+      expect(matterRes.matter!.isStaffMatter).toBe(true);
 
       // Involved partner P-000001 can access; uninvolved fee earner P-000005 cannot browse by default
       const p1 = store.people.find((p) => p.id === 'P-000001')!;
       const p5 = store.people.find((p) => p.id === 'P-000005')!;
-      expect(canUserAccessMatter(matterRes.matter, 'P-000001', p1)).toBe(true);
-      expect(canUserAccessMatter(matterRes.matter, 'P-000005', p5)).toBe(false);
+      expect(canUserAccessMatter(matterRes.matter!, 'P-000001', p1)).toBe(true);
+      expect(canUserAccessMatter(matterRes.matter!, 'P-000005', p5)).toBe(false);
     });
 
     it('Path D (Employee -> Leaver -> Contact): sets status to Leaver, deactivates firm-issued email/extension, keeps personal contact details & marketing consent, hides from employee selectors, and supports reassigning owned records', () => {

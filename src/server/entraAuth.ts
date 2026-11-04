@@ -48,6 +48,7 @@ export interface EntraSessionPayload {
 }
 
 export type VerifiedEntraSessionPayload = EntraSessionPayload & {
+  readonly tenantId: string;
   readonly [VERIFIED_ENTRA_SESSION_BRAND]: true;
 };
 

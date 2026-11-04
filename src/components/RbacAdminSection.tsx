@@ -262,22 +262,29 @@ export function RbacAdminSection({
       return;
     }
     let cancelled = false;
-    void previewRbacOverridesAction(selectedEmployee.id, {
-      grant: overrideGrant,
-      revoke: overrideRevoke,
-      rbacConfig: localRbac,
-    })
-      .then((res) => {
-        if (cancelled) return;
-        if (res.ok) {
-          setPreviewedPermissions(res.permissions);
-        }
+    const timer = setTimeout(() => {
+      void previewRbacOverridesAction(selectedEmployee.id, {
+        grant: overrideGrant,
+        revoke: overrideRevoke,
+        rbacConfig: localRbac,
       })
-      .catch(() => {
-        // Retain baseline permissions if preview fails
-      });
+        .then((res) => {
+          if (cancelled) return;
+          if (res.ok) {
+            setPreviewedPermissions(res.permissions);
+          } else {
+            setPreviewedPermissions(null);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setPreviewedPermissions(null);
+          }
+        });
+    }, 300);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [selectedEmployee, overrideGrant, overrideRevoke, localRbac]);
 

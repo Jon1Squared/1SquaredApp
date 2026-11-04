@@ -101,6 +101,7 @@ interface Props {
   duplicateCandidates: Person[];
   mergedFromId?: string | null;
   initialTab?: string;
+  firmName?: string;
 }
 
 export function PersonProfileClient({
@@ -125,6 +126,7 @@ export function PersonProfileClient({
   duplicateCandidates,
   mergedFromId,
   initialTab,
+  firmName = 'Firm',
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -2099,7 +2101,7 @@ export function PersonProfileClient({
         {person.isEmployee ? (
           <>
             <span>·</span>
-            <span>Not A Law Firm LLP ({resolveLabel(values, person.departmentId)})</span>
+            <span>{firmName} ({resolveLabel(values, person.departmentId)})</span>
           </>
         ) : mainOrg ? (
           <>

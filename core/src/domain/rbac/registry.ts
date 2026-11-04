@@ -335,6 +335,15 @@ export const PERMISSION_REGISTRY: Readonly<
     requiresMfa: false,
     sinceVersion: '1.0.0',
   },
+  'matter:restriction:lift': {
+    key: 'matter:restriction:lift',
+    domain: 'matter',
+    description:
+      'Lift a staff matter restriction or information barrier (ethical wall) on an accessible matter, requiring MFA and a recorded reason.',
+    sensitivity: 'restricted',
+    requiresMfa: true,
+    sinceVersion: '1.1.0',
+  },
   'task:claim_any': {
     key: 'task:claim_any',
     domain: 'task',
@@ -527,6 +536,7 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'matter:edit',
       'matter:reassign_ownership',
       'matter:restricted:access',
+      'matter:restriction:lift',
       'task:claim_any',
       'task:reassign_any',
       'admin:access',
@@ -604,6 +614,7 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'risk:view',
       'matter:edit',
       'matter:restricted:access',
+      'matter:restriction:lift',
       'keydate:view',
       'keydate:view_any_team',
       'keydate:verify',

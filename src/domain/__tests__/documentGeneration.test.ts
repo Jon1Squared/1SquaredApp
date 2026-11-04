@@ -6,6 +6,7 @@ import {
   resolveDocumentPermissions,
 } from '@platform/core';
 import {
+  buildDocumentActorFromPerson,
   buildFieldResolutionContextForRecord,
   buildFullCatalogueFromStoreCustomFields,
   buildSeedClientCareTemplateDocxBytes,
@@ -322,5 +323,13 @@ describe('Host Document Generation Domain & Server Services', () => {
         cfg,
       ),
     ).toBe(true);
+
+    // R151: buildDocumentActorFromPerson throws RBAC_TENANT_REQUIRED when called with no ctx and no active actor session
+    const samplePerson = getStore().people[0]!;
+    expect(() =>
+      runWithActiveActorSession(null, () =>
+        buildDocumentActorFromPerson(samplePerson),
+      ),
+    ).toThrow(/RBAC_TENANT_REQUIRED/);
   });
 });

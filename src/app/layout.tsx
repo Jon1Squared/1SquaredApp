@@ -59,6 +59,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               attention={snap.attention}
               tasks={snap.tasks}
               notifications={snap.notifications}
+              firmName={snap.firm.name}
               entraSession={entraSession}
             >
               {children}

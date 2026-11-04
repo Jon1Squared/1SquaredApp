@@ -87,6 +87,25 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.name).toBe(
       '0004_key_date_reminder_last_skipped_reason_expand',
     );
+    expect(
+      KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.dependsOn,
+    ).toEqual(['0003']);
+    // R149: Verify 0004 downSql drops both the constraint and the last_skipped_reason column
+    expect(
+      KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.downSql,
+    ).toContain(
+      'DROP CONSTRAINT IF EXISTS chk_key_date_reminder_states_last_skipped_reason',
+    );
+    expect(
+      KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.downSql,
+    ).toContain('DROP COLUMN IF EXISTS last_skipped_reason');
+
+    // R145: Applying 0004 without its prerequisite 0003 throws MIGRATION_DEPENDENCY_ERROR
+    expect(() =>
+      runner.applyUp(ctxB, [
+        KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
+      ]),
+    ).toThrow(/MIGRATION_DEPENDENCY_ERROR/);
 
     const appliedA = runner.applyUp(ctxA, CORE_TENANT_MIGRATIONS);
     expect(
@@ -104,7 +123,12 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
     expect(runner.getActiveTables(ctxB)).not.toContain('key_dates');
 
-    // R124: Attempting to roll back 0003 while 0004 is still applied throws MIGRATION_ROLLBACK_ORDER_ERROR
+    // R145: Rolling back 0002 (which 0003 and 0004 do not depend on) succeeds independently and leaves key-date tables intact
+    expect(runner.rollbackVersion(ctxA, '0002')).toBe(true);
+    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
+    expect(runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
+
+    // R124 & R145: Attempting to roll back 0003 while 0004 (dependsOn: ['0003']) is still applied throws MIGRATION_ROLLBACK_ORDER_ERROR
     expect(() => runner.rollbackVersion(ctxA, '0003')).toThrow(
       /MIGRATION_ROLLBACK_ORDER_ERROR/,
     );

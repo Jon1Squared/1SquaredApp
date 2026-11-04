@@ -90,7 +90,7 @@ export function isTemplateAvailableInContext(params: {
   actor: DocumentPermissionActor;
   config?: DocumentRbacConfigInput;
   permittedTemplateIds?: readonly string[];
-  sourceEntityType: 'matter' | 'client';
+  sourceEntityType?: 'matter' | 'client';
   practiceAreaKey?: string | null;
   matterTypeKey?: string | null;
   clientType?: 'Organisation' | 'Person' | null;
@@ -113,6 +113,7 @@ export function isTemplateAvailableInContext(params: {
 
   const rules = template.availabilityRules;
   if (
+    sourceEntityType &&
     rules.sourceContexts?.length &&
     !rules.sourceContexts.includes(sourceEntityType)
   ) {

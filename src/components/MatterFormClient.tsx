@@ -560,7 +560,7 @@ export function MatterFormClient({
   orgStructure: orgStructureProp,
   matterPartyTaxonomy,
   matterCostsConfig,
-  canReassignOwnership = true,
+  canReassignOwnership = false,
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -4121,10 +4121,7 @@ export function MatterFormClient({
   function handleRunConflictSearch() {
     const computed = computeMatchesForParties(allPartiesToCheck, true);
     const runTime = '22 Oct 2026, 17:42';
-    const runnerName =
-      currentUser.id === 'P-000003'
-        ? 'Bethan R.'
-        : `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
+    const runnerName = `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
 
     setMatches(computed);
     setHasRunSearch(true);
@@ -4798,7 +4795,7 @@ export function MatterFormClient({
       reviewerConditionType: 'consent_obtained',
       reviewerNote:
         'Unrelated subject matter to HAR001-0003; written informed consent obtained from both Penarth Estates Ltd and Harbourline Housing Association.',
-      reviewedById: 'P-000003',
+      reviewedById: currentUser.id,
       reviewedByName: 'Bethan Rees',
       reviewedAt: '22 Oct 2026, 17:50',
     };
@@ -4819,7 +4816,7 @@ export function MatterFormClient({
         {
           id: 'run-fast-1',
           runAtDisplay: '22 Oct 2026, 17:42',
-          runById: 'P-000003',
+          runById: currentUser.id,
           runByName: 'Bethan R.',
           searchTerms: ['Penarth Estates Ltd', 'Alun Davies', 'Coastline Outdoor Ltd'],
           partiesCount: 3,
@@ -4840,7 +4837,7 @@ export function MatterFormClient({
       {
         id: 'run-full-1',
         runAtDisplay: '22 Oct 2026, 17:42',
-        runById: 'P-000003',
+        runById: currentUser.id,
         runByName: 'Bethan R.',
         searchTerms: [
           'Penarth Estates Ltd',
@@ -4945,13 +4942,13 @@ export function MatterFormClient({
           : null,
       approvedById:
         statusToUse === 'Approved'
-          ? 'P-000003'
+          ? currentUser.id
           : statusToUse === 'Cleared'
             ? leadFeeEarnerId || currentUser.id
             : null,
       approvedByName:
         statusToUse === 'Approved'
-          ? 'Bethan Rees (COLP)'
+          ? `${personDisplayName(currentUser)} (COLP)`
           : statusToUse === 'Cleared'
             ? 'Cleared by fee earner'
             : null,
@@ -5018,9 +5015,9 @@ export function MatterFormClient({
       );
     }
 
-    // Include COLP (e.g. Bethan Rees)
+    // Include COLP
     const colpEmp =
-      employees.find((e) => e.id === 'P-000003') ??
+      employees.find((e) => e.employeeRoleId === 'employee_role.risk_and_compliance') ??
       employees.find((e) =>
         (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('colp'),
       );
@@ -7485,7 +7482,10 @@ export function MatterFormClient({
                   </div>
                 ) : null}
               </div>
-              {serverSaveErrors.costsGovernance || serverSaveErrors.permission || serverSaveErrors.access ? (
+              {serverSaveErrors.costsGovernance ||
+              serverSaveErrors.conflict ||
+              serverSaveErrors.permission ||
+              serverSaveErrors.access ? (
                 <div
                   className="field-group field-group--full"
                   role="alert"
@@ -7499,6 +7499,7 @@ export function MatterFormClient({
                   }}
                 >
                   {serverSaveErrors.costsGovernance ||
+                    serverSaveErrors.conflict ||
                     serverSaveErrors.permission ||
                     serverSaveErrors.access}
                 </div>

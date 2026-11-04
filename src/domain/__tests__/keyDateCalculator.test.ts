@@ -3,6 +3,7 @@ import {
   buildKeyDateCalculation,
   calculateLimitationDate,
   LIMITATION_CALCULATOR_DISCLAIMER,
+  previewKeyDateCalculation,
   sanitizeTriggerValuesForRule,
 } from '../keyDateCalculator';
 import type {
@@ -339,5 +340,21 @@ describe('Pure Limitation Calculator Engine (Phase 2)', () => {
     );
     expect(built.calculation.ruleSetReviewStatus).toBe('unreviewed');
     expect(built.warnings.some((w) => w.includes('unreviewed'))).toBe(true);
+
+    // R149: previewKeyDateCalculation throws KEY_DATE_PERMISSION_ERROR when overrideAllowed is false and an override is supplied
+    expect(() =>
+      previewKeyDateCalculation(
+        {
+          ruleSet: { id: 'ew-sample', version: 1, reviewStatus: 'unreviewed' },
+          rule,
+          triggers: { accrualDate: '2020-06-01' },
+          override: {
+            overriddenDate: '2026-05-01',
+            reason: 'Conservative contractual interpretation',
+          },
+        },
+        { overrideAllowed: false },
+      ),
+    ).toThrow(/KEY_DATE_PERMISSION_ERROR/);
   });
 });

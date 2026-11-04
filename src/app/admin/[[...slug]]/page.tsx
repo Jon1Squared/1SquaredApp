@@ -88,6 +88,7 @@ export default async function AdminCatchAllPage({
         currentUserKeyDatePermissions={snap.currentUserKeyDatePermissions}
         entraSession={actor.session}
         entraEnvStatus={entraEnvStatus}
+        firmName={snap.firm.name}
         authError={authError}
         authSuccess={authSuccess === '1'}
       />

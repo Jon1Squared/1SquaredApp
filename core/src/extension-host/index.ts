@@ -36,6 +36,14 @@ import {
 } from '../domain/document-generation/fieldCatalogue';
 import { validateExtensionManifest } from '../config-engine/index';
 
+export class ExtensionHookTimeoutError extends Error {
+  readonly code = 'EXTENSION_HOOK_TIMEOUT';
+  constructor(extensionId: string, timeoutMs: number) {
+    super(`Extension "${extensionId}" timed out after ${timeoutMs}ms`);
+    this.name = 'ExtensionHookTimeoutError';
+  }
+}
+
 export interface ExtensionHostOptions {
   coreApiVersion: string;
   defaultHookTimeoutMs?: number;
@@ -186,9 +194,7 @@ export class ExtensionHost {
             timeoutHandle = setTimeout(
               () =>
                 reject(
-                  new Error(
-                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-                  ),
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
                 ),
               timeoutMs,
             );
@@ -207,9 +213,11 @@ export class ExtensionHost {
           aggregatedWarnings.push(...result.governanceWarnings);
         }
       } catch (err) {
-        // Fail-safe error isolation: log warning without crashing the core
+        // Fail-safe error isolation: log warning without crashing the core.
+        // For beforeMatterOpen (opening gate), fail closed on any error (throw or timeout).
+        // For beforeMatterCostsCalculate (advisory), fail open with a warning.
         const reason = err instanceof Error ? err.message : 'Unknown error';
-        if (hookName === 'beforeMatterOpen' && reason.includes('timed out after')) {
+        if (hookName === 'beforeMatterOpen') {
           allowProceed = false;
         }
         aggregatedWarnings.push(
@@ -275,9 +283,7 @@ export class ExtensionHost {
         }
         const elapsedMs = Date.now() - startedAt;
         if (elapsedMs > timeoutMs) {
-          throw new Error(
-            `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-          );
+          throw new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs);
         }
         const result = maybePromise as MatterCostsHookResult;
         if (result.requiresPartnerSignOff) {
@@ -291,6 +297,9 @@ export class ExtensionHost {
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : 'Unknown error';
+        if (hookName === 'beforeMatterOpen') {
+          allowProceed = false;
+        }
         aggregatedWarnings.push(
           `[Extension isolated error: ${ext.manifest.id}] ${reason}`,
         );
@@ -344,9 +353,7 @@ export class ExtensionHost {
             setTimeout(
               () =>
                 reject(
-                  new Error(
-                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-                  ),
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
                 ),
               timeoutMs,
             ),
@@ -439,9 +446,7 @@ export class ExtensionHost {
             setTimeout(
               () =>
                 reject(
-                  new Error(
-                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-                  ),
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
                 ),
               timeoutMs,
             ),
@@ -545,9 +550,7 @@ export class ExtensionHost {
             setTimeout(
               () =>
                 reject(
-                  new Error(
-                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-                  ),
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
                 ),
               timeoutMs,
             ),
@@ -618,9 +621,7 @@ export class ExtensionHost {
             setTimeout(
               () =>
                 reject(
-                  new Error(
-                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-                  ),
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
                 ),
               timeoutMs,
             ),
@@ -703,9 +704,7 @@ export class ExtensionHost {
             setTimeout(
               () =>
                 reject(
-                  new Error(
-                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-                  ),
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
                 ),
               timeoutMs,
             ),
@@ -774,9 +773,7 @@ export class ExtensionHost {
             setTimeout(
               () =>
                 reject(
-                  new Error(
-                    `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
-                  ),
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
                 ),
               timeoutMs,
             ),

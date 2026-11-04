@@ -37,6 +37,7 @@ export default async function EditPersonPage({
         existingSensitive={null}
         leaverOwnedRecords={snap.leaverOwnedRecords}
         firmPrimaryDomain={snap.firmPrimaryDomain}
+        firmName={snap.firm.name}
       />
     );
   });

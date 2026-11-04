@@ -562,8 +562,72 @@ export const TenantConfigurationSchema = z
           .string()
           .default('default-logo.svg')
           .describe('Tenant-scoped asset key for the firm logo'),
+        contactEmail: z
+          .string()
+          .default('')
+          .optional()
+          .describe(
+            'Optional public contact email address for document headers and footers',
+          ),
+        website: z
+          .string()
+          .default('')
+          .optional()
+          .describe(
+            'Optional public website URL or hostname for document headers and footers',
+          ),
       })
       .strict(),
+    firm: z
+      .object({
+        contactEmail: z
+          .string()
+          .default('')
+          .describe(
+            'Public firm contact email address for document headers and footers (blank if not set)',
+          ),
+        website: z
+          .string()
+          .default('')
+          .describe(
+            'Public firm website URL or hostname for document headers and footers (blank if not set)',
+          ),
+      })
+      .strict()
+      .default({
+        contactEmail: '',
+        website: '',
+      })
+      .optional()
+      .describe('Firm contact details for generated documents'),
+    conflictReview: z
+      .object({
+        assigneeTeamKey: z
+          .string()
+          .min(1)
+          .nullable()
+          .default(null)
+          .describe(
+            'Stable key or ID of the team that receives referred conflict reviews',
+          ),
+        assigneeRoleKey: z
+          .string()
+          .min(1)
+          .nullable()
+          .default(null)
+          .describe(
+            'Optional role key or employee_role.* key used to pick an assignee within the team',
+          ),
+      })
+      .strict()
+      .default({
+        assigneeTeamKey: null,
+        assigneeRoleKey: null,
+      })
+      .optional()
+      .describe(
+        'Routing configuration for referred matter conflict review tasks',
+      ),
     featureFlags: z
       .object({
         enableMatterCostsGovernance: z
@@ -1938,6 +2002,30 @@ export function loadAndValidateTenantConfig(
       ...(environmentOverlay.integrations as Record<string, unknown> | undefined),
     },
   };
+
+  const baseFirm = baseConfig.firm as Record<string, unknown> | undefined;
+  const overlayFirm = environmentOverlay.firm as
+    | Record<string, unknown>
+    | undefined;
+  if (baseFirm || overlayFirm) {
+    merged.firm = {
+      ...(baseFirm ?? {}),
+      ...(overlayFirm ?? {}),
+    };
+  }
+
+  const baseConflictReview = baseConfig.conflictReview as
+    | Record<string, unknown>
+    | undefined;
+  const overlayConflictReview = environmentOverlay.conflictReview as
+    | Record<string, unknown>
+    | undefined;
+  if (baseConflictReview || overlayConflictReview) {
+    merged.conflictReview = {
+      ...(baseConflictReview ?? {}),
+      ...(overlayConflictReview ?? {}),
+    };
+  }
 
   if (baseDocGen || overlayDocGen) {
     merged.documentGeneration = {
