@@ -80,11 +80,16 @@ import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents
 import {
   clearActiveSessionTokenRoles,
   hasPersonPermission,
+  runWithActiveActorSession,
   setActiveSessionTokenRolesForPerson,
 } from '@/domain/rbac';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
+  buildEntraSessionPayload,
   createSignedEntraSessionCookie,
+  setTestEntraSessionOverride,
   verifySignedEntraSessionCookie,
+  type VerifiedEntraSessionPayload,
 } from '@/server/entraAuth';
 import {
   applyAdminTemplateAdditionsToOpenMatters,
@@ -104,6 +109,8 @@ import {
   remediateAdminReconciliationFinding,
   resetDocumentStoreSingletonsForTesting,
   resolveAdminSharePointLocationUrl,
+  resolvePersonEntraIdentity,
+  resolvePersonOrgAssignment,
   retryMatterDocumentProvisioning,
   runAdminDocumentReconciliationScan,
   saveAdminDocumentStoreConfiguration,
@@ -1811,14 +1818,24 @@ describe('External Document Store Integration (Sections 1–14)', () => {
     });
 
     function registerStoreEmployeeSessionsForTest(store: ReturnType<typeof getStore>) {
+      const cfg = getActiveTenantConfiguration();
+      const sessions = new Map<string, VerifiedEntraSessionPayload>();
       for (const emp of store.people) {
         if (!emp.isEmployee && !emp.employment) continue;
         if (!emp.entraObjectId) {
           emp.entraObjectId = `00000000-0000-4000-8000-${emp.id.replace(/\D/g, '').padStart(12, '0')}`;
         }
+        if (
+          emp.id === 'P-000010' &&
+          emp.employment &&
+          !emp.employment.teamOrPracticeGroupId
+        ) {
+          emp.employment.teamOrPracticeGroupId = 'TPG-RE-COM';
+        }
         const workEmail =
           emp.emails?.[0]?.address ??
           `${emp.id.toLowerCase()}@notalawfirm.example`;
+        const entraInfo = resolvePersonEntraIdentity(emp, cfg, store);
         const verifiedSession = verifySignedEntraSessionCookie(
           createSignedEntraSessionCookie({
             personId: emp.id,
@@ -1830,123 +1847,143 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             displayName: `${emp.firstName} ${emp.surname}`,
             entraRoles: emp.roles ?? [],
             mappedRoles: emp.roles ?? [],
-            entraGroups: [],
+            entraGroups: entraInfo.groups,
             mfaVerified: true,
             amr: ['pwd', 'mfa'],
             authenticatedAt: new Date().toISOString(),
             expiresAt: new Date(Date.now() + 3600_000).toISOString(),
           }),
         )!;
+        sessions.set(emp.id, verifiedSession);
         setActiveSessionTokenRolesForPerson(emp.id, emp.roles ?? [], {
           tenantId: 'not-a-law-firm',
           expiresAt: verifiedSession.expiresAt,
           verifiedSession,
         });
       }
+      function asEmployee<T>(personId: string, fn: () => T): T {
+        const verifiedSession = sessions.get(personId);
+        if (!verifiedSession) return fn();
+        return runWithActiveActorSession(
+          {
+            personId,
+            tenantId: 'not-a-law-firm',
+            tokenRoles: verifiedSession.mappedRoles,
+            expiresAtMs: Date.parse(verifiedSession.expiresAt),
+            verifiedSession,
+          },
+          fn,
+        );
+      }
+      return { sessions, asEmployee };
     }
 
     it('enforces R2: all 8 admin document store functions reject non-admin and non-MFA callers with access_denied', async () => {
-      registerStoreEmployeeSessionsForTest(getStore());
+      const { asEmployee } = registerStoreEmployeeSessionsForTest(getStore());
       try {
-        // P-000002 is a fee earner without admin permissions
-        expect(() =>
-          getDocumentStoresAdminDashboard('P-000002', { mfaVerified: true }),
-        ).toThrow(/PERMISSION_DENIED/);
-      await expect(
-        testAdminDocumentStoreConnection({
-          storeId: 'nalf-sharepoint-primary',
-          userId: 'P-000002',
-          mfaVerified: true,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      await expect(
-        resolveAdminSharePointLocationUrl({
-          rawUrlOrPath: 'https://contoso.sharepoint.com/sites/Test/Documents',
-          userId: 'P-000002',
-          mfaVerified: true,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      expect(() =>
-        saveAdminDocumentStoreConfiguration({
-          section: 'stores',
-          userId: 'P-000002',
-          mfaVerified: true,
-        }),
-      ).toThrow(/PERMISSION_DENIED/);
-      expect(() =>
-        previewAdminMatterFolderTemplate({
-          userId: 'P-000002',
-          mfaVerified: true,
-        }),
-      ).toThrow(/PERMISSION_DENIED/);
-      await expect(
-        applyAdminTemplateAdditionsToOpenMatters('P-000002', {
-          mfaVerified: true,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      await expect(
-        runAdminDocumentReconciliationScan({
-          userId: 'P-000002',
-          mfaVerified: true,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      await expect(
-        remediateAdminReconciliationFinding({
-          findingId: 'finding-1',
-          userId: 'P-000002',
-          mfaVerified: true,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
+        await asEmployee('P-000002', async () => {
+          // P-000002 is a fee earner without admin permissions
+          expect(() =>
+            getDocumentStoresAdminDashboard('P-000002', { mfaVerified: true }),
+          ).toThrow(/PERMISSION_DENIED/);
+          await expect(
+            testAdminDocumentStoreConnection({
+              storeId: 'nalf-sharepoint-primary',
+              userId: 'P-000002',
+              mfaVerified: true,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          await expect(
+            resolveAdminSharePointLocationUrl({
+              rawUrlOrPath: 'https://contoso.sharepoint.com/sites/Test/Documents',
+              userId: 'P-000002',
+              mfaVerified: true,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          expect(() =>
+            saveAdminDocumentStoreConfiguration({
+              section: 'stores',
+              userId: 'P-000002',
+              mfaVerified: true,
+            }),
+          ).toThrow(/PERMISSION_DENIED/);
+          expect(() =>
+            previewAdminMatterFolderTemplate({
+              userId: 'P-000002',
+              mfaVerified: true,
+            }),
+          ).toThrow(/PERMISSION_DENIED/);
+          await expect(
+            applyAdminTemplateAdditionsToOpenMatters('P-000002', {
+              mfaVerified: true,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          await expect(
+            runAdminDocumentReconciliationScan({
+              userId: 'P-000002',
+              mfaVerified: true,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          await expect(
+            remediateAdminReconciliationFinding({
+              findingId: 'finding-1',
+              userId: 'P-000002',
+              mfaVerified: true,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+        });
 
-      // P-000001 (admin) with mfaVerified: false is rejected with access_denied
-      expect(() =>
-        getDocumentStoresAdminDashboard('P-000001', { mfaVerified: false }),
-      ).toThrow(/MFA_REQUIRED/);
-      await expect(
-        testAdminDocumentStoreConnection({
-          storeId: 'nalf-sharepoint-primary',
-          userId: 'P-000001',
-          mfaVerified: false,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      await expect(
-        resolveAdminSharePointLocationUrl({
-          rawUrlOrPath: 'https://contoso.sharepoint.com/sites/Test/Documents',
-          userId: 'P-000001',
-          mfaVerified: false,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      expect(() =>
-        saveAdminDocumentStoreConfiguration({
-          section: 'stores',
-          userId: 'P-000001',
-          mfaVerified: false,
-        }),
-      ).toThrow(/MFA_REQUIRED/);
-      expect(() =>
-        previewAdminMatterFolderTemplate({
-          userId: 'P-000001',
-          mfaVerified: false,
-        }),
-      ).toThrow(/MFA_REQUIRED/);
-      await expect(
-        applyAdminTemplateAdditionsToOpenMatters('P-000001', {
-          mfaVerified: false,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      await expect(
-        runAdminDocumentReconciliationScan({
-          userId: 'P-000001',
-          mfaVerified: false,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
-      await expect(
-        remediateAdminReconciliationFinding({
-          findingId: 'finding-1',
-          userId: 'P-000001',
-          mfaVerified: false,
-        }),
-      ).rejects.toMatchObject({ code: 'access_denied' });
+        await asEmployee('P-000001', async () => {
+          // P-000001 (admin) with mfaVerified: false is rejected with access_denied
+          expect(() =>
+            getDocumentStoresAdminDashboard('P-000001', { mfaVerified: false }),
+          ).toThrow(/MFA_REQUIRED/);
+          await expect(
+            testAdminDocumentStoreConnection({
+              storeId: 'nalf-sharepoint-primary',
+              userId: 'P-000001',
+              mfaVerified: false,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          await expect(
+            resolveAdminSharePointLocationUrl({
+              rawUrlOrPath: 'https://contoso.sharepoint.com/sites/Test/Documents',
+              userId: 'P-000001',
+              mfaVerified: false,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          expect(() =>
+            saveAdminDocumentStoreConfiguration({
+              section: 'stores',
+              userId: 'P-000001',
+              mfaVerified: false,
+            }),
+          ).toThrow(/MFA_REQUIRED/);
+          expect(() =>
+            previewAdminMatterFolderTemplate({
+              userId: 'P-000001',
+              mfaVerified: false,
+            }),
+          ).toThrow(/MFA_REQUIRED/);
+          await expect(
+            applyAdminTemplateAdditionsToOpenMatters('P-000001', {
+              mfaVerified: false,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          await expect(
+            runAdminDocumentReconciliationScan({
+              userId: 'P-000001',
+              mfaVerified: false,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+          await expect(
+            remediateAdminReconciliationFinding({
+              findingId: 'finding-1',
+              userId: 'P-000001',
+              mfaVerified: false,
+            }),
+          ).rejects.toMatchObject({ code: 'access_denied' });
+        });
       } finally {
         clearActiveSessionTokenRoles();
       }
@@ -1973,7 +2010,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
 
       try {
         resetDocumentStoreSingletonsForTesting();
-        registerStoreEmployeeSessionsForTest(store);
+        const { sessions, asEmployee } = registerStoreEmployeeSessionsForTest(store);
 
         // R19: Unknown userId throws UNAUTHENTICATED rather than falling back to P-000001
         expect(() =>
@@ -1993,10 +2030,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const jobsOnRestrictedBefore = (store.documentLifecycleJobs ?? []).filter(
           (j) => j.matterId === 'M-000002',
         ).length;
-        const excludedBrowse = await browseMatterDocumentStoreFolder({
-          matterId: 'M-000002',
-          userId: 'P-000007',
-        });
+        const excludedBrowse = await asEmployee('P-000007', () =>
+          browseMatterDocumentStoreFolder({
+            matterId: 'M-000002',
+            userId: 'P-000007',
+          }),
+        );
         expect(excludedBrowse.errorCode).toBe('access_denied');
         expect(excludedBrowse.locations).toEqual([]);
         expect(excludedBrowse.activeLocation).toBeNull();
@@ -2009,20 +2048,20 @@ describe('External Document Store Integration (Sections 1–14)', () => {
 
         // R3: Excluded fee earner cannot retry provisioning on restricted Matter B
         await expect(
-          retryMatterDocumentProvisioning('M-000002', 'P-000007'),
+          asEmployee('P-000007', () =>
+            retryMatterDocumentProvisioning('M-000002', 'P-000007'),
+          ),
         ).rejects.toMatchObject({ code: 'access_denied' });
 
         // Provision Matter A (M-000001, accessible to P-000002, with P-000010 NOT named on the matter) and Matter B (M-000002, restricted to P-000001)
         const matterABeforeProv = store.matters.find((m) => m.id === 'M-000001')!;
         matterABeforeProv.teamMemberIds = ['P-000002'];
-        const provA = await ensureMatterDocumentStoreProvisioned(
-          'M-000001',
-          'P-000002',
+        const provA = await asEmployee('P-000002', () =>
+          ensureMatterDocumentStoreProvisioned('M-000001', 'P-000002'),
         );
         const locA = provA.locations[0]!;
-        const provB = await ensureMatterDocumentStoreProvisioned(
-          'M-000002',
-          'P-000001',
+        const provB = await asEmployee('P-000001', () =>
+          ensureMatterDocumentStoreProvisioned('M-000002', 'P-000001'),
         );
         const locB = provB.locations[0]!;
 
@@ -2034,33 +2073,39 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
         try {
           await expect(
-            linkExistingMatterDocumentFolder({
-              matterId: 'M-000001',
-              storeId: locB.storeId,
-              libraryId: locB.libraryId,
-              folderUrlOrPath: locB.webUrl,
-              userId: 'P-000002',
-            }),
+            asEmployee('P-000002', () =>
+              linkExistingMatterDocumentFolder({
+                matterId: 'M-000001',
+                storeId: locB.storeId,
+                libraryId: locB.libraryId,
+                folderUrlOrPath: locB.webUrl,
+                userId: 'P-000002',
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
 
           await expect(
-            linkExistingMatterDocumentFolder({
-              matterId: 'M-000001',
-              storeId: locA.storeId,
-              libraryId: locA.libraryId,
-              folderUrlOrPath: 'RE/RE-COM',
-              userId: 'P-000002',
-            }),
+            asEmployee('P-000002', () =>
+              linkExistingMatterDocumentFolder({
+                matterId: 'M-000001',
+                storeId: locA.storeId,
+                libraryId: locA.libraryId,
+                folderUrlOrPath: 'RE/RE-COM',
+                userId: 'P-000002',
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
 
           await expect(
-            linkExistingMatterDocumentFolder({
-              matterId: 'M-000002',
-              storeId: locB.storeId,
-              libraryId: locB.libraryId,
-              folderUrlOrPath: locB.webUrl,
-              userId: 'P-000007',
-            }),
+            asEmployee('P-000007', () =>
+              linkExistingMatterDocumentFolder({
+                matterId: 'M-000002',
+                storeId: locB.storeId,
+                libraryId: locB.libraryId,
+                folderUrlOrPath: locB.webUrl,
+                userId: 'P-000007',
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
 
           // Even an admin with MFA cannot link the department or team container folder itself, or a sibling team container (R92)
@@ -2094,51 +2139,59 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           });
 
           await expect(
-            linkExistingMatterDocumentFolder({
-              matterId: 'M-000001',
-              storeId: locA.storeId,
-              libraryId: locA.libraryId,
-              folderUrlOrPath: 'RE/RE-COM',
-              userId: 'P-000004',
-              mfaVerified: true,
-              allowRoutingMismatchOverride: true,
-            }),
+            asEmployee('P-000004', () =>
+              linkExistingMatterDocumentFolder({
+                matterId: 'M-000001',
+                storeId: locA.storeId,
+                libraryId: locA.libraryId,
+                folderUrlOrPath: 'RE/RE-COM',
+                userId: 'P-000004',
+                mfaVerified: true,
+                allowRoutingMismatchOverride: true,
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
 
           await expect(
-            linkExistingMatterDocumentFolder({
-              matterId: 'M-000001',
-              storeId: locA.storeId,
-              libraryId: locA.libraryId,
-              folderUrlOrPath: 'RE/RE-RES',
-              userId: 'P-000004',
-              mfaVerified: true,
-              allowRoutingMismatchOverride: true,
-            }),
+            asEmployee('P-000004', () =>
+              linkExistingMatterDocumentFolder({
+                matterId: 'M-000001',
+                storeId: locA.storeId,
+                libraryId: locA.libraryId,
+                folderUrlOrPath: 'RE/RE-RES',
+                userId: 'P-000004',
+                mfaVerified: true,
+                allowRoutingMismatchOverride: true,
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
 
           await expect(
-            linkExistingMatterDocumentFolder({
-              matterId: 'M-000001',
-              storeId: locA.storeId,
-              libraryId: locA.libraryId,
-              folderUrlOrPath: 'RE',
-              userId: 'P-000004',
-              mfaVerified: true,
-              allowRoutingMismatchOverride: true,
-            }),
+            asEmployee('P-000004', () =>
+              linkExistingMatterDocumentFolder({
+                matterId: 'M-000001',
+                storeId: locA.storeId,
+                libraryId: locA.libraryId,
+                folderUrlOrPath: 'RE',
+                userId: 'P-000004',
+                mfaVerified: true,
+                allowRoutingMismatchOverride: true,
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
 
           await expect(
-            linkExistingMatterDocumentFolder({
-              matterId: 'M-000001',
-              storeId: locA.storeId,
-              libraryId: locA.libraryId,
-              folderUrlOrPath: 'CORP',
-              userId: 'P-000004',
-              mfaVerified: true,
-              allowRoutingMismatchOverride: true,
-            }),
+            asEmployee('P-000004', () =>
+              linkExistingMatterDocumentFolder({
+                matterId: 'M-000001',
+                storeId: locA.storeId,
+                libraryId: locA.libraryId,
+                folderUrlOrPath: 'CORP',
+                userId: 'P-000004',
+                mfaVerified: true,
+                allowRoutingMismatchOverride: true,
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
 
           expect(setPermSpy).not.toHaveBeenCalled();
@@ -2170,75 +2223,89 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           actorDisplayName: 'Admin',
           conflictBehavior: 'replace',
         });
-        const linkedLegacy = await linkExistingMatterDocumentFolder({
-          matterId: m5ForLegacy.id,
-          storeId: locA.storeId,
-          libraryId: locA.libraryId,
-          folderUrlOrPath: 'Legacy/M-123',
-          userId: 'P-000004',
-          mfaVerified: true,
-          allowRoutingMismatchOverride: true,
-        });
+        const linkedLegacy = await asEmployee('P-000004', () =>
+          linkExistingMatterDocumentFolder({
+            matterId: m5ForLegacy.id,
+            storeId: locA.storeId,
+            libraryId: locA.libraryId,
+            folderUrlOrPath: 'Legacy/M-123',
+            userId: 'P-000004',
+            mfaVerified: true,
+            allowRoutingMismatchOverride: true,
+          }),
+        );
         expect(linkedLegacy.location.relativePath).toBe('Legacy/M-123');
         expect(linkedLegacy.location.routingMismatchNote).toContain('Legacy/M-123');
 
         // R4: User on Matter A calling download, upload, browse, or mutate with Matter A's matterId and Matter B's locationId or itemId is rejected with access_denied
         await expect(
-          downloadMatterStoreDocument({
+          asEmployee('P-000002', () =>
+            downloadMatterStoreDocument({
+              matterId: 'M-000001',
+              locationId: locB.id,
+              itemId: locB.providerFolderItemId,
+              userId: 'P-000002',
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          asEmployee('P-000002', () =>
+            downloadMatterStoreDocument({
+              matterId: 'M-000001',
+              locationId: locA.id,
+              itemId: locB.providerFolderItemId,
+              userId: 'P-000002',
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          asEmployee('P-000002', () =>
+            uploadMatterStoreDocument({
+              matterId: 'M-000001',
+              locationId: locB.id,
+              folderItemId: locB.providerFolderItemId,
+              fileName: 'cross-matter.txt',
+              bytes: new Uint8Array([1, 2, 3]),
+              userId: 'P-000002',
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          asEmployee('P-000002', () =>
+            uploadMatterStoreDocument({
+              matterId: 'M-000001',
+              locationId: locA.id,
+              folderItemId: locB.providerFolderItemId,
+              fileName: 'cross-matter.txt',
+              bytes: new Uint8Array([1, 2, 3]),
+              userId: 'P-000002',
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          asEmployee('P-000002', () =>
+            mutateMatterStoreItem({
+              matterId: 'M-000001',
+              locationId: locA.id,
+              action: 'rename',
+              itemId: locB.providerFolderItemId,
+              name: 'Hijacked',
+              userId: 'P-000002',
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        const crossBrowse = await asEmployee('P-000002', () =>
+          browseMatterDocumentStoreFolder({
             matterId: 'M-000001',
             locationId: locB.id,
-            itemId: locB.providerFolderItemId,
             userId: 'P-000002',
           }),
-        ).rejects.toMatchObject({ code: 'access_denied' });
-
-        await expect(
-          downloadMatterStoreDocument({
-            matterId: 'M-000001',
-            locationId: locA.id,
-            itemId: locB.providerFolderItemId,
-            userId: 'P-000002',
-          }),
-        ).rejects.toMatchObject({ code: 'access_denied' });
-
-        await expect(
-          uploadMatterStoreDocument({
-            matterId: 'M-000001',
-            locationId: locB.id,
-            folderItemId: locB.providerFolderItemId,
-            fileName: 'cross-matter.txt',
-            bytes: new Uint8Array([1, 2, 3]),
-            userId: 'P-000002',
-          }),
-        ).rejects.toMatchObject({ code: 'access_denied' });
-
-        await expect(
-          uploadMatterStoreDocument({
-            matterId: 'M-000001',
-            locationId: locA.id,
-            folderItemId: locB.providerFolderItemId,
-            fileName: 'cross-matter.txt',
-            bytes: new Uint8Array([1, 2, 3]),
-            userId: 'P-000002',
-          }),
-        ).rejects.toMatchObject({ code: 'access_denied' });
-
-        await expect(
-          mutateMatterStoreItem({
-            matterId: 'M-000001',
-            locationId: locA.id,
-            action: 'rename',
-            itemId: locB.providerFolderItemId,
-            name: 'Hijacked',
-            userId: 'P-000002',
-          }),
-        ).rejects.toMatchObject({ code: 'access_denied' });
-
-        const crossBrowse = await browseMatterDocumentStoreFolder({
-          matterId: 'M-000001',
-          locationId: locB.id,
-          userId: 'P-000002',
-        });
+        );
         expect(crossBrowse.errorCode).toBe('access_denied');
         expect(crossBrowse.locations).toEqual([]);
         expect(
@@ -2265,10 +2332,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(targetMatterA.responsiblePartnerId).not.toBe('P-000010');
         expect(targetMatterA.teamMemberIds ?? []).not.toContain('P-000010');
 
-        const colleagueBrowse = await browseMatterDocumentStoreFolder({
-          matterId: 'M-000001',
-          userId: 'P-000010',
-        });
+        const colleagueBrowse = await asEmployee('P-000010', () =>
+          browseMatterDocumentStoreFolder({
+            matterId: 'M-000001',
+            userId: 'P-000010',
+          }),
+        );
         expect(colleagueBrowse.errorCode).toBeUndefined();
         expect(colleagueBrowse.activeLocation?.id).toBe(locA.id);
         expect(colleagueBrowse.activeLocation?.hasUniquePermissions).toBe(false);
@@ -2290,15 +2359,17 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           sortOrder: 999,
         });
         try {
-          const rejectedHire = savePersonRecord(
-            {
-              ...clientPerson,
-              isEmployee: true,
-              employeeRoleId: 'employee_role.solicitor',
-              departmentId: 'DEPT-RE',
-              customFields: {},
-            },
-            { id: clientIdOnMatterA, byId: 'P-000001' },
+          const rejectedHire = asEmployee('P-000001', () =>
+            savePersonRecord(
+              {
+                ...clientPerson,
+                isEmployee: true,
+                employeeRoleId: 'employee_role.solicitor',
+                departmentId: 'DEPT-RE',
+                customFields: {},
+              },
+              { id: clientIdOnMatterA, byId: 'P-000001' },
+            ),
           );
           expect(rejectedHire.errors?.['CF-REQ-PERSON-TEST']).toBeDefined();
           expect(
@@ -2316,14 +2387,16 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         }
 
         // R8 & R80: Making Matter A a staff matter through conflict-on-hire (savePersonRecord) updates the mock backend's folder permissions as well as intendedGrants
-        const hireRes = savePersonRecord(
-          {
-            ...clientPerson,
-            isEmployee: true,
-            employeeRoleId: 'employee_role.solicitor',
-            departmentId: 'DEPT-RE',
-          },
-          { id: clientIdOnMatterA, byId: 'P-000001' },
+        const hireRes = asEmployee('P-000001', () =>
+          savePersonRecord(
+            {
+              ...clientPerson,
+              isEmployee: true,
+              employeeRoleId: 'employee_role.solicitor',
+              departmentId: 'DEPT-RE',
+            },
+            { id: clientIdOnMatterA, byId: 'P-000001' },
+          ),
         );
         expect(hireRes.errors).toBeUndefined();
         await flushDocumentLifecycleSyncForTesting();
@@ -2362,15 +2435,17 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toBe(true);
 
         // R8: Removing a team member from restricted Matter A removes their grant on the mock backend
-        saveMatterRecord(
-          {
-            ...targetMatterA,
-            isStaffMatter: true,
-            hasEthicalWall: true,
-            teamMemberIds: ['P-000002'],
-            restrictedAccessUserIds: ['P-000001', 'P-000002'],
-          },
-          { id: 'M-000001', byId: 'P-000001' },
+        asEmployee('P-000001', () =>
+          saveMatterRecord(
+            {
+              ...targetMatterA,
+              isStaffMatter: true,
+              hasEthicalWall: true,
+              teamMemberIds: ['P-000002'],
+              restrictedAccessUserIds: ['P-000001', 'P-000002'],
+            },
+            { id: 'M-000001', byId: 'P-000001' },
+          ),
         );
         await flushDocumentLifecycleSyncForTesting();
         const { item: mockItemAfterTeamRemoval } = mockBackend.getItemOrThrow(
@@ -2384,6 +2459,85 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             (g) => g.principal.internalId === 'P-000003',
           ),
         ).toBe(false);
+
+        // R121: (1) A fee earner (P-000007) not on restrictedAccessUserIds gets "not found or restricted" from saveMatterRecord, and the matter + folder permissions are unchanged
+        const grantsBeforeUnauthorizedSave = structuredClone(
+          mockItemAfterTeamRemoval.directGrants,
+        );
+        const unauthorizedSaveRes = asEmployee('P-000007', () =>
+          saveMatterRecord(
+            {
+              ...targetMatterA,
+              title: 'Unauthorized Tampered Title',
+              isStaffMatter: false,
+              hasEthicalWall: false,
+              restrictedAccessUserIds: [],
+            },
+            { id: 'M-000001', byId: 'P-000007' },
+          ),
+        );
+        expect(unauthorizedSaveRes.errors?.access).toMatch(
+          /not found or restricted/i,
+        );
+        await flushDocumentLifecycleSyncForTesting();
+        const matterAfterUnauthorizedSave = getStore().matters.find(
+          (m) => m.id === 'M-000001',
+        )!;
+        expect(matterAfterUnauthorizedSave.isStaffMatter).toBe(true);
+        expect(matterAfterUnauthorizedSave.title).not.toBe(
+          'Unauthorized Tampered Title',
+        );
+        const { item: mockItemAfterUnauthorizedSave } =
+          mockBackend.getItemOrThrow(
+            locA.tenantId,
+            locA.providerSiteId,
+            locA.providerDriveId,
+            locA.providerFolderItemId,
+          );
+        expect(mockItemAfterUnauthorizedSave.inheritsFromParent).toBe(false);
+        expect(mockItemAfterUnauthorizedSave.directGrants).toEqual(
+          grantsBeforeUnauthorizedSave,
+        );
+
+        // R121: (2) An authorised participant (P-000001) sending isStaffMatter: false and restrictedAccessUserIds: [] keeps the matter as a restricted staff matter
+        const authorisedAttemptToStripRes = asEmployee('P-000001', () =>
+          saveMatterRecord(
+            {
+              ...matterAfterUnauthorizedSave,
+              isStaffMatter: false,
+              hasEthicalWall: false,
+              restrictedAccessUserIds: [],
+            },
+            { id: 'M-000001', byId: 'P-000001' },
+          ),
+        );
+        await flushDocumentLifecycleSyncForTesting();
+        expect(authorisedAttemptToStripRes.errors).toBeUndefined();
+        expect(authorisedAttemptToStripRes.matter.isStaffMatter).toBe(true);
+        expect(
+          authorisedAttemptToStripRes.matter.restrictedAccessUserIds,
+        ).toContain('P-000001');
+        expect(
+          authorisedAttemptToStripRes.matter.restrictedAccessUserIds,
+        ).toContain('P-000002');
+
+        // R121: (3) A user without matter:create (e.g. finance role P-000009) cannot create a matter
+        const countBeforeUnauthorisedCreate = getStore().matters.length;
+        const unauthorisedCreateRes = asEmployee('P-000009', () =>
+          saveMatterRecord(
+            {
+              title: 'Finance Unauthorised Matter',
+              clientId: targetMatterA.clientId,
+              practiceAreaId: targetMatterA.practiceAreaId,
+              workTypeSubcategoryId: targetMatterA.workTypeSubcategoryId,
+            },
+            { byId: 'P-000009' },
+          ),
+        );
+        expect(unauthorisedCreateRes.errors?.permission).toMatch(
+          /matter:create/i,
+        );
+        expect(getStore().matters.length).toBe(countBeforeUnauthorisedCreate);
 
         // R88: Closing a matter via saveMatterRecord runs closeMatterFolderJob (invoking onBeforeMatterDocumentsClose hook and writing lifecycle:matter:closed audit event), and reopening writes lifecycle:matter:reopened
         const closeHookCalls: string[] = [];
@@ -2405,17 +2559,19 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             )?.id ?? 'matter_status.closed';
           const openStatusId = targetMatterA.matterStatusId;
 
-          const closeSaveRes = saveMatterRecord(
-            {
-              ...targetMatterA,
-              isStaffMatter: true,
-              hasEthicalWall: true,
-              matterStatusId: closedStatusId,
-              closedAt: '2026-11-01',
-              teamMemberIds: ['P-000002'],
-              restrictedAccessUserIds: ['P-000001', 'P-000002'],
-            },
-            { id: 'M-000001', byId: 'P-000001' },
+          const closeSaveRes = asEmployee('P-000001', () =>
+            saveMatterRecord(
+              {
+                ...targetMatterA,
+                isStaffMatter: true,
+                hasEthicalWall: true,
+                matterStatusId: closedStatusId,
+                closedAt: '2026-11-01',
+                teamMemberIds: ['P-000002'],
+                restrictedAccessUserIds: ['P-000001', 'P-000002'],
+              },
+              { id: 'M-000001', byId: 'P-000001' },
+            ),
           );
           expect(closeSaveRes.errors).toBeUndefined();
           await flushDocumentLifecycleSyncForTesting();
@@ -2430,17 +2586,19 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             ),
           ).toBe(true);
 
-          const reopenSaveRes = saveMatterRecord(
-            {
-              ...targetMatterA,
-              isStaffMatter: true,
-              hasEthicalWall: true,
-              matterStatusId: openStatusId,
-              closedAt: null,
-              teamMemberIds: ['P-000002'],
-              restrictedAccessUserIds: ['P-000001', 'P-000002'],
-            },
-            { id: 'M-000001', byId: 'P-000001' },
+          const reopenSaveRes = asEmployee('P-000001', () =>
+            saveMatterRecord(
+              {
+                ...targetMatterA,
+                isStaffMatter: true,
+                hasEthicalWall: true,
+                matterStatusId: openStatusId,
+                closedAt: null,
+                teamMemberIds: ['P-000002'],
+                restrictedAccessUserIds: ['P-000001', 'P-000002'],
+              },
+              { id: 'M-000001', byId: 'P-000001' },
+            ),
           );
           expect(reopenSaveRes.errors).toBeUndefined();
           await flushDocumentLifecycleSyncForTesting();
@@ -2465,27 +2623,29 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             (store.documentLifecycleJobs ?? []).map((j) => j.id),
           );
           try {
-            await syncMatterLifecycleOnSaveSync({
-              matter: {
-                ...targetMatterA,
-                isStaffMatter: true,
-                hasEthicalWall: true,
-                matterStatusId: closedStatusId,
-                closedAt: '2026-11-02',
-                teamMemberIds: ['P-000002'],
-                restrictedAccessUserIds: ['P-000001', 'P-000002'],
-              },
-              previousMatter: {
-                ...targetMatterA,
-                isStaffMatter: true,
-                hasEthicalWall: true,
-                matterStatusId: openStatusId,
-                closedAt: null,
-              },
-              userId: 'P-000001',
-              correlationId: 'corr-r109-hook-fail',
-              store,
-            });
+            await asEmployee('P-000001', () =>
+              syncMatterLifecycleOnSaveSync({
+                matter: {
+                  ...targetMatterA,
+                  isStaffMatter: true,
+                  hasEthicalWall: true,
+                  matterStatusId: closedStatusId,
+                  closedAt: '2026-11-02',
+                  teamMemberIds: ['P-000002'],
+                  restrictedAccessUserIds: ['P-000001', 'P-000002'],
+                },
+                previousMatter: {
+                  ...targetMatterA,
+                  isStaffMatter: true,
+                  hasEthicalWall: true,
+                  matterStatusId: openStatusId,
+                  closedAt: null,
+                },
+                userId: 'P-000001',
+                correlationId: 'corr-r109-hook-fail',
+                store,
+              }),
+            );
             expect(
               hookErrSpy.mock.calls.some((args) => {
                 const payload = String(args[0] ?? '');
@@ -2542,11 +2702,13 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             teamMemberIds: ['P-000002', 'P-000006'],
             restrictedAccessUserIds: ['P-000001', 'P-000002', 'P-000006'],
           };
-          syncMatterLifecycleOnSaveSync({
-            matter: modifiedMatterForFail,
-            userId: 'P-000001',
-            store,
-          });
+          asEmployee('P-000001', () =>
+            syncMatterLifecycleOnSaveSync({
+              matter: modifiedMatterForFail,
+              userId: 'P-000001',
+              store,
+            }),
+          );
           await flushDocumentLifecycleSyncForTesting();
 
           expect(errSpy).toHaveBeenCalled();
@@ -2701,9 +2863,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           leadFeeEarnerId: 'P-000002',
         };
         delete (rawUnsetTeamMatter as { owningTeamId?: string | null }).owningTeamId;
-        const savedNoTeamMatterRes = saveMatterRecord(rawUnsetTeamMatter, {
-          byId: 'P-000002',
-        });
+        const savedNoTeamMatterRes = asEmployee('P-000002', () =>
+          saveMatterRecord(rawUnsetTeamMatter, {
+            byId: 'P-000002',
+          }),
+        );
         expect(savedNoTeamMatterRes.errors).toBeUndefined();
         const noTeamMatterId = savedNoTeamMatterRes.matter!.id;
         expect(savedNoTeamMatterRes.matter?.owningTeamId).toBeUndefined();
@@ -2712,31 +2876,90 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toBeUndefined();
 
         // Save again by another user without setting owningTeamId: still undefined
-        const resavedByOtherUser = saveMatterRecord(
-          {
-            ...savedNoTeamMatterRes.matter!,
-            title: 'Matter Without Owning Team (Updated)',
-          },
-          { id: noTeamMatterId, byId: 'P-000001' },
+        const resavedByOtherUser = asEmployee('P-000001', () =>
+          saveMatterRecord(
+            {
+              ...savedNoTeamMatterRes.matter!,
+              title: 'Matter Without Owning Team (Updated)',
+            },
+            { id: noTeamMatterId, byId: 'P-000001' },
+          ),
         );
         expect(resavedByOtherUser.errors).toBeUndefined();
         expect(resavedByOtherUser.matter?.owningTeamId).toBeUndefined();
 
         await expect(
-          ensureMatterDocumentStoreProvisioned(
-            noTeamMatterId,
-            'P-000002',
+          asEmployee('P-000002', () =>
+            ensureMatterDocumentStoreProvisioned(
+              noTeamMatterId,
+              'P-000002',
+            ),
           ),
         ).rejects.toMatchObject({ code: 'misconfigured' });
 
-        // R107: Setting owningDepartmentId and owningTeamId via saveMatterRecord persists both and allows provisioning to succeed
-        const savedWithTeamMatterRes = saveMatterRecord(
-          {
-            ...resavedByOtherUser.matter!,
-            owningDepartmentId: targetMatterA.owningDepartmentId,
-            owningTeamId: targetMatterA.owningTeamId,
-          },
-          { id: noTeamMatterId, byId: 'P-000001' },
+        // R107: (1) A save with an unknown team or a team from another department returns a field error and changes nothing
+        const badUnknownTeamRes = asEmployee('P-000001', () =>
+          saveMatterRecord(
+            {
+              ...resavedByOtherUser.matter!,
+              owningDepartmentId: 'DEPT-RE',
+              owningTeamId: 'TPG-DOES-NOT-EXIST',
+            },
+            { id: noTeamMatterId, byId: 'P-000001' },
+          ),
+        );
+        expect(badUnknownTeamRes.errors?.owningTeamId).toMatch(
+          /does not exist or is inactive/i,
+        );
+        expect(
+          getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
+        ).toBeUndefined();
+
+        const badCrossDeptTeamRes = asEmployee('P-000001', () =>
+          saveMatterRecord(
+            {
+              ...resavedByOtherUser.matter!,
+              owningDepartmentId: 'DEPT-RE',
+              owningTeamId: 'TPG-CORP-MA',
+            },
+            { id: noTeamMatterId, byId: 'P-000001' },
+          ),
+        );
+        expect(badCrossDeptTeamRes.errors?.owningTeamId).toMatch(
+          /does not belong to the selected owning department/i,
+        );
+        expect(
+          getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
+        ).toBeUndefined();
+
+        // R107: (2) A fee earner without matter:reassign_ownership (P-000002) cannot change an existing matter's owning team
+        const feeEarnerReassignRes = asEmployee('P-000002', () =>
+          saveMatterRecord(
+            {
+              ...resavedByOtherUser.matter!,
+              owningDepartmentId: targetMatterA.owningDepartmentId,
+              owningTeamId: targetMatterA.owningTeamId,
+            },
+            { id: noTeamMatterId, byId: 'P-000002' },
+          ),
+        );
+        expect(feeEarnerReassignRes.errors?.owningTeamId).toMatch(
+          /matter:reassign_ownership/i,
+        );
+        expect(
+          getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
+        ).toBeUndefined();
+
+        // R107: Setting owningDepartmentId and owningTeamId via saveMatterRecord by a partner (with matter:reassign_ownership) persists both and allows provisioning to succeed
+        const savedWithTeamMatterRes = asEmployee('P-000001', () =>
+          saveMatterRecord(
+            {
+              ...resavedByOtherUser.matter!,
+              owningDepartmentId: targetMatterA.owningDepartmentId,
+              owningTeamId: targetMatterA.owningTeamId,
+            },
+            { id: noTeamMatterId, byId: 'P-000001' },
+          ),
         );
         expect(savedWithTeamMatterRes.errors).toBeUndefined();
         expect(savedWithTeamMatterRes.matter?.owningDepartmentId).toBe(
@@ -2745,9 +2968,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(savedWithTeamMatterRes.matter?.owningTeamId).toBe(
           targetMatterA.owningTeamId,
         );
-        const provWithTeam = await ensureMatterDocumentStoreProvisioned(
-          noTeamMatterId,
-          'P-000002',
+        const provWithTeam = await asEmployee('P-000002', () =>
+          ensureMatterDocumentStoreProvisioned(
+            noTeamMatterId,
+            'P-000002',
+          ),
         );
         expect(provWithTeam.locations[0]?.provisioningStatus).toBe('provisioned');
 
@@ -2814,9 +3039,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             featureFlags: { enableDemoMode: false },
           });
           const m3 = store.matters.find((m) => m.id === 'M-000003')!;
-          const provM3 = await ensureMatterDocumentStoreProvisioned(
-            m3.id,
-            'P-000001',
+          const provM3 = await asEmployee('P-000001', () =>
+            ensureMatterDocumentStoreProvisioned(
+              m3.id,
+              'P-000001',
+            ),
           );
           const locM3 = provM3.locations[0]!;
           const partM3 = mockBackend.getDrivePartitionOrThrow(
@@ -2889,6 +3116,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           .spyOn(console, 'error')
           .mockImplementation(() => {});
         try {
+          setTestEntraSessionOverride(sessions.get('P-000004'));
           const badStoreReq = new NextRequest(
             'http://localhost:3000/api/document-stores',
             {
@@ -2927,11 +3155,13 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           m4.owningDepartmentId = targetMatterA.owningDepartmentId;
           m4.owningTeamId = targetMatterA.owningTeamId;
           const browseCorrId = 'corr-r93-browse-provision';
-          const browseProvRes = await browseMatterDocumentStoreFolder({
-            matterId: m4.id,
-            userId: 'P-000001',
-            correlationId: browseCorrId,
-          });
+          const browseProvRes = await asEmployee('P-000001', () =>
+            browseMatterDocumentStoreFolder({
+              matterId: m4.id,
+              userId: 'P-000001',
+              correlationId: browseCorrId,
+            }),
+          );
           expect(browseProvRes.activeLocation).not.toBeNull();
           expect(
             (store.documentLifecycleJobs ?? []).some(
@@ -2951,13 +3181,15 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           ).toBe(true);
 
           await expect(
-            downloadMatterStoreDocument({
-              matterId: 'M-000001',
-              locationId: 'bad-loc',
-              itemId: 'bad-item',
-              userId: 'P-000002',
-              correlationId: sharedCorrelationId,
-            }),
+            asEmployee('P-000002', () =>
+              downloadMatterStoreDocument({
+                matterId: 'M-000001',
+                locationId: 'bad-loc',
+                itemId: 'bad-item',
+                userId: 'P-000002',
+                correlationId: sharedCorrelationId,
+              }),
+            ),
           ).rejects.toMatchObject({ code: 'access_denied' });
           expect(
             (store.documentStoreAuditEvents ?? []).some(
@@ -2965,6 +3197,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             ),
           ).toBe(true);
 
+          setTestEntraSessionOverride(sessions.get('P-000002'));
           const matterRouteReq = new NextRequest(
             'http://localhost:3000/api/matters/M-000001/documents?action=download&locationId=bad-loc&itemId=bad-item',
             {
@@ -2993,6 +3226,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             }),
           ).toBe(true);
         } finally {
+          setTestEntraSessionOverride(undefined);
           routeErrSpy.mockRestore();
         }
 
@@ -3010,6 +3244,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect('MockSharePointGraphBackend' in CoreBarrel).toBe(false);
         expect(typeof MockSharePointGraphBackend).toBe('function');
       } finally {
+        setTestEntraSessionOverride(undefined);
         clearActiveSessionTokenRoles();
         store.matters = snapshotMatters;
         store.people = snapshotPeople;
@@ -3087,6 +3322,326 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         }
       }
       expect(unknownDocPermKeys).toEqual([]);
+    });
+
+    it('enforces R77, R112, R125, R126, R127, R128: token-derived actorGroups, synchronous lifecycle throw persistence, multi-team org assignment, basePath prefix protection, multi-library resolution, and test hook guard', async () => {
+      const store = getStore();
+      const snapshotMatters = structuredClone(store.matters);
+      const snapshotPeople = structuredClone(store.people);
+      try {
+        resetDocumentStoreSingletonsForTesting();
+        const cfg = getActiveTenantConfiguration();
+        const { sessions, asEmployee } = registerStoreEmployeeSessionsForTest(store);
+
+        // R77 (1): For an employee whose stored roles map to a library-root group, with entraGroups: [] in their verified token, buildTenantContextForUser returns ctx.actorGroups equal to []
+        const empWithStoredAdmin = store.people.find((p) => p.id === 'P-000004')!;
+        const emptyGroupsSession = verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: empWithStoredAdmin.id,
+            tenantId: 'not-a-law-firm',
+            oid: empWithStoredAdmin.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: empWithStoredAdmin.id,
+            email: empWithStoredAdmin.emails?.[0]?.address ?? 'huw.pritchard@notalawfirm.example',
+            displayName: 'Huw Pritchard',
+            entraRoles: ['admin'],
+            mappedRoles: ['admin'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+        )!;
+        const { ctx: emptyGroupsCtx } = buildTenantContextForUser(
+          empWithStoredAdmin.id,
+          store,
+          cfg,
+          { session: emptyGroupsSession },
+        );
+        expect(emptyGroupsCtx.actorGroups).toEqual([]);
+
+        // R77 (2): Calling buildTenantContextForUser('P-000002', store, cfg, { session: verifiedSessionForP000001 }) throws TENANCY_ACTOR_MISMATCH
+        expect(() =>
+          buildTenantContextForUser('P-000002', store, cfg, {
+            session: sessions.get('P-000001'),
+          }),
+        ).toThrow(/TENANCY_ACTOR_MISMATCH/);
+
+        // R77 (3): Calling buildEntraSessionPayload without rawClaims.oid throws ENTRA_CLAIM_ERROR
+        expect(() =>
+          buildEntraSessionPayload({
+            personId: 'P-000001',
+            rawClaims: {
+              tid: '11111111-2222-3333-4444-000000000000',
+              sub: 'P-000001',
+              email: 'rhian.morgan@notalawfirm.example',
+              name: 'Rhian Morgan',
+              roles: ['partner'],
+              groups: [],
+            },
+            verifiedToken: {
+              __verifiedByOidcMiddleware: true,
+              sub: 'P-000001',
+              email: 'rhian.morgan@notalawfirm.example',
+              name: 'Rhian Morgan',
+              tenantId: 'not-a-law-firm',
+              roles: ['partner'],
+              mfaVerified: true,
+            },
+            rbacConfig: cfg.rbac!,
+          }),
+        ).toThrow(/ENTRA_CLAIM_ERROR/);
+
+        // R112: Calling saveMatterRecord when syncMatterLifecycleOnSaveSync throws synchronously still returns normally without error, persists the updated matter to data/runtime-store.json matching getStore(), and logs a JSON error containing both tenantId and correlationId
+        const syncErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const runtimeStorePath = path.resolve(
+          __dirname,
+          '../../data/runtime-store.json',
+        );
+        const runtimeExistedBefore = fs.existsSync(runtimeStorePath);
+        const runtimeContentBefore = runtimeExistedBefore
+          ? fs.readFileSync(runtimeStorePath, 'utf8')
+          : null;
+        const prevVitest = process.env.VITEST;
+        const prevNodeEnvForR112 = process.env.NODE_ENV;
+        const prevTenantPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+        try {
+          // Ensure Matter M-000001 has a location so syncMatterLifecycleOnSaveSync executes and throws synchronously when called outside asEmployee (no verifiedSession)
+          await asEmployee('P-000001', () =>
+            ensureMatterDocumentStoreProvisioned('M-000001', 'P-000001'),
+          );
+          const m1 = store.matters.find((m) => m.id === 'M-000001')!;
+          const updatedTitle = `R112 Persisted Title ${Date.now()}`;
+          delete (process.env as Record<string, string | undefined>).VITEST;
+          (process.env as Record<string, string | undefined>).NODE_ENV =
+            'development';
+          (process.env as Record<string, string | undefined>).PLATFORM_TENANT_PACKAGE_DIR =
+            'client-not-a-law-firm';
+          saveStore(store);
+          // Call outside asEmployee so syncMatterLifecycleOnSaveSync throws UNAUTHENTICATED synchronously
+          const saveRes = saveMatterRecord(
+            {
+              ...m1,
+              title: updatedTitle,
+            },
+            { id: 'M-000001', byId: 'P-000001' },
+          );
+          expect(saveRes.errors).toBeUndefined();
+          expect(saveRes.matter.title).toBe(updatedTitle);
+          expect(
+            getStore().matters.find((m) => m.id === 'M-000001')?.title,
+          ).toBe(updatedTitle);
+
+          const diskStore = JSON.parse(
+            fs.readFileSync(runtimeStorePath, 'utf8'),
+          ) as { matters: Array<{ id: string; title: string }> };
+          expect(
+            diskStore.matters.find((m) => m.id === 'M-000001')?.title,
+          ).toBe(updatedTitle);
+
+          expect(
+            syncErrSpy.mock.calls.some((args) => {
+              const str = String(args[0] ?? '');
+              return (
+                str.includes('"tenantId":"not-a-law-firm"') &&
+                str.includes('"correlationId":')
+              );
+            }),
+          ).toBe(true);
+        } finally {
+          (process.env as Record<string, string | undefined>).VITEST =
+            prevVitest;
+          (process.env as Record<string, string | undefined>).NODE_ENV =
+            prevNodeEnvForR112;
+          if (prevTenantPkgDir === undefined) {
+            delete (process.env as Record<string, string | undefined>)
+              .PLATFORM_TENANT_PACKAGE_DIR;
+          } else {
+            (process.env as Record<string, string | undefined>).PLATFORM_TENANT_PACKAGE_DIR =
+              prevTenantPkgDir;
+          }
+          if (runtimeExistedBefore && runtimeContentBefore !== null) {
+            fs.writeFileSync(runtimeStorePath, runtimeContentBefore, 'utf8');
+          } else if (!runtimeExistedBefore && fs.existsSync(runtimeStorePath)) {
+            fs.unlinkSync(runtimeStorePath);
+          }
+          syncErrSpy.mockRestore();
+        }
+
+        // R125: For an employee with departmentId: 'DEPT-RE' (which has multiple active teams) and teamOrPracticeGroupId: undefined, resolvePersonOrgAssignment returns { departmentId: 'DEPT-RE', teamId: '' }
+        const empNoTeam = structuredClone(
+          store.people.find((p) => p.id === 'P-000002')!,
+        );
+        empNoTeam.departmentId = 'DEPT-RE';
+        if (empNoTeam.employment) {
+          empNoTeam.employment.departmentId = 'DEPT-RE';
+          (
+            empNoTeam.employment as { teamOrPracticeGroupId?: string }
+          ).teamOrPracticeGroupId = undefined;
+        }
+        expect(resolvePersonOrgAssignment(empNoTeam, store)).toEqual({
+          departmentId: 'DEPT-RE',
+          teamId: '',
+        });
+
+        // R126: With a routing rule basePath: 'Archive/{departmentCode}', linkExistingMatterFolderJob with allowRoutingMismatchOverride: true and folderUrlOrPath: 'Archive' rejects with code: 'access_denied'
+        const ctxAlpha = makeTenantContext({ tenantId: 'firm-alpha' });
+        const multiLibStores: DocumentStoreConfig[] = [
+          {
+            ...makeGenericStores('alpha')[0]!,
+            sharepoint: {
+              hostname: 'alpha.sharepoint.com',
+              siteRelativePath: '/sites/PracticeDMS',
+              siteId: 'site-alpha-001',
+              libraries: [
+                {
+                  libraryId: 'lib-secondary',
+                  displayName: 'Secondary Library',
+                  libraryUrlSegment: 'Secondary',
+                  driveId: 'drive-alpha-secondary-001',
+                },
+                {
+                  libraryId: 'lib-matters',
+                  displayName: 'Matters',
+                  libraryUrlSegment: 'Matters',
+                  driveId: 'drive-alpha-matters-001',
+                },
+              ],
+            },
+          },
+        ];
+        const registryAlpha = new DocumentStoreProviderRegistry();
+        const repoAlpha = new TenantDocumentStoreRepository();
+        const archiveRoutingRules: DocumentRoutingRule[] = [
+          {
+            ruleId: 'rule-archive-re',
+            match: { departmentId: 'DEPT-PROP' },
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            basePath: 'Archive/{departmentCode}',
+          },
+          {
+            ruleId: 'rule-shared-re',
+            match: { departmentId: 'DEPT-PROP' },
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            basePath: 'Shared/{departmentCode}',
+          },
+        ];
+        const depsAlpha = {
+          repository: repoAlpha,
+          getProvider: (storeId: string) => {
+            const st = multiLibStores.find((s) => s.storeId === storeId)!;
+            return registryAlpha.createProvider(ctxAlpha, st);
+          },
+          stores: multiLibStores,
+          routingRules: archiveRoutingRules,
+          accessConfig: makeGenericAccessConfig(),
+          templatesConfig: makeGenericTemplatesConfig(),
+          matterFolderNameTemplate: '{matterNumber} - {matterDescription}',
+          resolveUserEntraObjectId: (_c: TenantContext, uid: string) => ({
+            entraObjectId: `oid-${uid}`,
+            displayName: `User ${uid}`,
+          }),
+        };
+
+        const providerAlpha = depsAlpha.getProvider('alpha-sp-primary');
+        const provCtxAlpha: ProvisioningAccessContext = {
+          kind: 'provisioning',
+          tenantContext: ctxAlpha,
+          triggeredByUserId: 'user-admin',
+          triggerEvent: 'r126-r127.test',
+        };
+        await provisionMatterDocumentsJob({
+          ctx: ctxAlpha,
+          deps: depsAlpha,
+          subject: makeMatterSubject({
+            matterDescription: '14 High Street Purchase',
+          }),
+        });
+        await providerAlpha.ensureFolderTree(
+          provCtxAlpha,
+          {
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            siteId: 'site-alpha-001',
+            driveId: 'drive-alpha-matters-001',
+          },
+          [{ name: 'Shared', relativePath: 'Shared', children: [] }],
+        );
+
+        await expect(
+          linkExistingMatterFolderJob({
+            ctx: ctxAlpha,
+            deps: depsAlpha,
+            subject: makeMatterSubject({ matterId: 'M-1002' }),
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            folderUrlOrPath: 'Archive',
+            allowRoutingMismatchOverride: true,
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        await expect(
+          linkExistingMatterFolderJob({
+            ctx: ctxAlpha,
+            deps: depsAlpha,
+            subject: makeMatterSubject({ matterId: 'M-1002B' }),
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            folderUrlOrPath: 'Shared',
+            allowRoutingMismatchOverride: true,
+          }),
+        ).rejects.toMatchObject({ code: 'access_denied' });
+
+        // R127: On a store with two libraries (lib-secondary first, lib-matters second), resolveLocation with a relative path and libraryId: 'lib-matters' resolves against lib-matters, and linkExistingMatterFolderJob refuses a full URL pointing to lib-secondary when the matter routes to lib-matters
+        const resolvedMattersLib = await providerAlpha.resolveLocation(
+          provCtxAlpha,
+          {
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            rawUrlOrPath: 'Archive/PROP/MAT-2026-0001 - 14 High Street Purchase',
+          },
+        );
+        expect(resolvedMattersLib.libraryId).toBe('lib-matters');
+        expect(resolvedMattersLib.driveId).toBe('drive-alpha-matters-001');
+
+        await expect(
+          linkExistingMatterFolderJob({
+            ctx: ctxAlpha,
+            deps: depsAlpha,
+            subject: makeMatterSubject({ matterId: 'M-1003' }),
+            storeId: 'alpha-sp-primary',
+            libraryId: 'lib-matters',
+            folderUrlOrPath:
+              'https://alpha.sharepoint.com/sites/PracticeDMS/Secondary/Archive/PROP/MAT-2026-0001',
+            allowRoutingMismatchOverride: true,
+          }),
+        ).rejects.toMatchObject({ code: 'invalid_path' });
+
+        // R128: With NODE_ENV = 'production', setBeforeMatterDocumentsCloseHookForTesting and setTestEntraSessionOverride throw SECURITY_ERROR
+        const prevNodeEnv = process.env.NODE_ENV;
+        try {
+          (process.env as Record<string, string | undefined>).NODE_ENV =
+            'production';
+          expect(() =>
+            setBeforeMatterDocumentsCloseHookForTesting(async () => {}),
+          ).toThrow(/SECURITY_ERROR/);
+          expect(() => setTestEntraSessionOverride(null)).toThrow(
+            /SECURITY_ERROR/,
+          );
+        } finally {
+          (process.env as Record<string, string | undefined>).NODE_ENV =
+            prevNodeEnv;
+        }
+      } finally {
+        clearActiveSessionTokenRoles();
+        store.matters = snapshotMatters;
+        store.people = snapshotPeople;
+        saveStore(store);
+        resetDocumentStoreSingletonsForTesting();
+      }
     });
   });
 });

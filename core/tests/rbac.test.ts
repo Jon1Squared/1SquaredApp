@@ -49,6 +49,7 @@ import {
   clearActiveSessionTokenRoles,
   getDefaultTenantRbacConfig,
   getStoredActorSessionForPerson,
+  hasPersonPermission,
   resolvePersonForEntraClaims,
   resolvePersonPermissions,
   runWithActiveActorSession,
@@ -60,6 +61,7 @@ import { NextRequest } from 'next/server';
 import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
 import {
   getAppSnapshot,
+  getEmployeeDetailsForUser,
   logEmployeeRestrictedAccess,
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
@@ -67,6 +69,7 @@ import {
   updateEmployeeRoleSetting,
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
+  withPageActor,
 } from '../../src/server/services';
 import { getStore } from '../../src/server/store';
 import {
@@ -166,8 +169,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 40 canonical permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(40);
+    it('defines all 43 canonical permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(43);
       for (const key of ALL_PERMISSION_KEYS) {
         const entry = PERMISSION_REGISTRY[key];
         expect(entry).toBeDefined();
@@ -657,7 +660,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         approveTemplateVersion({
           ctx,
           repo,
-          actor: { id: 'P-CREATOR', roles: ['managing_partner'], mfaVerified: true },
+          actor: {
+            id: 'P-CREATOR',
+            tenantId: ctx.tenantId,
+            roles: ['managing_partner'],
+            mfaVerified: true,
+          },
           config,
           versionId: 'VER-1',
         }),
@@ -905,7 +913,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       expect(
         canActorAccessGeneratedDocument(
-          { id: 'P-OTHER-PARTNER', roles: ['partner'] },
+          { id: 'P-OTHER-PARTNER', tenantId: config.tenantId, roles: ['partner'] },
           doc,
           [matterSubject],
           config,
@@ -914,7 +922,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       expect(
         canActorAccessGeneratedDocument(
-          { id: 'P-RISK-OFFICER', roles: ['risk_compliance'] },
+          { id: 'P-RISK-OFFICER', tenantId: config.tenantId, roles: ['risk_compliance'] },
           doc,
           [matterSubject],
           config,
@@ -1311,33 +1319,45 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         'P-000004',
         { mfaVerified: true },
       );
-      const hybridSignIn = resolveOrProvisionEntraEmployee({
-        oid: '00000000-0000-4000-8000-000000000002',
-        tid: '00000000-0000-4000-8000-000000000099',
-        sub: 'sub-002',
-        name: 'Dafydd Evans',
-        email: 'dafydd.evans@notalawfirm.example',
-        roles: ['1Squared.RiskCompliance'],
-        amr: ['pwd', 'mfa'],
-      });
-      expect(hybridSignIn.person.id).toBe('P-000002');
-      // Stored employee roles remain ['fee_earner'] and do not permanently gain 'risk_compliance'
-      expect(hybridSignIn.person.roles).toEqual(['fee_earner']);
-      // Yet the active session permission set includes risk_compliance permissions (e.g. 'risk:view')
-      const hybridSnap = getAppSnapshot('P-000002');
-      expect(hybridSnap.currentUserPermissions).toContain('risk:view');
-      // When the subsequent session has no token roles, the user falls back to stored ['fee_earner'] roles only
-      resolveOrProvisionEntraEmployee({
-        oid: '00000000-0000-4000-8000-000000000002',
-        tid: '00000000-0000-4000-8000-000000000099',
-        sub: 'sub-002',
-        name: 'Dafydd Evans',
-        email: 'dafydd.evans@notalawfirm.example',
-        roles: [],
-        amr: ['pwd', 'mfa'],
-      });
-      const hybridAfterSnap = getAppSnapshot('P-000002');
-      expect(hybridAfterSnap.currentUserPermissions).not.toContain('risk:view');
+      runWithActiveActorSession(
+        {
+          tenantId: 'not-a-law-firm',
+          personId: 'P-000002',
+          tokenRoles: [],
+          expiresAtMs: Date.now() + 3600_000,
+        },
+        () => {
+          const hybridSignIn = resolveOrProvisionEntraEmployee({
+            oid: '00000000-0000-4000-8000-000000000002',
+            tid: '00000000-0000-4000-8000-000000000099',
+            sub: 'sub-002',
+            name: 'Dafydd Evans',
+            email: 'dafydd.evans@notalawfirm.example',
+            roles: ['1Squared.RiskCompliance'],
+            amr: ['pwd', 'mfa'],
+          });
+          expect(hybridSignIn.person.id).toBe('P-000002');
+          // Stored employee roles remain ['fee_earner'] and do not permanently gain 'risk_compliance'
+          expect(hybridSignIn.person.roles).toEqual(['fee_earner']);
+          // Yet the active session permission set includes risk_compliance permissions (e.g. 'risk:view')
+          const hybridSnap = getAppSnapshot('P-000002');
+          expect(hybridSnap.currentUserPermissions).toContain('risk:view');
+          // When the subsequent session has no token roles, the user falls back to stored ['fee_earner'] roles only
+          resolveOrProvisionEntraEmployee({
+            oid: '00000000-0000-4000-8000-000000000002',
+            tid: '00000000-0000-4000-8000-000000000099',
+            sub: 'sub-002',
+            name: 'Dafydd Evans',
+            email: 'dafydd.evans@notalawfirm.example',
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          });
+          const hybridAfterSnap = getAppSnapshot('P-000002');
+          expect(hybridAfterSnap.currentUserPermissions).not.toContain(
+            'risk:view',
+          );
+        },
+      );
 
       // R63: getAppSnapshot(riskUser).employeeSensitiveRecords is empty; per-person read writes a view-sensitive audit entry
       const riskSnap = getAppSnapshot('P-000003');
@@ -1574,10 +1594,83 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // Request B evaluating Dafydd (user A) sees Dafydd's stored roles only (no risk:view from request A)
       expect(overlapB.otherPerms).not.toContain('risk:view');
 
-      // Outside runWithActiveActorSession, resolvePersonPermissions returns stored roles only
+      // Outside runWithActiveActorSession, resolvePersonPermissions returns stored roles only and getStoredActorSessionForPerson returns undefined
       expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
+      expect(
+        getStoredActorSessionForPerson('P-000002', 'not-a-law-firm'),
+      ).toBeUndefined();
+      expect(
+        getStoredActorSessionForPerson('P-000001', 'not-a-law-firm'),
+      ).toBeUndefined();
 
-      // 3. Signing out user A clears user A's session entry and leaves user B's entry intact
+      // 2b. Two concurrent sessions for the SAME person (P-000002) with different roles (['admin'] vs ['fee_earner']) each see only their own roles without overwriting each other
+      const [samePersonAdminSession, samePersonFeeEarnerSession] =
+        await Promise.all([
+          runWithActiveActorSession(
+            {
+              tenantId: 'not-a-law-firm',
+              personId: 'P-000002',
+              tokenRoles: ['admin'],
+              expiresAtMs: Date.now() + 3600_000,
+            },
+            async () => {
+              await new Promise((resolve) => setTimeout(resolve, 15));
+              return resolvePersonPermissions(dafydd);
+            },
+          ),
+          runWithActiveActorSession(
+            {
+              tenantId: 'not-a-law-firm',
+              personId: 'P-000002',
+              tokenRoles: ['fee_earner'],
+              expiresAtMs: Date.now() + 3600_000,
+            },
+            async () => {
+              await new Promise((resolve) => setTimeout(resolve, 15));
+              return resolvePersonPermissions(dafydd);
+            },
+          ),
+        ]);
+      expect(samePersonAdminSession).toContain('admin:access');
+      expect(samePersonFeeEarnerSession).not.toContain('admin:access');
+
+      // 2c. An Entra-only admin (stored roles: [], token mappedRoles: ['admin']) wrapped in withPageActor has admin:access
+      const storeForPageActor = getStore();
+      const entraOnlyAdmin = storeForPageActor.people.find(
+        (p) => p.id === 'P-000002',
+      )!;
+      const prevRoles = entraOnlyAdmin.roles;
+      const prevAppRole = entraOnlyAdmin.appRole;
+      try {
+        entraOnlyAdmin.roles = [];
+        delete entraOnlyAdmin.appRole;
+        setTestEntraSessionOverride({
+          personId: 'P-000002',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000002',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000002',
+          email: 'dafydd.evans@notalawfirm.example',
+          displayName: 'Dafydd Evans',
+          entraRoles: ['1Squared.Admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const canAccessAdminPage = await withPageActor(async (actor) =>
+          hasPersonPermission(actor.person, 'admin:access'),
+        );
+        expect(canAccessAdminPage).toBe(true);
+      } finally {
+        entraOnlyAdmin.roles = prevRoles;
+        entraOnlyAdmin.appRole = prevAppRole;
+        setTestEntraSessionOverride(undefined);
+      }
+
+      // 3. Signing out user A clears user A's active request session entry while leaving a concurrent user B request scope intact
       const userASignedCookie = createSignedEntraSessionCookie({
         personId: 'P-000002',
         tenantId: 'not-a-law-firm',
@@ -1600,11 +1693,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           cookie: `onesquared_entra_session=${encodeURIComponent(userASignedCookie)}`,
         },
       });
-      const logoutRes = await logoutPost(logoutReq);
-      expect(logoutRes.status).toBe(303);
-      expect(getStoredActorSessionForPerson('P-000002', 'not-a-law-firm')).toBeUndefined();
-      expect(getStoredActorSessionForPerson('P-000001', 'not-a-law-firm')).toBeDefined();
-      expect(getStoredActorSessionForPerson('P-000001', 'not-a-law-firm')?.tokenRoles).toContain('finance');
+      await runWithActiveActorSession(
+        {
+          tenantId: 'not-a-law-firm',
+          personId: 'P-000001',
+          tokenRoles: ['finance'],
+          expiresAtMs: Date.now() + 3600_000,
+        },
+        async () => {
+          const logoutRes = await logoutPost(logoutReq);
+          expect(logoutRes.status).toBe(303);
+          expect(
+            getStoredActorSessionForPerson('P-000002', 'not-a-law-firm'),
+          ).toBeUndefined();
+          expect(
+            getStoredActorSessionForPerson('P-000001', 'not-a-law-firm'),
+          ).toBeDefined();
+          expect(
+            getStoredActorSessionForPerson('P-000001', 'not-a-law-firm')
+              ?.tokenRoles,
+          ).toContain('finance');
+        },
+      );
 
       setRuntimeRbacConfigOverride(null, 'tenant-a');
       setRuntimeRbacConfigOverride(null, 'tenant-b');
@@ -1747,6 +1857,74 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       } finally {
         (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
         setActiveTenantConfigForTesting(null);
+      }
+    });
+
+    it('enforces R106, R123, and R130: server-computed snapshot maps (canTakeByTaskId, permissionsByPersonId, firmPrimaryDomain) and audited sensitive employee reads', () => {
+      resetAllDemoData('P-000001');
+      try {
+        const store = getStore();
+        // Create an unassigned open task on a team (TM-000004 Corporate) that P-000001 (Real Estate Partner with task:claim_any) is not a member of, while P-000002 (Real Estate Fee Earner without task:claim_any) is also not a member of
+        const corpTeam =
+          store.teams.find((t) => !t.memberIds.includes('P-000001') && !t.memberIds.includes('P-000002')) ??
+          store.teams[0]!;
+        const unassignedCorpTask: Task = {
+          ...store.tasks[0]!,
+          id: 'TSK-R123-CLAIM-ANY',
+          reference: 'TSK-R123',
+          title: 'Unassigned Corporate Task',
+          description: 'Test R123 task:claim_any on record task lists',
+          status: 'To do',
+          assignedPersonId: null,
+          assignedTeamId: corpTeam.id,
+          completedAt: null,
+          completedById: null,
+          linkedRecords: [
+            {
+              recordType: 'matter',
+              recordId: store.matters[0]!.id,
+            },
+          ],
+        };
+        store.tasks.push(unassignedCorpTask);
+
+        // R123: Partner P-000001 holds task:claim_any and sees canTakeByTaskId['TSK-R123-CLAIM-ANY'] === true even though not in corpTeam; Fee Earner P-000002 does not hold task:claim_any and sees false
+        const partnerSnap = getAppSnapshot('P-000001');
+        const feeEarnerSnap = getAppSnapshot('P-000002');
+        expect(partnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(true);
+        expect(feeEarnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(false);
+
+        // R106: getAppSnapshot returns server-computed appRoleByPersonId, rolesByPersonId, permissionsByPersonId, canReopenByEnquiryId, and firmPrimaryDomain
+        expect(partnerSnap.firmPrimaryDomain).toBe('notalawfirm.example');
+        expect(partnerSnap.appRoleByPersonId['P-000004']).toBe('admin');
+        expect(partnerSnap.rolesByPersonId['P-000002']).toContain('fee_earner');
+        expect(partnerSnap.permissionsByPersonId['P-000004']).toContain(
+          'admin:access',
+        );
+
+        // R130: getEmployeeDetailsForUser returns sensitive: null when logEmployeeRestrictedAccess returns null (e.g. caller without employee:view_sensitive or when logViewSensitive is false)
+        store.employeeSensitiveRecords['P-000002'] = {
+          personId: 'P-000002',
+          RightToWorkStatus: 'Verified',
+        } as unknown as (typeof store.employeeSensitiveRecords)[string];
+
+        const deniedRead = getEmployeeDetailsForUser('P-000002', 'P-000006', {
+          logViewSensitive: true,
+        });
+        expect(deniedRead.sensitive).toBeNull();
+        expect(deniedRead.errors?.sensitivePermission).toBeDefined();
+
+        const unauditedRead = getEmployeeDetailsForUser('P-000002', 'P-000004', {
+          logViewSensitive: false,
+        });
+        expect(unauditedRead.sensitive).toBeNull();
+
+        const auditedRead = getEmployeeDetailsForUser('P-000002', 'P-000004', {
+          logViewSensitive: true,
+        });
+        expect(auditedRead.sensitive).not.toBeNull();
+      } finally {
+        resetAllDemoData('P-000001');
       }
     });
   });

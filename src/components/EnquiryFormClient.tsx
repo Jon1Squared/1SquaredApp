@@ -27,7 +27,6 @@ import {
   toIsoDate,
 } from '@/domain/dates';
 import {
-  canUserReopenEnquiry,
   computeDraftSaveBarState,
   detectPreliminaryConflicts,
   enquiryDisplayName,
@@ -106,6 +105,7 @@ interface Props {
   customFields?: CustomFieldDefinition[];
   enquirySettings?: EnquirySettings;
   currentUserId: string;
+  canReopen?: boolean;
 }
 
 const DEMO_POSTCODE_ADDRESSES: Record<
@@ -150,6 +150,7 @@ export function EnquiryFormClient({
   customFields = [],
   enquirySettings,
   currentUserId,
+  canReopen: canReopenProp = false,
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
   const isDraftMode = isSavedEnquiry && enquiry?.status === 'Draft';
@@ -1112,13 +1113,7 @@ export function EnquiryFormClient({
     () => (enquiry ? getAvailableEnquiryActions(enquiry, currentUserId) : []),
     [enquiry, currentUserId],
   );
-  const canReopen = useMemo(
-    () =>
-      enquiry
-        ? canUserReopenEnquiry(currentUserId, enquiry, teams, people, values)
-        : false,
-    [currentUserId, enquiry, teams, people, values],
-  );
+  const canReopen = Boolean(enquiry && canReopenProp);
   const suggestNoResponse = useMemo(
     () =>
       enquiry

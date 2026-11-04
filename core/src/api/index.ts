@@ -62,6 +62,9 @@ export type PermissionKey =
   | 'finance:credit_control'
   | 'finance:manage_links'
   | 'risk:view'
+  | 'matter:create'
+  | 'matter:edit'
+  | 'matter:reassign_ownership'
   | 'matter:restricted:access'
   | 'task:claim_any'
   | 'task:reassign_any'
@@ -818,6 +821,7 @@ export type DocumentStoreErrorCode =
   | 'throttled'
   | 'unavailable'
   | 'misconfigured'
+  | 'invalid_path'
   | 'reauthentication_required';
 
 export interface DocumentStoreCapabilities {
@@ -958,6 +962,7 @@ export interface DocumentStoreConnectionTestResult {
 
 export interface DocumentLocationResolutionInput {
   readonly storeId?: string;
+  readonly libraryId?: string;
   readonly rawUrlOrPath: string;
 }
 
@@ -965,6 +970,7 @@ export type ResolveDocumentLocationInput = DocumentLocationResolutionInput;
 
 export interface DocumentLocationResolutionResult {
   readonly resolved: boolean;
+  readonly libraryId?: string;
   readonly siteId?: string;
   readonly driveId?: string;
   readonly libraryName?: string;

@@ -14,7 +14,6 @@ import {
   isTaskOpen,
   isTaskOverdue,
   isUserTeamLeadFor,
-  resolveUserAppRole,
   userTeams,
 } from '@/domain/tasks';
 import type {
@@ -123,10 +122,7 @@ export function TasksListClient({
     () => people.find((p) => p.id === currentUserId) ?? null,
     [people, currentUserId],
   );
-  const appRole = useMemo(
-    () => currentUserRole ?? resolveUserAppRole(currentUser, teams, values),
-    [currentUserRole, currentUser, teams, values],
-  );
+  const appRole = currentUserRole ?? currentUser?.appRole ?? 'fee_earner';
   const myTeams = useMemo(() => userTeams(currentUserId, teams), [currentUserId, teams]);
   const myTeamIds = useMemo(() => new Set(myTeams.map((t) => t.id)), [myTeams]);
 

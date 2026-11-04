@@ -21,6 +21,7 @@ import {
   syncReminderForConfirmedKeyDate,
 } from '../keyDateReminders';
 import {
+  carryEnquiryKeyDatesToMatter,
   reassignKeyDateTeamAndOwners,
   resolveKeyDateOutcome,
   supersedeConfirmedKeyDate,
@@ -429,6 +430,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
 
     closeReminderTaskForKeyDate({
       keyDateId: replacementKeyDate.id,
+      tenantId: 'tenant-nalf-test',
       tasks,
       reminderStates,
       nowIso: '2026-08-01T14:00:00Z',
@@ -545,6 +547,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
     expect(() =>
       reassignKeyDateTeamAndOwners({
         keyDate,
+        tenantId: 'tenant-nalf-test',
         teamId: 'TM-LIT',
         responsiblePersonIds: ['P-FEE'],
         actor: people.find((p) => p.id === 'P-LEAD')!,
@@ -653,6 +656,7 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
       assignedPersonId: 'P-LEAD',
       status: 'To do',
       linkedRecords: [{ recordType: 'matter', recordId: restrictedMatter.id }],
+      linkedKeyDateId: keyDate.id,
       idempotencyKey: `keydate-reminder:other-tenant:${keyDate.id}`,
       createdById: 'P-LEAD',
       createdAt: '2026-06-01T00:00:00Z',
@@ -680,5 +684,75 @@ describe('Single-Task Non-Stacking Reminders & Daily Scheduler (§4)', () => {
     });
     expect(crossTenantSync.task?.id).toBe('TSK-NALF-NEW-001');
     expect(otherTenantTask.title).toBe('Other Tenant Reminder Task');
+
+    // R116: closeReminderTaskForKeyDate does not close another tenant's task
+    const closedCross = closeReminderTaskForKeyDate({
+      keyDateId: keyDate.id,
+      tenantId: 'tenant-nalf-test',
+      tasks: [otherTenantTask],
+      reminderStates: [],
+      nowIso: '2026-06-03T10:00:00Z',
+      actorId: 'P-LEAD',
+    });
+    expect(closedCross).toBeNull();
+    expect(otherTenantTask.status).toBe('To do');
+
+    // R116: reassignKeyDateTeamAndOwners does not mutate another tenant's task
+    reassignKeyDateTeamAndOwners({
+      keyDate,
+      tenantId: 'tenant-nalf-test',
+      teamId: 'TM-CONV',
+      responsiblePersonIds: ['P-LEAD'],
+      actor: people.find((p) => p.id === 'P-LEAD')!,
+      nowIso: '2026-06-03T11:00:00Z',
+      config,
+      matter: restrictedMatter,
+      tasks: [otherTenantTask],
+      teams: [
+        ...teams,
+        {
+          ...teams[0]!,
+          id: 'TM-CONV',
+          name: 'Conveyancing Team',
+        },
+      ],
+      people,
+      audit: [],
+      nextAuditId: () => 'AU-CROSS-REASSIGN',
+    });
+    expect(otherTenantTask.assignedTeamId).toBe('TM-LIT');
+
+    // R116: carryEnquiryKeyDatesToMatter does not mutate another tenant's task
+    const enqKeyDate = makeConfirmedKeyDate({
+      id: 'KD-ENQ-CROSS-1',
+      matterId: undefined,
+      enquiryId: 'ENQ-CROSS-1',
+      dueDate: '2026-09-01',
+      responsiblePersonIds: ['P-LEAD'],
+    });
+    const otherTenantEnqTask: Task = {
+      ...otherTenantTask,
+      id: 'TSK-OTHER-TENANT-ENQ',
+      linkedRecords: [{ recordType: 'enquiry', recordId: 'ENQ-CROSS-1' }],
+      linkedKeyDateId: enqKeyDate.id,
+      idempotencyKey: `keydate-reminder:other-tenant:${enqKeyDate.id}`,
+    };
+    carryEnquiryKeyDatesToMatter({
+      enquiry: { id: 'ENQ-CROSS-1', keyDate: null, keyDateLabel: '' },
+      matter: restrictedMatter,
+      tenantId: 'tenant-nalf-test',
+      keyDates: [enqKeyDate],
+      tasks: [otherTenantEnqTask],
+      teams,
+      config,
+      actorId: 'P-LEAD',
+      nowIso: '2026-06-03T12:00:00Z',
+      nextKeyDateId: () => 'KD-CARRIED-CROSS',
+      audit: [],
+      nextAuditId: () => 'AU-CARRY-CROSS',
+    });
+    expect(otherTenantEnqTask.linkedRecords).toEqual([
+      { recordType: 'enquiry', recordId: 'ENQ-CROSS-1' },
+    ]);
   });
 });

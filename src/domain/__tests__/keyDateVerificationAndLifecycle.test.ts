@@ -433,6 +433,7 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
     const carried = carryEnquiryKeyDatesToMatter({
       enquiry,
       matter: litMatter,
+      tenantId: 'tenant-nalf-test',
       keyDates,
       teams,
       config,
@@ -953,6 +954,7 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
     expect(() =>
       reassignKeyDateTeamAndOwners({
         keyDate: validKd,
+        tenantId: 'tenant-nalf-test',
         teamId: 'TM-FORGED',
         actor: supervisor,
         nowIso: '2026-02-02T10:00:00Z',
@@ -968,6 +970,7 @@ describe('Key Dates Verification & Lifecycle (§1, §3, §9)', () => {
     expect(() =>
       reassignKeyDateTeamAndOwners({
         keyDate: validKd,
+        tenantId: 'tenant-nalf-test',
         teamId: 'TM-LIT',
         responsiblePersonIds: ['P-FORGED'],
         actor: supervisor,

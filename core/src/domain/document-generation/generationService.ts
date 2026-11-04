@@ -40,6 +40,7 @@ import {
   hasDocumentPermission,
   normaliseActorHomeRoles,
   type DocumentPermissionActor,
+  type DocumentRbacConfigInput,
   type MatterAccessSubject,
 } from './permissions';
 import { recordTemplateUsageEvent } from './usageService';
@@ -48,7 +49,7 @@ export function isTemplateAvailableInContext(params: {
   template: DocumentTemplateRecord;
   version?: DocumentTemplateVersionRecord | null;
   actor: DocumentPermissionActor;
-  config: TenantConfiguration;
+  config?: DocumentRbacConfigInput;
   sourceEntityType: 'matter' | 'client';
   practiceAreaKey?: string | null;
   matterTypeKey?: string | null;

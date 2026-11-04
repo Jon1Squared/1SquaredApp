@@ -394,29 +394,51 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       if (qte.prospectPhone?.trim()) expect(qte.prospectPhone.trim()).toMatch(ofcomDramaRegex);
     }
 
-    // R49: Verify both xlsx workbooks (data/pms and docs) and raw src/seed/demo.ts source text
-    const workbookPaths = [
-      path.join(process.cwd(), 'data', 'pms', '1Squared_PMS_Demo_Data.xlsx'),
-      path.join(process.cwd(), 'docs', '1Squared_PMS_Demo_Data.xlsx'),
-    ];
-    for (const wbPath of workbookPaths) {
-      expect(fs.existsSync(wbPath)).toBe(true);
-      const wb = openXlsxWorkbook(wbPath);
-      const feRows = wb.getSheetRows('fee_earners');
-      expect(feRows.length).toBeGreaterThan(0);
-      for (const row of feRows) {
-        if (row.email?.trim()) {
-          expect(row.email.trim(), `${wbPath} fee_earners email`).toMatch(allowedDomainRegex);
+    // R49 & R130: Verify single canonical workbook (data/pms/1Squared_PMS_Demo_Data.xlsx) across every sheet and raw src/seed/demo.ts source text
+    const wbPath = path.join(
+      process.cwd(),
+      'data',
+      'pms',
+      '1Squared_PMS_Demo_Data.xlsx',
+    );
+    expect(fs.existsSync(wbPath)).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(process.cwd(), 'docs', '1Squared_PMS_Demo_Data.xlsx'),
+      ),
+    ).toBe(false);
+    const wb = openXlsxWorkbook(wbPath);
+    expect(wb.sheetNames.length).toBeGreaterThan(0);
+    const emailCandidateRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const phoneHeaderRe = /phone|mobile|tel/i;
+    for (const sheetName of wb.sheetNames) {
+      const rows = wb.getSheetRows(sheetName);
+      for (const row of rows) {
+        for (const [colName, rawVal] of Object.entries(row)) {
+          const val = rawVal?.trim();
+          if (!val) continue;
+          if (/email/i.test(colName) || emailCandidateRe.test(val)) {
+            expect(val, `${wbPath} [${sheetName}.${colName}] email`).toMatch(
+              allowedDomainRegex,
+            );
+          }
+          if (phoneHeaderRe.test(colName)) {
+            expect(val, `${wbPath} [${sheetName}.${colName}] phone`).toMatch(
+              ofcomDramaRegex,
+            );
+          }
         }
       }
-      const clientRows = wb.getSheetRows('clients');
-      expect(clientRows.length).toBeGreaterThan(0);
-      for (const row of clientRows) {
-        if (row.email?.trim()) {
-          expect(row.email.trim(), `${wbPath} clients email`).toMatch(allowedDomainRegex);
-        }
-        if (row.phone?.trim()) {
-          expect(row.phone.trim(), `${wbPath} clients phone`).toMatch(ofcomDramaRegex);
+      const matrix = wb.getSheetMatrix(sheetName);
+      for (const mRow of matrix) {
+        for (const [colRef, rawCell] of Object.entries(mRow.cells)) {
+          const cellVal = rawCell?.trim();
+          if (cellVal && emailCandidateRe.test(cellVal)) {
+            expect(
+              cellVal,
+              `${wbPath} [${sheetName}!${colRef}${mRow.rowNumber}] cell email`,
+            ).toMatch(allowedDomainRegex);
+          }
         }
       }
     }

@@ -996,7 +996,9 @@ import type {
 } from '@platform/core';
 
 export async function getDocumentGenerationSnapshotAction() {
-  return withActorId((byId) => getDocumentGenerationSnapshotForUser(byId));
+  return withAuthenticatedActor((actor) =>
+    getDocumentGenerationSnapshotForUser(actor.personId, actor.session),
+  );
 }
 
 export async function uploadTemplateDraftAction(input: {
@@ -1015,8 +1017,12 @@ export async function uploadTemplateDraftAction(input: {
   promptedFields?: PromptedFieldDefinition[];
   changeNote?: string;
 }) {
-  return withActorId(async (byId) => {
-    const res = await uploadTemplateDraftService(input, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await uploadTemplateDraftService(
+      input,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
@@ -1037,8 +1043,12 @@ export async function updateTemplateDraftAction(input: {
   };
   changeNote?: string;
 }) {
-  return withActorId(async (byId) => {
-    const res = await updateTemplateDraftService(input, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await updateTemplateDraftService(
+      input,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
@@ -1048,16 +1058,25 @@ export async function submitTemplateVersionAction(
   versionId: string,
   changeNote?: string,
 ) {
-  return withActorId(async (byId) => {
-    const res = await submitTemplateVersionService(versionId, changeNote, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await submitTemplateVersionService(
+      versionId,
+      changeNote,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
 }
 
 export async function approveTemplateVersionAction(versionId: string) {
-  return withActorId(async (byId) => {
-    const res = await approveTemplateVersionService(versionId, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await approveTemplateVersionService(
+      versionId,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
@@ -1067,11 +1086,12 @@ export async function rejectTemplateVersionAction(
   versionId: string,
   rejectionReason: string,
 ) {
-  return withActorId(async (byId) => {
+  return withAuthenticatedActor(async (actor) => {
     const res = await rejectTemplateVersionService(
       versionId,
       rejectionReason,
-      byId,
+      actor.personId,
+      actor.session,
     );
     revalidateAll();
     return res;
@@ -1079,8 +1099,12 @@ export async function rejectTemplateVersionAction(
 }
 
 export async function retireTemplateAction(templateId: string) {
-  return withActorId(async (byId) => {
-    const res = await retireTemplateService(templateId, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await retireTemplateService(
+      templateId,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
@@ -1090,11 +1114,12 @@ export async function rollbackTemplateVersionAction(
   templateId: string,
   targetVersionId: string,
 ) {
-  return withActorId(async (byId) => {
+  return withAuthenticatedActor(async (actor) => {
     const res = await rollbackTemplateVersionService(
       templateId,
       targetVersionId,
-      byId,
+      actor.personId,
+      actor.session,
     );
     revalidateAll();
     return res;
@@ -1105,14 +1130,23 @@ export async function exportTemplatePackageAction(
   templateId: string,
   versionId?: string,
 ) {
-  return withActorId((byId) =>
-    exportTemplatePackageService(templateId, versionId, byId),
+  return withAuthenticatedActor((actor) =>
+    exportTemplatePackageService(
+      templateId,
+      versionId,
+      actor.personId,
+      actor.session,
+    ),
   );
 }
 
 export async function importTemplatePackageAction(pkg: TemplatePackageManifest) {
-  return withActorId(async (byId) => {
-    const res = await importTemplatePackageService(pkg, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await importTemplatePackageService(
+      pkg,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
@@ -1127,8 +1161,12 @@ export async function previewTemplateAction(input: {
   promptedValues?: Record<string, unknown>;
   outputFormat?: DocumentOutputFormat;
 }) {
-  return withActorId(async (byId) => {
-    const res = await previewTemplateService(input, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await previewTemplateService(
+      input,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
@@ -1145,22 +1183,30 @@ export async function generateDocumentAction(input: {
   promptedValues?: Record<string, unknown>;
   outputFormat?: DocumentOutputFormat;
 }) {
-  return withActorId(async (byId) => {
-    const res = await generateDocumentService(input, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await generateDocumentService(
+      input,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
 }
 
 export async function downloadGeneratedDocumentAction(documentId: string) {
-  return withActorId((byId) =>
-    downloadGeneratedDocumentService(documentId, byId),
+  return withAuthenticatedActor((actor) =>
+    downloadGeneratedDocumentService(documentId, actor.personId, actor.session),
   );
 }
 
 export async function deleteGeneratedDocumentAction(documentId: string) {
-  return withActorId(async (byId) => {
-    const res = await deleteGeneratedDocumentService(documentId, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await deleteGeneratedDocumentService(
+      documentId,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });
@@ -1169,12 +1215,18 @@ export async function deleteGeneratedDocumentAction(documentId: string) {
 export async function getTemplateUsageReportAction(
   filter: TemplateUsageReportFilter = {},
 ) {
-  return withActorId((byId) => getTemplateUsageReportService(filter, byId));
+  return withAuthenticatedActor((actor) =>
+    getTemplateUsageReportService(filter, actor.personId, actor.session),
+  );
 }
 
 export async function updateDocumentGenerationConfigAction(patch: Partial<DocumentGenerationConfig>) {
-  return withActorId(async (byId) => {
-    const res = await updateDocumentGenerationConfigService(patch, byId);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await updateDocumentGenerationConfigService(
+      patch,
+      actor.personId,
+      actor.session,
+    );
     revalidateAll();
     return res;
   });

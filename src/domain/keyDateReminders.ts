@@ -13,6 +13,7 @@
 
 import { runTenantBackgroundJob } from '@platform/core';
 import {
+  buildKeyDateReminderIdempotencyKey,
   canViewerAccessMatterKeyDates,
   isMatterRestrictedForKeyDates,
   resolveReminderScheduleForKeyDate,
@@ -39,18 +40,7 @@ import type {
   Team,
 } from './types';
 
-export function buildKeyDateReminderIdempotencyKey(
-  keyDateId: KeyDateId,
-  tenantId: string,
-): string {
-  const cleanTenant = tenantId?.trim();
-  if (!cleanTenant) {
-    throw new Error(
-      'TENANCY_JOB_ERROR: Cannot build key date reminder idempotency key without a tenantId.',
-    );
-  }
-  return `keydate-reminder:${cleanTenant}:${keyDateId}`;
-}
+export { buildKeyDateReminderIdempotencyKey };
 
 export function mapReminderPriorityToTaskPriorityId(
   priority: ReminderPriority | undefined,
@@ -318,14 +308,14 @@ export function syncReminderForConfirmedKeyDate(
   }
 
   if (!existingTask && existingState) {
-    existingTask = tasks.find((t) => t.id === existingState!.taskId);
-  }
-  if (!existingTask) {
     existingTask = tasks.find(
       (t) =>
-        t.idempotencyKey === idempotencyKey ||
-        t.linkedKeyDateId === keyDate.id,
+        t.id === existingState!.taskId &&
+        (!t.idempotencyKey || t.idempotencyKey === idempotencyKey),
     );
+  }
+  if (!existingTask) {
+    existingTask = tasks.find((t) => t.idempotencyKey === idempotencyKey);
   }
 
   const linkedRecords: Task['linkedRecords'] = [];
@@ -462,25 +452,29 @@ export function syncReminderForConfirmedKeyDate(
  */
 export function closeReminderTaskForKeyDate(params: {
   keyDateId: KeyDateId;
-  tenantId?: string;
+  tenantId: string;
   tasks: Task[];
   reminderStates: KeyDateReminderState[];
   nowIso: IsoDateTime;
   actorId: PersonId;
 }): Task | null {
   const { keyDateId, tenantId, tasks, reminderStates, nowIso, actorId } = params;
-  const state = reminderStates.find((s) => s.keyDateId === keyDateId);
-  const expectedIdempotencyKey = tenantId?.trim()
-    ? buildKeyDateReminderIdempotencyKey(keyDateId, tenantId.trim())
-    : state?.idempotencyKey ?? null;
+  const expectedIdempotencyKey = buildKeyDateReminderIdempotencyKey(
+    keyDateId,
+    tenantId,
+  );
+  const state = reminderStates.find(
+    (s) =>
+      s.keyDateId === keyDateId &&
+      (!s.idempotencyKey || s.idempotencyKey === expectedIdempotencyKey),
+  );
   const task = state
-    ? tasks.find((t) => t.id === state.taskId)
-    : tasks.find(
+    ? tasks.find(
         (t) =>
-          (expectedIdempotencyKey !== null &&
-            t.idempotencyKey === expectedIdempotencyKey) ||
-          (!t.idempotencyKey && t.linkedKeyDateId === keyDateId),
-      );
+          t.id === state.taskId &&
+          (!t.idempotencyKey || t.idempotencyKey === expectedIdempotencyKey),
+      )
+    : tasks.find((t) => t.idempotencyKey === expectedIdempotencyKey);
 
   if (!task) return null;
   if (task.status !== 'Done') {
@@ -703,12 +697,11 @@ export function runTenantKeyDateReminderJob(
     }
 
     const task =
-      tasks.find((t) => t.id === state!.taskId) ??
       tasks.find(
         (t) =>
-          t.idempotencyKey === state!.idempotencyKey ||
-          t.linkedKeyDateId === keyDate.id,
-      );
+          t.id === state!.taskId &&
+          (!t.idempotencyKey || t.idempotencyKey === state!.idempotencyKey),
+      ) ?? tasks.find((t) => t.idempotencyKey === state!.idempotencyKey);
 
     // Did the date cross into a closer stage (e.g. 90 -> 60 days, or 0 -> -1 past due)?
     if (evaluated.stageDaysBefore < state.currentStageDaysBefore) {

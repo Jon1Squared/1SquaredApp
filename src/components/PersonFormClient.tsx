@@ -100,6 +100,7 @@ interface Props {
   currentUserEmployeePermissions?: EmployeePermission[];
   existingSensitive?: EmployeeSensitiveRecord | null;
   leaverOwnedRecords?: LeaverOwnedRecordItem[];
+  firmPrimaryDomain?: string;
   embeddedInModal?: boolean;
   nameOnlyMandatory?: boolean;
   modalTitle?: string;
@@ -177,6 +178,7 @@ export function PersonFormClient({
   currentUserEmployeePermissions,
   existingSensitive = null,
   leaverOwnedRecords: leaverOwnedRecordsProp,
+  firmPrimaryDomain,
   embeddedInModal = false,
   nameOnlyMandatory = false,
   modalTitle,
@@ -685,11 +687,13 @@ export function PersonFormClient({
   );
   const [sysFirmWorkEmail, setSysFirmWorkEmail] = useState<string>(
     existingEmp?.systems?.firmWorkEmail ??
-      existing?.emails?.find(
-        (e) =>
-          e.address.toLowerCase().includes('@notalawfirm') ||
-          e.address.toLowerCase().includes('@pembrokevaughan'),
-      )?.address ??
+      existing?.emails?.find((e) => {
+        if (e.firmIssued) return true;
+        const domain = firmPrimaryDomain?.trim().toLowerCase();
+        return Boolean(
+          domain && e.address.toLowerCase().endsWith(`@${domain}`),
+        );
+      })?.address ??
       '',
   );
   const [sysDpTrainingDate, setSysDpTrainingDate] = useState<string>(
@@ -4597,7 +4601,11 @@ export function PersonFormClient({
                               type="email"
                               className="field-input"
                               disabled={!canEditCore}
-                              placeholder="name@notalawfirm.example"
+                              placeholder={
+                                firmPrimaryDomain
+                                  ? `name@${firmPrimaryDomain}`
+                                  : 'name@firm-domain'
+                              }
                               value={sysFirmWorkEmail}
                               onChange={(e) => setSysFirmWorkEmail(e.target.value)}
                             />

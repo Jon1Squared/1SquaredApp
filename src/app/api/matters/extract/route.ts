@@ -14,6 +14,7 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import { AuthorisationError } from '@/domain/rbac';
+import { resolveConfiguredFirmPrimaryDomain } from '@/domain/employment';
 import { vid } from '@/seed/lists';
 import {
   createOrUpdateLink,
@@ -2601,7 +2602,7 @@ export async function POST(req: Request) {
           emails: [
             {
               id: `em-${Date.now()}-fe`,
-              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@notalawfirm.example`,
+              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@${resolveConfiguredFirmPrimaryDomain()}`,
               typeId: vid('email_type', 'Work'),
               isPrimary: true,
             },

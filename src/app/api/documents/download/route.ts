@@ -65,7 +65,7 @@ export async function GET(request: Request) {
           }
         }
       }
-      const docActor = buildDocumentActorFromPerson(user);
+      const docActor = buildDocumentActorFromPerson(user, ctx);
       if (!canActorAccessGeneratedDocument(docActor, doc, linkedMatters, config)) {
         return NextResponse.json(
           { error: 'You do not have permission to download this document.' },

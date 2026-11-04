@@ -25,9 +25,10 @@ function brandVerifiedSessionActor(
 }
 
 declare const VERIFIED_ENTRA_SESSION_BRAND: unique symbol;
-const VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL = Symbol.for(
-  'onesquared.verifiedEntraSessionPayload',
+const VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL = Symbol(
+  'VerifiedEntraSessionPayload',
 );
+const verifiedEntraSessionPayloads = new WeakSet<object>();
 
 export const ENTRA_PKCE_COOKIE = 'onesquared_entra_pkce';
 export const ENTRA_SESSION_COOKIE = 'onesquared_entra_session';
@@ -62,6 +63,7 @@ function markAsVerifiedEntraSession(
     configurable: false,
     writable: false,
   });
+  verifiedEntraSessionPayloads.add(session);
   return session as VerifiedEntraSessionPayload;
 }
 
@@ -71,6 +73,7 @@ export function isVerifiedEntraSessionPayload(
   return Boolean(
     session &&
       typeof session === 'object' &&
+      verifiedEntraSessionPayloads.has(session) &&
       (session as Record<symbol, unknown>)[
         VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL
       ] === true,
@@ -115,7 +118,9 @@ export function setTestEntraSessionOverride(
   session: EntraSessionPayload | null | undefined,
 ): void {
   if (process.env.NODE_ENV !== 'test') {
-    throw new Error('setTestEntraSessionOverride is only permitted in test environments.');
+    throw new Error(
+      'SECURITY_ERROR: setTestEntraSessionOverride is only permitted in test environments.',
+    );
   }
   const previous = testEntraSessionOverride;
   if (session === undefined || session === null) {
@@ -562,13 +567,21 @@ export function buildEntraSessionPayload(params: {
     email ||
     'Entra ID User';
 
+  const oid =
+    typeof rawClaims.oid === 'string' ? rawClaims.oid.trim() : '';
+  if (!oid) {
+    throw new Error(
+      'ENTRA_CLAIM_ERROR: Microsoft Entra ID token is missing required Object ID (oid) claim.',
+    );
+  }
+
   const now = Date.now();
   const expiresAt = new Date(now + 8 * 60 * 60 * 1000).toISOString();
 
   return {
     personId,
     tenantId: verifiedToken.tenantId,
-    oid: rawClaims.oid ?? verifiedToken.sub,
+    oid,
     tid: rawClaims.tid ?? '',
     sub: verifiedToken.sub,
     email,
@@ -591,7 +604,6 @@ export function createVerifiedSessionActorFromEntraSession(
     correlationId?: string;
     tenantId?: string;
     untrustedRequestTenantOverride?: string;
-    groups?: readonly string[];
   },
 ): VerifiedSessionActorInput {
   if (!session || !isVerifiedEntraSessionPayload(session)) {
@@ -611,9 +623,6 @@ export function createVerifiedSessionActorFromEntraSession(
       'TENANCY_AUTH_ERROR: Verified OIDC session is missing required Entra Object ID (oid) claim.',
     );
   }
-  const mergedGroups = overrides?.groups
-    ? Array.from(new Set([...(session.entraGroups ?? []), ...overrides.groups]))
-    : session.entraGroups;
   return brandVerifiedSessionActor({
     id: session.personId,
     sub: session.sub || session.personId,
@@ -621,7 +630,7 @@ export function createVerifiedSessionActorFromEntraSession(
     email,
     upn: email,
     roles: session.mappedRoles,
-    groups: mergedGroups,
+    groups: session.entraGroups,
     entraObjectId: oid,
     entraTenantId: session.tid,
     mfaVerified: session.mfaVerified,

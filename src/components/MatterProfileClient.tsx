@@ -76,6 +76,7 @@ import type {
   KeyDate,
   KeyDateCalendarSync,
   KeyDateNotApplicable,
+  KeyDatePermission,
   KeyDateReminderState,
   KeyDatesConfig,
 } from '@/domain/keyDates.types';
@@ -99,6 +100,9 @@ interface MatterProfileClientProps {
   keyDateNotApplicable?: KeyDateNotApplicable[];
   keyDateReminderStates?: KeyDateReminderState[];
   keyDateCalendarSyncs?: KeyDateCalendarSync[];
+  userKeyDatePermissions?: KeyDatePermission[];
+  canVerifyByKeyDateId?: Record<string, { allowed: boolean; reason?: string }>;
+  canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
   pmsView?: MatterPmsViewBundle;
   notes: Note[];
@@ -192,6 +196,9 @@ export function MatterProfileClient({
   keyDateNotApplicable = [],
   keyDateReminderStates = [],
   keyDateCalendarSyncs = [],
+  userKeyDatePermissions = [],
+  canVerifyByKeyDateId,
+  canTakeByTaskId,
   canViewFinance = true,
   pmsView,
   notes,
@@ -2194,6 +2201,8 @@ export function MatterProfileClient({
               reminderStates={keyDateReminderStates}
               calendarSyncs={keyDateCalendarSyncs}
               currentUser={currentUser}
+              userPermissions={userKeyDatePermissions}
+              canVerifyByKeyDateId={canVerifyByKeyDateId}
               teams={teams}
               employees={employees ?? people.filter((p) => p.isEmployee)}
             />
@@ -2247,6 +2256,7 @@ export function MatterProfileClient({
             people={people}
             values={values}
             currentUserId={currentUserId}
+            canTakeByTaskId={canTakeByTaskId}
           />
         </div>
       ) : null}

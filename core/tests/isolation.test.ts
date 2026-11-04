@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildTenantCacheKey,
   CORE_API_VERSION,
@@ -13,8 +16,11 @@ import {
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
+import { resolveConfiguredFirmPrimaryDomain } from '../../src/domain/employment';
 import {
   getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
+  getExtensionHostLoadErrors,
   getPlatformExtensionHost,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
@@ -24,6 +30,8 @@ import {
   createVerifiedSessionActorFromEntraSession,
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
+import { resetAllDemoData, saveMatterRecord } from '../../src/server/services';
+import { getStore } from '../../src/server/store';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
@@ -351,5 +359,221 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         createdById: 'P-000001',
       }),
     ).rejects.toThrow(/EXTENSION_TENANT_MISMATCH/);
+
+    // R108 (1): An invalid manifest or an extension that throws on load is skipped and logged while valid enabled extensions still load, and extensions not in enabledExtensions are ignored
+    const tempPkgDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'onesquared-r108-pkg-'),
+    );
+    const prevPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const cfgDir = path.join(tempPkgDir, 'config', 'environments');
+      fs.mkdirSync(cfgDir, { recursive: true });
+      const baseWithMixedExts = {
+        ...(notALawFirmBaseConfig as Record<string, unknown>),
+        enabledExtensions: [
+          'nalf-matter-costs-governance',
+          'bad-manifest-ext',
+          'throwing-ext',
+        ],
+      };
+      fs.writeFileSync(
+        path.join(tempPkgDir, 'config', 'base.json'),
+        JSON.stringify(baseWithMixedExts, null, 2),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(cfgDir, 'dev.json'),
+        JSON.stringify(notALawFirmDevOverlay, null, 2),
+        'utf8',
+      );
+
+      // Copy valid nalf-matter-costs-governance extension
+      const srcNalfExt = path.resolve(
+        __dirname,
+        '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance',
+      );
+      const destNalfExt = path.join(
+        tempPkgDir,
+        'extensions',
+        'nalf-matter-costs-governance',
+        'src',
+      );
+      fs.mkdirSync(destNalfExt, { recursive: true });
+      fs.copyFileSync(
+        path.join(srcNalfExt, 'manifest.json'),
+        path.join(
+          tempPkgDir,
+          'extensions',
+          'nalf-matter-costs-governance',
+          'manifest.json',
+        ),
+      );
+      fs.copyFileSync(
+        path.join(srcNalfExt, 'src', 'index.ts'),
+        path.join(destNalfExt, 'index.ts'),
+      );
+
+      // Create bad-manifest-ext with invalid schema (missing supportedCoreApiRange & invalid version)
+      const badManifestDir = path.join(
+        tempPkgDir,
+        'extensions',
+        'bad-manifest-ext',
+        'src',
+      );
+      fs.mkdirSync(badManifestDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(
+          tempPkgDir,
+          'extensions',
+          'bad-manifest-ext',
+          'manifest.json',
+        ),
+        JSON.stringify({ id: 'bad-manifest-ext', name: 'Bad' }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(badManifestDir, 'index.ts'),
+        'export default {};',
+        'utf8',
+      );
+
+      // Create throwing-ext with valid manifest.json that throws during module load
+      const throwingExtDir = path.join(
+        tempPkgDir,
+        'extensions',
+        'throwing-ext',
+        'src',
+      );
+      fs.mkdirSync(throwingExtDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(tempPkgDir, 'extensions', 'throwing-ext', 'manifest.json'),
+        JSON.stringify({
+          id: 'throwing-ext',
+          name: 'Throwing Extension',
+          version: '1.0.0',
+          description: 'Throws during load',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['matter:read'],
+          hooks: ['beforeMatterOpen'],
+        }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(throwingExtDir, 'index.ts'),
+        'throw new Error("Simulated extension module load crash");',
+        'utf8',
+      );
+
+      // Create disabled-ext (not in enabledExtensions)
+      const disabledExtDir = path.join(
+        tempPkgDir,
+        'extensions',
+        'disabled-ext',
+        'src',
+      );
+      fs.mkdirSync(disabledExtDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(tempPkgDir, 'extensions', 'disabled-ext', 'manifest.json'),
+        JSON.stringify({
+          id: 'disabled-ext',
+          name: 'Disabled Extension',
+          version: '1.0.0',
+          description: 'Should not be loaded',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: ['matter:read'],
+          hooks: ['beforeMatterOpen'],
+        }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(disabledExtDir, 'index.ts'),
+        'throw new Error("Disabled extension should never be loaded");',
+        'utf8',
+      );
+
+      process.env.PLATFORM_TENANT_PACKAGE_DIR = tempPkgDir;
+      setActiveTenantConfigForTesting(null);
+
+      const isolatedHost = getPlatformExtensionHost();
+      const loadedIds = isolatedHost
+        .getActiveExtensionsForTenant({
+          ...config,
+          enabledExtensions: [
+            'nalf-matter-costs-governance',
+            'bad-manifest-ext',
+            'throwing-ext',
+            'disabled-ext',
+          ],
+        })
+        .map((e) => e.manifest.id);
+      expect(loadedIds).toContain('nalf-matter-costs-governance');
+      expect(loadedIds).not.toContain('bad-manifest-ext');
+      expect(loadedIds).not.toContain('throwing-ext');
+      expect(loadedIds).not.toContain('disabled-ext');
+
+      const loadErrors = getExtensionHostLoadErrors();
+      expect(loadErrors.map((e) => e.extensionDir)).toEqual(
+        expect.arrayContaining(['bad-manifest-ext', 'throwing-ext']),
+      );
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+      if (prevPkgDir === undefined) {
+        delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+      } else {
+        process.env.PLATFORM_TENANT_PACKAGE_DIR = prevPkgDir;
+      }
+      setActiveTenantConfigForTesting(null);
+      fs.rmSync(tempPkgDir, { recursive: true, force: true });
+    }
+
+    // R108 (2): Opening/saving a matter via saveMatterRecord on the NALF tenant runs beforeMatterCostsCalculate and beforeMatterOpen
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const baseMatter = store.matters[0]!;
+      const saveRes = saveMatterRecord(
+        {
+          ...baseMatter,
+          agreedFeeCapGbp: 30000,
+          feeEstimateGbp: 30000,
+          conflictClearedById: null,
+        },
+        { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
+      );
+      expect(saveRes.errors).toBeUndefined();
+      const gov = (saveRes.matter.fieldValues ?? {})[
+        'matterCostsGovernance'
+      ] as
+        | {
+            requiresPartnerSignOff?: boolean;
+            allowProceed?: boolean;
+            governanceWarnings?: string[];
+          }
+        | undefined;
+      expect(gov).toBeDefined();
+      expect(gov?.requiresPartnerSignOff).toBe(true);
+      expect(gov?.allowProceed).toBe(false);
+    } finally {
+      resetAllDemoData('P-000001');
+    }
+
+    // R118: resolveConfiguredFirmPrimaryDomain throws TENANT_CONFIG_ERROR when branding.primaryDomain is missing
+    const rawBase = getActiveTenantRawBaseConfig();
+    try {
+      setActiveTenantConfigForTesting({
+        ...rawBase,
+        branding: {
+          ...((rawBase.branding as Record<string, unknown>) ?? {}),
+          primaryDomain: '   ',
+        },
+      });
+      expect(() => resolveConfiguredFirmPrimaryDomain()).toThrow(
+        /TENANT_CONFIG_ERROR/,
+      );
+    } finally {
+      setActiveTenantConfigForTesting(null);
+    }
   });
 });

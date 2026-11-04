@@ -64,7 +64,7 @@ import { toMatterAccessSubject } from '@/domain/documentGeneration';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { personDisplayName } from '@/domain/names';
 import {
-  getStoredActorSessionForPerson,
+  getActiveActorSession,
   resolvePersonPermissions,
 } from '@/domain/rbac';
 import type { Matter, Person } from '@/domain/types';
@@ -147,9 +147,9 @@ export function loadActiveDocumentTenantConfig(
 /**
  * Resolves the department and team for a person from their employment record or configured orgStructure.
  */
-function resolvePersonOrgAssignment(
+export function resolvePersonOrgAssignment(
   person: Person,
-  store: FirmStore,
+  store: FirmStore = getStore(),
 ): { departmentId: string; teamId: string } {
   const matchedDept = store.orgStructure.departments.find(
     (d) =>
@@ -162,16 +162,8 @@ function resolvePersonOrgAssignment(
     person.employment?.departmentId ||
     matchedDept?.id ||
     '';
-  const explicitTeamId = person.employment?.teamOrPracticeGroupId;
-  if (explicitTeamId) {
-    return { departmentId: deptId, teamId: explicitTeamId };
-  }
-  const fallbackTeam = deptId
-    ? store.orgStructure.teamsOrPracticeGroups.find(
-        (t) => t.parentDepartmentId === deptId,
-      )?.id ?? ''
-    : '';
-  return { departmentId: deptId, teamId: fallbackTeam };
+  const explicitTeamId = person.employment?.teamOrPracticeGroupId ?? '';
+  return { departmentId: deptId, teamId: explicitTeamId };
 }
 
 /**
@@ -284,7 +276,6 @@ export function buildTenantContextForUser(
   }
 
   const roles = resolveEmployeeRoles(user, store.teams);
-  const entraInfo = resolvePersonEntraIdentity(user, config, store);
   const resolvedPerms = resolvePersonPermissions(user, {
     allPeople: store.people,
     teams: store.teams,
@@ -298,7 +289,7 @@ export function buildTenantContextForUser(
 
   const verifiedSession =
     options?.session ??
-    (getStoredActorSessionForPerson(user.id)?.verifiedSession as
+    (getActiveActorSession()?.verifiedSession as
       | VerifiedEntraSessionPayload
       | undefined);
   if (!verifiedSession) {
@@ -308,12 +299,18 @@ export function buildTenantContextForUser(
     err.code = 'reauthentication_required';
     throw err;
   }
+  if (verifiedSession.personId !== user.id) {
+    const err = new Error(
+      `TENANCY_ACTOR_MISMATCH: Verified session personId "${verifiedSession.personId}" does not match requested employee "${user.id}".`,
+    ) as Error & { code: DocumentStoreErrorCode };
+    err.code = 'access_denied';
+    throw err;
+  }
 
   const ctx = resolveCurrentTenantContext(
     createVerifiedSessionActorFromEntraSession(verifiedSession, {
       tenantId: config.tenantId,
       correlationId: options?.correlationId ?? `corr-${randomUUID()}`,
-      groups: entraInfo.groups,
     }),
     config,
   );
@@ -519,6 +516,11 @@ let customBeforeMatterDocumentsCloseHook:
 export function setBeforeMatterDocumentsCloseHookForTesting(
   hook: DocumentLifecycleDependencies['onBeforeMatterDocumentsClose'] | undefined,
 ): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setBeforeMatterDocumentsCloseHookForTesting is only permitted in test environments.',
+    );
+  }
   customBeforeMatterDocumentsCloseHook = hook;
 }
 
@@ -531,9 +533,35 @@ export function buildLifecycleDependencies(
   const registry = getRegistrySingleton();
 
   const protectedContainerPaths = new Set<string>();
+  const addProtectedPathAndPrefixes = (rawPath: string) => {
+    const cleaned = rawPath.trim().replace(/^\/+|\/+$/g, '');
+    if (!cleaned) return;
+    const segments = cleaned.split('/').filter(Boolean);
+    let prefix = '';
+    for (const seg of segments) {
+      if (seg.includes('{')) break;
+      prefix = prefix ? `${prefix}/${seg}` : seg;
+      protectedContainerPaths.add(prefix);
+    }
+  };
+
+  for (const rule of config.documentRouting ?? []) {
+    if (rule.basePath) {
+      addProtectedPathAndPrefixes(rule.basePath);
+    }
+  }
+
   for (const dept of store.orgStructure.departments ?? []) {
     if (dept.code) protectedContainerPaths.add(dept.code);
     if (dept.id) protectedContainerPaths.add(dept.id);
+    for (const rule of config.documentRouting ?? []) {
+      if (rule.basePath) {
+        const renderedDept = rule.basePath
+          .replace(/\{departmentCode\}/g, dept.code || '')
+          .replace(/\{departmentId\}/g, dept.id || '');
+        addProtectedPathAndPrefixes(renderedDept);
+      }
+    }
     for (const team of store.orgStructure.teamsOrPracticeGroups ?? []) {
       if (team.parentDepartmentId === dept.id) {
         if (dept.code && team.code) {
@@ -541,6 +569,16 @@ export function buildLifecycleDependencies(
         }
         if (dept.id && team.id) {
           protectedContainerPaths.add(`${dept.id}/${team.id}`);
+        }
+        for (const rule of config.documentRouting ?? []) {
+          if (rule.basePath) {
+            const renderedTeam = rule.basePath
+              .replace(/\{departmentCode\}/g, dept.code || '')
+              .replace(/\{departmentId\}/g, dept.id || '')
+              .replace(/\{teamCode\}/g, team.code || '')
+              .replace(/\{teamId\}/g, team.id || '');
+            addProtectedPathAndPrefixes(renderedTeam);
+          }
         }
       }
     }
@@ -683,6 +721,7 @@ async function seedSampleDocumentsForMatterLocation(
   if (location.provisioningStatus !== 'provisioned') return;
   const activeCfg = config ?? loadActiveDocumentTenantConfig(store);
   if (
+    process.env.NODE_ENV === 'production' ||
     !activeCfg.featureFlags?.enableDemoMode ||
     activeCfg.environment === 'live'
   ) {
@@ -1246,10 +1285,16 @@ function checkMatterAccessForActor(
   const isOnRestrictedAllowlist = isRestricted && allowlist.has(user.id);
   const subject = toMatterAccessSubject(matter);
 
+  const activeActorSession = getActiveActorSession();
   const canAccess = canActorAccessMatterRecord(
     {
       id: user.id,
+      tenantId: config.tenantId,
       roles,
+      tokenRoles:
+        activeActorSession && activeActorSession.personId === user.id
+          ? activeActorSession.tokenRoles
+          : [],
       departmentId: user.departmentId ?? user.employment?.departmentId ?? null,
       permissionOverrides: user.permissionOverrides ?? null,
       documentPermissions: user.documentPermissions,

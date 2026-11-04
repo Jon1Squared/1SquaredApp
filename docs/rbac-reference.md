@@ -50,6 +50,9 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `finance:credit_control` | `finance` | `restricted` | No | Record credit control chase actions, request matter bills, and flag write-offs |
 | `finance:manage_links` | `finance` | `critical` | **Yes** | Link or unlink Practice Management System (PMS) client and matter codes |
 | `risk:view` | `risk` | `restricted` | No | Access Risk & Compliance workspace, CDD/AML oversight queues, and conflict overrides |
+| `matter:create` | `matter` | `standard` | No | Create and open new matters, including draft conflict checks and enquiry/quote conversions |
+| `matter:edit` | `matter` | `standard` | No | Edit matter details, participants, conflict check records, and commercial fields on accessible matters |
+| `matter:reassign_ownership` | `matter` | `restricted` | No | Change the owning department or owning team/practice group on an existing matter (re-permissioning linked document store folders) |
 | `matter:restricted:access` | `matter` | `confidential` | No | Oversight access to restricted staff matters (`isStaffMatter`) and linked documents |
 | `task:claim_any` | `task` | `standard` | No | Take or claim unassigned tasks across any team |
 | `task:reassign_any` | `task` | `restricted` | No | Reassign tasks across any user or team |
@@ -57,6 +60,14 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `admin:access` | `admin` | `critical` | **Yes** | Access Administration screens and modify lists, routing rules, org structure, and Home layouts |
 | `rbac:manage_config` | `rbac` | `critical` | **Yes** | Modify tenant RBAC role mappings, department/relationship grants, and security settings |
 | `rbac:manage_user_overrides` | `rbac` | `critical` | **Yes** | Grant/revoke per-person permission overrides and modify another user's security roles |
+| `keydate:view` | `keydate` | `standard` | No | View key dates on accessible matters and enquiries, and view own teams' diaries |
+| `keydate:view_any_team` | `keydate` | `restricted` | No | Select and view any team diary and access the compliance exceptions report |
+| `keydate:edit` | `keydate` | `standard` | No | Create, edit, propose, supersede, and mark key dates as not applicable on accessible matters and enquiries |
+| `keydate:verify` | `keydate` | `restricted` | No | Perform second-person verification (confirm or reject) on proposed key dates where the user is not the proposer |
+| `keydate:resolve` | `keydate` | `standard` | No | Resolve key dates as met or missed and acknowledge key date reminder stages |
+| `keydate:waive` | `keydate` | `restricted` | No | Waive a key date with an audited reason |
+| `keydate:override_calculation` | `keydate` | `restricted` | No | Override a rule-calculated limitation or key date with a mandatory audited reason |
+| `keydate:configure` | `keydate` | `critical` | **Yes** | Configure key date types, matter type rules, reminder schedules, limitation rule sets, and business calendars |
 
 ### Field Catalogue Contract
 Every entry in `CORE_FIELD_CATALOGUE` (`core/src/domain/document-generation/fieldCatalogue.ts`) declares a `requiredPermission: PermissionKey`. A contract test in `core/tests/rbac.test.ts` verifies at CI time that every catalogue field's `requiredPermission` is registered in `PERMISSION_REGISTRY`.
@@ -69,16 +80,16 @@ Built-in `HomeRoleKey` identifiers are stable across tenants:
 
 | `HomeRoleKey` | Immutable `employeeRoleId` | Default Label | Default Permissions |
 | :--- | :--- | :--- | :--- |
-| `admin` | `employee_role.system_administrator` | System Administrator | All 25 permissions |
-| `managing_partner` | `employee_role.practice_manager` | Managing Partner / Practice Manager | All permissions except `finance:manage_links`, `enquiry:intake_view`, `rbac:manage_config`, `rbac:manage_user_overrides` |
-| `partner` | `employee_role.partner` | Partner / Head of Department | `employee:view_core`, `employee:edit_core`, `employee:hr_restricted`, `document_template:view`, `document_template:view_usage`, `document:generate`, `document:view`, `finance:view`, `finance:view_matter`, `finance:credit_control`, `task:claim_any`, `admin:access` |
-| `risk_compliance` | `employee_role.risk_and_compliance` | Risk & Compliance (MLRO / COLP) | `employee:view_core`, `employee:edit_core`, `employee:hr_restricted`, `employee:sensitive`, `document_template:view`, `document_template:approve`, `document_template:view_usage`, `document:generate`, `document:view`, `document:delete`, `finance:view_matter`, `risk:view`, `matter:restricted:access` |
-| `finance` | `employee_role.finance` | Finance / Accounts / Credit Control | `employee:view_core`, `employee:payroll`, `document_template:view`, `document:generate`, `document:view`, `finance:view`, `finance:view_matter`, `finance:credit_control` |
-| `fee_earner` | `employee_role.fee_earner` | Fee Earner | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `finance:view_matter` |
-| `supervisor` | `employee_role.supervisor` | Team Supervisor | `employee:view_core`, `employee:edit_core`, `document_template:view`, `document:generate`, `document:view`, `finance:view_matter`, `finance:credit_control`, `task:claim_any` |
-| `legal_secretary` | `employee_role.support_staff` | Legal Secretary / PA / Support Staff | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `finance:view_matter` |
-| `enquiries_coordinator` | `employee_role.enquiries_coordinator` | Enquiries Coordinator | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `enquiry:intake_view` |
-| `intake` | `employee_role.intake` | Intake / Call Handler | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `enquiry:intake_view` |
+| `admin` | `employee_role.system_administrator` | System Administrator | All 43 permissions |
+| `managing_partner` | `employee_role.practice_manager` | Managing Partner / Practice Manager | All permissions except `finance:manage_links`, `enquiry:intake_view`, `rbac:manage_config`, `rbac:manage_user_overrides`, `keydate:configure` |
+| `partner` | `employee_role.partner` | Partner / Head of Department | `employee:view_core`, `employee:edit_core`, `employee:hr_restricted`, `document_template:view`, `document_template:view_usage`, `document_template:configure`, `document:generate`, `document:view`, `document:download`, `document:upload`, `document:edit`, `document:delete`, `document:provision`, `finance:view`, `finance:view_matter`, `finance:credit_control`, `matter:create`, `matter:edit`, `matter:reassign_ownership`, `task:claim_any`, `admin:access`, `keydate:view`, `keydate:edit`, `keydate:verify`, `keydate:resolve`, `keydate:waive`, `keydate:override_calculation` |
+| `risk_compliance` | `employee_role.risk_and_compliance` | Risk & Compliance (MLRO / COLP) | `employee:view_core`, `employee:edit_core`, `employee:hr_restricted`, `employee:sensitive`, `document_template:view`, `document_template:approve`, `document_template:view_usage`, `document_template:configure`, `document:generate`, `document:view`, `document:download`, `document:upload`, `document:edit`, `document:delete`, `document:provision`, `document_access:review`, `finance:view_matter`, `risk:view`, `matter:edit`, `matter:restricted:access`, `keydate:view`, `keydate:view_any_team`, `keydate:verify` |
+| `finance` | `employee_role.finance` | Finance / Accounts / Credit Control | `employee:view_core`, `employee:payroll`, `document_template:view`, `document:generate`, `document:view`, `document:download`, `document:upload`, `finance:view`, `finance:view_matter`, `finance:credit_control` |
+| `fee_earner` | `employee_role.fee_earner` | Fee Earner | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `document:download`, `document:upload`, `document:edit`, `finance:view_matter`, `matter:create`, `matter:edit`, `keydate:view`, `keydate:edit`, `keydate:resolve` |
+| `supervisor` | `employee_role.supervisor` | Team Supervisor | `employee:view_core`, `employee:edit_core`, `employee:hr_restricted`, `document_template:view`, `document:generate`, `document:view`, `document:download`, `document:upload`, `document:edit`, `document:delete`, `document:provision`, `finance:view_matter`, `matter:create`, `matter:edit`, `matter:reassign_ownership`, `task:claim_any`, `task:reassign_any`, `keydate:view`, `keydate:edit`, `keydate:verify`, `keydate:resolve`, `keydate:waive` |
+| `legal_secretary` | `employee_role.support_staff` | Legal Secretary / PA / Support Staff | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `document:download`, `document:upload`, `document:edit`, `document:provision`, `matter:create`, `matter:edit`, `keydate:view`, `keydate:edit` |
+| `enquiries_coordinator` | `employee_role.enquiries_coordinator` | Enquiries Coordinator | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `document:download`, `matter:create`, `enquiry:intake_view` |
+| `intake` | `employee_role.intake` | Intake / Call Handler | `employee:view_core`, `document_template:view`, `document:generate`, `document:view`, `document:download`, `enquiry:intake_view` |
 
 ---
 

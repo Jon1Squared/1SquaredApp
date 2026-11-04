@@ -23,6 +23,7 @@ import {
 } from '@/domain/matterOpeningRecord';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import {
+  canUserReopenEnquiry,
   computeEnquiryConflictSnapshot,
   enquiryDisplayName,
   getMissingRoutingFields,
@@ -73,6 +74,7 @@ import {
   isWorkingAtFirm,
   maskBankDetails,
   maskNationalInsuranceNumber,
+  resolveConfiguredFirmPrimaryDomain,
   resolveEmployeePermissions,
   syncPersonWorkContactFlags,
   validateEmploymentRecord,
@@ -89,6 +91,7 @@ import {
 } from '@/domain/matterParties';
 import {
   createDefaultMatterCostsConfig,
+  resolveMatterCostsSnapshot,
   syncRateCardsWithPmsFeeEarners,
 } from '@/domain/matterCosts';
 import {
@@ -102,8 +105,9 @@ import {
 import {
   AuthorisationError,
   canPersonAccessMatter,
+  getActiveActorSession,
   getDefaultTenantRbacConfig,
-  getStoredActorSessionForPerson,
+  hasPersonPermission,
   isRegisteredPermissionKey,
   mergeRbacConfigOverlay,
   PERMISSION_REGISTRY,
@@ -132,6 +136,7 @@ import {
 } from './entraAuth';
 import {
   getActiveTenantConfiguration,
+  getPlatformExtensionHost,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -155,6 +160,7 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import {
+  canUserVerifyKeyDate,
   canViewerAccessMatterKeyDates,
   carryEnquiryKeyDatesToMatter,
   createOrProposeKeyDate,
@@ -217,6 +223,7 @@ import type {
   FormSection,
   HomeFirmSettings,
   HomePagesConfig,
+  HomeRoleKey,
   Matter,
   MatterCostsConfig,
   MatterPartyCapacityDef,
@@ -343,6 +350,8 @@ export async function withAuthenticatedActor<R>(
     () => fn(actor),
   );
 }
+
+export const withPageActor = withAuthenticatedActor;
 
 export async function getCurrentUserId(): Promise<string> {
   const actor = await requireAuthenticatedActor();
@@ -541,18 +550,31 @@ export function getKeyDatesConfig(store: FirmStore = getStore()): KeyDatesConfig
   return validateKeyDatesConfig(raw) as unknown as KeyDatesConfig;
 }
 
+function logDocumentLifecycleSyncError(
+  err: unknown,
+  correlationId: string,
+): void {
+  const tenantId = getActiveTenantConfiguration().tenantId;
+  console.error(
+    JSON.stringify({
+      level: 'error',
+      event: 'document_store.lifecycle_sync_unhandled',
+      tenantId,
+      correlationId,
+      code: (err as { code?: string })?.code ?? 'unavailable',
+    }),
+  );
+}
+
 export function getAppSnapshot(
   userId: string,
   options?: { tokenRoles?: readonly string[] },
 ) {
-  const activeTenantId = getActiveTenantConfiguration().tenantId;
-  const storedActorSession = getStoredActorSessionForPerson(
-    userId,
-    activeTenantId,
-  );
-  return runWithActiveActorSession(storedActorSession ?? null, () =>
-    getAppSnapshotInScope(userId, options),
-  );
+  const activeActor = getActiveActorSession();
+  if (activeActor && activeActor.personId === userId) {
+    return getAppSnapshotInScope(userId, options);
+  }
+  return getAppSnapshotInScope(userId, options);
 }
 
 function getAppSnapshotInScope(
@@ -814,8 +836,63 @@ function getAppSnapshotInScope(
     }
   }
 
+  const canTakeByTaskId: Record<string, boolean> = {};
+  for (const t of store.tasks) {
+    canTakeByTaskId[t.id] = canUserTakeTask(
+      user.id,
+      t,
+      store.teams,
+      store.people,
+      store.values,
+      currentUserPermissions,
+    );
+  }
+
+  const canVerifyByKeyDateId: Record<
+    string,
+    { allowed: boolean; reason?: string }
+  > = {};
+  for (const kd of visibleKeyDates) {
+    canVerifyByKeyDateId[kd.id] = canUserVerifyKeyDate(user, kd, {
+      config: keyDatesConfig,
+      allPeople: store.people,
+      teams: store.teams,
+    });
+  }
+
+  const canReopenByEnquiryId: Record<string, boolean> = {};
+  for (const eq of store.enquiries) {
+    canReopenByEnquiryId[eq.id] = canUserReopenEnquiry(
+      user.id,
+      eq,
+      store.teams,
+      store.people,
+      store.values,
+    );
+  }
+
+  const appRoleByPersonId: Record<string, AppRole> = {};
+  const rolesByPersonId: Record<string, HomeRoleKey[]> = {};
+  const permissionsByPersonId: Record<string, PermissionKey[]> = {};
+  for (const emp of store.people) {
+    if (!emp.isEmployee || emp.mergedIntoId) continue;
+    appRoleByPersonId[emp.id] = resolveUserAppRole(
+      emp,
+      store.teams,
+      store.values,
+    );
+    rolesByPersonId[emp.id] = resolveEmployeeRoles(emp, store.teams);
+    permissionsByPersonId[emp.id] = resolvePersonPermissions(emp, {
+      allPeople: store.people,
+      teams: store.teams,
+    });
+  }
+
+  const firmPrimaryDomain = resolveConfiguredFirmPrimaryDomain();
+
   return {
     firm: store.firm,
+    firmPrimaryDomain,
     currentUser: user,
     currentUserId: user.id,
     currentUserRole,
@@ -823,6 +900,12 @@ function getAppSnapshotInScope(
     currentUserEmployeePermissions,
     currentUserPermissions,
     currentUserKeyDatePermissions,
+    canTakeByTaskId,
+    canVerifyByKeyDateId,
+    canReopenByEnquiryId,
+    appRoleByPersonId,
+    rolesByPersonId,
+    permissionsByPersonId,
     keyDatesConfig,
     keyDates: visibleKeyDates,
     keyDateNotApplicable: visibleKeyDateNotApplicable,
@@ -916,18 +999,19 @@ export function getEmployeeDetailsForUser(
   }
 
   if (opts.logViewPayroll) {
-    if (!perms.includes('employee:payroll')) {
+    const payrollLogRes = logEmployeeRestrictedAccess(personId, 'payroll', byId);
+    if (!payrollLogRes.auditEntry) {
       errors.payrollPermission = 'You do not have permission to view payroll details.';
-    } else {
-      logEmployeeRestrictedAccess(personId, 'payroll', byId);
     }
   }
 
+  let sensitiveAuditWritten = false;
   if (opts.logViewSensitive) {
-    if (!perms.includes('employee:sensitive')) {
+    const sensitiveLogRes = logEmployeeRestrictedAccess(personId, 'sensitive', byId);
+    if (!sensitiveLogRes.auditEntry) {
       errors.sensitivePermission = 'You do not have permission to view sensitive employee information.';
     } else {
-      logEmployeeRestrictedAccess(personId, 'sensitive', byId);
+      sensitiveAuditWritten = true;
     }
   }
 
@@ -938,11 +1022,10 @@ export function getEmployeeDetailsForUser(
     store.teams,
     store.orgStructure,
   );
-  // R103: Only return sensitive HR records when logViewSensitive: true and the view-sensitive audit entry has been written
-  const sensitive =
-    opts.logViewSensitive === true && perms.includes('employee:sensitive')
-      ? structuredClone(store.employeeSensitiveRecords?.[personId] ?? null)
-      : null;
+  // R103 & R130: Only return sensitive HR records when logViewSensitive: true and logEmployeeRestrictedAccess succeeded
+  const sensitive = sensitiveAuditWritten
+    ? structuredClone(store.employeeSensitiveRecords?.[personId] ?? null)
+    : null;
 
   return {
     employment,
@@ -1459,20 +1542,21 @@ export function savePersonRecord(
             ...(m.teamMemberIds ?? []),
           ]);
           m.restrictedAccessUserIds = Array.from(allowed);
-          void syncMatterLifecycleOnSaveSync({
-            matter: m,
-            previousMatter: prevMatter,
-            userId: opts.byId,
-            store,
-          }).catch((err) => {
-            console.error(
-              JSON.stringify({
-                level: 'error',
-                event: 'document_store.lifecycle_sync_unhandled',
-                code: (err as { code?: string })?.code ?? 'unavailable',
-              }),
-            );
-          });
+          saveStore(store);
+          const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
+          try {
+            void syncMatterLifecycleOnSaveSync({
+              matter: m,
+              previousMatter: prevMatter,
+              userId: opts.byId,
+              correlationId: syncCorrelationId,
+              store,
+            }).catch((err) => {
+              logDocumentLifecycleSyncError(err, syncCorrelationId);
+            });
+          } catch (err) {
+            logDocumentLifecycleSyncError(err, syncCorrelationId);
+          }
         }
       }
     }
@@ -2204,6 +2288,61 @@ export function saveMatterRecord(
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const existing = opts.id ? store.matters.find((m) => m.id === opts.id) ?? null : null;
+  const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
+  if (!actingUser || !actingUser.isEmployee) {
+    return {
+      matter: null as unknown as Matter,
+      errors: {
+        access: 'Matter not found or restricted.',
+        permission: 'Matter not found or restricted.',
+      },
+    };
+  }
+  if (opts.id) {
+    if (
+      !existing ||
+      !canPersonAccessMatter(existing, opts.byId, actingUser, {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return {
+        matter: null as unknown as Matter,
+        errors: {
+          access: 'Matter not found or restricted.',
+          permission: 'Matter not found or restricted.',
+        },
+      };
+    }
+    if (
+      !hasPersonPermission(actingUser, 'matter:edit', {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return {
+        matter: existing,
+        errors: {
+          permission: 'You do not have permission (matter:edit) to edit matters.',
+        },
+      };
+    }
+  } else {
+    if (
+      !hasPersonPermission(actingUser, 'matter:create', {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return {
+        matter: null as unknown as Matter,
+        errors: {
+          permission: 'You do not have permission (matter:create) to create matters.',
+        },
+      };
+    }
+  }
+
   const isDraftSave = opts.saveMode === 'draft';
 
   const errors: Record<string, string> = {};
@@ -2212,6 +2351,65 @@ export function saveMatterRecord(
     if (!input.clientId) errors.clientId = 'Client (instructing entity or individual) is required.';
     if (!input.practiceAreaId) errors.practiceAreaId = 'Practice area is required.';
     if (!input.workTypeSubcategoryId) errors.workTypeSubcategoryId = 'Work type subcategory is required.';
+  }
+
+  // Validate owningDepartmentId and owningTeamId against orgStructure and enforce matter:reassign_ownership on existing matters (R107)
+  const nextOwningDepartmentId =
+    input.owningDepartmentId !== undefined
+      ? (input.owningDepartmentId ?? '').trim() || undefined
+      : existing?.owningDepartmentId || undefined;
+  const nextOwningTeamId =
+    input.owningTeamId !== undefined
+      ? (input.owningTeamId ?? '').trim() || undefined
+      : existing?.owningTeamId || undefined;
+
+  if (nextOwningDepartmentId) {
+    const activeDept = store.orgStructure.departments.find(
+      (d) => d.id === nextOwningDepartmentId && d.active,
+    );
+    if (!activeDept) {
+      errors.owningDepartmentId =
+        'Selected owning department does not exist or is inactive.';
+    }
+  }
+  if (nextOwningTeamId) {
+    const activeTeam = store.orgStructure.teamsOrPracticeGroups.find(
+      (t) => t.id === nextOwningTeamId && t.active,
+    );
+    if (!activeTeam) {
+      errors.owningTeamId = 'Selected owning team does not exist or is inactive.';
+    } else if (
+      !nextOwningDepartmentId ||
+      activeTeam.parentDepartmentId !== nextOwningDepartmentId
+    ) {
+      errors.owningTeamId =
+        'Selected owning team does not belong to the selected owning department.';
+    }
+  }
+
+  if (existing) {
+    const prevDeptId = existing.owningDepartmentId || undefined;
+    const prevTeamId = existing.owningTeamId || undefined;
+    const deptChanged =
+      input.owningDepartmentId !== undefined && nextOwningDepartmentId !== prevDeptId;
+    const teamChanged =
+      input.owningTeamId !== undefined && nextOwningTeamId !== prevTeamId;
+    if (
+      (deptChanged || teamChanged) &&
+      !hasPersonPermission(actingUser, 'matter:reassign_ownership', {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      if (deptChanged) {
+        errors.owningDepartmentId =
+          'You do not have permission (matter:reassign_ownership) to change a matter’s owning department.';
+      }
+      if (teamChanged) {
+        errors.owningTeamId =
+          'You do not have permission (matter:reassign_ownership) to change a matter’s owning team.';
+      }
+    }
   }
 
   // Enforce Key Dates opening & closure gates (§1)
@@ -2588,6 +2786,53 @@ export function saveMatterRecord(
         : null
       : existing?.conflictCheckRecord ?? null;
 
+  const effectiveResponsiblePartnerId =
+    input.responsiblePartnerId !== undefined
+      ? input.responsiblePartnerId
+      : existing?.responsiblePartnerId ?? opts.byId;
+  const effectiveSupervisingPartnerId =
+    input.supervisingPartnerId !== undefined
+      ? input.supervisingPartnerId
+      : existing?.supervisingPartnerId ?? opts.byId;
+  const effectiveLeadFeeEarnerId =
+    input.leadFeeEarnerId !== undefined
+      ? input.leadFeeEarnerId
+      : existing?.leadFeeEarnerId ?? opts.byId;
+  const effectiveTeamMemberIds = input.teamMemberIds ?? existing?.teamMemberIds ?? [];
+  const computedStaffStatus = computeStaffMatterStatus(
+    {
+      clientId: effectiveClientId,
+      additionalClientIds: input.additionalClientIds ?? existing?.additionalClientIds ?? [],
+      responsiblePartnerId: effectiveResponsiblePartnerId,
+      supervisingPartnerId: effectiveSupervisingPartnerId,
+      leadFeeEarnerId: effectiveLeadFeeEarnerId,
+      teamMemberIds: effectiveTeamMemberIds,
+    },
+    store.people,
+  );
+  const hasBarrierCondition = (resolvedConflictCheckRecord?.matches ?? []).some(
+    (m) => m.reviewerConditionType === 'information_barrier',
+  );
+  const effectiveIsStaffMatter = Boolean(
+    computedStaffStatus.isStaffMatter || existing?.isStaffMatter,
+  );
+  const effectiveHasEthicalWall = Boolean(
+    existing?.hasEthicalWall || hasBarrierCondition,
+  );
+  const effectiveRestrictedAccessUserIds =
+    effectiveIsStaffMatter || effectiveHasEthicalWall
+      ? Array.from(
+          new Set(
+            [
+              effectiveResponsiblePartnerId,
+              effectiveSupervisingPartnerId,
+              effectiveLeadFeeEarnerId,
+              ...effectiveTeamMemberIds,
+            ].filter((id): id is string => Boolean(id)),
+          ),
+        )
+      : [];
+
   const matter: Matter = {
     id: existing?.id ?? nextId(store, 'M'),
     recordType: 'matter',
@@ -2708,43 +2953,11 @@ export function saveMatterRecord(
       ...(input.fieldValues ?? {}),
     },
     conflictCheckRecord: resolvedConflictCheckRecord,
-    owningDepartmentId:
-      input.owningDepartmentId !== undefined
-        ? input.owningDepartmentId
-        : existing?.owningDepartmentId,
-    owningTeamId:
-      input.owningTeamId !== undefined
-        ? input.owningTeamId
-        : existing?.owningTeamId,
-    ...computeStaffMatterStatus(
-      {
-        clientId: effectiveClientId,
-        additionalClientIds: input.additionalClientIds ?? existing?.additionalClientIds ?? [],
-        responsiblePartnerId:
-          input.responsiblePartnerId !== undefined
-            ? input.responsiblePartnerId
-            : existing?.responsiblePartnerId ?? opts.byId,
-        supervisingPartnerId:
-          input.supervisingPartnerId !== undefined
-            ? input.supervisingPartnerId
-            : existing?.supervisingPartnerId ?? opts.byId,
-        leadFeeEarnerId:
-          input.leadFeeEarnerId !== undefined
-            ? input.leadFeeEarnerId
-            : existing?.leadFeeEarnerId ?? opts.byId,
-        teamMemberIds: input.teamMemberIds ?? existing?.teamMemberIds ?? [],
-      },
-      store.people,
-    ),
-    ...(input.isStaffMatter !== undefined
-      ? { isStaffMatter: input.isStaffMatter }
-      : {}),
-    ...(input.hasEthicalWall !== undefined
-      ? { hasEthicalWall: input.hasEthicalWall }
-      : {}),
-    ...(input.restrictedAccessUserIds !== undefined
-      ? { restrictedAccessUserIds: input.restrictedAccessUserIds }
-      : {}),
+    owningDepartmentId: nextOwningDepartmentId,
+    owningTeamId: nextOwningTeamId,
+    isStaffMatter: effectiveIsStaffMatter,
+    hasEthicalWall: effectiveHasEthicalWall,
+    restrictedAccessUserIds: effectiveRestrictedAccessUserIds,
   };
 
   // Ensure full conflict check record, risk assessment snapshot, and immutable matter opening snapshot are persisted
@@ -2767,6 +2980,79 @@ export function saveMatterRecord(
     opts.saveMode === 'submit_cleared' ||
     opts.saveMode === 'submit_referred' ||
     !existing.fieldValues?.['matterOpeningSnapshot'];
+
+  // R108: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
+  const tenantCfg = getActiveTenantConfiguration();
+  const host = getPlatformExtensionHost();
+  const costsConfig =
+    store.matterCostsConfig ?? createDefaultMatterCostsConfig(store.values);
+  const resolvedCosts = resolveMatterCostsSnapshot({
+    existing: matter,
+    practiceAreaId: matter.practiceAreaId,
+    config: costsConfig,
+    values: store.values,
+  });
+  const estimatedFeeGbp = Number(
+    matter.feeEstimateGbp ??
+      matter.agreedFeeCapGbp ??
+      resolvedCosts.totalEstimateGbp ??
+      resolvedCosts.agreedCapGbp ??
+      0,
+  );
+  const partnerSignOffCompleted = Boolean(
+    matter.fieldValues['partnerCostSignOffCompleted'] ||
+      matter.conflictClearedById,
+  );
+  const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  const extensionCtx: TenantContext =
+    activeVerifiedSession && activeVerifiedSession.personId === actingUser.id
+      ? resolveCurrentTenantContext(
+          createVerifiedSessionActorFromEntraSession(activeVerifiedSession),
+          tenantCfg,
+        )
+      : {
+          tenantId: tenantCfg.tenantId,
+          hostingMode: tenantCfg.hostingMode,
+          environment: tenantCfg.environment,
+          correlationId: `matter-save-${matter.id}`,
+          actorId: actingUser.id,
+          actorEmail:
+            actingUser.emails?.[0]?.address ??
+            `${actingUser.id.toLowerCase()}@${tenantCfg.branding.primaryDomain}`,
+          actorName: personDisplayName(actingUser),
+          actorRoles: resolveEmployeeRoles(actingUser, store.teams),
+          actorGroups: [],
+          mfaVerified: Boolean(activeVerifiedSession?.mfaVerified),
+          postgresDatabaseName: `pg_tenant_${tenantCfg.tenantId.replace(/-/g, '_')}_${tenantCfg.environment}`,
+          blobContainerName: `tenant-${tenantCfg.tenantId}-${tenantCfg.environment}`,
+          keyVaultSecretPrefix: `${tenantCfg.tenantId}-${tenantCfg.environment}`,
+        };
+  const costsHookInput = {
+    matterId: matter.id,
+    workBasis: resolvedCosts.workBasis,
+    estimatedFeeGbp,
+    disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+    partnerSignOffCompleted,
+  };
+  const calcGovernance = host.executeMatterCostsHookSync(
+    'beforeMatterCostsCalculate',
+    extensionCtx,
+    tenantCfg,
+    costsHookInput,
+  );
+  const openGovernance =
+    isOpeningEvent && !isDraftSave
+      ? host.executeMatterCostsHookSync(
+          'beforeMatterOpen',
+          extensionCtx,
+          tenantCfg,
+          costsHookInput,
+        )
+      : null;
+  matter.fieldValues['matterCostsGovernance'] = openGovernance ?? calcGovernance;
+
   if (isOpeningEvent) {
     // Re-build fresh immutable snapshot at the moment of opening (ignoring any prior draft snapshot)
     const cleanFieldVals = { ...matter.fieldValues };
@@ -2954,24 +3240,25 @@ export function saveMatterRecord(
     }
   }
 
+  saveStore(store);
+
   if (existing) {
-    void syncMatterLifecycleOnSaveSync({
-      matter,
-      previousMatter: existing,
-      userId: opts.byId,
-      store,
-    }).catch((err) => {
-      console.error(
-        JSON.stringify({
-          level: 'error',
-          event: 'document_store.lifecycle_sync_unhandled',
-          code: (err as { code?: string })?.code ?? 'unavailable',
-        }),
-      );
-    });
+    const syncCorrelationId = `corr-lifecycle-sync-${matter.id}-${Date.now()}`;
+    try {
+      void syncMatterLifecycleOnSaveSync({
+        matter,
+        previousMatter: existing,
+        userId: opts.byId,
+        correlationId: syncCorrelationId,
+        store,
+      }).catch((err) => {
+        logDocumentLifecycleSyncError(err, syncCorrelationId);
+      });
+    } catch (err) {
+      logDocumentLifecycleSyncError(err, syncCorrelationId);
+    }
   }
 
-  saveStore(store);
   return { matter };
 }
 
@@ -2984,7 +3271,26 @@ export function updateMatterConflictRecord(
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const matter = store.matters.find((m) => m.id === matterId);
-  if (!matter) return { matter: null };
+  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !matter ||
+    !actingUser ||
+    !actingUser.isEmployee ||
+    !canPersonAccessMatter(matter, byId, actingUser, {
+      allPeople: store.people,
+      teams: store.teams,
+    }) ||
+    (!hasPersonPermission(actingUser, 'matter:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    }) &&
+      !hasPersonPermission(actingUser, 'risk:view', {
+        allPeople: store.people,
+        teams: store.teams,
+      }))
+  ) {
+    return { matter: null };
+  }
   const prevMatter = structuredClone(matter);
 
   matter.conflictCheckRecord = record;
@@ -3038,22 +3344,23 @@ export function updateMatterConflictRecord(
     at: now,
   });
 
-  void syncMatterLifecycleOnSaveSync({
-    matter,
-    previousMatter: prevMatter,
-    userId: byId,
-    store,
-  }).catch((err) => {
-    console.error(
-      JSON.stringify({
-        level: 'error',
-        event: 'document_store.lifecycle_sync_unhandled',
-        code: (err as { code?: string })?.code ?? 'unavailable',
-      }),
-    );
-  });
-
   saveStore(store);
+
+  const syncCorrelationId = `corr-lifecycle-sync-${matter.id}-${Date.now()}`;
+  try {
+    void syncMatterLifecycleOnSaveSync({
+      matter,
+      previousMatter: prevMatter,
+      userId: byId,
+      correlationId: syncCorrelationId,
+      store,
+    }).catch((err) => {
+      logDocumentLifecycleSyncError(err, syncCorrelationId);
+    });
+  } catch (err) {
+    logDocumentLifecycleSyncError(err, syncCorrelationId);
+  }
+
   return { matter };
 }
 
@@ -8166,6 +8473,7 @@ export function getMatterKeyDatesSnapshot(
   keyDateNotApplicable: KeyDateNotApplicable[];
   keyDateReminderStates: KeyDateReminderState[];
   keyDateCalendarSyncs: KeyDateCalendarSync[];
+  canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
 } {
   const store = getStore();
   const user = resolveActorForKeyDates(store, userId);
@@ -8183,6 +8491,7 @@ export function getMatterKeyDatesSnapshot(
       keyDateNotApplicable: [],
       keyDateReminderStates: [],
       keyDateCalendarSyncs: [],
+      canVerifyByKeyDateId: {},
     };
   }
   const matter = store.matters.find((m) => m.id === matterId);
@@ -8192,6 +8501,7 @@ export function getMatterKeyDatesSnapshot(
       keyDateNotApplicable: [],
       keyDateReminderStates: [],
       keyDateCalendarSyncs: [],
+      canVerifyByKeyDateId: {},
     };
   }
   const keyDates = (store.keyDates ?? []).filter((kd) => kd.matterId === matter.id);
@@ -8205,11 +8515,23 @@ export function getMatterKeyDatesSnapshot(
   const keyDateCalendarSyncs = (store.keyDateCalendarSyncs ?? []).filter((cs) =>
     keyDateIdSet.has(cs.keyDateId),
   );
+  const canVerifyByKeyDateId: Record<
+    string,
+    { allowed: boolean; reason?: string }
+  > = {};
+  for (const kd of keyDates) {
+    canVerifyByKeyDateId[kd.id] = canUserVerifyKeyDate(user, kd, {
+      config,
+      allPeople: store.people,
+      teams: store.teams,
+    });
+  }
   return {
     keyDates,
     keyDateNotApplicable,
     keyDateReminderStates,
     keyDateCalendarSyncs,
+    canVerifyByKeyDateId,
   };
 }
 
@@ -9089,9 +9411,14 @@ export function runKeyDateReminderSchedulerRecord(
   const nowIso = new Date().toISOString();
   const verifiedSession =
     options?.session ??
-    (getStoredActorSessionForPerson(actor.id)?.verifiedSession as
+    (getActiveActorSession()?.verifiedSession as
       | VerifiedEntraSessionPayload
       | undefined);
+  if (verifiedSession && verifiedSession.personId !== actor.id) {
+    throw new Error(
+      `TENANCY_ACTOR_MISMATCH: Verified session personId "${verifiedSession.personId}" does not match requested actor "${actor.id}".`,
+    );
+  }
   const effectiveTenantCtx =
     providedCtx ??
     (verifiedSession

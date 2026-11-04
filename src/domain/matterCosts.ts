@@ -4,6 +4,7 @@
  * and Multi-Client Tenant Customisation Configuration.
  */
 import { resolveLabel } from './lists';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type {
   ChoiceValue,
   CustomGradeRateRow,
@@ -197,7 +198,7 @@ export function createDefaultMatterCostsConfig(
 
   return {
     clientProfileCode: 'NALF-LLP',
-    clientProfileName: 'Not A Law Firm LLP — Client Configuration (notalawfirm.example)',
+    clientProfileName: `${getActiveTenantConfiguration().displayName} — Client Configuration (${getActiveTenantConfiguration().branding.primaryDomain})`,
     sectionTitle: 'Matter Costs',
     rateSourceMode: 'pms_when_linked',
     pmsLinkActive: false,

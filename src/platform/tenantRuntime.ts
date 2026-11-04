@@ -13,9 +13,17 @@ import {
   PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
+  validateExtensionManifest,
+  type ExtensionManifest,
   type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
+import type { PlatformExtension } from '@platform/core-api';
+import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
+
+const BUNDLED_TENANT_EXTENSIONS: Readonly<Record<string, PlatformExtension>> = {
+  [notALawFirmMatterCostsExtension.manifest.id]: notALawFirmMatterCostsExtension,
+};
 
 let testBaseConfigOverride: Record<string, unknown> | null = null;
 let testDevOverlayOverride: Record<string, unknown> | null | undefined = undefined;
@@ -27,6 +35,8 @@ export function setActiveTenantConfigForTesting(
 ): void {
   testBaseConfigOverride = baseConfig;
   testDevOverlayOverride = devOverlay;
+  cachedHost = null;
+  cachedHostKey = null;
 }
 
 function resolveTenantPackageDir(): string {
@@ -67,7 +77,8 @@ export function getActiveTenantBaseConfigPath(): string {
     return `${folder}/config/base.json`;
   }
   const path = process.getBuiltinModule('node:path') as typeof import('node:path');
-  return path.join(process.cwd(), folder, 'config', 'base.json');
+  const packageRoot = path.resolve(process.cwd(), folder);
+  return path.join(packageRoot, 'config', 'base.json');
 }
 
 export function getActiveTenantEnvironmentOverlayPath(
@@ -78,7 +89,8 @@ export function getActiveTenantEnvironmentOverlayPath(
     return `${folder}/config/environments/${env}.json`;
   }
   const path = process.getBuiltinModule('node:path') as typeof import('node:path');
-  return path.join(process.cwd(), folder, 'config', 'environments', `${env}.json`);
+  const packageRoot = path.resolve(process.cwd(), folder);
+  return path.join(packageRoot, 'config', 'environments', `${env}.json`);
 }
 
 function readJsonConfigFile(
@@ -170,12 +182,25 @@ export type VerifiedSessionActorInput = UnbrandedSessionActorInput & {
 };
 
 let cachedHost: ExtensionHost | null = null;
-let cachedHostPackageDir: string | null = null;
+let cachedHostKey: string | null = null;
+let cachedHostLoadErrors: {
+  tenantId: string;
+  extensionDir: string;
+  error: string;
+}[] = [];
 let cachedCluster: PostgresTenantCluster | null = null;
+
+export function getExtensionHostLoadErrors(): readonly {
+  tenantId: string;
+  extensionDir: string;
+  error: string;
+}[] {
+  return cachedHostLoadErrors;
+}
 
 function isPlatformExtensionCandidate(
   value: unknown,
-): value is import('@platform/core-api').PlatformExtension {
+): value is PlatformExtension {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Record<string, unknown>;
   return (
@@ -187,17 +212,50 @@ function isPlatformExtensionCandidate(
   );
 }
 
-function loadTenantPackageExtensions(host: ExtensionHost, packageDir: string): void {
+function assertManifestMatchesFile(
+  fileManifest: ExtensionManifest,
+  exportedManifest: ExtensionManifest,
+): void {
+  const validatedExported = validateExtensionManifest(exportedManifest);
+  const normalise = (m: ExtensionManifest) => ({
+    id: m.id,
+    name: m.name,
+    version: m.version,
+    description: m.description,
+    supportedCoreApiRange: m.supportedCoreApiRange,
+    permissions: [...m.permissions],
+    hooks: [...m.hooks],
+    uiSlots: [...(m.uiSlots ?? [])],
+    hookTimeoutMs: m.hookTimeoutMs ?? 2000,
+  });
+  if (
+    JSON.stringify(normalise(fileManifest)) !==
+    JSON.stringify(normalise(validatedExported))
+  ) {
+    throw new Error(
+      `EXTENSION_MANIFEST_MISMATCH: Exported manifest for "${exportedManifest.id}" does not match manifest.json for "${fileManifest.id}".`,
+    );
+  }
+}
+
+function loadTenantPackageExtensions(
+  host: ExtensionHost,
+  packageDir: string,
+  tenantConfig: Pick<TenantConfiguration, 'tenantId' | 'enabledExtensions'>,
+): { tenantId: string; extensionDir: string; error: string }[] {
+  const loadErrors: { tenantId: string; extensionDir: string; error: string }[] = [];
   if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
-    return;
+    return loadErrors;
   }
   const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
   const path = process.getBuiltinModule('node:path') as typeof import('node:path');
   const nodeModule = process.getBuiltinModule('node:module') as typeof import('node:module');
-  const extensionsRoot = path.join(process.cwd(), packageDir, 'extensions');
+  const packageRoot = path.resolve(process.cwd(), packageDir);
+  const extensionsRoot = path.join(packageRoot, 'extensions');
   if (!fs.existsSync(extensionsRoot)) {
-    return;
+    return loadErrors;
   }
+  const enabledSet = new Set(tenantConfig.enabledExtensions ?? []);
   const req = nodeModule.createRequire(path.join(process.cwd(), 'package.json'));
   const entries = fs
     .readdirSync(extensionsRoot, { withFileTypes: true })
@@ -207,32 +265,102 @@ function loadTenantPackageExtensions(host: ExtensionHost, packageDir: string): v
   for (const extDirName of entries) {
     const extDir = path.join(extensionsRoot, extDirName);
     const manifestPath = path.join(extDir, 'manifest.json');
-    const entryCandidates = [
-      path.join(extDir, 'src', 'index.ts'),
-      path.join(extDir, 'src', 'index.js'),
-      path.join(extDir, 'index.ts'),
-      path.join(extDir, 'index.js'),
-    ];
-    const entryPath = entryCandidates.find((candidate) => fs.existsSync(candidate));
-    if (!fs.existsSync(manifestPath) || !entryPath) {
+    if (!fs.existsSync(manifestPath)) {
       continue;
     }
-    const loadedModule = req(entryPath) as Record<string, unknown>;
-    for (const exportedValue of Object.values(loadedModule)) {
-      if (isPlatformExtensionCandidate(exportedValue)) {
+    try {
+      const rawManifestJson = JSON.parse(
+        fs.readFileSync(manifestPath, 'utf8'),
+      ) as Record<string, unknown>;
+      const candidateId =
+        typeof rawManifestJson?.id === 'string' && rawManifestJson.id.trim()
+          ? rawManifestJson.id.trim()
+          : extDirName;
+      if (!enabledSet.has(candidateId) && !enabledSet.has(extDirName)) {
+        continue;
+      }
+      const validatedManifest = validateExtensionManifest(rawManifestJson);
+      if (!enabledSet.has(validatedManifest.id)) {
+        continue;
+      }
+
+      const entryCandidates = [
+        path.join(extDir, 'src', 'index.js'),
+        path.join(extDir, 'index.js'),
+        path.join(extDir, 'src', 'index.ts'),
+        path.join(extDir, 'index.ts'),
+      ];
+      const entryPath = entryCandidates.find((candidate) =>
+        fs.existsSync(candidate),
+      );
+
+      let candidates: PlatformExtension[] = [];
+      if (entryPath) {
+        try {
+          const loadedModule = req(entryPath) as Record<string, unknown>;
+          candidates = Object.values(loadedModule).filter(
+            isPlatformExtensionCandidate,
+          );
+        } catch (requireErr) {
+          const bundled = BUNDLED_TENANT_EXTENSIONS[validatedManifest.id];
+          if (bundled) {
+            candidates = [bundled];
+          } else {
+            throw requireErr;
+          }
+        }
+      } else if (BUNDLED_TENANT_EXTENSIONS[validatedManifest.id]) {
+        candidates = [BUNDLED_TENANT_EXTENSIONS[validatedManifest.id]];
+      } else {
+        throw new Error(
+          `EXTENSION_ENTRY_NOT_FOUND: No entry module found in "${extDir}".`,
+        );
+      }
+
+      if (candidates.length === 0) {
+        throw new Error(
+          `EXTENSION_EXPORT_MISSING: Module in "${extDir}" did not export a valid PlatformExtension.`,
+        );
+      }
+
+      for (const exportedValue of candidates) {
+        assertManifestMatchesFile(validatedManifest, exportedValue.manifest);
         host.registerExtension(exportedValue);
       }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      loadErrors.push({
+        tenantId: tenantConfig.tenantId,
+        extensionDir: extDirName,
+        error: message,
+      });
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'extension_load_failed',
+          tenantId: tenantConfig.tenantId,
+          extensionDir: extDirName,
+          error: message,
+        }),
+      );
     }
   }
+  return loadErrors;
 }
 
 export function getPlatformExtensionHost(): ExtensionHost {
   const packageDir = resolveTenantPackageDir();
-  if (!cachedHost || cachedHostPackageDir !== packageDir) {
+  const tenantConfig = getActiveTenantConfiguration();
+  const hostKey = `${packageDir}::${tenantConfig.tenantId}::${(tenantConfig.enabledExtensions ?? []).join(',')}`;
+  if (!cachedHost || cachedHostKey !== hostKey) {
     const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
-    loadTenantPackageExtensions(host, packageDir);
+    cachedHostLoadErrors = loadTenantPackageExtensions(
+      host,
+      packageDir,
+      tenantConfig,
+    );
     cachedHost = host;
-    cachedHostPackageDir = packageDir;
+    cachedHostKey = hostKey;
   }
   return cachedHost;
 }

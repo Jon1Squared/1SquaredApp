@@ -33,10 +33,12 @@ export { ALL_DOCUMENT_PERMISSIONS };
 
 export interface DocumentPermissionActor {
   readonly id: string;
-  /** Optional tenant ID for tenant-scoped RBAC resolution. */
-  readonly tenantId?: string;
-  /** Full set of assigned role keys for the user (from verified token or Person.roles). */
+  /** Required tenant ID for tenant-scoped RBAC resolution. */
+  readonly tenantId: string;
+  /** Stored role keys for the user (from Person.roles). */
   readonly roles?: readonly string[];
+  /** Verified token role claims (from TenantContext.actorRoles). */
+  readonly tokenRoles?: readonly string[];
   /** Unified per-person permission overrides (`grant` / `revoke`, ADR-0015). */
   readonly permissionOverrides?: PersonPermissionOverrides | null;
   /**
@@ -99,7 +101,7 @@ export function normaliseActorHomeRoles(
   actor: DocumentPermissionActor | null | undefined,
   config?: DocumentRbacConfigInput,
 ): HomeRoleKey[] {
-  if (!actor?.roles?.length) {
+  if (!actor) {
     return [];
   }
   const normalisedConfig = normaliseConfigForResolver(config);
@@ -114,6 +116,7 @@ export function normaliseActorHomeRoles(
       roles: actor.roles,
     },
     rbacConfig,
+    actor.tokenRoles ?? [],
   );
   return authoritative.filter((r) => validRoleSet.has(r)) as HomeRoleKey[];
 }
@@ -122,19 +125,25 @@ function resolveDocGenTenantId(
   actor: DocumentPermissionActor | null | undefined,
   config?: DocumentRbacConfigInput,
 ): string {
-  if (actor?.tenantId && actor.tenantId.trim()) {
-    return actor.tenantId.trim();
+  const tenantId = actor?.tenantId?.trim() ?? '';
+  if (!tenantId) {
+    throw new Error(
+      'RBAC_TENANT_REQUIRED: Document permission resolution requires a non-empty tenantId on DocumentPermissionActor.',
+    );
   }
-  if (
+  const cfgTenantId =
     config &&
     typeof config === 'object' &&
     'tenantId' in config &&
-    typeof (config as { tenantId?: unknown }).tenantId === 'string' &&
-    ((config as { tenantId: string }).tenantId.trim().length > 0)
-  ) {
-    return (config as { tenantId: string }).tenantId.trim();
+    typeof (config as { tenantId?: unknown }).tenantId === 'string'
+      ? ((config as { tenantId: string }).tenantId ?? '').trim()
+      : '';
+  if (cfgTenantId && cfgTenantId !== tenantId) {
+    throw new Error(
+      `DOCUMENT_TENANCY_ERROR: Actor tenantId "${tenantId}" does not match configuration tenantId "${cfgTenantId}".`,
+    );
   }
-  return 'doc-gen-scope';
+  return tenantId;
 }
 
 /**
@@ -147,16 +156,20 @@ export function resolveDocumentPermissions(
   actor: DocumentPermissionActor | null | undefined,
   config?: DocumentRbacConfigInput,
 ): DocumentPermission[] {
-  if (!actor?.id) {
+  if (!actor) {
+    return [];
+  }
+  const tenantId = resolveDocGenTenantId(actor, config);
+  if (!actor.id) {
     return [];
   }
 
   const resolved = resolvePermissions({
     context: {
-      tenantId: resolveDocGenTenantId(actor, config),
+      tenantId,
       correlationId: '',
       actorId: actor.id,
-      actorRoles: actor.roles ?? [],
+      actorRoles: actor.tokenRoles ?? [],
       mfaVerified: Boolean(actor.mfaVerified),
     },
     config: normaliseConfigForResolver(config),
@@ -178,13 +191,15 @@ export function hasDocumentPermission(
   permission: DocumentPermission,
   config?: DocumentRbacConfigInput,
 ): boolean {
-  if (!actor?.id) return false;
+  if (!actor) return false;
+  const tenantId = resolveDocGenTenantId(actor, config);
+  if (!actor.id) return false;
   const resolved = resolvePermissions({
     context: {
-      tenantId: resolveDocGenTenantId(actor, config),
+      tenantId,
       correlationId: '',
       actorId: actor.id,
-      actorRoles: actor.roles ?? [],
+      actorRoles: actor.tokenRoles ?? [],
       mfaVerified: Boolean(actor.mfaVerified),
     },
     config: normaliseConfigForResolver(config),
@@ -209,16 +224,20 @@ export function canActorAccessMatterRecord(
   matter: MatterAccessSubject | null | undefined,
   config: DocumentRbacConfigInput,
 ): boolean {
-  if (!actor?.id || !matter?.id) {
+  if (!actor) {
+    return false;
+  }
+  const tenantId = resolveDocGenTenantId(actor, config);
+  if (!actor.id || !matter?.id) {
     return false;
   }
 
   const resolved = resolvePermissions({
     context: {
-      tenantId: resolveDocGenTenantId(actor, config),
+      tenantId,
       correlationId: '',
       actorId: actor.id,
-      actorRoles: actor.roles ?? [],
+      actorRoles: actor.tokenRoles ?? [],
       mfaVerified: Boolean(actor.mfaVerified),
     },
     config: normaliseConfigForResolver(config),

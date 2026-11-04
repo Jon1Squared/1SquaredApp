@@ -112,7 +112,7 @@ export interface Email {
   address: string;
   typeId: string | null;
   isPrimary: boolean;
-  /** True when issued by the firm (e.g. @notalawfirm.example); marked inactive when the person leaves. */
+  /** True when issued by the firm (matching branding.primaryDomain); marked inactive when the person leaves. */
   firmIssued?: boolean;
   /** Defaults to true; set to false when deactivated on leaving the firm. */
   active?: boolean;
@@ -279,6 +279,9 @@ export type PermissionKey =
   | 'finance:credit_control'
   | 'finance:manage_links'
   | 'risk:view'
+  | 'matter:create'
+  | 'matter:edit'
+  | 'matter:reassign_ownership'
   | 'matter:restricted:access'
   | 'task:claim_any'
   | 'task:reassign_any'

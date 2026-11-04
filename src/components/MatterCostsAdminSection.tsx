@@ -192,12 +192,12 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <strong style={{ fontSize: 14 }}>
-              Three-Layer Platform Architecture · Active Tenant: Not A Law Firm LLP (notalawfirm.example)
+              Three-Layer Platform Architecture · Active Profile: {config.clientProfileName}
             </strong>
             <StatusPill label="PostgreSQL DB-per-Tenant" tone="positive" />
             <StatusPill label="Model A (Azure Single-Tenant) & Model B (Multi-Tenant)" tone="neutral" />
           </div>
-          <code style={{ fontSize: 12 }}>pg_tenant_not_a_law_firm_dev</code>
+          <code style={{ fontSize: 12 }}>DB-per-Tenant Runtime</code>
         </div>
 
         <div className="form-grid-3" style={{ gap: 12 }}>
@@ -235,7 +235,7 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
               <StatusPill label="Schema Validated" tone="positive" />
             </div>
             <div style={{ fontSize: 12.5 }} className="muted">
-              Declarative JSON in <code>client-not-a-law-firm/config/</code> (rate cards, custom grades, disbursement presets, PMS sync mode, Key Vault refs).
+              Declarative tenant JSON configuration (rate cards, custom grades, disbursement presets, PMS sync mode, Key Vault refs).
             </div>
           </div>
 
@@ -251,10 +251,10 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
               <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                 Layer 3 · Client Extensions
               </span>
-              <StatusPill label="nalf-matter-costs-governance v1.2.0" tone="warning" />
+              <StatusPill label="Extension Host Active" tone="warning" />
             </div>
             <div style={{ fontSize: 12.5 }} className="muted">
-              Sandboxed plugin in <code>client-not-a-law-firm/extensions/</code> implementing <code>beforeMatterCostsCalculate</code> &amp; <code>beforeMatterOpen</code> hooks.
+              Sandboxed tenant extension plugins implementing <code>beforeMatterCostsCalculate</code> &amp; <code>beforeMatterOpen</code> hooks via <code>ExtensionHost</code>.
             </div>
           </div>
         </div>

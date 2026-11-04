@@ -167,7 +167,7 @@ export function computeAutomaticPmsLinks(
     }
   }
 
-  // 3. Employees <-> PMS fee_earners on work email (or local-part across @notalawfirm.example / @pembrokevaughan.example)
+  // 3. Employees <-> PMS fee_earners on work email (or local-part across configured firm domains)
   for (const emp of people) {
     if (emp.mergedIntoId || !emp.isEmployee) continue;
     if (usedOneSquared.has(`employee:${emp.id}`)) continue;

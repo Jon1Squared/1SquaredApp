@@ -792,6 +792,8 @@ export function MatterFormClient({
       )?.id ??
       '',
   );
+  const [owningDepartmentExplicitlyChosen, setOwningDepartmentExplicitlyChosen] =
+    useState<boolean>(() => Boolean(existing?.owningDepartmentId));
   const [owningTeamId, setOwningTeamId] = useState<string>(
     () => existing?.owningTeamId ?? '',
   );
@@ -7287,16 +7289,10 @@ export function MatterFormClient({
                   onChange={(e) => {
                     const nextPa = e.target.value;
                     setPracticeAreaId(nextPa);
-                    const nextOrgDept = resolveOrgDepartment(nextPa, orgStructure);
-                    const nextOwningDeptId = nextOrgDept?.id ?? '';
-                    setOwningDepartmentId(nextOwningDeptId);
-                    if (
-                      owningTeamId &&
-                      !orgStructure.teamsOrPracticeGroups.some(
-                        (t) => t.id === owningTeamId && t.parentDepartmentId === nextOwningDeptId,
-                      )
-                    ) {
-                      setOwningTeamId('');
+                    if (!owningDepartmentExplicitlyChosen && !owningTeamId) {
+                      const nextOrgDept = resolveOrgDepartment(nextPa, orgStructure);
+                      const nextOwningDeptId = nextOrgDept?.id ?? '';
+                      setOwningDepartmentId(nextOwningDeptId);
                     }
                     const firstSub = values
                       .filter(
@@ -7394,6 +7390,7 @@ export function MatterFormClient({
                   disabled={isReadOnlyFeeEarner}
                   onChange={(e) => {
                     const nextDeptId = e.target.value;
+                    setOwningDepartmentExplicitlyChosen(Boolean(nextDeptId));
                     setOwningDepartmentId(nextDeptId);
                     if (
                       owningTeamId &&

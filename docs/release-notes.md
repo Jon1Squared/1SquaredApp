@@ -45,10 +45,9 @@
   - Demo Mode persona switching requires `isDemoModeEnabled() === true` (`featureFlags.enableDemoMode === true`, `environment !== 'live'`, and `NODE_ENV !== 'production'`; `homePagesConfig.firmSettings.demoMode` is derived from `isDemoModeEnabled()` and is not a separate setting), requires a target persona marked `demo: true`, and verifies that the signed-in actor holds every permission of the target persona and can access every restricted/staff matter (`restrictedAccessUserIds`) accessible to the target persona.
 - **Tenant Package Resolution & Dynamic Extension Registration (`PLATFORM_TENANT_PACKAGE_DIR`):**
   - `PLATFORM_TENANT_PACKAGE_DIR` must be explicitly configured outside `NODE_ENV === 'test'`; `resolveTenantPackageDir()` throws `TENANT_CONFIG_ERROR` when unset rather than falling back to the first `client-*` directory.
-  - `getPlatformExtensionHost()` dynamically discovers and registers client extensions declared under `<PLATFORM_TENANT_PACKAGE_DIR>/extensions/*/manifest.json` at startup without static client imports in core or host code.
+  - `getPlatformExtensionHost()` dynamically discovers `<PLATFORM_TENANT_PACKAGE_DIR>/extensions/*/manifest.json`, validates each `manifest.json` against `ExtensionManifestSchema`, checks compatibility with the extension module's exported `manifest`, registers only extensions listed in `tenantConfig.enabledExtensions`, isolates and logs load failures (`extension_load_failed`), caches the `ExtensionHost` instance, and executes `beforeMatterCostsCalculate` and `beforeMatterOpen` hooks during `saveMatterRecord`.
 - **Infrastructure (`core/infra/main.bicep`):**
-  - `entraClientId` and `entraRedirectUri` are now required Bicep parameters (no empty-string defaults).
-  - Key Vault network ACLs are configured so Azure App Service can resolve `@Microsoft.KeyVault(...)` secret references at runtime.
+  - `entraClientId` and `entraRedirectUri` are now required Bicep parameters (no empty-string defaults), `vnetAddressPrefix` and `appServiceSubnetPrefix` are parameterised for hub-and-spoke environments, and Key Vault network ACLs are configured so Azure App Service can resolve `@Microsoft.KeyVault(...)` secret references at runtime.
 - **Scoped Blob Download Token Signing (`PLATFORM_BLOB_SIGNING_KEY`):**
   - `PLATFORM_BLOB_SIGNING_KEY` must be configured in Key Vault / environment in non-test environments (`resolveTenantBlobSigningKey`). The legacy static fallback key has been removed, and signature verification uses constant-time `crypto.timingSafeEqual`.
 - **Transitional Local Store (`data/runtime-store.json`):**
@@ -56,10 +55,12 @@
   - All invented employee and client fixture email addresses now use RFC 2606 reserved domains (`notalawfirm.example`, `*.example`, `example.com`) and Ofcom drama telephone ranges.
 - **Entra ID Session & RBAC Isolation:**
   - `TenantContext` requires a branded `VerifiedSessionActorInput` minted exclusively from a cryptographically verified `VerifiedEntraSessionPayload` in `src/server/entraAuth.ts`, and rejects actors missing `email` or `entraObjectId`.
-  - In `hybrid` authority mode, token-derived roles are stored per `(tenantId, personId)` with the verified session's expiry, resolved only inside an active `runWithActiveActorSession` (`AsyncLocalStorage`) request scope for that exact `(tenantId, personId)`, and cleared only for the signing-out `(tenantId, personId)` on `POST /api/auth/logout`.
-  - `getEmployeeDetailsForUser` returns `sensitive: null` unless `logViewSensitive: true` is passed (which records a `view-sensitive` audit entry).
+  - In `hybrid` authority mode, token-derived roles are resolved strictly from the active `runWithActiveActorSession` (`AsyncLocalStorage`) request scope for that exact `(tenantId, personId)` (using the verified session's expiry), with no server-wide mutable session map.
+  - Added `matter:create`, `matter:edit`, and `matter:reassign_ownership` RBAC permissions enforced in `saveMatterRecord` and `updateMatterConflictRecord`, and server-side validation of `owningDepartmentId` and `owningTeamId` against active `store.orgStructure` records.
+  - `getEmployeeDetailsForUser` returns `sensitive: null` unless `logViewSensitive: true` is passed and `logEmployeeRestrictedAccess` records a `view-sensitive` audit entry.
 - **Key Dates & Limitation Governance:**
   - Limitation date calculations are verified server-side against the `(ruleSetId, ruleId)` pair in tenant configuration.
   - Superseding a confirmed calculated key date to a different due date (or after its limitation rule set has been retired from configuration) requires `keydate:override_calculation` and a recorded override reason, writing a `keydate-override-calculation` audit entry.
-  - Reminder task idempotency keys are tenant-scoped (`keydate-reminder:${tenantId}:${keyDateId}`), and restricted/staff matters with no permitted assignees surface a distinct `restricted_matter_no_permitted_assignee` compliance exception without leaking task details.
+  - Reminder task idempotency keys are tenant-scoped (`keydate-reminder:${tenantId}:${keyDateId}`), restricted/staff matters with no permitted assignees surface a distinct `restricted_matter_no_permitted_assignee` compliance exception without leaking task details, and orphan key dates referencing a missing matter surface an admin-only (`keydate:configure`) `orphan_key_date_missing_matter` exception with `keyDateId` only.
+  - Added reversible per-tenant migration `0004_key_date_reminder_last_skipped_reason_expand` (`last_skipped_reason` column on `key_date_reminder_states`).
   - Phase 1 Calendar Sync is read-only / disabled pending Phase 2 Microsoft Graph calendar integration.

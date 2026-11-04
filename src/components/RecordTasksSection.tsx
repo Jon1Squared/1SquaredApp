@@ -6,7 +6,12 @@ import { saveTaskAction, takeTaskAction } from '@/app/actions';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName } from '@/domain/names';
-import { isTaskOpen, isTaskOverdue, tasksForRecord } from '@/domain/tasks';
+import {
+  canUserTakeTask,
+  isTaskOpen,
+  isTaskOverdue,
+  tasksForRecord,
+} from '@/domain/tasks';
 import type {
   ChoiceValue,
   Person,
@@ -35,6 +40,7 @@ interface Props {
   values: ChoiceValue[];
   currentUserId: string;
   canClaimAnyTask?: boolean;
+  canTakeByTaskId?: Record<string, boolean>;
 }
 
 export function RecordTasksSection({
@@ -49,6 +55,7 @@ export function RecordTasksSection({
   values,
   currentUserId,
   canClaimAnyTask = false,
+  canTakeByTaskId,
 }: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
@@ -204,14 +211,16 @@ export function RecordTasksSection({
       .filter(Boolean)
       .join(' · ');
     const canTake =
-      !t.assignedPersonId &&
-      (!t.assignedTeamId ||
-        canClaimAnyTask ||
-        teams.some(
-          (tm) =>
-            tm.id === t.assignedTeamId &&
-            (tm.memberIds.includes(currentUserId) || tm.leadIds.includes(currentUserId)),
-        ));
+      canTakeByTaskId && t.id in canTakeByTaskId
+        ? Boolean(canTakeByTaskId[t.id])
+        : canUserTakeTask(
+            currentUserId,
+            t,
+            teams,
+            people,
+            values,
+            canClaimAnyTask ? ['task:claim_any'] : [],
+          );
 
     return (
       <div key={t.id} className="list-row">

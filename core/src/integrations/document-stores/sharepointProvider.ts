@@ -962,19 +962,54 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
       }
 
       const siteId = sp?.siteId ?? `site-${this.storeId}`;
+      const requestedLib = input.libraryId
+        ? sp?.libraries.find(
+            (l) =>
+              l.libraryId?.toLowerCase() === input.libraryId!.toLowerCase() ||
+              l.libraryUrlSegment?.toLowerCase() ===
+                input.libraryId!.toLowerCase() ||
+              l.displayName?.toLowerCase() === input.libraryId!.toLowerCase(),
+          )
+        : undefined;
+      if (input.libraryId && sp?.libraries?.length && !requestedLib) {
+        return {
+          resolved: false,
+          libraryId: input.libraryId,
+          errorCode: 'not_found',
+          errorMessage: `Requested library "${input.libraryId}" does not exist in store "${this.storeId}".`,
+        };
+      }
       const directMatchedLib = sp?.libraries.find(
         (l) =>
-          l.libraryUrlSegment.toLowerCase() ===
+          l.libraryUrlSegment?.toLowerCase() ===
             parsed.libraryUrlSegment!.toLowerCase() ||
-          l.displayName.toLowerCase() ===
+          l.displayName?.toLowerCase() ===
             parsed.libraryUrlSegment!.toLowerCase() ||
-          l.libraryId.toLowerCase() ===
+          l.libraryId?.toLowerCase() ===
             parsed.libraryUrlSegment!.toLowerCase(),
       );
+      if (
+        input.libraryId &&
+        directMatchedLib &&
+        directMatchedLib.libraryId.toLowerCase() !==
+          (requestedLib?.libraryId ?? input.libraryId).toLowerCase()
+      ) {
+        return {
+          resolved: false,
+          libraryId: directMatchedLib.libraryId,
+          errorCode: 'invalid_path',
+          errorMessage: `Resolved library "${directMatchedLib.libraryId}" does not match requested library "${input.libraryId}".`,
+        };
+      }
       const isRelativeInput = !/^https?:\/\//i.test(input.rawUrlOrPath.trim());
       const matchedLib =
         directMatchedLib ??
-        (isRelativeInput && sp?.libraries?.length ? sp.libraries[0] : undefined);
+        (isRelativeInput
+          ? requestedLib ??
+            (!input.libraryId && sp?.libraries?.length === 1
+              ? sp.libraries[0]
+              : undefined)
+          : undefined);
       const effectiveFolderRelativePath =
         !directMatchedLib && matchedLib
           ? [parsed.libraryUrlSegment, parsed.folderRelativePath]
@@ -984,6 +1019,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
 
       const libraryId =
         matchedLib?.libraryId ??
+        requestedLib?.libraryId ??
         parsed.libraryUrlSegment.toLowerCase().replace(/[^a-z0-9]+/g, '-');
       const driveId =
         matchedLib?.driveId ?? `drive-${this.storeId}-${libraryId}`;
@@ -1004,6 +1040,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
         const rootItem = partition.items.get('root')!;
         return {
           resolved: true,
+          libraryId,
           siteId,
           driveId,
           libraryName: matchedLib?.displayName ?? parsed.libraryUrlSegment,
@@ -1020,6 +1057,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
       if (!folderItem) {
         return {
           resolved: false,
+          libraryId,
           siteId,
           driveId,
           libraryName: matchedLib?.displayName ?? parsed.libraryUrlSegment,
@@ -1030,6 +1068,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
 
       return {
         resolved: true,
+        libraryId,
         siteId,
         driveId,
         libraryName: matchedLib?.displayName ?? parsed.libraryUrlSegment,

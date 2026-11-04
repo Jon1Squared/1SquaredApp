@@ -34,6 +34,7 @@ import {
   buildExtensionFieldCatalogueEntries,
   isExcludedSensitiveEmployeeFieldKey,
 } from '../domain/document-generation/fieldCatalogue';
+import { validateExtensionManifest } from '../config-engine/index';
 
 export interface ExtensionHostOptions {
   coreApiVersion: string;
@@ -78,6 +79,7 @@ export class ExtensionHost {
         'EXTENSION_MANIFEST_ERROR: Extension manifest must declare id, version, and supportedCoreApiRange.',
       );
     }
+    validateExtensionManifest(manifest);
 
     if (
       !isCoreApiRangeCompatible(
@@ -203,6 +205,82 @@ export class ExtensionHost {
         }
       } catch (err) {
         // Fail-safe error isolation: log warning without crashing the core
+        const reason = err instanceof Error ? err.message : 'Unknown error';
+        aggregatedWarnings.push(
+          `[Extension isolated error: ${ext.manifest.id}] ${reason}`,
+        );
+      }
+    }
+
+    return {
+      requiresPartnerSignOff,
+      governanceWarnings: aggregatedWarnings,
+      allowProceed,
+    };
+  }
+
+  public executeMatterCostsHookSync(
+    hookName: 'beforeMatterCostsCalculate' | 'beforeMatterOpen',
+    tenantCtx: TenantContext,
+    tenantConfig: TenantConfiguration,
+    input: MatterCostsHookInput,
+  ): MatterCostsHookResult {
+    if (tenantCtx.tenantId !== tenantConfig.tenantId) {
+      throw new Error(
+        'EXTENSION_TENANT_MISMATCH: TenantContext and TenantConfiguration must belong to the same tenant.',
+      );
+    }
+
+    const active = this.getActiveExtensionsForTenant(tenantConfig);
+    const aggregatedWarnings: string[] = [];
+    let requiresPartnerSignOff = false;
+    let allowProceed = true;
+
+    const scopedContext: ExtensionExecutionContext = Object.freeze({
+      tenant: Object.freeze({
+        tenantId: tenantCtx.tenantId,
+        hostingMode: tenantCtx.hostingMode,
+        environment: tenantCtx.environment,
+        correlationId: tenantCtx.correlationId,
+        actorRoles: tenantCtx.actorRoles,
+      }),
+      config: Object.freeze({ ...tenantConfig }),
+    });
+
+    for (const ext of active) {
+      const fn = ext.hooks[hookName];
+      if (!fn) continue;
+
+      const timeoutMs =
+        ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
+      const startedAt = Date.now();
+
+      try {
+        const maybePromise = fn(scopedContext, input);
+        if (
+          maybePromise &&
+          typeof (maybePromise as Promise<MatterCostsHookResult>).then ===
+            'function'
+        ) {
+          continue;
+        }
+        const elapsedMs = Date.now() - startedAt;
+        if (elapsedMs > timeoutMs) {
+          throw new Error(
+            `Extension "${ext.manifest.id}" timed out after ${timeoutMs}ms`,
+          );
+        }
+        const result = maybePromise as MatterCostsHookResult;
+        if (result.requiresPartnerSignOff) {
+          requiresPartnerSignOff = true;
+        }
+        if (!result.allowProceed) {
+          allowProceed = false;
+        }
+        if (result.governanceWarnings?.length) {
+          aggregatedWarnings.push(...result.governanceWarnings);
+        }
+      } catch (err) {
         const reason = err instanceof Error ? err.message : 'Unknown error';
         aggregatedWarnings.push(
           `[Extension isolated error: ${ext.manifest.id}] ${reason}`,

@@ -811,17 +811,15 @@ export function getRightToWorkEvidenceOnFile(person: Person | null | undefined):
  * applies HR retention rules to employment data separately from contact data,
  * and keeps the person record as a contact if they have other roles or the user chooses to.
  */
-function resolveConfiguredFirmPrimaryDomain(): string {
-  if (typeof window !== 'undefined') {
-    return 'firm.example';
+export function resolveConfiguredFirmPrimaryDomain(): string {
+  const config = getActiveTenantConfiguration();
+  const primaryDomain = config?.branding?.primaryDomain?.trim().toLowerCase();
+  if (!primaryDomain) {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: Tenant configuration is missing branding.primaryDomain.',
+    );
   }
-  try {
-    return (getActiveTenantConfiguration().branding.primaryDomain || 'firm.example')
-      .trim()
-      .toLowerCase();
-  } catch {
-    return 'firm.example';
-  }
+  return primaryDomain;
 }
 
 function isConfiguredFirmDomainEmail(address: string, firmWorkEmail?: string | null): boolean {

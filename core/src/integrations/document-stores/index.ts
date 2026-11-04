@@ -51,6 +51,8 @@ const USER_FRIENDLY_ERROR_MESSAGES: Record<DocumentStoreErrorCode, string> = {
     'The external document store is temporarily unavailable. Please try again shortly.',
   misconfigured:
     'The document store connection is misconfigured. Please contact your administrator.',
+  invalid_path:
+    'The specified document store path or library does not match the routed matter configuration.',
   reauthentication_required:
     'Your document store session requires re-authentication or multi-factor verification. Please sign in again.',
 };

@@ -16,7 +16,6 @@ import {
   previewTemplateAction,
 } from '@/app/actions';
 import {
-  buildDocumentActorFromPerson,
   isTemplateAvailableInContext,
   listPartyCandidatesForRecord,
   type DocumentOutputFormat,
@@ -157,7 +156,7 @@ export function DocumentGenerationModal({
 
   const availableTemplates = useMemo(() => {
     if (!snapshot || !currentUser) return [];
-    const actor = buildDocumentActorFromPerson(currentUser);
+    const actor = snapshot.actor;
     const versionById = new Map<string, DocumentTemplateVersionRecord>(
       snapshot.versions.map((v) => [v.id, v]),
     );
@@ -188,47 +187,8 @@ export function DocumentGenerationModal({
         version: activeVer,
         actor,
         config: {
-          schemaVersion: '1.0.0',
-          tenantId: 'not-a-law-firm',
-          displayName: 'Not A Law Firm LLP',
-          hostingMode: 'multi_tenant',
-          environment: 'dev',
-          branding: {
-            primaryDomain: 'notalawfirm.example',
-            accentColorHex: '#1f6feb',
-            logoAssetKey: 'logo.svg',
-          },
-          featureFlags: {
-            enableMatterCostsGovernance: true,
-            enablePmsLiveRateSync: true,
-            enableAiMatterExtraction: false,
-          },
-          matterCosts: {
-            rateSourceMode: 'pms_when_linked',
-            allowMatterRateOverrides: true,
-            partnerSignOffThresholdGbp: 25000,
-            rateCards: [],
-            disbursementPresets: [],
-          },
-          integrations: {
-            pmsConnectionSecretVaultRef: 'kv://v/s',
-            companiesHouseApiKeyVaultRef: 'kv://v/s',
-            aiProviderChoice: 'disabled',
-          },
-          customFields: [],
-          enabledExtensions: [],
           documentGeneration: snapshot.config,
-          rbac: {
-            roles: {},
-            departmentGrants: {},
-            relationshipGrants: [],
-            identityMapping: {
-              authorityMode: 'hybrid',
-              entraGroupToRoleKey: {},
-              entraAppRoleToRoleKey: {},
-              requireMfaForAdminPermissions: true,
-            },
-          },
+          ...(snapshot.rbac ? { rbac: snapshot.rbac } : {}),
         },
         sourceEntityType,
         practiceAreaKey: practiceAreaLabel,

@@ -49,6 +49,12 @@ param entraRedirectUri string
 @description('Tenant configuration package directory relative to application root')
 param tenantPackageDir string = 'client-${tenantSlug}'
 
+@description('Virtual network CIDR address prefix (parameterised per environment/spoke to avoid hub-and-spoke peering collisions)')
+param vnetAddressPrefix string = '10.24.0.0/16'
+
+@description('Subnet CIDR address prefix for App Service regional VNet integration')
+param appServiceSubnetPrefix string = '10.24.1.0/24'
+
 var resourceSuffix = '${tenantSlug}-${environment}'
 var sanitizedSlug = replace(tenantSlug, '-', '')
 var storageAccountName = take('st${sanitizedSlug}${environment}', 24)
@@ -69,14 +75,14 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
   properties: {
     addressSpace: {
       addressPrefixes: [
-        '10.24.0.0/16'
+        vnetAddressPrefix
       ]
     }
     subnets: [
       {
         name: 'snet-appservice'
         properties: {
-          addressPrefix: '10.24.1.0/24'
+          addressPrefix: appServiceSubnetPrefix
           serviceEndpoints: [
             {
               service: 'Microsoft.KeyVault'
@@ -170,7 +176,6 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
     httpsOnly: true
     virtualNetworkSubnetId: '${vnet.id}/subnets/snet-appservice'
     vnetRouteAllEnabled: true
-    vnetContentShareEnabled: true
     siteConfig: {
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'

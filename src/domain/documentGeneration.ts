@@ -53,12 +53,19 @@ import {
   normaliseActorHomeRoles,
   resolveDocumentPermissions,
   type DocumentPermissionActor,
+  type DocumentRbacConfigInput,
   type MatterAccessSubject,
   type TemplateUsageReportFilter,
   type TemplateUsageReportResult,
+  type TenantContext,
 } from '@platform/core';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { resolveEmployeeRoles } from './homeConfig';
 import { personDisplayName } from './names';
+import {
+  getActiveActorSession,
+  getActiveSessionTokenRolesForPerson,
+} from './rbac';
 import type {
   Address,
   ChoiceValue,
@@ -82,7 +89,7 @@ export function isTemplateAvailableInContext(params: {
   template: DocumentTemplateRecord;
   version?: DocumentTemplateVersionRecord | null;
   actor: DocumentPermissionActor;
-  config: TenantConfiguration;
+  config?: DocumentRbacConfigInput;
   sourceEntityType: 'matter' | 'client';
   practiceAreaKey?: string | null;
   matterTypeKey?: string | null;
@@ -149,7 +156,7 @@ export function isTemplateAvailableInContext(params: {
     };
   }
 
-  const actorRoles = new Set(normaliseActorHomeRoles(actor));
+  const actorRoles = new Set(normaliseActorHomeRoles(actor, config));
   if (rules.allowedRoleKeys?.length) {
     const hasRole = rules.allowedRoleKeys.some((r) => actorRoles.has(r));
     if (!hasRole) {
@@ -448,19 +455,34 @@ export {
 
 /**
  * Converts a `Person` record into a `DocumentPermissionActor` using their full resolved `HomeRoleKey` set
- * (`resolveEmployeeRoles(user)`) plus any explicit `user.documentPermissions` overrides.
+ * (`resolveEmployeeRoles(user)`), verified token role claims, and any explicit `user.documentPermissions` overrides.
  * Never uses the UI's "Viewing as" role (`activeViewingRole`).
  */
 export function buildDocumentActorFromPerson(
   user: Person | null | undefined,
+  tenantContext?: Pick<TenantContext, 'tenantId'> & {
+    actorRoles?: readonly string[];
+    mfaVerified?: boolean;
+  },
 ): DocumentPermissionActor {
+  const tenantId =
+    tenantContext?.tenantId?.trim() ||
+    getActiveActorSession()?.tenantId?.trim() ||
+    getActiveTenantConfiguration().tenantId;
   if (!user) {
-    return { id: '', roles: [] };
+    return { id: '', tenantId, roles: [], tokenRoles: [] };
   }
   const fullRoles = resolveEmployeeRoles(user);
+  const tokenRoles =
+    tenantContext?.actorRoles ??
+    getActiveSessionTokenRolesForPerson(user.id, tenantId) ??
+    [];
   return {
     id: user.id,
+    tenantId,
     roles: fullRoles,
+    tokenRoles,
+    mfaVerified: tenantContext?.mfaVerified,
     departmentId: user.departmentId ?? user.employment?.departmentId ?? null,
     permissionOverrides: user.permissionOverrides ?? null,
     documentPermissions: user.documentPermissions,
@@ -474,8 +496,15 @@ export function resolvePersonDocumentPermissions(
     | Pick<TenantConfiguration, 'documentGeneration'>
     | DocumentGenerationConfig
     | null,
+  tenantContext?: Pick<TenantContext, 'tenantId'> & {
+    actorRoles?: readonly string[];
+    mfaVerified?: boolean;
+  },
 ): DocumentPermission[] {
-  return resolveDocumentPermissions(buildDocumentActorFromPerson(user), config);
+  return resolveDocumentPermissions(
+    buildDocumentActorFromPerson(user, tenantContext),
+    config,
+  );
 }
 
 export function hasPersonDocumentPermission(
@@ -486,9 +515,13 @@ export function hasPersonDocumentPermission(
     | Pick<TenantConfiguration, 'documentGeneration'>
     | DocumentGenerationConfig
     | null,
+  tenantContext?: Pick<TenantContext, 'tenantId'> & {
+    actorRoles?: readonly string[];
+    mfaVerified?: boolean;
+  },
 ): boolean {
   return hasDocumentPermission(
-    buildDocumentActorFromPerson(user),
+    buildDocumentActorFromPerson(user, tenantContext),
     permission,
     config,
   );
@@ -922,8 +955,12 @@ export function buildFieldResolutionContextForRecord(params: {
         country: 'United Kingdom',
       },
       mainPhone: firm?.phone ?? '+44 20 7946 0800',
-      mainEmail: firm?.email ?? 'enquiries@pembrokevaughan.example',
-      website: firm?.website ?? 'www.pembrokevaughan.example',
+      mainEmail:
+        firm?.email ??
+        `enquiries@${getActiveTenantConfiguration().branding.primaryDomain}`,
+      website:
+        firm?.website ??
+        `www.${getActiveTenantConfiguration().branding.primaryDomain}`,
       complaintsPartnerName: 'Marcus Vaughan',
     },
     user: userData,

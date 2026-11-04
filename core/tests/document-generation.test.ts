@@ -41,7 +41,10 @@ import { GET as getDocumentDownloadRoute } from '@/app/api/documents/download/ro
 import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
 import { toMatterAccessSubject } from '@/domain/documentGeneration';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
-import { setActiveSessionTokenRolesForPerson } from '@/domain/rbac';
+import {
+  runWithActiveActorSession,
+  setActiveSessionTokenRolesForPerson,
+} from '@/domain/rbac';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   getDocumentGenerationSnapshotForUser,
@@ -58,22 +61,26 @@ import { getStore, saveStore } from '@/server/store';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 
-function registerTestSessionForEmployee(personId: string): void {
+function buildTestSessionScopeForEmployee(personId: string) {
   const store = getStore();
   const tenantId = getActiveTenantConfiguration().tenantId;
   const emp = store.people.find((p) => p.id === personId);
-  if (!emp) return;
+  if (!emp) return null;
   const nowIso = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
   const roles = resolveEmployeeRoles(emp, store.teams);
   const signed = createSignedEntraSessionCookie({
     personId: emp.id,
-    oid: emp.entraObjectId ?? `00000000-0000-4000-8000-${emp.id.replace(/\D/g, '').padStart(12, '0')}`,
+    oid:
+      emp.entraObjectId ??
+      `00000000-0000-4000-8000-${emp.id.replace(/\D/g, '').padStart(12, '0')}`,
     tid: '00000000-0000-4000-8000-000000000099',
     tenantId,
     sub: emp.id,
-    email: emp.emails?.[0]?.address ?? `${emp.id.toLowerCase()}@notalawfirm.example`,
-    displayName: `${emp.firstName ?? ''} ${emp.surname ?? ''}`.trim() || emp.id,
+    email:
+      emp.emails?.[0]?.address ?? `${emp.id.toLowerCase()}@notalawfirm.example`,
+    displayName:
+      `${emp.firstName ?? ''} ${emp.surname ?? ''}`.trim() || emp.id,
     entraRoles: roles,
     mappedRoles: roles,
     entraGroups: [],
@@ -83,13 +90,25 @@ function registerTestSessionForEmployee(personId: string): void {
     expiresAt,
   });
   const verified = verifySignedEntraSessionCookie(signed);
-  if (verified) {
-    setActiveSessionTokenRolesForPerson(emp.id, roles, {
-      tenantId,
-      expiresAt,
-      verifiedSession: verified,
-    });
-  }
+  if (!verified) return null;
+  setActiveSessionTokenRolesForPerson(emp.id, roles, {
+    tenantId,
+    expiresAt,
+    verifiedSession: verified,
+  });
+  return {
+    personId: emp.id,
+    tenantId,
+    tokenRoles: roles,
+    expiresAtMs: Date.parse(expiresAt),
+    verifiedSession: verified,
+  };
+}
+
+function runAsTestEmployee<T>(personId: string, fn: () => T): T {
+  const scope = buildTestSessionScopeForEmployee(personId);
+  if (!scope) return fn();
+  return runWithActiveActorSession(scope, fn);
 }
 
 describe('Document Generation — Unit, Contract, Isolation, Record-Access & Security Suite', () => {
@@ -399,12 +418,14 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
   it('4. Enforces DocumentPermission resolution from full role set (ignoring Viewing-As role) and finance:view gating', () => {
     const partnerViewingAsSecretary = {
       id: 'P-PARTNER-1',
+      tenantId: baseTenantConfig.tenantId,
       roles: ['partner'],
       activeViewingRole: 'legal_secretary', // UI "Viewing as" switcher
     };
 
     const secretaryActor = {
       id: 'P-SEC-1',
+      tenantId: baseTenantConfig.tenantId,
       roles: ['legal_secretary'],
     };
 
@@ -457,10 +478,12 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
 
     const builderActor = {
       id: 'P-BUILDER-1',
+      tenantId: ctxA.tenantId,
       roles: ['admin', 'managing_partner'],
     };
     const secondApproverActor = {
       id: 'P-APPROVER-2',
+      tenantId: ctxA.tenantId,
       roles: ['risk_compliance'],
     };
 
@@ -645,7 +668,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       storage,
       engine,
       catalogue,
-      actor: { id: 'P-ADMIN-B1', roles: ['admin'] },
+      actor: { id: 'P-ADMIN-B1', tenantId: ctxB.tenantId, roles: ['admin'] },
       config: configB,
       pkg: exportedPkg,
     });
@@ -659,10 +682,10 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     const engine = new BasicMergeEngine();
     const catalogue = buildFullFieldCatalogueForTenant();
 
-    const builderA = { id: 'P-BUILD-A', roles: ['admin'] };
-    const approverA = { id: 'P-APP-A', roles: ['risk_compliance'] };
-    const feeEarnerAssigned = { id: 'P-FE-ASSIGNED', roles: ['fee_earner'] };
-    const feeEarnerUnassigned = { id: 'P-FE-OTHER', roles: ['fee_earner'] };
+    const builderA = { id: 'P-BUILD-A', tenantId: ctxA.tenantId, roles: ['admin'] };
+    const approverA = { id: 'P-APP-A', tenantId: ctxA.tenantId, roles: ['risk_compliance'] };
+    const feeEarnerAssigned = { id: 'P-FE-ASSIGNED', tenantId: ctxA.tenantId, roles: ['fee_earner'] };
+    const feeEarnerUnassigned = { id: 'P-FE-OTHER', tenantId: ctxA.tenantId, roles: ['fee_earner'] };
 
     const docxBytes = buildValidDocxArchive({
       paragraphs: [
@@ -898,7 +921,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
 
     // Usage reporting & dual user-level gate (`document_template:view_usage_by_user` + `showUserLevelDetail`)
-    const partnerActor = { id: 'P-PARTNER-1', roles: ['partner'] };
+    const partnerActor = { id: 'P-PARTNER-1', tenantId: ctxA.tenantId, roles: ['partner'] };
     const partnerReport = queryTemplateUsageReport({
       ctx: ctxA,
       repo,
@@ -1095,8 +1118,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       ),
     ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
 
-    registerTestSessionForEmployee('P-000004');
-    const hostInit = await getInitializedDocGenContext('P-000004');
+    const hostInit = await runAsTestEmployee('P-000004', () =>
+      getInitializedDocGenContext('P-000004'),
+    );
     const hostIssued = await hostInit.storage.issueScopedDownloadToken(
       hostInit.ctx,
       {
@@ -1187,9 +1211,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       },
     };
 
-    const builder = { id: 'P-ADMIN-1', roles: ['admin'] };
-    const unnamedPartner = { id: 'P-PARTNER-UNNAMED', roles: ['partner'] };
-    const namedPartner = { id: 'P-PARTNER-NAMED', roles: ['partner'] };
+    const builder = { id: 'P-ADMIN-1', tenantId: ctxA.tenantId, roles: ['admin'] };
+    const unnamedPartner = { id: 'P-PARTNER-UNNAMED', tenantId: ctxA.tenantId, roles: ['partner'] };
+    const namedPartner = { id: 'P-PARTNER-NAMED', tenantId: ctxA.tenantId, roles: ['partner'] };
 
     const docxBytes = buildValidDocxArchive({
       paragraphs: [{ text: 'Hello {{ client.name }}' }],
@@ -1233,7 +1257,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     approveTemplateVersion({
       ctx: ctxA,
       repo,
-      actor: { id: 'P-RISK-APPROVER', roles: ['risk_compliance'] },
+      actor: { id: 'P-RISK-APPROVER', tenantId: ctxA.tenantId, roles: ['risk_compliance'] },
       config: customPartnerConfig,
       versionId: created.version.id,
     });
@@ -1357,10 +1381,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       wallMatter.responsiblePartnerId = 'P-000001';
       wallMatter.teamMemberIds = ['P-000001'];
 
-      registerTestSessionForEmployee('P-000001');
-      registerTestSessionForEmployee('P-000007');
-      const { ctx, repo: hostRepo } =
-        await getInitializedDocGenContext('P-000001');
+      const { ctx, repo: hostRepo } = await runAsTestEmployee('P-000001', () =>
+        getInitializedDocGenContext('P-000001'),
+      );
       const docRecord = {
         id: 'DOC-WALL-R11',
         tenantId: ctx.tenantId,
@@ -1393,13 +1416,17 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       store.documents = [...(store.documents ?? []), docRecord];
 
       // P-000007 is an excluded fee earner (not on M-000002's ethical wall allow-list)
-      const excludedSnap = await getDocumentGenerationSnapshotForUser('P-000007');
+      const excludedSnap = await runAsTestEmployee('P-000007', () =>
+        getDocumentGenerationSnapshotForUser('P-000007'),
+      );
       expect(
         excludedSnap.documents.some((d) => d.id === 'DOC-WALL-R11'),
       ).toBe(false);
 
       // P-000001 (on the allow-list) sees the document
-      const allowedSnap = await getDocumentGenerationSnapshotForUser('P-000001');
+      const allowedSnap = await runAsTestEmployee('P-000001', () =>
+        getDocumentGenerationSnapshotForUser('P-000001'),
+      );
       expect(
         allowedSnap.documents.some((d) => d.id === 'DOC-WALL-R11'),
       ).toBe(true);
@@ -1419,29 +1446,32 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         getDocumentGenerationSnapshotForUser('NON-EXISTENT-USER'),
       ).rejects.toThrow(/UNAUTHENTICATED/);
 
-      registerTestSessionForEmployee('P-000001');
       const beforeInvalidSave = structuredClone(
         store.documentGenerationConfigOverride,
       );
       await expect(
-        updateDocumentGenerationConfigService(
-          {
-            customDocumentTypes: [
-              { key: 'INVALID UPPERCASE KEY!', label: 'Invalid' },
-            ],
-          },
-          'P-000001',
+        runAsTestEmployee('P-000001', () =>
+          updateDocumentGenerationConfigService(
+            {
+              customDocumentTypes: [
+                { key: 'INVALID UPPERCASE KEY!', label: 'Invalid' },
+              ],
+            },
+            'P-000001',
+          ),
         ),
       ).rejects.toThrow();
       // R16: Stored settings remain unchanged when validation rejects the update
       expect(store.documentGenerationConfigOverride).toEqual(beforeInvalidSave);
 
       await expect(
-        updateDocumentGenerationConfigService(
-          {
-            storageProvider: 'invalid-provider' as never,
-          },
-          'P-000001',
+        runAsTestEmployee('P-000001', () =>
+          updateDocumentGenerationConfigService(
+            {
+              storageProvider: 'invalid-provider' as never,
+            },
+            'P-000001',
+          ),
         ),
       ).rejects.toThrow();
       expect(store.documentGenerationConfigOverride).toEqual(beforeInvalidSave);
@@ -1488,7 +1518,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         ctx,
         repo: hostRepo,
         storage: hostStorage,
-      } = await getInitializedDocGenContext('P-000001');
+      } = await runAsTestEmployee('P-000001', () =>
+        getInitializedDocGenContext('P-000001'),
+      );
 
       const storedBlob = await hostStorage.putObject(ctx, {
         category: 'documents',

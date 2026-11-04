@@ -90,6 +90,7 @@ interface Props {
   enquiries?: Enquiry[];
   currentUserId?: string;
   currentUserRole?: AppRole;
+  canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
   pmsView?: ClientPmsViewBundle;
   values: ChoiceValue[];
@@ -113,6 +114,7 @@ export function PersonProfileClient({
   enquiries = [],
   currentUserId = 'P-0001',
   currentUserRole = 'admin',
+  canTakeByTaskId,
   canViewFinance = true,
   pmsView,
   values,
@@ -2303,6 +2305,7 @@ export function PersonProfileClient({
             people={allPeople}
             values={values}
             currentUserId={currentUserId}
+            canTakeByTaskId={canTakeByTaskId}
           />
 
           {person.isEmployee ? (

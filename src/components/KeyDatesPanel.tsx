@@ -18,10 +18,8 @@ import {
   findBusinessCalendar,
 } from '@/domain/keyDateCalculator';
 import {
-  canUserVerifyKeyDate,
   evaluateMatterKeyDateClosureGate,
   evaluateMatterKeyDateOpeningGate,
-  hasKeyDatePermission,
   resolveMatterDefaultResponsiblePersonIds,
   resolveMatterOwningTeamId,
 } from '@/domain/keyDates';
@@ -47,6 +45,7 @@ export interface KeyDatesPanelProps {
   calendarSyncs?: KeyDateCalendarSync[];
   currentUser: Person;
   userPermissions?: KeyDatePermission[];
+  canVerifyByKeyDateId?: Record<string, { allowed: boolean; reason?: string }>;
   teams: Team[];
   employees: Person[];
 }
@@ -60,6 +59,8 @@ export function KeyDatesPanel({
   reminderStates = [],
   calendarSyncs = [],
   currentUser,
+  userPermissions = [],
+  canVerifyByKeyDateId,
   teams,
   employees,
 }: KeyDatesPanelProps) {
@@ -83,21 +84,14 @@ export function KeyDatesPanel({
     return notApplicableRecords.filter((na) => na.matterId === matter.id);
   }, [notApplicableRecords, matter]);
 
-  const permOpts = useMemo(
-    () => ({ config, allPeople: employees, teams }),
-    [config, employees, teams],
-  );
+  const permSet = useMemo(() => new Set(userPermissions), [userPermissions]);
 
-  const canView = hasKeyDatePermission(currentUser, 'keydate:view', permOpts);
-  const canEdit = hasKeyDatePermission(currentUser, 'keydate:edit', permOpts);
-  const canVerify = hasKeyDatePermission(currentUser, 'keydate:verify', permOpts);
-  const canOverrideCalc = hasKeyDatePermission(
-    currentUser,
-    'keydate:override_calculation',
-    permOpts,
-  );
-  const canResolve = hasKeyDatePermission(currentUser, 'keydate:resolve', permOpts);
-  const canWaive = hasKeyDatePermission(currentUser, 'keydate:waive', permOpts);
+  const canView = permSet.has('keydate:view');
+  const canEdit = permSet.has('keydate:edit');
+  const canVerify = permSet.has('keydate:verify');
+  const canOverrideCalc = permSet.has('keydate:override_calculation');
+  const canResolve = permSet.has('keydate:resolve');
+  const canWaive = permSet.has('keydate:waive');
 
   const defaultTeamId = useMemo(() => {
     if (matter) return resolveMatterOwningTeamId(matter, teams);
@@ -291,8 +285,7 @@ export function KeyDatesPanel({
             ? {
                 overriddenDate: overrideDate,
                 reason: overrideReason,
-                actor: currentUser,
-                permissionOptions: permOpts,
+                actorPermitted: canOverrideCalc,
               }
             : undefined,
         });
@@ -1105,7 +1098,27 @@ export function KeyDatesPanel({
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {visibleDates.map((kd) => {
-            const verifyCheck = canUserVerifyKeyDate(currentUser, kd, permOpts);
+            const verifyCheck =
+              canVerifyByKeyDateId?.[kd.id] ??
+              (!canVerify
+                ? {
+                    allowed: false,
+                    reason:
+                      'You do not have permission (keydate:verify) to verify key dates.',
+                  }
+                : kd.status !== 'awaiting_verification'
+                  ? {
+                      allowed: false,
+                      reason: `Key date is in status "${kd.status}" and is not awaiting verification.`,
+                    }
+                  : (kd.verification.proposedById ?? kd.createdById) ===
+                      currentUser.id
+                    ? {
+                        allowed: false,
+                        reason:
+                          'The proposer of a key date cannot verify their own date.',
+                      }
+                    : { allowed: true });
             const reminder = reminderStates.find((r) => r.keyDateId === kd.id);
             const syncState = calendarSyncs.find((s) => s.keyDateId === kd.id);
 

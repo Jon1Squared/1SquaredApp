@@ -10,13 +10,13 @@ import {
 import {
   HEADLINE_CARD_DEFINITIONS,
   PANEL_DEFINITIONS,
-  resolveEmployeeRoles,
   setRolePanelPlacement,
   syncHomeRolesWithEmployeeRoles,
 } from '@/domain/homeConfig';
 import type {
   ChoiceValue,
   HomePagesConfig,
+  HomeRoleKey,
   PanelCategory,
   PanelId,
   Person,
@@ -38,6 +38,7 @@ const PANEL_CATEGORIES: PanelCategory[] = [
 interface Props {
   initialConfig: HomePagesConfig;
   activeViewingRole?: string;
+  rolesByPersonId?: Record<string, HomeRoleKey[]>;
   people: Person[];
   teams: Team[];
   values?: ChoiceValue[];
@@ -47,8 +48,9 @@ interface Props {
 export function HomePagesAdminSection({
   initialConfig,
   activeViewingRole,
+  rolesByPersonId = {},
   people,
-  teams,
+  teams: _teams,
   values = [],
   onNavigateToEmployeeRoles,
 }: Props) {
@@ -106,13 +108,13 @@ export function HomePagesAdminSection({
     const counts: Record<string, number> = {};
     for (const r of roles) counts[r.key] = 0;
     for (const emp of realEmployees) {
-      const empRoles = resolveEmployeeRoles(emp, teams);
+      const empRoles = rolesByPersonId[emp.id] ?? emp.roles ?? [];
       for (const rk of empRoles) {
         counts[rk] = (counts[rk] ?? 0) + 1;
       }
     }
     return counts;
-  }, [roles, realEmployees, teams]);
+  }, [roles, realEmployees, rolesByPersonId]);
 
   const selectedRole = useMemo(
     () => roles.find((r) => r.key === selectedRoleKey) ?? roles[0],

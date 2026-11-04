@@ -28,12 +28,11 @@ import {
 } from '@/domain/customFields';
 import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
 import { whereUsed } from '@/domain/fieldRegistry';
-import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { canDeactivate, resolveLabel, valuesForList } from '@/domain/lists';
 import { buildDefaultMatterPartyTaxonomy } from '@/domain/matterParties';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
-import { findPracticeAreaRoutingClashes, resolveUserAppRole, userTeams } from '@/domain/tasks';
+import { findPracticeAreaRoutingClashes, userTeams } from '@/domain/tasks';
 import type {
   AppRole,
   ChoiceList,
@@ -45,6 +44,7 @@ import type {
   EnquirySettings,
   FormSection,
   HomePagesConfig,
+  HomeRoleKey,
   ListGroup,
   Matter,
   MatterCostsConfig,
@@ -173,7 +173,10 @@ interface Props {
   matterCostsConfig?: MatterCostsConfig;
   currentUserId?: string;
   currentUserPermissions?: PermissionKey[];
-  rbacConfig?: RbacConfiguration;
+  appRoleByPersonId?: Record<string, AppRole>;
+  rolesByPersonId?: Record<string, HomeRoleKey[]>;
+  permissionsByPersonId?: Record<string, PermissionKey[]>;
+  rbacConfig: RbacConfiguration;
   keyDatesConfig?: KeyDatesConfig;
   currentUserKeyDatePermissions?: KeyDatePermission[];
   entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
@@ -204,6 +207,9 @@ export function AdminClient({
   matterCostsConfig,
   currentUserId,
   currentUserPermissions,
+  appRoleByPersonId = {},
+  rolesByPersonId = {},
+  permissionsByPersonId = {},
   rbacConfig,
   keyDatesConfig,
   currentUserKeyDatePermissions = [],
@@ -1342,6 +1348,7 @@ export function AdminClient({
         <RbacAdminSection
           currentUserId={currentUserId}
           currentUserPermissions={currentUserPermissions}
+          permissionsByPersonId={permissionsByPersonId}
           rbacConfig={rbacConfig}
           people={people}
           teams={teams}
@@ -3799,9 +3806,10 @@ export function AdminClient({
             </Link>
           </div>
           {employees.map((emp) => {
-            const resolvedRole = resolveUserAppRole(emp, teams, values);
+            const resolvedRole =
+              appRoleByPersonId[emp.id] ?? emp.appRole ?? 'fee_earner';
             const empTeams = userTeams(emp.id, teams);
-            const empRoles = resolveEmployeeRoles(emp, teams);
+            const empRoles = rolesByPersonId[emp.id] ?? emp.roles ?? [];
             const availableRoles = homePagesConfig?.roles ?? [];
             const realEmpsForSupport = employees.filter((e) => !e.demo && e.id !== emp.id);
             const showsWorkPerson = emp.showsWorkOfId
@@ -3980,6 +3988,7 @@ export function AdminClient({
         <HomePagesAdminSection
           initialConfig={homePagesConfig}
           activeViewingRole={activeViewingRole}
+          rolesByPersonId={rolesByPersonId}
           people={people}
           teams={teams}
           values={values}

@@ -596,7 +596,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
         reminderScheduleId: 'critical',
         currentStageDaysBefore: 30,
         stageEnteredAt: '2026-06-01T08:00:00Z',
-        escalationLevel: 0,
+        escalationLevel: 1,
         lastSkippedReason: 'no_permitted_assignees',
       },
     ];
@@ -658,11 +658,16 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       id: 'KD-ORPHAN-MISSING-MATTER',
       matterId: 'MAT-DOES-NOT-EXIST',
     };
-    const orphanReminderState = {
+    const orphanReminderState: KeyDateReminderState = {
       ...staffReminderStates[0]!,
       keyDateId: orphanKeyDate.id,
       lastSkippedReason: 'missing_matter' as const,
-      escalationLevelReached: 1,
+      escalationLevel: 1,
+    };
+    const provisionalOrphanKeyDate: KeyDate = {
+      ...orphanKeyDate,
+      id: 'KD-ORPHAN-PROVISIONAL-NO-REMINDER',
+      status: 'provisional',
     };
     const adminViewer: Person = {
       ...privilegedComplianceUser,
@@ -674,7 +679,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       viewer: adminViewer,
       todayIso,
       config,
-      keyDates: [orphanKeyDate],
+      keyDates: [orphanKeyDate, provisionalOrphanKeyDate],
       reminderStates: [orphanReminderState],
       matters: [staffMatter],
       teams,
@@ -683,6 +688,13 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     const orphanMatches = adminOrphanExceptions.filter(
       (e) => e.keyDateId === orphanKeyDate.id,
     );
+    expect(
+      adminOrphanExceptions.filter(
+        (e) =>
+          e.keyDateId === provisionalOrphanKeyDate.id &&
+          e.kind === 'orphan_key_date_missing_matter',
+      ),
+    ).toHaveLength(1);
     expect(orphanMatches).toHaveLength(1);
     expect(orphanMatches[0]?.kind).toBe('orphan_key_date_missing_matter');
     expect(orphanMatches[0]?.matterId).toBeUndefined();

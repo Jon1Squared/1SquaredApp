@@ -52,6 +52,8 @@ import {
   type PromptedFieldDefinition,
   type ScopedDownloadToken,
   type TemplateAvailabilityRules,
+  type DocumentPermissionActor,
+  type RbacConfiguration,
   type TemplatePackageManifest,
   type TemplatePlaceholderMapping,
   type TemplateUsageReportFilter,
@@ -68,7 +70,7 @@ import {
   toMatterAccessSubject,
 } from '@/domain/documentGeneration';
 import {
-  getStoredActorSessionForPerson,
+  getActiveActorSession,
   hasPersonPermission,
 } from '@/domain/rbac';
 import type { Person } from '@/domain/types';
@@ -100,6 +102,8 @@ export interface SerializableCatalogueField {
 
 export interface DocumentGenerationClientSnapshot {
   config: DocumentGenerationConfig;
+  rbac?: RbacConfiguration;
+  actor: DocumentPermissionActor;
   userPermissions: DocumentPermission[];
   readableCatalogueFields: SerializableCatalogueField[];
   templates: DocumentTemplateRecord[];
@@ -198,12 +202,17 @@ export function resolveTenantContextForStoreUser(
 
   const verifiedSession =
     session ??
-    (getStoredActorSessionForPerson(user.id)?.verifiedSession as
+    (getActiveActorSession()?.verifiedSession as
       | VerifiedEntraSessionPayload
       | undefined);
   if (!verifiedSession) {
     throw new Error(
       `UNAUTHENTICATED: Verified Entra ID session is required for user "${user.id}".`,
+    );
+  }
+  if (verifiedSession.personId !== user.id) {
+    throw new Error(
+      `TENANCY_ACTOR_MISMATCH: Verified session personId "${verifiedSession.personId}" does not match requested user "${user.id}".`,
     );
   }
 
@@ -593,10 +602,11 @@ export async function getInitializedDocGenContext(
 
 export async function getDocumentGenerationSnapshotForUser(
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<DocumentGenerationClientSnapshot> {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
   const userPermissions = resolveDocumentPermissions(actor, config);
   const fullCatalogue = buildFullCatalogueFromStoreCustomFields(
     store.customFields,
@@ -655,6 +665,8 @@ export async function getDocumentGenerationSnapshotForUser(
 
   return {
     config: config.documentGeneration,
+    rbac: config.rbac,
+    actor,
     userPermissions,
     readableCatalogueFields: serializableCatalogue,
     templates,
@@ -708,10 +720,11 @@ export async function uploadTemplateDraftService(
     changeNote?: string;
   },
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo, storage } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine({
     maxTemplateSizeMb: config.documentGeneration.maxTemplateSizeMb,
@@ -780,10 +793,11 @@ export async function updateTemplateDraftService(
     changeNote?: string;
   },
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
 
   const result = updateDraftTemplateVersion({
@@ -807,10 +821,11 @@ export async function submitTemplateVersionService(
   versionId: string,
   changeNote: string | undefined,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
 
   const result = submitTemplateVersionForApproval({
@@ -840,10 +855,11 @@ export async function submitTemplateVersionService(
 export async function approveTemplateVersionService(
   versionId: string,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const result = approveTemplateVersion({
     ctx,
@@ -871,10 +887,11 @@ export async function rejectTemplateVersionService(
   versionId: string,
   rejectionReason: string,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const result = rejectTemplateVersion({
     ctx,
@@ -902,10 +919,11 @@ export async function rejectTemplateVersionService(
 export async function retireTemplateService(
   templateId: string,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const result = retireTemplate({
     ctx,
@@ -933,10 +951,11 @@ export async function rollbackTemplateVersionService(
   templateId: string,
   targetVersionId: string,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const result = rollbackTemplateToVersion({
     ctx,
@@ -965,10 +984,11 @@ export async function exportTemplatePackageService(
   templateId: string,
   versionId: string | undefined,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<TemplatePackageManifest> {
   const { ctx, user, config, repo, storage } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   return exportTemplatePackage({
     ctx,
@@ -984,10 +1004,11 @@ export async function exportTemplatePackageService(
 export async function importTemplatePackageService(
   pkg: TemplatePackageManifest,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ) {
   const { store, ctx, user, config, repo, storage } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine({
     maxTemplateSizeMb: config.documentGeneration.maxTemplateSizeMb,
@@ -1029,6 +1050,7 @@ export async function previewTemplateService(
     outputFormat?: DocumentOutputFormat;
   },
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<{
   fileBase64: string;
   fileName: string;
@@ -1036,8 +1058,8 @@ export async function previewTemplateService(
   missingRequiredFields: string[];
 }> {
   const { store, ctx, user, config, repo, storage } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
   const pdfConverter = new BuiltInOpenXmlPdfConverter();
@@ -1106,6 +1128,7 @@ export async function generateDocumentService(
     outputFormat?: DocumentOutputFormat;
   },
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<{
   status: 'generated' | 'blocked_missing_required';
   document?: GeneratedDocumentRecord;
@@ -1114,8 +1137,8 @@ export async function generateDocumentService(
   missingRequiredFields: string[];
 }> {
   const { store, ctx, user, config, repo, storage } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
   const pdfConverter = new BuiltInOpenXmlPdfConverter();
@@ -1225,6 +1248,7 @@ export async function generateDocumentService(
 export async function downloadGeneratedDocumentService(
   documentId: string,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<{
   fileBase64: string;
   fileName: string;
@@ -1232,8 +1256,8 @@ export async function downloadGeneratedDocumentService(
   downloadToken: ScopedDownloadToken;
 }> {
   const { store, ctx, user, config, repo, storage } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const doc = repo.getDocumentById(ctx, documentId);
   if (!doc || doc.isDeleted) {
@@ -1280,10 +1304,11 @@ export async function downloadGeneratedDocumentService(
 export async function deleteGeneratedDocumentService(
   documentId: string,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<GeneratedDocumentRecord> {
   const { store, ctx, user, config, repo, storage } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const deleted = await deleteGeneratedDocument({
     ctx,
@@ -1321,10 +1346,11 @@ export interface EnrichedTemplateUsageReportResult
 export async function getTemplateUsageReportService(
   filter: TemplateUsageReportFilter = {},
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<EnrichedTemplateUsageReportResult> {
   const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+    await getInitializedDocGenContext(userId, session);
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const report = queryTemplateUsageReport({
     ctx,
@@ -1359,9 +1385,13 @@ export async function getTemplateUsageReportService(
 export async function updateDocumentGenerationConfigService(
   patch: Partial<DocumentGenerationConfig>,
   userId: string,
+  session?: VerifiedEntraSessionPayload,
 ): Promise<DocumentGenerationConfig> {
-  const { store, user, config } = await getInitializedDocGenContext(userId);
-  const actor = buildDocumentActorFromPerson(user);
+  const { store, ctx, user, config } = await getInitializedDocGenContext(
+    userId,
+    session,
+  );
+  const actor = buildDocumentActorFromPerson(user, ctx);
 
   const isSecuritySensitivePatch =
     patch.permissions !== undefined ||

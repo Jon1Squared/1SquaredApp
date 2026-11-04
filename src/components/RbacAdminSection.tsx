@@ -8,9 +8,7 @@ import {
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import {
   ALL_PERMISSION_KEYS,
-  getDefaultTenantRbacConfig,
   PERMISSION_REGISTRY,
-  resolvePersonPermissions,
   type PermissionKey,
   type RbacConfiguration,
 } from '@/domain/rbac';
@@ -22,7 +20,8 @@ import { useToast } from './Toast';
 interface RbacAdminSectionProps {
   currentUserId?: string;
   currentUserPermissions?: PermissionKey[];
-  rbacConfig?: RbacConfiguration;
+  permissionsByPersonId?: Record<string, PermissionKey[]>;
+  rbacConfig: RbacConfiguration;
   people: Person[];
   teams: Team[];
   orgStructure: OrgStructureCatalogue;
@@ -36,10 +35,11 @@ type SubTab = 'matrix' | 'departments' | 'entra' | 'overrides';
 
 export function RbacAdminSection({
   currentUserId = 'P-000001',
-  currentUserPermissions,
+  currentUserPermissions = [],
+  permissionsByPersonId,
   rbacConfig: rbacConfigProp,
   people,
-  teams,
+  teams: _teams,
   orgStructure,
   entraSession = null,
   entraEnvStatus,
@@ -50,11 +50,7 @@ export function RbacAdminSection({
   const [pending, startTransition] = useTransition();
   const [subTab, setSubTab] = useState<SubTab>('matrix');
 
-  const initialRbac = useMemo(
-    () => rbacConfigProp ?? getDefaultTenantRbacConfig(),
-    [rbacConfigProp],
-  );
-  const [localRbac, setLocalRbac] = useState<RbacConfiguration>(initialRbac);
+  const [localRbac, setLocalRbac] = useState<RbacConfiguration>(rbacConfigProp);
 
   const employees = useMemo(
     () =>
@@ -64,19 +60,10 @@ export function RbacAdminSection({
     [people],
   );
 
-  const currentUser = useMemo(
-    () => people.find((p) => p.id === currentUserId) ?? employees[0] ?? null,
-    [people, currentUserId, employees],
+  const actorPerms = useMemo(
+    () => new Set<PermissionKey>(currentUserPermissions),
+    [currentUserPermissions],
   );
-
-  const actorPerms = useMemo(() => {
-    if (currentUserPermissions && currentUserPermissions.length > 0) {
-      return new Set<PermissionKey>(currentUserPermissions);
-    }
-    return new Set<PermissionKey>(
-      resolvePersonPermissions(currentUser, { allPeople: people, teams }),
-    );
-  }, [currentUserPermissions, currentUser, people, teams]);
 
   const canManageConfig = actorPerms.has('rbac:manage_config');
   const canManageOverrides = actorPerms.has('rbac:manage_user_overrides');
@@ -266,22 +253,34 @@ export function RbacAdminSection({
 
   const selectedEmployeeEffectivePermissions = useMemo(() => {
     if (!selectedEmployee) return new Set<PermissionKey>();
-    const previewPerson: Person = {
-      ...selectedEmployee,
-      permissionOverrides: {
-        grant: overrideGrant,
-        revoke: overrideRevoke,
-      },
-    };
-    return new Set<PermissionKey>(
-      resolvePersonPermissions(previewPerson, {
-        allPeople: people,
-        teams,
-        config: { rbac: localRbac },
-        context: { tenantId: 'preview' },
-      }),
+    const baseline = new Set<PermissionKey>(
+      permissionsByPersonId?.[selectedEmployee.id] ?? [],
     );
-  }, [selectedEmployee, overrideGrant, overrideRevoke, people, teams, localRbac]);
+    for (const oldGrant of selectedEmployee.permissionOverrides?.grant ?? []) {
+      baseline.delete(oldGrant);
+    }
+    for (const roleKey of selectedEmployee.roles ?? []) {
+      for (const perm of localRbac.roles[roleKey]?.permissions ?? []) {
+        baseline.add(perm);
+      }
+    }
+    const deptId =
+      selectedEmployee.employment?.departmentId ?? selectedEmployee.departmentId;
+    if (deptId) {
+      for (const perm of localRbac.departmentGrants[deptId] ?? []) {
+        baseline.add(perm);
+      }
+    }
+    for (const g of overrideGrant) baseline.add(g);
+    for (const r of overrideRevoke) baseline.delete(r);
+    return baseline;
+  }, [
+    selectedEmployee,
+    permissionsByPersonId,
+    overrideGrant,
+    overrideRevoke,
+    localRbac,
+  ]);
 
   const isSelfSelected = selectedEmployee?.id === currentUserId;
 

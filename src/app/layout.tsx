@@ -5,7 +5,7 @@ import { AppShell } from '@/components/AppShell';
 import { LoginScreen } from '@/components/LoginScreen';
 import { ToastProvider } from '@/components/Toast';
 import { getEntraEnvStatus, getEntraSession } from '@/server/entraAuth';
-import { getAppSnapshot, getCurrentUserId } from '@/server/services';
+import { getAppSnapshot, withPageActor } from '@/server/services';
 
 const manrope = Manrope({
   variable: '--font-manrope',
@@ -40,31 +40,32 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     );
   }
 
-  const userId = await getCurrentUserId();
-  const snap = getAppSnapshot(userId);
+  return withPageActor(async (actor) => {
+    const snap = getAppSnapshot(actor.personId);
 
-  return (
-    <html lang="en-GB" className={`${manrope.variable} ${sourceSans.variable}`}>
-      <body>
-        <ToastProvider>
-          <AppShell
-            currentUser={snap.currentUser}
-            effectiveWorkPerson={snap.effectiveWorkPerson}
-            currentUserRoles={snap.currentUserRoles}
-            activeViewingRole={snap.activeViewingRole}
-            leftRailVisibility={snap.leftRailVisibility}
-            homePagesConfig={snap.homePagesConfig}
-            employees={snap.employees}
-            searchIndex={snap.searchIndex}
-            attention={snap.attention}
-            tasks={snap.tasks}
-            notifications={snap.notifications}
-            entraSession={entraSession}
-          >
-            {children}
-          </AppShell>
-        </ToastProvider>
-      </body>
-    </html>
-  );
+    return (
+      <html lang="en-GB" className={`${manrope.variable} ${sourceSans.variable}`}>
+        <body>
+          <ToastProvider>
+            <AppShell
+              currentUser={snap.currentUser}
+              effectiveWorkPerson={snap.effectiveWorkPerson}
+              currentUserRoles={snap.currentUserRoles}
+              activeViewingRole={snap.activeViewingRole}
+              leftRailVisibility={snap.leftRailVisibility}
+              homePagesConfig={snap.homePagesConfig}
+              employees={snap.employees}
+              searchIndex={snap.searchIndex}
+              attention={snap.attention}
+              tasks={snap.tasks}
+              notifications={snap.notifications}
+              entraSession={entraSession}
+            >
+              {children}
+            </AppShell>
+          </ToastProvider>
+        </body>
+      </html>
+    );
+  });
 }

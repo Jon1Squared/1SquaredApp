@@ -32,7 +32,7 @@ Administrators can configure \`rbac.identityMapping.authorityMode\` in **Admin �
 
 | Authority Mode | How Roles Are Resolved |
 | --- | --- |
-| \`hybrid\` (default) | Combines roles mapped from the current Entra ID token (\`groups\` and \`roles\` claims) with the roles stored on the employee’s 1Squared profile, scoped strictly to that \`(tenantId, personId)\` session (using the verified session’s expiry) inside an active \`AsyncLocalStorage\` request scope (\`runWithActiveActorSession\`) and cleared for that \`(tenantId, personId)\` on sign-out, without permanently overwriting stored 1Squared roles or leaking across concurrent requests. |
+| \`hybrid\` (default) | Combines roles mapped from the current Entra ID token (\`groups\` and \`roles\` claims) with the roles stored on the employee’s 1Squared profile, resolved strictly from the active \`AsyncLocalStorage\` request scope (\`runWithActiveActorSession\`) for that exact \`(tenantId, personId)\` (honouring the verified session’s expiry), with no server-wide mutable session map and without permanently overwriting stored 1Squared roles or leaking across concurrent requests. |
 | \`token_only\` | Uses exclusively the roles mapped from the Microsoft Entra ID token on each sign-in (including replacing stored roles with \`[]\` if all Entra roles are removed). |
 
 ## 3. Roles, permissions & per-person overrides
@@ -41,7 +41,7 @@ Permissions are grouped into built-in and custom roles in the tenant RBAC config
 
 - **Core Administration & RBAC**: \`admin:access\`, \`rbac:manage_config\`, \`rbac:manage_user_overrides\`
 - **Employee & HR Records**: \`employee:view_core\`, \`employee:edit_core\`, \`employee:hr_restricted\`, \`employee:payroll\`, \`employee:sensitive\`
-- **Staff & Restricted Matters**: \`matter:restricted:access\`
+- **Matters & Restricted Matters**: \`matter:create\`, \`matter:edit\`, \`matter:reassign_ownership\`, \`matter:restricted:access\`
 - **Finance & Risk**: \`finance:view\`, \`finance:view_matter\`, \`finance:credit_control\`, \`finance:manage_links\`, \`risk:view\`
 - **Document Templates & SharePoint DMS**: \`document_template:view\`, \`document_template:build\`, \`document_template:approve\`, \`document_template:view_usage\`, \`document_template:view_usage_by_user\`, \`document_template:configure\`, \`document:generate\`, \`document:view\`, \`document:download\`, \`document:upload\`, \`document:edit\`, \`document:delete\`, \`document:provision\`, \`document_store:configure\`, \`document_access:review\`
 - **Key Dates & Limitation**: \`keydate:view\`, \`keydate:view_any_team\`, \`keydate:edit\`, \`keydate:verify\`, \`keydate:override_calculation\`, \`keydate:resolve\`, \`keydate:waive\`, \`keydate:configure\`

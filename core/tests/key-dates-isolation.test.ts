@@ -147,6 +147,18 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(repo.getReminderState(ctxA, kdAlpha.id)?.lastSkippedReason).toBe(
       'no_permitted_assignees',
     );
+    expect(() =>
+      repo.putReminderState(ctxA, {
+        keyDateId: kdAlpha.id,
+        taskId: 'TSK-ALPHA-001',
+        idempotencyKey: `keydate-reminder:tenant-alpha:${kdAlpha.id}`,
+        reminderScheduleId: 'limitation',
+        currentStageDaysBefore: 90,
+        stageEnteredAt: '2026-11-03T00:00:00.000Z',
+        escalationLevel: 0,
+        lastSkippedReason: 'forged_reason' as unknown as 'no_permitted_assignees',
+      }),
+    ).toThrow(/KEY_DATE_VALIDATION_ERROR/);
     repo.putCalendarSync(ctxA, {
       keyDateId: kdAlpha.id,
       externalEvents: [{ target: 'person:P-ALPHA-1', eventId: 'evt-alpha-1' }],
@@ -486,7 +498,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(diaryEntries.some((e) => e.keyDateId === orphanKd.id)).toBe(false);
 
     const exceptions = computeKeyDateExceptions({
-      viewer: staffPartner,
+      viewer: unpermittedPartner,
       todayIso: '2026-11-01',
       config: { enabled: true },
       keyDates: store.keyDates,
@@ -495,5 +507,21 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       teams: store.teams,
     });
     expect(exceptions.some((e) => e.keyDateId === orphanKd.id)).toBe(false);
+
+    const adminExceptions = computeKeyDateExceptions({
+      viewer: staffPartner,
+      todayIso: '2026-11-01',
+      config: { enabled: true },
+      keyDates: store.keyDates,
+      matters: store.matters,
+      people: store.people,
+      teams: store.teams,
+    });
+    const adminOrphanMatches = adminExceptions.filter(
+      (e) => e.keyDateId === orphanKd.id,
+    );
+    expect(adminOrphanMatches).toHaveLength(1);
+    expect(adminOrphanMatches[0]?.kind).toBe('orphan_key_date_missing_matter');
+    expect(adminOrphanMatches[0]?.matterId).toBeUndefined();
   });
 });

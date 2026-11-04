@@ -1,6 +1,6 @@
 /**
  * Builds the separate PMS SQLite demo database (`data/pms/pms-demo.sqlite`)
- * from `data/pms/1Squared_PMS_Demo_Data.xlsx` (or `docs/1Squared_PMS_Demo_Data.xlsx`).
+ * from `data/pms/1Squared_PMS_Demo_Data.xlsx`.
  *
  * Imports ONLY the 9 data sheets:
  *   fee_earners, clients, matters, fee_estimates, time_entries,
@@ -22,11 +22,6 @@ export const DEFAULT_XLSX_PATH = path.join(
   'pms',
   '1Squared_PMS_Demo_Data.xlsx',
 );
-export const FALLBACK_XLSX_PATH = path.join(
-  process.cwd(),
-  'docs',
-  '1Squared_PMS_Demo_Data.xlsx',
-);
 export const DEFAULT_PMS_DB_PATH = path.join(process.cwd(), 'data', 'pms', 'pms-demo.sqlite');
 
 export const PMS_AS_AT_DATE = '2026-10-16';
@@ -34,10 +29,7 @@ export const PMS_AS_AT_DATE = '2026-10-16';
 export function resolveWorkbookPath(customPath?: string): string {
   if (customPath && fs.existsSync(customPath)) return customPath;
   if (fs.existsSync(DEFAULT_XLSX_PATH)) return DEFAULT_XLSX_PATH;
-  if (fs.existsSync(FALLBACK_XLSX_PATH)) return FALLBACK_XLSX_PATH;
-  throw new Error(
-    `PMS demo workbook not found at ${DEFAULT_XLSX_PATH} or ${FALLBACK_XLSX_PATH}`,
-  );
+  throw new Error(`PMS demo workbook not found at ${DEFAULT_XLSX_PATH}`);
 }
 
 const SCHEMA_SQL = `

@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type {
   DocumentGenerationConfig,
   DocumentPermission,
+  ExtensionManifest,
   HomeRoleKey,
   HostingMode,
   KeyDatesConfiguration,
@@ -2189,4 +2190,63 @@ export function validateDocumentConfigAgainstTenantData(
     valid: errors.length === 0,
     errors,
   };
+}
+
+export const ExtensionPermissionSchema = z.enum([
+  'matter:read',
+  'client:read',
+  'person:read',
+  'finance:view',
+  'document:fields:provide',
+  'document:read',
+  'document:write',
+  'matter:costs:validate',
+  'matter:open:gate',
+  'config:read',
+  'audit:write',
+  'pms:sync',
+  'keydate:read',
+  'keydate:write',
+]);
+
+export const ExtensionHookPointSchema = z.enum([
+  'beforeMatterCostsCalculate',
+  'afterMatterCostsCalculate',
+  'beforeMatterOpen',
+  'afterMatterOpen',
+  'onPmsOutboundCommand',
+  'provideDocumentFields',
+  'afterMatterDocumentsProvisioned',
+  'beforeMatterDocumentsClose',
+  'keyDate.beforeCreate',
+  'keyDate.afterStatusChange',
+  'keyDate.calculateCustomRule',
+]);
+
+export const ExtensionManifestSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    version: z.string().min(1),
+    description: z.string().min(1),
+    supportedCoreApiRange: z.string().min(1),
+    permissions: z.array(ExtensionPermissionSchema),
+    hooks: z.array(ExtensionHookPointSchema),
+    uiSlots: z.array(z.string()).optional(),
+    hookTimeoutMs: z.number().int().positive().default(2000).optional(),
+  })
+  .strict();
+
+export function validateExtensionManifest(
+  rawManifest: unknown,
+): ExtensionManifest {
+  const parsed = ExtensionManifestSchema.safeParse(rawManifest);
+  if (!parsed.success) {
+    throw new Error(
+      `EXTENSION_MANIFEST_ERROR: Invalid extension manifest: ${parsed.error.issues
+        .map((i) => `${i.path.join('.') || 'root'}: ${i.message}`)
+        .join('; ')}`,
+    );
+  }
+  return parsed.data;
 }

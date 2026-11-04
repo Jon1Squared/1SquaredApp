@@ -522,7 +522,8 @@ export function buildKeyDateCalculation(input: {
   override?: {
     overriddenDate: IsoDate;
     reason: string;
-    actor: Person | null | undefined;
+    actor?: Person | null | undefined;
+    actorPermitted?: boolean;
     permissionOptions?: ResolveKeyDatePermissionsOptions | KeyDatesConfig | null;
   };
 }): {
@@ -539,13 +540,15 @@ export function buildKeyDateCalculation(input: {
   });
 
   if (input.override) {
-    if (
-      !hasKeyDatePermission(
-        input.override.actor,
-        'keydate:override_calculation',
-        input.override.permissionOptions,
-      )
-    ) {
+    const permitted =
+      input.override.actorPermitted !== undefined
+        ? input.override.actorPermitted
+        : hasKeyDatePermission(
+            input.override.actor,
+            'keydate:override_calculation',
+            input.override.permissionOptions,
+          );
+    if (!permitted) {
       throw new Error(
         'KEY_DATE_PERMISSION_ERROR: Overriding a calculated date requires the "keydate:override_calculation" permission.',
       );

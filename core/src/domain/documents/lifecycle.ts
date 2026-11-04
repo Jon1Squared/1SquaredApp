@@ -721,14 +721,30 @@ export async function linkExistingMatterFolderJob(params: {
 
       const resolvedLoc = await provider.resolveLocation(provCtx, {
         storeId,
+        libraryId,
         rawUrlOrPath: folderUrlOrPath,
       });
 
+      if (
+        resolvedLoc.libraryId &&
+        resolvedLoc.libraryId.toLowerCase() !== libraryId.toLowerCase()
+      ) {
+        const err = new Error(
+          `INVALID_PATH: Resolved library "${resolvedLoc.libraryId}" does not match requested library "${libraryId}".`,
+        ) as Error & { code: DocumentStoreErrorCode };
+        err.code = 'invalid_path';
+        throw err;
+      }
+
       if (!resolvedLoc.resolved || !resolvedLoc.folderItemId) {
-        throw new Error(
+        const err = new Error(
           resolvedLoc.errorMessage ??
             'Could not resolve the existing folder in the document store.',
-        );
+        ) as Error & { code?: DocumentStoreErrorCode };
+        if (resolvedLoc.errorCode) {
+          err.code = resolvedLoc.errorCode;
+        }
+        throw err;
       }
 
       const actualRelPath = resolvedLoc.relativePath ?? '';
@@ -804,9 +820,23 @@ export async function linkExistingMatterFolderJob(params: {
             s.providerItemId === resolvedLoc.folderItemId,
         );
 
-      const matchesProtectedContainerPath = (
-        deps.protectedContainerPaths ?? []
-      ).some((rawPath) => {
+      const ruleBasePrefixes: string[] = [];
+      for (const rule of deps.routingRules ?? []) {
+        if (rule.basePath) {
+          const cleaned = rule.basePath.trim().replace(/^\/+|\/+$/g, '');
+          let prefix = '';
+          for (const seg of cleaned.split('/').filter(Boolean)) {
+            if (seg.includes('{')) break;
+            prefix = prefix ? `${prefix}/${seg}` : seg;
+            ruleBasePrefixes.push(prefix);
+          }
+        }
+      }
+
+      const matchesProtectedContainerPath = [
+        ...(deps.protectedContainerPaths ?? []),
+        ...ruleBasePrefixes,
+      ].some((rawPath) => {
         const norm = rawPath.toLowerCase().replace(/^\/+|\/+$/g, '');
         return (
           Boolean(norm) &&
