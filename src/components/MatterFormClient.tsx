@@ -102,6 +102,7 @@ import type {
   ConflictCheckMatch,
   ConflictCheckParty,
   ConflictCheckRecord,
+  ConflictCheckRecordInput,
   ConflictCheckRunAudit,
   ConflictCheckStatusPill,
   ConflictConditionType,
@@ -4550,7 +4551,7 @@ export function MatterFormClient({
   function buildConflictRecordSnapshot(
     overrideStatus?: ConflictCheckStatusPill,
     overrideOutcome?: ConflictCheckRecord['outcomeLabel'],
-  ): ConflictCheckRecord {
+  ): ConflictCheckRecordInput {
     const statusToUse = overrideStatus ?? conflictStatusPillLabel;
     const outcomeToUse: ConflictCheckRecord['outcomeLabel'] =
       overrideOutcome ??
@@ -4569,29 +4570,12 @@ export function MatterFormClient({
         statusToUse === 'In progress'
           ? null
           : formatDateTime(new Date().toISOString()),
-      submittedById: leadFeeEarnerId || currentUser.id,
       submittedByName:
         people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))
           ? personDisplayName(
               people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))!,
             )
           : personDisplayName(currentUser),
-      approvedAtDisplay:
-        statusToUse === 'Approved' || statusToUse === 'Cleared'
-          ? formatDateTime(new Date().toISOString())
-          : null,
-      approvedById:
-        statusToUse === 'Approved'
-          ? currentUser.id
-          : statusToUse === 'Cleared'
-            ? leadFeeEarnerId || currentUser.id
-            : null,
-      approvedByName:
-        statusToUse === 'Approved'
-          ? personDisplayName(currentUser)
-          : statusToUse === 'Cleared'
-            ? 'Cleared by fee earner'
-            : null,
       parties: allPartiesToCheck,
       matches,
       runs: searchRuns,
@@ -4629,7 +4613,26 @@ export function MatterFormClient({
           | PartnerCostSignOffRecord
           | undefined) ?? null,
     );
+  const [savedEstimateGbp, setSavedEstimateGbp] = useState<number | null>(() => {
+    if (!existing) return null;
+    return Number(
+      existing.feeEstimateGbp ??
+        existing.agreedFeeCapGbp ??
+        initialMatterCosts.totalEstimateGbp ??
+        initialMatterCosts.agreedCapGbp ??
+        0,
+    );
+  });
+  const [signOffNote, setSignOffNote] = useState<string>('');
   const [signingOffCosts, setSigningOffCosts] = useState<boolean>(false);
+
+  const currentFormEstimateGbp = Number(
+    numericFeeEstimateGbp ??
+      (costWorkBasis === 'capped' ? numericAgreedCapGbp : null) ??
+      0,
+  );
+  const hasUnsavedEstimateChanges =
+    savedEstimateGbp === null || currentFormEstimateGbp !== savedEstimateGbp;
 
   async function handleSignOffMatterCosts() {
     const targetId = savedDraftMatterId ?? existing?.id;
@@ -4637,11 +4640,15 @@ export function MatterFormClient({
       showToast('Save the draft matter first before signing off costs.');
       return;
     }
+    if (hasUnsavedEstimateChanges) {
+      showToast('Save your changes before signing off');
+      return;
+    }
     setSigningOffCosts(true);
     try {
       const res = await signOffMatterCostsAction(
         targetId,
-        'Partner cost sign-off recorded',
+        signOffNote.trim() || undefined,
       );
       setSigningOffCosts(false);
       if (res.errors && Object.keys(res.errors).length > 0) {
@@ -4656,6 +4663,10 @@ export function MatterFormClient({
             | PartnerCostSignOffRecord
             | undefined) ?? null;
         setPartnerCostSignOff(record);
+        if (record?.signedOffEstimateGbp != null) {
+          setSavedEstimateGbp(record.signedOffEstimateGbp);
+        }
+        setSignOffNote('');
         showToast('Partner cost sign-off recorded');
         router.refresh();
       }
@@ -4812,6 +4823,12 @@ export function MatterFormClient({
       }
       if (res.matter) {
         setSavedDraftMatterId(res.matter.id);
+        setSavedEstimateGbp(currentFormEstimateGbp);
+        setPartnerCostSignOff(
+          (res.matter.fieldValues?.['partnerCostSignOff'] as
+            | PartnerCostSignOffRecord
+            | undefined) ?? null,
+        );
         if (typeof window !== 'undefined') {
           try {
             sessionStorage.removeItem(sessionDraftKey);
@@ -4924,6 +4941,12 @@ export function MatterFormClient({
         if (draftRes.matter) {
           targetMatterId = draftRes.matter.id;
           setSavedDraftMatterId(draftRes.matter.id);
+          setSavedEstimateGbp(currentFormEstimateGbp);
+          setPartnerCostSignOff(
+            (draftRes.matter.fieldValues?.['partnerCostSignOff'] as
+              | PartnerCostSignOffRecord
+              | undefined) ?? null,
+          );
           setInitialSnapshot(currentFormStateSignature);
           setRestoredSessionDirty(false);
         }
@@ -5160,8 +5183,20 @@ export function MatterFormClient({
           targetCompletionAt,
           conflictCheckRecord: existing.conflictCheckRecord
             ? {
-                ...existing.conflictCheckRecord,
+                status: existing.conflictCheckRecord.status,
+                outcomeLabel: existing.conflictCheckRecord.outcomeLabel,
+                declarationConfirmed: existing.conflictCheckRecord.declarationConfirmed,
+                reviewerMessage: existing.conflictCheckRecord.reviewerMessage,
+                lastRunAtDisplay: existing.conflictCheckRecord.lastRunAtDisplay,
+                lastRunById: existing.conflictCheckRecord.lastRunById,
+                lastRunByName: existing.conflictCheckRecord.lastRunByName,
+                savedDraftAtDisplay: existing.conflictCheckRecord.savedDraftAtDisplay,
+                submittedAtDisplay: existing.conflictCheckRecord.submittedAtDisplay,
+                submittedByName: existing.conflictCheckRecord.submittedByName,
                 parties: [...fixedClientParties, ...finalOtherParties],
+                matches: existing.conflictCheckRecord.matches,
+                runs: existing.conflictCheckRecord.runs,
+                comments: existing.conflictCheckRecord.comments,
               }
             : undefined,
           fieldValues: updatedFieldValues,
@@ -5354,6 +5389,11 @@ export function MatterFormClient({
             conflictCheckDate: today,
             conflictNotes: reviewerMessage,
             stageId: intakeCompleteStageId,
+            feeEstimateGbp: feeEstimateGbp ? Number(feeEstimateGbp) : null,
+            agreedFeeCapGbp: agreedFeeCapGbp ? Number(agreedFeeCapGbp) : null,
+            retainerMoniesOnAccountGbp: retainerMoniesOnAccountGbp
+              ? Number(retainerMoniesOnAccountGbp)
+              : null,
             conflictCheckRecord: snapshot,
             fieldValues: updatedFieldValues,
           },
@@ -5364,6 +5404,10 @@ export function MatterFormClient({
           setServerSaveErrors(res.errors);
           showToast(Object.values(res.errors)[0] ?? 'Could not submit matter');
           return;
+        }
+        if (res.matter) {
+          setSavedDraftMatterId(res.matter.id);
+          setSavedEstimateGbp(currentFormEstimateGbp);
         }
         setWorkflowState('referred_readonly');
         showToast(
@@ -5396,14 +5440,17 @@ export function MatterFormClient({
     const snapshot = buildConflictRecordSnapshot(nextStatus, nextOutcome);
     setWorkflowState(decision === 'approve' ? 'approved' : 'declined');
 
+    let warningMsg: string | undefined;
     if (existing?.id) {
-      await updateMatterConflictRecordAction(existing.id, snapshot);
+      const res = await updateMatterConflictRecordAction(existing.id, snapshot);
+      warningMsg = res?.warnings?.[0];
     }
     setSaving(false);
     showToast(
-      decision === 'approve'
-        ? `Conflict check ${hasConditions ? 'approved with conditions' : 'approved'} · Recorded on conflict check record`
-        : 'Conflict check declined · Recorded on conflict check record',
+      warningMsg ??
+        (decision === 'approve'
+          ? `Conflict check ${hasConditions ? 'approved with conditions' : 'approved'} · Recorded on conflict check record`
+          : 'Conflict check declined · Recorded on conflict check record'),
     );
   }
 
@@ -8624,33 +8671,68 @@ export function MatterFormClient({
                       background: 'var(--bg-surface-subtle)',
                     }}
                   >
-                    <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4,
+                        fontSize: 12.5,
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
                       {partnerCostSignOff ? (
-                        <>
+                        <div>
                           <strong style={{ color: 'var(--text-primary)' }}>
                             Partner cost sign-off completed
                           </strong>{' '}
                           by {partnerCostSignOff.byName} (
                           {formatGbp(partnerCostSignOff.signedOffEstimateGbp ?? 0)})
-                        </>
+                          {partnerCostSignOff.note ? ` · "${partnerCostSignOff.note}"` : ''}
+                        </div>
                       ) : (
                         <span>
                           High-value fee estimates require partner cost sign-off before opening.
                         </span>
                       )}
+                      {canSignOffCosts && (savedDraftMatterId || existing?.id) ? (
+                        <span>
+                          {hasUnsavedEstimateChanges
+                            ? 'Save your changes before signing off'
+                            : `You're signing off ${formatGbp(savedEstimateGbp ?? 0)}`}
+                        </span>
+                      ) : null}
                     </div>
                     {canSignOffCosts && (savedDraftMatterId || existing?.id) ? (
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        disabled={signingOffCosts}
-                        onClick={handleSignOffMatterCosts}
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          flexWrap: 'wrap',
+                        }}
                       >
-                        <ShieldCheck size={14} />
-                        <span>
-                          {partnerCostSignOff ? 'Re-sign off costs' : 'Sign off costs'}
-                        </span>
-                      </button>
+                        <input
+                          type="text"
+                          className="field-input"
+                          style={{ height: 32, width: 220, fontSize: 12 }}
+                          placeholder="Optional sign-off note…"
+                          aria-label="Partner cost sign-off note"
+                          value={signOffNote}
+                          onChange={(e) => setSignOffNote(e.target.value)}
+                          disabled={signingOffCosts || hasUnsavedEstimateChanges}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          disabled={signingOffCosts || hasUnsavedEstimateChanges}
+                          onClick={handleSignOffMatterCosts}
+                        >
+                          <ShieldCheck size={14} />
+                          <span>
+                            {partnerCostSignOff ? 'Re-sign off costs' : 'Sign off costs'}
+                          </span>
+                        </button>
+                      </div>
                     ) : null}
                   </div>
                 ) : null}

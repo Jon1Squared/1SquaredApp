@@ -6,7 +6,7 @@ import type {
   AppRole,
   AutoTaskTrigger,
   CapacityGroupName,
-  ConflictCheckRecord,
+  ConflictCheckRecordInput,
   ContactLogMethod,
   ContactLogOutcome,
   CustomFieldRecordType,
@@ -242,11 +242,12 @@ export async function saveOrganisationAction(
 }
 
 export async function saveMatterAction(
-  payload: Omit<Partial<Matter>, 'conflictClearedById'> & {
+  payload: Omit<Partial<Matter>, 'conflictClearedById' | 'conflictCheckRecord'> & {
     title: string;
     clientId: string;
     practiceAreaId: string;
     workTypeSubcategoryId: string;
+    conflictCheckRecord?: ConflictCheckRecordInput | null;
   },
   opts: {
     id?: string;
@@ -261,8 +262,8 @@ export async function saveMatterAction(
 }
 
 export async function signOffMatterCostsAction(matterId: string, note?: string) {
-  return withActorId(async (byId) => {
-    const res = await signOffMatterCostsRecord(matterId, byId, note);
+  return withAuthenticatedActor(async (actor) => {
+    const res = await signOffMatterCostsRecord(matterId, actor.personId, note);
     revalidateAll();
     return res;
   });
@@ -298,7 +299,7 @@ export async function runMatterConflictSearchAction(
 
 export async function updateMatterConflictRecordAction(
   matterId: string,
-  record: ConflictCheckRecord,
+  record: ConflictCheckRecordInput,
 ) {
   return withActorId((byId) => {
     const res = updateMatterConflictRecord(matterId, record, byId);

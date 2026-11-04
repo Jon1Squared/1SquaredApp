@@ -2,6 +2,7 @@ export const SERVER_OWNED_MATTER_FIELD_KEYS = [
   'partnerCostSignOffCompleted',
   'partnerCostSignOff',
   'matterOpeningSnapshot',
+  'matterOpeningGate',
   'matterCostsGovernance',
   'riskAssessment',
 ] as const;
@@ -16,6 +17,12 @@ export interface PartnerCostSignOffRecord {
   at: string;
   note: string;
   signedOffEstimateGbp: number | null;
+}
+
+export interface MatterOpeningGateRecord {
+  allowProceed: boolean;
+  estimatedFeeGbp: number;
+  checkedAt: string;
 }
 
 export function stripServerOwnedFieldValues(

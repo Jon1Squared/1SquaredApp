@@ -27,7 +27,7 @@ export interface MatterConflictSearchDeps {
   people: Person[];
   organisations: Organisation[];
   canView: (matter: Matter) => boolean;
-  canViewEnquiry?: (enquiry: Enquiry) => boolean;
+  canViewEnquiry: (enquiry: Enquiry) => boolean;
 }
 
 function redactMatchKeyHash(input: string): string {
@@ -385,7 +385,7 @@ export function searchMatterConflicts(
         );
         if (matchedOther) {
           const isExact = matchedOther.toLowerCase() === lower;
-          if (deps.canViewEnquiry && !deps.canViewEnquiry(enq)) {
+          if (!deps.canViewEnquiry(enq)) {
             const redactedId = `match-restricted-enq-${party.id}-${redactMatchKeyHash(`${party.id}:${enq.id}`)}`;
             const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
             pushMatch(
@@ -474,7 +474,7 @@ export function searchMatterConflicts(
 
       if (!callerMatched && !behalfMatched && !matchedOther) continue;
 
-      if (deps.canViewEnquiry && !deps.canViewEnquiry(enq)) {
+      if (!deps.canViewEnquiry(enq)) {
         const isExact =
           (callerMatched && callerLower === lower) ||
           (behalfMatched && behalfLower === lower) ||
@@ -739,14 +739,15 @@ export function reconcileServerConflictMatches(params: {
       ? {
           ...m,
           matchedRecordId: '',
-          matchedRecordName: 'Match on a restricted matter',
+          matchedRecordName: m.matchedRecordName || 'Match on a restricted matter',
           matchedRecordType: 'matter',
-          whereFound: 'Restricted matter: refer to Risk',
+          whereFound: m.whereFound || 'Restricted matter: refer to Risk',
           matterId: null,
           matterNumber: null,
           responsiblePartnerId: null,
           responsiblePartnerName: '',
           dateLabel: '',
+          matchedOn: m.matchedOn || 'Restricted matter: refer to Risk',
           restricted: true,
           disposition: 'potential_conflict',
         }
@@ -818,4 +819,13 @@ export function reconcileServerConflictMatches(params: {
 
   return reconciled;
 }
+
+export function hasUnapprovedRestrictedMatches(
+  matches: readonly ConflictCheckMatch[],
+  approvedIds: Iterable<string> | undefined | null,
+): boolean {
+  const approved = new Set(approvedIds ?? []);
+  return matches.some((m) => m.restricted && !approved.has(m.id));
+}
+
 

@@ -24,6 +24,7 @@ import {
 } from '@/domain/matterOpeningRecord';
 import {
   buildEffectiveConflictParties,
+  hasUnapprovedRestrictedMatches,
   reconcileServerConflictMatches,
   searchMatterConflicts,
   type MatterConflictSearchInput,
@@ -208,8 +209,13 @@ import {
 } from '@/domain/keyDateCalendarSync';
 import {
   stripServerOwnedFieldValues,
+  type MatterOpeningGateRecord,
   type PartnerCostSignOffRecord,
 } from '@/domain/matterFieldValues';
+import {
+  resolveConflictReviewTaskRouting,
+  resolveSuggestedConflictReviewer,
+} from './conflictReview';
 import { buildRecordVisibility } from './visibility';
 import type {
   Address,
@@ -222,7 +228,11 @@ import type {
   ChoiceList,
   ChoiceValue,
   ConflictCheckMatch,
+  ConflictCheckParty,
   ConflictCheckRecord,
+  ConflictCheckRecordInput,
+  ConflictCheckRunAudit,
+  ConflictCheckStatusPill,
   ContactLogEntry,
   ContactLogMethod,
   ContactLogOutcome,
@@ -1068,25 +1078,12 @@ function getAppSnapshotInScope(
   }
 
   const conflictReviewCfg = activeTenantCfg.conflictReview;
-  const riskAssigneeRoleKey =
-    conflictReviewCfg?.assigneeRoleKey ?? 'risk_compliance';
-  const riskAssigneeTeamId = conflictReviewCfg?.assigneeTeamKey
-    ? store.teams.find(
-        (t) =>
-          t.id === conflictReviewCfg.assigneeTeamKey ||
-          t.name.toLowerCase() === conflictReviewCfg.assigneeTeamKey!.toLowerCase(),
-      )?.id
-    : undefined;
-  const riskReviewer =
-    employees.find(
-      (e) =>
-        rolesByPersonId[e.id]?.includes(riskAssigneeRoleKey) ||
-        e.employeeRoleId === 'employee_role.risk_and_compliance' ||
-        (riskAssigneeTeamId &&
-          store.teams
-            .find((t) => t.id === riskAssigneeTeamId)
-            ?.memberIds.includes(e.id)),
-    ) ?? null;
+  const riskReviewer = resolveSuggestedConflictReviewer(
+    store,
+    conflictReviewCfg,
+    rolesByPersonId,
+    employees,
+  );
   const practiceManager =
     employees.find(
       (e) =>
@@ -2512,12 +2509,140 @@ export function generateMatterNumber(store: FirmStore, clientId: string): string
   return `${prefix}-${String(nextSeq).padStart(4, '0')}`;
 }
 
+function buildServerConflictCheckRecord(params: {
+  submitted: ConflictCheckRecordInput | ConflictCheckRecord;
+  stored: ConflictCheckRecord | null | undefined;
+  parties: ConflictCheckParty[];
+  matches: ConflictCheckMatch[];
+  actorId: string;
+  actorDisplayName: string;
+  actorHasRiskView: boolean;
+  nowDisplay: string;
+  saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
+}): ConflictCheckRecord {
+  const {
+    submitted,
+    stored,
+    parties,
+    matches,
+    actorId,
+    actorDisplayName,
+    actorHasRiskView,
+    nowDisplay,
+    saveMode,
+  } = params;
+
+  const isRiskDecisionStatus =
+    submitted.status === 'Approved' || submitted.status === 'Declined';
+  const status: ConflictCheckStatusPill =
+    isRiskDecisionStatus && !actorHasRiskView
+      ? stored?.status ??
+        (saveMode === 'submit_referred'
+          ? 'Referred'
+          : saveMode === 'submit_cleared'
+            ? 'Cleared'
+            : 'In progress')
+      : submitted.status;
+
+  const isRiskDecisionOutcome =
+    submitted.outcomeLabel === 'Approved by Risk & Compliance' ||
+    submitted.outcomeLabel === 'Approved with conditions' ||
+    submitted.outcomeLabel === 'Declined by Risk & Compliance';
+  const outcomeLabel: ConflictCheckRecord['outcomeLabel'] =
+    isRiskDecisionOutcome && !actorHasRiskView
+      ? stored?.outcomeLabel ??
+        (status === 'Referred'
+          ? 'Referred to risk for review'
+          : status === 'Cleared'
+            ? 'Cleared by fee earner'
+            : 'Pending')
+      : submitted.outcomeLabel;
+
+  const storedComments = stored?.comments ?? [];
+  const storedCommentIds = new Set(storedComments.map((c) => c.id));
+  const newComments = (submitted.comments ?? [])
+    .filter((c) => Boolean(c && typeof c.id === 'string' && !storedCommentIds.has(c.id)))
+    .map((c) => ({
+      ...c,
+      authorId: actorId,
+      authorName: actorDisplayName,
+      atDisplay: nowDisplay,
+    }));
+  const comments = [...storedComments, ...newComments];
+
+  const storedRuns = stored?.runs ?? [];
+  const serverRun: ConflictCheckRunAudit = {
+    id: `run-srv-${randomUUID()}`,
+    runAtDisplay: nowDisplay,
+    runById: actorId,
+    runByName: actorDisplayName,
+    searchTerms: parties.map((p) => p.name).filter(Boolean),
+    partiesCount: parties.length,
+    matchesCount: matches.length,
+    potentialConflictsCount: matches.filter(
+      (m) => m.disposition === 'potential_conflict' || m.restricted,
+    ).length,
+  };
+  const runs = [...storedRuns, serverRun];
+
+  const isRiskApprovalOrDecline =
+    actorHasRiskView && (status === 'Approved' || status === 'Declined');
+  const isSubmission =
+    status === 'Cleared' ||
+    status === 'Referred' ||
+    saveMode === 'submit_cleared' ||
+    saveMode === 'submit_referred';
+
+  const approvedRestrictedMatchIds =
+    actorHasRiskView && status === 'Approved'
+      ? matches.filter((m) => m.restricted).map((m) => m.id)
+      : actorHasRiskView && status === 'Declined'
+        ? []
+        : stored?.approvedRestrictedMatchIds;
+
+  return {
+    status,
+    outcomeLabel,
+    declarationConfirmed: Boolean(submitted.declarationConfirmed),
+    reviewerMessage: submitted.reviewerMessage ?? '',
+    lastRunAtDisplay: nowDisplay,
+    lastRunById: actorId,
+    lastRunByName: actorDisplayName,
+    savedDraftAtDisplay:
+      saveMode === 'draft' ? nowDisplay : stored?.savedDraftAtDisplay ?? null,
+    submittedAtDisplay: isSubmission
+      ? nowDisplay
+      : stored?.submittedAtDisplay ?? null,
+    submittedById: isSubmission ? actorId : stored?.submittedById ?? null,
+    submittedByName: isSubmission
+      ? actorDisplayName
+      : stored?.submittedByName ?? null,
+    approvedAtDisplay: isRiskApprovalOrDecline
+      ? nowDisplay
+      : stored?.approvedAtDisplay ?? null,
+    approvedById: isRiskApprovalOrDecline
+      ? actorId
+      : stored?.approvedById ?? null,
+    approvedByName: isRiskApprovalOrDecline
+      ? actorDisplayName
+      : stored?.approvedByName ?? null,
+    ...(approvedRestrictedMatchIds !== undefined
+      ? { approvedRestrictedMatchIds }
+      : {}),
+    parties,
+    matches,
+    runs,
+    comments,
+  };
+}
+
 export async function saveMatterRecord(
-  input: Omit<Partial<Matter>, 'conflictClearedById'> & {
+  input: Omit<Partial<Matter>, 'conflictClearedById' | 'conflictCheckRecord'> & {
     title: string;
     clientId: string;
     practiceAreaId: string;
     workTypeSubcategoryId: string;
+    conflictCheckRecord?: ConflictCheckRecordInput | ConflictCheckRecord | null;
   },
   opts: {
     id?: string;
@@ -3172,18 +3297,15 @@ export async function saveMatterRecord(
     reviewedAtIso: now,
   });
 
-  const approvedIds = new Set(
-    existing?.conflictCheckRecord?.approvedRestrictedMatchIds ?? [],
-  );
-  const hasUnapprovedRestrictedMatch = reconciledConflictMatches.some(
-    (m) => m.restricted && !approvedIds.has(m.id),
+  const hasUnapprovedRestrictedMatch = hasUnapprovedRestrictedMatches(
+    reconciledConflictMatches,
+    existing?.conflictCheckRecord?.approvedRestrictedMatchIds,
   );
   const isApprovedByRiskInThisSave =
     actorHasRiskView && input.conflictCheckRecord?.status === 'Approved';
   if (
     hasUnapprovedRestrictedMatch &&
     !isApprovedByRiskInThisSave &&
-    !actorHasRiskView &&
     (opts.saveMode === 'submit_cleared' ||
       (!isDraftSave &&
         opts.saveMode !== 'submit_referred' &&
@@ -3199,18 +3321,21 @@ export async function saveMatterRecord(
     };
   }
 
-  const preservedApprovedRestrictedIds = isApprovedByRiskInThisSave
-    ? reconciledConflictMatches.filter((m) => m.restricted).map((m) => m.id)
-    : existing?.conflictCheckRecord?.approvedRestrictedMatchIds;
+  const actorDisplayName = personDisplayName(actingUser);
   const resolvedConflictCheckRecord =
     input.conflictCheckRecord !== undefined
       ? input.conflictCheckRecord
-        ? {
-            ...input.conflictCheckRecord,
+        ? buildServerConflictCheckRecord({
+            submitted: input.conflictCheckRecord,
+            stored: existing?.conflictCheckRecord,
             parties: effectiveConflictParties,
             matches: reconciledConflictMatches,
-            approvedRestrictedMatchIds: preservedApprovedRestrictedIds,
-          }
+            actorId: opts.byId,
+            actorDisplayName,
+            actorHasRiskView,
+            nowDisplay: now,
+            saveMode: opts.saveMode,
+          })
         : null
       : existing?.conflictCheckRecord
         ? {
@@ -3285,7 +3410,9 @@ export async function saveMatterRecord(
       isDraftSave || opts.saveMode === 'submit_referred'
         ? prospectiveStatus
         : opts.saveMode === 'submit_cleared'
-          ? input.matterStatusId || cmiIncompleteStatus
+          ? input.matterStatusId && input.matterStatusId !== prospectiveStatus
+            ? input.matterStatusId
+            : cmiIncompleteStatus
           : input.matterStatusId || existing?.recordStatusId || cmiIncompleteStatus,
     createdById: existing?.createdById ?? opts.byId,
     createdAt: existing?.createdAt ?? now,
@@ -3312,7 +3439,9 @@ export async function saveMatterRecord(
       isDraftSave || opts.saveMode === 'submit_referred'
         ? prospectiveStatus
         : opts.saveMode === 'submit_cleared'
-          ? input.matterStatusId || cmiIncompleteStatus
+          ? input.matterStatusId && input.matterStatusId !== prospectiveStatus
+            ? input.matterStatusId
+            : cmiIncompleteStatus
           : input.matterStatusId || existing?.matterStatusId || cmiIncompleteStatus,
     sourceEnquiryId: input.sourceEnquiryId !== undefined ? input.sourceEnquiryId : existing?.sourceEnquiryId ?? null,
     sourceQuoteId: input.sourceQuoteId !== undefined ? input.sourceQuoteId : existing?.sourceQuoteId ?? null,
@@ -3420,23 +3549,19 @@ export async function saveMatterRecord(
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
 
   const existingSnapshot = existing?.fieldValues?.['matterOpeningSnapshot'] as
-    | { saveMode?: string }
+    | { saveMode?: string; capturedAt?: string }
     | undefined;
-  const hasExistingOpeningSnapshot = Boolean(
+  const existingHasOpened = Boolean(
     existing &&
       existing.matterNumber !== 'DRAFT' &&
       !existing.matterNumber.startsWith('DRAFT') &&
+      existing.matterStatusId !== prospectiveStatus &&
       existingSnapshot &&
       existingSnapshot.saveMode !== 'draft',
   );
-  const isOpeningEvent =
-    !hasExistingOpeningSnapshot &&
-    (!existing ||
-      opts.saveMode === 'submit_cleared' ||
-      opts.saveMode === 'submit_referred' ||
-      !existingSnapshot);
+  const isOpeningEvent = !isDraftSave && !existingHasOpened;
 
-  // R108 & R131: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
+  // R108 & R131 & R173: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
   const host = getPlatformExtensionHost();
   const loadErrors = getExtensionHostLoadErrors();
   const enabledExtSet = new Set(tenantCfg.enabledExtensions ?? []);
@@ -3446,7 +3571,7 @@ export async function saveMatterRecord(
       (enabledExtSet.has(err.extensionId ?? '') || enabledExtSet.has(err.extensionDir)) &&
       (err.declaredHooks === null || err.declaredHooks.includes('beforeMatterOpen')),
   );
-  if (isOpeningEvent && !isDraftSave && gateLoadFailure) {
+  if (isOpeningEvent && gateLoadFailure) {
     return {
       matter: null,
       errors: {
@@ -3501,15 +3626,14 @@ export async function saveMatterRecord(
     tenantCfg,
     costsHookInput,
   );
-  const openGovernance =
-    isOpeningEvent && !isDraftSave
-      ? await host.executeMatterCostsHook(
-          'beforeMatterOpen',
-          extensionCtx,
-          tenantCfg,
-          costsHookInput,
-        )
-      : null;
+  const openGovernance = isOpeningEvent
+    ? await host.executeMatterCostsHook(
+        'beforeMatterOpen',
+        extensionCtx,
+        tenantCfg,
+        costsHookInput,
+      )
+    : null;
 
   if (openGovernance && !openGovernance.allowProceed) {
     const rawWarning = openGovernance.governanceWarnings[0] ?? '';
@@ -3563,9 +3687,24 @@ export async function saveMatterRecord(
   }
 
   matter.fieldValues['matterCostsGovernance'] = openGovernance ?? calcGovernance;
+  if (openGovernance) {
+    const gateRecord: MatterOpeningGateRecord = {
+      allowProceed: openGovernance.allowProceed,
+      estimatedFeeGbp,
+      checkedAt: now,
+    };
+    matter.fieldValues['matterOpeningGate'] = gateRecord;
+  } else if (!existingHasOpened) {
+    const draftGateRecord: MatterOpeningGateRecord = {
+      allowProceed: !calcGovernance.requiresPartnerSignOff || partnerSignOffCompleted,
+      estimatedFeeGbp,
+      checkedAt: now,
+    };
+    matter.fieldValues['matterOpeningGate'] = draftGateRecord;
+  }
 
-  if (isOpeningEvent) {
-    // Re-build fresh immutable snapshot at the moment of opening (ignoring any prior draft snapshot)
+  if (!existingHasOpened) {
+    // Re-build fresh snapshot until the matter has actually opened (non-prospective status)
     const cleanFieldVals = { ...matter.fieldValues };
     delete cleanFieldVals['matterOpeningSnapshot'];
     const openingSnapshot = resolveMatterOpeningSnapshot(
@@ -3576,7 +3715,9 @@ export async function saveMatterRecord(
       store.enquiries,
       store.quotes,
     );
-    openingSnapshot.saveMode = opts.saveMode ?? 'opened';
+    openingSnapshot.saveMode = isDraftSave
+      ? 'draft'
+      : opts.saveMode ?? 'opened';
     openingSnapshot.capturedAt = now;
     matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
   }
@@ -3724,55 +3865,8 @@ export async function saveMatterRecord(
       const riskTaskId = nextId(store, 'TSK');
       const configuredTeamKey = tenantCfg.conflictReview?.assigneeTeamKey?.trim() || null;
       const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
-      let resolvedRiskTeam: Team | undefined;
-      if (configuredTeamKey) {
-        resolvedRiskTeam = store.teams.find(
-          (tm) => tm.active && tm.id === configuredTeamKey,
-        );
-        if (!resolvedRiskTeam) {
-          const matchedOrgTeam = store.orgStructure?.teamsOrPracticeGroups?.find(
-            (ot) =>
-              ot.active &&
-              (ot.id === configuredTeamKey || ot.code === configuredTeamKey),
-          );
-          if (matchedOrgTeam) {
-            resolvedRiskTeam = store.teams.find(
-              (tm) =>
-                tm.active &&
-                (tm.id === matchedOrgTeam.id || tm.id === matchedOrgTeam.code),
-            );
-          }
-        }
-      }
-
-      let assignedReviewerId: string | null = null;
-      if (resolvedRiskTeam) {
-        const teamCandidates = store.people
-          .filter(
-            (p) =>
-              p.isEmployee &&
-              !p.mergedIntoId &&
-              resolvedRiskTeam!.memberIds.includes(p.id),
-          )
-          .filter((p) => {
-            if (!configuredRoleKey) return true;
-            if (p.employeeRoleId === configuredRoleKey) return true;
-            const roles = resolveEmployeeRoles(p, store.teams);
-            return roles.includes(configuredRoleKey);
-          })
-          .filter((p) =>
-            canPersonAccessMatter(matter, p.id, p, {
-              allPeople: store.people,
-              teams: store.teams,
-            }),
-          );
-        teamCandidates.sort((a, b) => {
-          const aLead = isUserTeamLeadFor(a.id, resolvedRiskTeam!.id, store.teams) ? 0 : 1;
-          const bLead = isUserTeamLeadFor(b.id, resolvedRiskTeam!.id, store.teams) ? 0 : 1;
-          return aLead - bLead || a.id.localeCompare(b.id);
-        });
-        assignedReviewerId = teamCandidates[0]?.id ?? null;
-      }
+      const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
+        resolveConflictReviewTaskRouting(store, tenantCfg.conflictReview, matter);
 
       if (!assignedReviewerId) {
         console.warn(
@@ -4091,17 +4185,26 @@ export function runMatterConflictSearchRecord(
   const restrictedCount = matches.filter((m) => m.restricted).length;
   if (restrictedCount > 0) {
     const tenantId = getActiveTenantConfiguration().tenantId;
-    const correlationId = `conflict-search-${randomUUID()}`;
-    writeAudit(store, {
-      recordType: 'matter',
-      recordId: input.currentMatterId ?? 'DRAFT-CONFLICT-SEARCH',
-      action: 'update',
-      field: 'Conflict check restricted match',
-      oldValue: null,
-      newValue: `Restricted conflict match count: ${restrictedCount} across ${input.parties.length} searched party/parties`,
-      byId,
-    });
-    saveStore(store);
+    const activeSession = getActiveActorSession();
+    const correlationId =
+      (activeSession as { correlationId?: string } | null)?.correlationId ??
+      `conflict-search-${randomUUID()}`;
+    const hasSavedMatter = Boolean(
+      input.currentMatterId &&
+        store.matters.some((m) => m.id === input.currentMatterId),
+    );
+    if (hasSavedMatter && input.currentMatterId) {
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: input.currentMatterId,
+        action: 'update',
+        field: 'Conflict check restricted match',
+        oldValue: null,
+        newValue: `Restricted conflict match count: ${restrictedCount} across ${input.parties.length} searched party/parties`,
+        byId,
+      });
+      saveStore(store);
+    }
     console.info(
       JSON.stringify({
         level: 'info',
@@ -4109,7 +4212,7 @@ export function runMatterConflictSearchRecord(
         tenantId,
         correlationId,
         actorId: byId,
-        matterId: input.currentMatterId ?? null,
+        matterId: hasSavedMatter ? input.currentMatterId : null,
         partiesCount: input.parties.length,
         restrictedCount,
       }),
@@ -4120,9 +4223,9 @@ export function runMatterConflictSearchRecord(
 
 export function updateMatterConflictRecord(
   matterId: string,
-  record: ConflictCheckRecord,
+  record: ConflictCheckRecordInput | ConflictCheckRecord,
   byId: string,
-): { matter: Matter | null; errors?: Record<string, string> } {
+): { matter: Matter | null; errors?: Record<string, string>; warnings?: string[] } {
   const store = getStore();
   const today = toIsoDate(new Date());
   const matter = store.matters.find((m) => m.id === matterId);
@@ -4199,8 +4302,10 @@ export function updateMatterConflictRecord(
 
   if (
     record.status === 'Cleared' &&
-    !actorHasRiskView &&
-    reconciledMatches.some((m) => m.restricted)
+    hasUnapprovedRestrictedMatches(
+      reconciledMatches,
+      matter.conflictCheckRecord?.approvedRestrictedMatchIds,
+    )
   ) {
     return {
       matter: null,
@@ -4213,43 +4318,16 @@ export function updateMatterConflictRecord(
 
   const prevMatter = structuredClone(matter);
   const now = touchMatter(matter, byId);
-  const storedComments = matter.conflictCheckRecord?.comments ?? [];
-  const storedCommentIds = new Set(storedComments.map((c) => c.id));
-  const newComments = (record.comments ?? [])
-    .filter((c) => !storedCommentIds.has(c.id))
-    .map((c) => ({
-      ...c,
-      authorId: byId,
-      authorName: actorDisplayName,
-      atDisplay: now,
-    }));
-  const sanitisedComments = [...storedComments, ...newComments];
-  const approvedRestrictedMatchIds =
-    record.status === 'Approved'
-      ? reconciledMatches.filter((m) => m.restricted).map((m) => m.id)
-      : record.status === 'Declined'
-        ? []
-        : matter.conflictCheckRecord?.approvedRestrictedMatchIds ?? [];
-  const sanitisedRecord: ConflictCheckRecord = {
-    ...record,
+  const sanitisedRecord = buildServerConflictCheckRecord({
+    submitted: record,
+    stored: matter.conflictCheckRecord,
     parties: effectiveParties,
     matches: reconciledMatches,
-    comments: sanitisedComments,
-    approvedRestrictedMatchIds,
-    ...(record.status === 'Approved' || record.status === 'Declined'
-      ? {
-          approvedById: byId,
-          approvedByName: actorDisplayName,
-          approvedAtDisplay: now,
-        }
-      : record.status === 'Cleared'
-        ? {
-            submittedById: byId,
-            submittedByName: actorDisplayName,
-            submittedAtDisplay: now,
-          }
-        : {}),
-  };
+    actorId: byId,
+    actorDisplayName,
+    actorHasRiskView,
+    nowDisplay: now,
+  });
 
   matter.conflictCheckRecord = sanitisedRecord;
 
@@ -4279,11 +4357,15 @@ export function updateMatterConflictRecord(
     matter.restrictedAccessUserIds = Array.from(allowed);
   }
 
+  const gate = matter.fieldValues?.['matterOpeningGate'] as
+    | MatterOpeningGateRecord
+    | undefined;
   const hasPassedOpeningGate =
     matter.matterNumber !== 'DRAFT' &&
-    Boolean(matter.openedAt) &&
-    Boolean(matter.fieldValues?.['matterOpeningSnapshot']);
+    !matter.matterNumber.startsWith('DRAFT') &&
+    gate?.allowProceed === true;
 
+  const warnings: string[] = [];
   if (sanitisedRecord.status === 'Approved' || sanitisedRecord.status === 'Cleared') {
     matter.conflictCheckStatus =
       sanitisedRecord.outcomeLabel === 'Approved with conditions'
@@ -4295,10 +4377,32 @@ export function updateMatterConflictRecord(
       matter.conflictClearedById = null;
     }
     matter.conflictCheckDate = today;
-    if (hasPassedOpeningGate && sanitisedRecord.status === 'Approved') {
-      const activeStatusId = vid('matter_status', 'Active');
-      matter.matterStatusId = activeStatusId;
-      matter.recordStatusId = activeStatusId;
+    if (sanitisedRecord.status === 'Approved') {
+      if (hasPassedOpeningGate) {
+        const activeStatusId = vid('matter_status', 'Active');
+        matter.matterStatusId = activeStatusId;
+        matter.recordStatusId = activeStatusId;
+        const cleanFieldVals = { ...(matter.fieldValues ?? {}) };
+        delete cleanFieldVals['matterOpeningSnapshot'];
+        const openingSnapshot = resolveMatterOpeningSnapshot(
+          { ...matter, fieldValues: cleanFieldVals },
+          store.people,
+          store.organisations,
+          store.values,
+          store.enquiries,
+          store.quotes,
+        );
+        openingSnapshot.saveMode = 'opened';
+        openingSnapshot.capturedAt = now;
+        matter.fieldValues = {
+          ...(matter.fieldValues ?? {}),
+          matterOpeningSnapshot: openingSnapshot,
+        };
+      } else {
+        warnings.push(
+          'Conflict approved. The matter can open once partner cost sign-off is complete.',
+        );
+      }
     }
   } else if (sanitisedRecord.status === 'Declined') {
     matter.conflictCheckStatus = 'Declined — Conflict of interest';
@@ -4334,7 +4438,7 @@ export function updateMatterConflictRecord(
     logDocumentLifecycleSyncError(err, syncCorrelationId);
   }
 
-  return { matter };
+  return { matter, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 export async function signOffMatterCostsRecord(
@@ -4436,19 +4540,58 @@ export async function signOffMatterCostsRecord(
   };
 
   const host = getPlatformExtensionHost();
+  const hookInput = {
+    matterId: matter.id,
+    workBasis: resolvedCosts.workBasis,
+    estimatedFeeGbp: signedOffEstimateGbp,
+    disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+    partnerSignOffCompleted: true,
+  };
   const calcGovernance = await host.executeMatterCostsHook(
     'beforeMatterCostsCalculate',
     extensionCtx,
     tenantCfg,
-    {
-      matterId: matter.id,
-      workBasis: resolvedCosts.workBasis,
-      estimatedFeeGbp: signedOffEstimateGbp,
-      disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
-      partnerSignOffCompleted: true,
-    },
+    hookInput,
   );
-  matter.fieldValues['matterCostsGovernance'] = calcGovernance;
+  const openGovernance = await host.executeMatterCostsHook(
+    'beforeMatterOpen',
+    extensionCtx,
+    tenantCfg,
+    hookInput,
+  );
+  matter.fieldValues['matterCostsGovernance'] = openGovernance ?? calcGovernance;
+  const gateRecord: MatterOpeningGateRecord = {
+    allowProceed: openGovernance.allowProceed,
+    estimatedFeeGbp: signedOffEstimateGbp,
+    checkedAt: now,
+  };
+  matter.fieldValues['matterOpeningGate'] = gateRecord;
+
+  const prospectiveStatusId = vid('matter_status', 'Prospective / Enquiry');
+  if (
+    openGovernance.allowProceed &&
+    matter.matterNumber !== 'DRAFT' &&
+    !matter.matterNumber.startsWith('DRAFT') &&
+    matter.matterStatusId === prospectiveStatusId &&
+    matter.conflictCheckRecord?.status === 'Approved'
+  ) {
+    const activeStatusId = vid('matter_status', 'Active');
+    matter.matterStatusId = activeStatusId;
+    matter.recordStatusId = activeStatusId;
+    const cleanFieldVals = { ...matter.fieldValues };
+    delete cleanFieldVals['matterOpeningSnapshot'];
+    const openingSnapshot = resolveMatterOpeningSnapshot(
+      { ...matter, fieldValues: cleanFieldVals },
+      store.people,
+      store.organisations,
+      store.values,
+      store.enquiries,
+      store.quotes,
+    );
+    openingSnapshot.saveMode = 'opened';
+    openingSnapshot.capturedAt = now;
+    matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
+  }
 
   writeAudit(store, {
     recordType: 'matter',

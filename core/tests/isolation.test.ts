@@ -38,6 +38,8 @@ import {
   migrateEmployeesToEmploymentRecords,
 } from '../../src/domain/employment';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
+import { reconcileServerConflictMatches } from '../../src/domain/matterConflicts';
+import { resolveMatterConflictCheckRecord } from '../../src/domain/matterOpeningRecord';
 import { buildDefaultOrgStructure } from '../../src/domain/orgStructure';
 import {
   getDefaultTenantRbacConfig,
@@ -3389,9 +3391,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const auditCountBefore = store.audit.length;
       const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
       try {
-        const res = runMatterConflictSearchRecord(
+        // 1. Unsaved matter (currentMatterId: null) writes the structured log only, not store.audit
+        const unsavedRes = runMatterConflictSearchRecord(
           {
             currentMatterId: null,
+            parties: [
+              {
+                id: 'pty-r172-1',
+                name: 'SecretDraft CallerName',
+                entityType: 'person',
+                role: 'Opponent',
+                linkedRecordId: null,
+              },
+            ],
+          },
+          feeEarner.id,
+        );
+        expect(unsavedRes.errors).toBeUndefined();
+        expect(unsavedRes.matches.some((m) => m.restricted)).toBe(true);
+        expect(store.audit.length).toBe(auditCountBefore);
+
+        // 2. Saved matter (currentMatterId: 'M-000001') writes both the count-only audit entry and structured log
+        const res = runMatterConflictSearchRecord(
+          {
+            currentMatterId: 'M-000001',
             parties: [
               {
                 id: 'pty-r172-1',
@@ -3409,6 +3432,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         expect(store.audit.length).toBe(auditCountBefore + 1);
         const latestAudit = store.audit[0]!;
+        expect(latestAudit.recordId).toBe('M-000001');
         expect(latestAudit.field).toBe('Conflict check restricted match');
         expect(latestAudit.newValue).toContain('Restricted conflict match count: 1');
         expect(latestAudit.newValue).not.toContain('SecretDraft CallerName');
@@ -3430,5 +3454,633 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     } finally {
       resetAllDemoData('P-000001');
     }
+  });
+
+  it('R173: saveMatterRecord runs beforeMatterOpen on every non-draft save until the matter has opened, and updateMatterConflictRecord keeps referred matters Prospective until partner cost sign-off', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const riskOfficer = store.people.find((p) =>
+        (p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          p.id !== riskOfficer.id &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+      const prospectiveStatusId =
+        store.values.find(
+          (v) =>
+            v.listKey === 'matter_status' &&
+            v.label === 'Prospective / Enquiry',
+        )?.id ?? 'matter_status.prospective_enquiry';
+      const activeStatusId =
+        store.values.find(
+          (v) => v.listKey === 'matter_status' && v.label === 'Active',
+        )?.id ?? 'matter_status.active';
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const makeActorSession = (
+        person: typeof partner,
+        roles: string[],
+        fallbackEmail: string,
+      ) => {
+        const cookie = createSignedEntraSessionCookie({
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id.replace(/\D/g, '').padStart(12, '0')}`,
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: person.id,
+          email: person.emails[0]?.address ?? fallbackEmail,
+          displayName: `${person.firstName} ${person.surname}`,
+          entraRoles: roles,
+          mappedRoles: roles,
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        });
+        return {
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: roles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+        };
+      };
+      const feeEarnerSession = makeActorSession(
+        feeEarner,
+        feeEarner.roles ?? ['fee_earner'],
+        'fe@notalawfirm.example',
+      );
+      const riskSession = makeActorSession(
+        riskOfficer,
+        riskOfficer.roles ?? ['risk_compliance'],
+        'risk@notalawfirm.example',
+      );
+      const partnerSession = makeActorSession(
+        partner,
+        partner.roles ?? ['partner', 'managing_partner'],
+        'partner@notalawfirm.example',
+      );
+
+      // 1. Refer a matter with a £10,000 estimate (below £50,000 partner sign-off threshold)
+      const referLowRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R173 Referred Matter',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+              parties: [],
+            },
+            { byId: feeEarner.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(referLowRes.errors).toBeUndefined();
+      expect(referLowRes.matter?.matterStatusId).toBe(prospectiveStatusId);
+      const matterId = referLowRes.matter!.id;
+
+      // 2. Saving the referred matter with a £75,000 estimate and saveMode: 'submit_referred' runs beforeMatterOpen and returns errors.costsGovernance
+      const referHighRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referLowRes.matter!,
+              title: 'R173 Referred Matter',
+              feeEstimateGbp: 75000,
+              agreedFeeCapGbp: 75000,
+            },
+            { id: matterId, byId: feeEarner.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(referHighRes.matter).toBeNull();
+      expect(referHighRes.errors?.costsGovernance).toMatch(/partner.*sign-off/i);
+
+      // 3. Raising the estimate to £75,000 on a draft save updates matterOpeningGate.allowProceed to false; Risk approval then keeps the matter in prospectiveStatus until a partner signs off
+      const draftHighRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referLowRes.matter!,
+              title: 'R173 Referred Matter',
+              feeEstimateGbp: 75000,
+              agreedFeeCapGbp: 75000,
+            },
+            { id: matterId, byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(draftHighRes.errors).toBeUndefined();
+      expect(
+        (
+          draftHighRes.matter?.fieldValues['matterOpeningGate'] as {
+            allowProceed?: boolean;
+          }
+        )?.allowProceed,
+      ).toBe(false);
+
+      const riskApproveBeforeSignOff = runWithActiveActorSession(
+        riskSession,
+        () =>
+          updateMatterConflictRecord(
+            matterId,
+            {
+              ...draftHighRes.matter!.conflictCheckRecord!,
+              status: 'Approved',
+              outcomeLabel: 'Approved by Risk & Compliance',
+            },
+            riskOfficer.id,
+          ),
+      );
+      expect(riskApproveBeforeSignOff.errors).toBeUndefined();
+      expect(riskApproveBeforeSignOff.matter?.matterStatusId).toBe(
+        prospectiveStatusId,
+      );
+      expect(riskApproveBeforeSignOff.warnings?.[0]).toMatch(
+        /partner cost sign-off/i,
+      );
+
+      // 4. Once a partner signs off the £75,000 estimate, the matter transitions to Active
+      const partnerSignOffRes = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          signOffMatterCostsRecord(
+            matterId,
+            partner.id,
+            'Approved £75,000 estimate',
+          ),
+      );
+      expect(partnerSignOffRes.errors).toBeUndefined();
+      expect(partnerSignOffRes.matter?.matterStatusId).toBe(activeStatusId);
+    } finally {
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R174: getAppSnapshot conflict reviewer resolution uses stable team id/code and configured assigneeRoleKey without matching team display names or hard-coding risk_compliance', () => {
+    resetAllDemoData('P-000001');
+    const originalRawBase = getActiveTenantRawBaseConfig();
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const nonRiskEmployee = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          p.employeeRoleId !== 'employee_role.risk_and_compliance' &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+
+      // 1. Team whose display name (not id or code) equals assigneeTeamKey is NOT picked
+      store.teams.push({
+        id: 'TM-R174-NAME-ONLY',
+        name: 'custom-team-key-by-name',
+        description: 'Name collision test team',
+        memberIds: [nonRiskEmployee.id],
+        leadIds: [nonRiskEmployee.id],
+        practiceAreaIds: [],
+        active: true,
+        createdById: partner.id,
+        createdAt: new Date().toISOString(),
+        updatedById: partner.id,
+        updatedAt: new Date().toISOString(),
+      });
+
+      setActiveTenantConfigForTesting({
+        ...originalRawBase,
+        conflictReview: {
+          assigneeTeamKey: 'custom-team-key-by-name',
+        },
+      });
+      const snapByName = getAppSnapshot(partner.id);
+      expect(
+        snapByName.suggestedMatterGovernanceAssignees.riskReviewerId,
+      ).toBeNull();
+
+      // 2. Custom assigneeRoleKey selects a holder of that role, not a holder of risk_compliance
+      nonRiskEmployee.employeeRoleId = 'employee_role.custom_conflict_reviewer';
+      setActiveTenantConfigForTesting({
+        ...originalRawBase,
+        conflictReview: {
+          assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
+        },
+      });
+      const snapCustomRole = getAppSnapshot(partner.id);
+      expect(
+        snapCustomRole.suggestedMatterGovernanceAssignees.riskReviewerId,
+      ).toBe(nonRiskEmployee.id);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R175: user with risk:view (and matter:create/edit) but without matter:restricted:access cannot submit_cleared on an unapproved restricted match unless recording status Approved', async () => {
+    resetAllDemoData('P-000001');
+    const originalRawBase = getActiveTenantRawBaseConfig();
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const customReviewer = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+
+      // Create a restricted staff matter invisible to customReviewer (since customReviewer lacks matter:restricted:access)
+      store.matters.push({
+        ...structuredClone(baseMatter),
+        id: 'M-R175-STAFF',
+        matterNumber: 'STF175-0001',
+        title: 'Restricted Staff Matter R175',
+        isStaffMatter: true,
+        restrictedAccessUserIds: [partner.id],
+        responsiblePartnerId: partner.id,
+        supervisingPartnerId: partner.id,
+        leadFeeEarnerId: partner.id,
+        teamMemberIds: [partner.id],
+        parties: [
+          {
+            id: 'pty-r175-secret',
+            name: 'ConfidentialStaffTarget Ltd',
+            entityType: 'organisation',
+            role: 'Opponent',
+            relationshipCode: 'OP',
+            capacityCodes: ['CAP_DEFENDANT'],
+            alignment: 'adverse',
+            linkedRecordId: null,
+          },
+        ],
+      });
+
+      // Grant customReviewer a role with risk:view, matter:create, and matter:edit, but NOT matter:restricted:access
+      const currentRbac = getActiveTenantConfiguration().rbac;
+      const customRoles = {
+        ...currentRbac.roles,
+        junior_risk_reviewer: {
+          key: 'junior_risk_reviewer',
+          label: 'Junior Risk Reviewer',
+          description: 'Can view risk queue and edit matters without unrestricted staff matter access',
+          permissions: [
+            'matter:view',
+            'matter:create',
+            'matter:edit',
+            'risk:view',
+          ] as never,
+        },
+      };
+      setRuntimeRbacConfigOverride({
+        ...currentRbac,
+        roles: customRoles,
+      });
+      customReviewer.roles = ['junior_risk_reviewer' as never];
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const reviewerCookie = createSignedEntraSessionCookie({
+        personId: customReviewer.id,
+        tenantId: 'not-a-law-firm',
+        oid: customReviewer.entraObjectId ?? '00000000-0000-4000-8000-000000000175',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: customReviewer.id,
+        email: customReviewer.emails[0]?.address ?? 'jr@notalawfirm.example',
+        displayName: 'Junior Reviewer',
+        entraRoles: ['junior_risk_reviewer'],
+        mappedRoles: ['junior_risk_reviewer'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const reviewerSession = {
+        personId: customReviewer.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: ['junior_risk_reviewer'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(reviewerCookie)!,
+      };
+
+      // 1. Attempting submit_cleared with conflictCheckRecord.status === 'Cleared' is refused because the restricted match is unapproved
+      const clearedAttempt = await runWithActiveActorSession(
+        reviewerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R175 Matter With Restricted Hit',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: customReviewer.id,
+              feeEstimateGbp: 5000,
+              parties: [
+                {
+                  id: 'pty-r175-1',
+                  name: 'ConfidentialStaffTarget Ltd',
+                  entityType: 'organisation',
+                  role: 'Opponent',
+                  relationshipCode: 'OP',
+                  capacityCodes: ['CAP_DEFENDANT'],
+                  alignment: 'adverse',
+                  linkedRecordId: null,
+                },
+              ],
+              conflictCheckStatus: 'Cleared',
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: null,
+                lastRunById: null,
+                lastRunByName: null,
+                parties: [],
+                matches: [],
+                runs: [],
+                comments: [],
+              },
+            },
+            { byId: customReviewer.id, saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(clearedAttempt.matter).toBeNull();
+      expect(clearedAttempt.errors?.conflict).toMatch(/referred to Risk/i);
+
+      // 2. Saving with conflictCheckRecord.status === 'Approved' succeeds and records the restricted match ID in approvedRestrictedMatchIds
+      const approvedAttempt = await runWithActiveActorSession(
+        reviewerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R175 Matter With Restricted Hit',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: customReviewer.id,
+              feeEstimateGbp: 5000,
+              parties: [
+                {
+                  id: 'pty-r175-1',
+                  name: 'ConfidentialStaffTarget Ltd',
+                  entityType: 'organisation',
+                  role: 'Opponent',
+                  relationshipCode: 'OP',
+                  capacityCodes: ['CAP_DEFENDANT'],
+                  alignment: 'adverse',
+                  linkedRecordId: null,
+                },
+              ],
+              conflictCheckStatus: 'Cleared',
+              conflictCheckRecord: {
+                status: 'Approved',
+                outcomeLabel: 'Approved by Risk & Compliance',
+                declarationConfirmed: true,
+                reviewerMessage: 'Approved after review',
+                lastRunAtDisplay: null,
+                lastRunById: null,
+                lastRunByName: null,
+                parties: [],
+                matches: [],
+                runs: [],
+                comments: [],
+              },
+            },
+            { byId: customReviewer.id, saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(approvedAttempt.errors).toBeUndefined();
+      expect(approvedAttempt.matter).not.toBeNull();
+      const restrictedIds = approvedAttempt.matter!.conflictCheckRecord!.matches
+        .filter((m) => m.restricted)
+        .map((m) => m.id);
+      expect(restrictedIds.length).toBeGreaterThan(0);
+      expect(
+        approvedAttempt.matter!.conflictCheckRecord!.approvedRestrictedMatchIds,
+      ).toEqual(restrictedIds);
+    } finally {
+      void originalRawBase;
+      setRuntimeRbacConfigOverride(null);
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R176: saveMatterRecord builds ConflictCheckRecord on the server, preserving stored comments and runs and rejecting forged risk approvals', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const riskOfficer = store.people.find((p) =>
+        (p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          p.id !== riskOfficer.id &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const feeEarnerCookie = createSignedEntraSessionCookie({
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        oid: feeEarner.entraObjectId ?? '00000000-0000-4000-8000-000000000176',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: feeEarner.id,
+        email: feeEarner.emails[0]?.address ?? 'fe@notalawfirm.example',
+        displayName: 'Fee Earner',
+        entraRoles: feeEarner.roles ?? ['fee_earner'],
+        mappedRoles: feeEarner.roles ?? ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const feeEarnerSession = {
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: feeEarner.roles ?? ['fee_earner'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(feeEarnerCookie)!,
+      };
+
+      // Seed a draft matter with an existing comment and server run
+      const initialSave = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R176 Audit Integrity Matter',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 5000,
+              parties: [],
+              conflictCheckRecord: {
+                status: 'In progress',
+                outcomeLabel: 'Pending',
+                declarationConfirmed: false,
+                reviewerMessage: '',
+                lastRunAtDisplay: null,
+                lastRunById: null,
+                lastRunByName: null,
+                parties: [],
+                matches: [],
+                runs: [],
+                comments: [
+                  {
+                    id: 'comment-original-1',
+                    authorId: feeEarner.id,
+                    authorName: 'Fee Earner',
+                    authorRole: 'Solicitor',
+                    atDisplay: '2026-01-01',
+                    text: 'Original conflict note that must not be deleted',
+                  },
+                ],
+              },
+            },
+            { byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(initialSave.errors).toBeUndefined();
+      const matterId = initialSave.matter!.id;
+      const originalRunId =
+        initialSave.matter!.conflictCheckRecord!.runs[0]!.id;
+
+      // Fee earner now attempts to forge status: 'Approved', approvedById: riskOfficer.id, wipe comments: [], and inject runs: [{ id: 'forged' }]
+      const forgedSave = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...initialSave.matter!,
+              title: 'R176 Audit Integrity Matter',
+              conflictCheckRecord: {
+                status: 'Approved',
+                outcomeLabel: 'Approved by Risk & Compliance',
+                declarationConfirmed: true,
+                reviewerMessage: 'Forged approval',
+                lastRunAtDisplay: null,
+                lastRunById: null,
+                lastRunByName: null,
+                approvedById: riskOfficer.id,
+                approvedByName: 'Forged Risk Officer',
+                approvedAtDisplay: '2099-01-01',
+                parties: [],
+                matches: [],
+                runs: [
+                  {
+                    id: 'forged',
+                    runAtDisplay: '2099-01-01',
+                    runById: riskOfficer.id,
+                    runByName: 'Forged Risk Officer',
+                    searchTerms: ['forged'],
+                    partiesCount: 99,
+                    matchesCount: 0,
+                    potentialConflictsCount: 0,
+                  },
+                ],
+                comments: [],
+              } as never,
+            },
+            { id: matterId, byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(forgedSave.errors).toBeUndefined();
+      const storedRecord = forgedSave.matter!.conflictCheckRecord!;
+      expect(storedRecord.status).not.toBe('Approved');
+      expect(storedRecord.approvedById).toBeNull();
+      expect(storedRecord.approvedByName).toBeNull();
+      expect(
+        storedRecord.comments.some((c) => c.id === 'comment-original-1'),
+      ).toBe(true);
+      expect(storedRecord.runs.some((r) => r.id === originalRunId)).toBe(true);
+      expect(storedRecord.runs.some((r) => r.id === 'forged')).toBe(false);
+    } finally {
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R177: reconcileServerConflictMatches preserves restricted enquiry labels and resolveMatterConflictCheckRecord uses blank date fallbacks', () => {
+    const reconciled = reconcileServerConflictMatches({
+      serverMatches: [
+        {
+          id: 'match-restricted-enq-1',
+          partyId: 'pty-1',
+          partyName: 'Restricted Enquirer',
+          matchedRecordId: '',
+          matchedRecordName: 'Match on a restricted enquiry',
+          matchedRecordType: 'matter',
+          strength: 'Exact',
+          whereFound: 'Restricted enquiry: refer to Risk',
+          matterId: null,
+          matterNumber: null,
+          responsiblePartnerId: null,
+          responsiblePartnerName: '',
+          dateLabel: '',
+          matchedOn: 'Restricted enquiry: refer to Risk',
+          restricted: true,
+          disposition: 'potential_conflict',
+          note: 'Match on a restricted enquiry — must be referred to Risk & Compliance.',
+        },
+      ],
+      canReviewConditions: false,
+    });
+    expect(reconciled[0]?.matchedRecordName).toBe(
+      'Match on a restricted enquiry',
+    );
+    expect(reconciled[0]?.whereFound).toBe('Restricted enquiry: refer to Risk');
+    expect(reconciled[0]?.matchedOn).toBe('Restricted enquiry: refer to Risk');
+
+    const store = getStore();
+    const baseMatter = structuredClone(store.matters[0]!);
+    delete baseMatter.conflictCheckRecord;
+    baseMatter.conflictCheckDate = null;
+    const fallbackRecord = resolveMatterConflictCheckRecord(
+      baseMatter,
+      store.people,
+      store.organisations,
+    );
+    expect(fallbackRecord.lastRunAtDisplay).toBe('');
+    expect(fallbackRecord.submittedAtDisplay).toBe('');
+    expect(fallbackRecord.approvedAtDisplay).toBe('');
+    expect(fallbackRecord.runs[0]?.runAtDisplay).toBe('');
   });
 });

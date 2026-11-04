@@ -855,6 +855,15 @@ export interface ConflictCheckRecord {
   comments: ConflictReviewerComment[];
 }
 
+export type ConflictCheckRecordInput = Omit<
+  ConflictCheckRecord,
+  | 'approvedById'
+  | 'approvedByName'
+  | 'approvedAtDisplay'
+  | 'submittedById'
+  | 'approvedRestrictedMatchIds'
+>;
+
 export interface Matter extends RecordBase {
   recordType: 'matter';
   // CORE-001..008 Identification
