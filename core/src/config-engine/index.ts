@@ -563,13 +563,7 @@ export const TenantConfigurationSchema = z
           .default('default-logo.svg')
           .describe('Tenant-scoped asset key for the firm logo'),
         contactEmail: z
-          .union([
-            z.literal(''),
-            z
-              .string()
-              .email()
-              .regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/),
-          ])
+          .string()
           .default('')
           .optional()
           .describe(
@@ -577,10 +571,6 @@ export const TenantConfigurationSchema = z
           ),
         website: z
           .string()
-          .regex(
-            /^$|^(https?:\/\/)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(\/\S*)?$/,
-            'Invalid website hostname or URL',
-          )
           .default('')
           .optional()
           .describe(
@@ -632,7 +622,7 @@ export const TenantConfigurationSchema = z
           .nullable()
           .default(null)
           .describe(
-            'Stable key or ID of the team that receives referred conflict reviews',
+            'Stable team ID or organisation team code of the team that receives referred conflict reviews',
           ),
         assigneeRoleKey: z
           .string()

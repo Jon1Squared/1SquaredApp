@@ -85,6 +85,7 @@ import {
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
+  getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
@@ -1266,20 +1267,30 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(() => resolveCurrentTenantContext()).toThrow(/TENANCY_AUTH_ERROR/);
 
       // R60: An override for tenant A doesn't change getDefaultTenantRbacConfig('tenant-b')
-      setRuntimeRbacConfigOverride(
-        {
-          ...getDefaultTenantRbacConfig('tenant-a'),
-          departmentGrants: { 'DEPT-CUSTOM-A': ['finance:view'] },
-        },
-        'tenant-a',
-      );
-      expect(
-        getDefaultTenantRbacConfig('tenant-a').departmentGrants['DEPT-CUSTOM-A'],
-      ).toEqual(['finance:view']);
-      expect(
-        getDefaultTenantRbacConfig('tenant-b').departmentGrants['DEPT-CUSTOM-A'],
-      ).toBeUndefined();
-      setRuntimeRbacConfigOverride(null, 'tenant-a');
+      const baseTenantCfg = getActiveTenantRawBaseConfig();
+      try {
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
+        setRuntimeRbacConfigOverride(
+          {
+            ...getDefaultTenantRbacConfig('tenant-a'),
+            departmentGrants: { 'DEPT-CUSTOM-A': ['finance:view'] },
+          },
+          'tenant-a',
+        );
+        expect(
+          getDefaultTenantRbacConfig('tenant-a').departmentGrants['DEPT-CUSTOM-A'],
+        ).toEqual(['finance:view']);
+
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-b' });
+        expect(
+          getDefaultTenantRbacConfig('tenant-b').departmentGrants['DEPT-CUSTOM-A'],
+        ).toBeUndefined();
+
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
+        setRuntimeRbacConfigOverride(null, 'tenant-a');
+      } finally {
+        setActiveTenantConfigForTesting(null);
+      }
 
       // R61: Under token_only, a person who signs in with 1Squared.Admin and then again with no roles loses admin
       updateTenantRbacConfig(
@@ -1502,24 +1513,31 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
 
       // 1. Two-tenant isolation: P-000002 with ['admin'] token roles in tenant-a does NOT get admin permissions in tenant-b
-      const tenantBHybridRbac = {
-        ...getDefaultTenantRbacConfig('tenant-b'),
-        identityMapping: {
-          ...getDefaultTenantRbacConfig('tenant-b').identityMapping,
-          authorityMode: 'hybrid' as const,
-        },
-      };
-      setRuntimeRbacConfigOverride(tenantBHybridRbac, 'tenant-b');
-      setRuntimeRbacConfigOverride(
-        {
-          ...getDefaultTenantRbacConfig('tenant-a'),
+      const baseTenantCfg = getActiveTenantRawBaseConfig();
+      try {
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-b' });
+        const tenantBHybridRbac = {
+          ...getDefaultTenantRbacConfig('tenant-b'),
           identityMapping: {
-            ...getDefaultTenantRbacConfig('tenant-a').identityMapping,
+            ...getDefaultTenantRbacConfig('tenant-b').identityMapping,
             authorityMode: 'hybrid' as const,
           },
-        },
-        'tenant-a',
-      );
+        };
+        setRuntimeRbacConfigOverride(tenantBHybridRbac, 'tenant-b');
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
+        setRuntimeRbacConfigOverride(
+          {
+            ...getDefaultTenantRbacConfig('tenant-a'),
+            identityMapping: {
+              ...getDefaultTenantRbacConfig('tenant-a').identityMapping,
+              authorityMode: 'hybrid' as const,
+            },
+          },
+          'tenant-a',
+        );
+      } finally {
+        setActiveTenantConfigForTesting(null);
+      }
 
       const dafydd = getAppSnapshot('P-000002').people.find((p) => p.id === 'P-000002')!;
       const carys = getAppSnapshot('P-000001').people.find((p) => p.id === 'P-000001')!;
@@ -1530,45 +1548,51 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(resolvePersonPermissions(dafydd)).not.toContain('risk:view');
 
       // 1b. Inside runWithActiveActorSession for tenant-a, token roles apply to tenant-a and never leak to tenant-b
-      const permsInTenantA = runWithActiveActorSession(
-        {
-          tenantId: 'tenant-a',
-          personId: 'P-000002',
-          tokenRoles: ['admin'],
-          expiresAtMs: Date.now() + 3600_000,
-        },
-        () =>
-          resolvePersonPermissions(dafydd, {
-            context: {
-              tenantId: 'tenant-a',
-              correlationId: 'r100-tenant-a',
-              actorId: 'P-000002',
-              actorRoles: ['fee_earner'],
-              mfaVerified: true,
-            },
-          }),
-      );
-      expect(permsInTenantA).toContain('admin:access');
+      try {
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
+        const permsInTenantA = runWithActiveActorSession(
+          {
+            tenantId: 'tenant-a',
+            personId: 'P-000002',
+            tokenRoles: ['admin'],
+            expiresAtMs: Date.now() + 3600_000,
+          },
+          () =>
+            resolvePersonPermissions(dafydd, {
+              context: {
+                tenantId: 'tenant-a',
+                correlationId: 'r100-tenant-a',
+                actorId: 'P-000002',
+                actorRoles: ['fee_earner'],
+                mfaVerified: true,
+              },
+            }),
+        );
+        expect(permsInTenantA).toContain('admin:access');
 
-      const permsInTenantB = runWithActiveActorSession(
-        {
-          tenantId: 'tenant-a',
-          personId: 'P-000002',
-          tokenRoles: ['admin'],
-          expiresAtMs: Date.now() + 3600_000,
-        },
-        () =>
-          resolvePersonPermissions(dafydd, {
-            context: {
-              tenantId: 'tenant-b',
-              correlationId: 'r100-tenant-b',
-              actorId: 'P-000002',
-              actorRoles: ['fee_earner'],
-              mfaVerified: true,
-            },
-          }),
-      );
-      expect(permsInTenantB).not.toContain('admin:access');
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-b' });
+        const permsInTenantB = runWithActiveActorSession(
+          {
+            tenantId: 'tenant-a',
+            personId: 'P-000002',
+            tokenRoles: ['admin'],
+            expiresAtMs: Date.now() + 3600_000,
+          },
+          () =>
+            resolvePersonPermissions(dafydd, {
+              context: {
+                tenantId: 'tenant-b',
+                correlationId: 'r100-tenant-b',
+                actorId: 'P-000002',
+                actorRoles: ['fee_earner'],
+                mfaVerified: true,
+              },
+            }),
+        );
+        expect(permsInTenantB).not.toContain('admin:access');
+      } finally {
+        setActiveTenantConfigForTesting(null);
+      }
 
       // 2. Two overlapping async requests (A and B, with an await between setting and checking) see only their own token roles
       const [overlapA, overlapB] = await Promise.all([

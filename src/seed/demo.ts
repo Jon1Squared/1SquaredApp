@@ -24,6 +24,7 @@ import type {
   Person,
   PersonOrganisationLink,
   Phone,
+  PmsLink,
   Quote,
   SignOffItem,
   Task,
@@ -4133,4 +4134,84 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     },
   };
 }
+
+export function buildInitialSeedMatterPmsLinks(
+  matters: Matter[],
+  existingLinks: PmsLink[] = [],
+  nowIso: string = new Date().toISOString(),
+): PmsLink[] {
+  const seededMatterLinks: PmsLink[] = [...existingLinks];
+  const addSeedMatterLink = (matterId: string | undefined, pmsCode: string) => {
+    if (!matterId) return;
+    if (
+      seededMatterLinks.some(
+        (l) =>
+          l.entityType === 'matter' &&
+          (l.onesquaredId === matterId || l.pmsCode === pmsCode),
+      )
+    ) {
+      return;
+    }
+    seededMatterLinks.push({
+      id: `PMSL-M-${pmsCode}`,
+      entityType: 'matter',
+      onesquaredId: matterId,
+      pmsCode,
+      matchedBy: 'seed',
+      matchedAt: nowIso,
+    });
+  };
+
+  addSeedMatterLink(
+    matters.find(
+      (m) => m.matterNumber === 'PEN001-0004' || m.matterNumber === 'PEN001-0001',
+    )?.id,
+    'PEN001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PEN001-0002')?.id,
+    'PEN001-0002',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PRI001-0001')?.id,
+    'PRI001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PUG001-0001')?.id,
+    'PUG001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.id === 'M-000007')?.id,
+    'BRI001-0001',
+  );
+  addSeedMatterLink(
+    matters.find(
+      (m) => m.matterNumber === 'BRI001-0003' && m.title.includes('Afon Care'),
+    )?.id,
+    'BRI001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'SEV001-0001')?.id,
+    'SEV001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PEN001-0003')?.id,
+    'PEN001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'HAR001-0003')?.id,
+    'HAR001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'BAY001-0001')?.id,
+    'BAY001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'JON002-0001')?.id,
+    'SJO001-0001',
+  );
+
+  return seededMatterLinks;
+}
+
 

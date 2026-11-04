@@ -4039,35 +4039,38 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(postLiftSave.matter?.hasEthicalWall).toBe(false);
 
         // Adding a NEW information_barrier match ID (CM-BARRIER-2) reinstates hasEthicalWall === true
-        const newBarrierRes = runAsStoreEmployee('P-000001', () =>
-          updateMatterConflictRecord(
-            openMatter.id,
-            {
-              ...(openMatter.conflictCheckRecord!),
-              matches: [
-                ...(openMatter.conflictCheckRecord?.matches ?? []),
-                {
-                  id: 'CM-BARRIER-2',
-                  partyId: 'pt-2',
-                  partyName: 'Second Barrier Party',
-                  matchedRecordId: openMatter.clientId,
-                  matchedRecordName: 'Second Barrier Party',
-                  matchedRecordType: 'organisation',
-                  strength: 'Exact',
-                  whereFound: 'Matter',
-                  responsiblePartnerId: 'P-000001',
-                  responsiblePartnerName: 'Carys Hughes',
-                  dateLabel: '2026-11-04',
-                  disposition: 'potential_conflict',
-                  note: 'New conflicting instruction',
-                  reviewerDecision: 'approve_with_conditions',
-                  reviewerConditionType: 'information_barrier',
-                  reviewerNote: 'New ethical wall required',
-                },
-              ],
-            },
-            'P-000001',
-          ),
+        const newBarrierRes = runAsStoreEmployee(
+          'P-000001',
+          () =>
+            updateMatterConflictRecord(
+              openMatter.id,
+              {
+                ...(openMatter.conflictCheckRecord!),
+                matches: [
+                  ...(openMatter.conflictCheckRecord?.matches ?? []),
+                  {
+                    id: 'CM-BARRIER-2',
+                    partyId: 'pt-2',
+                    partyName: 'Second Barrier Party',
+                    matchedRecordId: openMatter.clientId,
+                    matchedRecordName: 'Second Barrier Party',
+                    matchedRecordType: 'organisation',
+                    strength: 'Exact',
+                    whereFound: 'Matter',
+                    responsiblePartnerId: 'P-000001',
+                    responsiblePartnerName: 'Carys Hughes',
+                    dateLabel: '2026-11-04',
+                    disposition: 'potential_conflict',
+                    note: 'New conflicting instruction',
+                    reviewerDecision: 'approve_with_conditions',
+                    reviewerConditionType: 'information_barrier',
+                    reviewerNote: 'New ethical wall required',
+                  },
+                ],
+              },
+              'P-000001',
+            ),
+          { rolesOverride: ['partner', 'risk_compliance'] },
         );
         expect(newBarrierRes.matter?.hasEthicalWall).toBe(true);
       } finally {

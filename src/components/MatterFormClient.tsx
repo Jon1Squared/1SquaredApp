@@ -34,11 +34,13 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import {
+  runMatterConflictSearchAction,
   saveMatterAction,
   saveTaskAction,
   switchViewingRoleAction,
   updateMatterConflictRecordAction,
 } from '@/app/actions';
+import { searchMatterConflicts } from '@/domain/matterConflicts';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import {
   enquiryDisplayName,
@@ -567,7 +569,7 @@ export function MatterFormClient({
   const today = toIsoDate(new Date());
 
   const orgStructure = useMemo(
-    () => orgStructureProp ?? buildDefaultOrgStructure(),
+    () => orgStructureProp ?? buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' }),
     [orgStructureProp],
   );
 
@@ -3728,399 +3730,51 @@ export function MatterFormClient({
     return results.slice(0, 6);
   }, [newPartyName, organisations, people, enquiries]);
 
-  // Build conflict matches for a given list of parties
+  // Build conflict matches for a given list of parties using the shared domain helper
   function computeMatchesForParties(
     partiesList: ConflictCheckParty[],
     preserveExistingDispositions = true,
   ): ConflictCheckMatch[] {
-    const prevByPartyAndRec = new Map<string, ConflictCheckMatch>();
-    if (preserveExistingDispositions) {
-      for (const m of matches) {
-        prevByPartyAndRec.set(`${m.partyName.toLowerCase()}__${m.matchedRecordName.toLowerCase()}`, m);
-      }
-    }
-
-    const generated: ConflictCheckMatch[] = [];
-
-    for (const party of partiesList) {
-      const lower = party.name.trim().toLowerCase();
-      if (!lower) continue;
-
-      if (party.isClientFixed) {
-        // Check client party against otherPartiesNamed on enquiries (excluding current source enquiry)
-        for (const enq of enquiries) {
-          if (enq.anonymisedAt || enq.id === initialEnquiry?.id || enq.id === existing?.sourceEnquiryId) {
-            continue;
-          }
-          const enqOtherEntries = (enq.otherPartiesNamed ?? '')
-            .split(/[,;/\n]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          const matchedEnqOther = enqOtherEntries.find((entry) => {
-            const eLower = entry.toLowerCase();
-            return eLower === lower || eLower.includes(lower) || lower.includes(eLower);
-          });
-          if (matchedEnqOther) {
-            const callerName = enquiryDisplayName(enq, 'Enquirer');
-            const ownerPerson =
-              people.find((p) => p.id === (enq.assignedToId || enq.takenById)) ??
-              people.find((p) => p.id === 'P-000001');
-            const ownerName = ownerPerson ? personDisplayName(ownerPerson) : 'Rhian Morgan';
-            const key = `${lower}__${matchedEnqOther.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            generated.push({
-              id: prev?.id ?? `match-client-enq-other-${party.id}-${enq.id}`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.id,
-              matchedRecordName: matchedEnqOther,
-              matchedRecordType: party.entityType,
-              strength: matchedEnqOther.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Other party named on Enquiry ${enq.reference} (Caller: ${callerName}) · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `Instructing client matches other party "${matchedEnqOther}" named on enquiry ${enq.reference}`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-              reviewerDecision: prev?.reviewerDecision ?? null,
-              reviewerConditionType: prev?.reviewerConditionType ?? null,
-              reviewerNote: prev?.reviewerNote ?? '',
-            });
-          }
-        }
-        continue;
-      }
-
-      // 1. Coastline Outdoor Ltd (Demo match 1)
-      if (lower.includes('coastline outdoor')) {
-        const key = `${lower}__coastline outdoor ltd`;
-        const prev = prevByPartyAndRec.get(key);
-        generated.push({
-          id: prev?.id ?? `match-coastline-${party.id}`,
-          partyId: party.id,
-          partyName: party.name,
-          matchedRecordId: 'O-000014',
-          matchedRecordName: 'Coastline Outdoor Ltd',
-          matchedRecordType: 'organisation',
-          strength: 'Exact',
-          whereFound: 'Opposing party (Tenant) on PEN001-0004 · Open',
-          matterId: 'M-000001',
-          matterNumber: 'PEN001-0004',
-          responsiblePartnerId: 'P-000001',
-          responsiblePartnerName: 'Rhian Morgan',
-          dateLabel: '17 Sep 2026',
-          matchedOn: 'Exact legal name, company number (08419203) & registered address',
-          disposition: prev ? prev.disposition : null,
-          note: prev ? prev.note : '',
-          reviewerDecision: prev?.reviewerDecision ?? null,
-          reviewerConditionType: prev?.reviewerConditionType ?? null,
-          reviewerNote: prev?.reviewerNote ?? '',
-        });
-        continue;
-      }
-
-      // 2. Morgan Price Solicitors (Demo match 2)
-      if (lower.includes('morgan price')) {
-        const key = `${lower}__morgan price solicitors`;
-        const prev = prevByPartyAndRec.get(key);
-        generated.push({
-          id: prev?.id ?? `match-morganprice-${party.id}`,
-          partyId: party.id,
-          partyName: party.name,
-          matchedRecordId: 'O-000008',
-          matchedRecordName: 'Morgan Price Solicitors',
-          matchedRecordType: 'organisation',
-          strength: 'Exact',
-          whereFound: 'Connected to other side (Solicitor) on PEN001-0004 · Open',
-          matterId: 'M-000001',
-          matterNumber: 'PEN001-0004',
-          responsiblePartnerId: 'P-000001',
-          responsiblePartnerName: 'Rhian Morgan',
-          dateLabel: '17 Sep 2026',
-          matchedOn: 'Exact firm name, email domain (@morganprice.example) & Cardiff address',
-          disposition: prev ? prev.disposition : null,
-          note: prev ? prev.note : '',
-          reviewerDecision: prev?.reviewerDecision ?? null,
-          reviewerConditionType: prev?.reviewerConditionType ?? null,
-          reviewerNote: prev?.reviewerNote ?? '',
-        });
-        continue;
-      }
-
-      // 3. Harbourline Housing Association (Demo match 3 — existing client on HAR001-0003)
-      if (lower.includes('harbourline')) {
-        const key = `${lower}__harbourline housing association`;
-        const prev = prevByPartyAndRec.get(key);
-        generated.push({
-          id: prev?.id ?? `match-harbourline-${party.id}`,
-          partyId: party.id,
-          partyName: party.name,
-          matchedRecordId: 'O-000002',
-          matchedRecordName: 'Harbourline Housing Association',
-          matchedRecordType: 'organisation',
-          strength: 'Exact',
-          whereFound: 'Client on HAR001-0003 · Open',
-          matterId: 'M-000005',
-          matterNumber: 'HAR001-0003',
-          responsiblePartnerId: 'P-000001',
-          responsiblePartnerName: 'Rhian Morgan',
-          dateLabel: '24 Jul 2026',
-          matchedOn: 'Exact legal name, active client record & relationship partner Rhian Morgan',
-          disposition: prev ? prev.disposition : null,
-          note: prev ? prev.note : '',
-          reviewerDecision: prev?.reviewerDecision ?? null,
-          reviewerConditionType: prev?.reviewerConditionType ?? null,
-          reviewerNote: prev?.reviewerNote ?? '',
-        });
-        continue;
-      }
-
-      // 4. General search across matters, enquiries, organisations, and people
-      let matchedForParty = false;
-      for (const m of matters) {
-        if (m.id === existing?.id) continue;
-        const clientOrg = organisations.find((o) => o.id === m.clientId);
-        const clientPerson = people.find((p) => p.id === m.clientId);
-        const mClientName =
-          clientOrg?.legalName || (clientPerson ? personDisplayName(clientPerson) : '');
-        const respPartner =
-          people.find((p) => p.id === m.responsiblePartnerId) ??
-          people.find((p) => p.id === 'P-000001');
-        const respPartnerName = respPartner ? personDisplayName(respPartner) : 'Rhian Morgan';
-
-        if (mClientName && mClientName.toLowerCase().includes(lower)) {
-          const key = `${lower}__${mClientName.toLowerCase()}`;
-          const prev = prevByPartyAndRec.get(key);
-          generated.push({
-            id: prev?.id ?? `match-${party.id}-${m.id}`,
-            partyId: party.id,
-            partyName: party.name,
-            matchedRecordId: m.clientId,
-            matchedRecordName: mClientName,
-            matchedRecordType: m.clientId.startsWith('O-') ? 'organisation' : 'person',
-            strength: mClientName.toLowerCase() === lower ? 'Exact' : 'Close',
-            whereFound: `Client on ${m.matterNumber} · Open`,
-            matterId: m.id,
-            matterNumber: m.matterNumber,
-            responsiblePartnerId: m.responsiblePartnerId,
-            responsiblePartnerName: respPartnerName,
-            dateLabel: '12 Aug 2026',
-            matchedOn: 'Name, email & address match across active matters',
-            disposition: prev?.disposition ?? null,
-            note: prev?.note ?? '',
-          });
-          matchedForParty = true;
-          break;
-        }
-
-        const matchedParty = m.parties.find((pt) => pt.name.toLowerCase().includes(lower));
-        if (matchedParty) {
-          const key = `${lower}__${matchedParty.name.toLowerCase()}`;
-          const prev = prevByPartyAndRec.get(key);
-          generated.push({
-            id: prev?.id ?? `match-${party.id}-${matchedParty.id}`,
-            partyId: party.id,
-            partyName: party.name,
-            matchedRecordId: matchedParty.linkedRecordId || m.id,
-            matchedRecordName: matchedParty.name,
-            matchedRecordType: matchedParty.linkedRecordId?.startsWith('O-')
-              ? 'organisation'
-              : 'person',
-            strength: matchedParty.name.toLowerCase() === lower ? 'Exact' : 'Close',
-            whereFound: `${formatPartyRoleDisplay(
-              taxonomy,
-              matchedParty.relationshipCode,
-              matchedParty.capacityCodes,
-              matchedParty.role,
-            )} on ${m.matterNumber} · Open`,
-            matterId: m.id,
-            matterNumber: m.matterNumber,
-            responsiblePartnerId: m.responsiblePartnerId,
-            responsiblePartnerName: respPartnerName,
-            dateLabel: '17 Sep 2026',
-            matchedOn: 'Counterparty name & linked contact details',
-            disposition: prev?.disposition ?? null,
-            note: prev?.note ?? '',
-          });
-          matchedForParty = true;
-          break;
-        }
-      }
-
-      // 5. Search across Enquiries (caller name, callingOnBehalfOf, and otherPartiesNamed)
-      if (!matchedForParty) {
-        for (const enq of enquiries) {
-          if (enq.anonymisedAt || enq.id === initialEnquiry?.id || enq.id === existing?.sourceEnquiryId) {
-            continue;
-          }
-          const enqCallerName = enquiryDisplayName(enq, '').trim();
-          const enqBehalf = (enq.callingOnBehalfOf ?? '').trim();
-          const enqOtherEntries = (enq.otherPartiesNamed ?? '')
-            .split(/[,;/\n]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          const ownerPerson =
-            people.find((p) => p.id === (enq.assignedToId || enq.takenById)) ??
-            people.find((p) => p.id === 'P-000001');
-          const ownerName = ownerPerson ? personDisplayName(ownerPerson) : 'Rhian Morgan';
-
-          const callerMatch =
-            enqCallerName &&
-            (enqCallerName.toLowerCase().includes(lower) ||
-              lower.includes(enqCallerName.toLowerCase()) ||
-              Boolean(personNameLooseMatch(party.name, enqCallerName)));
-          if (callerMatch) {
-            const key = `${lower}__${enqCallerName.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            const matchedDetails = [
-              'Caller name',
-              enq.email ? `email (${enq.email})` : null,
-              enq.phone ? `phone (${enq.phone})` : null,
-              enq.address?.postcode ? `postcode (${enq.address.postcode})` : null,
-            ]
-              .filter(Boolean)
-              .join(', ');
-            generated.push({
-              id: prev?.id ?? `match-${party.id}-${enq.id}-caller`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.linkedPersonId || enq.id,
-              matchedRecordName: enqCallerName,
-              matchedRecordType: 'person',
-              strength: enqCallerName.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Enquirer on ${enq.reference} · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `${matchedDetails} saved on enquiry ${enq.reference}`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-            });
-            matchedForParty = true;
-            break;
-          }
-
-          const behalfMatch =
-            enqBehalf &&
-            (enqBehalf.toLowerCase().includes(lower) ||
-              lower.includes(enqBehalf.toLowerCase()) ||
-              Boolean(organisationNameLooseMatch(party.name, enqBehalf)));
-          if (behalfMatch) {
-            const key = `${lower}__${enqBehalf.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            generated.push({
-              id: prev?.id ?? `match-${party.id}-${enq.id}-behalf`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.linkedOrganisationId || enq.id,
-              matchedRecordName: enqBehalf,
-              matchedRecordType: 'organisation',
-              strength: enqBehalf.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Prospective client organisation on ${enq.reference} · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `Organisation name saved on enquiry ${enq.reference} (Caller: ${enqCallerName || 'Unknown'})`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-            });
-            matchedForParty = true;
-            break;
-          }
-
-          const matchedEnqOther = enqOtherEntries.find((entry) => {
-            const eLower = entry.toLowerCase();
-            return (
-              eLower.includes(lower) ||
-              lower.includes(eLower) ||
-              Boolean(personNameLooseMatch(party.name, entry)) ||
-              Boolean(organisationNameLooseMatch(party.name, entry))
-            );
-          });
-          if (matchedEnqOther) {
-            const key = `${lower}__${matchedEnqOther.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            generated.push({
-              id: prev?.id ?? `match-${party.id}-${enq.id}-other`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.id,
-              matchedRecordName: matchedEnqOther,
-              matchedRecordType: party.entityType,
-              strength: matchedEnqOther.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Other party named on Enquiry ${enq.reference} (Caller: ${enqCallerName || 'Unknown'}) · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `Named as other party on enquiry ${enq.reference}`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-            });
-            matchedForParty = true;
-            break;
-          }
-        }
-      }
-
-      // 6. Search standalone People and Organisations (including people saved in enquiries)
-      if (!matchedForParty) {
-        const matchedPerson = people.find((p) => {
-          if (p.mergedIntoId || p.demo || p.isEmployee) return false;
-          const pName = personDisplayName(p).toLowerCase();
-          return (
-            pName.includes(lower) ||
-            lower.includes(pName) ||
-            Boolean(personNameLooseMatch(party.name, personDisplayName(p)))
-          );
-        });
-        if (matchedPerson) {
-          const pName = personDisplayName(matchedPerson);
-          const key = `${lower}__${pName.toLowerCase()}`;
-          const prev = prevByPartyAndRec.get(key);
-          const ownerPerson =
-            people.find((p) => p.id === matchedPerson.relationshipOwnerId) ??
-            people.find((p) => p.id === 'P-000001');
-          const ownerName = ownerPerson ? personDisplayName(ownerPerson) : 'Rhian Morgan';
-          generated.push({
-            id: prev?.id ?? `match-${party.id}-${matchedPerson.id}`,
-            partyId: party.id,
-            partyName: party.name,
-            matchedRecordId: matchedPerson.id,
-            matchedRecordName: pName,
-            matchedRecordType: 'person',
-            strength: pName.toLowerCase() === lower ? 'Exact' : 'Close',
-            whereFound: matchedPerson.id.startsWith('ENQ-')
-              ? `Enquiry contact (${matchedPerson.id})`
-              : `Contact record (${matchedPerson.id})`,
-            matterId: matchedPerson.id,
-            matterNumber: matchedPerson.id,
-            responsiblePartnerId: matchedPerson.relationshipOwnerId || 'P-000001',
-            responsiblePartnerName: ownerName,
-            dateLabel: matchedPerson.firstKnownAt || '12 Aug 2026',
-            matchedOn: 'Contact name, email & address match in People directory',
-            disposition: prev?.disposition ?? null,
-            note: prev?.note ?? '',
-          });
-        }
-      }
-    }
-
-    return generated;
+    return searchMatterConflicts(
+      {
+        currentMatterId: existing?.id ?? null,
+        sourceEnquiryId:
+          existing?.sourceEnquiryId ??
+          initialEnquiry?.id ??
+          initialQuote?.linkedEnquiryId ??
+          null,
+        parties: partiesList,
+        previousMatches: preserveExistingDispositions ? matches : [],
+      },
+      {
+        matters,
+        enquiries,
+        people,
+        organisations,
+        canView: () => true,
+      },
+    );
   }
 
-  // Run conflict search handler
-  function handleRunConflictSearch() {
-    const computed = computeMatchesForParties(allPartiesToCheck, true);
-    const runTime = '22 Oct 2026, 17:42';
+  // Run conflict search handler (executes server-side across all tenant matters, including restricted matters)
+  async function handleRunConflictSearch() {
+    let computed: ConflictCheckMatch[];
+    try {
+      const serverRes = await runMatterConflictSearchAction({
+        currentMatterId: existing?.id ?? null,
+        sourceEnquiryId:
+          existing?.sourceEnquiryId ??
+          initialEnquiry?.id ??
+          initialQuote?.linkedEnquiryId ??
+          null,
+        parties: allPartiesToCheck,
+        previousMatches: matches,
+      });
+      computed = serverRes.matches;
+    } catch {
+      computed = computeMatchesForParties(allPartiesToCheck, true);
+    }
+    const runTime = formatDateTime(new Date().toISOString());
     const runnerName = `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
 
     setMatches(computed);
@@ -4691,8 +4345,11 @@ export function MatterFormClient({
     setInstructingContactCapacityCodes(['CAP_REPRESENTATIVE', 'CAP_DECISION_MAKER']);
     if (realEstatePa) setPracticeAreaId(realEstatePa.id);
     if (landlordTenantSub) setWorkTypeSubcategoryId(landlordTenantSub.id);
-    setResponsiblePartnerId('P-000001');
-    setLeadFeeEarnerId('P-000002');
+    const presetPartnerId = userMatterDefaults.responsiblePartnerId || currentUser.id;
+    const presetPartnerPerson = people.find((p) => p.id === presetPartnerId) ?? currentUser;
+    const presetPartnerName = personDisplayName(presetPartnerPerson);
+    setResponsiblePartnerId(presetPartnerId);
+    setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId || currentUser.id);
 
     setTitle('Lease renewal — Unit 7, Cardiff Bay Retail Park');
 
@@ -4747,8 +4404,8 @@ export function MatterFormClient({
       whereFound: 'Opposing party (Tenant) on PEN001-0004 · Open',
       matterId: 'M-000001',
       matterNumber: 'PEN001-0004',
-      responsiblePartnerId: 'P-000001',
-      responsiblePartnerName: 'Rhian Morgan',
+      responsiblePartnerId: presetPartnerId,
+      responsiblePartnerName: presetPartnerName,
       dateLabel: '17 Sep 2026',
       matchedOn: 'Exact legal name, company number (08419203) & Cardiff address',
       disposition: 'same_no_conflict',
@@ -4766,8 +4423,8 @@ export function MatterFormClient({
       whereFound: 'Connected to other side (Solicitor) on PEN001-0004 · Open',
       matterId: 'M-000001',
       matterNumber: 'PEN001-0004',
-      responsiblePartnerId: 'P-000001',
-      responsiblePartnerName: 'Rhian Morgan',
+      responsiblePartnerId: presetPartnerId,
+      responsiblePartnerName: presetPartnerName,
       dateLabel: '17 Sep 2026',
       matchedOn: 'Exact firm name & Cardiff office address',
       disposition: 'same_no_conflict',
@@ -4785,12 +4442,12 @@ export function MatterFormClient({
       whereFound: 'Client on HAR001-0003 · Open',
       matterId: 'M-000005',
       matterNumber: 'HAR001-0003',
-      responsiblePartnerId: 'P-000001',
-      responsiblePartnerName: 'Rhian Morgan',
+      responsiblePartnerId: presetPartnerId,
+      responsiblePartnerName: presetPartnerName,
       dateLabel: '24 Jul 2026',
-      matchedOn: 'Exact legal name & active client record (responsible partner Rhian Morgan)',
+      matchedOn: `Exact legal name & active client record (responsible partner ${presetPartnerName})`,
       disposition: 'potential_conflict',
-      note: 'Existing client on HAR001-0003 (responsible partner Rhian Morgan). Harbourline holds a neighbouring estate road easement at Cardiff Bay Retail Park.',
+      note: `Existing client on HAR001-0003 (responsible partner ${presetPartnerName}). Harbourline holds a neighbouring estate road easement at Cardiff Bay Retail Park.`,
       reviewerDecision: 'approve_with_conditions',
       reviewerConditionType: 'consent_obtained',
       reviewerNote:
@@ -5020,7 +4677,7 @@ export function MatterFormClient({
       (e) =>
         e.employeeRoleId === 'employee_role.risk_and_compliance' ||
         e.roles?.includes('risk_compliance') ||
-        e.roles?.includes('managing_partner'),
+        e.roles?.includes('colp'),
     );
     if (colpEmp) {
       addPerson(colpEmp.id, 'Risk & Compliance');
@@ -6020,7 +5677,7 @@ export function MatterFormClient({
                 <span>
                   <strong>Submitted and referred to Risk &amp; Compliance</strong> (22 Oct 2026, 17:46).
                   Matter status is <strong>Pending conflict review</strong> and a task has been assigned
-                  to the Risk team (Bethan Rees). Snapshot is locked read-only.
+                  to the Risk team. Snapshot is locked read-only.
                 </span>
               </div>
               <button
@@ -6040,7 +5697,7 @@ export function MatterFormClient({
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <ShieldCheck size={17} style={{ flexShrink: 0 }} />
                 <span>
-                  <strong>Viewing as Risk / Compliance (Bethan Rees, COLP).</strong> Fee earner inputs
+                  <strong>Viewing as Risk / Compliance ({personDisplayName(currentUser)}).</strong> Fee earner inputs
                   are read-only. Review each flagged potential conflict below and record your decision.
                 </span>
               </div>
@@ -10982,6 +10639,12 @@ export function MatterFormClient({
                                     label={`${m.strength} match`}
                                     tone={strengthPillTone(m.strength)}
                                   />
+                                  {m.restricted ? (
+                                    <StatusPill
+                                      label="Refer to Risk"
+                                      tone="alert"
+                                    />
+                                  ) : null}
                                   <span
                                     style={{
                                       fontSize: 13,
@@ -10992,18 +10655,20 @@ export function MatterFormClient({
                                     {m.whereFound}
                                   </span>
                                 </div>
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    color: 'var(--text-secondary)',
-                                    marginTop: 3,
-                                  }}
-                                >
-                                  Responsible partner:{' '}
-                                  <strong>{m.responsiblePartnerName}</strong> · Date:{' '}
-                                  {m.dateLabel}
-                                  {m.matchedOn ? ` · Matched on: ${m.matchedOn}` : ''}
-                                </div>
+                                {!m.restricted ? (
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      color: 'var(--text-secondary)',
+                                      marginTop: 3,
+                                    }}
+                                  >
+                                    Responsible partner:{' '}
+                                    <strong>{m.responsiblePartnerName || '—'}</strong> · Date:{' '}
+                                    {m.dateLabel || '—'}
+                                    {m.matchedOn ? ` · Matched on: ${m.matchedOn}` : ''}
+                                  </div>
+                                ) : null}
                               </div>
 
                               {/* 3 Segmented disposition buttons */}
@@ -11014,7 +10679,7 @@ export function MatterFormClient({
                               >
                                 <button
                                   type="button"
-                                  disabled={isReadOnlyFeeEarner}
+                                  disabled={isReadOnlyFeeEarner || Boolean(m.restricted)}
                                   className={`conflict-seg-btn ${
                                     m.disposition === 'not_the_same'
                                       ? 'conflict-seg-btn--active'
@@ -11028,7 +10693,7 @@ export function MatterFormClient({
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={isReadOnlyFeeEarner}
+                                  disabled={isReadOnlyFeeEarner || Boolean(m.restricted)}
                                   className={`conflict-seg-btn ${
                                     m.disposition === 'same_no_conflict'
                                       ? 'conflict-seg-btn--active conflict-seg-btn--green'

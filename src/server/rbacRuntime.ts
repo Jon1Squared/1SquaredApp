@@ -10,7 +10,6 @@ import 'server-only';
 import {
   canAccessMatter,
   clearPermissionRequestCache,
-  createDefaultRbacConfig,
   hasPermission,
   requirePermission,
   validateRbacConfig,
@@ -96,6 +95,16 @@ export function resolveConfiguredFirmPrimaryDomain(
   );
 }
 
+function requireActiveTenantRbacBase(tenantId: string): RbacConfiguration {
+  const activeCfg = getServerTenantConfiguration();
+  if (tenantId !== activeCfg.tenantId) {
+    throw new Error(
+      `TENANT_MISMATCH: Cannot resolve RBAC configuration for tenant "${tenantId}" while active tenant is "${activeCfg.tenantId}".`,
+    );
+  }
+  return activeCfg.rbac;
+}
+
 export function setRuntimeRbacConfigOverride(
   override: Partial<RbacConfiguration> | null | undefined,
   tenantId?: string,
@@ -105,10 +114,7 @@ export function setRuntimeRbacConfigOverride(
   if (!override) {
     runtimeRbacConfigOverrideByTenant.delete(activeTenantId);
   } else {
-    const baseCfg =
-      activeTenantId === activeCfg.tenantId
-        ? activeCfg.rbac
-        : createDefaultRbacConfig();
+    const baseCfg = requireActiveTenantRbacBase(activeTenantId);
     const merged = mergeRbacConfigOverlay(baseCfg, override);
     const validated = validateRbacConfig(merged);
     runtimeRbacConfigOverrideByTenant.set(activeTenantId, validated);
@@ -122,15 +128,12 @@ export function getDefaultTenantRbacConfig(
 ): RbacConfiguration {
   const activeCfg = getServerTenantConfiguration();
   const targetTenantId = tenantId?.trim() || activeCfg.tenantId;
+  const base = requireActiveTenantRbacBase(targetTenantId);
   const cached = tenantRbacConfigCacheByTenant.get(targetTenantId);
   if (cached) {
     return cached;
   }
 
-  const base =
-    targetTenantId === activeCfg.tenantId
-      ? activeCfg.rbac
-      : createDefaultRbacConfig();
   const runtimeOverride = runtimeRbacConfigOverrideByTenant.get(targetTenantId);
   const withRuntime = mergeRbacConfigOverlay(base, runtimeOverride);
   tenantRbacConfigCacheByTenant.set(targetTenantId, withRuntime);

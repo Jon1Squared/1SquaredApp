@@ -8,6 +8,7 @@ import { personDisplayName } from './names';
 import {
   buildDefaultOrgStructure,
   DEFAULT_LEGAL_ENTITY_ID,
+  DEFAULT_ORG_DEPARTMENTS,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
   resolveOrgDepartment,
@@ -984,7 +985,7 @@ export function generateNextEmployeeNumber(people: Person[]): string {
 export function resolveDefaultDepartmentPartnerId(
   deptId: string,
   allPeople: Person[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
 ): string {
   // Prefer a Partner/Member in the same department
   const sameDeptPartners = allPeople.filter((p) => {
@@ -1040,7 +1041,8 @@ export function createDefaultEmploymentRecord(opts: {
   status?: EmploymentStatus;
   primaryDomain?: string | null;
 }): EmploymentRecord {
-  const orgStructure = opts.orgStructure ?? buildDefaultOrgStructure();
+  const orgStructure =
+    opts.orgStructure ?? buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' });
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const today = nowIso.slice(0, 10);
 
@@ -1067,20 +1069,19 @@ export function createDefaultEmploymentRecord(opts: {
     orgStructure,
   );
   const managingPartnerId =
-    opts.allPeople.find((p) => !p.demo && p.roles?.includes('managing_partner'))?.id ??
-    'P-000001';
+    opts.allPeople.find((p) => !p.demo && p.roles?.includes('managing_partner'))?.id ?? null;
 
   const defaultLineManagerId = isTop
     ? null
     : opts.person.id === deptPartnerId
-      ? managingPartnerId !== opts.person.id
+      ? managingPartnerId && managingPartnerId !== opts.person.id
         ? managingPartnerId
-        : 'P-000001'
-      : deptPartnerId;
+        : null
+      : deptPartnerId || null;
 
   const defaultSupervisingPartnerId =
     resolvedDept.parentDivisionId === 'DIV-LEGAL' || isFeeEarnerRoleType(roleType)
-      ? deptPartnerId
+      ? deptPartnerId || null
       : null;
 
   const empNumber = generateNextEmployeeNumber(opts.allPeople);
@@ -1266,7 +1267,9 @@ export function createDefaultEmploymentRecord(opts: {
 export function migrateEmployeesToEmploymentRecords(
   people: Person[],
   values: ChoiceValue[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure({
+    legalName: 'Configured Legal Entity',
+  }),
   pmsLinks: PmsLink[] = [],
   primaryDomain?: string | null,
   nowIso: string = new Date().toISOString(),
@@ -1283,35 +1286,47 @@ export function migrateEmployeesToEmploymentRecords(
     }
 
     if (person.employment) {
-      // Repair legacy seeded supervisingPartnerId/lineManagerId if pointing to non-employee P-000013 or missing on legal dept
+      // Repair legacy seeded supervisingPartnerId/lineManagerId if pointing to a non-employee or missing on legal dept
       const empDept = resolveOrgDepartment(
         person.employment.departmentId || person.departmentId,
         orgStructure,
       );
       const deptPartnerId = empDept
         ? resolveDefaultDepartmentPartnerId(empDept.id, people, orgStructure)
-        : 'P-000001';
+        : '';
+      const managingPartnerId =
+        people.find((p) => !p.demo && p.roles?.includes('managing_partner'))?.id ?? '';
       let patchedEmp = person.employment;
       const supPerson = patchedEmp.supervisingPartnerId
         ? people.find((x) => x.id === patchedEmp.supervisingPartnerId)
         : null;
       const supInvalid =
         !supPerson || (!supPerson.isEmployee && !supPerson.employment);
+      const lineMgrPerson = patchedEmp.lineManagerId
+        ? people.find((x) => x.id === patchedEmp.lineManagerId)
+        : null;
+      const lineMgrInvalid =
+        Boolean(patchedEmp.lineManagerId) &&
+        (!lineMgrPerson || (!lineMgrPerson.isEmployee && !lineMgrPerson.employment));
       const shouldFixDefaultDeptPartner =
         empDept &&
         empDept.parentDivisionId === 'DIV-LEGAL' &&
+        Boolean(deptPartnerId) &&
         (supInvalid ||
-          (patchedEmp.supervisingPartnerId === 'P-000001' &&
-            deptPartnerId !== 'P-000001' &&
+          lineMgrInvalid ||
+          (Boolean(managingPartnerId) &&
+            patchedEmp.supervisingPartnerId === managingPartnerId &&
+            deptPartnerId !== managingPartnerId &&
             patchedEmp.updatedAt === patchedEmp.createdAt));
       if (shouldFixDefaultDeptPartner) {
         patchedEmp = {
           ...patchedEmp,
           supervisingPartnerId: deptPartnerId,
           lineManagerId:
-            patchedEmp.lineManagerId === 'P-000013' ||
-            (patchedEmp.lineManagerId === 'P-000001' &&
-              deptPartnerId !== 'P-000001' &&
+            lineMgrInvalid ||
+            (Boolean(managingPartnerId) &&
+              patchedEmp.lineManagerId === managingPartnerId &&
+              deptPartnerId !== managingPartnerId &&
               person.id !== deptPartnerId)
               ? deptPartnerId
               : patchedEmp.lineManagerId,
@@ -1363,7 +1378,7 @@ export function migrateEmployeesToEmploymentRecords(
       person,
       allPeople: [...updatedPeople, ...people.filter((p) => !updatedPeople.some((u) => u.id === p.id))],
       orgStructure,
-      byId: person.updatedById || 'P-000004',
+      byId: person.updatedById || person.createdById || person.id,
       nowIso,
       status: 'Active',
       primaryDomain,
@@ -1420,7 +1435,7 @@ export function migrateEmployeesToEmploymentRecords(
  */
 export function syncPersonWorkContactFlags(
   person: Person,
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
   primaryDomain?: string | null,
 ): Person {
   const emp = person.employment;
@@ -1542,7 +1557,7 @@ const PRACTICE_AREA_TO_ORG_DEPT_IDS: Record<string, string[]> = {
 export function resolvePracticeAreaIdForPersonDepartment(
   person: Person | null | undefined,
   practiceAreas: ChoiceValue[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
 ): string {
   if (!person) return '';
   const dept = resolveOrgDepartment(
@@ -1573,10 +1588,11 @@ export function resolvePracticeAreaIdForPersonDepartment(
 export function resolveOrgDepartmentIdsForPracticeArea(
   practiceAreaId: string | null | undefined,
   practiceAreas: ChoiceValue[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
 ): Set<string> {
   const result = new Set<string>();
   if (!practiceAreaId) return result;
+  const departments = orgStructure?.departments ?? DEFAULT_ORG_DEPARTMENTS;
 
   const direct = PRACTICE_AREA_TO_ORG_DEPT_IDS[practiceAreaId];
   if (direct) {
@@ -1586,7 +1602,7 @@ export function resolveOrgDepartmentIdsForPracticeArea(
   const pa = practiceAreas.find((p) => p.id === practiceAreaId);
   if (pa) {
     const paLower = pa.label.trim().toLowerCase();
-    for (const dept of orgStructure.departments) {
+    for (const dept of departments) {
       const deptLower = dept.name.trim().toLowerCase();
       if (
         deptLower === paLower ||
@@ -1625,11 +1641,11 @@ export function filterEmployeesForMatterDepartment(opts: {
   employees: Person[];
   practiceAreaId: string | null | undefined;
   practiceAreas: ChoiceValue[];
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>;
   includeSupervisingPartners?: boolean;
   preserveSelectedId?: string | null;
 }): Person[] {
-  const orgStructure = opts.orgStructure ?? buildDefaultOrgStructure();
+  const orgStructure = opts.orgStructure;
   const baseEmployees = opts.employees.filter(
     (e) => !e.demo || e.id === opts.preserveSelectedId,
   );
@@ -1659,7 +1675,7 @@ export function filterEmployeesForMatterDepartment(opts: {
   const result = [...inDept];
 
   // If filtering for Responsible Partner and the department's members have a supervising partner
-  // who sits across departments (e.g. Dispute Resolution supervised by Rhian Morgan), include them
+  // who sits across departments, include them
   if (opts.includeSupervisingPartners) {
     for (const member of inDept) {
       const supId = member.employment?.supervisingPartnerId;
@@ -1696,13 +1712,13 @@ export function resolveNewMatterDepartmentDefaults(opts: {
   allPeople: Person[];
   employees: Person[];
   practiceAreas: ChoiceValue[];
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>;
 }): {
   practiceAreaId: string;
   responsiblePartnerId: string | null;
   leadFeeEarnerId: string | null;
 } {
-  const orgStructure = opts.orgStructure ?? buildDefaultOrgStructure();
+  const orgStructure = opts.orgStructure;
   const user = opts.currentUser;
   if (!user) {
     return { practiceAreaId: '', responsiblePartnerId: null, leadFeeEarnerId: null };

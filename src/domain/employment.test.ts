@@ -194,7 +194,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         engagementType: 'Employee',
       });
 
-      const org = buildDefaultOrgStructure();
+      const org = buildDefaultOrgStructure({ legalName: 'Test Firm LLP' });
       const resolvedRealEstate = resolveOrgDepartment('department.real_estate', org);
       expect(resolvedRealEstate?.id).toBe('DEPT-RE');
       expect(resolvedRealEstate?.parentDivisionId).toBe('DIV-LEGAL');

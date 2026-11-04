@@ -22,6 +22,12 @@ import {
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
 } from '@/domain/matterOpeningRecord';
+import {
+  buildEffectiveConflictParties,
+  reconcileServerConflictMatches,
+  searchMatterConflicts,
+  type MatterConflictSearchInput,
+} from '@/domain/matterConflicts';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import {
   computeEnquiryConflictSnapshot,
@@ -210,6 +216,7 @@ import type {
   CapacityGroupName,
   ChoiceList,
   ChoiceValue,
+  ConflictCheckMatch,
   ConflictCheckRecord,
   ContactLogEntry,
   ContactLogMethod,
@@ -936,12 +943,9 @@ function getAppSnapshotInScope(
       if (mf.unbilled_disbursements > 0) {
         pmsAllDisbursements.push(...pms.getDisbursements(mf.matter_code));
       }
-      if (
-        mf.client_account_balance > 0 ||
-        mf.matter_code === 'PRI001-0001' ||
-        mf.matter_code === 'PUG001-0001'
-      ) {
-        pmsClientAccountByMatterCode[mf.matter_code] = pms.getClientAccountLedger(mf.matter_code);
+      const ledgerEntries = pms.getClientAccountLedger(mf.matter_code);
+      if (mf.client_account_balance > 0 || ledgerEntries.length > 0) {
+        pmsClientAccountByMatterCode[mf.matter_code] = ledgerEntries;
       }
     }
   }
@@ -3065,20 +3069,6 @@ export async function saveMatterRecord(
       ? [...store.organisations, ...pendingOrganisations]
       : store.organisations;
 
-  const resolvedConflictCheckRecord =
-    input.conflictCheckRecord !== undefined
-      ? input.conflictCheckRecord
-        ? {
-            ...input.conflictCheckRecord,
-            parties: input.conflictCheckRecord.parties.map((cp) =>
-              !cp.linkedRecordId && createdRecordByPartyId.has(cp.id)
-                ? { ...cp, linkedRecordId: createdRecordByPartyId.get(cp.id)! }
-                : cp,
-            ),
-          }
-        : null
-      : existing?.conflictCheckRecord ?? null;
-
   const effectiveResponsiblePartnerId =
     input.responsiblePartnerId !== undefined
       ? input.responsiblePartnerId
@@ -3097,6 +3087,112 @@ export async function saveMatterRecord(
     existing?.additionalClientIds ??
     []
   ).map((cid) => promoteEnquiryPersonId(cid) || cid);
+  const resolvedInstructingContactId = promoteEnquiryPersonId(
+    input.instructingContactId !== undefined
+      ? input.instructingContactId
+      : existing?.instructingContactId ?? null,
+  );
+
+  const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
+    allPeople: allPeopleWithPending,
+    teams: store.teams,
+  });
+  const mappedInputConflictParties =
+    input.conflictCheckRecord !== undefined
+      ? input.conflictCheckRecord
+        ? input.conflictCheckRecord.parties.map((cp) =>
+            !cp.linkedRecordId && createdRecordByPartyId.has(cp.id)
+              ? { ...cp, linkedRecordId: createdRecordByPartyId.get(cp.id)! }
+              : cp,
+          )
+        : []
+      : existing?.conflictCheckRecord?.parties ?? [];
+  const effectiveConflictParties = buildEffectiveConflictParties({
+    submittedParties: mappedInputConflictParties,
+    clientId: effectiveClientId,
+    additionalClientIds: resolvedAdditionalClientIds,
+    instructingContactId: resolvedInstructingContactId,
+    matterParties: resolvedParties,
+    people: allPeopleWithPending,
+    organisations: allOrganisationsWithPending,
+  });
+  const rawServerMatches = searchMatterConflicts(
+    {
+      currentMatterId: existing?.id ?? null,
+      sourceEnquiryId:
+        input.sourceEnquiryId !== undefined
+          ? input.sourceEnquiryId
+          : existing?.sourceEnquiryId ?? null,
+      parties: effectiveConflictParties,
+      previousMatches:
+        input.conflictCheckRecord?.matches ??
+        existing?.conflictCheckRecord?.matches ??
+        [],
+      canReviewConditions: actorHasRiskView,
+      reviewerUserId: actorHasRiskView ? opts.byId : null,
+      reviewerDisplayName: actorHasRiskView ? personDisplayName(actingUser) : null,
+      reviewedAtIso: now,
+    },
+    {
+      matters: store.matters,
+      enquiries: store.enquiries,
+      people: allPeopleWithPending,
+      organisations: allOrganisationsWithPending,
+      canView: (m) =>
+        canPersonAccessMatter(m, opts.byId, actingUser, {
+          allPeople: allPeopleWithPending,
+          teams: store.teams,
+        }),
+    },
+  );
+  const reconciledConflictMatches = reconcileServerConflictMatches({
+    serverMatches: rawServerMatches,
+    submittedMatches: input.conflictCheckRecord?.matches,
+    existingStoredMatches: existing?.conflictCheckRecord?.matches,
+    canReviewConditions: actorHasRiskView,
+    reviewerUserId: actorHasRiskView ? opts.byId : null,
+    reviewerDisplayName: actorHasRiskView ? personDisplayName(actingUser) : null,
+    reviewedAtIso: now,
+  });
+
+  const hasRestrictedConflictMatch = reconciledConflictMatches.some((m) => m.restricted);
+  const isApprovedByRisk =
+    existing?.conflictCheckRecord?.status === 'Approved' ||
+    (actorHasRiskView && input.conflictCheckRecord?.status === 'Approved');
+  if (
+    hasRestrictedConflictMatch &&
+    !isApprovedByRisk &&
+    (opts.saveMode === 'submit_cleared' ||
+      (!isDraftSave &&
+        opts.saveMode !== 'submit_referred' &&
+        (input.conflictCheckStatus === 'Cleared' ||
+          input.conflictCheckStatus === 'Clear')))
+  ) {
+    return {
+      matter: null,
+      errors: {
+        conflict:
+          'This matter must be referred to Risk because a match was found on a restricted matter.',
+      },
+    };
+  }
+
+  const resolvedConflictCheckRecord =
+    input.conflictCheckRecord !== undefined
+      ? input.conflictCheckRecord
+        ? {
+            ...input.conflictCheckRecord,
+            parties: effectiveConflictParties,
+            matches: reconciledConflictMatches,
+          }
+        : null
+      : existing?.conflictCheckRecord
+        ? {
+            ...existing.conflictCheckRecord,
+            parties: effectiveConflictParties,
+            matches: reconciledConflictMatches,
+          }
+        : null;
   const computedStaffStatus = computeStaffMatterStatus(
     {
       clientId: effectiveClientId,
@@ -3344,8 +3440,7 @@ export async function saveMatterRecord(
       0,
   );
   const partnerSignOffCompleted = Boolean(
-    matter.fieldValues['partnerCostSignOffCompleted'] ||
-      matter.conflictClearedById,
+    matter.fieldValues['partnerCostSignOffCompleted'],
   );
   const costsHookInput = {
     matterId: matter.id,
@@ -3585,29 +3680,20 @@ export async function saveMatterRecord(
       const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
       let resolvedRiskTeam: Team | undefined;
       if (configuredTeamKey) {
-        const cleanKeyLower = configuredTeamKey.toLowerCase();
         resolvedRiskTeam = store.teams.find(
-          (tm) =>
-            tm.active &&
-            (tm.id === configuredTeamKey ||
-              tm.name.trim().toLowerCase() === cleanKeyLower),
+          (tm) => tm.active && tm.id === configuredTeamKey,
         );
         if (!resolvedRiskTeam) {
           const matchedOrgTeam = store.orgStructure?.teamsOrPracticeGroups?.find(
             (ot) =>
               ot.active &&
-              (ot.id === configuredTeamKey ||
-                ot.code === configuredTeamKey ||
-                ot.name.trim().toLowerCase() === cleanKeyLower),
+              (ot.id === configuredTeamKey || ot.code === configuredTeamKey),
           );
           if (matchedOrgTeam) {
-            const matchedOrgNameLower = matchedOrgTeam.name.trim().toLowerCase();
             resolvedRiskTeam = store.teams.find(
               (tm) =>
                 tm.active &&
-                (tm.id === matchedOrgTeam.id ||
-                  tm.id === matchedOrgTeam.code ||
-                  tm.name.trim().toLowerCase() === matchedOrgNameLower),
+                (tm.id === matchedOrgTeam.id || tm.id === matchedOrgTeam.code),
             );
           }
         }
@@ -3908,6 +3994,59 @@ export function liftMatterRestriction(
   return { matter: existing };
 }
 
+export function runMatterConflictSearchRecord(
+  input: MatterConflictSearchInput,
+  byId: string,
+): { matches: ConflictCheckMatch[]; errors?: Record<string, string> } {
+  const store = getStore();
+  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !actingUser ||
+    !actingUser.isEmployee ||
+    (!hasPersonPermission(actingUser, 'matter:create', {
+      allPeople: store.people,
+      teams: store.teams,
+    }) &&
+      !hasPersonPermission(actingUser, 'matter:edit', {
+        allPeople: store.people,
+        teams: store.teams,
+      }))
+  ) {
+    return {
+      matches: [],
+      errors: {
+        permission:
+          'You do not have permission (matter:create or matter:edit) to run a matter conflict search.',
+      },
+    };
+  }
+  const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  const matches = searchMatterConflicts(
+    {
+      ...input,
+      canReviewConditions: actorHasRiskView,
+      reviewerUserId: actorHasRiskView ? byId : null,
+      reviewerDisplayName: actorHasRiskView ? personDisplayName(actingUser) : null,
+      reviewedAtIso: new Date().toISOString(),
+    },
+    {
+      matters: store.matters,
+      enquiries: store.enquiries,
+      people: store.people,
+      organisations: store.organisations,
+      canView: (m) =>
+        canPersonAccessMatter(m, byId, actingUser, {
+          allPeople: store.people,
+          teams: store.teams,
+        }),
+    },
+  );
+  return { matches };
+}
+
 export function updateMatterConflictRecord(
   matterId: string,
   record: ConflictCheckRecord,
@@ -3932,12 +4071,13 @@ export function updateMatterConflictRecord(
   ) {
     return { matter: null };
   }
+  const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
+    allPeople: store.people,
+    teams: store.teams,
+  });
   if (
     (record.status === 'Approved' || record.status === 'Declined') &&
-    !hasPersonPermission(actingUser, 'risk:view', {
-      allPeople: store.people,
-      teams: store.teams,
-    })
+    !actorHasRiskView
   ) {
     return {
       matter: null,
@@ -3947,36 +4087,93 @@ export function updateMatterConflictRecord(
       },
     };
   }
+  const nowCheckIso = new Date().toISOString();
+  const actorDisplayName = personDisplayName(actingUser);
+  const effectiveParties = buildEffectiveConflictParties({
+    submittedParties: record.parties,
+    clientId: matter.clientId,
+    additionalClientIds: matter.additionalClientIds,
+    instructingContactId: matter.instructingContactId,
+    matterParties: matter.parties,
+    people: store.people,
+    organisations: store.organisations,
+  });
+  const rawServerMatches = searchMatterConflicts(
+    {
+      currentMatterId: matter.id,
+      sourceEnquiryId: matter.sourceEnquiryId,
+      parties: effectiveParties,
+      previousMatches: record.matches ?? matter.conflictCheckRecord?.matches ?? [],
+      canReviewConditions: actorHasRiskView,
+      reviewerUserId: actorHasRiskView ? byId : null,
+      reviewerDisplayName: actorHasRiskView ? actorDisplayName : null,
+      reviewedAtIso: nowCheckIso,
+    },
+    {
+      matters: store.matters,
+      enquiries: store.enquiries,
+      people: store.people,
+      organisations: store.organisations,
+      canView: (m) =>
+        canPersonAccessMatter(m, byId, actingUser, {
+          allPeople: store.people,
+          teams: store.teams,
+        }),
+    },
+  );
+  const reconciledMatches = reconcileServerConflictMatches({
+    serverMatches: rawServerMatches,
+    submittedMatches: record.matches,
+    existingStoredMatches: matter.conflictCheckRecord?.matches,
+    canReviewConditions: actorHasRiskView,
+    reviewerUserId: actorHasRiskView ? byId : null,
+    reviewerDisplayName: actorHasRiskView ? actorDisplayName : null,
+    reviewedAtIso: nowCheckIso,
+  });
+
+  if (
+    record.status === 'Cleared' &&
+    !actorHasRiskView &&
+    reconciledMatches.some((m) => m.restricted)
+  ) {
+    return {
+      matter: null,
+      errors: {
+        conflict:
+          'This matter must be referred to Risk because a match was found on a restricted matter.',
+      },
+    };
+  }
+
   const prevMatter = structuredClone(matter);
   const now = touchMatter(matter, byId);
-  const actorDisplayName = personDisplayName(actingUser);
-  const existingCommentIds = new Set(
-    (matter.conflictCheckRecord?.comments ?? []).map((c) => c.id),
-  );
-  const sanitisedComments = (record.comments ?? []).map((c) =>
-    existingCommentIds.has(c.id)
-      ? c
-      : {
-          ...c,
-          authorId: byId,
-          authorName: actorDisplayName,
-          atDisplay: c.atDisplay || now,
-        },
-  );
+  const storedComments = matter.conflictCheckRecord?.comments ?? [];
+  const storedCommentIds = new Set(storedComments.map((c) => c.id));
+  const newComments = (record.comments ?? [])
+    .filter((c) => !storedCommentIds.has(c.id))
+    .map((c) => ({
+      ...c,
+      authorId: byId,
+      authorName: actorDisplayName,
+      atDisplay: now,
+    }));
+  const sanitisedComments = [...storedComments, ...newComments];
   const sanitisedRecord: ConflictCheckRecord = {
     ...record,
+    parties: effectiveParties,
+    matches: reconciledMatches,
     comments: sanitisedComments,
     ...(record.status === 'Approved' || record.status === 'Declined'
       ? {
           approvedById: byId,
           approvedByName: actorDisplayName,
-          approvedAtDisplay: record.approvedAtDisplay || now,
+          approvedAtDisplay: now,
         }
       : record.status === 'Cleared'
         ? {
             submittedById: byId,
             submittedByName: actorDisplayName,
-            submittedAtDisplay: record.submittedAtDisplay || now,
+            submittedAtDisplay: now,
           }
         : {}),
   };
@@ -4019,7 +4216,11 @@ export function updateMatterConflictRecord(
       sanitisedRecord.outcomeLabel === 'Approved with conditions'
         ? 'Approved with conditions'
         : 'Cleared';
-    matter.conflictClearedById = byId;
+    if (actorHasRiskView) {
+      matter.conflictClearedById = byId;
+    } else {
+      matter.conflictClearedById = null;
+    }
     matter.conflictCheckDate = today;
     if (hasPassedOpeningGate && sanitisedRecord.status === 'Approved') {
       const activeStatusId = vid('matter_status', 'Active');
@@ -7882,7 +8083,22 @@ export function requestMatterBill(
     return { ok: false };
   }
 
-  const assignedPersonId = targetMatter?.leadFeeEarnerId ?? 'P-000002';
+  const assignedPersonId = targetMatter?.leadFeeEarnerId ?? null;
+  const assignedTeamId = targetMatter?.owningTeamId ?? null;
+  if (!assignedPersonId) {
+    const tenantCfg = getActiveTenantConfiguration();
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'draft_bill_approval_task_unassigned',
+        tenantId: tenantCfg.tenantId,
+        correlationId: `corr-bill-task-${Date.now()}`,
+        matterCode,
+        matterId: targetMatter?.id ?? null,
+        assignedTeamId,
+      }),
+    );
+  }
   const linkedRecords: TaskLinkedRecord[] = targetMatter
     ? [{ recordType: 'matter', recordId: targetMatter.id }]
     : [];
@@ -7895,6 +8111,7 @@ export function requestMatterBill(
       priorityId: vid('task_priority', 'High'),
       dueAt: toIsoDate(new Date()),
       assignedPersonId,
+      assignedTeamId,
       linkedRecords,
     },
     byId,
@@ -7930,6 +8147,21 @@ export function flagMatterWriteOff(
     style: 'currency',
     currency: 'GBP',
   });
+  const assignedPartnerId =
+    matter?.supervisingPartnerId ?? matter?.responsiblePartnerId ?? null;
+  if (!assignedPartnerId) {
+    const tenantCfg = getActiveTenantConfiguration();
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'write_off_signoff_unassigned',
+        tenantId: tenantCfg.tenantId,
+        correlationId: `corr-writeoff-${Date.now()}`,
+        matterCode,
+        matterId: matter?.id ?? null,
+      }),
+    );
+  }
 
   const signOff: SignOffItem = {
     id,
@@ -7940,7 +8172,7 @@ export function flagMatterWriteOff(
     subtitle: `${matterCode}${matter ? ` · ${matter.title}` : ''} · Flagged for partner write-off decision`,
     requestedById: byId,
     requestedAt: nowIso,
-    assignedPartnerId: matter?.supervisingPartnerId ?? 'P-000001',
+    assignedPartnerId,
     status: 'Pending',
   };
 
@@ -7957,7 +8189,20 @@ export function remindTeamLeadOverdueCompliance(
   const store = getStore();
   const team = store.teams.find((t) => t.id === teamId);
   if (!team) return { ok: false };
-  const leadId = team.leadIds[0] ?? 'P-000001';
+  const leadId = team.leadIds[0] ?? null;
+  if (!leadId) {
+    const tenantCfg = getActiveTenantConfiguration();
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'compliance_reminder_no_team_lead',
+        tenantId: tenantCfg.tenantId,
+        correlationId: `corr-compliance-remind-${Date.now()}`,
+        teamId: team.id,
+      }),
+    );
+    return { ok: false };
+  }
   const nowIso = new Date().toISOString();
 
   store.notifications.unshift({
@@ -8000,7 +8245,11 @@ export function recordInvoiceCreditControlAction(
   byId: string,
 ): { ok: boolean; taskId?: string } {
   const store = getStore();
-  const linkedMatterId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', input.matterCode);
+  const matterByNumber = store.matters.find((m) => m.matterNumber === input.matterCode);
+  const linkedMatterId =
+    findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', input.matterCode) ??
+    matterByNumber?.id ??
+    null;
   const linkedOrgId = findOneSquaredIdForPmsCode(store.pmsLinks, 'organisation', input.clientCode);
   const linkedPersonId = findOneSquaredIdForPmsCode(store.pmsLinks, 'person', input.clientCode);
 
@@ -8023,7 +8272,24 @@ export function recordInvoiceCreditControlAction(
   const nowIso = new Date().toISOString();
 
   if (input.actionType === 'escalate') {
-    const partnerId = matter?.responsiblePartnerId ?? 'P-000001';
+    const partnerId =
+      matter?.responsiblePartnerId ?? matter?.supervisingPartnerId ?? null;
+    const assignedTeamId = matter?.owningTeamId ?? null;
+    if (!partnerId) {
+      const tenantCfg = getActiveTenantConfiguration();
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'credit_control_escalation_task_unassigned',
+          tenantId: tenantCfg.tenantId,
+          correlationId: `corr-credit-escalate-${Date.now()}`,
+          invoiceNumber: input.invoiceNumber,
+          matterCode: input.matterCode,
+          matterId: matter?.id ?? null,
+          assignedTeamId,
+        }),
+      );
+    }
     const res = saveTaskRecord(
       {
         title: `Partner escalation: overdue invoice ${input.invoiceNumber} (${input.matterCode})`,
@@ -8034,6 +8300,7 @@ export function recordInvoiceCreditControlAction(
         priorityId: vid('task_priority', 'Urgent'),
         dueAt: toIsoDate(new Date()),
         assignedPersonId: partnerId,
+        assignedTeamId,
         linkedRecords,
       },
       byId,

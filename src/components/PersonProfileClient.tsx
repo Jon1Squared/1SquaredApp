@@ -203,7 +203,10 @@ export function PersonProfileClient({
     return false;
   }, [person, roleLabels, mainOrg, values, matters]);
 
-  const orgStructure = useMemo(() => buildDefaultOrgStructure(), []);
+  const orgStructure = useMemo(
+    () => buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' }),
+    [],
+  );
 
   const visibleTabs = useMemo(
     () =>

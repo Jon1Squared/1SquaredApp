@@ -56,14 +56,12 @@
           "type": "string",
           "default": "",
           "deprecated": true,
-          "pattern": "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
           "description": "Deprecated: use firm.contactEmail instead. Optional public contact email address for document headers and footers"
         },
         "website": {
           "type": "string",
           "default": "",
           "deprecated": true,
-          "pattern": "^$|^(https?://)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(/\\S*)?$",
           "description": "Deprecated: use firm.website instead. Optional public website URL or hostname for document headers and footers"
         }
       }
@@ -97,7 +95,7 @@
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
           "default": null,
-          "description": "Stable key or ID of the team that receives referred conflict reviews"
+          "description": "Stable team ID or organisation team code of the team that receives referred conflict reviews"
         },
         "assigneeRoleKey": {
           "type": ["string", "null"],

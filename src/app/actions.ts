@@ -78,6 +78,7 @@ import {
   resetAllDemoData,
   resetHomePagesConfig,
   reviseQuoteRecord,
+  runMatterConflictSearchRecord,
   saveCustomFieldDefinition,
   saveEnquiryRecord,
   saveEnquirySettingsRecord,
@@ -275,6 +276,14 @@ export async function liftMatterRestrictionAction(
     const res = liftMatterRestriction(matterId, restriction, reason, byId);
     revalidateAll();
     return res;
+  });
+}
+
+export async function runMatterConflictSearchAction(
+  input: Parameters<typeof runMatterConflictSearchRecord>[0],
+) {
+  return withAuthenticatedActor((actor) => {
+    return runMatterConflictSearchRecord(input, actor.personId);
   });
 }
 

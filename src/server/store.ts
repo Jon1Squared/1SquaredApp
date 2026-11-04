@@ -54,6 +54,7 @@ import { getPmsSource } from '@/pms/pmsSource';
 import { buildSeedLists } from '@/seed/lists';
 import {
   buildDemoData,
+  buildInitialSeedMatterPmsLinks,
   DEFAULT_ENQUIRY_SETTINGS,
   DEFAULT_TASK_SETTINGS,
   DEFAULT_USER_ID,
@@ -149,72 +150,10 @@ function buildInitialPmsLinks(
   const pmsMatters = pms.listMatters();
   const nowIso = new Date().toISOString();
 
-  // Seed links for the 4 demo matters noted in the PMS workbook README
-  // (Penarth lease, Price purchase, Pugh estate, Brightwater tribunal claim)
-  // plus the key story matters seeded in demo.ts
-  const seededMatterLinks: PmsLink[] = [...existingLinks];
-  const addSeedMatterLink = (matterId: string | undefined, pmsCode: string) => {
-    if (!matterId) return;
-    if (
-      seededMatterLinks.some(
-        (l) => l.entityType === 'matter' && (l.onesquaredId === matterId || l.pmsCode === pmsCode),
-      )
-    ) {
-      return;
-    }
-    seededMatterLinks.push({
-      id: `PMSL-M-${pmsCode}`,
-      entityType: 'matter',
-      onesquaredId: matterId,
-      pmsCode,
-      matchedBy: 'seed',
-      matchedAt: nowIso,
-    });
-  };
-
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'PEN001-0004' || m.matterNumber === 'PEN001-0001')?.id,
-    'PEN001-0001',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'PEN001-0002')?.id,
-    'PEN001-0002',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'PRI001-0001')?.id,
-    'PRI001-0001',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'PUG001-0001')?.id,
-    'PUG001-0001',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.id === 'M-000007')?.id,
-    'BRI001-0001',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'BRI001-0003' && m.title.includes('Afon Care'))?.id,
-    'BRI001-0003',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'SEV001-0001')?.id,
-    'SEV001-0001',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'PEN001-0003')?.id,
-    'PEN001-0003',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'HAR001-0003')?.id,
-    'HAR001-0003',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'BAY001-0001')?.id,
-    'BAY001-0001',
-  );
-  addSeedMatterLink(
-    matters.find((m) => m.matterNumber === 'JON002-0001')?.id,
-    'SJO001-0001',
+  const seededMatterLinks = buildInitialSeedMatterPmsLinks(
+    matters,
+    existingLinks,
+    nowIso,
   );
 
   return computeAutomaticPmsLinks(
@@ -265,9 +204,9 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     partyMigration.values,
     today.toISOString(),
   );
-  return {
+  const store: FirmStore = {
     firmId: resolveActiveFirmId(),
-    firm: FIRM,
+    firm: { ...FIRM },
     isCleanDeployment: false,
     lists: [...seedLists.lists, ...demo.customLists],
     values: partyMigration.values,
@@ -302,6 +241,8 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     keyDateReminderStates: [],
     keyDateCalendarSyncs: [],
   };
+  migrateFirmBrandingToNotALawFirm(store);
+  return store;
 }
 
 function buildSeedKeyDates(
@@ -315,6 +256,10 @@ function buildSeedKeyDates(
   const m0 = matters[0]!;
   const m1 = matters[1] ?? m0;
   const m2 = matters[2] ?? m0;
+  const m0LeadId = m0.leadFeeEarnerId || m0.responsiblePartnerId || m0.createdById;
+  const m0PartnerId = m0.responsiblePartnerId || m0.leadFeeEarnerId || m0.createdById;
+  const m1LeadId = m1.leadFeeEarnerId || m1.responsiblePartnerId || m1.createdById;
+  const m2LeadId = m2.leadFeeEarnerId || m2.responsiblePartnerId || m2.createdById;
   const addDaysIso = (d: number) => {
     const dt = new Date(today.getTime());
     dt.setUTCDate(dt.getUTCDate() + d);
@@ -356,15 +301,15 @@ function buildSeedKeyDates(
       },
       verification: {
         required: true,
-        proposedById: m0.leadFeeEarnerId || 'P-000002',
+        proposedById: m0LeadId,
         proposedAt: nowIso,
-        verifiedById: m0.responsiblePartnerId || 'P-000001',
+        verifiedById: m0PartnerId,
         verifiedAt: nowIso,
       },
       notes: 'Confirmed against signed supply agreement.',
-      createdById: m0.leadFeeEarnerId || 'P-000002',
+      createdById: m0LeadId,
       createdAt: nowIso,
-      updatedById: m0.responsiblePartnerId || 'P-000001',
+      updatedById: m0PartnerId,
       updatedAt: nowIso,
       version: 2,
     },
@@ -389,13 +334,13 @@ function buildSeedKeyDates(
       ),
       verification: {
         required: true,
-        proposedById: m1.leadFeeEarnerId || 'P-000002',
+        proposedById: m1LeadId,
         proposedAt: nowIso,
       },
       notes: 'Per sealed Case Management Order.',
-      createdById: m1.leadFeeEarnerId || 'P-000002',
+      createdById: m1LeadId,
       createdAt: nowIso,
-      updatedById: m1.leadFeeEarnerId || 'P-000002',
+      updatedById: m1LeadId,
       updatedAt: nowIso,
       version: 1,
     },
@@ -419,14 +364,14 @@ function buildSeedKeyDates(
       ),
       verification: {
         required: false,
-        proposedById: m2.leadFeeEarnerId || 'P-000002',
+        proposedById: m2LeadId,
         proposedAt: nowIso,
-        verifiedById: m2.leadFeeEarnerId || 'P-000002',
+        verifiedById: m2LeadId,
         verifiedAt: nowIso,
       },
-      createdById: m2.leadFeeEarnerId || 'P-000002',
+      createdById: m2LeadId,
       createdAt: nowIso,
-      updatedById: m2.leadFeeEarnerId || 'P-000002',
+      updatedById: m2LeadId,
       updatedAt: nowIso,
       version: 1,
     },
@@ -550,6 +495,48 @@ async function trySyncToFirestore(store: FirmStore): Promise<void> {
   }
 }
 
+function isStoreDemoModeEnabled(): boolean {
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  const activeTenantConfig = getActiveTenantConfiguration();
+  if (activeTenantConfig.environment === 'live') {
+    return false;
+  }
+  return Boolean(activeTenantConfig.featureFlags?.enableDemoMode);
+}
+
+function hasInvalidSupervisingPartner(person: Person, allPeople: Person[]): boolean {
+  const supId = person.employment?.supervisingPartnerId;
+  if (!supId) return false;
+  const sup = allPeople.find((sp) => sp.id === supId);
+  return !sup || (!sup.isEmployee && !sup.employment);
+}
+
+function syncStoreHomePageRoles(store: FirmStore): boolean {
+  if (!store.homePagesConfig || !Array.isArray(store.homePagesConfig.roles)) {
+    return false;
+  }
+  const syncedRoles = syncHomeRolesWithEmployeeRoles(
+    store.homePagesConfig.roles,
+    store.values ?? [],
+    createDefaultRoleConfigs(getActiveTenantConfiguration().branding.primaryDomain),
+  );
+  if (
+    syncedRoles.length !== store.homePagesConfig.roles.length ||
+    syncedRoles.some(
+      (r, i) =>
+        r.key !== store.homePagesConfig.roles[i]?.key ||
+        r.label !== store.homePagesConfig.roles[i]?.label ||
+        r.employeeRoleId !== store.homePagesConfig.roles[i]?.employeeRoleId,
+    )
+  ) {
+    store.homePagesConfig.roles = syncedRoles;
+    return true;
+  }
+  return false;
+}
+
 function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
   let changed = false;
   const activeFirmId = resolveActiveFirmId();
@@ -557,13 +544,21 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
     store.firmId = activeFirmId;
     changed = true;
   }
+  if (syncStoreHomePageRoles(store)) {
+    changed = true;
+  }
+  if (!isStoreDemoModeEnabled() || store.isCleanDeployment) {
+    return changed;
+  }
+  const tenantCfg = getActiveTenantConfiguration();
+  const targetDomain = resolveConfiguredFirmPrimaryDomain(tenantCfg);
   if (!store.firm || store.firm.name !== FIRM.name || store.firm.shortName !== FIRM.shortName) {
     store.firm = { ...FIRM };
     changed = true;
   }
   if (store.orgStructure && Array.isArray(store.orgStructure.legalEntities)) {
     const defaultEntities = buildDefaultOrgStructure({
-      legalName: getActiveTenantConfiguration().displayName,
+      legalName: tenantCfg.displayName,
     }).legalEntities;
     for (const defLe of defaultEntities) {
       const existingLe = store.orgStructure.legalEntities.find((le) => le.id === defLe.id);
@@ -581,7 +576,7 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
           if (em.address.toLowerCase().includes('@pembrokevaughan.example')) {
             em.address = em.address.replace(
               /@pembrokevaughan\.example/gi,
-              '@notalawfirm.example',
+              `@${targetDomain}`,
             );
             changed = true;
           }
@@ -598,35 +593,18 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
       if (p.employment?.systems?.firmWorkEmail?.toLowerCase().includes('@pembrokevaughan')) {
         p.employment.systems.firmWorkEmail = p.employment.systems.firmWorkEmail.replace(
           /@pembrokevaughan\.example/gi,
-          '@notalawfirm.example',
+          `@${targetDomain}`,
         );
         changed = true;
       }
     }
   }
   if (store.homePagesConfig && Array.isArray(store.homePagesConfig.roles)) {
-    const syncedRoles = syncHomeRolesWithEmployeeRoles(
-      store.homePagesConfig.roles,
-      store.values ?? [],
-      createDefaultRoleConfigs(getActiveTenantConfiguration().branding.primaryDomain),
-    );
-    if (
-      syncedRoles.length !== store.homePagesConfig.roles.length ||
-      syncedRoles.some(
-        (r, i) =>
-          r.key !== store.homePagesConfig.roles[i]?.key ||
-          r.label !== store.homePagesConfig.roles[i]?.label ||
-          r.employeeRoleId !== store.homePagesConfig.roles[i]?.employeeRoleId,
-      )
-    ) {
-      store.homePagesConfig.roles = syncedRoles;
-      changed = true;
-    }
     for (const r of store.homePagesConfig.roles) {
       if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.example')) {
         r.demoUserEmail = r.demoUserEmail.replace(
           /@pembrokevaughan\.example/gi,
-          '@notalawfirm.example',
+          `@${targetDomain}`,
         );
         changed = true;
       }
@@ -638,7 +616,6 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
       store.matterCostsConfig.clientProfileName.includes('Pembroke Vaughan') ||
       store.matterCostsConfig.clientProfileName.includes('Standard Base Platform'))
   ) {
-    const tenantCfg = getActiveTenantConfiguration();
     store.matterCostsConfig.clientProfileCode = tenantCfg.tenantId;
     store.matterCostsConfig.clientProfileName = `${tenantCfg.displayName} — Client Configuration (${tenantCfg.branding.primaryDomain})`;
     changed = true;
@@ -670,7 +647,15 @@ export function getStore(): FirmStore {
     global.__oneSquaredStore.homePagesConfig
   ) {
     const seedLists = buildSeedLists();
-    let addedSeedItems = migrateFirmBrandingToNotALawFirm(global.__oneSquaredStore);
+    let addedSeedItems = false;
+    const activeFirmId = resolveActiveFirmId();
+    if (global.__oneSquaredStore.firmId !== activeFirmId) {
+      global.__oneSquaredStore.firmId = activeFirmId;
+      addedSeedItems = true;
+    }
+    if (syncStoreHomePageRoles(global.__oneSquaredStore)) {
+      addedSeedItems = true;
+    }
     for (const l of seedLists.lists) {
       if (!global.__oneSquaredStore.lists.some((x) => x.key === l.key)) {
         global.__oneSquaredStore.lists.push(l);
@@ -709,7 +694,7 @@ export function getStore(): FirmStore {
       global.__oneSquaredStore.people.some(
         (p) =>
           (p.isEmployee && !p.employment) ||
-          p.employment?.supervisingPartnerId === 'P-000013' ||
+          hasInvalidSupervisingPartner(p, global.__oneSquaredStore!.people) ||
           (p.employment?.divisionId === 'DIV-LEGAL' && !p.employment.supervisingPartnerId),
       )
     ) {
@@ -1015,7 +1000,7 @@ export function getStore(): FirmStore {
         parsed.people.some(
           (p) =>
             (p.isEmployee && !p.employment) ||
-            p.employment?.supervisingPartnerId === 'P-000013' ||
+            hasInvalidSupervisingPartner(p, parsed.people) ||
             (p.employment?.divisionId === 'DIV-LEGAL' && !p.employment.supervisingPartnerId),
         )
       ) {

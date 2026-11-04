@@ -357,6 +357,25 @@ async function ensureSeedDocumentTemplates(
     bytes: cclBytes,
   });
 
+  const activeEmployees = store.people.filter(
+    (p) => p.isEmployee && !p.demo && !p.mergedIntoId,
+  );
+  const seedPartnerId =
+    activeEmployees.find(
+      (p) => p.roles?.includes('partner') || p.roles?.includes('managing_partner'),
+    )?.id ??
+    activeEmployees[0]?.id ??
+    ctx.actorId;
+  const seedReviewerId =
+    activeEmployees.find((p) => p.id !== seedPartnerId)?.id ?? seedPartnerId;
+  const seedSubmitterId =
+    activeEmployees.find(
+      (p) =>
+        p.id !== seedPartnerId &&
+        p.id !== seedReviewerId &&
+        p.roles?.includes('fee_earner'),
+    )?.id ?? seedReviewerId;
+
   repo.putTemplate(ctx, {
     id: 'TPL-SEED-CCL',
     tenantId: ctx.tenantId,
@@ -373,7 +392,7 @@ async function ensureSeedDocumentTemplates(
     },
     activeVersionId: 'TPL-SEED-CCL-V1',
     status: 'Active',
-    createdByUserId: 'P-000001',
+    createdByUserId: seedPartnerId,
     createdAt: nowIso,
     updatedAt: nowIso,
   });
@@ -394,11 +413,11 @@ async function ensureSeedDocumentTemplates(
     extractedPlaceholders: cclExtracted.placeholders,
     fieldMappings: cclMappings,
     promptedFields: cclPrompted,
-    createdByUserId: 'P-000001',
+    createdByUserId: seedPartnerId,
     createdAt: nowIso,
-    submittedByUserId: 'P-000001',
+    submittedByUserId: seedPartnerId,
     submittedAt: nowIso,
-    reviewedByUserId: 'P-000002',
+    reviewedByUserId: seedReviewerId,
     reviewedAt: nowIso,
     changeNote: 'Initial approved firm-wide Client Care & Engagement Letter',
   });
@@ -447,7 +466,7 @@ async function ensureSeedDocumentTemplates(
     },
     activeVersionId: 'TPL-SEED-CORR-V1',
     status: 'Active',
-    createdByUserId: 'P-000001',
+    createdByUserId: seedPartnerId,
     createdAt: nowIso,
     updatedAt: nowIso,
   });
@@ -468,11 +487,11 @@ async function ensureSeedDocumentTemplates(
     extractedPlaceholders: corrExtracted.placeholders,
     fieldMappings: corrMappings,
     promptedFields: corrPrompted,
-    createdByUserId: 'P-000001',
+    createdByUserId: seedPartnerId,
     createdAt: nowIso,
-    submittedByUserId: 'P-000001',
+    submittedByUserId: seedPartnerId,
     submittedAt: nowIso,
-    reviewedByUserId: 'P-000002',
+    reviewedByUserId: seedReviewerId,
     reviewedAt: nowIso,
     changeNote: 'Approved general correspondence letterhead',
   });
@@ -540,7 +559,7 @@ async function ensureSeedDocumentTemplates(
     },
     activeVersionId: null,
     status: 'Submitted',
-    createdByUserId: 'P-000007',
+    createdByUserId: seedSubmitterId,
     createdAt: nowIso,
     updatedAt: nowIso,
   });
@@ -561,9 +580,9 @@ async function ensureSeedDocumentTemplates(
     extractedPlaceholders: attExtracted.placeholders,
     fieldMappings: attMappings,
     promptedFields: attPrompted,
-    createdByUserId: 'P-000007',
+    createdByUserId: seedSubmitterId,
     createdAt: nowIso,
-    submittedByUserId: 'P-000007',
+    submittedByUserId: seedSubmitterId,
     submittedAt: nowIso,
     changeNote: 'Submitted for Risk & Compliance / Partner approval',
   });

@@ -794,6 +794,7 @@ export interface ConflictCheckMatch {
   responsiblePartnerName: string;
   dateLabel: string;
   matchedOn?: string;
+  restricted?: boolean;
   disposition: ConflictMatchDisposition | null;
   note: string;
   reviewerDecision?: ConflictReviewerDecisionType | null;
@@ -1561,7 +1562,7 @@ export interface SignOffItem {
   subtitle: string;
   requestedById: string;
   requestedAt: string;
-  assignedPartnerId: string;
+  assignedPartnerId: string | null;
   status: 'Pending' | 'Approved' | 'Discussing';
   approvedById?: string | null;
   approvedAt?: string | null;

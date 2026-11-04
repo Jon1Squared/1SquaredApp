@@ -515,7 +515,7 @@ export function resolveMatterRiskAssessment(
   values: ChoiceValue[],
 ): MatterRiskAssessmentSnapshot {
   const nameOf = (id: string | null | undefined) => {
-    if (!id) return 'Bethan Rees';
+    if (!id) return 'Fee earner';
     const p = people.find((x) => x.id === id);
     return p ? personDisplayName(p) : id;
   };
@@ -643,9 +643,11 @@ export function resolveMatterConflictCheckRecord(
   const instructingName = matter.instructingContactId
     ? nameMap.get(matter.instructingContactId)
     : undefined;
-  const clearedByName = matter.conflictClearedById
-    ? nameMap.get(matter.conflictClearedById) ?? 'Bethan Rees'
-    : 'Bethan Rees';
+  const fallbackCleaverId =
+    matter.conflictClearedById || matter.leadFeeEarnerId || matter.responsiblePartnerId;
+  const clearedByName = fallbackCleaverId
+    ? nameMap.get(fallbackCleaverId) ?? fallbackCleaverId
+    : 'Fee earner';
 
   return {
     status:

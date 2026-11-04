@@ -203,7 +203,7 @@ export function PersonFormClient({
   const [continueAnyway, setContinueAnyway] = useState(false);
 
   const orgStructure = useMemo(
-    () => orgStructureProp ?? buildDefaultOrgStructure(),
+    () => orgStructureProp ?? buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' }),
     [orgStructureProp],
   );
 

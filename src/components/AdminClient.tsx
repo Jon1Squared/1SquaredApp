@@ -225,7 +225,7 @@ export function AdminClient({
   const { showToast } = useToast();
   const [tab, setTab] = useState<AdminTab>(initialTab);
   const [orgCatalogue, setOrgCatalogue] = useState<OrgStructureCatalogue>(
-    () => orgStructureProp ?? buildDefaultOrgStructure(),
+    () => orgStructureProp ?? buildDefaultOrgStructure({ legalName: firmName || 'Firm' }),
   );
   const [newDivName, setNewDivName] = useState('');
   const [newDivCode, setNewDivCode] = useState('');
