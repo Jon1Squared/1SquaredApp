@@ -163,6 +163,7 @@ interface MatterFormClientProps {
   matterCostsConfig: MatterCostsConfig;
   canReassignOwnership?: boolean;
   canSignOffCosts?: boolean;
+  initialSignOffEstimateGbp?: number | null;
   suggestedMatterGovernanceAssignees?: {
     riskReviewerId: string | null;
     practiceManagerId: string | null;
@@ -571,6 +572,7 @@ export function MatterFormClient({
   matterCostsConfig,
   canReassignOwnership = false,
   canSignOffCosts = false,
+  initialSignOffEstimateGbp = null,
   suggestedMatterGovernanceAssignees,
 }: MatterFormClientProps) {
   const router = useRouter();
@@ -3738,7 +3740,7 @@ export function MatterFormClient({
   async function handleRunConflictSearch() {
     try {
       const serverRes = await runMatterConflictSearchAction({
-        currentMatterId: existing?.id ?? null,
+        currentMatterId: savedDraftMatterId ?? existing?.id ?? null,
         sourceEnquiryId:
           existing?.sourceEnquiryId ??
           initialEnquiry?.id ??
@@ -3755,8 +3757,11 @@ export function MatterFormClient({
         return;
       }
       const computed = serverRes.matches;
-      const runTime = formatDateTime(new Date().toISOString());
-      const runnerName = `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
+      const runTime =
+        serverRes.run?.runAtDisplay || formatDateTime(new Date().toISOString());
+      const runnerName =
+        serverRes.run?.runByName ||
+        `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
 
       setMatches(computed);
       setHasRunSearch(true);
@@ -3766,7 +3771,7 @@ export function MatterFormClient({
       setReopenedDraftBanner(null);
 
       const potCount = computed.filter((m) => m.disposition === 'potential_conflict').length;
-      const newAudit: ConflictCheckRunAudit = {
+      const newAudit: ConflictCheckRunAudit = serverRes.run ?? {
         id: `run-${Date.now()}`,
         runAtDisplay: runTime,
         runById: currentUser.id,
@@ -4614,6 +4619,7 @@ export function MatterFormClient({
           | undefined) ?? null,
     );
   const [savedEstimateGbp, setSavedEstimateGbp] = useState<number | null>(() => {
+    if (initialSignOffEstimateGbp != null) return initialSignOffEstimateGbp;
     if (!existing) return null;
     return Number(
       existing.feeEstimateGbp ??
@@ -4628,7 +4634,9 @@ export function MatterFormClient({
 
   const currentFormEstimateGbp = Number(
     numericFeeEstimateGbp ??
-      (costWorkBasis === 'capped' ? numericAgreedCapGbp : null) ??
+      numericAgreedCapGbp ??
+      initialMatterCosts.totalEstimateGbp ??
+      initialMatterCosts.agreedCapGbp ??
       0,
   );
   const hasUnsavedEstimateChanges =
@@ -4667,7 +4675,7 @@ export function MatterFormClient({
           setSavedEstimateGbp(record.signedOffEstimateGbp);
         }
         setSignOffNote('');
-        showToast('Partner cost sign-off recorded');
+        showToast(res.warnings?.[0] ?? 'Partner cost sign-off recorded');
         router.refresh();
       }
     } catch {

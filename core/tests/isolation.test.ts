@@ -69,6 +69,7 @@ import {
   liftMatterRestriction,
   markEngagementLetterDrafted,
   recordInvoiceCreditControlAction,
+  recordKeyDateNotApplicableRecord,
   requestMatterBill,
   resetAllDemoData,
   runMatterConflictSearchRecord,
@@ -3675,8 +3676,34 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         snapByName.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBeNull();
 
-      // 2. Custom assigneeRoleKey selects a holder of that role, not a holder of risk_compliance
+      // 2. Custom assigneeRoleKey selects a holder of that role, not a holder of risk_compliance (and R180d: scopes to assigneeTeamKey when configured)
       nonRiskEmployee.employeeRoleId = 'employee_role.custom_conflict_reviewer';
+      const emptyCustomTeamId = 'TM-R174-EMPTY-TEAM';
+      store.teams.push({
+        id: emptyCustomTeamId,
+        name: 'Conflict Review Team Without Custom Role Holder',
+        description: 'Team that does not include nonRiskEmployee',
+        memberIds: [partner.id],
+        leadIds: [partner.id],
+        practiceAreaIds: [],
+        active: true,
+        createdById: partner.id,
+        createdAt: new Date().toISOString(),
+        updatedById: partner.id,
+        updatedAt: new Date().toISOString(),
+      });
+      setActiveTenantConfigForTesting({
+        ...originalRawBase,
+        conflictReview: {
+          assigneeTeamKey: emptyCustomTeamId,
+          assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
+        },
+      });
+      const snapRoleOutsideTeam = getAppSnapshot(partner.id);
+      expect(
+        snapRoleOutsideTeam.suggestedMatterGovernanceAssignees.riskReviewerId,
+      ).toBeNull();
+
       setActiveTenantConfigForTesting({
         ...originalRawBase,
         conflictReview: {
@@ -4082,5 +4109,406 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(fallbackRecord.submittedAtDisplay).toBe('');
     expect(fallbackRecord.approvedAtDisplay).toBe('');
     expect(fallbackRecord.runs[0]?.runAtDisplay).toBe('');
+  });
+
+  it('R178: draft saves of unopened matters set matterOpeningGate.allowProceed to false, and signOffMatterCostsRecord fails closed when an enabled beforeMatterOpen extension fails to load', async () => {
+    resetAllDemoData('P-000001');
+    const originalRawBase = getActiveTenantRawBaseConfig();
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const riskOfficer = store.people.find((p) =>
+        (p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          p.id !== riskOfficer.id &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+      const prospectiveStatusId = store.values.find(
+        (v) =>
+          v.listKey === 'matter_status' &&
+          v.label === 'Prospective / Enquiry',
+      )!.id;
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const makeSession = (
+        person: typeof partner,
+        roles: string[],
+        email: string,
+      ) => {
+        const cookie = createSignedEntraSessionCookie({
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id}`,
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: person.id,
+          email,
+          displayName: `${person.firstName} ${person.surname}`,
+          entraRoles: roles,
+          mappedRoles: roles,
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        });
+        return {
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: roles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+        };
+      };
+
+      const feeEarnerSession = makeSession(
+        feeEarner,
+        feeEarner.roles ?? ['fee_earner'],
+        'fe-r178@notalawfirm.example',
+      );
+      const riskSession = makeSession(
+        riskOfficer,
+        riskOfficer.roles ?? ['risk_compliance'],
+        'risk-r178@notalawfirm.example',
+      );
+      const partnerSession = makeSession(
+        partner,
+        partner.roles ?? ['partner', 'managing_partner'],
+        'partner-r178@notalawfirm.example',
+      );
+
+      // Part 1: Refer a matter (£10,000, below threshold), then save it as a draft -> matterOpeningGate.allowProceed becomes false -> Risk approval keeps matter Prospective
+      const referRes = await runWithActiveActorSession(feeEarnerSession, () =>
+        saveMatterRecord(
+          {
+            title: 'R178 Draft Gate Reset Matter',
+            clientId: baseMatter.clientId,
+            practiceAreaId: baseMatter.practiceAreaId,
+            workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+            responsiblePartnerId: partner.id,
+            supervisingPartnerId: partner.id,
+            leadFeeEarnerId: feeEarner.id,
+            feeEstimateGbp: 10000,
+            agreedFeeCapGbp: 10000,
+            parties: [],
+          },
+          { byId: feeEarner.id, saveMode: 'submit_referred' },
+        ),
+      );
+      expect(referRes.errors).toBeUndefined();
+      expect(
+        (
+          referRes.matter?.fieldValues['matterOpeningGate'] as {
+            allowProceed?: boolean;
+          }
+        )?.allowProceed,
+      ).toBe(true);
+      const matterId = referRes.matter!.id;
+
+      const draftSaveAfterRefer = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referRes.matter!,
+              title: 'R178 Draft Gate Reset Matter (Edited Draft)',
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+            },
+            { id: matterId, byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(draftSaveAfterRefer.errors).toBeUndefined();
+      expect(
+        (
+          draftSaveAfterRefer.matter?.fieldValues['matterOpeningGate'] as {
+            allowProceed?: boolean;
+          }
+        )?.allowProceed,
+      ).toBe(false);
+
+      const riskApproveAfterDraft = runWithActiveActorSession(
+        riskSession,
+        () =>
+          updateMatterConflictRecord(
+            matterId,
+            {
+              ...draftSaveAfterRefer.matter!.conflictCheckRecord!,
+              status: 'Approved',
+              outcomeLabel: 'Approved by Risk & Compliance',
+            },
+            riskOfficer.id,
+          ),
+      );
+      expect(riskApproveAfterDraft.errors).toBeUndefined();
+      expect(riskApproveAfterDraft.matter?.matterStatusId).toBe(
+        prospectiveStatusId,
+      );
+      expect(riskApproveAfterDraft.warnings?.length).toBeGreaterThan(0);
+
+      // Part 2: When an enabled beforeMatterOpen extension fails to load, signOffMatterCostsRecord fails closed and does not activate the matter
+      const tmpLoadFailDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'nalf-r178-load-fail-'),
+      );
+      const prevPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+      try {
+        fs.mkdirSync(path.join(tmpLoadFailDir, 'config'), { recursive: true });
+        const extSubDir = path.join(
+          tmpLoadFailDir,
+          'extensions',
+          'missing-open-gate-r178',
+        );
+        fs.mkdirSync(extSubDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(tmpLoadFailDir, 'config', 'base.json'),
+          JSON.stringify({
+            ...originalRawBase,
+            enabledExtensions: ['missing-open-gate-r178'],
+          }),
+          'utf8',
+        );
+        fs.writeFileSync(
+          path.join(extSubDir, 'manifest.json'),
+          JSON.stringify({
+            id: 'missing-open-gate-r178',
+            name: 'Missing Open Gate R178',
+            version: '1.0.0',
+            description: 'Missing from generated registry to trigger load error',
+            supportedCoreApiRange: '^1.0.0',
+            permissions: ['matter:open:gate'],
+            hooks: ['beforeMatterOpen'],
+          }),
+          'utf8',
+        );
+        process.env.PLATFORM_TENANT_PACKAGE_DIR = tmpLoadFailDir;
+        setActiveTenantConfigForTesting(null);
+        getPlatformExtensionHost();
+        expect(
+          getExtensionHostLoadErrors().some(
+            (e) =>
+              e.extensionId === 'missing-open-gate-r178' &&
+              e.declaredHooks?.includes('beforeMatterOpen'),
+          ),
+        ).toBe(true);
+
+        const signOffUnderLoadErr = await runWithActiveActorSession(
+          partnerSession,
+          () =>
+            signOffMatterCostsRecord(
+              matterId,
+              partner.id,
+              'Attempt sign-off while beforeMatterOpen extension failed to load',
+            ),
+        );
+        expect(signOffUnderLoadErr.errors).toBeUndefined();
+        expect(signOffUnderLoadErr.matter?.matterStatusId).toBe(
+          prospectiveStatusId,
+        );
+        expect(
+          (
+            signOffUnderLoadErr.matter?.fieldValues['matterOpeningGate'] as {
+              allowProceed?: boolean;
+            }
+          )?.allowProceed,
+        ).toBe(false);
+        expect(signOffUnderLoadErr.warnings?.[0]).toBe(
+          'A required costs check could not run. Please contact your administrator.',
+        );
+      } finally {
+        if (prevPkgDir === undefined) {
+          delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+        } else {
+          process.env.PLATFORM_TENANT_PACKAGE_DIR = prevPkgDir;
+        }
+        setActiveTenantConfigForTesting(null);
+        fs.rmSync(tmpLoadFailDir, { recursive: true, force: true });
+      }
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R179: saveMatterRecord, updateMatterConflictRecord, and signOffMatterCostsRecord enforce evaluateMatterKeyDateOpeningGate when requiredKeyDateTypeIds are configured', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const riskOfficer = store.people.find((p) =>
+        (p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+      const prospectiveStatusId = store.values.find(
+        (v) =>
+          v.listKey === 'matter_status' &&
+          v.label === 'Prospective / Enquiry',
+      )!.id;
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const makeSession = (
+        person: typeof partner,
+        roles: string[],
+        email: string,
+      ) => {
+        const cookie = createSignedEntraSessionCookie({
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id}`,
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: person.id,
+          email,
+          displayName: `${person.firstName} ${person.surname}`,
+          entraRoles: roles,
+          mappedRoles: roles,
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        });
+        return {
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: roles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+        };
+      };
+
+      const partnerSession = makeSession(
+        partner,
+        partner.roles ?? ['partner', 'managing_partner', 'admin'],
+        'partner-r179@notalawfirm.example',
+      );
+      const riskSession = makeSession(
+        riskOfficer,
+        riskOfficer.roles ?? ['risk_compliance'],
+        'risk-r179@notalawfirm.example',
+      );
+
+      // 1. Brand-new matter whose matterTypeId requires 'limitation' is refused on submit_cleared with instruction to save as draft first
+      const newOpenWithoutKd = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R179 Litigation Matter Requiring Limitation Date',
+              clientId: baseMatter.clientId,
+              practiceAreaId: 'work_type.dispute_resolution',
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              matterTypeId: 'matter_type.litigation',
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: partner.id,
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+              parties: [],
+            },
+            { byId: partner.id, saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(newOpenWithoutKd.matter).toBeNull();
+      expect(newOpenWithoutKd.errors?.keyDates).toMatch(
+        /Save the matter as a draft and add its required key dates before opening/i,
+      );
+
+      // 2. Saving as a draft succeeds; attempting to open the saved draft without the required key date is refused with errors.keyDates
+      const draftRes = await runWithActiveActorSession(partnerSession, () =>
+        saveMatterRecord(
+          {
+            title: 'R179 Litigation Matter Requiring Limitation Date',
+            clientId: baseMatter.clientId,
+            practiceAreaId: 'work_type.dispute_resolution',
+            workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+            matterTypeId: 'matter_type.litigation',
+            responsiblePartnerId: partner.id,
+            supervisingPartnerId: partner.id,
+            leadFeeEarnerId: partner.id,
+            feeEstimateGbp: 10000,
+            agreedFeeCapGbp: 10000,
+            parties: [],
+          },
+          { byId: partner.id, saveMode: 'draft' },
+        ),
+      );
+      expect(draftRes.errors).toBeUndefined();
+      const draftId = draftRes.matter!.id;
+
+      const draftOpenWithoutKd = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...draftRes.matter!,
+              title: 'R179 Litigation Matter Requiring Limitation Date',
+            },
+            { id: draftId, byId: partner.id, saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(draftOpenWithoutKd.matter).toBeNull();
+      expect(draftOpenWithoutKd.errors?.keyDates).toMatch(
+        /Matter cannot open until required key date\(s\) are recorded or marked not applicable.*Limitation date/i,
+      );
+
+      // 3. Risk approval on a draft/referred matter missing its required key date keeps matterStatusId as Prospective
+      const riskApproveWithoutKd = runWithActiveActorSession(riskSession, () =>
+        updateMatterConflictRecord(
+          draftId,
+          {
+            ...draftRes.matter!.conflictCheckRecord!,
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+          },
+          riskOfficer.id,
+        ),
+      );
+      expect(riskApproveWithoutKd.errors).toBeUndefined();
+      expect(riskApproveWithoutKd.matter?.matterStatusId).toBe(
+        prospectiveStatusId,
+      );
+      expect(riskApproveWithoutKd.warnings?.[0]).toMatch(/required key dates/i);
+
+      // 4. Recording the required key date as Not applicable (or adding it) allows saveMatterRecord(submit_cleared) to open the matter
+      const naRes = recordKeyDateNotApplicableRecord(
+        {
+          matterId: draftId,
+          keyDateTypeId: 'limitation',
+          reason:
+            'Declaratory relief only; statutory limitation period does not apply.',
+        },
+        partner.id,
+      );
+      expect(naRes.ok).toBe(true);
+      expect(naRes.error).toBeUndefined();
+
+      const openWithKdRes = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...draftRes.matter!,
+              title: 'R179 Litigation Matter Requiring Limitation Date',
+            },
+            { id: draftId, byId: partner.id, saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(openWithKdRes.errors).toBeUndefined();
+      expect(openWithKdRes.matter).not.toBeNull();
+      expect(openWithKdRes.matter?.matterStatusId).not.toBe(
+        prospectiveStatusId,
+      );
+      expect(openWithKdRes.matter?.matterNumber).not.toBe('DRAFT');
+    } finally {
+      resetAllDemoData('P-000001');
+    }
   });
 });

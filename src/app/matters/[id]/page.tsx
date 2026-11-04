@@ -65,6 +65,7 @@ export default async function MatterProfilePage({
           matterCostsConfig={snap.matterCostsConfig}
           canReassignOwnership={snap.currentUserPermissions.includes('matter:reassign_ownership')}
           canSignOffCosts={snap.canSignOffCostsByMatterId[matter.id] ?? false}
+          initialSignOffEstimateGbp={snap.signOffEstimateGbpByMatterId[matter.id] ?? null}
           suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
         />
       );

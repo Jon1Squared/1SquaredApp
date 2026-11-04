@@ -9,6 +9,7 @@ import {
   addWorkingDays,
   calculateFirstContactDue,
   formatDate,
+  formatDateTime,
   toIsoDate,
   type WorkingHoursConfig,
 } from '@/domain/dates';
@@ -99,7 +100,6 @@ import {
 import {
   countMyUrgentBadgeTasks,
   isTaskOpen,
-  isUserTeamLeadFor,
   resolveRoutedTeam,
 } from '@/domain/tasks';
 import {
@@ -1071,10 +1071,16 @@ function getAppSnapshotInScope(
   }
 
   const canSignOffCostsByMatterId: Record<string, boolean> = {};
+  const signOffEstimateGbpByMatterId: Record<string, number> = {};
   const actorCanSignOffCosts = currentUserPermissions.includes('matter:costs:sign_off');
   for (const m of visibleMatters) {
     canSignOffCostsByMatterId[m.id] =
       actorCanSignOffCosts && visibility.canViewMatter(m);
+    signOffEstimateGbpByMatterId[m.id] = resolveMatterSignOffEstimateGbp(
+      store,
+      activeTenantCfg,
+      m,
+    ).estimatedFeeGbp;
   }
 
   const conflictReviewCfg = activeTenantCfg.conflictReview;
@@ -1111,6 +1117,7 @@ function getAppSnapshotInScope(
     canVerifyByKeyDateId,
     canReopenByEnquiryId,
     canSignOffCostsByMatterId,
+    signOffEstimateGbpByMatterId,
     suggestedMatterGovernanceAssignees,
     appRoleByPersonId,
     rolesByPersonId,
@@ -2509,6 +2516,163 @@ export function generateMatterNumber(store: FirmStore, clientId: string): string
   return `${prefix}-${String(nextSeq).padStart(4, '0')}`;
 }
 
+function resolveMatterSignOffEstimateGbp(
+  store: FirmStore,
+  tenantCfg: ReturnType<typeof getActiveTenantConfiguration>,
+  matter: Matter,
+): {
+  resolvedCosts: ReturnType<typeof resolveMatterCostsSnapshot>;
+  estimatedFeeGbp: number;
+} {
+  const costsConfig =
+    store.matterCostsConfig ??
+    createDefaultMatterCostsConfig(store.values, {
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    });
+  const resolvedCosts = resolveMatterCostsSnapshot({
+    existing: matter,
+    practiceAreaId: matter.practiceAreaId,
+    config: costsConfig,
+    values: store.values,
+  });
+  const estimatedFeeGbp = Number(
+    matter.feeEstimateGbp ??
+      matter.agreedFeeCapGbp ??
+      resolvedCosts.totalEstimateGbp ??
+      resolvedCosts.agreedCapGbp ??
+      0,
+  );
+  return { resolvedCosts, estimatedFeeGbp };
+}
+
+async function runMatterOpeningGate(params: {
+  store: FirmStore;
+  matter: Matter;
+  isNewMatter: boolean;
+  extensionCtx: TenantContext;
+  tenantCfg: ReturnType<typeof getActiveTenantConfiguration>;
+  costsHookInput: {
+    matterId: string;
+    workBasis: ReturnType<typeof resolveMatterCostsSnapshot>['workBasis'];
+    estimatedFeeGbp: number;
+    disbursementsTotalGbp: number;
+    partnerSignOffCompleted: boolean;
+  };
+  now: string;
+}): Promise<{
+  allowProceed: boolean;
+  errors: Record<string, string>;
+  governance: Awaited<
+    ReturnType<ReturnType<typeof getPlatformExtensionHost>['executeMatterCostsHook']>
+  > | null;
+  record: MatterOpeningGateRecord;
+}> {
+  const {
+    store,
+    matter,
+    isNewMatter,
+    extensionCtx,
+    tenantCfg,
+    costsHookInput,
+    now,
+  } = params;
+  const errors: Record<string, string> = {};
+
+  // 1. Extension load failure on an enabled beforeMatterOpen extension fails closed.
+  const loadErrors = getExtensionHostLoadErrors();
+  const enabledExtSet = new Set(tenantCfg.enabledExtensions ?? []);
+  const gateLoadFailure = loadErrors.find(
+    (err) =>
+      err.tenantId === tenantCfg.tenantId &&
+      (enabledExtSet.has(err.extensionId ?? '') ||
+        enabledExtSet.has(err.extensionDir)) &&
+      (err.declaredHooks === null ||
+        err.declaredHooks.includes('beforeMatterOpen')),
+  );
+  if (gateLoadFailure) {
+    errors.costsGovernance =
+      'A required costs check could not run. Please contact your administrator.';
+  }
+
+  // 2. Key-dates opening gate (when the Key Dates module is enabled for the tenant).
+  const kdConfig = getKeyDatesConfig(store);
+  if (kdConfig.enabled) {
+    const targetMatterTypeId = matter.matterTypeId || matter.practiceAreaId;
+    const matterKds = isNewMatter
+      ? []
+      : (store.keyDates ?? []).filter((kd) => kd.matterId === matter.id);
+    const matterNas = isNewMatter
+      ? []
+      : (store.keyDateNotApplicable ?? []).filter(
+          (na) => na.matterId === matter.id,
+        );
+    const openGate = evaluateMatterKeyDateOpeningGate(
+      kdConfig,
+      targetMatterTypeId,
+      matterKds,
+      matterNas,
+    );
+    if (!openGate.canOpen) {
+      const missingLabels = openGate.missingKeyDateTypes
+        .map((t) => t.label)
+        .join(', ');
+      errors.keyDates = isNewMatter
+        ? `Save the matter as a draft and add its required key dates before opening (${missingLabels}).`
+        : `Matter cannot open until required key date(s) are recorded or marked not applicable: ${missingLabels}.`;
+    }
+  }
+
+  // 3. beforeMatterOpen extension hook.
+  const host = getPlatformExtensionHost();
+  const openGovernance = gateLoadFailure
+    ? null
+    : await host.executeMatterCostsHook(
+        'beforeMatterOpen',
+        extensionCtx,
+        tenantCfg,
+        costsHookInput,
+      );
+
+  if (openGovernance && !openGovernance.allowProceed) {
+    const rawWarning = openGovernance.governanceWarnings[0] ?? '';
+    const isInternalHookFailure =
+      rawWarning.startsWith('Hook "beforeMatterOpen" in extension ') ||
+      rawWarning.startsWith('[Extension isolated error:');
+    if (isInternalHookFailure) {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'before_matter_open_hook_failed',
+          tenantId: extensionCtx.tenantId,
+          correlationId: extensionCtx.correlationId,
+          matterId: matter.id,
+          errorMessage: rawWarning,
+        }),
+      );
+    }
+    errors.costsGovernance = isInternalHookFailure
+      ? 'A required costs check could not run. Please contact your administrator.'
+      : rawWarning ||
+        'This matter needs partner sign-off on costs before it can be opened.';
+  }
+
+  const allowProceed =
+    Object.keys(errors).length === 0 && Boolean(openGovernance?.allowProceed);
+
+  return {
+    allowProceed,
+    errors,
+    governance: openGovernance,
+    record: {
+      allowProceed,
+      estimatedFeeGbp: costsHookInput.estimatedFeeGbp,
+      checkedAt: now,
+    },
+  };
+}
+
 function buildServerConflictCheckRecord(params: {
   submitted: ConflictCheckRecordInput | ConflictCheckRecord;
   stored: ConflictCheckRecord | null | undefined;
@@ -2531,6 +2695,7 @@ function buildServerConflictCheckRecord(params: {
     nowDisplay,
     saveMode,
   } = params;
+  const displayNow = formatDateTime(nowDisplay) || nowDisplay;
 
   const isRiskDecisionStatus =
     submitted.status === 'Approved' || submitted.status === 'Declined';
@@ -2566,32 +2731,40 @@ function buildServerConflictCheckRecord(params: {
       ...c,
       authorId: actorId,
       authorName: actorDisplayName,
-      atDisplay: nowDisplay,
+      atDisplay: displayNow,
     }));
   const comments = [...storedComments, ...newComments];
 
   const storedRuns = stored?.runs ?? [];
+  const nextSearchTerms = parties.map((p) => p.name).filter(Boolean);
+  const lastRun = storedRuns[storedRuns.length - 1];
+  const lastRunTermsKey = lastRun ? lastRun.searchTerms.join('\u0000') : null;
+  const nextTermsKey = nextSearchTerms.join('\u0000');
+  const shouldAppendRun =
+    storedRuns.length === 0 || lastRunTermsKey !== nextTermsKey;
   const serverRun: ConflictCheckRunAudit = {
     id: `run-srv-${randomUUID()}`,
-    runAtDisplay: nowDisplay,
+    runAtDisplay: displayNow,
     runById: actorId,
     runByName: actorDisplayName,
-    searchTerms: parties.map((p) => p.name).filter(Boolean),
+    searchTerms: nextSearchTerms,
     partiesCount: parties.length,
     matchesCount: matches.length,
     potentialConflictsCount: matches.filter(
       (m) => m.disposition === 'potential_conflict' || m.restricted,
     ).length,
   };
-  const runs = [...storedRuns, serverRun];
+  const runs = shouldAppendRun ? [...storedRuns, serverRun] : [...storedRuns];
 
   const isRiskApprovalOrDecline =
     actorHasRiskView && (status === 'Approved' || status === 'Declined');
-  const isSubmission =
-    status === 'Cleared' ||
-    status === 'Referred' ||
-    saveMode === 'submit_cleared' ||
-    saveMode === 'submit_referred';
+  const isNewSubmission =
+    (status === 'Cleared' ||
+      status === 'Referred' ||
+      saveMode === 'submit_cleared' ||
+      saveMode === 'submit_referred') &&
+    (!stored?.submittedAtDisplay ||
+      (stored.status !== 'Cleared' && stored.status !== 'Referred'));
 
   const approvedRestrictedMatchIds =
     actorHasRiskView && status === 'Approved'
@@ -2605,20 +2778,20 @@ function buildServerConflictCheckRecord(params: {
     outcomeLabel,
     declarationConfirmed: Boolean(submitted.declarationConfirmed),
     reviewerMessage: submitted.reviewerMessage ?? '',
-    lastRunAtDisplay: nowDisplay,
+    lastRunAtDisplay: displayNow,
     lastRunById: actorId,
     lastRunByName: actorDisplayName,
     savedDraftAtDisplay:
-      saveMode === 'draft' ? nowDisplay : stored?.savedDraftAtDisplay ?? null,
-    submittedAtDisplay: isSubmission
-      ? nowDisplay
+      saveMode === 'draft' ? displayNow : stored?.savedDraftAtDisplay ?? null,
+    submittedAtDisplay: isNewSubmission
+      ? displayNow
       : stored?.submittedAtDisplay ?? null,
-    submittedById: isSubmission ? actorId : stored?.submittedById ?? null,
-    submittedByName: isSubmission
+    submittedById: isNewSubmission ? actorId : stored?.submittedById ?? null,
+    submittedByName: isNewSubmission
       ? actorDisplayName
       : stored?.submittedByName ?? null,
     approvedAtDisplay: isRiskApprovalOrDecline
-      ? nowDisplay
+      ? displayNow
       : stored?.approvedAtDisplay ?? null,
     approvedById: isRiskApprovalOrDecline
       ? actorId
@@ -2648,7 +2821,6 @@ export async function saveMatterRecord(
     id?: string;
     byId: string;
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
-    enforceKeyDateGates?: boolean;
   },
 ): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
   const store = getStore();
@@ -2821,7 +2993,7 @@ export async function saveMatterRecord(
     }
   }
 
-  // Enforce Key Dates opening & closure gates (§1)
+  // Enforce Key Dates closure gate (§1; opening gate runs via runMatterOpeningGate)
   const kdConfig = getKeyDatesConfig(store);
   if (kdConfig.enabled && !isDraftSave) {
     const targetMatterId = existing?.id;
@@ -2837,33 +3009,17 @@ export async function saveMatterRecord(
       nextStatusLabel.toLowerCase() === 'archived' ||
       nextStatusId === 'matter_status.closed';
 
-    if (targetMatterId) {
+    if (targetMatterId && isClosing) {
       const matterKds = (store.keyDates ?? []).filter(
         (kd) => kd.matterId === targetMatterId,
       );
-      const matterNas = (store.keyDateNotApplicable ?? []).filter(
-        (na) => na.matterId === targetMatterId,
+      const closeGate = evaluateMatterKeyDateClosureGate(
+        kdConfig,
+        targetMatterTypeId,
+        matterKds,
       );
-
-      if (isClosing) {
-        const closeGate = evaluateMatterKeyDateClosureGate(
-          kdConfig,
-          targetMatterTypeId,
-          matterKds,
-        );
-        if (!closeGate.canClose) {
-          errors.keyDates = `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`;
-        }
-      } else if (opts.enforceKeyDateGates) {
-        const openGate = evaluateMatterKeyDateOpeningGate(
-          kdConfig,
-          targetMatterTypeId,
-          matterKds,
-          matterNas,
-        );
-        if (!openGate.canOpen) {
-          errors.keyDates = `Matter cannot open until required key date(s) are recorded or marked not applicable: ${openGate.missingKeyDateTypes.map((t) => t.label).join(', ')}.`;
-        }
+      if (!closeGate.canClose) {
+        errors.keyDates = `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`;
       }
     }
   }
@@ -3561,44 +3717,12 @@ export async function saveMatterRecord(
   );
   const isOpeningEvent = !isDraftSave && !existingHasOpened;
 
-  // R108 & R131 & R173: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
+  // R108 & R131 & R173 & R178 & R179: Run active tenant extension hooks and unified matter opening gate
   const host = getPlatformExtensionHost();
-  const loadErrors = getExtensionHostLoadErrors();
-  const enabledExtSet = new Set(tenantCfg.enabledExtensions ?? []);
-  const gateLoadFailure = loadErrors.find(
-    (err) =>
-      err.tenantId === tenantCfg.tenantId &&
-      (enabledExtSet.has(err.extensionId ?? '') || enabledExtSet.has(err.extensionDir)) &&
-      (err.declaredHooks === null || err.declaredHooks.includes('beforeMatterOpen')),
-  );
-  if (isOpeningEvent && gateLoadFailure) {
-    return {
-      matter: null,
-      errors: {
-        costsGovernance:
-          'A required costs check could not run. Please contact your administrator.',
-      },
-    };
-  }
-  const costsConfig =
-    store.matterCostsConfig ??
-    createDefaultMatterCostsConfig(store.values, {
-      clientProfileCode: tenantCfg.tenantId,
-      displayName: tenantCfg.displayName,
-      primaryDomain: tenantCfg.branding.primaryDomain,
-    });
-  const resolvedCosts = resolveMatterCostsSnapshot({
-    existing: matter,
-    practiceAreaId: matter.practiceAreaId,
-    config: costsConfig,
-    values: store.values,
-  });
-  const estimatedFeeGbp = Number(
-    matter.feeEstimateGbp ??
-      matter.agreedFeeCapGbp ??
-      resolvedCosts.totalEstimateGbp ??
-      resolvedCosts.agreedCapGbp ??
-      0,
+  const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
+    store,
+    tenantCfg,
+    matter,
   );
   const storedSignOff = matter.fieldValues['partnerCostSignOff'] as
     | PartnerCostSignOffRecord
@@ -3626,40 +3750,22 @@ export async function saveMatterRecord(
     tenantCfg,
     costsHookInput,
   );
-  const openGovernance = isOpeningEvent
-    ? await host.executeMatterCostsHook(
-        'beforeMatterOpen',
+  const gateResult = isOpeningEvent
+    ? await runMatterOpeningGate({
+        store,
+        matter,
+        isNewMatter: !existing,
         extensionCtx,
         tenantCfg,
         costsHookInput,
-      )
+        now,
+      })
     : null;
 
-  if (openGovernance && !openGovernance.allowProceed) {
-    const rawWarning = openGovernance.governanceWarnings[0] ?? '';
-    const isInternalHookFailure =
-      rawWarning.startsWith('Hook "beforeMatterOpen" in extension ') ||
-      rawWarning.startsWith('[Extension isolated error:');
-    if (isInternalHookFailure) {
-      console.error(
-        JSON.stringify({
-          level: 'error',
-          event: 'before_matter_open_hook_failed',
-          tenantId: extensionCtx.tenantId,
-          correlationId: extensionCtx.correlationId,
-          matterId: matter.id,
-          errorMessage: rawWarning,
-        }),
-      );
-    }
+  if (gateResult && !gateResult.allowProceed) {
     return {
       matter: null,
-      errors: {
-        costsGovernance: isInternalHookFailure
-          ? 'A required costs check could not run. Please contact your administrator.'
-          : rawWarning ||
-            'This matter needs partner sign-off on costs before it can be opened.',
-      },
+      errors: gateResult.errors,
     };
   }
 
@@ -3686,17 +3792,13 @@ export async function saveMatterRecord(
     link.enquiry.linkedPersonId = link.linkedPersonId;
   }
 
-  matter.fieldValues['matterCostsGovernance'] = openGovernance ?? calcGovernance;
-  if (openGovernance) {
-    const gateRecord: MatterOpeningGateRecord = {
-      allowProceed: openGovernance.allowProceed,
-      estimatedFeeGbp,
-      checkedAt: now,
-    };
-    matter.fieldValues['matterOpeningGate'] = gateRecord;
+  matter.fieldValues['matterCostsGovernance'] =
+    gateResult?.governance ?? calcGovernance;
+  if (gateResult) {
+    matter.fieldValues['matterOpeningGate'] = gateResult.record;
   } else if (!existingHasOpened) {
     const draftGateRecord: MatterOpeningGateRecord = {
-      allowProceed: !calcGovernance.requiresPartnerSignOff || partnerSignOffCompleted,
+      allowProceed: false,
       estimatedFeeGbp,
       checkedAt: now,
     };
@@ -4137,7 +4239,11 @@ export function liftMatterRestriction(
 export function runMatterConflictSearchRecord(
   input: MatterConflictSearchInput,
   byId: string,
-): { matches: ConflictCheckMatch[]; errors?: Record<string, string> } {
+): {
+  matches: ConflictCheckMatch[];
+  run?: ConflictCheckRunAudit;
+  errors?: Record<string, string>;
+} {
   const store = getStore();
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -4165,13 +4271,15 @@ export function runMatterConflictSearchRecord(
     teams: store.teams,
   });
   const visibility = buildRecordVisibility(store, actingUser);
+  const nowIso = new Date().toISOString();
+  const actorDisplayName = personDisplayName(actingUser);
   const matches = searchMatterConflicts(
     {
       ...input,
       canReviewConditions: actorHasRiskView,
       reviewerUserId: actorHasRiskView ? byId : null,
-      reviewerDisplayName: actorHasRiskView ? personDisplayName(actingUser) : null,
-      reviewedAtIso: new Date().toISOString(),
+      reviewerDisplayName: actorHasRiskView ? actorDisplayName : null,
+      reviewedAtIso: nowIso,
     },
     {
       matters: store.matters,
@@ -4182,6 +4290,42 @@ export function runMatterConflictSearchRecord(
       canViewEnquiry: visibility.canViewEnquiry,
     },
   );
+  const displayNow = formatDateTime(nowIso) || nowIso;
+  const run: ConflictCheckRunAudit = {
+    id: `run-srv-${randomUUID()}`,
+    runAtDisplay: displayNow,
+    runById: byId,
+    runByName: actorDisplayName,
+    searchTerms: input.parties.map((p) => p.name).filter(Boolean),
+    partiesCount: input.parties.length,
+    matchesCount: matches.length,
+    potentialConflictsCount: matches.filter(
+      (m) => m.disposition === 'potential_conflict' || m.restricted,
+    ).length,
+  };
+  const savedMatter = input.currentMatterId
+    ? store.matters.find((m) => m.id === input.currentMatterId) ?? null
+    : null;
+  const hasSavedMatter = Boolean(savedMatter);
+  let storeModified = false;
+  if (
+    savedMatter &&
+    visibility.canViewMatter(savedMatter) &&
+    hasPersonPermission(actingUser, 'matter:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    }) &&
+    savedMatter.conflictCheckRecord
+  ) {
+    savedMatter.conflictCheckRecord.runs = [
+      ...(savedMatter.conflictCheckRecord.runs ?? []),
+      run,
+    ];
+    savedMatter.conflictCheckRecord.lastRunAtDisplay = displayNow;
+    savedMatter.conflictCheckRecord.lastRunById = byId;
+    savedMatter.conflictCheckRecord.lastRunByName = actorDisplayName;
+    storeModified = true;
+  }
   const restrictedCount = matches.filter((m) => m.restricted).length;
   if (restrictedCount > 0) {
     const tenantId = getActiveTenantConfiguration().tenantId;
@@ -4189,10 +4333,6 @@ export function runMatterConflictSearchRecord(
     const correlationId =
       (activeSession as { correlationId?: string } | null)?.correlationId ??
       `conflict-search-${randomUUID()}`;
-    const hasSavedMatter = Boolean(
-      input.currentMatterId &&
-        store.matters.some((m) => m.id === input.currentMatterId),
-    );
     if (hasSavedMatter && input.currentMatterId) {
       writeAudit(store, {
         recordType: 'matter',
@@ -4203,7 +4343,7 @@ export function runMatterConflictSearchRecord(
         newValue: `Restricted conflict match count: ${restrictedCount} across ${input.parties.length} searched party/parties`,
         byId,
       });
-      saveStore(store);
+      storeModified = true;
     }
     console.info(
       JSON.stringify({
@@ -4218,7 +4358,10 @@ export function runMatterConflictSearchRecord(
       }),
     );
   }
-  return { matches };
+  if (storeModified) {
+    saveStore(store);
+  }
+  return { matches, run };
 }
 
 export function updateMatterConflictRecord(
@@ -4360,10 +4503,22 @@ export function updateMatterConflictRecord(
   const gate = matter.fieldValues?.['matterOpeningGate'] as
     | MatterOpeningGateRecord
     | undefined;
+  const kdConfig = getKeyDatesConfig(store);
+  const keyDatesOpenGate = kdConfig.enabled
+    ? evaluateMatterKeyDateOpeningGate(
+        kdConfig,
+        matter.matterTypeId || matter.practiceAreaId,
+        (store.keyDates ?? []).filter((kd) => kd.matterId === matter.id),
+        (store.keyDateNotApplicable ?? []).filter(
+          (na) => na.matterId === matter.id,
+        ),
+      )
+    : { canOpen: true, missingKeyDateTypes: [] };
   const hasPassedOpeningGate =
     matter.matterNumber !== 'DRAFT' &&
     !matter.matterNumber.startsWith('DRAFT') &&
-    gate?.allowProceed === true;
+    gate?.allowProceed === true &&
+    keyDatesOpenGate.canOpen;
 
   const warnings: string[] = [];
   if (sanitisedRecord.status === 'Approved' || sanitisedRecord.status === 'Cleared') {
@@ -4400,7 +4555,7 @@ export function updateMatterConflictRecord(
         };
       } else {
         warnings.push(
-          'Conflict approved. The matter can open once partner cost sign-off is complete.',
+          'Conflict approved. The matter will open once it passes the opening checks (including partner cost sign-off and required key dates).',
         );
       }
     }
@@ -4445,7 +4600,11 @@ export async function signOffMatterCostsRecord(
   matterId: string,
   byId: string,
   note?: string,
-): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
+): Promise<{
+  matter: Matter | null;
+  errors?: Record<string, string>;
+  warnings?: string[];
+}> {
   const store = getStore();
   const matter = store.matters.find((m) => m.id === matterId) ?? null;
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
@@ -4505,26 +4664,8 @@ export async function signOffMatterCostsRecord(
     };
   }
 
-  const costsConfig =
-    store.matterCostsConfig ??
-    createDefaultMatterCostsConfig(store.values, {
-      clientProfileCode: tenantCfg.tenantId,
-      displayName: tenantCfg.displayName,
-      primaryDomain: tenantCfg.branding.primaryDomain,
-    });
-  const resolvedCosts = resolveMatterCostsSnapshot({
-    existing: matter,
-    practiceAreaId: matter.practiceAreaId,
-    config: costsConfig,
-    values: store.values,
-  });
-  const signedOffEstimateGbp = Number(
-    matter.feeEstimateGbp ??
-      matter.agreedFeeCapGbp ??
-      resolvedCosts.totalEstimateGbp ??
-      resolvedCosts.agreedCapGbp ??
-      0,
-  );
+  const { resolvedCosts, estimatedFeeGbp: signedOffEstimateGbp } =
+    resolveMatterSignOffEstimateGbp(store, tenantCfg, matter);
   const now = touchMatter(matter, byId);
   const signOffRecord: PartnerCostSignOffRecord = {
     byId,
@@ -4553,44 +4694,53 @@ export async function signOffMatterCostsRecord(
     tenantCfg,
     hookInput,
   );
-  const openGovernance = await host.executeMatterCostsHook(
-    'beforeMatterOpen',
+  const gateResult = await runMatterOpeningGate({
+    store,
+    matter,
+    isNewMatter: false,
     extensionCtx,
     tenantCfg,
-    hookInput,
-  );
-  matter.fieldValues['matterCostsGovernance'] = openGovernance ?? calcGovernance;
-  const gateRecord: MatterOpeningGateRecord = {
-    allowProceed: openGovernance.allowProceed,
-    estimatedFeeGbp: signedOffEstimateGbp,
-    checkedAt: now,
-  };
-  matter.fieldValues['matterOpeningGate'] = gateRecord;
+    costsHookInput: hookInput,
+    now,
+  });
+  matter.fieldValues['matterCostsGovernance'] =
+    gateResult.governance ?? calcGovernance;
+  matter.fieldValues['matterOpeningGate'] = gateResult.record;
 
+  const warnings: string[] = [];
   const prospectiveStatusId = vid('matter_status', 'Prospective / Enquiry');
   if (
-    openGovernance.allowProceed &&
     matter.matterNumber !== 'DRAFT' &&
     !matter.matterNumber.startsWith('DRAFT') &&
     matter.matterStatusId === prospectiveStatusId &&
     matter.conflictCheckRecord?.status === 'Approved'
   ) {
-    const activeStatusId = vid('matter_status', 'Active');
-    matter.matterStatusId = activeStatusId;
-    matter.recordStatusId = activeStatusId;
-    const cleanFieldVals = { ...matter.fieldValues };
-    delete cleanFieldVals['matterOpeningSnapshot'];
-    const openingSnapshot = resolveMatterOpeningSnapshot(
-      { ...matter, fieldValues: cleanFieldVals },
-      store.people,
-      store.organisations,
-      store.values,
-      store.enquiries,
-      store.quotes,
-    );
-    openingSnapshot.saveMode = 'opened';
-    openingSnapshot.capturedAt = now;
-    matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
+    if (gateResult.allowProceed) {
+      const activeStatusId = vid('matter_status', 'Active');
+      matter.matterStatusId = activeStatusId;
+      matter.recordStatusId = activeStatusId;
+      const cleanFieldVals = { ...matter.fieldValues };
+      delete cleanFieldVals['matterOpeningSnapshot'];
+      const openingSnapshot = resolveMatterOpeningSnapshot(
+        { ...matter, fieldValues: cleanFieldVals },
+        store.people,
+        store.organisations,
+        store.values,
+        store.enquiries,
+        store.quotes,
+      );
+      openingSnapshot.saveMode = 'opened';
+      openingSnapshot.capturedAt = now;
+      matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
+    } else {
+      warnings.push(
+        Object.values(gateResult.errors)[0] ??
+          'The matter will open once it passes the opening checks.',
+      );
+    }
+  } else if (!gateResult.allowProceed) {
+    const firstErr = Object.values(gateResult.errors)[0];
+    if (firstErr) warnings.push(firstErr);
   }
 
   writeAudit(store, {
@@ -4604,7 +4754,7 @@ export async function signOffMatterCostsRecord(
     at: now,
   });
   saveStore(store);
-  return { matter };
+  return { matter, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 export function dismissDuplicateMatch(recordType: RecordType, recordId: string, otherId: string | null, byId: string): void {

@@ -62,6 +62,11 @@ export default async function NewMatterPage({
             ? snap.canSignOffCostsByMatterId[draftMatter.id] ?? false
             : snap.currentUserPermissions.includes('matter:costs:sign_off')
         }
+        initialSignOffEstimateGbp={
+          draftMatter
+            ? snap.signOffEstimateGbpByMatterId[draftMatter.id] ?? null
+            : null
+        }
         suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
       />
     );

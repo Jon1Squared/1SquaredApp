@@ -89,7 +89,7 @@ export function resolveSuggestedConflictReviewer(
       const inTeamMatches = sortByTeamLead(
         roleMatches.filter((p) => team.memberIds.includes(p.id)),
       );
-      if (inTeamMatches.length > 0) return inTeamMatches[0]!;
+      return inTeamMatches[0] ?? null;
     }
     return sortByTeamLead(roleMatches)[0] ?? null;
   }
