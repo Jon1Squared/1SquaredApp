@@ -6,9 +6,10 @@ import { addDays, toIsoDate } from './dates';
 import { resolveLabel } from './lists';
 import { personDisplayName } from './names';
 import {
-  buildDefaultOrgStructure,
   DEFAULT_LEGAL_ENTITY_ID,
   DEFAULT_ORG_DEPARTMENTS,
+  DEFAULT_ORG_OFFICES,
+  DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
   resolveOrgDepartment,
@@ -1035,14 +1036,21 @@ export function resolveDefaultDepartmentPartnerId(
 export function createDefaultEmploymentRecord(opts: {
   person: Partial<Person> & { id: string; firstName: string; surname: string };
   allPeople: Person[];
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure?: Pick<
+    OrgStructureCatalogue,
+    'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
+  >;
   byId: string;
   nowIso?: string;
   status?: EmploymentStatus;
   primaryDomain?: string | null;
 }): EmploymentRecord {
-  const orgStructure =
-    opts.orgStructure ?? buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' });
+  const orgStructure = opts.orgStructure ?? {
+    departments: DEFAULT_ORG_DEPARTMENTS,
+    offices: DEFAULT_ORG_OFFICES,
+    teamsOrPracticeGroups: DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
+    defaultProbationMonths: 6,
+  };
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const today = nowIso.slice(0, 10);
 
@@ -1267,9 +1275,15 @@ export function createDefaultEmploymentRecord(opts: {
 export function migrateEmployeesToEmploymentRecords(
   people: Person[],
   values: ChoiceValue[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure({
-    legalName: 'Configured Legal Entity',
-  }),
+  orgStructure: Pick<
+    OrgStructureCatalogue,
+    'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
+  > = {
+    departments: DEFAULT_ORG_DEPARTMENTS,
+    offices: DEFAULT_ORG_OFFICES,
+    teamsOrPracticeGroups: DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
+    defaultProbationMonths: 6,
+  },
   pmsLinks: PmsLink[] = [],
   primaryDomain?: string | null,
   nowIso: string = new Date().toISOString(),

@@ -206,6 +206,11 @@ import {
   syncKeyDateToOutlookCalendar,
   type GraphCalendarAdapter,
 } from '@/domain/keyDateCalendarSync';
+import {
+  stripServerOwnedFieldValues,
+  type PartnerCostSignOffRecord,
+} from '@/domain/matterFieldValues';
+import { buildRecordVisibility } from './visibility';
 import type {
   Address,
   AnyRecord,
@@ -650,27 +655,13 @@ function getAppSnapshotInScope(
   // Never bulk-return sensitive HR records in page snapshots (R63); serve only via audited per-person read service.
   const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
-  // Data-layer record visibility filtering for the signed-in user (R152, Rule 4):
-  const visibleMatters: Matter[] = store.matters.filter((m) =>
-    canPersonAccessMatter(m, user.id, user, {
-      allPeople: store.people,
-      teams: store.teams,
-      tokenRoles: options?.tokenRoles,
-    }),
-  );
-  const visibleMatterIdSet = new Set(visibleMatters.map((m) => m.id));
-  const hiddenMatterIds = new Set(
-    store.matters
-      .filter((m) => !visibleMatterIdSet.has(m.id))
-      .map((m) => m.id),
-  );
-  const hiddenMatterSourceEnquiryIds = new Set<string>();
-  const hiddenMatterSourceQuoteIds = new Set<string>();
-  for (const m of store.matters) {
-    if (!hiddenMatterIds.has(m.id)) continue;
-    if (m.sourceEnquiryId) hiddenMatterSourceEnquiryIds.add(m.sourceEnquiryId);
-    if (m.sourceQuoteId) hiddenMatterSourceQuoteIds.add(m.sourceQuoteId);
-  }
+  // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
+  const visibility = buildRecordVisibility(store, user, {
+    tokenRoles: options?.tokenRoles,
+  });
+  const visibleMatters: Matter[] = store.matters.filter(visibility.canViewMatter);
+  const hiddenMatterIds = visibility.hiddenMatterIds;
+  const hiddenMatterSourceQuoteIds = visibility.hiddenMatterSourceQuoteIds;
   const hiddenMatterKeyDateIds = new Set(
     (store.keyDates ?? [])
       .filter((kd) => Boolean(kd.matterId && hiddenMatterIds.has(kd.matterId)))
@@ -680,22 +671,7 @@ function getAppSnapshotInScope(
   // Filter enquiries: hide personal Drafts belonging to another user and enquiries converted into a hidden matter,
   // and strip hidden matter conflict hits from conflictSnapshot.
   const visibleEnquiries: Enquiry[] = store.enquiries
-    .filter((e) => {
-      if (
-        e.status === 'Draft' &&
-        e.createdById !== user.id &&
-        e.takenById !== user.id
-      ) {
-        return false;
-      }
-      if (e.convertedMatterId && hiddenMatterIds.has(e.convertedMatterId)) {
-        return false;
-      }
-      if (hiddenMatterSourceEnquiryIds.has(e.id)) {
-        return false;
-      }
-      return true;
-    })
+    .filter(visibility.canViewEnquiry)
     .map((e) => {
       if (
         !e.conflictSnapshot?.conflicts?.length ||
@@ -1084,6 +1060,44 @@ function getAppSnapshotInScope(
     });
   }
 
+  const canSignOffCostsByMatterId: Record<string, boolean> = {};
+  const actorCanSignOffCosts = currentUserPermissions.includes('matter:costs:sign_off');
+  for (const m of visibleMatters) {
+    canSignOffCostsByMatterId[m.id] =
+      actorCanSignOffCosts && visibility.canViewMatter(m);
+  }
+
+  const conflictReviewCfg = activeTenantCfg.conflictReview;
+  const riskAssigneeRoleKey =
+    conflictReviewCfg?.assigneeRoleKey ?? 'risk_compliance';
+  const riskAssigneeTeamId = conflictReviewCfg?.assigneeTeamKey
+    ? store.teams.find(
+        (t) =>
+          t.id === conflictReviewCfg.assigneeTeamKey ||
+          t.name.toLowerCase() === conflictReviewCfg.assigneeTeamKey!.toLowerCase(),
+      )?.id
+    : undefined;
+  const riskReviewer =
+    employees.find(
+      (e) =>
+        rolesByPersonId[e.id]?.includes(riskAssigneeRoleKey) ||
+        e.employeeRoleId === 'employee_role.risk_and_compliance' ||
+        (riskAssigneeTeamId &&
+          store.teams
+            .find((t) => t.id === riskAssigneeTeamId)
+            ?.memberIds.includes(e.id)),
+    ) ?? null;
+  const practiceManager =
+    employees.find(
+      (e) =>
+        rolesByPersonId[e.id]?.includes('managing_partner') ||
+        e.employeeRoleId === 'employee_role.practice_manager',
+    ) ?? null;
+  const suggestedMatterGovernanceAssignees = {
+    riskReviewerId: riskReviewer?.id ?? null,
+    practiceManagerId: practiceManager?.id ?? null,
+  };
+
   const firmPrimaryDomain = resolveConfiguredFirmPrimaryDomain();
 
   return {
@@ -1099,6 +1113,8 @@ function getAppSnapshotInScope(
     canTakeByTaskId,
     canVerifyByKeyDateId,
     canReopenByEnquiryId,
+    canSignOffCostsByMatterId,
+    suggestedMatterGovernanceAssignees,
     appRoleByPersonId,
     rolesByPersonId,
     permissionsByPersonId,
@@ -2497,7 +2513,7 @@ export function generateMatterNumber(store: FirmStore, clientId: string): string
 }
 
 export async function saveMatterRecord(
-  input: Partial<Matter> & {
+  input: Omit<Partial<Matter>, 'conflictClearedById'> & {
     title: string;
     clientId: string;
     practiceAreaId: string;
@@ -3116,6 +3132,10 @@ export async function saveMatterRecord(
     people: allPeopleWithPending,
     organisations: allOrganisationsWithPending,
   });
+  const visibility = buildRecordVisibility(
+    { ...store, people: allPeopleWithPending },
+    actingUser,
+  );
   const rawServerMatches = searchMatterConflicts(
     {
       currentMatterId: existing?.id ?? null,
@@ -3138,11 +3158,8 @@ export async function saveMatterRecord(
       enquiries: store.enquiries,
       people: allPeopleWithPending,
       organisations: allOrganisationsWithPending,
-      canView: (m) =>
-        canPersonAccessMatter(m, opts.byId, actingUser, {
-          allPeople: allPeopleWithPending,
-          teams: store.teams,
-        }),
+      canView: visibility.canViewMatter,
+      canViewEnquiry: visibility.canViewEnquiry,
     },
   );
   const reconciledConflictMatches = reconcileServerConflictMatches({
@@ -3155,13 +3172,18 @@ export async function saveMatterRecord(
     reviewedAtIso: now,
   });
 
-  const hasRestrictedConflictMatch = reconciledConflictMatches.some((m) => m.restricted);
-  const isApprovedByRisk =
-    existing?.conflictCheckRecord?.status === 'Approved' ||
-    (actorHasRiskView && input.conflictCheckRecord?.status === 'Approved');
+  const approvedIds = new Set(
+    existing?.conflictCheckRecord?.approvedRestrictedMatchIds ?? [],
+  );
+  const hasUnapprovedRestrictedMatch = reconciledConflictMatches.some(
+    (m) => m.restricted && !approvedIds.has(m.id),
+  );
+  const isApprovedByRiskInThisSave =
+    actorHasRiskView && input.conflictCheckRecord?.status === 'Approved';
   if (
-    hasRestrictedConflictMatch &&
-    !isApprovedByRisk &&
+    hasUnapprovedRestrictedMatch &&
+    !isApprovedByRiskInThisSave &&
+    !actorHasRiskView &&
     (opts.saveMode === 'submit_cleared' ||
       (!isDraftSave &&
         opts.saveMode !== 'submit_referred' &&
@@ -3172,11 +3194,14 @@ export async function saveMatterRecord(
       matter: null,
       errors: {
         conflict:
-          'This matter must be referred to Risk because a match was found on a restricted matter.',
+          'This matter must be referred to Risk because a match was found on a restricted record.',
       },
     };
   }
 
+  const preservedApprovedRestrictedIds = isApprovedByRiskInThisSave
+    ? reconciledConflictMatches.filter((m) => m.restricted).map((m) => m.id)
+    : existing?.conflictCheckRecord?.approvedRestrictedMatchIds;
   const resolvedConflictCheckRecord =
     input.conflictCheckRecord !== undefined
       ? input.conflictCheckRecord
@@ -3184,6 +3209,7 @@ export async function saveMatterRecord(
             ...input.conflictCheckRecord,
             parties: effectiveConflictParties,
             matches: reconciledConflictMatches,
+            approvedRestrictedMatchIds: preservedApprovedRestrictedIds,
           }
         : null
       : existing?.conflictCheckRecord
@@ -3332,8 +3358,7 @@ export async function saveMatterRecord(
     parties: resolvedParties,
     conflictCheckStatus: input.conflictCheckStatus ?? existing?.conflictCheckStatus ?? 'Clear',
     conflictCheckDate: input.conflictCheckDate !== undefined ? input.conflictCheckDate : existing?.conflictCheckDate ?? today,
-    conflictClearedById:
-      input.conflictClearedById !== undefined ? input.conflictClearedById : existing?.conflictClearedById ?? null,
+    conflictClearedById: existing?.conflictClearedById ?? null,
     conflictNotes: input.conflictNotes ?? existing?.conflictNotes ?? '',
     amlStatus: (input.amlStatus || existing?.amlStatus || 'CMI incomplete').trim(),
     amlCompletedAt: input.amlCompletedAt !== undefined ? input.amlCompletedAt : existing?.amlCompletedAt ?? null,
@@ -3366,7 +3391,7 @@ export async function saveMatterRecord(
       input.destructionDueAt !== undefined ? input.destructionDueAt : existing?.destructionDueAt ?? null,
     fieldValues: {
       ...(existing?.fieldValues ?? {}),
-      ...(input.fieldValues ?? {}),
+      ...stripServerOwnedFieldValues(input.fieldValues),
     },
     conflictCheckRecord: resolvedConflictCheckRecord,
     owningDepartmentId: nextOwningDepartmentId,
@@ -3394,11 +3419,22 @@ export async function saveMatterRecord(
   );
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
 
+  const existingSnapshot = existing?.fieldValues?.['matterOpeningSnapshot'] as
+    | { saveMode?: string }
+    | undefined;
+  const hasExistingOpeningSnapshot = Boolean(
+    existing &&
+      existing.matterNumber !== 'DRAFT' &&
+      !existing.matterNumber.startsWith('DRAFT') &&
+      existingSnapshot &&
+      existingSnapshot.saveMode !== 'draft',
+  );
   const isOpeningEvent =
-    !existing ||
-    opts.saveMode === 'submit_cleared' ||
-    opts.saveMode === 'submit_referred' ||
-    !existing.fieldValues?.['matterOpeningSnapshot'];
+    !hasExistingOpeningSnapshot &&
+    (!existing ||
+      opts.saveMode === 'submit_cleared' ||
+      opts.saveMode === 'submit_referred' ||
+      !existingSnapshot);
 
   // R108 & R131: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
   const host = getPlatformExtensionHost();
@@ -3439,6 +3475,16 @@ export async function saveMatterRecord(
       resolvedCosts.agreedCapGbp ??
       0,
   );
+  const storedSignOff = matter.fieldValues['partnerCostSignOff'] as
+    | PartnerCostSignOffRecord
+    | undefined;
+  if (
+    matter.fieldValues['partnerCostSignOffCompleted'] &&
+    (!storedSignOff || storedSignOff.signedOffEstimateGbp !== estimatedFeeGbp)
+  ) {
+    matter.fieldValues['partnerCostSignOffCompleted'] = false;
+    delete matter.fieldValues['partnerCostSignOff'];
+  }
   const partnerSignOffCompleted = Boolean(
     matter.fieldValues['partnerCostSignOffCompleted'],
   );
@@ -4024,6 +4070,7 @@ export function runMatterConflictSearchRecord(
     allPeople: store.people,
     teams: store.teams,
   });
+  const visibility = buildRecordVisibility(store, actingUser);
   const matches = searchMatterConflicts(
     {
       ...input,
@@ -4037,13 +4084,37 @@ export function runMatterConflictSearchRecord(
       enquiries: store.enquiries,
       people: store.people,
       organisations: store.organisations,
-      canView: (m) =>
-        canPersonAccessMatter(m, byId, actingUser, {
-          allPeople: store.people,
-          teams: store.teams,
-        }),
+      canView: visibility.canViewMatter,
+      canViewEnquiry: visibility.canViewEnquiry,
     },
   );
+  const restrictedCount = matches.filter((m) => m.restricted).length;
+  if (restrictedCount > 0) {
+    const tenantId = getActiveTenantConfiguration().tenantId;
+    const correlationId = `conflict-search-${randomUUID()}`;
+    writeAudit(store, {
+      recordType: 'matter',
+      recordId: input.currentMatterId ?? 'DRAFT-CONFLICT-SEARCH',
+      action: 'update',
+      field: 'Conflict check restricted match',
+      oldValue: null,
+      newValue: `Restricted conflict match count: ${restrictedCount} across ${input.parties.length} searched party/parties`,
+      byId,
+    });
+    saveStore(store);
+    console.info(
+      JSON.stringify({
+        level: 'info',
+        event: 'conflict_search_restricted_match',
+        tenantId,
+        correlationId,
+        actorId: byId,
+        matterId: input.currentMatterId ?? null,
+        partiesCount: input.parties.length,
+        restrictedCount,
+      }),
+    );
+  }
   return { matches };
 }
 
@@ -4056,14 +4127,12 @@ export function updateMatterConflictRecord(
   const today = toIsoDate(new Date());
   const matter = store.matters.find((m) => m.id === matterId);
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  const visibility = buildRecordVisibility(store, actingUser);
   if (
     !matter ||
     !actingUser ||
     !actingUser.isEmployee ||
-    !canPersonAccessMatter(matter, byId, actingUser, {
-      allPeople: store.people,
-      teams: store.teams,
-    }) ||
+    !visibility.canViewMatter(matter) ||
     !hasPersonPermission(actingUser, 'matter:edit', {
       allPeople: store.people,
       teams: store.teams,
@@ -4114,11 +4183,8 @@ export function updateMatterConflictRecord(
       enquiries: store.enquiries,
       people: store.people,
       organisations: store.organisations,
-      canView: (m) =>
-        canPersonAccessMatter(m, byId, actingUser, {
-          allPeople: store.people,
-          teams: store.teams,
-        }),
+      canView: visibility.canViewMatter,
+      canViewEnquiry: visibility.canViewEnquiry,
     },
   );
   const reconciledMatches = reconcileServerConflictMatches({
@@ -4140,7 +4206,7 @@ export function updateMatterConflictRecord(
       matter: null,
       errors: {
         conflict:
-          'This matter must be referred to Risk because a match was found on a restricted matter.',
+          'This matter must be referred to Risk because a match was found on a restricted record.',
       },
     };
   }
@@ -4158,11 +4224,18 @@ export function updateMatterConflictRecord(
       atDisplay: now,
     }));
   const sanitisedComments = [...storedComments, ...newComments];
+  const approvedRestrictedMatchIds =
+    record.status === 'Approved'
+      ? reconciledMatches.filter((m) => m.restricted).map((m) => m.id)
+      : record.status === 'Declined'
+        ? []
+        : matter.conflictCheckRecord?.approvedRestrictedMatchIds ?? [];
   const sanitisedRecord: ConflictCheckRecord = {
     ...record,
     parties: effectiveParties,
     matches: reconciledMatches,
     comments: sanitisedComments,
+    approvedRestrictedMatchIds,
     ...(record.status === 'Approved' || record.status === 'Declined'
       ? {
           approvedById: byId,
@@ -4261,6 +4334,133 @@ export function updateMatterConflictRecord(
     logDocumentLifecycleSyncError(err, syncCorrelationId);
   }
 
+  return { matter };
+}
+
+export async function signOffMatterCostsRecord(
+  matterId: string,
+  byId: string,
+  note?: string,
+): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
+  const store = getStore();
+  const matter = store.matters.find((m) => m.id === matterId) ?? null;
+  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  const visibility = buildRecordVisibility(store, actingUser);
+  if (
+    !matter ||
+    !actingUser ||
+    !actingUser.isEmployee ||
+    !visibility.canViewMatter(matter)
+  ) {
+    return {
+      matter: null,
+      errors: { permission: 'Matter not found or restricted.' },
+    };
+  }
+  if (
+    !hasPersonPermission(actingUser, 'matter:costs:sign_off', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      matter: null,
+      errors: {
+        permission:
+          'Forbidden: matter:costs:sign_off permission is required to sign off matter costs.',
+      },
+    };
+  }
+  const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  if (!activeVerifiedSession || activeVerifiedSession.personId !== actingUser.id) {
+    return {
+      matter: null,
+      errors: {
+        access: 'UNAUTHENTICATED: Your session has expired. Please sign in again.',
+      },
+    };
+  }
+  const tenantCfg = getActiveTenantConfiguration();
+  let extensionCtx: TenantContext;
+  try {
+    extensionCtx = resolveCurrentTenantContext(
+      createVerifiedSessionActorFromEntraSession(activeVerifiedSession, {
+        correlationId: `matter-cost-signoff-${randomUUID()}`,
+      }),
+      tenantCfg,
+    );
+  } catch {
+    return {
+      matter: null,
+      errors: {
+        access:
+          'UNAUTHENTICATED: Your session is invalid for this tenant. Please sign in again.',
+      },
+    };
+  }
+
+  const costsConfig =
+    store.matterCostsConfig ??
+    createDefaultMatterCostsConfig(store.values, {
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    });
+  const resolvedCosts = resolveMatterCostsSnapshot({
+    existing: matter,
+    practiceAreaId: matter.practiceAreaId,
+    config: costsConfig,
+    values: store.values,
+  });
+  const signedOffEstimateGbp = Number(
+    matter.feeEstimateGbp ??
+      matter.agreedFeeCapGbp ??
+      resolvedCosts.totalEstimateGbp ??
+      resolvedCosts.agreedCapGbp ??
+      0,
+  );
+  const now = touchMatter(matter, byId);
+  const signOffRecord: PartnerCostSignOffRecord = {
+    byId,
+    byName: personDisplayName(actingUser),
+    at: now,
+    note: (note ?? '').trim(),
+    signedOffEstimateGbp,
+  };
+  matter.fieldValues = {
+    ...(matter.fieldValues ?? {}),
+    partnerCostSignOffCompleted: true,
+    partnerCostSignOff: signOffRecord,
+  };
+
+  const host = getPlatformExtensionHost();
+  const calcGovernance = await host.executeMatterCostsHook(
+    'beforeMatterCostsCalculate',
+    extensionCtx,
+    tenantCfg,
+    {
+      matterId: matter.id,
+      workBasis: resolvedCosts.workBasis,
+      estimatedFeeGbp: signedOffEstimateGbp,
+      disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+      partnerSignOffCompleted: true,
+    },
+  );
+  matter.fieldValues['matterCostsGovernance'] = calcGovernance;
+
+  writeAudit(store, {
+    recordType: 'matter',
+    recordId: matter.id,
+    action: 'update',
+    field: 'Partner cost sign-off',
+    oldValue: null,
+    newValue: `Signed off £${signedOffEstimateGbp.toLocaleString('en-GB')} by ${signOffRecord.byName}${signOffRecord.note ? ` (${signOffRecord.note})` : ''}`,
+    byId,
+    at: now,
+  });
+  saveStore(store);
   return { matter };
 }
 

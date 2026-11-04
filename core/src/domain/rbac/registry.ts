@@ -344,6 +344,15 @@ export const PERMISSION_REGISTRY: Readonly<
     requiresMfa: true,
     sinceVersion: '1.1.0',
   },
+  'matter:costs:sign_off': {
+    key: 'matter:costs:sign_off',
+    domain: 'matter',
+    description:
+      'Sign off matter fee estimates that exceed the configured partner cost sign-off threshold.',
+    sensitivity: 'restricted',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
   'task:claim_any': {
     key: 'task:claim_any',
     domain: 'task',
@@ -537,6 +546,7 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'matter:reassign_ownership',
       'matter:restricted:access',
       'matter:restriction:lift',
+      'matter:costs:sign_off',
       'task:claim_any',
       'task:reassign_any',
       'admin:access',
@@ -576,6 +586,7 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'matter:create',
       'matter:edit',
       'matter:reassign_ownership',
+      'matter:costs:sign_off',
       'task:claim_any',
       'admin:access',
       'keydate:view',

@@ -42,7 +42,6 @@ import { InfoPopover } from './InfoPopover';
 import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import {
-  buildDefaultOrgStructure,
   DEFAULT_LEGAL_ENTITY_ID,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
@@ -96,7 +95,7 @@ interface Props {
   values: ChoiceValue[];
   customFields: CustomFieldDefinition[];
   currentUserId: string;
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure: OrgStructureCatalogue;
   currentUserEmployeePermissions?: EmployeePermission[];
   existingSensitive?: EmployeeSensitiveRecord | null;
   leaverOwnedRecords?: LeaverOwnedRecordItem[];
@@ -175,7 +174,7 @@ export function PersonFormClient({
   values,
   customFields,
   currentUserId,
-  orgStructure: orgStructureProp,
+  orgStructure,
   currentUserEmployeePermissions,
   existingSensitive = null,
   leaverOwnedRecords: leaverOwnedRecordsProp,
@@ -201,11 +200,6 @@ export function PersonFormClient({
   const [pending, startTransition] = useTransition();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [continueAnyway, setContinueAnyway] = useState(false);
-
-  const orgStructure = useMemo(
-    () => orgStructureProp ?? buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' }),
-    [orgStructureProp],
-  );
 
   const currentUser = useMemo(
     () => allPeople.find((p) => p.id === currentUserId) ?? null,

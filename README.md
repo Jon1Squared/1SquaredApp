@@ -10,7 +10,7 @@ npm run generate:extensions
 npm run dev
 ```
 
-> **Note:** `npm run generate:extensions` generates the gitignored `src/platform/generatedExtensionLoaders.ts` barrel from the active tenant's extension manifests. It runs automatically before `npm run dev`, `npm run build`, and `npm test` via `predev`, `prebuild`, and `pretest` lifecycle hooks; run `npm run generate:extensions` explicitly before running `npx tsc --noEmit` on a fresh checkout.
+> **Note:** `npm run generate:extensions` writes the gitignored `src/platform/generated/extensionRegistry.ts` from the active tenant's extension manifests (when `PLATFORM_TENANT_PACKAGE_DIR` is set). `npm run build` and `npm test` run it automatically via `prebuild` and `pretest`, and it must be run manually before `npm run dev` or `npx tsc --noEmit` on a fresh checkout.
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 

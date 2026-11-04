@@ -33,6 +33,10 @@ import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json'
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
 import { syncHomeRolesWithEmployeeRoles } from '../../src/domain/homeConfig';
+import {
+  createDefaultEmploymentRecord,
+  migrateEmployeesToEmploymentRecords,
+} from '../../src/domain/employment';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
 import { buildDefaultOrgStructure } from '../../src/domain/orgStructure';
 import {
@@ -68,6 +72,7 @@ import {
   runMatterConflictSearchRecord,
   saveMatterRecord,
   savePersonRecord,
+  signOffMatterCostsRecord,
   updateMatterConflictRecord,
 } from '../../src/server/services';
 import { getStore } from '../../src/server/store';
@@ -653,7 +658,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               ...baseMatter,
               agreedFeeCapGbp: 30000,
               feeEstimateGbp: 30000,
-              conflictClearedById: null,
               parties: [
                 ...(baseMatter.parties ?? []),
                 {
@@ -688,7 +692,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               ...baseMatter,
               agreedFeeCapGbp: 30000,
               feeEstimateGbp: 30000,
-              conflictClearedById: null,
             },
             { id: baseMatter.id, byId: 'P-000001', saveMode: 'draft' },
           ),
@@ -900,7 +903,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...baseMatter,
-              conflictClearedById: null,
             },
             { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
           ),
@@ -968,7 +970,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             saveMatterRecord(
               {
                 ...baseMatter,
-                conflictClearedById: null,
               },
               { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
             ),
@@ -1245,7 +1246,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         saveMatterRecord(
           {
             ...targetMatter,
-            conflictClearedById: null,
             parties: [
               ...(targetMatter.parties ?? []),
               {
@@ -1367,7 +1367,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           {
             ...refreshedTarget,
             title: 'Stale Overwrite Attempt',
-            conflictClearedById: null,
           },
           { id: refreshedTarget.id, byId: carys.id, saveMode: 'submit_cleared' },
         ),
@@ -1838,7 +1837,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           {
             ...draftMatter,
             title: 'R144 Concurrent Client Hire Matter Opened',
-            conflictClearedById: null,
           },
           { id: draftMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
         ),
@@ -2328,7 +2326,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...baseMatter,
-              conflictClearedById: null,
             },
             { id: baseMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
           ),
@@ -2724,6 +2721,90 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(referredAttempt.matter).not.toBeNull();
       expect(referredAttempt.errors).toBeUndefined();
+
+      // Risk & Compliance (Carys) approves the referred conflict check; server records approvedRestrictedMatchIds
+      const referredMatter = referredAttempt.matter!;
+      const riskApproveRes = runWithActiveActorSession(carysSession, () =>
+        updateMatterConflictRecord(
+          referredMatter.id,
+          {
+            ...referredMatter.conflictCheckRecord!,
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+          },
+          carys.id,
+        ),
+      );
+      expect(riskApproveRes.errors).toBeUndefined();
+      expect(
+        riskApproveRes.matter?.conflictCheckRecord?.approvedRestrictedMatchIds?.length,
+      ).toBeGreaterThan(0);
+
+      // Now create a SECOND restricted staff matter for a different employee
+      const secondStaffClient = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== carys.id &&
+          p.id !== feeEarner.id &&
+          p.id !== staffClient.id &&
+          Boolean(p.employment),
+      )!;
+      const secondStaffRes = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...matterTemplate,
+            title: 'R162 Second Confidential Staff Matter',
+            clientId: secondStaffClient.id,
+            responsiblePartnerId: carys.id,
+            supervisingPartnerId: carys.id,
+            leadFeeEarnerId: carys.id,
+            teamMemberIds: [carys.id],
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+          },
+          { byId: carys.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(secondStaffRes.matter?.isStaffMatter).toBe(true);
+
+      // Fee earner adds secondStaffClient as a new party on the previously approved matter and tries submit_cleared
+      // (even attempting to forge approvedRestrictedMatchIds in conflictCheckRecord)
+      const secondPartyClearedAttempt = await runWithActiveActorSession(
+        feSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referredMatter,
+              parties: [
+                ...referredMatter.parties,
+                {
+                  id: 'mp-r162-2',
+                  name: `${secondStaffClient.firstName} ${secondStaffClient.surname}`,
+                  role: 'Opponent',
+                  linkedRecordId: secondStaffClient.id,
+                },
+              ],
+              conflictCheckStatus: 'Cleared',
+              conflictCheckRecord: {
+                ...riskApproveRes.matter!.conflictCheckRecord!,
+                approvedRestrictedMatchIds: [
+                  ...(riskApproveRes.matter!.conflictCheckRecord!
+                    .approvedRestrictedMatchIds ?? []),
+                  'forged-match-id',
+                ],
+              },
+            },
+            {
+              id: referredMatter.id,
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(secondPartyClearedAttempt.matter).toBeNull();
+      expect(secondPartyClearedAttempt.errors?.conflict).toMatch(
+        /must be referred to Risk/i,
+      );
     } finally {
       resetAllDemoData('P-000001');
     }
@@ -2912,5 +2993,442 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     });
     expect(fromShortCode.legalEntities[0]?.code).toBe('ACMLLP');
     expect(fromShortCode.legalEntities[1]?.code).toBe('ACMSRV');
+
+    const store = getStore();
+    const snap = getAppSnapshot('P-000001');
+    expect(snap.suggestedMatterGovernanceAssignees).toBeDefined();
+    expect(snap.suggestedMatterGovernanceAssignees.riskReviewerId).toBeTruthy();
+    expect(
+      snap.suggestedMatterGovernanceAssignees.practiceManagerId,
+    ).toBeTruthy();
+
+    const defaultEmp = createDefaultEmploymentRecord({
+      person: { id: 'P-TEST-168', firstName: 'Test', surname: 'Employee' },
+      allPeople: store.people,
+      byId: 'P-000001',
+      primaryDomain: 'notalawfirm.example',
+    });
+    expect(defaultEmp.departmentId).toBeTruthy();
+    const migrated = migrateEmployeesToEmploymentRecords(
+      store.people.slice(0, 2),
+      store.values,
+      undefined,
+      [],
+      'notalawfirm.example',
+    );
+    expect(migrated.people).toHaveLength(2);
+  });
+
+  it('R169: saveMatterRecord strips server-owned fieldValues, ignores caller conflictClearedById, preserves matterOpeningSnapshot on open matters, requires signOffMatterCostsRecord (matter:costs:sign_off), and resets sign-off if feeEstimateGbp changes', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+
+      const feCookie = createSignedEntraSessionCookie({
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        oid: feeEarner.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: feeEarner.id,
+        email: feeEarner.emails[0]?.address ?? 'fe@notalawfirm.example',
+        displayName: `${feeEarner.firstName} ${feeEarner.surname}`,
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const feSession = {
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: ['fee_earner'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(feCookie)!,
+      };
+      const partnerCookie = createSignedEntraSessionCookie({
+        personId: partner.id,
+        tenantId: 'not-a-law-firm',
+        oid: partner.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: partner.id,
+        email: partner.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: `${partner.firstName} ${partner.surname}`,
+        entraRoles: ['partner', 'managing_partner'],
+        mappedRoles: ['partner', 'managing_partner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const partnerSession = {
+        personId: partner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: ['partner', 'managing_partner'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(partnerCookie)!,
+      };
+
+      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      void _omittedId;
+
+      await runWithActiveActorSession(feSession, async () => {
+        // 1. Draft with £75,000 estimate + forged server-owned fieldValues + forged conflictClearedById
+        const draftRes = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            title: 'R169 High Value Matter',
+            leadFeeEarnerId: feeEarner.id,
+            responsiblePartnerId: partner.id,
+            supervisingPartnerId: partner.id,
+            teamMemberIds: [feeEarner.id, partner.id],
+            feeEstimateGbp: 75000,
+            agreedFeeCapGbp: 75000,
+            ...( { conflictClearedById: partner.id } as Record<string, unknown> ),
+            fieldValues: {
+              partnerCostSignOffCompleted: true,
+              partnerCostSignOff: {
+                byId: partner.id,
+                byName: 'Forged',
+                at: '2026-01-01T00:00:00Z',
+                note: '',
+                signedOffEstimateGbp: 75000,
+              },
+              matterOpeningSnapshot: { forged: true },
+              matterCostsGovernance: { allowProceed: true },
+              riskAssessment: { forged: true },
+              customClientNote: 'preserved',
+            },
+          },
+          { byId: feeEarner.id, saveMode: 'draft' },
+        );
+        expect(draftRes.errors).toBeUndefined();
+        expect(draftRes.matter).not.toBeNull();
+        const matterId = draftRes.matter!.id;
+        expect(draftRes.matter!.conflictClearedById).toBeNull();
+        expect(
+          draftRes.matter!.fieldValues['partnerCostSignOffCompleted'],
+        ).toBeUndefined();
+        expect(
+          draftRes.matter!.fieldValues['partnerCostSignOff'],
+        ).toBeUndefined();
+        expect(draftRes.matter!.fieldValues['customClientNote']).toBe(
+          'preserved',
+        );
+        expect(
+          (
+            draftRes.matter!.fieldValues['matterOpeningSnapshot'] as {
+              forged?: boolean;
+            }
+          )?.forged,
+        ).toBeUndefined();
+
+        // 2. Attempting to open with forged partnerCostSignOffCompleted: true in fieldValues is blocked by beforeMatterOpen
+        const forgedOpenRes = await saveMatterRecord(
+          {
+            ...draftRes.matter!,
+            title: 'R169 High Value Matter',
+            fieldValues: {
+              ...draftRes.matter!.fieldValues,
+              partnerCostSignOffCompleted: true,
+            },
+          },
+          { id: matterId, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        );
+        expect(forgedOpenRes.matter).toBeNull();
+        expect(forgedOpenRes.errors?.costsGovernance).toMatch(
+          /partner.*sign-off/i,
+        );
+
+        // 3. Fee earner without matter:costs:sign_off cannot sign off
+        const feSignOff = await signOffMatterCostsRecord(
+          matterId,
+          feeEarner.id,
+          'Attempting self sign-off',
+        );
+        expect(feSignOff.matter).toBeNull();
+        expect(feSignOff.errors?.permission).toMatch(/matter:costs:sign_off/i);
+
+        // 4. Partner with matter:costs:sign_off signs off £75,000
+        const partnerSignOff = await runWithActiveActorSession(
+          partnerSession,
+          () =>
+            signOffMatterCostsRecord(
+              matterId,
+              partner.id,
+              'Approved high-value estimate',
+            ),
+        );
+        expect(partnerSignOff.errors).toBeUndefined();
+        expect(
+          partnerSignOff.matter?.fieldValues['partnerCostSignOffCompleted'],
+        ).toBe(true);
+
+        // 5. If fee earner raises feeEstimateGbp to £90,000 after sign-off, sign-off resets and opening is blocked
+        const raisedOpenRes = await saveMatterRecord(
+          {
+            ...partnerSignOff.matter!,
+            title: 'R169 High Value Matter',
+            feeEstimateGbp: 90000,
+            agreedFeeCapGbp: 90000,
+          },
+          { id: matterId, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        );
+        expect(raisedOpenRes.matter).toBeNull();
+        expect(raisedOpenRes.errors?.costsGovernance).toMatch(
+          /partner.*sign-off/i,
+        );
+
+        // 6. Opening at the signed-off £75,000 estimate succeeds and preserves matterOpeningSnapshot on subsequent edits
+        const validOpenRes = await saveMatterRecord(
+          {
+            ...partnerSignOff.matter!,
+            title: 'R169 High Value Matter',
+            feeEstimateGbp: 75000,
+            agreedFeeCapGbp: 75000,
+            ...( { conflictClearedById: partner.id } as Record<string, unknown> ),
+          },
+          { id: matterId, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        );
+        expect(validOpenRes.errors).toBeUndefined();
+        expect(validOpenRes.matter?.conflictClearedById).toBeNull();
+        expect(
+          store.audit.some(
+            (a) =>
+              a.recordId === matterId && a.field === 'Partner cost sign-off',
+          ),
+        ).toBe(true);
+        const capturedAt = (
+          validOpenRes.matter?.fieldValues['matterOpeningSnapshot'] as {
+            capturedAt?: string;
+          }
+        )?.capturedAt;
+        expect(capturedAt).toBeTruthy();
+
+        const editOpenMatterRes = await saveMatterRecord(
+          {
+            ...validOpenRes.matter!,
+            title: 'R169 High Value Matter (Updated Title)',
+            fieldValues: {
+              ...validOpenRes.matter!.fieldValues,
+              matterOpeningSnapshot: { forgedOverwrite: true },
+            },
+          },
+          { id: matterId, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        );
+        expect(editOpenMatterRes.errors).toBeUndefined();
+        expect(
+          (
+            editOpenMatterRes.matter?.fieldValues['matterOpeningSnapshot'] as {
+              capturedAt?: string;
+              forgedOverwrite?: boolean;
+            }
+          )?.capturedAt,
+        ).toBe(capturedAt);
+        expect(
+          (
+            editOpenMatterRes.matter?.fieldValues['matterOpeningSnapshot'] as {
+              forgedOverwrite?: boolean;
+            }
+          )?.forgedOverwrite,
+        ).toBeUndefined();
+      });
+    } finally {
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R170: searchMatterConflicts redacts matches on restricted enquiries (converted to a staff matter or another user personal Draft)', () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+      const baseEnquiry = store.enquiries[0]!;
+
+      // Create a restricted staff matter invisible to feeEarner
+      store.matters.push({
+        ...structuredClone(baseMatter),
+        id: 'M-R170-STAFF',
+        matterNumber: 'STF999-0001',
+        title: 'Confidential Staff Matter',
+        isStaffMatter: true,
+        restrictedAccessUserIds: [partner.id],
+        responsiblePartnerId: partner.id,
+        supervisingPartnerId: partner.id,
+        leadFeeEarnerId: partner.id,
+        teamMemberIds: [partner.id],
+      });
+
+      // Create an enquiry converted into that restricted staff matter
+      store.enquiries.push({
+        ...structuredClone(baseEnquiry),
+        id: 'ENQ-R170-STAFF',
+        reference: 'ENQ-R170-STAFF',
+        status: 'Converted',
+        firstName: 'Private',
+        lastName: 'StaffCaller',
+        callingOnBehalfOf: 'SecretStaffOrg LLP',
+        otherPartiesNamed: 'HiddenEnquiryOpponent Ltd',
+        summary: 'Confidential disciplinary advice',
+        convertedMatterId: 'M-R170-STAFF',
+        createdById: partner.id,
+        takenById: partner.id,
+      });
+
+      // Also create a personal Draft enquiry belonging to partner (invisible to feeEarner)
+      store.enquiries.push({
+        ...structuredClone(baseEnquiry),
+        id: 'ENQ-R170-DRAFT',
+        reference: 'ENQ-R170-DRAFT',
+        status: 'Draft',
+        firstName: 'DraftOnly',
+        lastName: 'PrivateEnquirer',
+        summary: 'Unpublished personal draft enquiry',
+        convertedMatterId: null,
+        createdById: partner.id,
+        takenById: partner.id,
+      });
+
+      const res = runMatterConflictSearchRecord(
+        {
+          currentMatterId: null,
+          parties: [
+            {
+              id: 'pty-r170-1',
+              name: 'Private StaffCaller',
+              entityType: 'person',
+              role: 'Opponent',
+              linkedRecordId: null,
+            },
+            {
+              id: 'pty-r170-2',
+              name: 'DraftOnly PrivateEnquirer',
+              entityType: 'person',
+              role: 'Opponent',
+              linkedRecordId: null,
+            },
+          ],
+        },
+        feeEarner.id,
+      );
+
+      expect(res.errors).toBeUndefined();
+      const restrictedMatches = res.matches.filter((m) => m.restricted);
+      expect(restrictedMatches.length).toBe(2);
+      for (const rm of restrictedMatches) {
+        expect(rm.matchedRecordName).toBe('Match on a restricted enquiry');
+        expect(rm.whereFound).toBe('Restricted enquiry: refer to Risk');
+        expect(rm.matterNumber).toBeNull();
+        expect(rm.responsiblePartnerName).toBe('');
+        expect(rm.disposition).toBe('potential_conflict');
+      }
+      const serialized = JSON.stringify(res.matches);
+      expect(serialized).not.toContain('ENQ-R170-STAFF');
+      expect(serialized).not.toContain('Confidential disciplinary advice');
+      expect(serialized).not.toContain('ENQ-R170-DRAFT');
+      expect(serialized).not.toContain('Unpublished personal draft enquiry');
+    } finally {
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R172: runMatterConflictSearchRecord logs count-only restricted conflict match audit entries and structured logs with no party or record names', () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== partner.id &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseEnquiry = store.enquiries[0]!;
+
+      store.enquiries.push({
+        ...structuredClone(baseEnquiry),
+        id: 'ENQ-R172-DRAFT',
+        reference: 'ENQ-R172-DRAFT',
+        status: 'Draft',
+        firstName: 'SecretDraft',
+        lastName: 'CallerName',
+        summary: 'Sensitive draft enquiry summary',
+        convertedMatterId: null,
+        createdById: partner.id,
+        takenById: partner.id,
+      });
+
+      const auditCountBefore = store.audit.length;
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      try {
+        const res = runMatterConflictSearchRecord(
+          {
+            currentMatterId: null,
+            parties: [
+              {
+                id: 'pty-r172-1',
+                name: 'SecretDraft CallerName',
+                entityType: 'person',
+                role: 'Opponent',
+                linkedRecordId: null,
+              },
+            ],
+          },
+          feeEarner.id,
+        );
+        expect(res.errors).toBeUndefined();
+        expect(res.matches.some((m) => m.restricted)).toBe(true);
+
+        expect(store.audit.length).toBe(auditCountBefore + 1);
+        const latestAudit = store.audit[0]!;
+        expect(latestAudit.field).toBe('Conflict check restricted match');
+        expect(latestAudit.newValue).toContain('Restricted conflict match count: 1');
+        expect(latestAudit.newValue).not.toContain('SecretDraft CallerName');
+        expect(latestAudit.newValue).not.toContain('ENQ-R172-DRAFT');
+
+        const logCall = infoSpy.mock.calls.find((call) =>
+          String(call[0]).includes('conflict_search_restricted_match'),
+        );
+        expect(logCall).toBeDefined();
+        const logJson = String(logCall![0]);
+        expect(logJson).not.toContain('SecretDraft CallerName');
+        expect(logJson).not.toContain('ENQ-R172-DRAFT');
+        const parsedLog = JSON.parse(logJson);
+        expect(parsedLog.restrictedCount).toBe(1);
+        expect(parsedLog.partiesCount).toBe(1);
+      } finally {
+        infoSpy.mockRestore();
+      }
+    } finally {
+      resetAllDemoData('P-000001');
+    }
   });
 });

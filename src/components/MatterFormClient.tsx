@@ -37,10 +37,11 @@ import {
   runMatterConflictSearchAction,
   saveMatterAction,
   saveTaskAction,
+  signOffMatterCostsAction,
   switchViewingRoleAction,
   updateMatterConflictRecordAction,
 } from '@/app/actions';
-import { searchMatterConflicts } from '@/domain/matterConflicts';
+import type { PartnerCostSignOffRecord } from '@/domain/matterFieldValues';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import {
   enquiryDisplayName,
@@ -66,7 +67,7 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import { buildDefaultOrgStructure, resolveOrgDepartment } from '@/domain/orgStructure';
+import { resolveOrgDepartment } from '@/domain/orgStructure';
 import {
   calculateDisbursementsTotal,
   lookupRatesForMatter,
@@ -156,10 +157,15 @@ interface MatterFormClientProps {
   customFields?: CustomFieldDefinition[];
   employees: Person[];
   currentUser: Person;
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure: OrgStructureCatalogue;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterCostsConfig: MatterCostsConfig;
   canReassignOwnership?: boolean;
+  canSignOffCosts?: boolean;
+  suggestedMatterGovernanceAssignees?: {
+    riskReviewerId: string | null;
+    practiceManagerId: string | null;
+  };
 }
 
 type OptionalTabKey =
@@ -559,19 +565,16 @@ export function MatterFormClient({
   customFields = [],
   employees: initialEmployees,
   currentUser,
-  orgStructure: orgStructureProp,
+  orgStructure,
   matterPartyTaxonomy,
   matterCostsConfig,
   canReassignOwnership = false,
+  canSignOffCosts = false,
+  suggestedMatterGovernanceAssignees,
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
   const today = toIsoDate(new Date());
-
-  const orgStructure = useMemo(
-    () => orgStructureProp ?? buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' }),
-    [orgStructureProp],
-  );
 
   const costsConfig = matterCostsConfig;
 
@@ -3730,35 +3733,8 @@ export function MatterFormClient({
     return results.slice(0, 6);
   }, [newPartyName, organisations, people, enquiries]);
 
-  // Build conflict matches for a given list of parties using the shared domain helper
-  function computeMatchesForParties(
-    partiesList: ConflictCheckParty[],
-    preserveExistingDispositions = true,
-  ): ConflictCheckMatch[] {
-    return searchMatterConflicts(
-      {
-        currentMatterId: existing?.id ?? null,
-        sourceEnquiryId:
-          existing?.sourceEnquiryId ??
-          initialEnquiry?.id ??
-          initialQuote?.linkedEnquiryId ??
-          null,
-        parties: partiesList,
-        previousMatches: preserveExistingDispositions ? matches : [],
-      },
-      {
-        matters,
-        enquiries,
-        people,
-        organisations,
-        canView: () => true,
-      },
-    );
-  }
-
   // Run conflict search handler (executes server-side across all tenant matters, including restricted matters)
   async function handleRunConflictSearch() {
-    let computed: ConflictCheckMatch[];
     try {
       const serverRes = await runMatterConflictSearchAction({
         currentMatterId: existing?.id ?? null,
@@ -3770,37 +3746,44 @@ export function MatterFormClient({
         parties: allPartiesToCheck,
         previousMatches: matches,
       });
-      computed = serverRes.matches;
+      if (serverRes.errors && Object.keys(serverRes.errors).length > 0) {
+        showToast(
+          serverRes.errors.permission ||
+            'The conflict search couldn’t run. Please try again.',
+        );
+        return;
+      }
+      const computed = serverRes.matches;
+      const runTime = formatDateTime(new Date().toISOString());
+      const runnerName = `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
+
+      setMatches(computed);
+      setHasRunSearch(true);
+      setLastRunAtDisplay(runTime);
+      setLastRunByName(runnerName);
+      setPartiesChangedSinceSearch(false);
+      setReopenedDraftBanner(null);
+
+      const potCount = computed.filter((m) => m.disposition === 'potential_conflict').length;
+      const newAudit: ConflictCheckRunAudit = {
+        id: `run-${Date.now()}`,
+        runAtDisplay: runTime,
+        runById: currentUser.id,
+        runByName: runnerName,
+        searchTerms: allPartiesToCheck.map((p) => p.name),
+        partiesCount: allPartiesToCheck.length,
+        matchesCount: computed.length,
+        potentialConflictsCount: potCount,
+      };
+      setSearchRuns((prev) => [newAudit, ...prev]);
+      showToast(
+        `Conflict search completed · ${allPartiesToCheck.length} parties checked · ${computed.length} ${
+          computed.length === 1 ? 'match' : 'matches'
+        }`,
+      );
     } catch {
-      computed = computeMatchesForParties(allPartiesToCheck, true);
+      showToast('The conflict search couldn’t run. Please try again.');
     }
-    const runTime = formatDateTime(new Date().toISOString());
-    const runnerName = `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
-
-    setMatches(computed);
-    setHasRunSearch(true);
-    setLastRunAtDisplay(runTime);
-    setLastRunByName(runnerName);
-    setPartiesChangedSinceSearch(false);
-    setReopenedDraftBanner(null);
-
-    const potCount = computed.filter((m) => m.disposition === 'potential_conflict').length;
-    const newAudit: ConflictCheckRunAudit = {
-      id: `run-${Date.now()}`,
-      runAtDisplay: runTime,
-      runById: currentUser.id,
-      runByName: runnerName,
-      searchTerms: allPartiesToCheck.map((p) => p.name),
-      partiesCount: allPartiesToCheck.length,
-      matchesCount: computed.length,
-      potentialConflictsCount: potCount,
-    };
-    setSearchRuns((prev) => [newAudit, ...prev]);
-    showToast(
-      `Conflict search completed · ${allPartiesToCheck.length} parties checked · ${computed.length} ${
-        computed.length === 1 ? 'match' : 'matches'
-      }`,
-    );
   }
 
   function resetAddPartyForm() {
@@ -4639,6 +4622,48 @@ export function MatterFormClient({
     existing?.id ?? null,
   );
   const [serverSaveErrors, setServerSaveErrors] = useState<Record<string, string>>({});
+  const [partnerCostSignOff, setPartnerCostSignOff] =
+    useState<PartnerCostSignOffRecord | null>(
+      () =>
+        (existing?.fieldValues?.['partnerCostSignOff'] as
+          | PartnerCostSignOffRecord
+          | undefined) ?? null,
+    );
+  const [signingOffCosts, setSigningOffCosts] = useState<boolean>(false);
+
+  async function handleSignOffMatterCosts() {
+    const targetId = savedDraftMatterId ?? existing?.id;
+    if (!targetId) {
+      showToast('Save the draft matter first before signing off costs.');
+      return;
+    }
+    setSigningOffCosts(true);
+    try {
+      const res = await signOffMatterCostsAction(
+        targetId,
+        'Partner cost sign-off recorded',
+      );
+      setSigningOffCosts(false);
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        showToast(
+          Object.values(res.errors)[0] ?? 'Could not sign off matter costs',
+        );
+        return;
+      }
+      if (res.matter) {
+        const record =
+          (res.matter.fieldValues?.['partnerCostSignOff'] as
+            | PartnerCostSignOffRecord
+            | undefined) ?? null;
+        setPartnerCostSignOff(record);
+        showToast('Partner cost sign-off recorded');
+        router.refresh();
+      }
+    } catch {
+      setSigningOffCosts(false);
+      showToast('Could not sign off matter costs');
+    }
+  }
 
   const [assignModalOpen, setAssignModalOpen] = useState<boolean>(false);
   const [assignSubmitting, setAssignSubmitting] = useState<boolean>(false);
@@ -4672,23 +4697,11 @@ export function MatterFormClient({
       );
     }
 
-    // Include Risk & Compliance reviewer
-    const colpEmp = employees.find(
-      (e) =>
-        e.employeeRoleId === 'employee_role.risk_and_compliance' ||
-        e.roles?.includes('risk_compliance') ||
-        e.roles?.includes('colp'),
-    );
-    if (colpEmp) {
-      addPerson(colpEmp.id, 'Risk & Compliance');
+    if (suggestedMatterGovernanceAssignees?.riskReviewerId) {
+      addPerson(suggestedMatterGovernanceAssignees.riskReviewerId, 'Risk & Compliance');
     }
-
-    // Include Practice Manager (e.g. Catrin Hopkins)
-    const practiceMgrEmp = employees.find((e) =>
-      (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('practice manager'),
-    );
-    if (practiceMgrEmp) {
-      addPerson(practiceMgrEmp.id, 'Practice manager');
+    if (suggestedMatterGovernanceAssignees?.practiceManagerId) {
+      addPerson(suggestedMatterGovernanceAssignees.practiceManagerId, 'Practice manager');
     }
 
     return list;
@@ -4701,6 +4714,7 @@ export function MatterFormClient({
     newTeamPersonId,
     employees,
     people,
+    suggestedMatterGovernanceAssignees,
   ]);
 
   const initialSelectedAssignPersonIds = useMemo<string[]>(() => {
@@ -5255,7 +5269,6 @@ export function MatterFormClient({
             parties: matterParties,
             conflictCheckStatus: 'Cleared',
             conflictCheckDate: today,
-            conflictClearedById: leadFeeEarnerId || currentUser.id,
             conflictNotes: matches
               .map((m) => `${m.partyName}: ${m.note}`)
               .filter(Boolean)
@@ -8595,6 +8608,52 @@ export function MatterFormClient({
                     </div>
                   ) : null}
                 </div>
+
+                {partnerCostSignOff ||
+                (canSignOffCosts && (savedDraftMatterId || existing?.id)) ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 12,
+                      padding: '10px 14px',
+                      borderRadius: 10,
+                      border: '1px solid var(--border-subtle)',
+                      background: 'var(--bg-surface-subtle)',
+                    }}
+                  >
+                    <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                      {partnerCostSignOff ? (
+                        <>
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            Partner cost sign-off completed
+                          </strong>{' '}
+                          by {partnerCostSignOff.byName} (
+                          {formatGbp(partnerCostSignOff.signedOffEstimateGbp ?? 0)})
+                        </>
+                      ) : (
+                        <span>
+                          High-value fee estimates require partner cost sign-off before opening.
+                        </span>
+                      )}
+                    </div>
+                    {canSignOffCosts && (savedDraftMatterId || existing?.id) ? (
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        disabled={signingOffCosts}
+                        onClick={handleSignOffMatterCosts}
+                      >
+                        <ShieldCheck size={14} />
+                        <span>
+                          {partnerCostSignOff ? 'Re-sign off costs' : 'Sign off costs'}
+                        </span>
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </section>
@@ -12372,6 +12431,7 @@ export function MatterFormClient({
                   values={values}
                   customFields={customFields}
                   currentUserId={currentUser.id}
+                  orgStructure={orgStructure}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingPerson={(existingPerson) => {
                     handleAddClientsToMatter(
@@ -12848,6 +12908,7 @@ export function MatterFormClient({
                       values={values}
                       customFields={customFields}
                       currentUserId={currentUser.id}
+                      orgStructure={orgStructure}
                       onCancelModal={resetAddPartyForm}
                       onSelectExistingPerson={(existingPerson) => {
                         addPersonRecordToMatter(

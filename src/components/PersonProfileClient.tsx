@@ -23,7 +23,6 @@ import { enquiryDisplayName } from '@/domain/enquiries';
 import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, personFullName, primaryEmail } from '@/domain/names';
-import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import {
   maskBankDetails,
   maskNationalInsuranceNumber,
@@ -41,6 +40,7 @@ import type {
   MergeHistory,
   Note,
   Organisation,
+  OrgStructureCatalogue,
   Person,
   PersonOrganisationLink,
   Task,
@@ -102,6 +102,7 @@ interface Props {
   mergedFromId?: string | null;
   initialTab?: string;
   firmName?: string;
+  orgStructure: OrgStructureCatalogue;
 }
 
 export function PersonProfileClient({
@@ -127,6 +128,7 @@ export function PersonProfileClient({
   mergedFromId,
   initialTab,
   firmName = 'Firm',
+  orgStructure,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -202,11 +204,6 @@ export function PersonProfileClient({
     }
     return false;
   }, [person, roleLabels, mainOrg, values, matters]);
-
-  const orgStructure = useMemo(
-    () => buildDefaultOrgStructure({ legalName: 'Configured Legal Entity' }),
-    [],
-  );
 
   const visibleTabs = useMemo(
     () =>

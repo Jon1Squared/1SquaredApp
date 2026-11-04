@@ -281,6 +281,7 @@ export type PermissionKey =
   | 'risk:view'
   | 'matter:create'
   | 'matter:edit'
+  | 'matter:costs:sign_off'
   | 'matter:reassign_ownership'
   | 'matter:restricted:access'
   | 'matter:restriction:lift'
@@ -846,6 +847,8 @@ export interface ConflictCheckRecord {
   approvedAtDisplay?: string | null;
   approvedById?: string | null;
   approvedByName?: string | null;
+  /** Server-owned list of restricted match IDs present when Risk & Compliance approved this record. */
+  approvedRestrictedMatchIds?: string[];
   parties: ConflictCheckParty[];
   matches: ConflictCheckMatch[];
   runs: ConflictCheckRunAudit[];

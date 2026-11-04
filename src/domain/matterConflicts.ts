@@ -27,6 +27,7 @@ export interface MatterConflictSearchDeps {
   people: Person[];
   organisations: Organisation[];
   canView: (matter: Matter) => boolean;
+  canViewEnquiry?: (enquiry: Enquiry) => boolean;
 }
 
 function redactMatchKeyHash(input: string): string {
@@ -384,6 +385,33 @@ export function searchMatterConflicts(
         );
         if (matchedOther) {
           const isExact = matchedOther.toLowerCase() === lower;
+          if (deps.canViewEnquiry && !deps.canViewEnquiry(enq)) {
+            const redactedId = `match-restricted-enq-${party.id}-${redactMatchKeyHash(`${party.id}:${enq.id}`)}`;
+            const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
+            pushMatch(
+              {
+                id: redactedId,
+                partyId: party.id,
+                partyName: party.name,
+                matchedRecordId: '',
+                matchedRecordName: 'Match on a restricted enquiry',
+                matchedRecordType: 'matter',
+                strength: isExact ? 'Exact' : 'Close',
+                whereFound: 'Restricted enquiry: refer to Risk',
+                matterId: null,
+                matterNumber: null,
+                responsiblePartnerId: null,
+                responsiblePartnerName: '',
+                dateLabel: '',
+                matchedOn: 'Restricted enquiry: refer to Risk',
+                restricted: true,
+                disposition: 'potential_conflict',
+                note: 'Match on a restricted enquiry — must be referred to Risk & Compliance.',
+              },
+              fallbackKey,
+            );
+            continue;
+          }
           const matchId = `match-client-enq-other-${party.id}-${enq.id}`;
           const whereFound = `Other party on Enquiry ${enq.reference} (${enq.summary})`;
           const fallbackKey = `${lower}__${matchedOther.toLowerCase()}__${whereFound.toLowerCase()}`;
@@ -430,7 +458,55 @@ export function searchMatterConflicts(
         ownerPerson?.id ?? enq.assignedToId ?? enq.takenById ?? enq.createdById ?? null;
       const dateLabel = formatDate(enq.receivedAt || enq.createdAt) || '';
 
-      if (namesMatch(callerLower, lower)) {
+      const callerMatched = namesMatch(callerLower, lower);
+      const behalfMatched = !callerMatched && namesMatch(behalfLower, lower);
+      const enqOtherEntries =
+        !callerMatched && !behalfMatched
+          ? (enq.otherPartiesNamed ?? '')
+              .split(/[,;/\n]+/)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [];
+      const matchedOther =
+        !callerMatched && !behalfMatched
+          ? enqOtherEntries.find((op) => namesMatch(op.toLowerCase(), lower))
+          : undefined;
+
+      if (!callerMatched && !behalfMatched && !matchedOther) continue;
+
+      if (deps.canViewEnquiry && !deps.canViewEnquiry(enq)) {
+        const isExact =
+          (callerMatched && callerLower === lower) ||
+          (behalfMatched && behalfLower === lower) ||
+          (matchedOther !== undefined && matchedOther.toLowerCase() === lower);
+        const redactedId = `match-restricted-enq-${party.id}-${redactMatchKeyHash(`${party.id}:${enq.id}`)}`;
+        const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
+        pushMatch(
+          {
+            id: redactedId,
+            partyId: party.id,
+            partyName: party.name,
+            matchedRecordId: '',
+            matchedRecordName: 'Match on a restricted enquiry',
+            matchedRecordType: 'matter',
+            strength: isExact ? 'Exact' : 'Close',
+            whereFound: 'Restricted enquiry: refer to Risk',
+            matterId: null,
+            matterNumber: null,
+            responsiblePartnerId: null,
+            responsiblePartnerName: '',
+            dateLabel: '',
+            matchedOn: 'Restricted enquiry: refer to Risk',
+            restricted: true,
+            disposition: 'potential_conflict',
+            note: 'Match on a restricted enquiry — must be referred to Risk & Compliance.',
+          },
+          fallbackKey,
+        );
+        continue;
+      }
+
+      if (callerMatched) {
         const isExact = callerLower === lower;
         const matchId = `match-${party.id}-${enq.id}-caller`;
         const whereFound = `Enquirer on ${enq.reference} (${enq.summary})`;
@@ -458,7 +534,7 @@ export function searchMatterConflicts(
           },
           fallbackKey,
         );
-      } else if (namesMatch(behalfLower, lower)) {
+      } else if (behalfMatched) {
         const isExact = behalfLower === lower;
         const matchId = `match-${party.id}-${enq.id}-behalf`;
         const whereFound = `Prospective client on ${enq.reference} (${enq.summary})`;
@@ -486,43 +562,34 @@ export function searchMatterConflicts(
           },
           fallbackKey,
         );
-      } else {
-        const enqOtherEntries = (enq.otherPartiesNamed ?? '')
-          .split(/[,;/\n]+/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const matchedOther = enqOtherEntries.find((op) =>
-          namesMatch(op.toLowerCase(), lower),
+      } else if (matchedOther) {
+        const isExact = matchedOther.toLowerCase() === lower;
+        const matchId = `match-${party.id}-${enq.id}-other`;
+        const whereFound = `Other party on ${enq.reference} (${enq.summary})`;
+        const fallbackKey = `${lower}__${matchedOther.toLowerCase()}__${whereFound.toLowerCase()}`;
+        pushMatch(
+          {
+            id: matchId,
+            partyId: party.id,
+            partyName: party.name,
+            matchedRecordId: enq.id,
+            matchedRecordName: matchedOther,
+            matchedRecordType: party.entityType,
+            strength: isExact ? 'Exact' : 'Close',
+            whereFound,
+            matterId: null,
+            matterNumber: enq.reference,
+            responsiblePartnerId: ownerId,
+            responsiblePartnerName: ownerName,
+            dateLabel,
+            matchedOn: isExact
+              ? 'Exact other party name on enquiry'
+              : 'Similar other party name on enquiry',
+            disposition: null,
+            note: '',
+          },
+          fallbackKey,
         );
-        if (matchedOther) {
-          const isExact = matchedOther.toLowerCase() === lower;
-          const matchId = `match-${party.id}-${enq.id}-other`;
-          const whereFound = `Other party on ${enq.reference} (${enq.summary})`;
-          const fallbackKey = `${lower}__${matchedOther.toLowerCase()}__${whereFound.toLowerCase()}`;
-          pushMatch(
-            {
-              id: matchId,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.id,
-              matchedRecordName: matchedOther,
-              matchedRecordType: party.entityType,
-              strength: isExact ? 'Exact' : 'Close',
-              whereFound,
-              matterId: null,
-              matterNumber: enq.reference,
-              responsiblePartnerId: ownerId,
-              responsiblePartnerName: ownerName,
-              dateLabel,
-              matchedOn: isExact
-                ? 'Exact other party name on enquiry'
-                : 'Similar other party name on enquiry',
-              disposition: null,
-              note: '',
-            },
-            fallbackKey,
-          );
-        }
       }
     }
 

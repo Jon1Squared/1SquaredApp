@@ -94,6 +94,7 @@ import {
   type SaveQuoteInput,
   saveTaskRecord,
   saveTaskSettingsRecord,
+  signOffMatterCostsRecord,
   syncMatterCostsRatesFromPms,
   updateMatterConflictRecord,
   saveTeamRecord,
@@ -241,7 +242,7 @@ export async function saveOrganisationAction(
 }
 
 export async function saveMatterAction(
-  payload: Partial<Matter> & {
+  payload: Omit<Partial<Matter>, 'conflictClearedById'> & {
     title: string;
     clientId: string;
     practiceAreaId: string;
@@ -254,6 +255,14 @@ export async function saveMatterAction(
 ) {
   return withActorId(async (byId) => {
     const res = await saveMatterRecord(payload, { ...opts, byId });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function signOffMatterCostsAction(matterId: string, note?: string) {
+  return withActorId(async (byId) => {
+    const res = await signOffMatterCostsRecord(matterId, byId, note);
     revalidateAll();
     return res;
   });

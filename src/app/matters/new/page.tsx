@@ -57,6 +57,12 @@ export default async function NewMatterPage({
         matterPartyTaxonomy={snap.matterPartyTaxonomy}
         matterCostsConfig={snap.matterCostsConfig}
         canReassignOwnership={snap.currentUserPermissions.includes('matter:reassign_ownership')}
+        canSignOffCosts={
+          draftMatter
+            ? snap.canSignOffCostsByMatterId[draftMatter.id] ?? false
+            : snap.currentUserPermissions.includes('matter:costs:sign_off')
+        }
+        suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
       />
     );
   });

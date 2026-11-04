@@ -186,6 +186,121 @@ export const DEFAULT_ORG_OFFICES: OrgOffice[] = [
   },
 ];
 
+export const DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS: OrgTeamOrPracticeGroup[] = [
+  {
+    id: 'TPG-RE-COMM',
+    name: 'Commercial Property',
+    code: 'RE-COM',
+    parentDepartmentId: 'DEPT-RE',
+    active: true,
+  },
+  {
+    id: 'TPG-RE-RES',
+    name: 'Residential Conveyancing',
+    code: 'RE-RES',
+    parentDepartmentId: 'DEPT-RE',
+    active: true,
+  },
+  {
+    id: 'TPG-RE-DEV',
+    name: 'Property Development & Planning',
+    code: 'RE-DEV',
+    parentDepartmentId: 'DEPT-RE',
+    active: true,
+  },
+  {
+    id: 'TPG-CORP-MA',
+    name: 'M&A and Corporate Finance',
+    code: 'CORP-MA',
+    parentDepartmentId: 'DEPT-CORP',
+    active: true,
+  },
+  {
+    id: 'TPG-CORP-COM',
+    name: 'Commercial & Technology',
+    code: 'CORP-COM',
+    parentDepartmentId: 'DEPT-CORP',
+    active: true,
+  },
+  {
+    id: 'TPG-DR-COM',
+    name: 'Commercial Litigation',
+    code: 'DR-COM',
+    parentDepartmentId: 'DEPT-DR',
+    active: true,
+  },
+  {
+    id: 'TPG-DR-PROP',
+    name: 'Property Litigation',
+    code: 'DR-PROP',
+    parentDepartmentId: 'DEPT-DR',
+    active: true,
+  },
+  {
+    id: 'TPG-PC-WILLS',
+    name: 'Wills, Trusts & Probate',
+    code: 'PC-WTP',
+    parentDepartmentId: 'DEPT-PC',
+    active: true,
+  },
+  {
+    id: 'TPG-PC-TAX',
+    name: 'Private Wealth & Tax',
+    code: 'PC-TAX',
+    parentDepartmentId: 'DEPT-PC',
+    active: true,
+  },
+  {
+    id: 'TPG-EMP-ADV',
+    name: 'Employment Advisory & Tribunals',
+    code: 'EMP-ADV',
+    parentDepartmentId: 'DEPT-EMP',
+    active: true,
+  },
+  {
+    id: 'TPG-RISK-AML',
+    name: 'Conflicts, AML & Regulatory',
+    code: 'RISK-AML',
+    parentDepartmentId: 'DEPT-RISK',
+    active: true,
+  },
+  {
+    id: 'TPG-FIN-OPS',
+    name: 'Billing, Credit Control & Cashiering',
+    code: 'FIN-OPS',
+    parentDepartmentId: 'DEPT-FIN',
+    active: true,
+  },
+  {
+    id: 'TPG-BD-INTAKE',
+    name: 'Client Intake & Marketing',
+    code: 'BD-INT',
+    parentDepartmentId: 'DEPT-BD',
+    active: true,
+  },
+  {
+    id: 'TPG-OPS-SEC',
+    name: 'Secretarial & Workplace Operations',
+    code: 'OPS-SEC',
+    parentDepartmentId: 'DEPT-OPS',
+    active: true,
+  },
+  {
+    id: 'TPG-IT-SYS',
+    name: 'Business Systems & Infrastructure',
+    code: 'IT-SYS',
+    parentDepartmentId: 'DEPT-IT',
+    active: true,
+  },
+  {
+    id: 'TPG-HR-OPS',
+    name: 'HR & Talent Development',
+    code: 'HR-OPS',
+    parentDepartmentId: 'DEPT-HR',
+    active: true,
+  },
+];
+
 export function buildDefaultOrgStructure(options: {
   legalName: string;
   shortCode?: string;
@@ -246,120 +361,8 @@ export function buildDefaultOrgStructure(options: {
 
   const departments: OrgDepartment[] = DEFAULT_ORG_DEPARTMENTS.map((dept) => ({ ...dept }));
 
-  const teamsOrPracticeGroups: OrgTeamOrPracticeGroup[] = [
-    {
-      id: 'TPG-RE-COMM',
-      name: 'Commercial Property',
-      code: 'RE-COM',
-      parentDepartmentId: 'DEPT-RE',
-      active: true,
-    },
-    {
-      id: 'TPG-RE-RES',
-      name: 'Residential Conveyancing',
-      code: 'RE-RES',
-      parentDepartmentId: 'DEPT-RE',
-      active: true,
-    },
-    {
-      id: 'TPG-RE-DEV',
-      name: 'Property Development & Planning',
-      code: 'RE-DEV',
-      parentDepartmentId: 'DEPT-RE',
-      active: true,
-    },
-    {
-      id: 'TPG-CORP-MA',
-      name: 'M&A and Corporate Finance',
-      code: 'CORP-MA',
-      parentDepartmentId: 'DEPT-CORP',
-      active: true,
-    },
-    {
-      id: 'TPG-CORP-COM',
-      name: 'Commercial & Technology',
-      code: 'CORP-COM',
-      parentDepartmentId: 'DEPT-CORP',
-      active: true,
-    },
-    {
-      id: 'TPG-DR-COM',
-      name: 'Commercial Litigation',
-      code: 'DR-COM',
-      parentDepartmentId: 'DEPT-DR',
-      active: true,
-    },
-    {
-      id: 'TPG-DR-PROP',
-      name: 'Property Litigation',
-      code: 'DR-PROP',
-      parentDepartmentId: 'DEPT-DR',
-      active: true,
-    },
-    {
-      id: 'TPG-PC-WILLS',
-      name: 'Wills, Trusts & Probate',
-      code: 'PC-WTP',
-      parentDepartmentId: 'DEPT-PC',
-      active: true,
-    },
-    {
-      id: 'TPG-PC-TAX',
-      name: 'Private Wealth & Tax',
-      code: 'PC-TAX',
-      parentDepartmentId: 'DEPT-PC',
-      active: true,
-    },
-    {
-      id: 'TPG-EMP-ADV',
-      name: 'Employment Advisory & Tribunals',
-      code: 'EMP-ADV',
-      parentDepartmentId: 'DEPT-EMP',
-      active: true,
-    },
-    {
-      id: 'TPG-RISK-AML',
-      name: 'Conflicts, AML & Regulatory',
-      code: 'RISK-AML',
-      parentDepartmentId: 'DEPT-RISK',
-      active: true,
-    },
-    {
-      id: 'TPG-FIN-OPS',
-      name: 'Billing, Credit Control & Cashiering',
-      code: 'FIN-OPS',
-      parentDepartmentId: 'DEPT-FIN',
-      active: true,
-    },
-    {
-      id: 'TPG-BD-INTAKE',
-      name: 'Client Intake & Marketing',
-      code: 'BD-INT',
-      parentDepartmentId: 'DEPT-BD',
-      active: true,
-    },
-    {
-      id: 'TPG-OPS-SEC',
-      name: 'Secretarial & Workplace Operations',
-      code: 'OPS-SEC',
-      parentDepartmentId: 'DEPT-OPS',
-      active: true,
-    },
-    {
-      id: 'TPG-IT-SYS',
-      name: 'Business Systems & Infrastructure',
-      code: 'IT-SYS',
-      parentDepartmentId: 'DEPT-IT',
-      active: true,
-    },
-    {
-      id: 'TPG-HR-OPS',
-      name: 'HR & Talent Development',
-      code: 'HR-OPS',
-      parentDepartmentId: 'DEPT-HR',
-      active: true,
-    },
-  ];
+  const teamsOrPracticeGroups: OrgTeamOrPracticeGroup[] =
+    DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS.map((tpg) => ({ ...tpg }));
 
   const offices: OrgOffice[] = DEFAULT_ORG_OFFICES.map((office) => ({
     ...office,

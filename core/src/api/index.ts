@@ -67,6 +67,7 @@ export type PermissionKey =
   | 'matter:reassign_ownership'
   | 'matter:restricted:access'
   | 'matter:restriction:lift'
+  | 'matter:costs:sign_off'
   | 'task:claim_any'
   | 'task:reassign_any'
   | 'enquiry:intake_view'

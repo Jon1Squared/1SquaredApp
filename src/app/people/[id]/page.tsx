@@ -88,6 +88,7 @@ export default async function PersonProfilePage({
         mergedFromId={mergedFrom ?? null}
         initialTab={tab}
         firmName={snap.firm.name}
+        orgStructure={snap.orgStructure}
       />
     );
   });
