@@ -242,12 +242,15 @@ export async function saveOrganisationAction(
 }
 
 export async function saveMatterAction(
-  payload: Omit<Partial<Matter>, 'conflictClearedById' | 'conflictCheckRecord'> & {
+  payload: Omit<
+    Partial<Matter>,
+    'conflictClearedById' | 'conflictCheckRecord' | 'conflictCheckStatus'
+  > & {
     title: string;
     clientId: string;
     practiceAreaId: string;
     workTypeSubcategoryId: string;
-    conflictCheckRecord?: ConflictCheckRecordInput | null;
+    conflictCheckRecord?: ConflictCheckRecordInput;
   },
   opts: {
     id?: string;

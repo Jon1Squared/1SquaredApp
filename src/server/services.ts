@@ -20,6 +20,7 @@ import {
 } from '@/domain/quotes';
 import {
   conflictStatusPillFromLegacy,
+  legacyConflictStatusFromRecord,
   resolveMatterConflictCheckRecord,
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
@@ -2720,6 +2721,12 @@ function buildServerConflictCheckRecord(params: {
   const isRiskDecisionStatus =
     submitted.status === 'Approved' || submitted.status === 'Declined';
   const storedIsReferred = stored?.status === 'Referred';
+  const storedIsRiskLocked =
+    stored?.status === 'Referred' ||
+    stored?.status === 'Declined' ||
+    (stored?.status === 'Approved' &&
+      saveMode !== 'submit_referred' &&
+      submitted.status !== 'Referred');
   const isUnauthorizedClearWithoutSaveMode =
     submitted.status === 'Cleared' &&
     saveMode !== 'submit_cleared' &&
@@ -2727,7 +2734,7 @@ function buildServerConflictCheckRecord(params: {
   const fallsBackToStored =
     (isRiskDecisionStatus && !actorHasRiskView) ||
     isUnauthorizedClearWithoutSaveMode ||
-    (storedIsReferred && !actorHasRiskView && submitted.status === 'Cleared');
+    (storedIsRiskLocked && !actorHasRiskView && submitted.status !== stored?.status);
   const status: ConflictCheckStatusPill = fallsBackToStored
     ? stored?.status ??
       (saveMode === 'submit_referred'
@@ -2859,12 +2866,15 @@ function buildServerConflictCheckRecord(params: {
 }
 
 export async function saveMatterRecord(
-  input: Omit<Partial<Matter>, 'conflictClearedById' | 'conflictCheckRecord'> & {
+  input: Omit<
+    Partial<Matter>,
+    'conflictClearedById' | 'conflictCheckRecord' | 'conflictCheckStatus'
+  > & {
     title: string;
     clientId: string;
     practiceAreaId: string;
     workTypeSubcategoryId: string;
-    conflictCheckRecord?: ConflictCheckRecordInput | ConflictCheckRecord | null;
+    conflictCheckRecord?: ConflictCheckRecordInput | ConflictCheckRecord;
   },
   opts: {
     id?: string;
@@ -3444,15 +3454,15 @@ export async function saveMatterRecord(
     allPeople: allPeopleWithPending,
     teams: store.teams,
   });
+  const submittedConflictRecord =
+    input.conflictCheckRecord === null ? undefined : input.conflictCheckRecord;
   const mappedInputConflictParties =
-    input.conflictCheckRecord !== undefined
-      ? input.conflictCheckRecord
-        ? input.conflictCheckRecord.parties.map((cp) =>
-            !cp.linkedRecordId && createdRecordByPartyId.has(cp.id)
-              ? { ...cp, linkedRecordId: createdRecordByPartyId.get(cp.id)! }
-              : cp,
-          )
-        : []
+    submittedConflictRecord !== undefined
+      ? submittedConflictRecord.parties.map((cp) =>
+          !cp.linkedRecordId && createdRecordByPartyId.has(cp.id)
+            ? { ...cp, linkedRecordId: createdRecordByPartyId.get(cp.id)! }
+            : cp,
+        )
       : existing?.conflictCheckRecord?.parties ?? [];
   const effectiveConflictParties = buildEffectiveConflictParties({
     submittedParties: mappedInputConflictParties,
@@ -3476,7 +3486,7 @@ export async function saveMatterRecord(
           : existing?.sourceEnquiryId ?? null,
       parties: effectiveConflictParties,
       previousMatches:
-        input.conflictCheckRecord?.matches ??
+        submittedConflictRecord?.matches ??
         existing?.conflictCheckRecord?.matches ??
         [],
       canReviewConditions: actorHasRiskView,
@@ -3495,7 +3505,7 @@ export async function saveMatterRecord(
   );
   const reconciledConflictMatches = reconcileServerConflictMatches({
     serverMatches: rawServerMatches,
-    submittedMatches: input.conflictCheckRecord?.matches,
+    submittedMatches: submittedConflictRecord?.matches,
     existingStoredMatches: existing?.conflictCheckRecord?.matches,
     canReviewConditions: actorHasRiskView,
     reviewerUserId: actorHasRiskView ? opts.byId : null,
@@ -3536,7 +3546,7 @@ export async function saveMatterRecord(
     storedConflictRecord?.status === 'Referred' &&
     !actorHasRiskView &&
     (opts.saveMode === 'submit_cleared' ||
-      input.conflictCheckRecord?.status === 'Cleared')
+      submittedConflictRecord?.status === 'Cleared')
   ) {
     return {
       matter: null,
@@ -3552,16 +3562,16 @@ export async function saveMatterRecord(
     storedConflictRecord?.approvedRestrictedMatchIds,
   );
   const isApprovedByRiskInThisSave =
-    actorHasRiskView && input.conflictCheckRecord?.status === 'Approved';
+    actorHasRiskView && submittedConflictRecord?.status === 'Approved';
   if (
     !isPmsImport &&
     hasUnapprovedRestrictedMatch &&
     !isApprovedByRiskInThisSave &&
     (opts.saveMode === 'submit_cleared' ||
+      submittedConflictRecord?.status === 'Cleared' ||
       (!isDraftSave &&
         opts.saveMode !== 'submit_referred' &&
-        (input.conflictCheckStatus === 'Cleared' ||
-          input.conflictCheckStatus === 'Clear')))
+        !existing))
   ) {
     return {
       matter: null,
@@ -3574,20 +3584,18 @@ export async function saveMatterRecord(
 
   const actorDisplayName = personDisplayName(actingUser);
   const resolvedConflictCheckRecord =
-    input.conflictCheckRecord !== undefined
-      ? input.conflictCheckRecord
-        ? buildServerConflictCheckRecord({
-            submitted: input.conflictCheckRecord,
-            stored: storedConflictRecord,
-            parties: effectiveConflictParties,
-            matches: reconciledConflictMatches,
-            actorId: opts.byId,
-            actorDisplayName,
-            actorHasRiskView,
-            nowDisplay: now,
-            saveMode: opts.saveMode,
-          })
-        : null
+    submittedConflictRecord !== undefined
+      ? buildServerConflictCheckRecord({
+          submitted: submittedConflictRecord,
+          stored: storedConflictRecord,
+          parties: effectiveConflictParties,
+          matches: reconciledConflictMatches,
+          actorId: opts.byId,
+          actorDisplayName,
+          actorHasRiskView,
+          nowDisplay: now,
+          saveMode: opts.saveMode,
+        })
       : storedConflictRecord
         ? {
             ...storedConflictRecord,
@@ -3607,16 +3615,15 @@ export async function saveMatterRecord(
             parties: effectiveConflictParties,
             matches: reconciledConflictMatches,
           }
-        : null;
+        : undefined;
 
   if (willOpen && !isPmsImport) {
     const fallbackStatusFromField =
-      input.conflictCheckStatus ??
-      (opts.saveMode === 'submit_referred'
+      opts.saveMode === 'submit_referred'
         ? 'Pending conflict review'
         : isDraftSave
           ? existing?.conflictCheckStatus ?? 'Draft'
-          : existing?.conflictCheckStatus ?? 'Clear');
+          : existing?.conflictCheckStatus ?? 'Clear';
     const inferredConflictStatus = conflictStatusPillFromLegacy(
       fallbackStatusFromField,
     );
@@ -3625,8 +3632,8 @@ export async function saveMatterRecord(
       storedConflictRecord?.status ??
       inferredConflictStatus;
     const conflictAllowsOpening =
-      (nextConflictStatus === 'Cleared' && !hasUnapprovedRestrictedMatch) ||
-      nextConflictStatus === 'Approved';
+      (nextConflictStatus === 'Cleared' || nextConflictStatus === 'Approved') &&
+      (!hasUnapprovedRestrictedMatch || isApprovedByRiskInThisSave);
     if (!conflictAllowsOpening) {
       return {
         matter: null,
@@ -3765,12 +3772,15 @@ export async function saveMatterRecord(
     ),
     parties: resolvedParties,
     conflictCheckStatus:
-      input.conflictCheckStatus ??
-      (opts.saveMode === 'submit_referred'
-        ? 'Pending conflict review'
-        : isDraftSave
-          ? existing?.conflictCheckStatus ?? 'Draft'
-          : existing?.conflictCheckStatus ?? 'Clear'),
+      resolvedConflictCheckRecord ?? storedConflictRecord
+        ? legacyConflictStatusFromRecord(
+            (resolvedConflictCheckRecord ?? storedConflictRecord)!,
+          )
+        : opts.saveMode === 'submit_referred'
+          ? 'Pending conflict review'
+          : isDraftSave
+            ? existing?.conflictCheckStatus ?? 'Draft'
+            : existing?.conflictCheckStatus ?? 'Clear',
     conflictCheckDate: input.conflictCheckDate !== undefined ? input.conflictCheckDate : existing?.conflictCheckDate ?? today,
     conflictClearedById: existing?.conflictClearedById ?? null,
     conflictNotes: input.conflictNotes ?? existing?.conflictNotes ?? '',
@@ -3820,10 +3830,15 @@ export async function saveMatterRecord(
 
   // Ensure full conflict check record, risk assessment snapshot, and immutable matter opening snapshot are persisted
   if (!matter.conflictCheckRecord) {
-    matter.conflictCheckRecord = resolveMatterConflictCheckRecord(
-      matter,
-      allPeopleWithPending,
-      allOrganisationsWithPending,
+    matter.conflictCheckRecord =
+      storedConflictRecord ??
+      resolveMatterConflictCheckRecord(
+        matter,
+        allPeopleWithPending,
+        allOrganisationsWithPending,
+      );
+    matter.conflictCheckStatus = legacyConflictStatusFromRecord(
+      matter.conflictCheckRecord,
     );
   }
   const fullRiskAssessment = resolveMatterRiskAssessment(
@@ -4696,11 +4711,8 @@ export function updateMatterConflictRecord(
     keyDatesOpenGate.canOpen;
 
   const warnings: string[] = [];
+  matter.conflictCheckStatus = legacyConflictStatusFromRecord(sanitisedRecord);
   if (sanitisedRecord.status === 'Approved' || sanitisedRecord.status === 'Cleared') {
-    matter.conflictCheckStatus =
-      sanitisedRecord.outcomeLabel === 'Approved with conditions'
-        ? 'Approved with conditions'
-        : 'Cleared';
     if (actorHasRiskView) {
       matter.conflictClearedById = byId;
     } else {
@@ -4738,10 +4750,6 @@ export function updateMatterConflictRecord(
         );
       }
     }
-  } else if (sanitisedRecord.status === 'Declined') {
-    matter.conflictCheckStatus = 'Declined — Conflict of interest';
-  } else if (sanitisedRecord.status === 'Referred') {
-    matter.conflictCheckStatus = 'Referred to risk for review';
   }
 
   writeAudit(store, {

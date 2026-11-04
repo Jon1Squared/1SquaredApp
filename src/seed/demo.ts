@@ -1204,7 +1204,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       retentionPeriod: fields.retentionPeriod ?? '6 years',
       destructionDueAt: fields.destructionDueAt ?? null,
       fieldValues: fields.fieldValues ?? {},
-      conflictCheckRecord: fields.conflictCheckRecord ?? null,
+      conflictCheckRecord: fields.conflictCheckRecord ?? undefined,
     };
     matters.push(m);
     return m;

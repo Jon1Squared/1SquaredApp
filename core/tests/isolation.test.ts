@@ -39,7 +39,11 @@ import {
 } from '../../src/domain/employment';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
 import { reconcileServerConflictMatches } from '../../src/domain/matterConflicts';
-import { resolveMatterConflictCheckRecord } from '../../src/domain/matterOpeningRecord';
+import {
+  conflictStatusPillFromLegacy,
+  legacyConflictStatusFromRecord,
+  resolveMatterConflictCheckRecord,
+} from '../../src/domain/matterOpeningRecord';
 import { buildDefaultOrgStructure } from '../../src/domain/orgStructure';
 import {
   getDefaultTenantRbacConfig,
@@ -2791,7 +2795,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
                   linkedRecordId: secondStaffClient.id,
                 },
               ],
-              conflictCheckStatus: 'Cleared',
               conflictCheckRecord: {
                 ...riskApproveRes.matter!.conflictCheckRecord!,
                 approvedRestrictedMatchIds: [
@@ -3864,7 +3867,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
                   linkedRecordId: null,
                 },
               ],
-              conflictCheckStatus: 'Cleared',
               conflictCheckRecord: {
                 status: 'Cleared',
                 outcomeLabel: 'Cleared by fee earner',
@@ -3911,7 +3913,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
                   linkedRecordId: null,
                 },
               ],
-              conflictCheckStatus: 'Cleared',
               conflictCheckRecord: {
                 status: 'Approved',
                 outcomeLabel: 'Approved by Risk & Compliance',
@@ -5110,7 +5111,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...referNewRes.matter!,
-              conflictCheckStatus: 'Cleared',
               conflictCheckRecord: {
                 ...referNewRes.matter!.conflictCheckRecord!,
                 status: 'Cleared',
@@ -5176,7 +5176,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...riskApproveRes.matter!,
-              conflictCheckStatus: 'Cleared',
               conflictCheckRecord: {
                 ...riskApproveRes.matter!.conflictCheckRecord!,
                 status: 'Cleared',
@@ -5194,6 +5193,307 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(postApprovalSubmitRes.matter).not.toBeNull();
       expect(postApprovalSubmitRes.matter?.matterStatusId).not.toBe(
         prospectiveStatusId,
+      );
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R185: saveMatterRecord ignores conflictCheckRecord: null and caller conflictCheckStatus, preserves Referred status across two-save bypass attempts, and derives conflictCheckStatus from the server record', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      // Round-trip check: conflictStatusPillFromLegacy(legacyConflictStatusFromRecord(r)) returns r.status for every status
+      const roundTripCases = [
+        { status: 'Cleared' as const, outcomeLabel: 'Cleared by fee earner' as const },
+        {
+          status: 'Approved' as const,
+          outcomeLabel: 'Approved by Risk & Compliance' as const,
+        },
+        {
+          status: 'Approved' as const,
+          outcomeLabel: 'Approved with conditions' as const,
+        },
+        {
+          status: 'Declined' as const,
+          outcomeLabel: 'Declined by Risk & Compliance' as const,
+        },
+        {
+          status: 'Referred' as const,
+          outcomeLabel: 'Referred to risk for review' as const,
+        },
+        { status: 'In progress' as const, outcomeLabel: 'Pending' as const },
+        { status: 'Not started' as const, outcomeLabel: 'Pending' as const },
+      ];
+      for (const c of roundTripCases) {
+        expect(
+          conflictStatusPillFromLegacy(legacyConflictStatusFromRecord(c)),
+        ).toBe(c.status);
+      }
+
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+      const riskOfficer = store.people.find(
+        (p) => p.isEmployee && (p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const prospectiveStatusId = store.values.find(
+        (v) =>
+          v.listKey === 'matter_status' &&
+          v.label === 'Prospective / Enquiry',
+      )!.id;
+      const activeStatusId = store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label === 'Active',
+      )!.id;
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const makeSession = (
+        person: typeof partner,
+        roles: string[],
+        email: string,
+      ) => {
+        const cookie = createSignedEntraSessionCookie({
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id}`,
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: person.id,
+          email,
+          displayName: `${person.firstName} ${person.surname}`,
+          entraRoles: roles,
+          mappedRoles: roles,
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        });
+        return {
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: roles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+        };
+      };
+
+      const feeEarnerSession = makeSession(
+        feeEarner,
+        feeEarner.roles ?? ['fee_earner'],
+        'fee-earner-r185@notalawfirm.example',
+      );
+      const riskSession = makeSession(
+        riskOfficer,
+        riskOfficer.roles ?? ['risk_compliance'],
+        'risk-r185@notalawfirm.example',
+      );
+
+      // 1. Legacy matter M-000006: Save 1 with no saveMode, conflictCheckRecord: null, and conflictCheckStatus: 'Clear' keeps stored record Referred and conflictCheckStatus as 'Pending conflict review'; Save 2 (submit_cleared) is refused with errors.conflict
+      const fixtureM6 = store.matters.find((m) => m.id === 'M-000006')!;
+      expect(fixtureM6.conflictCheckRecord).toBeFalsy();
+      expect(fixtureM6.conflictCheckStatus).toBe(
+        'Potential conflict — escalated',
+      );
+
+      const m6Save1Res = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...fixtureM6,
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+              conflictCheckStatus: 'Clear',
+              conflictCheckRecord: null,
+            } as unknown as Parameters<typeof saveMatterRecord>[0],
+            { id: fixtureM6.id, byId: feeEarner.id },
+          ),
+      );
+      expect(m6Save1Res.errors).toBeUndefined();
+      expect(m6Save1Res.matter?.conflictCheckRecord?.status).toBe('Referred');
+      expect(m6Save1Res.matter?.conflictCheckStatus).toBe(
+        'Pending conflict review',
+      );
+      expect(m6Save1Res.matter?.matterStatusId).toBe(prospectiveStatusId);
+
+      const m6Save2Res = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...m6Save1Res.matter!,
+            },
+            {
+              id: fixtureM6.id,
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(m6Save2Res.matter).toBeNull();
+      expect(m6Save2Res.errors?.conflict).toMatch(
+        /referred to Risk.*Only Risk & Compliance can clear or approve/i,
+      );
+      expect(
+        getStore().matters.find((m) => m.id === fixtureM6.id)
+          ?.conflictCheckRecord?.status,
+      ).toBe('Referred');
+
+      // 2. Newly referred matter: two-save bypass attempt (conflictCheckRecord: null + conflictCheckStatus: 'Clear', then submit_cleared) is refused
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+      const referNewRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R185 Newly Referred Matter',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+              parties: [],
+            },
+            { byId: feeEarner.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(referNewRes.errors).toBeUndefined();
+      const referredId = referNewRes.matter!.id;
+      expect(referNewRes.matter?.conflictCheckRecord?.status).toBe('Referred');
+      expect(referNewRes.matter?.conflictCheckStatus).toBe(
+        'Pending conflict review',
+      );
+
+      const newRefSave1 = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referNewRes.matter!,
+              conflictCheckStatus: 'Clear',
+              conflictCheckRecord: null,
+            } as unknown as Parameters<typeof saveMatterRecord>[0],
+            { id: referredId, byId: feeEarner.id },
+          ),
+      );
+      expect(newRefSave1.errors).toBeUndefined();
+      expect(newRefSave1.matter?.conflictCheckRecord?.status).toBe('Referred');
+      expect(newRefSave1.matter?.conflictCheckStatus).toBe(
+        'Pending conflict review',
+      );
+
+      const newRefSave2 = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...newRefSave1.matter!,
+            },
+            {
+              id: referredId,
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(newRefSave2.matter).toBeNull();
+      expect(newRefSave2.errors?.conflict).toMatch(
+        /referred to Risk.*Only Risk & Compliance can clear or approve/i,
+      );
+
+      // 3. Forged Risk approval: saving with conflictCheckStatus: 'Approved with conditions' and conflictCheckRecord: null keeps the stored record as Referred, and a later plain save with matterStatusId: Active is refused
+      const forgedApprovalSave1 = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...newRefSave1.matter!,
+              conflictCheckStatus: 'Approved with conditions',
+              conflictCheckRecord: null,
+            } as unknown as Parameters<typeof saveMatterRecord>[0],
+            { id: referredId, byId: feeEarner.id },
+          ),
+      );
+      expect(forgedApprovalSave1.errors).toBeUndefined();
+      expect(forgedApprovalSave1.matter?.conflictCheckRecord?.status).toBe(
+        'Referred',
+      );
+      expect(
+        forgedApprovalSave1.matter?.conflictCheckRecord?.outcomeLabel,
+      ).toBe('Referred to risk for review');
+      expect(forgedApprovalSave1.matter?.conflictCheckStatus).toBe(
+        'Pending conflict review',
+      );
+
+      const forgedApprovalSave2 = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...forgedApprovalSave1.matter!,
+              matterStatusId: activeStatusId,
+            },
+            { id: referredId, byId: feeEarner.id },
+          ),
+      );
+      expect(forgedApprovalSave2.matter).toBeNull();
+      expect(forgedApprovalSave2.errors?.conflict).toMatch(
+        /cannot open until its conflict check is cleared or approved by Risk/i,
+      );
+      expect(
+        getStore().matters.find((m) => m.id === referredId)?.matterStatusId,
+      ).toBe(prospectiveStatusId);
+
+      // 4. After a Risk user records Approved through updateMatterConflictRecord, matter.conflictCheckStatus is set to match, and the fee earner can then open the matter
+      const riskApproveWithConditions = runWithActiveActorSession(
+        riskSession,
+        () =>
+          updateMatterConflictRecord(
+            fixtureM6.id,
+            {
+              ...m6Save1Res.matter!.conflictCheckRecord!,
+              status: 'Approved',
+              outcomeLabel: 'Approved with conditions',
+            },
+            riskOfficer.id,
+          ),
+      );
+      expect(riskApproveWithConditions.errors).toBeUndefined();
+      expect(
+        riskApproveWithConditions.matter?.conflictCheckRecord?.status,
+      ).toBe('Approved');
+      expect(riskApproveWithConditions.matter?.conflictCheckStatus).toBe(
+        'Approved with conditions',
+      );
+
+      const feeEarnerOpenM6Res = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...riskApproveWithConditions.matter!,
+            },
+            {
+              id: fixtureM6.id,
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(feeEarnerOpenM6Res.errors).toBeUndefined();
+      expect(feeEarnerOpenM6Res.matter).not.toBeNull();
+      expect(feeEarnerOpenM6Res.matter?.matterStatusId).not.toBe(
+        prospectiveStatusId,
+      );
+      expect(
+        feeEarnerOpenM6Res.matter?.conflictCheckRecord?.status,
+      ).toBe('Approved');
+      expect(feeEarnerOpenM6Res.matter?.conflictCheckStatus).toBe(
+        'Approved with conditions',
       );
     } finally {
       setTestEntraSessionOverride(undefined);

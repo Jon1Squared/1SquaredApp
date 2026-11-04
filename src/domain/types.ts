@@ -934,7 +934,7 @@ export interface Matter extends RecordBase {
   // All Core (CORE-001..075), Field Group (FG01..FG09) and Subcategory-specific fields stored keyed by Field ID
   fieldValues: Record<string, unknown>;
   /** Full built-in conflict check snapshot & audit record */
-  conflictCheckRecord?: ConflictCheckRecord | null;
+  conflictCheckRecord?: ConflictCheckRecord;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
   /** True when an ethical wall / information barrier applies to this matter. */

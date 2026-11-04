@@ -4791,7 +4791,6 @@ export function MatterFormClient({
           instructingContactId,
           billingContactId,
           parties: matterParties,
-          conflictCheckStatus: 'Draft',
           conflictCheckRecord: snapshot,
           feeEstimateGbp: feeEstimateGbp ? Number(feeEstimateGbp) : null,
           agreedFeeCapGbp: agreedFeeCapGbp ? Number(agreedFeeCapGbp) : null,
@@ -4908,7 +4907,6 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckStatus: 'Draft',
             conflictCheckRecord: snapshot,
             feeEstimateGbp: feeEstimateGbp ? Number(feeEstimateGbp) : null,
             agreedFeeCapGbp: agreedFeeCapGbp ? Number(agreedFeeCapGbp) : null,
@@ -5310,7 +5308,6 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckStatus: 'Cleared',
             conflictCheckDate: today,
             conflictNotes: matches
               .map((m) => `${m.partyName}: ${m.note}`)
@@ -5393,7 +5390,6 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckStatus: 'Pending conflict review',
             conflictCheckDate: today,
             conflictNotes: reviewerMessage,
             stageId: intakeCompleteStageId,

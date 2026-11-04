@@ -638,6 +638,9 @@ export function conflictStatusPillFromLegacy(
   const trimmed = (value ?? '').trim();
   if (!trimmed) return 'In progress';
   if (CLEAR_LEGACY_CONFLICT_STATUSES.has(trimmed)) return 'Cleared';
+  if (trimmed === 'Not started') {
+    return 'Not started';
+  }
   if (
     trimmed === 'Draft' ||
     trimmed === 'In progress' ||
@@ -675,6 +678,27 @@ export function conflictOutcomeLabelFromLegacy(
   if (status === 'Referred') return 'Referred to risk for review';
   if (status === 'Cleared') return 'Cleared by fee earner';
   return 'Pending';
+}
+
+export function legacyConflictStatusFromRecord(
+  record: Pick<ConflictCheckRecord, 'status' | 'outcomeLabel'>,
+): string {
+  switch (record.status) {
+    case 'Cleared':
+      return 'Clear';
+    case 'Approved':
+      return record.outcomeLabel === 'Approved with conditions'
+        ? 'Approved with conditions'
+        : 'Approved by Risk & Compliance';
+    case 'Declined':
+      return 'Declined — Conflict of interest';
+    case 'Referred':
+      return 'Pending conflict review';
+    case 'Not started':
+      return 'Not started';
+    default:
+      return 'Draft';
+  }
 }
 
 /**
