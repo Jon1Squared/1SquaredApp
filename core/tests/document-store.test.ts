@@ -78,10 +78,8 @@ import { MockSharePointGraphBackend } from '../src/testing';
 import { POST as postDocumentStoresRoute } from '@/app/api/document-stores/route';
 import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
 import {
-  clearActiveSessionTokenRoles,
   hasPersonPermission,
   runWithActiveActorSession,
-  setActiveSessionTokenRolesForPerson,
 } from '@/domain/rbac';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
@@ -109,7 +107,6 @@ import {
   remediateAdminReconciliationFinding,
   resetDocumentStoreSingletonsForTesting,
   resolveAdminSharePointLocationUrl,
-  resolvePersonEntraIdentity,
   resolvePersonOrgAssignment,
   retryMatterDocumentProvisioning,
   runAdminDocumentReconciliationScan,
@@ -119,7 +116,13 @@ import {
   testAdminDocumentStoreConnection,
   uploadMatterStoreDocument,
 } from '@/server/documentStoreServices';
-import { saveMatterRecord, savePersonRecord } from '@/server/services';
+import {
+  liftMatterRestriction,
+  markEngagementLetterDrafted,
+  saveMatterRecord,
+  savePersonRecord,
+  updateMatterConflictRecord,
+} from '@/server/services';
 import { getStore, saveStore } from '@/server/store';
 
 void CORE_VERSION;
@@ -1694,6 +1697,8 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         'document_reconciliation_findings',
       );
 
+      expect(runner.rollbackVersion(ctx, '0004')).toBe(true);
+      expect(runner.rollbackVersion(ctx, '0003')).toBe(true);
       const rolledBack = runner.rollbackVersion(ctx, '0002');
       expect(rolledBack).toBe(true);
       expect(runner.getActiveTables(ctx)).not.toContain(
@@ -1835,7 +1840,36 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const workEmail =
           emp.emails?.[0]?.address ??
           `${emp.id.toLowerCase()}@notalawfirm.example`;
-        const entraInfo = resolvePersonEntraIdentity(emp, cfg, store);
+        const { departmentId, teamId } = resolvePersonOrgAssignment(emp, store);
+        const testGroups: string[] = [];
+        const deptGroup = departmentId
+          ? cfg.documentAccess?.departmentEntraGroups?.[departmentId]
+          : undefined;
+        if (deptGroup) testGroups.push(deptGroup);
+        const teamGroup = teamId
+          ? cfg.documentAccess?.teamEntraGroups?.[teamId]
+          : undefined;
+        if (teamGroup) testGroups.push(teamGroup);
+        const roleSet = new Set<string>(emp.roles ?? []);
+        if (emp.appRole === 'admin') roleSet.add('admin');
+        for (const [groupId, roleKeys] of Object.entries(
+          cfg.rbac?.identityMapping?.entraGroupToRoleKey ?? {},
+        )) {
+          const keys = Array.isArray(roleKeys) ? roleKeys : [roleKeys];
+          if (keys.some((rk) => roleSet.has(rk))) {
+            testGroups.push(groupId);
+          }
+        }
+        if (roleSet.has('admin')) {
+          for (const rootGrant of cfg.documentAccess?.defaultPolicy?.libraryRoot ?? []) {
+            if (rootGrant.level === 'manage') testGroups.push(rootGrant.groupId);
+          }
+        }
+        if (roleSet.has('risk_compliance')) {
+          for (const rootGrant of cfg.documentAccess?.defaultPolicy?.libraryRoot ?? []) {
+            if (rootGrant.level === 'read') testGroups.push(rootGrant.groupId);
+          }
+        }
         const verifiedSession = verifySignedEntraSessionCookie(
           createSignedEntraSessionCookie({
             personId: emp.id,
@@ -1847,7 +1881,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             displayName: `${emp.firstName} ${emp.surname}`,
             entraRoles: emp.roles ?? [],
             mappedRoles: emp.roles ?? [],
-            entraGroups: entraInfo.groups,
+            entraGroups: Array.from(new Set(testGroups)),
             mfaVerified: true,
             amr: ['pwd', 'mfa'],
             authenticatedAt: new Date().toISOString(),
@@ -1855,11 +1889,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           }),
         )!;
         sessions.set(emp.id, verifiedSession);
-        setActiveSessionTokenRolesForPerson(emp.id, emp.roles ?? [], {
-          tenantId: 'not-a-law-firm',
-          expiresAt: verifiedSession.expiresAt,
-          verifiedSession,
-        });
       }
       function asEmployee<T>(personId: string, fn: () => T): T {
         const verifiedSession = sessions.get(personId);
@@ -1985,7 +2014,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           ).rejects.toMatchObject({ code: 'access_denied' });
         });
       } finally {
-        clearActiveSessionTokenRoles();
+        resetDocumentStoreSingletonsForTesting();
       }
     });
 
@@ -2435,7 +2464,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toBe(true);
 
         // R8: Removing a team member from restricted Matter A removes their grant on the mock backend
-        asEmployee('P-000001', () =>
+        await asEmployee('P-000001', () =>
           saveMatterRecord(
             {
               ...targetMatterA,
@@ -2464,7 +2493,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const grantsBeforeUnauthorizedSave = structuredClone(
           mockItemAfterTeamRemoval.directGrants,
         );
-        const unauthorizedSaveRes = asEmployee('P-000007', () =>
+        const unauthorizedSaveRes = await asEmployee('P-000007', () =>
           saveMatterRecord(
             {
               ...targetMatterA,
@@ -2500,7 +2529,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
 
         // R121: (2) An authorised participant (P-000001) sending isStaffMatter: false and restrictedAccessUserIds: [] keeps the matter as a restricted staff matter
-        const authorisedAttemptToStripRes = asEmployee('P-000001', () =>
+        const authorisedAttemptToStripRes = await asEmployee('P-000001', () =>
           saveMatterRecord(
             {
               ...matterAfterUnauthorizedSave,
@@ -2513,17 +2542,17 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
         await flushDocumentLifecycleSyncForTesting();
         expect(authorisedAttemptToStripRes.errors).toBeUndefined();
-        expect(authorisedAttemptToStripRes.matter.isStaffMatter).toBe(true);
+        expect(authorisedAttemptToStripRes.matter?.isStaffMatter).toBe(true);
         expect(
-          authorisedAttemptToStripRes.matter.restrictedAccessUserIds,
+          authorisedAttemptToStripRes.matter?.restrictedAccessUserIds,
         ).toContain('P-000001');
         expect(
-          authorisedAttemptToStripRes.matter.restrictedAccessUserIds,
+          authorisedAttemptToStripRes.matter?.restrictedAccessUserIds,
         ).toContain('P-000002');
 
         // R121: (3) A user without matter:create (e.g. finance role P-000009) cannot create a matter
         const countBeforeUnauthorisedCreate = getStore().matters.length;
-        const unauthorisedCreateRes = asEmployee('P-000009', () =>
+        const unauthorisedCreateRes = await asEmployee('P-000009', () =>
           saveMatterRecord(
             {
               title: 'Finance Unauthorised Matter',
@@ -2559,7 +2588,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             )?.id ?? 'matter_status.closed';
           const openStatusId = targetMatterA.matterStatusId;
 
-          const closeSaveRes = asEmployee('P-000001', () =>
+          const closeSaveRes = await asEmployee('P-000001', () =>
             saveMatterRecord(
               {
                 ...targetMatterA,
@@ -2586,7 +2615,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             ),
           ).toBe(true);
 
-          const reopenSaveRes = asEmployee('P-000001', () =>
+          const reopenSaveRes = await asEmployee('P-000001', () =>
             saveMatterRecord(
               {
                 ...targetMatterA,
@@ -2856,14 +2885,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         // R9, R91 & R107: Matter with unset owningTeamId (undefined) stays undefined after store load and after a save by another user, fails provisioning as misconfigured, and succeeds once owningDepartmentId + owningTeamId are saved
         const rawUnsetTeamMatter = {
           ...targetMatterA,
-          id: 'M-NO-TEAM-SAVED',
           matterNumber: 'NT001-0001',
           title: 'Matter Without Owning Team',
           owningDepartmentId: 'DEPT-RE',
           leadFeeEarnerId: 'P-000002',
         };
+        delete (rawUnsetTeamMatter as { id?: string }).id;
         delete (rawUnsetTeamMatter as { owningTeamId?: string | null }).owningTeamId;
-        const savedNoTeamMatterRes = asEmployee('P-000002', () =>
+        const savedNoTeamMatterRes = await asEmployee('P-000002', () =>
           saveMatterRecord(rawUnsetTeamMatter, {
             byId: 'P-000002',
           }),
@@ -2876,7 +2905,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toBeUndefined();
 
         // Save again by another user without setting owningTeamId: still undefined
-        const resavedByOtherUser = asEmployee('P-000001', () =>
+        const resavedByOtherUser = await asEmployee('P-000001', () =>
           saveMatterRecord(
             {
               ...savedNoTeamMatterRes.matter!,
@@ -2898,7 +2927,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).rejects.toMatchObject({ code: 'misconfigured' });
 
         // R107: (1) A save with an unknown team or a team from another department returns a field error and changes nothing
-        const badUnknownTeamRes = asEmployee('P-000001', () =>
+        const badUnknownTeamRes = await asEmployee('P-000001', () =>
           saveMatterRecord(
             {
               ...resavedByOtherUser.matter!,
@@ -2915,7 +2944,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
         ).toBeUndefined();
 
-        const badCrossDeptTeamRes = asEmployee('P-000001', () =>
+        const badCrossDeptTeamRes = await asEmployee('P-000001', () =>
           saveMatterRecord(
             {
               ...resavedByOtherUser.matter!,
@@ -2933,7 +2962,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toBeUndefined();
 
         // R107: (2) A fee earner without matter:reassign_ownership (P-000002) cannot change an existing matter's owning team
-        const feeEarnerReassignRes = asEmployee('P-000002', () =>
+        const feeEarnerReassignRes = await asEmployee('P-000002', () =>
           saveMatterRecord(
             {
               ...resavedByOtherUser.matter!,
@@ -2951,7 +2980,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toBeUndefined();
 
         // R107: Setting owningDepartmentId and owningTeamId via saveMatterRecord by a partner (with matter:reassign_ownership) persists both and allows provisioning to succeed
-        const savedWithTeamMatterRes = asEmployee('P-000001', () =>
+        const savedWithTeamMatterRes = await asEmployee('P-000001', () =>
           saveMatterRecord(
             {
               ...resavedByOtherUser.matter!,
@@ -3245,7 +3274,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(typeof MockSharePointGraphBackend).toBe('function');
       } finally {
         setTestEntraSessionOverride(undefined);
-        clearActiveSessionTokenRoles();
         store.matters = snapshotMatters;
         store.people = snapshotPeople;
         store.notifications = snapshotNotifications;
@@ -3407,26 +3435,39 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const prevNodeEnvForR112 = process.env.NODE_ENV;
         const prevTenantPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
         try {
-          // Ensure Matter M-000001 has a location so syncMatterLifecycleOnSaveSync executes and throws synchronously when called outside asEmployee (no verifiedSession)
+          // Ensure Matter M-000001 has a location and set a mismatched documentStoreConfigOverride.tenantId so syncMatterLifecycleOnSaveSync throws synchronously inside saveMatterRecord
           await asEmployee('P-000001', () =>
             ensureMatterDocumentStoreProvisioned('M-000001', 'P-000001'),
           );
           const m1 = store.matters.find((m) => m.id === 'M-000001')!;
           const updatedTitle = `R112 Persisted Title ${Date.now()}`;
+          const prevDocStoreOverride = store.documentStoreConfigOverride;
+          store.documentStoreConfigOverride = {
+            ...(store.documentStoreConfigOverride ?? {}),
+            documentStores: 'invalid-override-to-force-sync-throw' as never,
+          } as never;
           delete (process.env as Record<string, string | undefined>).VITEST;
           (process.env as Record<string, string | undefined>).NODE_ENV =
             'development';
           (process.env as Record<string, string | undefined>).PLATFORM_TENANT_PACKAGE_DIR =
             'client-not-a-law-firm';
           saveStore(store);
-          // Call outside asEmployee so syncMatterLifecycleOnSaveSync throws UNAUTHENTICATED synchronously
-          const saveRes = saveMatterRecord(
-            {
-              ...m1,
-              title: updatedTitle,
-            },
-            { id: 'M-000001', byId: 'P-000001' },
-          );
+          let saveRes: Awaited<ReturnType<typeof saveMatterRecord>>;
+          try {
+            saveRes = await asEmployee('P-000001', () =>
+              saveMatterRecord(
+                {
+                  title: updatedTitle,
+                  clientId: m1.clientId,
+                  practiceAreaId: m1.practiceAreaId,
+                  workTypeSubcategoryId: m1.workTypeSubcategoryId,
+                },
+                { id: 'M-000001', byId: 'P-000001' },
+              ),
+            );
+          } finally {
+            store.documentStoreConfigOverride = prevDocStoreOverride;
+          }
           expect(saveRes.errors).toBeUndefined();
           expect(saveRes.matter.title).toBe(updatedTitle);
           expect(
@@ -3635,8 +3676,285 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           (process.env as Record<string, string | undefined>).NODE_ENV =
             prevNodeEnv;
         }
+
+        // R137: Session signed for 'tenant-a' passed to buildTenantContextForUser when config.tenantId is 'not-a-law-firm' throws TENANCY_FORGERY_DETECTED
+        const carysUser = store.people.find((p) => p.id === 'P-000001')!;
+        const forgedTenantCookie = createSignedEntraSessionCookie({
+          personId: carysUser.id,
+          tenantId: 'tenant-a',
+          oid:
+            carysUser.entraObjectId ??
+            '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: carysUser.id,
+          email:
+            carysUser.emails[0]?.address ??
+            'carys.hughes@notalawfirm.example',
+          displayName: `${carysUser.firstName} ${carysUser.surname}`,
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const verifiedForgedSession =
+          verifySignedEntraSessionCookie(forgedTenantCookie)!;
+        expect(() =>
+          buildTenantContextForUser(
+            carysUser.id,
+            store,
+            getActiveTenantConfiguration(),
+            { session: verifiedForgedSession },
+          ),
+        ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+        // Helper for authenticated request sessions on store employees
+        const runAsStoreEmployee = <T>(
+          personId: string,
+          fn: () => T,
+          opts?: { mfaVerified?: boolean; rolesOverride?: string[] },
+        ): T => {
+          const emp = store.people.find((p) => p.id === personId)!;
+          const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+          const roles = opts?.rolesOverride ?? emp.roles ?? ['fee_earner'];
+          const verified = verifySignedEntraSessionCookie(
+            createSignedEntraSessionCookie({
+              personId: emp.id,
+              tenantId: 'not-a-law-firm',
+              oid:
+                emp.entraObjectId ??
+                `00000000-0000-4000-8000-${emp.id.replace(/\D/g, '').padStart(12, '0')}`,
+              tid: '11111111-2222-3333-4444-000000000000',
+              sub: emp.id,
+              email:
+                emp.emails[0]?.address ??
+                `${emp.id.toLowerCase()}@notalawfirm.example`,
+              displayName: `${emp.firstName} ${emp.surname}`,
+              entraRoles: roles,
+              mappedRoles: roles,
+              entraGroups: [],
+              mfaVerified: opts?.mfaVerified ?? true,
+              amr: (opts?.mfaVerified ?? true) ? ['pwd', 'mfa'] : ['pwd'],
+              authenticatedAt: new Date().toISOString(),
+              expiresAt,
+            }),
+          )!;
+          return runWithActiveActorSession(
+            {
+              personId: emp.id,
+              tenantId: 'not-a-law-firm',
+              tokenRoles: roles,
+              expiresAtMs: Date.parse(expiresAt),
+              verifiedSession: verified,
+            },
+            fn,
+          );
+        };
+
+        const openMatter = store.matters.find(
+          (m) => !m.isStaffMatter && !m.hasEthicalWall,
+        )!;
+
+        // R143 (1) & R133: User who can access the matter (P-000009 finance) but lacks matter:edit gets { matter: null, errors: { permission: ... } }
+        const noEditPermRes = await runAsStoreEmployee('P-000009', () =>
+          saveMatterRecord(
+            { ...openMatter, title: 'Finance Cannot Edit' },
+            { id: openMatter.id, byId: 'P-000009' },
+          ),
+        );
+        expect(noEditPermRes.matter).toBeNull();
+        expect(noEditPermRes.errors?.permission).toMatch(/matter:edit/i);
+
+        // R138: Passing an existing matter object with `id` into saveMatterRecord without `opts.id` returns errors.id and matter: null without creating a duplicate
+        const matterCountBeforeMissingId = store.matters.length;
+        const missingIdOptsRes = await runAsStoreEmployee('P-000001', () =>
+          saveMatterRecord(
+            { ...openMatter, title: 'Missing opts.id' },
+            { byId: 'P-000001' },
+          ),
+        );
+        expect(missingIdOptsRes.matter).toBeNull();
+        expect(missingIdOptsRes.errors?.id).toMatch(/opts\.id/i);
+        expect(store.matters.length).toBe(matterCountBeforeMissingId);
+
+        // R138 (b): markEngagementLetterDrafted updates only engagementLetterStatus: 'Drafted' on the existing matter
+        const draftedRes = runAsStoreEmployee('P-000001', () =>
+          markEngagementLetterDrafted(openMatter.id, 'P-000001'),
+        );
+        expect(draftedRes.errors).toBeUndefined();
+        expect(draftedRes.matter?.id).toBe(openMatter.id);
+        expect(draftedRes.matter?.engagementLetterStatus).toBe('Drafted');
+
+        // R134: Editing title on an existing matter whose owningDepartmentId/owningTeamId was archived succeeds; changing to an archived department/team fails
+        const targetDept = store.orgStructure!.departments.find(
+          (d) => d.id === openMatter.owningDepartmentId,
+        )!;
+        const targetTeam = store.orgStructure!.teamsOrPracticeGroups.find(
+          (g) => g.id === openMatter.owningTeamId,
+        )!;
+        const otherInactiveDept = store.orgStructure!.departments.find(
+          (d) => d.id !== openMatter.owningDepartmentId,
+        )!;
+        const prevDeptActive = targetDept.active;
+        const prevTeamActive = targetTeam.active;
+        const prevOtherDeptActive = otherInactiveDept.active;
+        try {
+          targetDept.active = false;
+          targetTeam.active = false;
+          otherInactiveDept.active = false;
+
+          const legacyDeptTitleSave = await runAsStoreEmployee('P-000001', () =>
+            saveMatterRecord(
+              {
+                ...openMatter,
+                title: `${openMatter.title} (Updated on Legacy Archived Dept)`,
+              },
+              { id: openMatter.id, byId: 'P-000001' },
+            ),
+          );
+          expect(legacyDeptTitleSave.errors).toBeUndefined();
+          expect(legacyDeptTitleSave.matter?.title).toContain(
+            '(Updated on Legacy Archived Dept)',
+          );
+
+          const changeToArchivedDeptSave = await runAsStoreEmployee(
+            'P-000001',
+            () =>
+              saveMatterRecord(
+                {
+                  ...openMatter,
+                  owningDepartmentId: otherInactiveDept.id,
+                },
+                { id: openMatter.id, byId: 'P-000001' },
+              ),
+          );
+          expect(changeToArchivedDeptSave.matter).toBeNull();
+          expect(
+            changeToArchivedDeptSave.errors?.owningDepartmentId,
+          ).toBeDefined();
+        } finally {
+          targetDept.active = prevDeptActive;
+          targetTeam.active = prevTeamActive;
+          otherInactiveDept.active = prevOtherDeptActive;
+        }
+
+        // R136: updateMatterConflictRecord requires matter:edit (a user with risk:view only gets { matter: null })
+        const riskViewOnlyRes = runAsStoreEmployee(
+          'P-000009',
+          () =>
+            updateMatterConflictRecord(
+              openMatter.id,
+              {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '2026-11-01',
+                lastRunById: 'P-000009',
+                lastRunByName: 'Finance User',
+                parties: [],
+                matches: [],
+                runs: [],
+                comments: [],
+              },
+              'P-000009',
+            ),
+          { rolesOverride: ['finance'] },
+        );
+        expect(riskViewOnlyRes.matter).toBeNull();
+
+        // R136 (b) & R135: Permitted user saves an information_barrier match -> hasEthicalWall becomes true; liftMatterRestriction enforces permission, MFA, and reason, and writes matter-restriction-lift audit
+        const barrierRes = runAsStoreEmployee('P-000001', () =>
+          updateMatterConflictRecord(
+            openMatter.id,
+            {
+              status: 'Approved',
+              outcomeLabel: 'Approved with conditions',
+              declarationConfirmed: true,
+              reviewerMessage: '',
+              lastRunAtDisplay: '2026-11-01',
+              lastRunById: 'P-000001',
+              lastRunByName: 'Carys Hughes',
+              parties: [],
+              matches: [
+                {
+                  id: 'CM-BARRIER-1',
+                  partyId: 'pt-1',
+                  partyName: 'Barrier Party',
+                  matchedRecordId: openMatter.clientId,
+                  matchedRecordName: 'Barrier Party',
+                  matchedRecordType: 'organisation',
+                  strength: 'Exact',
+                  whereFound: 'Matter',
+                  responsiblePartnerId: 'P-000001',
+                  responsiblePartnerName: 'Carys Hughes',
+                  dateLabel: '2026-11-01',
+                  disposition: 'potential_conflict',
+                  note: 'Prior instruction',
+                  reviewerDecision: 'approve_with_conditions',
+                  reviewerConditionType: 'information_barrier',
+                  reviewerNote: 'Ethical wall established',
+                },
+              ],
+              runs: [],
+              comments: [],
+            },
+            'P-000001',
+          ),
+        );
+        expect(barrierRes.matter?.hasEthicalWall).toBe(true);
+
+        // Lifting without permission (P-000002 fee_earner) is refused
+        const liftNoPerm = runAsStoreEmployee('P-000002', () =>
+          liftMatterRestriction(
+            openMatter.id,
+            'ethical_wall',
+            'Attempt by fee earner',
+            'P-000002',
+          ),
+        );
+        expect(liftNoPerm.matter).toBeNull();
+        expect(liftNoPerm.errors?.permission).toBeDefined();
+
+        // Lifting without MFA (P-000001 partner with mfaVerified: false) is refused
+        const liftNoMfa = runAsStoreEmployee(
+          'P-000001',
+          () =>
+            liftMatterRestriction(
+              openMatter.id,
+              'ethical_wall',
+              'Attempt without MFA',
+              'P-000001',
+            ),
+          { mfaVerified: false },
+        );
+        expect(liftNoMfa.matter).toBeNull();
+        expect(liftNoMfa.errors?.mfa).toMatch(/MFA_REQUIRED/);
+
+        // Lifting with permission, MFA, and non-empty reason clears hasEthicalWall and records matter-restriction-lift audit
+        const liftOk = runAsStoreEmployee(
+          'P-000001',
+          () =>
+            liftMatterRestriction(
+              openMatter.id,
+              'ethical_wall',
+              'Counterparty instruction concluded and COLP approved lifting barrier',
+              'P-000001',
+            ),
+          { mfaVerified: true },
+        );
+        expect(liftOk.errors).toBeUndefined();
+        expect(liftOk.matter?.hasEthicalWall).toBe(false);
+        expect(
+          store.audit.some(
+            (a) =>
+              a.recordId === openMatter.id &&
+              a.action === 'matter-restriction-lift',
+          ),
+        ).toBe(true);
       } finally {
-        clearActiveSessionTokenRoles();
         store.matters = snapshotMatters;
         store.people = snapshotPeople;
         saveStore(store);

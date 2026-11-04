@@ -9,7 +9,7 @@
  */
 import { formatDate } from './dates';
 import { resolveLabel } from './lists';
-import { normaliseEmail, normaliseOrgName, normaliseRegNumber, normaliseText } from './normalise';
+import { normaliseEmail, normaliseRegNumber, normaliseText } from './normalise';
 import { resolvePersonPermissionSet } from './rbac';
 import { resolveUserAppRole } from './tasks';
 import type {
@@ -315,9 +315,6 @@ export function findOneSquaredIdForPmsCode(
     null
   );
 }
-
-// Keep normaliseOrgName referenced for potential fuzzy matching
-void normaliseOrgName;
 
 /**
  * Extract the 1Squared value for a configured field mapping key across core fields,

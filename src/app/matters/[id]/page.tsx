@@ -60,6 +60,10 @@ export default async function MatterProfilePage({
           customFields={snap.customFields}
           employees={snap.employees}
           currentUser={snap.currentUser}
+          orgStructure={snap.orgStructure}
+          matterPartyTaxonomy={snap.matterPartyTaxonomy}
+          matterCostsConfig={snap.matterCostsConfig}
+          canReassignOwnership={snap.currentUserPermissions.includes('matter:reassign_ownership')}
         />
       );
     }

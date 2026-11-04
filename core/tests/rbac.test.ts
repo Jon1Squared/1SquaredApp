@@ -46,14 +46,12 @@ import {
 } from '../../src/domain/tasks';
 import {
   canPersonAccessMatter,
-  clearActiveSessionTokenRoles,
   getDefaultTenantRbacConfig,
   getStoredActorSessionForPerson,
   hasPersonPermission,
   resolvePersonForEntraClaims,
   resolvePersonPermissions,
   runWithActiveActorSession,
-  setActiveSessionTokenRolesForPerson,
   setRuntimeRbacConfigOverride,
 } from '../../src/domain/rbac';
 import { buildDemoData } from '../../src/seed/demo';
@@ -63,6 +61,8 @@ import {
   getAppSnapshot,
   getEmployeeDetailsForUser,
   logEmployeeRestrictedAccess,
+  previewRbacOverrides,
+  requireAuthenticatedActor,
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
   updateEmployeeRolesAndSupports,
@@ -76,6 +76,7 @@ import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
   setTestEntraSessionOverride,
+  verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
   getActiveTenantRawBaseConfig,
@@ -1210,6 +1211,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // R53: updateTenantRbacConfigAction with mfaVerified: false returns MFA_REQUIRED
       setTestEntraSessionOverride({
         personId: 'P-000004',
+        tenantId: 'not-a-law-firm',
         oid: '00000000-0000-4000-8000-000000000004',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'P-000004',
@@ -1340,10 +1342,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           // Stored employee roles remain ['fee_earner'] and do not permanently gain 'risk_compliance'
           expect(hybridSignIn.person.roles).toEqual(['fee_earner']);
           // Yet the active session permission set includes risk_compliance permissions (e.g. 'risk:view')
-          const hybridSnap = getAppSnapshot('P-000002');
+          const hybridSnap = runWithActiveActorSession(
+            {
+              tenantId: 'not-a-law-firm',
+              personId: 'P-000002',
+              tokenRoles: hybridSignIn.verifiedToken.roles,
+              expiresAtMs: Date.now() + 3600_000,
+            },
+            () => getAppSnapshot('P-000002'),
+          );
           expect(hybridSnap.currentUserPermissions).toContain('risk:view');
           // When the subsequent session has no token roles, the user falls back to stored ['fee_earner'] roles only
-          resolveOrProvisionEntraEmployee({
+          const subsequentSignIn = resolveOrProvisionEntraEmployee({
             oid: '00000000-0000-4000-8000-000000000002',
             tid: '00000000-0000-4000-8000-000000000099',
             sub: 'sub-002',
@@ -1352,7 +1362,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             roles: [],
             amr: ['pwd', 'mfa'],
           });
-          const hybridAfterSnap = getAppSnapshot('P-000002');
+          const hybridAfterSnap = runWithActiveActorSession(
+            {
+              tenantId: 'not-a-law-firm',
+              personId: 'P-000002',
+              tokenRoles: subsequentSignIn.verifiedToken.roles,
+              expiresAtMs: Date.now() + 3600_000,
+            },
+            () => getAppSnapshot('P-000002'),
+          );
           expect(hybridAfterSnap.currentUserPermissions).not.toContain(
             'risk:view',
           );
@@ -1392,6 +1410,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // and a fee earner calling switchUserAction('P-000051') in demo mode is refused.
       setTestEntraSessionOverride({
         personId: 'P-000002',
+        tenantId: 'not-a-law-firm',
         oid: '00000000-0000-4000-8000-000000000002',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: '00000000-0000-4000-8000-000000000002',
@@ -1463,7 +1482,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('enforces R100 request/tenant-scoped token roles without cross-tenant, post-logout, or cross-user leakage', async () => {
       resetAllDemoData('P-000001');
-      clearActiveSessionTokenRoles();
 
       updateTenantRbacConfig(
         {
@@ -1499,10 +1517,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const dafydd = getAppSnapshot('P-000002').people.find((p) => p.id === 'P-000002')!;
       const carys = getAppSnapshot('P-000001').people.find((p) => p.id === 'P-000001')!;
       expect(dafydd.roles).toEqual(['fee_earner']);
-
-      setActiveSessionTokenRolesForPerson('P-000002', ['admin'], {
-        tenantId: 'tenant-a',
-      });
 
       // 1a. Outside runWithActiveActorSession, resolvePersonPermissions(person) returns stored roles only
       expect(resolvePersonPermissions(dafydd)).not.toContain('admin:access');
@@ -1559,9 +1573,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expiresAtMs: Date.now() + 3600_000,
           },
           async () => {
-            setActiveSessionTokenRolesForPerson('P-000002', ['risk_compliance'], {
-              tenantId: 'not-a-law-firm',
-            });
             await new Promise((resolve) => setTimeout(resolve, 15));
             return {
               selfPerms: resolvePersonPermissions(dafydd),
@@ -1577,9 +1588,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expiresAtMs: Date.now() + 3600_000,
           },
           async () => {
-            setActiveSessionTokenRolesForPerson('P-000001', ['finance'], {
-              tenantId: 'not-a-law-firm',
-            });
             await new Promise((resolve) => setTimeout(resolve, 15));
             return {
               selfPerms: resolvePersonPermissions(carys),
@@ -1670,7 +1678,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setTestEntraSessionOverride(undefined);
       }
 
-      // 3. Signing out user A clears user A's active request session entry while leaving a concurrent user B request scope intact
+      // 3. Signing out clears the session cookies; an expired or signed-out session is rejected with UNAUTHENTICATED
       const userASignedCookie = createSignedEntraSessionCookie({
         personId: 'P-000002',
         tenantId: 'not-a-law-firm',
@@ -1693,32 +1701,39 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           cookie: `onesquared_entra_session=${encodeURIComponent(userASignedCookie)}`,
         },
       });
-      await runWithActiveActorSession(
-        {
-          tenantId: 'not-a-law-firm',
-          personId: 'P-000001',
-          tokenRoles: ['finance'],
-          expiresAtMs: Date.now() + 3600_000,
-        },
-        async () => {
-          const logoutRes = await logoutPost(logoutReq);
-          expect(logoutRes.status).toBe(303);
-          expect(
-            getStoredActorSessionForPerson('P-000002', 'not-a-law-firm'),
-          ).toBeUndefined();
-          expect(
-            getStoredActorSessionForPerson('P-000001', 'not-a-law-firm'),
-          ).toBeDefined();
-          expect(
-            getStoredActorSessionForPerson('P-000001', 'not-a-law-firm')
-              ?.tokenRoles,
-          ).toContain('finance');
-        },
-      );
+      const logoutRes = await logoutPost(logoutReq);
+      expect(logoutRes.status).toBe(303);
+      expect(logoutRes.cookies.get('onesquared_entra_session')?.value ?? '').toBe('');
+
+      // An expired session cookie is rejected by verifySignedEntraSessionCookie and requireAuthenticatedActor throws UNAUTHENTICATED when signed out
+      const expiredCookie = createSignedEntraSessionCookie({
+        personId: 'P-000002',
+        tenantId: 'not-a-law-firm',
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: 'P-000002',
+        email: 'dafydd.evans@notalawfirm.example',
+        displayName: 'Dafydd Evans',
+        entraRoles: ['risk_compliance'],
+        mappedRoles: ['risk_compliance'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date(Date.now() - 7200_000).toISOString(),
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      });
+      expect(verifySignedEntraSessionCookie(expiredCookie)).toBeNull();
+      setTestEntraSessionOverride(null);
+      try {
+        await expect(requireAuthenticatedActor()).rejects.toThrow(
+          /UNAUTHENTICATED/,
+        );
+      } finally {
+        setTestEntraSessionOverride(undefined);
+      }
 
       setRuntimeRbacConfigOverride(null, 'tenant-a');
       setRuntimeRbacConfigOverride(null, 'tenant-b');
-      clearActiveSessionTokenRoles();
       resetAllDemoData('P-000001');
     });
 
@@ -1810,6 +1825,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // Sign in as P-000006 (Owain Jenkins, fee_earner, not on restrictedAccessUserIds)
         setTestEntraSessionOverride({
           personId: 'P-000006',
+          tenantId: 'not-a-law-firm',
           oid: '00000000-0000-4000-8000-000000000006',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'P-000006',
@@ -1923,6 +1939,35 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           logViewSensitive: true,
         });
         expect(auditedRead.sensitive).not.toBeNull();
+
+        // R139: A fee earner who leads a team (isTeamLeadOfAnyTeam: true) does NOT hold matter:reassign_ownership
+        const dafydd = store.people.find((p) => p.id === 'P-000002')!;
+        const teamLedByDafydd: Team = {
+          ...store.teams[0]!,
+          id: 'TM-R139-LEAD',
+          leadIds: ['P-000002'],
+          memberIds: ['P-000002'],
+          active: true,
+        };
+        const dafyddAsTeamLeadPerms = resolvePersonPermissions(dafydd, {
+          allPeople: store.people,
+          teams: [...store.teams, teamLedByDafydd],
+        });
+        expect(dafyddAsTeamLeadPerms).toContain('task:claim_any');
+        expect(dafyddAsTeamLeadPerms).not.toContain('matter:reassign_ownership');
+
+        // R141: previewRbacOverrides resolves draft grant/revoke overrides on the server via resolvePersonPermissions
+        const previewRes = previewRbacOverrides(
+          'P-000002',
+          {
+            grant: ['risk:view'],
+            revoke: ['matter:create'],
+          },
+          'P-000004',
+        );
+        expect(previewRes.ok).toBe(true);
+        expect(previewRes.permissions).toContain('risk:view');
+        expect(previewRes.permissions).not.toContain('matter:create');
       } finally {
         resetAllDemoData('P-000001');
       }

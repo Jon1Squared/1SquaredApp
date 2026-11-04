@@ -41,10 +41,7 @@ import { GET as getDocumentDownloadRoute } from '@/app/api/documents/download/ro
 import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
 import { toMatterAccessSubject } from '@/domain/documentGeneration';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
-import {
-  runWithActiveActorSession,
-  setActiveSessionTokenRolesForPerson,
-} from '@/domain/rbac';
+import { runWithActiveActorSession } from '@/domain/rbac';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   getDocumentGenerationSnapshotForUser,
@@ -91,11 +88,6 @@ function buildTestSessionScopeForEmployee(personId: string) {
   });
   const verified = verifySignedEntraSessionCookie(signed);
   if (!verified) return null;
-  setActiveSessionTokenRolesForPerson(emp.id, roles, {
-    tenantId,
-    expiresAt,
-    verifiedSession: verified,
-  });
   return {
     personId: emp.id,
     tenantId,
@@ -1004,14 +996,17 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     // Tenant B is unaffected until its own migration runs
     expect(runner.listAppliedMigrations(ctxB)).toHaveLength(0);
 
-    // Roll back migration 0001 on Tenant A
+    // Roll back migrations in reverse order down to 0001 on Tenant A
+    expect(runner.rollbackVersion(ctxA, '0004')).toBe(true);
+    expect(runner.rollbackVersion(ctxA, '0003')).toBe(true);
+    expect(runner.rollbackVersion(ctxA, '0002')).toBe(true);
     const rolledBack = runner.rollbackVersion(ctxA, '0001');
     expect(rolledBack).toBe(true);
     expect(runner.getActiveTables(ctxA)).not.toContain('document_templates');
 
     // Re-apply cleanly
     const reapplied = runner.applyUp(ctxA);
-    expect(reapplied).toHaveLength(1);
+    expect(reapplied).toHaveLength(4);
     expect(runner.getActiveTables(ctxA)).toContain('documents');
   });
 
@@ -1482,6 +1477,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       staffMatter.restrictedAccessUserIds = ['P-000001'];
       setTestEntraSessionOverride({
         sub: 'P-000007',
+        tenantId: 'not-a-law-firm',
         oid: '00000000-0000-0000-0000-000000000007',
         tid: '11111111-2222-3333-4444-555555555555',
         displayName: 'Excluded Solicitor',
@@ -1573,6 +1569,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       );
       setTestEntraSessionOverride({
         sub: 'P-000001',
+        tenantId: 'not-a-law-firm',
         oid: '00000000-0000-0000-0000-000000000001',
         tid: '11111111-2222-3333-4444-555555555555',
         displayName: 'Admin User',

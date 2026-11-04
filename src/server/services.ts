@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import { attentionList } from '@/domain/attention';
@@ -36,6 +37,7 @@ import {
 import type { FormatContext } from '@/domain/fieldRegistry';
 import {
   createDefaultHomePagesConfig,
+  createDefaultRoleConfigs,
   getLeftRailVisibility,
   resolveActiveViewingRole,
   resolveEmployeeRoles,
@@ -116,7 +118,6 @@ import {
   resolvePersonPermissionSet,
   resolvePersonPermissions,
   runWithActiveActorSession,
-  setActiveSessionTokenRolesForPerson,
   setRuntimeRbacConfigOverride,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
@@ -321,11 +322,6 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
     });
   }
   const resolvedTenantId = entraSession.tenantId || tenantId;
-  setActiveSessionTokenRolesForPerson(person.id, entraSession.mappedRoles, {
-    tenantId: resolvedTenantId,
-    expiresAt: entraSession.expiresAt,
-    verifiedSession: entraSession,
-  });
   return {
     personId: person.id,
     person,
@@ -570,10 +566,6 @@ export function getAppSnapshot(
   userId: string,
   options?: { tokenRoles?: readonly string[] },
 ) {
-  const activeActor = getActiveActorSession();
-  if (activeActor && activeActor.personId === userId) {
-    return getAppSnapshotInScope(userId, options);
-  }
   return getAppSnapshotInScope(userId, options);
 }
 
@@ -636,7 +628,13 @@ function getAppSnapshotInScope(
     store.enquiries,
   );
 
-  const rawHomePagesConfig = store.homePagesConfig ?? createDefaultHomePagesConfig(now.toISOString());
+  const activeTenantCfg = getActiveTenantConfiguration();
+  const rawHomePagesConfig =
+    store.homePagesConfig ??
+    createDefaultHomePagesConfig(
+      now.toISOString(),
+      activeTenantCfg.branding.primaryDomain,
+    );
   const homePagesConfig: HomePagesConfig = {
     ...rawHomePagesConfig,
     firmSettings: {
@@ -955,7 +953,13 @@ function getAppSnapshotInScope(
     notifications: userNotifications,
     enquirySettings: store.enquirySettings,
     taskSettings: store.taskSettings,
-    matterCostsConfig: store.matterCostsConfig ?? createDefaultMatterCostsConfig(store.values),
+    matterCostsConfig:
+      store.matterCostsConfig ??
+      createDefaultMatterCostsConfig(store.values, {
+        clientProfileCode: activeTenantCfg.tenantId,
+        displayName: activeTenantCfg.displayName,
+        primaryDomain: activeTenantCfg.branding.primaryDomain,
+      }),
     taskBadgeCount,
     notes: store.notes,
     audit: store.audit,
@@ -2270,7 +2274,7 @@ export function generateMatterNumber(store: FirmStore, clientId: string): string
   return `${prefix}-${String(nextSeq).padStart(4, '0')}`;
 }
 
-export function saveMatterRecord(
+export async function saveMatterRecord(
   input: Partial<Matter> & {
     title: string;
     clientId: string;
@@ -2283,7 +2287,7 @@ export function saveMatterRecord(
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
     enforceKeyDateGates?: boolean;
   },
-): { matter: Matter; errors?: Record<string, string> } {
+): Promise<{ matter: Matter; errors?: Record<string, string> }> {
   const store = getStore();
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
@@ -2295,6 +2299,25 @@ export function saveMatterRecord(
       errors: {
         access: 'Matter not found or restricted.',
         permission: 'Matter not found or restricted.',
+      },
+    };
+  }
+  const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  if (!activeVerifiedSession || activeVerifiedSession.personId !== actingUser.id) {
+    return {
+      matter: null as unknown as Matter,
+      errors: {
+        access: 'UNAUTHENTICATED: Your session has expired. Please sign in again.',
+      },
+    };
+  }
+  if ((input as { id?: string }).id && !opts.id) {
+    return {
+      matter: null as unknown as Matter,
+      errors: {
+        id: 'Cannot save an existing matter payload without passing opts.id.',
       },
     };
   }
@@ -2321,7 +2344,7 @@ export function saveMatterRecord(
       })
     ) {
       return {
-        matter: existing,
+        matter: null as unknown as Matter,
         errors: {
           permission: 'You do not have permission (matter:edit) to edit matters.',
         },
@@ -2353,7 +2376,7 @@ export function saveMatterRecord(
     if (!input.workTypeSubcategoryId) errors.workTypeSubcategoryId = 'Work type subcategory is required.';
   }
 
-  // Validate owningDepartmentId and owningTeamId against orgStructure and enforce matter:reassign_ownership on existing matters (R107)
+  // Validate owningDepartmentId and owningTeamId against orgStructure and enforce matter:reassign_ownership on existing matters (R107, R134)
   const nextOwningDepartmentId =
     input.owningDepartmentId !== undefined
       ? (input.owningDepartmentId ?? '').trim() || undefined
@@ -2363,7 +2386,17 @@ export function saveMatterRecord(
       ? (input.owningTeamId ?? '').trim() || undefined
       : existing?.owningTeamId || undefined;
 
-  if (nextOwningDepartmentId) {
+  const prevDeptId = existing?.owningDepartmentId || undefined;
+  const prevTeamId = existing?.owningTeamId || undefined;
+  const deptChanged =
+    input.owningDepartmentId !== undefined && nextOwningDepartmentId !== prevDeptId;
+  const teamChanged =
+    input.owningTeamId !== undefined && nextOwningTeamId !== prevTeamId;
+
+  const shouldValidateDept = !existing || deptChanged;
+  const shouldValidateTeam = !existing || teamChanged || deptChanged;
+
+  if (shouldValidateDept && nextOwningDepartmentId) {
     const activeDept = store.orgStructure.departments.find(
       (d) => d.id === nextOwningDepartmentId && d.active,
     );
@@ -2372,7 +2405,7 @@ export function saveMatterRecord(
         'Selected owning department does not exist or is inactive.';
     }
   }
-  if (nextOwningTeamId) {
+  if (shouldValidateTeam && nextOwningTeamId) {
     const activeTeam = store.orgStructure.teamsOrPracticeGroups.find(
       (t) => t.id === nextOwningTeamId && t.active,
     );
@@ -2388,12 +2421,6 @@ export function saveMatterRecord(
   }
 
   if (existing) {
-    const prevDeptId = existing.owningDepartmentId || undefined;
-    const prevTeamId = existing.owningTeamId || undefined;
-    const deptChanged =
-      input.owningDepartmentId !== undefined && nextOwningDepartmentId !== prevDeptId;
-    const teamChanged =
-      input.owningTeamId !== undefined && nextOwningTeamId !== prevTeamId;
     if (
       (deptChanged || teamChanged) &&
       !hasPersonPermission(actingUser, 'matter:reassign_ownership', {
@@ -2460,8 +2487,13 @@ export function saveMatterRecord(
   }
 
   if (Object.keys(errors).length > 0) {
-    return { matter: existing as Matter, errors };
+    return { matter: null as unknown as Matter, errors };
   }
+
+  const countersSnapshot = { ...store.counters };
+  const pendingPeople: Person[] = [];
+  const pendingOrganisations: Organisation[] = [];
+  const pendingEnquiryLinks: Array<{ enquiry: Enquiry; linkedPersonId: string }> = [];
 
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
   const defaultStatus = vid('matter_status', 'Active');
@@ -2477,12 +2509,22 @@ export function saveMatterRecord(
     if (!rawId.startsWith('ENQ-')) return rawId;
     const enq = store.enquiries.find((e) => e.id === rawId);
     if (!enq) return rawId;
-    if (enq.linkedPersonId && store.people.some((p) => p.id === enq.linkedPersonId)) {
+    if (
+      enq.linkedPersonId &&
+      (store.people.some((p) => p.id === enq.linkedPersonId) ||
+        pendingPeople.some((p) => p.id === enq.linkedPersonId))
+    ) {
       return enq.linkedPersonId;
     }
-    const existingFromEnq = store.people.find((p) => p.createdFromEnquiryId === enq.id);
+    const existingPendingLink = pendingEnquiryLinks.find((l) => l.enquiry.id === enq.id);
+    if (existingPendingLink) {
+      return existingPendingLink.linkedPersonId;
+    }
+    const existingFromEnq =
+      store.people.find((p) => p.createdFromEnquiryId === enq.id) ??
+      pendingPeople.find((p) => p.createdFromEnquiryId === enq.id);
     if (existingFromEnq) {
-      enq.linkedPersonId = existingFromEnq.id;
+      pendingEnquiryLinks.push({ enquiry: enq, linkedPersonId: existingFromEnq.id });
       return existingFromEnq.id;
     }
     const newPersonId = nextId(store, 'P');
@@ -2561,8 +2603,8 @@ export function saveMatterRecord(
       riskReferences: '',
       createdFromEnquiryId: enq.id,
     };
-    store.people.push(newPerson);
-    enq.linkedPersonId = newPersonId;
+    pendingPeople.push(newPerson);
+    pendingEnquiryLinks.push({ enquiry: enq, linkedPersonId: newPersonId });
     return newPersonId;
   };
 
@@ -2596,9 +2638,13 @@ export function saveMatterRecord(
     const cleanName = pt.name.trim();
     const isPerson = pt.entityType === 'person';
     if (isPerson) {
-      const existingPerson = store.people.find(
-        (p) => !p.mergedIntoId && personDisplayName(p).toLowerCase() === cleanName.toLowerCase(),
-      );
+      const existingPerson =
+        store.people.find(
+          (p) => !p.mergedIntoId && personDisplayName(p).toLowerCase() === cleanName.toLowerCase(),
+        ) ??
+        pendingPeople.find(
+          (p) => !p.mergedIntoId && personDisplayName(p).toLowerCase() === cleanName.toLowerCase(),
+        );
       if (existingPerson) {
         createdRecordByPartyId.set(pt.id, existingPerson.id);
         return { ...pt, linkedRecordId: existingPerson.id };
@@ -2683,13 +2729,17 @@ export function saveMatterRecord(
         verificationReviewerId: null,
         riskReferences: '',
       };
-      store.people.push(newPerson);
+      pendingPeople.push(newPerson);
       createdRecordByPartyId.set(pt.id, newPersonId);
       return { ...pt, linkedRecordId: newPersonId };
     } else {
-      const existingOrg = store.organisations.find(
-        (o) => !o.mergedIntoId && o.legalName.toLowerCase() === cleanName.toLowerCase(),
-      );
+      const existingOrg =
+        store.organisations.find(
+          (o) => !o.mergedIntoId && o.legalName.toLowerCase() === cleanName.toLowerCase(),
+        ) ??
+        pendingOrganisations.find(
+          (o) => !o.mergedIntoId && o.legalName.toLowerCase() === cleanName.toLowerCase(),
+        );
       if (existingOrg) {
         createdRecordByPartyId.set(pt.id, existingOrg.id);
         return { ...pt, linkedRecordId: existingOrg.id };
@@ -2766,11 +2816,18 @@ export function saveMatterRecord(
         reviewDate: null,
         reviewerId: null,
       };
-      store.organisations.push(newOrg);
+      pendingOrganisations.push(newOrg);
       createdRecordByPartyId.set(pt.id, newOrgId);
       return { ...pt, linkedRecordId: newOrgId };
     }
   });
+
+  const allPeopleWithPending =
+    pendingPeople.length > 0 ? [...store.people, ...pendingPeople] : store.people;
+  const allOrganisationsWithPending =
+    pendingOrganisations.length > 0
+      ? [...store.organisations, ...pendingOrganisations]
+      : store.organisations;
 
   const resolvedConflictCheckRecord =
     input.conflictCheckRecord !== undefined
@@ -2808,7 +2865,7 @@ export function saveMatterRecord(
       leadFeeEarnerId: effectiveLeadFeeEarnerId,
       teamMemberIds: effectiveTeamMemberIds,
     },
-    store.people,
+    allPeopleWithPending,
   );
   const hasBarrierCondition = (resolvedConflictCheckRecord?.matches ?? []).some(
     (m) => m.reviewerConditionType === 'information_barrier',
@@ -2964,13 +3021,13 @@ export function saveMatterRecord(
   if (!matter.conflictCheckRecord) {
     matter.conflictCheckRecord = resolveMatterConflictCheckRecord(
       matter,
-      store.people,
-      store.organisations,
+      allPeopleWithPending,
+      allOrganisationsWithPending,
     );
   }
   const fullRiskAssessment = resolveMatterRiskAssessment(
     matter,
-    store.people,
+    allPeopleWithPending,
     store.values,
   );
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
@@ -2981,11 +3038,16 @@ export function saveMatterRecord(
     opts.saveMode === 'submit_referred' ||
     !existing.fieldValues?.['matterOpeningSnapshot'];
 
-  // R108: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
+  // R108 & R131: Run active tenant extension hooks (beforeMatterCostsCalculate and beforeMatterOpen)
   const tenantCfg = getActiveTenantConfiguration();
   const host = getPlatformExtensionHost();
   const costsConfig =
-    store.matterCostsConfig ?? createDefaultMatterCostsConfig(store.values);
+    store.matterCostsConfig ??
+    createDefaultMatterCostsConfig(store.values, {
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    });
   const resolvedCosts = resolveMatterCostsSnapshot({
     existing: matter,
     practiceAreaId: matter.practiceAreaId,
@@ -3003,32 +3065,12 @@ export function saveMatterRecord(
     matter.fieldValues['partnerCostSignOffCompleted'] ||
       matter.conflictClearedById,
   );
-  const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
-    | VerifiedEntraSessionPayload
-    | undefined;
-  const extensionCtx: TenantContext =
-    activeVerifiedSession && activeVerifiedSession.personId === actingUser.id
-      ? resolveCurrentTenantContext(
-          createVerifiedSessionActorFromEntraSession(activeVerifiedSession),
-          tenantCfg,
-        )
-      : {
-          tenantId: tenantCfg.tenantId,
-          hostingMode: tenantCfg.hostingMode,
-          environment: tenantCfg.environment,
-          correlationId: `matter-save-${matter.id}`,
-          actorId: actingUser.id,
-          actorEmail:
-            actingUser.emails?.[0]?.address ??
-            `${actingUser.id.toLowerCase()}@${tenantCfg.branding.primaryDomain}`,
-          actorName: personDisplayName(actingUser),
-          actorRoles: resolveEmployeeRoles(actingUser, store.teams),
-          actorGroups: [],
-          mfaVerified: Boolean(activeVerifiedSession?.mfaVerified),
-          postgresDatabaseName: `pg_tenant_${tenantCfg.tenantId.replace(/-/g, '_')}_${tenantCfg.environment}`,
-          blobContainerName: `tenant-${tenantCfg.tenantId}-${tenantCfg.environment}`,
-          keyVaultSecretPrefix: `${tenantCfg.tenantId}-${tenantCfg.environment}`,
-        };
+  const extensionCtx: TenantContext = resolveCurrentTenantContext(
+    createVerifiedSessionActorFromEntraSession(activeVerifiedSession, {
+      correlationId: `matter-save-${randomUUID()}`,
+    }),
+    tenantCfg,
+  );
   const costsHookInput = {
     matterId: matter.id,
     workBasis: resolvedCosts.workBasis,
@@ -3036,7 +3078,7 @@ export function saveMatterRecord(
     disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
     partnerSignOffCompleted,
   };
-  const calcGovernance = host.executeMatterCostsHookSync(
+  const calcGovernance = await host.executeMatterCostsHook(
     'beforeMatterCostsCalculate',
     extensionCtx,
     tenantCfg,
@@ -3044,13 +3086,36 @@ export function saveMatterRecord(
   );
   const openGovernance =
     isOpeningEvent && !isDraftSave
-      ? host.executeMatterCostsHookSync(
+      ? await host.executeMatterCostsHook(
           'beforeMatterOpen',
           extensionCtx,
           tenantCfg,
           costsHookInput,
         )
       : null;
+
+  if (openGovernance && !openGovernance.allowProceed) {
+    store.counters = countersSnapshot;
+    return {
+      matter: null as unknown as Matter,
+      errors: {
+        costsGovernance:
+          openGovernance.governanceWarnings[0] ??
+          'This matter needs partner sign-off on costs before it can be opened.',
+      },
+    };
+  }
+
+  for (const person of pendingPeople) {
+    store.people.push(person);
+  }
+  for (const org of pendingOrganisations) {
+    store.organisations.push(org);
+  }
+  for (const link of pendingEnquiryLinks) {
+    link.enquiry.linkedPersonId = link.linkedPersonId;
+  }
+
   matter.fieldValues['matterCostsGovernance'] = openGovernance ?? calcGovernance;
 
   if (isOpeningEvent) {
@@ -3262,6 +3327,182 @@ export function saveMatterRecord(
   return { matter };
 }
 
+export function markEngagementLetterDrafted(
+  matterId: string,
+  byId: string,
+): { matter: Matter | null; errors?: Record<string, string> } {
+  const store = getStore();
+  const existing = store.matters.find((m) => m.id === matterId) ?? null;
+  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !existing ||
+    !actingUser ||
+    !actingUser.isEmployee ||
+    !canPersonAccessMatter(existing, byId, actingUser, {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      matter: null,
+      errors: {
+        access: 'Matter not found or restricted.',
+        permission: 'Matter not found or restricted.',
+      },
+    };
+  }
+  if (
+    !hasPersonPermission(actingUser, 'matter:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      matter: null,
+      errors: {
+        permission: 'You do not have permission (matter:edit) to edit matters.',
+      },
+    };
+  }
+  if (existing.engagementLetterStatus === 'Signed') {
+    return { matter: existing };
+  }
+  const now = new Date().toISOString();
+  const prevStatus = existing.engagementLetterStatus;
+  existing.engagementLetterStatus = 'Drafted';
+  existing.updatedAt = now;
+  existing.updatedById = byId;
+  writeAudit(store, {
+    recordType: 'matter',
+    recordId: existing.id,
+    action: 'update',
+    field: 'Engagement letter status',
+    oldValue: prevStatus,
+    newValue: 'Drafted',
+    byId,
+    at: now,
+  });
+  saveStore(store);
+  return { matter: existing };
+}
+
+export function liftMatterRestriction(
+  matterId: string,
+  restriction: 'staff_matter' | 'ethical_wall',
+  reason: string,
+  byId: string,
+): { matter: Matter | null; errors?: Record<string, string> } {
+  const store = getStore();
+  const existing = store.matters.find((m) => m.id === matterId) ?? null;
+  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !existing ||
+    !actingUser ||
+    !actingUser.isEmployee ||
+    !canPersonAccessMatter(existing, byId, actingUser, {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      matter: null,
+      errors: {
+        access: 'Matter not found or restricted.',
+        permission: 'Matter not found or restricted.',
+      },
+    };
+  }
+  const canLift =
+    hasPersonPermission(actingUser, 'admin:access', {
+      allPeople: store.people,
+      teams: store.teams,
+    }) ||
+    hasPersonPermission(actingUser, 'matter:restricted:access', {
+      allPeople: store.people,
+      teams: store.teams,
+    });
+  if (!canLift) {
+    return {
+      matter: null,
+      errors: {
+        permission:
+          'You do not have permission (admin:access or matter:restricted:access) to lift matter restrictions.',
+      },
+    };
+  }
+  const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  if (!activeVerifiedSession || activeVerifiedSession.mfaVerified !== true) {
+    return {
+      matter: null,
+      errors: {
+        mfa: 'MFA_REQUIRED: Multi-factor authentication is required to lift a staff matter or information barrier restriction.',
+      },
+    };
+  }
+  const cleanReason = (reason ?? '').trim();
+  if (!cleanReason) {
+    return {
+      matter: null,
+      errors: {
+        reason: 'A written reason is required to lift a matter restriction.',
+      },
+    };
+  }
+
+  const prevMatter = structuredClone(existing);
+  const now = new Date().toISOString();
+  const fieldLabel =
+    restriction === 'staff_matter' ? 'Staff matter restriction' : 'Information barrier';
+  const oldVal =
+    restriction === 'staff_matter'
+      ? String(Boolean(existing.isStaffMatter))
+      : String(Boolean(existing.hasEthicalWall));
+
+  if (restriction === 'staff_matter') {
+    existing.isStaffMatter = false;
+  } else {
+    existing.hasEthicalWall = false;
+  }
+  if (!existing.isStaffMatter && !existing.hasEthicalWall) {
+    existing.restrictedAccessUserIds = [];
+  }
+  existing.updatedAt = now;
+  existing.updatedById = byId;
+
+  writeAudit(store, {
+    recordType: 'matter',
+    recordId: existing.id,
+    action: 'matter-restriction-lift',
+    field: fieldLabel,
+    oldValue: oldVal,
+    newValue: 'false',
+    reason: cleanReason,
+    byId,
+    at: now,
+  });
+
+  saveStore(store);
+
+  const syncCorrelationId = `corr-lifecycle-sync-${existing.id}-${Date.now()}`;
+  try {
+    void syncMatterLifecycleOnSaveSync({
+      matter: existing,
+      previousMatter: prevMatter,
+      userId: byId,
+      correlationId: syncCorrelationId,
+      store,
+    }).catch((err) => {
+      logDocumentLifecycleSyncError(err, syncCorrelationId);
+    });
+  } catch (err) {
+    logDocumentLifecycleSyncError(err, syncCorrelationId);
+  }
+
+  return { matter: existing };
+}
+
 export function updateMatterConflictRecord(
   matterId: string,
   record: ConflictCheckRecord,
@@ -3280,14 +3521,10 @@ export function updateMatterConflictRecord(
       allPeople: store.people,
       teams: store.teams,
     }) ||
-    (!hasPersonPermission(actingUser, 'matter:edit', {
+    !hasPersonPermission(actingUser, 'matter:edit', {
       allPeople: store.people,
       teams: store.teams,
-    }) &&
-      !hasPersonPermission(actingUser, 'risk:view', {
-        allPeople: store.people,
-        teams: store.teams,
-      }))
+    })
   ) {
     return { matter: null };
   }
@@ -3599,6 +3836,9 @@ export function addChoiceValue(
     store.homePagesConfig.roles = syncHomeRolesWithEmployeeRoles(
       store.homePagesConfig.roles,
       store.values,
+      createDefaultRoleConfigs(
+        getActiveTenantConfiguration().branding.primaryDomain,
+      ),
     );
   }
   writeAudit(store, {
@@ -3647,6 +3887,9 @@ export function updateChoiceValue(
     store.homePagesConfig.roles = syncHomeRolesWithEmployeeRoles(
       store.homePagesConfig.roles,
       store.values,
+      createDefaultRoleConfigs(
+        getActiveTenantConfiguration().branding.primaryDomain,
+      ),
     );
   }
   if (false) {
@@ -6152,11 +6395,11 @@ function mapPmsEmployeeRoleId(store: FirmStore, grade: string): string {
   return roles[0]?.id ?? vid('employee_role', 'Solicitor');
 }
 
-export function createRecordFromPms(
+export async function createRecordFromPms(
   entityType: PmsEntityType,
   pmsCode: string,
   byId: string,
-): { ok: boolean; createdId?: string; error?: string } {
+): Promise<{ ok: boolean; createdId?: string; error?: string }> {
   const store = getStore();
   const pms = getPmsSource();
 
@@ -6311,7 +6554,7 @@ export function createRecordFromPms(
       pmsClient?.client_type === 'Individual' ? 'person' : 'organisation';
     let clientId = findOneSquaredIdForPmsCode(store.pmsLinks, clientEntityType, pm.client_code);
     if (!clientId) {
-      const createdClient = createRecordFromPms(clientEntityType, pm.client_code, byId);
+      const createdClient = await createRecordFromPms(clientEntityType, pm.client_code, byId);
       if (!createdClient.ok || !createdClient.createdId) {
         return {
           ok: false,
@@ -6328,13 +6571,13 @@ export function createRecordFromPms(
       pm.responsible_partner_id,
     );
     if (!partnerId) {
-      const createdFe = createRecordFromPms('employee', pm.responsible_partner_id, byId);
+      const createdFe = await createRecordFromPms('employee', pm.responsible_partner_id, byId);
       partnerId = createdFe.createdId ?? byId;
     }
 
     let leadId = findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', pm.fee_earner_id);
     if (!leadId) {
-      const createdLead = createRecordFromPms('employee', pm.fee_earner_id, byId);
+      const createdLead = await createRecordFromPms('employee', pm.fee_earner_id, byId);
       leadId = createdLead.createdId ?? partnerId;
     }
 
@@ -6347,7 +6590,7 @@ export function createRecordFromPms(
       valueBySystemKey(store.values, 'matter_status', statusKey)?.id ??
       vid('matter_status', 'Active');
 
-    const res = saveMatterRecord(
+    const res = await saveMatterRecord(
       {
         matterNumber: pm.matter_code,
         title: pm.matter_description,
@@ -6389,7 +6632,10 @@ export function switchViewingRole(
   }
 
   if (!store.homePagesConfig) {
-    store.homePagesConfig = createDefaultHomePagesConfig(new Date().toISOString());
+    store.homePagesConfig = createDefaultHomePagesConfig(
+      new Date().toISOString(),
+      getActiveTenantConfiguration().branding.primaryDomain,
+    );
   }
   store.homePagesConfig.lastViewingRoleByUserId = {
     ...(store.homePagesConfig.lastViewingRoleByUserId ?? {}),
@@ -6409,7 +6655,9 @@ export function saveHomePagesConfig(
 ): { ok: boolean; code?: string; error?: string; config: HomePagesConfig } {
   const store = getStore();
   const nowIso = new Date().toISOString();
-  const current = store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso);
+  const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
+  const current =
+    store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const rbacConfig = getDefaultTenantRbacConfig();
   const actorPerms = resolvePersonPermissionSet(actor, {
@@ -6484,7 +6732,9 @@ export function resetHomePagesConfig(
 ): { ok: boolean; code?: string; error?: string; config: HomePagesConfig } {
   const store = getStore();
   const nowIso = new Date().toISOString();
-  const current = store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso);
+  const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
+  const current =
+    store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const rbacConfig = getDefaultTenantRbacConfig();
   const actorPerms = resolvePersonPermissionSet(actor, {
@@ -6512,12 +6762,16 @@ export function resetHomePagesConfig(
   }
 
   const preservedViewing = store.homePagesConfig?.lastViewingRoleByUserId ?? {};
-  const defaults = createDefaultHomePagesConfig(nowIso);
+  const defaults = createDefaultHomePagesConfig(nowIso, primaryDomain);
   defaults.lastViewingRoleByUserId = preservedViewing;
   defaults.firmSettings.demoMode = isDemoModeEnabled();
   defaults.updatedById = byId;
 
-  defaults.roles = syncHomeRolesWithEmployeeRoles(defaults.roles, store.values);
+  defaults.roles = syncHomeRolesWithEmployeeRoles(
+    defaults.roles,
+    store.values,
+    createDefaultRoleConfigs(primaryDomain),
+  );
   store.homePagesConfig = defaults;
   writeAudit(store, {
     recordType: 'system',
@@ -6566,7 +6820,10 @@ export function addHomeRole(
   }
 
   if (!store.homePagesConfig) {
-    store.homePagesConfig = createDefaultHomePagesConfig(nowIso);
+    store.homePagesConfig = createDefaultHomePagesConfig(
+      nowIso,
+      getActiveTenantConfiguration().branding.primaryDomain,
+    );
   }
   const cleanLabel = input.label.trim();
   if (!cleanLabel) return { ok: false, error: 'Role name is required.' };
@@ -6702,6 +6959,79 @@ export function updateEmployeeRolesAndSupports(
 
   saveStore(store);
   return { ok: true };
+}
+
+/**
+ * Computes a server-side preview of a target employee's effective permissions when draft
+ * `grant`/`revoke` overrides (and optional draft `rbacConfig`) are applied, using the
+ * central RBAC resolver (`resolvePersonPermissions`).
+ */
+export function previewRbacOverrides(
+  personId: string,
+  draftOverrides: {
+    grant: PermissionKey[];
+    revoke: PermissionKey[];
+    rbacConfig?: RbacConfiguration;
+  },
+  byId: string,
+): { ok: boolean; error?: string; permissions: PermissionKey[] } {
+  const store = getStore();
+  const actor = store.people.find((p) => p.id === byId);
+  const target = store.people.find((p) => p.id === personId);
+  if (!actor)
+    return { ok: false, error: 'Acting user not found.', permissions: [] };
+  if (!target)
+    return { ok: false, error: 'Target employee not found.', permissions: [] };
+  if (
+    !hasPersonPermission(actor, 'admin:access', {
+      allPeople: store.people,
+      teams: store.teams,
+    }) &&
+    !hasPersonPermission(actor, 'rbac:manage_user_overrides', {
+      allPeople: store.people,
+      teams: store.teams,
+    }) &&
+    !hasPersonPermission(actor, 'rbac:manage_config', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return {
+      ok: false,
+      error:
+        'RBAC_PERMISSION_DENIED: You do not have permission to preview RBAC overrides.',
+      permissions: [],
+    };
+  }
+
+  const cleanGrant = Array.from(
+    new Set((draftOverrides.grant ?? []).filter(isRegisteredPermissionKey)),
+  );
+  const cleanRevoke = Array.from(
+    new Set(
+      (draftOverrides.revoke ?? [])
+        .filter(isRegisteredPermissionKey)
+        .filter((p) => !cleanGrant.includes(p)),
+    ),
+  );
+
+  const syntheticTarget: Person = {
+    ...target,
+    permissionOverrides: {
+      grant: cleanGrant,
+      revoke: cleanRevoke,
+    },
+  };
+
+  const permissions = resolvePersonPermissions(syntheticTarget, {
+    allPeople: store.people,
+    teams: store.teams,
+    ...(draftOverrides.rbacConfig
+      ? { config: { rbac: draftOverrides.rbacConfig } }
+      : {}),
+  });
+
+  return { ok: true, permissions };
 }
 
 /**
@@ -8226,7 +8556,14 @@ export function syncMatterCostsRatesFromPms(
   const store = getStore();
   const pms = getPmsSource();
   const feeEarners = pms.listFeeEarners();
-  const base = store.matterCostsConfig ?? createDefaultMatterCostsConfig(store.values);
+  const tenantCfg = getActiveTenantConfiguration();
+  const base =
+    store.matterCostsConfig ??
+    createDefaultMatterCostsConfig(store.values, {
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    });
   const synced = syncRateCardsWithPmsFeeEarners(base, feeEarners, store.values);
   const now = new Date().toISOString();
   const next: MatterCostsConfig = {
@@ -8315,14 +8652,6 @@ export function resolveOrProvisionEntraEmployee(
       newValue: `oid=${oid}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}`,
       byId: matchedPerson.id,
       at: now,
-    });
-    const tokenExpiresAtMs =
-      typeof claims.exp === 'number'
-        ? claims.exp * 1000
-        : Date.now() + 8 * 60 * 60 * 1000;
-    setActiveSessionTokenRolesForPerson(matchedPerson.id, verifiedToken.roles, {
-      tenantId: verifiedToken.tenantId,
-      expiresAt: tokenExpiresAtMs,
     });
     saveStore(store);
     return { person: matchedPerson, verifiedToken, rbacConfig };

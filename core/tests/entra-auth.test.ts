@@ -417,6 +417,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
   it('rejects a tampered session cookie and throws in production when AUTH_SECRET is missing (R56, R59)', () => {
     const validCookie = createSignedEntraSessionCookie({
       personId: 'P-000002',
+      tenantId: 'not-a-law-firm',
       oid: '00000000-0000-4000-8000-000000000002',
       tid: TEST_TENANT_ID,
       sub: 'P-000002',
@@ -508,6 +509,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     // R50: Active Entra session for P-000002 always resolves to P-000002
     setTestEntraSessionOverride({
       personId: 'P-000002',
+      tenantId: 'not-a-law-firm',
       oid: '00000000-0000-4000-8000-000000000002',
       tid: TEST_TENANT_ID,
       sub: 'P-000002',

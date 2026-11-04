@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "generate:extensions": "tsx scripts/generate-extension-registry.ts",
+    "postinstall": "tsx scripts/generate-extension-registry.ts",
+    "predev": "tsx scripts/generate-extension-registry.ts",
+    "prebuild": "tsx scripts/generate-extension-registry.ts",
+    "pretest": "tsx scripts/generate-extension-registry.ts",
+    "prelint": "tsx scripts/generate-extension-registry.ts",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -16,6 +22,7 @@
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "server-only": "^0.0.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {

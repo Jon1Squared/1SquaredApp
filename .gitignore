@@ -45,4 +45,6 @@ next-env.d.ts
 /data/storage/
 /data/pembroke-vaughan.json
 /data/runtime-store.json
+/src/platform/generated/
+
 

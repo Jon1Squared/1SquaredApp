@@ -54,11 +54,13 @@ import {
   executeMerge,
   flagMatterWriteOff,
   getEmployeeDetailsForUser,
+  liftMatterRestriction,
   linkPmsRecord,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
   logQuoteFollowUpRecord,
   markAllNotificationsRead,
+  markEngagementLetterDrafted,
   markNotificationRead,
   markQuoteSentRecord,
   prepareEnquiryConversion,
@@ -102,6 +104,7 @@ import {
   updateChoiceValue,
   updateEmployeeRolesAndSupports,
   updateEmployeeRoleSetting,
+  previewRbacOverrides,
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
   updateWorkTypeProfiles,
@@ -248,8 +251,28 @@ export async function saveMatterAction(
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
   } = {},
 ) {
+  return withActorId(async (byId) => {
+    const res = await saveMatterRecord(payload, { ...opts, byId });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function markEngagementLetterDraftedAction(matterId: string) {
   return withActorId((byId) => {
-    const res = saveMatterRecord(payload, { ...opts, byId });
+    const res = markEngagementLetterDrafted(matterId, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function liftMatterRestrictionAction(
+  matterId: string,
+  restriction: 'staff_matter' | 'ethical_wall',
+  reason: string,
+) {
+  return withActorId((byId) => {
+    const res = liftMatterRestriction(matterId, restriction, reason, byId);
     revalidateAll();
     return res;
   });
@@ -641,8 +664,8 @@ export async function rerunAutomaticPmsMatchingAction() {
 }
 
 export async function createRecordFromPmsAction(entityType: PmsEntityType, pmsCode: string) {
-  return withActorId((byId) => {
-    const res = createRecordFromPms(entityType, pmsCode, byId);
+  return withActorId(async (byId) => {
+    const res = await createRecordFromPms(entityType, pmsCode, byId);
     revalidateAll();
     return res;
   });
@@ -709,6 +732,19 @@ export async function updateEmployeeRolesAndSupportsAction(
     revalidateAll();
     return res;
   });
+}
+
+export async function previewRbacOverridesAction(
+  personId: string,
+  draftOverrides: {
+    grant: PermissionKey[];
+    revoke: PermissionKey[];
+    rbacConfig?: RbacConfiguration;
+  },
+) {
+  return withAuthenticatedActor((actor) =>
+    previewRbacOverrides(personId, draftOverrides, actor.personId),
+  );
 }
 
 export async function updatePersonPermissionOverridesAction(

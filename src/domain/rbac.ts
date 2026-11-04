@@ -48,8 +48,36 @@ import {
   type TenantContext,
   type VerifiedOidcTokenClaims,
 } from '@platform/core';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type { Matter, Person, Team } from './types';
+
+type ServerTenantConfigReader = () => Pick<
+  TenantConfiguration,
+  'tenantId' | 'displayName' | 'branding' | 'rbac'
+>;
+
+let serverTenantConfigReader: ServerTenantConfigReader | null = null;
+
+/**
+ * Registers the server-only tenant configuration reader from `src/platform/tenantRuntime.ts`.
+ * Never registered in browser bundles (`src/platform/tenantRuntime.ts` is guarded by `import 'server-only'`).
+ */
+export function registerServerTenantConfigReader(
+  reader: ServerTenantConfigReader,
+): void {
+  serverTenantConfigReader = reader;
+}
+
+export function getServerTenantConfiguration(): Pick<
+  TenantConfiguration,
+  'tenantId' | 'displayName' | 'branding' | 'rbac'
+> {
+  if (typeof window !== 'undefined' || !serverTenantConfigReader) {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: Tenant configuration is server-only and is not available in this context.',
+    );
+  }
+  return serverTenantConfigReader();
+}
 
 /**
  * Immutable taxonomy ID mapping (`employee_role.<slug>` -> canonical `HomeRoleKey`).
@@ -133,14 +161,14 @@ export function setRuntimeRbacConfigOverride(
   override: Partial<RbacConfiguration> | null | undefined,
   tenantId?: string,
 ): void {
-  const activeTenantId =
-    tenantId?.trim() || getActiveTenantConfiguration().tenantId;
+  const activeCfg = getServerTenantConfiguration();
+  const activeTenantId = tenantId?.trim() || activeCfg.tenantId;
   if (!override) {
     runtimeRbacConfigOverrideByTenant.delete(activeTenantId);
   } else {
     const baseCfg =
-      activeTenantId === getActiveTenantConfiguration().tenantId
-        ? getActiveTenantConfiguration().rbac
+      activeTenantId === activeCfg.tenantId
+        ? activeCfg.rbac
         : createDefaultRbacConfig();
     const merged = mergeRbacConfigOverlay(baseCfg, override);
     const validated = validateRbacConfig(merged);
@@ -151,7 +179,7 @@ export function setRuntimeRbacConfigOverride(
 }
 
 export function getDefaultTenantRbacConfig(tenantId?: string): RbacConfiguration {
-  const activeCfg = getActiveTenantConfiguration();
+  const activeCfg = getServerTenantConfiguration();
   const targetTenantId = tenantId?.trim() || activeCfg.tenantId;
   const cached = tenantRbacConfigCacheByTenant.get(targetTenantId);
   if (cached) {
@@ -302,52 +330,6 @@ export function getActiveActorSession(): ActiveActorTokenSession | undefined {
   return activeActor;
 }
 
-export function setActiveSessionTokenRolesForPerson(
-  personId: string,
-  tokenRoles: readonly string[] | null | undefined,
-  options?: {
-    tenantId?: string;
-    expiresAt?: string | number;
-    verifiedSession?: unknown;
-  },
-): void {
-  if (!personId) {
-    return;
-  }
-  const activeActor = getActorSessionAsyncStorage()?.getStore();
-  if (!activeActor || activeActor.personId !== personId) {
-    return;
-  }
-  const tenantId =
-    options?.tenantId?.trim() ||
-    activeActor.tenantId ||
-    getActiveTenantConfiguration().tenantId;
-  if (activeActor.tenantId !== tenantId) {
-    return;
-  }
-  if (!tokenRoles) {
-    activeActor.tokenRoles = [];
-    activeActor.expiresAtMs = 0;
-    return;
-  }
-  const rawExpires = options?.expiresAt;
-  const parsedExpiresMs =
-    typeof rawExpires === 'number'
-      ? rawExpires
-      : typeof rawExpires === 'string'
-        ? new Date(rawExpires).getTime()
-        : activeActor.expiresAtMs;
-  const expiresAtMs = Number.isFinite(parsedExpiresMs)
-    ? parsedExpiresMs
-    : activeActor.expiresAtMs;
-
-  activeActor.tokenRoles = [...tokenRoles];
-  activeActor.expiresAtMs = expiresAtMs;
-  if (options?.verifiedSession !== undefined) {
-    activeActor.verifiedSession = options.verifiedSession;
-  }
-}
-
 export function getStoredActorSessionForPerson(
   personId: string,
   tenantId?: string,
@@ -360,7 +342,7 @@ export function getStoredActorSessionForPerson(
   const targetTenantId =
     tenantId?.trim() ||
     activeActor.tenantId ||
-    getActiveTenantConfiguration().tenantId;
+    getServerTenantConfiguration().tenantId;
   if (activeActor.tenantId !== targetTenantId) {
     return undefined;
   }
@@ -379,29 +361,11 @@ export function getActiveSessionTokenRolesForPerson(
   const targetTenantId =
     tenantId?.trim() ||
     activeActor.tenantId ||
-    getActiveTenantConfiguration().tenantId;
+    getServerTenantConfiguration().tenantId;
   if (activeActor.tenantId !== targetTenantId) {
     return undefined;
   }
   return activeActor.tokenRoles;
-}
-
-export function clearActiveSessionTokenRoles(
-  personId?: string,
-  tenantId?: string,
-): void {
-  const activeActor = getActorSessionAsyncStorage()?.getStore();
-  if (!activeActor) {
-    return;
-  }
-  if (personId && activeActor.personId !== personId) {
-    return;
-  }
-  if (tenantId?.trim() && activeActor.tenantId !== tenantId.trim()) {
-    return;
-  }
-  activeActor.tokenRoles = [];
-  activeActor.expiresAtMs = 0;
 }
 
 export interface ResolvePersonPermissionsOptions {
@@ -438,7 +402,7 @@ export function resolveActiveTenantIdForRbac(
   if (explicitTenantId && explicitTenantId.trim().length > 0) {
     return explicitTenantId.trim();
   }
-  return getActiveTenantConfiguration().tenantId;
+  return getServerTenantConfiguration().tenantId;
 }
 
 /**
@@ -701,7 +665,7 @@ export function resolvePersonForEntraClaims(params: {
   permissions: ResolvedPermissionSet;
 } {
   const activeTenantId =
-    params.tenantId?.trim() || getActiveTenantConfiguration().tenantId;
+    params.tenantId?.trim() || getServerTenantConfiguration().tenantId;
   const {
     claims,
     people,

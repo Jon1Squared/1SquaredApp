@@ -11,12 +11,17 @@ import {
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
   runTenantBackgroundJob,
+  validateExtensionManifest,
   type PlatformExtension,
 } from '@platform/core';
+import extensionManifestJsonSchema from '../schemas/extension-manifest.schema.json';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
 import { resolveConfiguredFirmPrimaryDomain } from '../../src/domain/employment';
+import { syncHomeRolesWithEmployeeRoles } from '../../src/domain/homeConfig';
+import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
+import { runWithActiveActorSession } from '../../src/domain/rbac';
 import {
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
@@ -148,6 +153,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     const signedSession = verifySignedEntraSessionCookie(
       createSignedEntraSessionCookie({
         personId: 'P-000002',
+        tenantId: 'fictional-chambers-uk',
         oid: '00000000-0000-4000-8000-000000000002',
         tid: '00000000-0000-4000-8000-000000000000',
         sub: 'P-000002',
@@ -164,9 +170,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     )!;
     expect(() =>
       resolveCurrentTenantContext(
-        createVerifiedSessionActorFromEntraSession(signedSession, {
-          tenantId: 'fictional-chambers-uk',
-        }),
+        createVerifiedSessionActorFromEntraSession(signedSession),
       ),
     ).toThrow(/TENANCY_FORGERY_DETECTED/);
 
@@ -414,7 +418,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         path.join(destNalfExt, 'index.ts'),
       );
 
-      // Create bad-manifest-ext with invalid schema (missing supportedCoreApiRange & invalid version)
+      // Create bad-manifest-ext with a valid module export (`src/index.js`) and invalid manifest.json
       const badManifestDir = path.join(
         tempPkgDir,
         'extensions',
@@ -433,8 +437,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'utf8',
       );
       fs.writeFileSync(
-        path.join(badManifestDir, 'index.ts'),
-        'export default {};',
+        path.join(badManifestDir, 'index.js'),
+        `module.exports = {
+          manifest: {
+            id: 'bad-manifest-ext',
+            name: 'Bad Manifest Extension',
+            version: '1.0.0',
+            description: 'Valid export with invalid manifest.json',
+            supportedCoreApiRange: '^1.0.0',
+            permissions: ['matter:read'],
+            hooks: ['beforeMatterOpen'],
+          },
+          hooks: {},
+        };`,
         'utf8',
       );
 
@@ -460,12 +475,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'utf8',
       );
       fs.writeFileSync(
-        path.join(throwingExtDir, 'index.ts'),
+        path.join(throwingExtDir, 'index.js'),
         'throw new Error("Simulated extension module load crash");',
         'utf8',
       );
 
-      // Create disabled-ext (not in enabledExtensions)
+      // Create disabled-ext with a valid manifest and valid module export that loads cleanly when enabled,
+      // but is omitted from enabledExtensions in base.json
       const disabledExtDir = path.join(
         tempPkgDir,
         'extensions',
@@ -479,7 +495,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           id: 'disabled-ext',
           name: 'Disabled Extension',
           version: '1.0.0',
-          description: 'Should not be loaded',
+          description: 'Valid extension omitted from enabledExtensions',
           supportedCoreApiRange: '^1.0.0',
           permissions: ['matter:read'],
           hooks: ['beforeMatterOpen'],
@@ -487,8 +503,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'utf8',
       );
       fs.writeFileSync(
-        path.join(disabledExtDir, 'index.ts'),
-        'throw new Error("Disabled extension should never be loaded");',
+        path.join(disabledExtDir, 'index.js'),
+        `module.exports = {
+          manifest: {
+            id: 'disabled-ext',
+            name: 'Disabled Extension',
+            version: '1.0.0',
+            description: 'Valid extension omitted from enabledExtensions',
+            supportedCoreApiRange: '^1.0.0',
+            permissions: ['matter:read'],
+            hooks: ['beforeMatterOpen'],
+          },
+          hooks: {},
+        };`,
         'utf8',
       );
 
@@ -516,6 +543,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(loadErrors.map((e) => e.extensionDir)).toEqual(
         expect.arrayContaining(['bad-manifest-ext', 'throwing-ext']),
       );
+      expect(loadErrors.map((e) => e.extensionDir)).not.toContain(
+        'disabled-ext',
+      );
+      const badManifestErr = loadErrors.find(
+        (e) => e.extensionDir === 'bad-manifest-ext',
+      );
+      expect(badManifestErr?.error).toContain('EXTENSION_MANIFEST_ERROR');
       expect(errSpy).toHaveBeenCalled();
     } finally {
       errSpy.mockRestore();
@@ -528,22 +562,105 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       fs.rmSync(tempPkgDir, { recursive: true, force: true });
     }
 
-    // R108 (2): Opening/saving a matter via saveMatterRecord on the NALF tenant runs beforeMatterCostsCalculate and beforeMatterOpen
+    // R108 & R131: saveMatterRecord requires an authenticated request session, awaits beforeMatterOpen, blocks opening when allowProceed === false, and rolls back inline parties when vetoed
     resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const baseMatter = store.matters[0]!;
-      const saveRes = saveMatterRecord(
-        {
-          ...baseMatter,
-          agreedFeeCapGbp: 30000,
-          feeEstimateGbp: 30000,
-          conflictClearedById: null,
-        },
-        { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
+
+      // (a) Outside a signed-in request scope, saveMatterRecord refuses with UNAUTHENTICATED and runs no extension hooks
+      const unauthSaveRes = await runWithActiveActorSession(null, () =>
+        saveMatterRecord(
+          {
+            ...baseMatter,
+            title: 'Should Fail Without Session',
+          },
+          { id: baseMatter.id, byId: 'P-000001', saveMode: 'draft' },
+        ),
       );
-      expect(saveRes.errors).toBeUndefined();
-      const gov = (saveRes.matter.fieldValues ?? {})[
+      expect(unauthSaveRes.matter).toBeNull();
+      expect(unauthSaveRes.errors?.access).toMatch(/UNAUTHENTICATED/);
+
+      // Build a verified session scope for P-000001
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+      const verifiedSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: carys.id,
+          tenantId: 'not-a-law-firm',
+          oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: carys.id,
+          email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+          displayName: `${carys.firstName} ${carys.surname}`,
+          entraRoles: carys.roles ?? ['partner'],
+          mappedRoles: carys.roles ?? ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt,
+        }),
+      )!;
+
+      // (b) Inside a signed-in request scope, saveMode: 'submit_cleared' at £30,000 without partner sign-off is vetoed by beforeMatterOpen (allowProceed: false) and returns errors.costsGovernance with matter: null
+      const peopleCountBeforeVeto = store.people.length;
+      const vetoedSaveRes = await runWithActiveActorSession(
+        {
+          personId: carys.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: verifiedSession.mappedRoles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession,
+        },
+        () =>
+          saveMatterRecord(
+            {
+              ...baseMatter,
+              agreedFeeCapGbp: 30000,
+              feeEstimateGbp: 30000,
+              conflictClearedById: null,
+              parties: [
+                ...(baseMatter.parties ?? []),
+                {
+                  id: 'pt-new-transient',
+                  name: 'Transient Counterparty Person',
+                  role: 'Counterparty',
+                  linkedRecordId: null,
+                  entityType: 'person',
+                },
+              ],
+            },
+            { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(vetoedSaveRes.matter).toBeNull();
+      expect(vetoedSaveRes.errors?.costsGovernance).toMatch(/£25,000|partner sign-off/i);
+      // Inline-created party was NOT pushed to store.people when beforeMatterOpen vetoed the save
+      expect(store.people.length).toBe(peopleCountBeforeVeto);
+
+      // (c) In draft mode, beforeFeeEstimateSave records governance warnings without blocking pre-open draft save
+      const preOpenRes = await runWithActiveActorSession(
+        {
+          personId: carys.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: verifiedSession.mappedRoles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession,
+        },
+        () =>
+          saveMatterRecord(
+            {
+              ...baseMatter,
+              agreedFeeCapGbp: 30000,
+              feeEstimateGbp: 30000,
+              conflictClearedById: null,
+            },
+            { id: baseMatter.id, byId: 'P-000001', saveMode: 'draft' },
+          ),
+      );
+      expect(preOpenRes.errors).toBeUndefined();
+      const gov = (preOpenRes.matter?.fieldValues ?? {})[
         'matterCostsGovernance'
       ] as
         | {
@@ -554,10 +671,177 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         | undefined;
       expect(gov).toBeDefined();
       expect(gov?.requiresPartnerSignOff).toBe(true);
-      expect(gov?.allowProceed).toBe(false);
+      expect(gov?.allowProceed).toBe(true);
     } finally {
       resetAllDemoData('P-000001');
     }
+
+    // R108 (3): Async beforeMatterOpen hook veto and hook timeout both block opening (allowProceed === false)
+    const asyncHost = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+    asyncHost.registerExtension({
+      manifest: {
+        id: 'async-veto-ext',
+        name: 'Async Veto Extension',
+        version: '1.0.0',
+        description: 'Awaits a timer and vetoes matter opening',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: ['matter:open:gate'],
+        hooks: ['beforeMatterOpen'],
+        hookTimeoutMs: 500,
+      },
+      hooks: {
+        beforeMatterOpen: async () => {
+          await new Promise((r) => setTimeout(r, 15));
+          return {
+            allowProceed: false,
+            requiresPartnerSignOff: true,
+            governanceWarnings: ['Async veto from extension hook'],
+          };
+        },
+      },
+    });
+    const asyncCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantAToken,
+      hostingMode: 'single_tenant',
+      environment: 'dev',
+      correlationId: 'corr-async-veto',
+    });
+    const asyncVetoOutcome = await asyncHost.executeMatterCostsHook(
+      'beforeMatterOpen',
+      asyncCtx,
+      {
+        ...config,
+        enabledExtensions: ['async-veto-ext'],
+      },
+      {
+        matterId: 'M-000011',
+        workBasis: 'capped',
+        estimatedFeeGbp: 10000,
+        disbursementsTotalGbp: 0,
+        partnerSignOffCompleted: false,
+      },
+    );
+    expect(asyncVetoOutcome.allowProceed).toBe(false);
+    expect(asyncVetoOutcome.governanceWarnings).toContain(
+      'Async veto from extension hook',
+    );
+
+    const timeoutHost = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+    timeoutHost.registerExtension({
+      manifest: {
+        id: 'timeout-gate-ext',
+        name: 'Timeout Gate Extension',
+        version: '1.0.0',
+        description: 'Exceeds hookTimeoutMs during beforeMatterOpen',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: ['matter:open:gate'],
+        hooks: ['beforeMatterOpen'],
+        hookTimeoutMs: 20,
+      },
+      hooks: {
+        beforeMatterOpen: async () => {
+          await new Promise((r) => setTimeout(r, 80));
+          return {
+            allowProceed: true,
+            requiresPartnerSignOff: false,
+            governanceWarnings: [],
+          };
+        },
+      },
+    });
+    const timeoutOutcome = await timeoutHost.executeMatterCostsHook(
+      'beforeMatterOpen',
+      asyncCtx,
+      {
+        ...config,
+        enabledExtensions: ['timeout-gate-ext'],
+      },
+      {
+        matterId: 'M-000011',
+        workBasis: 'capped',
+        estimatedFeeGbp: 10000,
+        disbursementsTotalGbp: 0,
+        partnerSignOffCompleted: true,
+      },
+    );
+    expect(timeoutOutcome.allowProceed).toBe(false);
+    expect(timeoutOutcome.governanceWarnings[0]).toMatch(/timed out after/i);
+
+    // R106: Domain helpers (syncHomeRolesWithEmployeeRoles, createDefaultMatterCostsConfig) succeed in browser window mode without reading tenant configuration
+    const storeValues = getStore().values;
+    const prevWindow = (globalThis as Record<string, unknown>).window;
+    const savedPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
+    try {
+      (globalThis as Record<string, unknown>).window = {};
+      delete process.env.PLATFORM_TENANT_PACKAGE_DIR;
+      const syncedRoles = syncHomeRolesWithEmployeeRoles([], storeValues);
+      expect(syncedRoles.length).toBeGreaterThan(0);
+      const defaultCosts = createDefaultMatterCostsConfig(storeValues);
+      expect(defaultCosts.clientProfileCode).toBeDefined();
+    } finally {
+      if (prevWindow === undefined) {
+        delete (globalThis as Record<string, unknown>).window;
+      } else {
+        (globalThis as Record<string, unknown>).window = prevWindow;
+      }
+      if (savedPkgDir !== undefined) {
+        process.env.PLATFORM_TENANT_PACKAGE_DIR = savedPkgDir;
+      }
+    }
+
+    // R143 (7): Manifest schema parity between core/schemas/extension-manifest.schema.json and validateExtensionManifest
+    const schemaPerms =
+      extensionManifestJsonSchema.properties.permissions.items.enum;
+    const schemaHooks =
+      extensionManifestJsonSchema.properties.hooks.items.enum;
+    for (const perm of schemaPerms) {
+      expect(() =>
+        validateExtensionManifest({
+          id: 'parity-ext',
+          name: 'Parity Extension',
+          version: '1.0.0',
+          description: 'Parity test',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: [perm],
+          hooks: [schemaHooks[0]],
+        }),
+      ).not.toThrow();
+    }
+    for (const hook of schemaHooks) {
+      expect(() =>
+        validateExtensionManifest({
+          id: 'parity-ext',
+          name: 'Parity Extension',
+          version: '1.0.0',
+          description: 'Parity test',
+          supportedCoreApiRange: '^1.0.0',
+          permissions: [schemaPerms[0]],
+          hooks: [hook],
+        }),
+      ).not.toThrow();
+    }
+    expect(() =>
+      validateExtensionManifest({
+        id: '',
+        name: 'Parity Extension',
+        version: '1.0.0',
+        description: 'Parity test',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: [],
+        hooks: [],
+      }),
+    ).toThrow(/EXTENSION_MANIFEST_ERROR/);
+    expect(() =>
+      validateExtensionManifest({
+        id: 'parity-ext',
+        name: 'Parity Extension',
+        version: '1.0.0',
+        description: 'Parity test',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: ['not:a:permission'],
+        hooks: [],
+      }),
+    ).toThrow(/EXTENSION_MANIFEST_ERROR/);
 
     // R118: resolveConfiguredFirmPrimaryDomain throws TENANT_CONFIG_ERROR when branding.primaryDomain is missing
     const rawBase = getActiveTenantRawBaseConfig();

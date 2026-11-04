@@ -39,6 +39,11 @@ import {
   saveMatterRecord,
   savePersonRecord,
 } from '../server/services';
+import {
+  createSignedEntraSessionCookie,
+  verifySignedEntraSessionCookie,
+} from '../server/entraAuth';
+import { runWithActiveActorSession } from './rbac';
 import type { EmploymentRecord, Person } from './types';
 
 describe('Employee section, conversion paths, migration & permissions', () => {
@@ -372,7 +377,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       );
     });
 
-    it('Path C (Employee -> Client): marks matter as staff matter with restricted access and shows Right-to-Work evidence on file without auto-completing Client ID verification', () => {
+    it('Path C (Employee -> Client): marks matter as staff matter with restricted access and shows Right-to-Work evidence on file without auto-completing Client ID verification', async () => {
       const store = getStore();
       const employeeClient = store.people.find((p) => p.id === 'P-000002')!;
       const initialVerificationStatus = employeeClient.verificationStatusId;
@@ -396,18 +401,46 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(staffCheck.restrictedAccessUserIds).toContain('P-000001');
 
       const templateMatter = store.matters[0];
-      const matterRes = saveMatterRecord(
+      const verifiedSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000001',
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      const matterRes = await runWithActiveActorSession(
         {
-          title: 'Residential purchase for staff member',
-          clientId: 'P-000002',
-          practiceAreaId: templateMatter.practiceAreaId,
-          workTypeSubcategoryId: templateMatter.workTypeSubcategoryId,
-          responsiblePartnerId: 'P-000001',
-          supervisingPartnerId: 'P-000001',
-          leadFeeEarnerId: 'P-000001',
-          teamMemberIds: [],
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          tokenRoles: ['partner'],
+          expiresAtMs: Date.now() + 3600_000,
+          verifiedSession,
         },
-        { byId: 'P-000001' },
+        () =>
+          saveMatterRecord(
+            {
+              title: 'Residential purchase for staff member',
+              clientId: 'P-000002',
+              practiceAreaId: templateMatter.practiceAreaId,
+              workTypeSubcategoryId: templateMatter.workTypeSubcategoryId,
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000001',
+              teamMemberIds: [],
+            },
+            { byId: 'P-000001' },
+          ),
       );
       expect(matterRes.errors).toBeUndefined();
       expect(matterRes.matter.isStaffMatter).toBe(true);

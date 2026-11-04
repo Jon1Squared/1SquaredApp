@@ -512,7 +512,7 @@ export function calculateLimitationDate(
 
 /**
  * Builds a persisted `KeyDateCalculation` record from a rule set, rule, triggers, and optional override.
- * Enforces `keydate:override_calculation` and a mandatory non-empty reason when overriding.
+ * Always enforces `keydate:override_calculation` via `hasKeyDatePermission` and a mandatory non-empty reason when overriding.
  */
 export function buildKeyDateCalculation(input: {
   ruleSet: Pick<LimitationRuleSetConfig, 'id' | 'version' | 'reviewStatus'>;
@@ -523,7 +523,6 @@ export function buildKeyDateCalculation(input: {
     overriddenDate: IsoDate;
     reason: string;
     actor?: Person | null | undefined;
-    actorPermitted?: boolean;
     permissionOptions?: ResolveKeyDatePermissionsOptions | KeyDatesConfig | null;
   };
 }): {
@@ -540,15 +539,96 @@ export function buildKeyDateCalculation(input: {
   });
 
   if (input.override) {
-    const permitted =
-      input.override.actorPermitted !== undefined
-        ? input.override.actorPermitted
-        : hasKeyDatePermission(
-            input.override.actor,
-            'keydate:override_calculation',
-            input.override.permissionOptions,
-          );
+    const permitted = hasKeyDatePermission(
+      input.override.actor,
+      'keydate:override_calculation',
+      input.override.permissionOptions,
+    );
     if (!permitted) {
+      throw new Error(
+        'KEY_DATE_PERMISSION_ERROR: Overriding a calculated date requires the "keydate:override_calculation" permission.',
+      );
+    }
+    const reason = input.override.reason?.trim();
+    if (!reason) {
+      throw new Error(
+        'KEY_DATE_OVERRIDE_REASON_REQUIRED: A reason is required when overriding a calculated date.',
+      );
+    }
+    if (!parseIsoDateStrict(input.override.overriddenDate)) {
+      throw new Error(
+        `CALCULATOR_INVALID_DATE: Overridden date "${input.override.overriddenDate}" must be a valid YYYY-MM-DD date.`,
+      );
+    }
+    const overriddenDate = input.override.overriddenDate.trim();
+    return {
+      calculation: {
+        ruleSetId: input.ruleSet.id,
+        ruleSetVersion: input.ruleSet.version,
+        ruleId: input.rule.id,
+        ruleSetReviewStatus: input.ruleSet.reviewStatus,
+        triggers: sanitized,
+        calculatedDate: result.date,
+        explanation: [
+          ...result.explanation,
+          `Calculation overridden from ${result.date} to ${overriddenDate}. Reason: ${reason}`,
+        ],
+        overridden: true,
+        overrideReason: reason,
+      },
+      effectiveDueDate: overriddenDate,
+      warnings: result.warnings,
+    };
+  }
+
+  return {
+    calculation: {
+      ruleSetId: input.ruleSet.id,
+      ruleSetVersion: input.ruleSet.version,
+      ruleId: input.rule.id,
+      ruleSetReviewStatus: input.ruleSet.reviewStatus,
+      triggers: sanitized,
+      calculatedDate: result.date,
+      explanation: result.explanation,
+      overridden: false,
+    },
+    effectiveDueDate: result.date,
+    warnings: result.warnings,
+  };
+}
+
+/**
+ * UI-only preview helper for assembling a `KeyDateCalculation` payload in a client component
+ * using a server-precomputed `overrideAllowed` boolean. Server actions re-verify
+ * `keydate:override_calculation` authoritatively before persisting.
+ */
+export function previewKeyDateCalculation(
+  input: {
+    ruleSet: Pick<LimitationRuleSetConfig, 'id' | 'version' | 'reviewStatus'>;
+    rule: LimitationRuleConfig;
+    triggers: KeyDateTriggerValues;
+    calendar?: BusinessCalendarConfig | null;
+    override?: {
+      overriddenDate: IsoDate;
+      reason: string;
+    };
+  },
+  options: { overrideAllowed: boolean },
+): {
+  calculation: KeyDateCalculation;
+  effectiveDueDate: IsoDate;
+  warnings: string[];
+} {
+  const { sanitized } = sanitizeTriggerValuesForRule(input.rule, input.triggers);
+  const result = calculateLimitationDate({
+    rule: input.rule,
+    triggers: sanitized,
+    calendar: input.calendar,
+    ruleSetReviewStatus: input.ruleSet.reviewStatus,
+  });
+
+  if (input.override) {
+    if (!options.overrideAllowed) {
       throw new Error(
         'KEY_DATE_PERMISSION_ERROR: Overriding a calculated date requires the "keydate:override_calculation" permission.',
       );

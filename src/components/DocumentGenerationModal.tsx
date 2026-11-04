@@ -188,8 +188,8 @@ export function DocumentGenerationModal({
         actor,
         config: {
           documentGeneration: snapshot.config,
-          ...(snapshot.rbac ? { rbac: snapshot.rbac } : {}),
         },
+        permittedTemplateIds: snapshot.permittedTemplateIds,
         sourceEntityType,
         practiceAreaKey: practiceAreaLabel,
         matterTypeKey: matterTypeLabel,

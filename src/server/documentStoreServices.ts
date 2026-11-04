@@ -167,16 +167,11 @@ export function resolvePersonOrgAssignment(
 }
 
 /**
- * Resolves or synthesises the Entra Object ID (`oid`) for an employee (populated on sign-in or resolved by UPN).
+ * Resolves the Entra Object ID (`oid`) and UPN for an employee record.
  */
-export function resolvePersonEntraIdentity(
-  person: Person,
-  config: TenantConfiguration,
-  store: FirmStore = getStore(),
-): {
+export function resolvePersonEntraIdentity(person: Person): {
   entraObjectId: string | undefined;
   upn: string;
-  groups: string[];
 } {
   const primaryEmail = (
     person.emails?.find((e) => e.isPrimary)?.address ||
@@ -189,61 +184,12 @@ export function resolvePersonEntraIdentity(
     return {
       entraObjectId: undefined,
       upn: primaryEmail,
-      groups: [],
     };
   }
 
-  const oid = person.entraObjectId?.trim() || undefined;
-
-  const { departmentId, teamId } = resolvePersonOrgAssignment(person, store);
-  const groups: string[] = [];
-
-  const deptGroup = departmentId
-    ? config.documentAccess?.departmentEntraGroups?.[departmentId]
-    : undefined;
-  if (deptGroup) groups.push(deptGroup);
-
-  const teamGroup = teamId
-    ? config.documentAccess?.teamEntraGroups?.[teamId]
-    : undefined;
-  if (teamGroup) groups.push(teamGroup);
-
-  const roles = resolveEmployeeRoles(person, store.teams);
-  const roleSet = new Set<string>(roles);
-  if (person.appRole === 'admin') {
-    roleSet.add('admin');
-  }
-
-  for (const [groupId, roleKeys] of Object.entries(
-    config.rbac?.identityMapping?.entraGroupToRoleKey ?? {},
-  )) {
-    const keys = Array.isArray(roleKeys) ? roleKeys : [roleKeys];
-    if (keys.some((rk) => roleSet.has(rk))) {
-      groups.push(groupId);
-    }
-  }
-
-  if (roleSet.has('admin')) {
-    for (const rootGrant of config.documentAccess?.defaultPolicy?.libraryRoot ??
-      []) {
-      if (rootGrant.level === 'manage') {
-        groups.push(rootGrant.groupId);
-      }
-    }
-  }
-  if (roleSet.has('risk_compliance')) {
-    for (const rootGrant of config.documentAccess?.defaultPolicy?.libraryRoot ??
-      []) {
-      if (rootGrant.level === 'read') {
-        groups.push(rootGrant.groupId);
-      }
-    }
-  }
-
   return {
-    entraObjectId: oid,
+    entraObjectId: person.entraObjectId?.trim() || undefined,
     upn: primaryEmail,
-    groups: Array.from(new Set(groups)),
   };
 }
 
@@ -309,7 +255,6 @@ export function buildTenantContextForUser(
 
   const ctx = resolveCurrentTenantContext(
     createVerifiedSessionActorFromEntraSession(verifiedSession, {
-      tenantId: config.tenantId,
       correlationId: options?.correlationId ?? `corr-${randomUUID()}`,
     }),
     config,
@@ -617,7 +562,7 @@ export function buildLifecycleDependencies(
     resolveUserEntraObjectId: (_c: TenantContext, userId: string) => {
       const p = store.people.find((person) => person.id === userId);
       if (!p) return null;
-      const info = resolvePersonEntraIdentity(p, config);
+      const info = resolvePersonEntraIdentity(p);
       if (!info.entraObjectId || !info.upn) return null;
       return {
         entraObjectId: info.entraObjectId,

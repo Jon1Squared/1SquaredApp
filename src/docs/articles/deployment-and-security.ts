@@ -6,7 +6,7 @@ export const deploymentAndSecurityArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared isolates every firm’s data in a dedicated database, supports firm-specific customisations without forking the core, and runs identically in 1Squared UK Cloud or your firm’s own Azure subscription.',
-  updated: '2026-11-03',
+  updated: '2026-11-04',
   body: `
 Law firms evaluating practice management platforms traditionally face an uncomfortable compromise between **multi-tenant SaaS** (easy upgrades, but your client and matter records sit in a shared database alongside rival firms) and **bespoke on-premises forks** (isolated infrastructure, but every customisation makes upgrades slow, expensive, and fragile).
 
@@ -30,7 +30,7 @@ When a firm needs custom business logic—such as a bespoke risk-scoring integra
 
 - **Dedicated Private Repository**: Each firm’s configuration and custom extensions live in their own private repository. Another firm’s code is never packaged into your deployment.
 - **Public Extension API Contract**: Extensions import only from the versioned \`@platform/core/api\` contract (such as \`matter.afterCreate\`, \`matter.documents.provisioned\`, or \`ui.matter.sidebar\`) and never reach into core internals.
-- **Sandboxed Execution**: Every extension declares its required permissions in an \`extension-manifest.json\`. At runtime, the Extension Host enforces those permissions, wraps every hook in a strict execution timeout (default 5,000 ms), and isolates errors so a faulty custom script can never crash core platform operations.
+- **Sandboxed Execution**: Every extension declares its required permissions in an \`extension-manifest.json\`. At build time, \`scripts/generate-extension-registry.ts\` validates the active tenant’s extension manifests and emits \`src/platform/generated/extensionRegistry.ts\` so \`src/platform/tenantRuntime.ts\` (guarded by \`import 'server-only'\`) contains zero client-specific paths. At runtime, the Extension Host enforces manifest permissions, wraps every asynchronous hook (\`executeMatterCostsHook\`) in a strict execution timeout (default 5,000 ms), and blocks matter opening (\`allowProceed = false\`) if a \`beforeMatterOpen\` hook times out or vetoes the transition.
 
 ## 2. Database, storage & cryptographic isolation
 

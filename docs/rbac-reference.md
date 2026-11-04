@@ -144,3 +144,15 @@ Implemented in `core/src/domain/rbac/resolver.ts` (and bridged for host entities
 - When an active firm employee is a client on a matter (`isStaffMatter: true`), `computeStaffMatterStatus` populates `restrictedAccessUserIds` **only** with the named matter participants (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `teamMemberIds`).
 - Oversight access is evaluated dynamically via `matter:restricted:access` (`risk_compliance`, `managing_partner`, `admin`), so role changes take effect immediately without stale stored user IDs.
 - Generated documents linked to a restricted staff matter inherit the restriction on both Matter and Client (`person` / `organisation`) screens via `canActorAccessGeneratedDocument`.
+
+---
+
+## 8. Default Relationship Grants (`DEFAULT_RBAC_RELATIONSHIP_GRANTS`)
+
+In addition to role-based grants, the RBAC engine evaluates relationship rules (`relationshipGrants`) when resolving permissions:
+
+| Relationship Key | Default Granted Permissions | Description |
+|---|---|---|
+| `is_team_lead_of_any_team` | `employee:view_core`, `employee:edit_core`, `task:claim_any`, `keydate:view`, `keydate:edit`, `keydate:verify`, `keydate:resolve`, `keydate:waive` | Team leads and line managers can view and edit core employment records, claim unassigned tasks, and verify/manage key dates. Does **not** grant `matter:reassign_ownership` (which is restricted to `supervisor`, `partner`, `managing_partner`, and `admin`). |
+| `is_line_manager_of_target` | `employee:view_core`, `employee:edit_core` | Line managers and supervising partners can view and edit core employment records. |
+

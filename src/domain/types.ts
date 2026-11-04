@@ -1359,7 +1359,8 @@ export type AuditAction =
   | 'keydate-reminder-acknowledge'
   | 'keydate-reminder-escalate'
   | 'keydate-config-change'
-  | 'keydate-export';
+  | 'keydate-export'
+  | 'matter-restriction-lift';
 
 export interface AuditEntry {
   id: string;

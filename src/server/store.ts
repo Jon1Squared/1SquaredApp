@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { migrateEmployeesToEmploymentRecords } from '@/domain/employment';
-import { createDefaultHomePagesConfig, syncHomeRolesWithEmployeeRoles } from '@/domain/homeConfig';
+import {
+  createDefaultHomePagesConfig,
+  createDefaultRoleConfigs,
+  syncHomeRolesWithEmployeeRoles,
+} from '@/domain/homeConfig';
 import {
   createDefaultMatterCostsConfig,
   syncRateCardsWithPmsFeeEarners,
@@ -244,8 +248,13 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     today.toISOString(),
   );
   const pmsFeeEarners = getPmsSource().listFeeEarners();
+  const tenantCfg = getActiveTenantConfiguration();
   const matterCostsConfig = syncRateCardsWithPmsFeeEarners(
-    createDefaultMatterCostsConfig(partyMigration.values, today.toISOString()),
+    createDefaultMatterCostsConfig(partyMigration.values, today.toISOString(), {
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    }),
     pmsFeeEarners,
     partyMigration.values,
     today.toISOString(),
@@ -435,9 +444,21 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
     matterPartyTaxonomy,
     nowIso,
   );
-  const homePagesConfig = createDefaultHomePagesConfig(nowIso);
+  const tenantCfg = getActiveTenantConfiguration();
+  const homePagesConfig = createDefaultHomePagesConfig(
+    nowIso,
+    tenantCfg.branding.primaryDomain,
+  );
   homePagesConfig.firmSettings.demoMode = false;
-  const matterCostsConfig = createDefaultMatterCostsConfig(partyMigration.values, nowIso);
+  const matterCostsConfig = createDefaultMatterCostsConfig(
+    partyMigration.values,
+    nowIso,
+    {
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    },
+  );
 
   return {
     firmId: resolveActiveFirmId(),
@@ -577,6 +598,7 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
     const syncedRoles = syncHomeRolesWithEmployeeRoles(
       store.homePagesConfig.roles,
       store.values ?? [],
+      createDefaultRoleConfigs(getActiveTenantConfiguration().branding.primaryDomain),
     );
     if (
       syncedRoles.length !== store.homePagesConfig.roles.length ||
@@ -733,8 +755,13 @@ export function getStore(): FirmStore {
       addedSeedItems = true;
     }
     if (!global.__oneSquaredStore.matterCostsConfig) {
+      const tenantCfg = getActiveTenantConfiguration();
       global.__oneSquaredStore.matterCostsConfig = syncRateCardsWithPmsFeeEarners(
-        createDefaultMatterCostsConfig(global.__oneSquaredStore.values),
+        createDefaultMatterCostsConfig(global.__oneSquaredStore.values, {
+          clientProfileCode: tenantCfg.tenantId,
+          displayName: tenantCfg.displayName,
+          primaryDomain: tenantCfg.branding.primaryDomain,
+        }),
         getPmsSource().listFeeEarners(),
         global.__oneSquaredStore.values,
       );
@@ -936,7 +963,10 @@ export function getStore(): FirmStore {
       }
 
       if (!parsed.homePagesConfig || !Array.isArray(parsed.homePagesConfig.roles)) {
-        parsed.homePagesConfig = createDefaultHomePagesConfig(new Date().toISOString());
+        parsed.homePagesConfig = createDefaultHomePagesConfig(
+          new Date().toISOString(),
+          getActiveTenantConfiguration().branding.primaryDomain,
+        );
         migrated = true;
       } else if (!parsed.homePagesConfig.updatedById || parsed.homePagesConfig.updatedById === 'system') {
         for (const r of parsed.homePagesConfig.roles) {
@@ -1030,8 +1060,13 @@ export function getStore(): FirmStore {
       }
 
       if (!parsed.matterCostsConfig) {
+        const tenantCfg = getActiveTenantConfiguration();
         parsed.matterCostsConfig = syncRateCardsWithPmsFeeEarners(
-          createDefaultMatterCostsConfig(parsed.values),
+          createDefaultMatterCostsConfig(parsed.values, {
+            clientProfileCode: tenantCfg.tenantId,
+            displayName: tenantCfg.displayName,
+            primaryDomain: tenantCfg.branding.primaryDomain,
+          }),
           getPmsSource().listFeeEarners(),
           parsed.values,
         );

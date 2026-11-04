@@ -59,7 +59,6 @@ import {
   type TemplateUsageReportResult,
   type TenantContext,
 } from '@platform/core';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { resolveEmployeeRoles } from './homeConfig';
 import { personDisplayName } from './names';
 import {
@@ -90,6 +89,7 @@ export function isTemplateAvailableInContext(params: {
   version?: DocumentTemplateVersionRecord | null;
   actor: DocumentPermissionActor;
   config?: DocumentRbacConfigInput;
+  permittedTemplateIds?: readonly string[];
   sourceEntityType: 'matter' | 'client';
   practiceAreaKey?: string | null;
   matterTypeKey?: string | null;
@@ -100,6 +100,7 @@ export function isTemplateAvailableInContext(params: {
     version,
     actor,
     config,
+    permittedTemplateIds,
     sourceEntityType,
     practiceAreaKey,
     matterTypeKey,
@@ -154,6 +155,17 @@ export function isTemplateAvailableInContext(params: {
       available: false,
       reason: `Template is restricted to ${rules.clientTypes.join('/')} clients.`,
     };
+  }
+
+  if (permittedTemplateIds) {
+    if (!permittedTemplateIds.includes(template.id)) {
+      return {
+        available: false,
+        reason:
+          'Actor does not have the required role or permission for this template.',
+      };
+    }
+    return { available: true };
   }
 
   const actorRoles = new Set(normaliseActorHomeRoles(actor, config));
@@ -468,7 +480,12 @@ export function buildDocumentActorFromPerson(
   const tenantId =
     tenantContext?.tenantId?.trim() ||
     getActiveActorSession()?.tenantId?.trim() ||
-    getActiveTenantConfiguration().tenantId;
+    '';
+  if (!tenantId) {
+    throw new Error(
+      'RBAC_TENANT_REQUIRED: Cannot build DocumentPermissionActor without an active tenantId.',
+    );
+  }
   if (!user) {
     return { id: '', tenantId, roles: [], tokenRoles: [] };
   }
@@ -955,12 +972,8 @@ export function buildFieldResolutionContextForRecord(params: {
         country: 'United Kingdom',
       },
       mainPhone: firm?.phone ?? '+44 20 7946 0800',
-      mainEmail:
-        firm?.email ??
-        `enquiries@${getActiveTenantConfiguration().branding.primaryDomain}`,
-      website:
-        firm?.website ??
-        `www.${getActiveTenantConfiguration().branding.primaryDomain}`,
+      mainEmail: firm?.email ?? '',
+      website: firm?.website ?? '',
       complaintsPartnerName: 'Marcus Vaughan',
     },
     user: userData,

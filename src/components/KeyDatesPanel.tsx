@@ -13,9 +13,9 @@ import {
   verifyProposedKeyDateAction,
 } from '@/app/actions';
 import {
-  buildKeyDateCalculation,
   calculateLimitationDate,
   findBusinessCalendar,
+  previewKeyDateCalculation,
 } from '@/domain/keyDateCalculator';
 import {
   evaluateMatterKeyDateClosureGate,
@@ -270,25 +270,27 @@ export function KeyDatesPanel({
         return;
       }
       try {
-        const built = buildKeyDateCalculation({
-          ruleSet: selectedRuleSet,
-          rule: selectedRule,
-          triggers: {
-            ...triggerValues,
-            ...(standstillPeriods.length > 0 ? { standstillPeriods } : {}),
+        const built = previewKeyDateCalculation(
+          {
+            ruleSet: selectedRuleSet,
+            rule: selectedRule,
+            triggers: {
+              ...triggerValues,
+              ...(standstillPeriods.length > 0 ? { standstillPeriods } : {}),
+            },
+            calendar: findBusinessCalendar(
+              config,
+              selectedRule.calendarId || config.businessCalendars?.[0]?.id,
+            ),
+            override: useOverride
+              ? {
+                  overriddenDate: overrideDate,
+                  reason: overrideReason,
+                }
+              : undefined,
           },
-          calendar: findBusinessCalendar(
-            config,
-            selectedRule.calendarId || config.businessCalendars?.[0]?.id,
-          ),
-          override: useOverride
-            ? {
-                overriddenDate: overrideDate,
-                reason: overrideReason,
-                actorPermitted: canOverrideCalc,
-              }
-            : undefined,
-        });
+          { overrideAllowed: canOverrideCalc },
+        );
         calculationPayload = built.calculation;
         effectiveDueDate = built.effectiveDueDate;
       } catch (err) {
@@ -1099,26 +1101,11 @@ export function KeyDatesPanel({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {visibleDates.map((kd) => {
             const verifyCheck =
-              canVerifyByKeyDateId?.[kd.id] ??
-              (!canVerify
-                ? {
-                    allowed: false,
-                    reason:
-                      'You do not have permission (keydate:verify) to verify key dates.',
-                  }
-                : kd.status !== 'awaiting_verification'
-                  ? {
-                      allowed: false,
-                      reason: `Key date is in status "${kd.status}" and is not awaiting verification.`,
-                    }
-                  : (kd.verification.proposedById ?? kd.createdById) ===
-                      currentUser.id
-                    ? {
-                        allowed: false,
-                        reason:
-                          'The proposer of a key date cannot verify their own date.',
-                      }
-                    : { allowed: true });
+              canVerifyByKeyDateId?.[kd.id] ?? {
+                allowed: false,
+                reason:
+                  'Verification permission was not precomputed for this key date.',
+              };
             const reminder = reminderStates.find((r) => r.keyDateId === kd.id);
             const syncState = calendarSyncs.find((s) => s.keyDateId === kd.id);
 

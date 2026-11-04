@@ -37,6 +37,7 @@ const PANEL_CATEGORIES: PanelCategory[] = [
 
 interface Props {
   initialConfig: HomePagesConfig;
+  defaultRoleConfigs?: RoleHomeConfig[];
   activeViewingRole?: string;
   rolesByPersonId?: Record<string, HomeRoleKey[]>;
   people: Person[];
@@ -47,6 +48,7 @@ interface Props {
 
 export function HomePagesAdminSection({
   initialConfig,
+  defaultRoleConfigs,
   activeViewingRole,
   rolesByPersonId = {},
   people,
@@ -59,14 +61,14 @@ export function HomePagesAdminSection({
   const [pending, startTransition] = useTransition();
 
   const syncedInitialRoles = useMemo(
-    () => syncHomeRolesWithEmployeeRoles(initialConfig.roles, values),
-    [initialConfig.roles, values],
+    () => syncHomeRolesWithEmployeeRoles(initialConfig.roles, values, defaultRoleConfigs),
+    [initialConfig.roles, values, defaultRoleConfigs],
   );
 
   const [rawRoles, setRoles] = useState<RoleHomeConfig[]>(syncedInitialRoles);
   const roles = useMemo(
-    () => syncHomeRolesWithEmployeeRoles(rawRoles, values),
-    [rawRoles, values],
+    () => syncHomeRolesWithEmployeeRoles(rawRoles, values, defaultRoleConfigs),
+    [rawRoles, values, defaultRoleConfigs],
   );
   const [firmSettings, setFirmSettings] = useState(() => ({
     ...initialConfig.firmSettings,
@@ -226,7 +228,7 @@ export function HomePagesAdminSection({
         firmSettings: { ...firmSettings, demoMode: false },
       });
       if (res.config) {
-        setRoles(syncHomeRolesWithEmployeeRoles(res.config.roles, values));
+        setRoles(syncHomeRolesWithEmployeeRoles(res.config.roles, values, defaultRoleConfigs));
         setFirmSettings({ ...res.config.firmSettings, demoMode: false });
       }
       showToast('Home pages configuration saved');
@@ -237,7 +239,7 @@ export function HomePagesAdminSection({
     startTransition(async () => {
       const res = await resetHomePagesConfigAction();
       if (res.config) {
-        setRoles(syncHomeRolesWithEmployeeRoles(res.config.roles, values));
+        setRoles(syncHomeRolesWithEmployeeRoles(res.config.roles, values, defaultRoleConfigs));
         setFirmSettings({ ...res.config.firmSettings, demoMode: false });
       }
       showToast('Home pages reset to firm defaults');

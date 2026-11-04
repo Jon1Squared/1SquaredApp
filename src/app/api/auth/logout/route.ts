@@ -1,22 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { clearActiveSessionTokenRoles } from '@/domain/rbac';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   ENTRA_PKCE_COOKIE,
   ENTRA_SESSION_COOKIE,
-  verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
 import { USER_COOKIE } from '@/server/services';
 
 function buildLogoutResponse(request: NextRequest) {
-  const rawSessionCookie = request.cookies.get(ENTRA_SESSION_COOKIE)?.value;
-  const verified = verifySignedEntraSessionCookie(rawSessionCookie);
-  if (verified?.personId) {
-    clearActiveSessionTokenRoles(
-      verified.personId,
-      verified.tenantId || getActiveTenantConfiguration().tenantId,
-    );
-  }
   const destUrl = new URL('/?signedOut=1', request.url);
   const response = NextResponse.redirect(destUrl, { status: 303 });
   response.cookies.delete(ENTRA_SESSION_COOKIE);

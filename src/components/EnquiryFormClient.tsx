@@ -70,7 +70,7 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
-import { FIRM } from '@/seed/demo';
+
 import {
   CreateTaskModal,
   type CreateTaskSubmitPayload,
@@ -106,6 +106,7 @@ interface Props {
   enquirySettings?: EnquirySettings;
   currentUserId: string;
   canReopen?: boolean;
+  firmName?: string;
 }
 
 const DEMO_POSTCODE_ADDRESSES: Record<
@@ -151,6 +152,7 @@ export function EnquiryFormClient({
   enquirySettings,
   currentUserId,
   canReopen: canReopenProp = false,
+  firmName = 'the firm',
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
   const isDraftMode = isSavedEnquiry && enquiry?.status === 'Draft';
@@ -404,7 +406,7 @@ export function EnquiryFormClient({
 
   const [sendEmailModalOpen, setSendEmailModalOpen] = useState(false);
   const [emailTo, setEmailTo] = useState('');
-  const [emailSubject, setEmailSubject] = useState(`Response to enquiry to ${FIRM.name}`);
+  const [emailSubject, setEmailSubject] = useState(`Response to enquiry to ${firmName}`);
   const [emailBodyHtml, setEmailBodyHtml] = useState('');
   const emailEditorRef = useRef<HTMLDivElement | null>(null);
   const [viewingSentEmail, setViewingSentEmail] = useState<{
@@ -1276,7 +1278,7 @@ export function EnquiryFormClient({
 
   const openSendEmailModal = () => {
     setEmailTo(resolvedEmail);
-    setEmailSubject(`Response to enquiry to ${FIRM.name}`);
+    setEmailSubject(`Response to enquiry to ${firmName}`);
     setEmailBodyHtml('');
     setSendEmailModalOpen(true);
     setTimeout(() => {
@@ -4256,8 +4258,8 @@ export function EnquiryFormClient({
                   {(() => {
                     const sender = people.find((p) => p.id === viewingSentEmail.email.sentById);
                     return sender
-                      ? `${personDisplayName(sender)} (${FIRM.name})`
-                      : `${viewingSentEmail.email.sentById} (${FIRM.name})`;
+                      ? `${personDisplayName(sender)} (${firmName})`
+                      : `${viewingSentEmail.email.sentById} (${firmName})`;
                   })()}
                 </span>
                 <span className="muted" style={{ fontWeight: 600 }}>

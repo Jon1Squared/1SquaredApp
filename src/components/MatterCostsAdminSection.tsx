@@ -6,7 +6,6 @@ import {
   saveMatterCostsConfigAction,
   syncMatterCostsRatesFromPmsAction,
 } from '@/app/actions';
-import { createDefaultMatterCostsConfig } from '@/domain/matterCosts';
 import type {
   ChoiceValue,
   CustomGradeRateRow,
@@ -19,7 +18,7 @@ import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
 interface Props {
-  initialConfig?: MatterCostsConfig;
+  initialConfig: MatterCostsConfig;
   values: ChoiceValue[];
 }
 
@@ -27,9 +26,7 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
 
-  const [config, setConfig] = useState<MatterCostsConfig>(() =>
-    initialConfig ?? createDefaultMatterCostsConfig(values),
-  );
+  const [config, setConfig] = useState<MatterCostsConfig>(initialConfig);
 
   const [newCardName, setNewCardName] = useState('');
   const [newCardPracticeAreaId, setNewCardPracticeAreaId] = useState<string>('');

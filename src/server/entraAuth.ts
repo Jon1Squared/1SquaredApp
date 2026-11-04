@@ -1,16 +1,13 @@
 import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
 import {
-  clearActiveSessionTokenRoles,
   isEntraMfaVerified,
   mapEntraTokenClaimsToVerifiedOidcToken,
-  setActiveSessionTokenRolesForPerson,
   type EntraIdRawTokenClaims,
   type RbacConfiguration,
   type VerifiedOidcTokenClaims,
 } from '@/domain/rbac';
 import {
-  getActiveTenantConfiguration,
   type UnbrandedSessionActorInput,
   type VerifiedSessionActorInput,
 } from '@/platform/tenantRuntime';
@@ -122,27 +119,13 @@ export function setTestEntraSessionOverride(
       'SECURITY_ERROR: setTestEntraSessionOverride is only permitted in test environments.',
     );
   }
-  const previous = testEntraSessionOverride;
   if (session === undefined || session === null) {
     testEntraSessionOverride = session;
-    if (previous?.personId) {
-      clearActiveSessionTokenRoles(
-        previous.personId,
-        previous.tenantId || getActiveTenantConfiguration().tenantId,
-      );
-    }
     return;
   }
   const signed = createSignedEntraSessionCookie(session);
   const verified = verifySignedEntraSessionCookie(signed);
   testEntraSessionOverride = verified;
-  if (verified?.personId) {
-    setActiveSessionTokenRolesForPerson(verified.personId, verified.mappedRoles, {
-      tenantId: verified.tenantId || getActiveTenantConfiguration().tenantId,
-      expiresAt: verified.expiresAt,
-      verifiedSession: verified,
-    });
-  }
 }
 
 export function shouldUseSecureCookies(): boolean {
@@ -504,6 +487,9 @@ export function verifySignedEntraSessionCookie(
 ): VerifiedEntraSessionPayload | null {
   const session = verifySignedPayload<EntraSessionPayload>(rawCookieValue);
   if (!session) return null;
+  if (typeof session.tenantId !== 'string' || !session.tenantId.trim()) {
+    return null;
+  }
   if (new Date(session.expiresAt).getTime() < Date.now()) {
     return null;
   }
@@ -512,38 +498,12 @@ export function verifySignedEntraSessionCookie(
 
 export async function getEntraSession(): Promise<VerifiedEntraSessionPayload | null> {
   if (process.env.NODE_ENV === 'test' && testEntraSessionOverride !== undefined) {
-    if (testEntraSessionOverride?.personId) {
-      setActiveSessionTokenRolesForPerson(
-        testEntraSessionOverride.personId,
-        testEntraSessionOverride.mappedRoles,
-        {
-          tenantId:
-            testEntraSessionOverride.tenantId ||
-            getActiveTenantConfiguration().tenantId,
-          expiresAt: testEntraSessionOverride.expiresAt,
-          verifiedSession: testEntraSessionOverride,
-        },
-      );
-    }
     return testEntraSessionOverride;
   }
   try {
     const jar = await cookies();
     const raw = jar.get(ENTRA_SESSION_COOKIE)?.value;
-    const verified = verifySignedEntraSessionCookie(raw);
-    if (verified?.personId) {
-      setActiveSessionTokenRolesForPerson(
-        verified.personId,
-        verified.mappedRoles,
-        {
-          tenantId:
-            verified.tenantId || getActiveTenantConfiguration().tenantId,
-          expiresAt: verified.expiresAt,
-          verifiedSession: verified,
-        },
-      );
-    }
-    return verified;
+    return verifySignedEntraSessionCookie(raw);
   } catch {
     return null;
   }
@@ -602,13 +562,18 @@ export function createVerifiedSessionActorFromEntraSession(
   session: VerifiedEntraSessionPayload,
   overrides?: {
     correlationId?: string;
-    tenantId?: string;
     untrustedRequestTenantOverride?: string;
   },
 ): VerifiedSessionActorInput {
   if (!session || !isVerifiedEntraSessionPayload(session)) {
     throw new Error(
       'TENANCY_AUTH_ERROR: Session payload was not produced by verifySignedEntraSessionCookie or getEntraSession.',
+    );
+  }
+  const tenantId = (session.tenantId ?? '').trim();
+  if (!tenantId) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session is missing required tenantId claim.',
     );
   }
   const email = (session.email ?? '').trim();
@@ -634,7 +599,7 @@ export function createVerifiedSessionActorFromEntraSession(
     entraObjectId: oid,
     entraTenantId: session.tid,
     mfaVerified: session.mfaVerified,
-    tenantId: overrides?.tenantId ?? session.tenantId,
+    tenantId,
     untrustedRequestTenantOverride: overrides?.untrustedRequestTenantOverride,
     correlationId: overrides?.correlationId,
   });

@@ -17,6 +17,7 @@ export default async function NewEnquiryPage() {
         values={snap.values}
         customFields={snap.customFields}
         currentUserId={snap.currentUserId}
+        firmName={snap.firm.name}
       />
     );
   });

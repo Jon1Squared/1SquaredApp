@@ -1,6 +1,8 @@
 import { redirect } from 'next/navigation';
 import { AdminClient, type AdminTab } from '@/components/AdminClient';
+import { createDefaultRoleConfigs } from '@/domain/homeConfig';
 import { hasPersonPermission } from '@/domain/rbac';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { getEntraEnvStatus } from '@/server/entraAuth';
 import { getAppSnapshot, getPmsAdminSnapshot, withPageActor } from '@/server/services';
 
@@ -69,6 +71,9 @@ export default async function AdminCatchAllPage({
         enquiries={snap.enquiries}
         pmsAdmin={pmsAdmin}
         homePagesConfig={snap.homePagesConfig}
+        defaultRoleConfigs={createDefaultRoleConfigs(
+          getActiveTenantConfiguration().branding.primaryDomain,
+        )}
         orgStructure={snap.orgStructure}
         matterPartyTaxonomy={snap.matterPartyTaxonomy}
         matterPartyMigrationReport={snap.matterPartyMigrationReport}

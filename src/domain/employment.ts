@@ -2,7 +2,6 @@
  * Domain logic for Employment records, permissions, effective dating,
  * conversion paths (contact/client <-> employee <-> leaver), and migration.
  */
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { addDays, toIsoDate } from './dates';
 import { resolveLabel } from './lists';
 import { personDisplayName } from './names';
@@ -80,6 +79,7 @@ export const CONTRACT_TYPES: ContractType[] = [
 import {
   ALL_EMPLOYEE_PERMISSIONS as CORE_ALL_EMPLOYEE_PERMISSIONS,
   canPersonAccessMatter,
+  getServerTenantConfiguration,
   resolvePersonPermissionSet,
 } from './rbac';
 
@@ -811,8 +811,10 @@ export function getRightToWorkEvidenceOnFile(person: Person | null | undefined):
  * applies HR retention rules to employment data separately from contact data,
  * and keeps the person record as a contact if they have other roles or the user chooses to.
  */
-export function resolveConfiguredFirmPrimaryDomain(): string {
-  const config = getActiveTenantConfiguration();
+export function resolveConfiguredFirmPrimaryDomain(
+  configOverride?: { branding?: { primaryDomain?: string } } | null,
+): string {
+  const config = configOverride ?? getServerTenantConfiguration();
   const primaryDomain = config?.branding?.primaryDomain?.trim().toLowerCase();
   if (!primaryDomain) {
     throw new Error(

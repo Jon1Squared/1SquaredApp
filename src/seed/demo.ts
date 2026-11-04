@@ -3891,7 +3891,10 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     },
   ];
 
-  const homePagesConfig = createDefaultHomePagesConfig(ts(0, 9));
+  const homePagesConfig = createDefaultHomePagesConfig(
+    ts(0, 9),
+    getActiveTenantConfiguration().branding.primaryDomain,
+  );
 
   // Notifications for demo users
   const notifications: NotificationItem[] = [

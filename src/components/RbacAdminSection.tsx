@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useMemo, useState, useTransition } from 'react';
+import React, { useEffect, useMemo, useState, useTransition } from 'react';
 import {
+  previewRbacOverridesAction,
   updatePersonPermissionOverridesAction,
   updateTenantRbacConfigAction,
 } from '@/app/actions';
@@ -251,36 +252,44 @@ export function RbacAdminSection({
     });
   };
 
+  const [previewedPermissions, setPreviewedPermissions] = useState<
+    PermissionKey[] | null
+  >(null);
+
+  useEffect(() => {
+    if (!selectedEmployee) {
+      queueMicrotask(() => setPreviewedPermissions(null));
+      return;
+    }
+    let cancelled = false;
+    void previewRbacOverridesAction(selectedEmployee.id, {
+      grant: overrideGrant,
+      revoke: overrideRevoke,
+      rbacConfig: localRbac,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.ok) {
+          setPreviewedPermissions(res.permissions);
+        }
+      })
+      .catch(() => {
+        // Retain baseline permissions if preview fails
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEmployee, overrideGrant, overrideRevoke, localRbac]);
+
   const selectedEmployeeEffectivePermissions = useMemo(() => {
     if (!selectedEmployee) return new Set<PermissionKey>();
-    const baseline = new Set<PermissionKey>(
+    if (previewedPermissions) {
+      return new Set<PermissionKey>(previewedPermissions);
+    }
+    return new Set<PermissionKey>(
       permissionsByPersonId?.[selectedEmployee.id] ?? [],
     );
-    for (const oldGrant of selectedEmployee.permissionOverrides?.grant ?? []) {
-      baseline.delete(oldGrant);
-    }
-    for (const roleKey of selectedEmployee.roles ?? []) {
-      for (const perm of localRbac.roles[roleKey]?.permissions ?? []) {
-        baseline.add(perm);
-      }
-    }
-    const deptId =
-      selectedEmployee.employment?.departmentId ?? selectedEmployee.departmentId;
-    if (deptId) {
-      for (const perm of localRbac.departmentGrants[deptId] ?? []) {
-        baseline.add(perm);
-      }
-    }
-    for (const g of overrideGrant) baseline.add(g);
-    for (const r of overrideRevoke) baseline.delete(r);
-    return baseline;
-  }, [
-    selectedEmployee,
-    permissionsByPersonId,
-    overrideGrant,
-    overrideRevoke,
-    localRbac,
-  ]);
+  }, [selectedEmployee, previewedPermissions, permissionsByPersonId]);
 
   const isSelfSelected = selectedEmployee?.id === currentUserId;
 

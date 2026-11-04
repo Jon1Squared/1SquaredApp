@@ -476,8 +476,8 @@ DROP TABLE IF EXISTS key_dates;
 };
 
 export const KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004: TenantMigrationDefinition = {
-  version: '0004_key_date_reminder_last_skipped_reason_expand',
-  name: 'key_date_reminder_last_skipped_reason_expand',
+  version: '0004',
+  name: '0004_key_date_reminder_last_skipped_reason_expand',
   description:
     'Adds nullable last_skipped_reason column with CHECK constraint to key_date_reminder_states so skipped reminder reasons (no_permitted_assignees, missing_matter) persist across tenant databases.',
   tablesChanged: ['key_date_reminder_states'],
@@ -585,12 +585,24 @@ export class TenantMigrationRunner {
       return false;
     }
 
-    const definition = migrations.find(
+    const targetIndex = migrations.findIndex(
       (m) => m.version === version || m.name === version,
     );
+    const definition = targetIndex >= 0 ? migrations[targetIndex] : undefined;
     const targetVersion = definition?.version ?? version;
     if (!dbMigrations.has(targetVersion)) {
       return false;
+    }
+
+    if (targetIndex >= 0) {
+      for (let i = migrations.length - 1; i > targetIndex; i--) {
+        const laterMigration = migrations[i]!;
+        if (dbMigrations.has(laterMigration.version)) {
+          throw new Error(
+            `MIGRATION_ROLLBACK_ORDER_ERROR: Cannot roll back migration "${targetVersion}" while later migration "${laterMigration.version}" is still applied. Roll back in reverse order.`,
+          );
+        }
+      }
     }
 
     if (!definition || !definition.downSql.trim()) {

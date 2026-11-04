@@ -178,11 +178,12 @@ export class ExtensionHost {
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
 
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       try {
         const result = await Promise.race<MatterCostsHookResult>([
           Promise.resolve(fn(scopedContext, input)),
-          new Promise<MatterCostsHookResult>((_, reject) =>
-            setTimeout(
+          new Promise<MatterCostsHookResult>((_, reject) => {
+            timeoutHandle = setTimeout(
               () =>
                 reject(
                   new Error(
@@ -190,9 +191,11 @@ export class ExtensionHost {
                   ),
                 ),
               timeoutMs,
-            ),
-          ),
-        ]);
+            );
+          }),
+        ]).finally(() => {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+        });
 
         if (result.requiresPartnerSignOff) {
           requiresPartnerSignOff = true;
@@ -206,6 +209,9 @@ export class ExtensionHost {
       } catch (err) {
         // Fail-safe error isolation: log warning without crashing the core
         const reason = err instanceof Error ? err.message : 'Unknown error';
+        if (hookName === 'beforeMatterOpen' && reason.includes('timed out after')) {
+          allowProceed = false;
+        }
         aggregatedWarnings.push(
           `[Extension isolated error: ${ext.manifest.id}] ${reason}`,
         );
@@ -219,6 +225,9 @@ export class ExtensionHost {
     };
   }
 
+  /**
+   * @deprecated Use async `executeMatterCostsHook` instead.
+   */
   public executeMatterCostsHookSync(
     hookName: 'beforeMatterCostsCalculate' | 'beforeMatterOpen',
     tenantCtx: TenantContext,

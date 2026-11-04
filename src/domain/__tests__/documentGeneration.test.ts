@@ -21,10 +21,7 @@ import {
   getTemplateUsageReportService,
 } from '@/server/documentGenerationServices';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
-import {
-  runWithActiveActorSession,
-  setActiveSessionTokenRolesForPerson,
-} from '@/domain/rbac';
+import { runWithActiveActorSession } from '@/domain/rbac';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import {
   createSignedEntraSessionCookie,
@@ -65,22 +62,41 @@ describe('Host Document Generation Domain & Server Services', () => {
     );
 
     if (managingPartner) {
-      const perms = resolvePersonDocumentPermissions(managingPartner);
+      const perms = resolvePersonDocumentPermissions(
+        managingPartner,
+        undefined,
+        { tenantId: 'not-a-law-firm' },
+      );
       expect(perms).toContain('document_template:build');
       expect(perms).toContain('document_template:approve');
       expect(perms).toContain('finance:view');
       expect(
-        hasPersonDocumentPermission(managingPartner, 'document_template:build'),
+        hasPersonDocumentPermission(
+          managingPartner,
+          'document_template:build',
+          undefined,
+          { tenantId: 'not-a-law-firm' },
+        ),
       ).toBe(true);
     }
 
     if (legalSec && !legalSec.roles?.includes('admin')) {
       expect(
-        hasPersonDocumentPermission(legalSec, 'document_template:build'),
+        hasPersonDocumentPermission(
+          legalSec,
+          'document_template:build',
+          undefined,
+          { tenantId: 'not-a-law-firm' },
+        ),
       ).toBe(false);
-      expect(hasPersonDocumentPermission(legalSec, 'document:generate')).toBe(
-        true,
-      );
+      expect(
+        hasPersonDocumentPermission(
+          legalSec,
+          'document:generate',
+          undefined,
+          { tenantId: 'not-a-law-firm' },
+        ),
+      ).toBe(true);
     }
   });
 
@@ -133,11 +149,6 @@ describe('Host Document Generation Domain & Server Services', () => {
       expiresAt,
     });
     const verified = verifySignedEntraSessionCookie(signed)!;
-    setActiveSessionTokenRolesForPerson(emp.id, roles, {
-      tenantId,
-      expiresAt,
-      verifiedSession: verified,
-    });
 
     await runWithActiveActorSession(
       {

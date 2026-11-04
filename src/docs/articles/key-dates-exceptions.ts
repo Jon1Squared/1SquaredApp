@@ -6,7 +6,7 @@ export const keyDatesExceptionsArticle: DocArticle = {
   section: 'key-dates-limitation',
   summary:
     'How risk, compliance, and managing partners monitor all 10 key date exception kinds (9 matter/diary compliance kinds plus the admin data-integrity orphan check) across teams and export audited reports.',
-  updated: '2026-11-03',
+  updated: '2026-11-04',
   body: `
 The **Compliance exceptions** tab in the [Key Dates & Limitation Diary](/key-dates) gives Risk & Compliance officers, Managing Partners, and Administrators (\`keydate:view_any_team\`) a real-time view of every key date governance exception across the firm.
 
@@ -31,6 +31,6 @@ The exceptions engine continuously evaluates open and closed matters against ten
 
 - **Filter by team or exception kind**: Narrow the report to specific practice teams or specific exception types.
 - **Restricted (staff) matters**: Exceptions belonging to restricted staff matters are omitted at the data layer unless the viewer is explicitly listed in \`matter.restrictedAccessUserIds\` or holds the \`matter:restricted:access\` permission grant.
-- **Audited CSV and JSON exports**: Selecting **Export CSV (Audited)** or **Export JSON (Audited)** downloads the filtered report and writes an immutable \`keydate-exceptions-export\` entry to the audit log.
+- **Audited CSV and JSON exports**: Selecting **Export CSV (Audited)** or **Export JSON (Audited)** downloads the filtered report and writes an immutable \`keydate-export\` entry to the audit log.
 `,
 };

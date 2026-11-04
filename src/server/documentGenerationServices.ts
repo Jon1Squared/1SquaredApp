@@ -29,6 +29,7 @@ import {
   hasDocumentPermission,
   hasPermission,
   importTemplatePackage,
+  normaliseActorHomeRoles,
   previewTemplateVersion,
   queryTemplateUsageReport,
   rejectTemplateVersion,
@@ -53,7 +54,6 @@ import {
   type ScopedDownloadToken,
   type TemplateAvailabilityRules,
   type DocumentPermissionActor,
-  type RbacConfiguration,
   type TemplatePackageManifest,
   type TemplatePlaceholderMapping,
   type TemplateUsageReportFilter,
@@ -102,9 +102,9 @@ export interface SerializableCatalogueField {
 
 export interface DocumentGenerationClientSnapshot {
   config: DocumentGenerationConfig;
-  rbac?: RbacConfiguration;
   actor: DocumentPermissionActor;
   userPermissions: DocumentPermission[];
+  permittedTemplateIds: string[];
   readableCatalogueFields: SerializableCatalogueField[];
   templates: DocumentTemplateRecord[];
   versions: DocumentTemplateVersionRecord[];
@@ -663,11 +663,39 @@ export async function getDocumentGenerationSnapshotForUser(
     documentLinks.push(...repo.listLinksForDocument(ctx, docId));
   }
 
+  const versionById = new Map(versions.map((v) => [v.id, v]));
+  const actorRoles = new Set(normaliseActorHomeRoles(actor, config));
+  const canViewFinance = hasDocumentPermission(actor, 'finance:view', config);
+  const permittedTemplateIds = templates
+    .filter((t) => {
+      if (t.availabilityRules.allowedRoleKeys?.length) {
+        const hasRole = t.availabilityRules.allowedRoleKeys.some((r) =>
+          actorRoles.has(r),
+        );
+        if (!hasRole) return false;
+      }
+      const activeVer = t.activeVersionId
+        ? versionById.get(t.activeVersionId)
+        : null;
+      if (activeVer) {
+        const usesFinancialField = Object.values(activeVer.fieldMappings).some(
+          (m) =>
+            m.sourceType === 'catalogue' &&
+            m.catalogueKey?.startsWith('financial.'),
+        );
+        if (usesFinancialField && !canViewFinance) {
+          return false;
+        }
+      }
+      return true;
+    })
+    .map((t) => t.id);
+
   return {
     config: config.documentGeneration,
-    rbac: config.rbac,
     actor,
     userPermissions,
+    permittedTemplateIds,
     readableCatalogueFields: serializableCatalogue,
     templates,
     versions,
@@ -1088,6 +1116,8 @@ export async function previewTemplateService(
     firm: {
       name: store.firm.shortName,
       legalName: store.firm.name,
+      email: `enquiries@${config.branding.primaryDomain}`,
+      website: `www.${config.branding.primaryDomain}`,
     },
   });
 
@@ -1190,6 +1220,8 @@ export async function generateDocumentService(
     firm: {
       name: store.firm.shortName,
       legalName: store.firm.name,
+      email: `enquiries@${config.branding.primaryDomain}`,
+      website: `www.${config.branding.primaryDomain}`,
     },
   });
 

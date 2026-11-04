@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import {
   addNoteAction,
+  markEngagementLetterDraftedAction,
   saveMatterAction,
   saveTaskAction,
   updateMatterConflictRecordAction,
@@ -370,6 +371,7 @@ export function MatterProfileClient({
   }, [isBrightwaterTribunal, subcatLabel, matter.openedAt, matter.targetCompletionAt]);
 
   async function persistStageIdx(nextIdx: number) {
+    const prevIdx = currentStageIdx;
     const bounded = Math.max(0, Math.min(stageSteps.length - 1, nextIdx));
     setCurrentStageIdx(bounded);
     const matchingStage = values.find(
@@ -379,7 +381,7 @@ export function MatterProfileClient({
         v.label.toLowerCase().startsWith(`stage ${bounded + 1}`),
     );
     if (matchingStage) {
-      await saveMatterAction(
+      const res = await saveMatterAction(
         {
           title: matter.title,
           clientId: matter.clientId,
@@ -389,6 +391,11 @@ export function MatterProfileClient({
         },
         { id: matter.id },
       );
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setCurrentStageIdx(prevIdx);
+        showToast(Object.values(res.errors)[0] ?? 'Could not update matter stage');
+        return;
+      }
       router.refresh();
     }
     showToast(`Moved matter to Stage ${bounded + 1}: ${stageSteps[bounded].name}`);
@@ -4020,10 +4027,7 @@ export function MatterProfileClient({
             doc.documentType === 'Client Care Letter' &&
             matter.engagementLetterStatus !== 'Signed'
           ) {
-            void saveMatterAction({
-              ...matter,
-              engagementLetterStatus: 'Drafted',
-            });
+            void markEngagementLetterDraftedAction(matter.id);
           }
           showToast(`Generated ${doc.fileName}`);
           router.refresh();

@@ -67,7 +67,6 @@ import {
 import { buildDefaultOrgStructure, resolveOrgDepartment } from '@/domain/orgStructure';
 import {
   calculateDisbursementsTotal,
-  createDefaultMatterCostsConfig,
   lookupRatesForMatter,
   mapBillingBasisLabelToWorkBasis,
   mapWorkBasisToBillingBasisId,
@@ -157,7 +156,8 @@ interface MatterFormClientProps {
   currentUser: Person;
   orgStructure?: OrgStructureCatalogue;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
-  matterCostsConfig?: MatterCostsConfig;
+  matterCostsConfig: MatterCostsConfig;
+  canReassignOwnership?: boolean;
 }
 
 type OptionalTabKey =
@@ -560,6 +560,7 @@ export function MatterFormClient({
   orgStructure: orgStructureProp,
   matterPartyTaxonomy,
   matterCostsConfig,
+  canReassignOwnership = true,
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -570,10 +571,7 @@ export function MatterFormClient({
     [orgStructureProp],
   );
 
-  const costsConfig = useMemo(
-    () => matterCostsConfig ?? createDefaultMatterCostsConfig(values),
-    [matterCostsConfig, values],
-  );
+  const costsConfig = matterCostsConfig;
 
   const taxonomy = useMemo(
     () => matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(values),
@@ -4986,6 +4984,7 @@ export function MatterFormClient({
   const [savedDraftMatterId, setSavedDraftMatterId] = useState<string | null>(
     existing?.id ?? null,
   );
+  const [serverSaveErrors, setServerSaveErrors] = useState<Record<string, string>>({});
 
   const [assignModalOpen, setAssignModalOpen] = useState<boolean>(false);
   const [assignSubmitting, setAssignSubmitting] = useState<boolean>(false);
@@ -5064,6 +5063,7 @@ export function MatterFormClient({
   // Save draft handler
   async function handleSaveDraft() {
     setSaving(true);
+    setServerSaveErrors({});
     try {
       const snapshot = buildConflictRecordSnapshot('In progress', 'Pending');
       const matterParties: MatterParty[] = otherParties.map(toMatterParty);
@@ -5136,6 +5136,11 @@ export function MatterFormClient({
         { id: savedDraftMatterId ?? existing?.id, saveMode: 'draft' },
       );
       setSaving(false);
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setServerSaveErrors(res.errors);
+        showToast(Object.values(res.errors)[0] ?? 'Could not save draft');
+        return;
+      }
       if (res.matter) {
         setSavedDraftMatterId(res.matter.id);
         if (typeof window !== 'undefined') {
@@ -5164,6 +5169,7 @@ export function MatterFormClient({
 
   async function handleConfirmAssignTask(payload: CreateTaskSubmitPayload) {
     setAssignSubmitting(true);
+    setServerSaveErrors({});
     try {
       let targetMatterId = savedDraftMatterId ?? existing?.id ?? null;
       if (!isEditingExistingMatter) {
@@ -5240,6 +5246,12 @@ export function MatterFormClient({
           },
           { id: targetMatterId ?? undefined, saveMode: 'draft' },
         );
+        if (draftRes.errors && Object.keys(draftRes.errors).length > 0) {
+          setServerSaveErrors(draftRes.errors);
+          setAssignSubmitting(false);
+          showToast(Object.values(draftRes.errors)[0] ?? 'Could not save draft');
+          return;
+        }
         if (draftRes.matter) {
           targetMatterId = draftRes.matter.id;
           setSavedDraftMatterId(draftRes.matter.id);
@@ -5424,6 +5436,7 @@ export function MatterFormClient({
   async function handleSaveExistingMatter() {
     if (!canSaveExisting || !existing) return;
     setSaving(true);
+    setServerSaveErrors({});
     try {
       const {
         finalTeamMemberIds,
@@ -5487,6 +5500,11 @@ export function MatterFormClient({
         { id: existing.id },
       );
       setSaving(false);
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setServerSaveErrors(res.errors);
+        showToast(Object.values(res.errors)[0] ?? 'Could not save matter changes');
+        return;
+      }
       if (res.matter) {
         showToast(`Saved changes to ${res.matter.matterNumber}`);
         router.push(`/matters/${res.matter.id}`);
@@ -5506,6 +5524,7 @@ export function MatterFormClient({
     }
     if (!canSubmit) return;
     setSaving(true);
+    setServerSaveErrors({});
     try {
       const {
         finalTeamMemberIds,
@@ -5604,6 +5623,11 @@ export function MatterFormClient({
           { id: savedDraftMatterId ?? existing?.id, saveMode: 'submit_cleared' },
         );
         setSaving(false);
+        if (res.errors && Object.keys(res.errors).length > 0) {
+          setServerSaveErrors(res.errors);
+          showToast(Object.values(res.errors)[0] ?? 'Could not open matter');
+          return;
+        }
         if (res.matter) {
           if (typeof window !== 'undefined') {
             try {
@@ -5628,7 +5652,7 @@ export function MatterFormClient({
           'Referred',
           'Referred to risk for review',
         );
-        await saveMatterAction(
+        const res = await saveMatterAction(
           {
             title: title.trim(),
             shortDescription,
@@ -5668,6 +5692,11 @@ export function MatterFormClient({
           { id: savedDraftMatterId ?? existing?.id, saveMode: 'submit_referred' },
         );
         setSaving(false);
+        if (res.errors && Object.keys(res.errors).length > 0) {
+          setServerSaveErrors(res.errors);
+          showToast(Object.values(res.errors)[0] ?? 'Could not submit matter');
+          return;
+        }
         setWorkflowState('referred_readonly');
         showToast(
           'Referred to Risk & Compliance · Task created for risk team · Status: Pending conflict review',
@@ -7289,7 +7318,11 @@ export function MatterFormClient({
                   onChange={(e) => {
                     const nextPa = e.target.value;
                     setPracticeAreaId(nextPa);
-                    if (!owningDepartmentExplicitlyChosen && !owningTeamId) {
+                    if (
+                      (!isEditingExistingMatter || canReassignOwnership) &&
+                      !owningDepartmentExplicitlyChosen &&
+                      !owningTeamId
+                    ) {
                       const nextOrgDept = resolveOrgDepartment(nextPa, orgStructure);
                       const nextOwningDeptId = nextOrgDept?.id ?? '';
                       setOwningDepartmentId(nextOwningDeptId);
@@ -7387,7 +7420,7 @@ export function MatterFormClient({
                   id="nm-owning-department"
                   className="field-select"
                   value={owningDepartmentId}
-                  disabled={isReadOnlyFeeEarner}
+                  disabled={isReadOnlyFeeEarner || (isEditingExistingMatter && !canReassignOwnership)}
                   onChange={(e) => {
                     const nextDeptId = e.target.value;
                     setOwningDepartmentExplicitlyChosen(Boolean(nextDeptId));
@@ -7404,13 +7437,23 @@ export function MatterFormClient({
                 >
                   <option value="">Select owning department…</option>
                   {orgStructure.departments
-                    .filter((d) => d.active)
+                    .filter((d) => d.active || d.id === owningDepartmentId)
                     .map((d) => (
                       <option key={d.id} value={d.id}>
-                        {d.name} ({d.code})
+                        {d.name} ({d.code}){!d.active ? ' (Inactive)' : ''}
                       </option>
                     ))}
                 </select>
+                {isEditingExistingMatter && !canReassignOwnership ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Reassigning an opened matter’s owning department requires matter ownership reassignment permission.
+                  </div>
+                ) : null}
+                {serverSaveErrors.owningDepartmentId ? (
+                  <div className="field-error" style={{ color: 'var(--status-alert)', fontSize: 12, marginTop: 4 }}>
+                    {serverSaveErrors.owningDepartmentId}
+                  </div>
+                ) : null}
               </div>
 
               <div className="field-group">
@@ -7421,7 +7464,7 @@ export function MatterFormClient({
                   id="nm-owning-team"
                   className="field-select"
                   value={owningTeamId}
-                  disabled={isReadOnlyFeeEarner}
+                  disabled={isReadOnlyFeeEarner || (isEditingExistingMatter && !canReassignOwnership)}
                   onChange={(e) => setOwningTeamId(e.target.value)}
                 >
                   <option value="">Select owning team…</option>
@@ -7431,7 +7474,35 @@ export function MatterFormClient({
                     </option>
                   ))}
                 </select>
+                {isEditingExistingMatter && !canReassignOwnership ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Reassigning an opened matter’s owning team requires matter ownership reassignment permission.
+                  </div>
+                ) : null}
+                {serverSaveErrors.owningTeamId ? (
+                  <div className="field-error" style={{ color: 'var(--status-alert)', fontSize: 12, marginTop: 4 }}>
+                    {serverSaveErrors.owningTeamId}
+                  </div>
+                ) : null}
               </div>
+              {serverSaveErrors.costsGovernance || serverSaveErrors.permission || serverSaveErrors.access ? (
+                <div
+                  className="field-group field-group--full"
+                  role="alert"
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    background: 'rgba(220, 38, 38, 0.08)',
+                    border: '1px solid var(--status-alert)',
+                    color: 'var(--status-alert)',
+                    fontSize: 13,
+                  }}
+                >
+                  {serverSaveErrors.costsGovernance ||
+                    serverSaveErrors.permission ||
+                    serverSaveErrors.access}
+                </div>
+              ) : null}
 
               {/* Responsible partner and fee earner */}
               <div className="field-group">

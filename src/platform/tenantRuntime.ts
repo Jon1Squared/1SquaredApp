@@ -1,3 +1,5 @@
+import 'server-only';
+
 /**
  * Platform Runtime Bridge connecting the Next.js host (`onesquared`) to:
  * - Layer 1: `@platform/core` (Tenancy, Config Engine, Extension Host, PostgreSQL Database-per-Tenant)
@@ -19,15 +21,14 @@ import {
   type TenantContext,
 } from '@platform/core';
 import type { PlatformExtension } from '@platform/core-api';
-import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
-
-const BUNDLED_TENANT_EXTENSIONS: Readonly<Record<string, PlatformExtension>> = {
-  [notALawFirmMatterCostsExtension.manifest.id]: notALawFirmMatterCostsExtension,
-};
+import { registerServerTenantConfigReader } from '@/domain/rbac';
+import { BUNDLED_TENANT_EXTENSIONS } from './generated/extensionRegistry';
 
 let testBaseConfigOverride: Record<string, unknown> | null = null;
 let testDevOverlayOverride: Record<string, unknown> | null | undefined = undefined;
 const fileJsonCache = new Map<string, Record<string, unknown>>();
+
+registerServerTenantConfigReader(() => getActiveTenantConfiguration());
 
 export function setActiveTenantConfigForTesting(
   baseConfig: Record<string, unknown> | null,
@@ -304,6 +305,20 @@ function loadTenantPackageExtensions(
         } catch (requireErr) {
           const bundled = BUNDLED_TENANT_EXTENSIONS[validatedManifest.id];
           if (bundled) {
+            console.warn(
+              JSON.stringify({
+                level: 'warn',
+                event: 'extension_require_fallback_to_bundled_registry',
+                tenantId: tenantConfig.tenantId,
+                correlationId: `ext-load-${tenantConfig.tenantId}`,
+                extensionDir: extDirName,
+                extensionId: validatedManifest.id,
+                reason:
+                  requireErr instanceof Error
+                    ? requireErr.message
+                    : String(requireErr),
+              }),
+            );
             candidates = [bundled];
           } else {
             throw requireErr;
@@ -339,6 +354,7 @@ function loadTenantPackageExtensions(
           level: 'error',
           event: 'extension_load_failed',
           tenantId: tenantConfig.tenantId,
+          correlationId: `ext-load-${tenantConfig.tenantId}`,
           extensionDir: extDirName,
           error: message,
         }),
@@ -423,8 +439,13 @@ export function resolveCurrentTenantContext(
     );
   }
   const cfg = configOverride ?? getActiveTenantConfiguration();
-  const sessionTenantId = cfg.tenantId;
-  if (actor.tenantId && actor.tenantId !== sessionTenantId) {
+  const sessionTenantId = (actor.tenantId ?? '').trim();
+  if (!sessionTenantId) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session actor is missing required tenantId claim.',
+    );
+  }
+  if (sessionTenantId !== cfg.tenantId) {
     throw new Error(
       'TENANCY_FORGERY_DETECTED: Request attempted to override authenticated session tenantId.',
     );

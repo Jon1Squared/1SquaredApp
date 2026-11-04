@@ -167,6 +167,7 @@ interface Props {
   enquiries: Enquiry[];
   pmsAdmin?: PmsAdminSnapshot;
   homePagesConfig?: HomePagesConfig;
+  defaultRoleConfigs?: import('@/domain/types').RoleHomeConfig[];
   orgStructure?: OrgStructureCatalogue;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterPartyMigrationReport?: MatterPartyMigrationReport;
@@ -201,6 +202,7 @@ export function AdminClient({
   enquiries,
   pmsAdmin,
   homePagesConfig,
+  defaultRoleConfigs,
   orgStructure: orgStructureProp,
   matterPartyTaxonomy,
   matterPartyMigrationReport,
@@ -2774,7 +2776,7 @@ export function AdminClient({
                 <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
                   All core application fields remain available to every client. Additional client
                   fields, their screen locations, and mandatory status are saved per client in{' '}
-                  <code>client-not-a-law-firm/config/base.json</code>.
+                  <code>config/base.json</code>.
                 </div>
               </div>
               <StatusPill label="Layer 2 · Client Configuration" tone="positive" />
@@ -3976,7 +3978,7 @@ export function AdminClient({
       {tab === 'document-stores' && <DocumentStoresAdminPanel />}
 
       {/* TAB: RATES & MATTER COSTS */}
-      {tab === 'rates-and-costs' && (
+      {tab === 'rates-and-costs' && matterCostsConfig && (
         <MatterCostsAdminSection
           initialConfig={matterCostsConfig}
           values={values}
@@ -3987,6 +3989,7 @@ export function AdminClient({
       {tab === 'home-pages' && homePagesConfig && (
         <HomePagesAdminSection
           initialConfig={homePagesConfig}
+          defaultRoleConfigs={defaultRoleConfigs}
           activeViewingRole={activeViewingRole}
           rolesByPersonId={rolesByPersonId}
           people={people}

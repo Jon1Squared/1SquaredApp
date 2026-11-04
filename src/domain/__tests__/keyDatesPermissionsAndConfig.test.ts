@@ -498,6 +498,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       const signedAdminSession = verifySignedEntraSessionCookie(
         createSignedEntraSessionCookie({
           personId: admin.id,
+          tenantId: 'not-a-law-firm',
           oid: admin.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
           tid: '00000000-0000-4000-8000-000000000000',
           sub: admin.id,
@@ -835,6 +836,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       const signedSession = verifySignedEntraSessionCookie(
         createSignedEntraSessionCookie({
           personId: 'P-000001',
+          tenantId: tenantConfig.tenantId,
           oid: '00000000-0000-4000-8000-000000000001',
           tid: '00000000-0000-4000-8000-000000000000',
           sub: 'P-000001',
@@ -853,10 +855,10 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         createVerifiedSessionActorFromEntraSession(
           signedSession,
           {
-            tenantId: tenantConfig.tenantId,
             correlationId: 'corr-kd-ext-1',
           },
         ),
+        tenantConfig,
       );
 
       const beforeCreateRes = await host.executeKeyDateBeforeCreateHook(

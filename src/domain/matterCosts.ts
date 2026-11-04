@@ -4,7 +4,6 @@
  * and Multi-Client Tenant Customisation Configuration.
  */
 import { resolveLabel } from './lists';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type {
   ChoiceValue,
   CustomGradeRateRow,
@@ -49,10 +48,25 @@ export const WORK_BASIS_OPTIONS: {
   },
 ];
 
+export interface MatterCostsProfileDescriptor {
+  clientProfileCode?: string;
+  displayName?: string;
+  primaryDomain?: string;
+}
+
 export function createDefaultMatterCostsConfig(
   values: ChoiceValue[] = [],
-  nowIso: string = new Date().toISOString(),
+  nowIsoOrProfile?: string | MatterCostsProfileDescriptor,
+  profileArg?: MatterCostsProfileDescriptor,
 ): MatterCostsConfig {
+  const nowIso =
+    typeof nowIsoOrProfile === 'string'
+      ? nowIsoOrProfile
+      : new Date().toISOString();
+  const profile =
+    typeof nowIsoOrProfile === 'object' && nowIsoOrProfile !== null
+      ? nowIsoOrProfile
+      : profileArg;
   const practiceAreas = values.filter(
     (v) => v.listKey === 'work_type' && !v.parentId && v.active,
   );
@@ -196,9 +210,15 @@ export function createDefaultMatterCostsConfig(
     },
   ];
 
+  const profileCode = profile?.clientProfileCode?.trim() || 'DEFAULT';
+  const profileName =
+    profile?.displayName && profile?.primaryDomain
+      ? `${profile.displayName} — Client Configuration (${profile.primaryDomain})`
+      : profile?.displayName || 'Standard Matter Costs Configuration';
+
   return {
-    clientProfileCode: 'NALF-LLP',
-    clientProfileName: `${getActiveTenantConfiguration().displayName} — Client Configuration (${getActiveTenantConfiguration().branding.primaryDomain})`,
+    clientProfileCode: profileCode,
+    clientProfileName: profileName,
     sectionTitle: 'Matter Costs',
     rateSourceMode: 'pms_when_linked',
     pmsLinkActive: false,

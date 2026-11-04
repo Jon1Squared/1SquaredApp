@@ -747,7 +747,6 @@ export const DEFAULT_RBAC_RELATIONSHIP_GRANTS: readonly RbacRelationshipGrantRul
       permissions: [
         'employee:view_core',
         'employee:edit_core',
-        'matter:reassign_ownership',
         'task:claim_any',
         'keydate:view',
         'keydate:edit',

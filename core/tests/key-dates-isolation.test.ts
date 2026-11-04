@@ -81,6 +81,12 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
 
     expect(KEY_DATES_MIGRATION_0003.version).toBe('0003');
     expect(KEY_DATES_MIGRATION_0003.name).toBe('0003_key_dates_expand');
+    expect(KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.version).toBe(
+      '0004',
+    );
+    expect(KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.name).toBe(
+      '0004_key_date_reminder_last_skipped_reason_expand',
+    );
 
     const appliedA = runner.applyUp(ctxA, CORE_TENANT_MIGRATIONS);
     expect(
@@ -98,11 +104,14 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
     expect(runner.getActiveTables(ctxB)).not.toContain('key_dates');
 
-    // R110: Reversible rollback of 0004_key_date_reminder_last_skipped_reason_expand
-    const rolledBack0004 = runner.rollbackVersion(
-      ctxA,
-      '0004_key_date_reminder_last_skipped_reason_expand',
+    // R124: Attempting to roll back 0003 while 0004 is still applied throws MIGRATION_ROLLBACK_ORDER_ERROR
+    expect(() => runner.rollbackVersion(ctxA, '0003')).toThrow(
+      /MIGRATION_ROLLBACK_ORDER_ERROR/,
     );
+    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
+
+    // R110 & R124: Reversible rollback of 0004 ('0004' or '0004_key_date_reminder_last_skipped_reason_expand'), followed by 0003
+    const rolledBack0004 = runner.rollbackVersion(ctxA, '0004');
     expect(rolledBack0004).toBe(true);
     expect(runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
 

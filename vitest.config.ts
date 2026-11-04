@@ -10,11 +10,13 @@ export default defineConfig({
       '@platform/core/testing': path.resolve(__dirname, 'core/src/testing.ts'),
       '@platform/core': path.resolve(__dirname, 'core/src/index.ts'),
       '@platform/core-api': path.resolve(__dirname, 'core/src/api/index.ts'),
+      'server-only': path.resolve(__dirname, 'tests/stubs/empty.ts'),
     },
   },
   test: {
     environment: 'node',
     fileParallelism: false,
+    setupFiles: ['./tests/stubs/vitest-setup.ts'],
     include: ['src/**/*.test.ts', 'core/tests/**/*.test.ts'],
   },
 });
