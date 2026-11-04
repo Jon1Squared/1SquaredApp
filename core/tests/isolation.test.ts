@@ -610,7 +610,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     resetAllDemoData('P-000001');
     try {
       const store = getStore();
-      const baseMatter = store.matters[0]!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
 
       // (a) Outside a signed-in request scope, saveMatterRecord refuses with UNAUTHENTICATED and runs no extension hooks
       const unauthSaveRes = await runWithActiveActorSession(null, () =>
@@ -853,7 +853,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     try {
       const store = getStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
-      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
       const cookieVal = createSignedEntraSessionCookie({
@@ -1187,7 +1187,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     try {
       const store = getStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
-      const targetMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const targetMatter = store.matters.find((m) => m.id === 'M-000008')!;
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
       const cookieVal = createSignedEntraSessionCookie({
@@ -2256,7 +2256,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     try {
       const store = getStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
-      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
       const cookieVal = createSignedEntraSessionCookie({
@@ -3542,7 +3542,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'partner@notalawfirm.example',
       );
 
-      // 1. Refer a matter with a £10,000 estimate (below £50,000 partner sign-off threshold)
+      // 1. Refer a matter with a £10,000 estimate (below £50,000 partner sign-off threshold), and verify existing Prospective fixture M-000016 is refused on submit_referred at £75,000
+      const fixtureM16 = store.matters.find((m) => m.id === 'M-000016')!;
+      const fixtureM16ReferHigh = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...fixtureM16,
+              feeEstimateGbp: 75000,
+              agreedFeeCapGbp: 75000,
+            },
+            { id: fixtureM16.id, byId: feeEarner.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(fixtureM16ReferHigh.matter).toBeNull();
+      expect(fixtureM16ReferHigh.errors?.costsGovernance).toMatch(
+        /partner.*sign-off/i,
+      );
+
       const referLowRes = await runWithActiveActorSession(
         feeEarnerSession,
         () =>
@@ -4195,7 +4213,28 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'partner-r178@notalawfirm.example',
       );
 
-      // Part 1: Refer a matter (£10,000, below threshold), then save it as a draft -> matterOpeningGate.allowProceed becomes false -> Risk approval keeps matter Prospective
+      // Part 1: Refer a matter (£10,000, below threshold), then save it as a draft -> matterOpeningGate.allowProceed becomes false -> Risk approval keeps matter Prospective (and verify existing Prospective fixture M-000008 behaves identically on draft save)
+      const fixtureM8 = store.matters.find((m) => m.id === 'M-000008')!;
+      const fixtureM8Draft = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...fixtureM8,
+              title: `${fixtureM8.title} (Draft)`,
+            },
+            { id: fixtureM8.id, byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(fixtureM8Draft.errors).toBeUndefined();
+      expect(
+        (
+          fixtureM8Draft.matter?.fieldValues['matterOpeningGate'] as {
+            allowProceed?: boolean;
+          }
+        )?.allowProceed,
+      ).toBe(false);
+
       const referRes = await runWithActiveActorSession(feeEarnerSession, () =>
         saveMatterRecord(
           {
@@ -4405,7 +4444,24 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'risk-r179@notalawfirm.example',
       );
 
-      // 1. Brand-new matter whose matterTypeId requires 'limitation' is refused on submit_cleared with instruction to save as draft first
+      // 1. Brand-new matter (and existing Prospective fixture M-000008) whose matterTypeId requires 'limitation' is refused on submit_cleared without the required key date
+      const fixtureM8 = store.matters.find((m) => m.id === 'M-000008')!;
+      const fixtureM8OpenWithoutKd = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...fixtureM8,
+              matterTypeId: 'matter_type.litigation',
+            },
+            { id: fixtureM8.id, byId: partner.id, saveMode: 'submit_cleared' },
+          ),
+      );
+      expect(fixtureM8OpenWithoutKd.matter).toBeNull();
+      expect(fixtureM8OpenWithoutKd.errors?.keyDates).toMatch(
+        /Matter cannot open until required key date\(s\) are recorded or marked not applicable.*Limitation date/i,
+      );
+
       const newOpenWithoutKd = await runWithActiveActorSession(
         partnerSession,
         () =>
@@ -4700,6 +4756,34 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         )?.allowProceed,
       ).toBe(false);
 
+      // Also verify stage edit on existing Prospective fixture M-000006 (with £75,000 estimate, no saveMode) succeeds and keeps M-000006 Prospective with allowProceed: false
+      const fixtureM6 = store.matters.find((m) => m.id === 'M-000006')!;
+      const fixtureM6StageRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...fixtureM6,
+              feeEstimateGbp: 75000,
+              agreedFeeCapGbp: 75000,
+              stageId: alternateStageId,
+            },
+            { id: fixtureM6.id, byId: feeEarner.id },
+          ),
+      );
+      expect(fixtureM6StageRes.errors).toBeUndefined();
+      expect(fixtureM6StageRes.matter?.matterStatusId).toBe(
+        prospectiveStatusId,
+      );
+      expect(fixtureM6StageRes.matter?.stageId).toBe(alternateStageId);
+      expect(
+        (
+          fixtureM6StageRes.matter?.fieldValues['matterOpeningGate'] as {
+            allowProceed?: boolean;
+          }
+        )?.allowProceed,
+      ).toBe(false);
+
       // 3. saveMatterAction filters opts so unknown/internal options (such as source: 'pms_import') cannot be passed from the client
       setTestEntraSessionOverride(feeEarnerSession.verifiedSession);
       const actionAttemptRes = await saveMatterAction(
@@ -4749,6 +4833,368 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             a.action === 'matter-imported-open',
         ),
       ).toBe(true);
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R183: existing open matters without an opening snapshot can be edited and closed without triggering the opening gate, and backfill matterOpeningSnapshot with saveMode backfilled', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const activeStatusId = store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label === 'Active',
+      )!.id;
+      const closedStatusId = store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label === 'Closed',
+      )!.id;
+      const fixtureM3 = store.matters.find((m) => m.id === 'M-000003')!;
+      const fixtureM1 = store.matters.find((m) => m.id === 'M-000001')!;
+      expect(fixtureM3.matterStatusId).toBe(activeStatusId);
+      expect(fixtureM3.feeEstimateGbp).toBe(145000);
+      expect(
+        fixtureM3.fieldValues?.['matterOpeningSnapshot'],
+      ).toBeUndefined();
+
+      const alternateStageId =
+        store.values.find(
+          (v) =>
+            v.listKey === 'matter_stage' && v.id !== fixtureM3.stageId,
+        )?.id ?? 'matter_stage.stage_2_investigation_and_preparation';
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const cookie = createSignedEntraSessionCookie({
+        personId: partner.id,
+        tenantId: 'not-a-law-firm',
+        oid: partner.entraObjectId ?? `00000000-0000-4000-8000-${partner.id}`,
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: partner.id,
+        email: 'partner-r183@notalawfirm.example',
+        displayName: `${partner.firstName} ${partner.surname}`,
+        entraRoles: partner.roles ?? ['partner', 'managing_partner', 'admin'],
+        mappedRoles: partner.roles ?? ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const partnerSession = {
+        personId: partner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: partner.roles ?? ['partner', 'managing_partner', 'admin'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+      };
+
+      // 1. Stage change on M-000003 (£145,000, Active, no opening snapshot) and M-000001 (£8,500) with no saveMode succeeds and writes a backfilled snapshot
+      const m3StageRes = await runWithActiveActorSession(partnerSession, () =>
+        saveMatterRecord(
+          {
+            ...fixtureM3,
+            stageId: alternateStageId,
+          },
+          { id: fixtureM3.id, byId: partner.id },
+        ),
+      );
+      expect(m3StageRes.errors).toBeUndefined();
+      expect(m3StageRes.matter?.matterStatusId).toBe(activeStatusId);
+      expect(m3StageRes.matter?.stageId).toBe(alternateStageId);
+      const backfilledSnap = m3StageRes.matter?.fieldValues?.[
+        'matterOpeningSnapshot'
+      ] as {
+        saveMode?: string;
+        capturedAt?: string;
+        captureNote?: string;
+      };
+      expect(backfilledSnap).toBeDefined();
+      expect(backfilledSnap.saveMode).toBe('backfilled');
+      expect(backfilledSnap.capturedAt).not.toBe(fixtureM3.openedAt);
+      expect(backfilledSnap.captureNote).toMatch(/Recorded after opening/i);
+
+      const m1StageRes = await runWithActiveActorSession(partnerSession, () =>
+        saveMatterRecord(
+          {
+            ...fixtureM1,
+            stageId: alternateStageId,
+          },
+          { id: fixtureM1.id, byId: partner.id },
+        ),
+      );
+      expect(m1StageRes.errors).toBeUndefined();
+      expect(m1StageRes.matter?.matterStatusId).toBe(activeStatusId);
+
+      // 2. Closing M-000003 follows only the key dates closure check (not the £145,000 opening gate)
+      const kdRes = await createOrProposeKeyDateRecord(
+        {
+          matterId: fixtureM3.id,
+          keyDateTypeId: 'limitation',
+          title: 'R183 Open Key Date Blocking Closure',
+          dueDate: '2027-06-01',
+          source: 'manual',
+          responsiblePersonIds: [partner.id],
+          teamId: 'TM-000001',
+        },
+        partner.id,
+      );
+      expect(kdRes.ok).toBe(true);
+
+      const closeBlockedByKd = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...m3StageRes.matter!,
+              matterStatusId: closedStatusId,
+            },
+            { id: fixtureM3.id, byId: partner.id },
+          ),
+      );
+      expect(closeBlockedByKd.matter).toBeNull();
+      expect(closeBlockedByKd.errors?.keyDates).toMatch(
+        /Cannot close matter while \d+ key date\(s\) remain open/i,
+      );
+      expect(closeBlockedByKd.errors?.costsGovernance).toBeUndefined();
+
+      // Remove the open key date and verify M-000003 closes cleanly despite £145,000 fee estimate without partner sign-off
+      getStore().keyDates = (getStore().keyDates ?? []).filter(
+        (kd) => kd.matterId !== fixtureM3.id,
+      );
+      const closeSuccessRes = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...m3StageRes.matter!,
+              matterStatusId: closedStatusId,
+            },
+            { id: fixtureM3.id, byId: partner.id },
+          ),
+      );
+      expect(closeSuccessRes.errors).toBeUndefined();
+      expect(closeSuccessRes.matter?.matterStatusId).toBe(closedStatusId);
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R184: legacy escalated conflict status maps to Referred with no fabricated approver, and once referred only Risk & Compliance can clear or approve a matter', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+      const riskOfficer = store.people.find((p) =>
+        (p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const prospectiveStatusId = store.values.find(
+        (v) =>
+          v.listKey === 'matter_status' &&
+          v.label === 'Prospective / Enquiry',
+      )!.id;
+      const activeStatusId = store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label === 'Active',
+      )!.id;
+      const fixtureM6 = store.matters.find((m) => m.id === 'M-000006')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const makeSession = (
+        person: typeof partner,
+        roles: string[],
+        email: string,
+      ) => {
+        const cookie = createSignedEntraSessionCookie({
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id}`,
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: person.id,
+          email,
+          displayName: `${person.firstName} ${person.surname}`,
+          entraRoles: roles,
+          mappedRoles: roles,
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        });
+        return {
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: roles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+        };
+      };
+
+      const feeEarnerSession = makeSession(
+        feeEarner,
+        feeEarner.roles ?? ['fee_earner'],
+        'fe-r184@notalawfirm.example',
+      );
+      const riskSession = makeSession(
+        riskOfficer,
+        riskOfficer.roles ?? ['risk_compliance'],
+        'risk-r184@notalawfirm.example',
+      );
+
+      // 1. resolveMatterConflictCheckRecord for M-000006 ('Potential conflict — escalated') returns status: 'Referred' and null approvedById
+      const resolvedM6Record = resolveMatterConflictCheckRecord(
+        fixtureM6,
+        store.people,
+        store.organisations,
+      );
+      expect(resolvedM6Record.status).toBe('Referred');
+      expect(resolvedM6Record.outcomeLabel).toBe('Referred to risk for review');
+      expect(resolvedM6Record.approvedById).toBeNull();
+      expect(resolvedM6Record.approvedByName).toBeNull();
+      expect(resolvedM6Record.approvedAtDisplay).toBeNull();
+
+      // 2. Saving M-000006 as feeEarner P-000002 with no saveMode, matterStatusId: Active, and estimate lowered to £10,000 is refused with errors.conflict and M-000006 stays Prospective
+      const m6OpenAttempt = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...fixtureM6,
+              matterStatusId: activeStatusId,
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+            },
+            { id: fixtureM6.id, byId: feeEarner.id },
+          ),
+      );
+      expect(m6OpenAttempt.matter).toBeNull();
+      expect(m6OpenAttempt.errors?.conflict).toMatch(
+        /cannot open until its conflict check is cleared or approved by Risk/i,
+      );
+      expect(
+        getStore().matters.find((m) => m.id === fixtureM6.id)?.matterStatusId,
+      ).toBe(prospectiveStatusId);
+
+      // 3. Refer a new matter as feeEarner, then attempt submit_cleared with status: 'Cleared' as feeEarner -> refused with errors.conflict and stays Referred & Prospective
+      const referNewRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R184 Referred Matter Cannot Self-Clear',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+              parties: [],
+            },
+            { byId: feeEarner.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(referNewRes.errors).toBeUndefined();
+      expect(referNewRes.matter?.conflictCheckRecord?.status).toBe('Referred');
+      expect(referNewRes.matter?.matterStatusId).toBe(prospectiveStatusId);
+      const referredMatterId = referNewRes.matter!.id;
+
+      const feeEarnerSelfClearRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referNewRes.matter!,
+              conflictCheckStatus: 'Cleared',
+              conflictCheckRecord: {
+                ...referNewRes.matter!.conflictCheckRecord!,
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+              },
+            },
+            {
+              id: referredMatterId,
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(feeEarnerSelfClearRes.matter).toBeNull();
+      expect(feeEarnerSelfClearRes.errors?.conflict).toMatch(
+        /referred to Risk.*Only Risk & Compliance can clear or approve/i,
+      );
+      const storedAfterSelfClear = getStore().matters.find(
+        (m) => m.id === referredMatterId,
+      )!;
+      expect(storedAfterSelfClear.conflictCheckRecord?.status).toBe('Referred');
+      expect(storedAfterSelfClear.matterStatusId).toBe(prospectiveStatusId);
+
+      // Also verify updateMatterConflictRecord refuses status: 'Cleared' by a non-Risk caller on a referred matter
+      const updateSelfClearRes = runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          updateMatterConflictRecord(
+            referredMatterId,
+            {
+              ...storedAfterSelfClear.conflictCheckRecord!,
+              status: 'Cleared',
+              outcomeLabel: 'Cleared by fee earner',
+            },
+            feeEarner.id,
+          ),
+      );
+      expect(updateSelfClearRes.matter).toBeNull();
+      expect(updateSelfClearRes.errors?.conflict).toMatch(
+        /referred to Risk.*Only Risk & Compliance can clear or approve/i,
+      );
+
+      // 4. After a Risk user records Approved, the fee earner's submit_cleared succeeds
+      const riskApproveRes = runWithActiveActorSession(riskSession, () =>
+        updateMatterConflictRecord(
+          referredMatterId,
+          {
+            ...storedAfterSelfClear.conflictCheckRecord!,
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+          },
+          riskOfficer.id,
+        ),
+      );
+      expect(riskApproveRes.errors).toBeUndefined();
+      expect(riskApproveRes.matter?.conflictCheckRecord?.status).toBe(
+        'Approved',
+      );
+
+      const postApprovalSubmitRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...riskApproveRes.matter!,
+              conflictCheckStatus: 'Cleared',
+              conflictCheckRecord: {
+                ...riskApproveRes.matter!.conflictCheckRecord!,
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+              },
+            },
+            {
+              id: referredMatterId,
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(postApprovalSubmitRes.errors).toBeUndefined();
+      expect(postApprovalSubmitRes.matter).not.toBeNull();
+      expect(postApprovalSubmitRes.matter?.matterStatusId).not.toBe(
+        prospectiveStatusId,
+      );
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

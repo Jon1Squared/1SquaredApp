@@ -4,6 +4,7 @@ import { personDisplayName } from './names';
 import type {
   ChoiceValue,
   ConflictCheckRecord,
+  ConflictCheckStatusPill,
   Enquiry,
   Matter,
   Organisation,
@@ -353,7 +354,13 @@ export interface MatterOpeningSnapshot {
   capturedAtDisplay: string;
   capturedById: string;
   capturedByName: string;
-  saveMode: 'draft' | 'submit_cleared' | 'submit_referred' | 'opened';
+  saveMode:
+    | 'draft'
+    | 'submit_cleared'
+    | 'submit_referred'
+    | 'opened'
+    | 'backfilled';
+  captureNote?: string;
   matterId: string;
   matterNumber: string;
   title: string;
@@ -623,6 +630,53 @@ export function resolveMatterRiskAssessment(
   });
 }
 
+const CLEAR_LEGACY_CONFLICT_STATUSES = new Set(['Clear', 'Cleared']);
+
+export function conflictStatusPillFromLegacy(
+  value: string | null | undefined,
+): ConflictCheckStatusPill {
+  const trimmed = (value ?? '').trim();
+  if (!trimmed) return 'In progress';
+  if (CLEAR_LEGACY_CONFLICT_STATUSES.has(trimmed)) return 'Cleared';
+  if (
+    trimmed === 'Draft' ||
+    trimmed === 'In progress' ||
+    trimmed === 'Not checked'
+  ) {
+    return 'In progress';
+  }
+  if (
+    trimmed === 'Declined — Conflict of interest' ||
+    trimmed === 'Declined - Conflict of interest' ||
+    trimmed === 'Conflict – declined' ||
+    trimmed === 'Conflict - declined'
+  ) {
+    return 'Declined';
+  }
+  if (
+    trimmed === 'Approved with conditions' ||
+    trimmed === 'Approved by Risk & Compliance'
+  ) {
+    return 'Approved';
+  }
+  return 'Referred';
+}
+
+export function conflictOutcomeLabelFromLegacy(
+  value: string | null | undefined,
+  status: ConflictCheckStatusPill = conflictStatusPillFromLegacy(value),
+): ConflictCheckRecord['outcomeLabel'] {
+  const trimmed = (value ?? '').trim();
+  if (trimmed === 'Approved with conditions') {
+    return 'Approved with conditions';
+  }
+  if (status === 'Approved') return 'Approved by Risk & Compliance';
+  if (status === 'Declined') return 'Declined by Risk & Compliance';
+  if (status === 'Referred') return 'Referred to risk for review';
+  if (status === 'Cleared') return 'Cleared by fee earner';
+  return 'Pending';
+}
+
 /**
  * Resolves the ConflictCheckRecord for a Matter (using the saved record or constructing a consistent default for seeded matters).
  */
@@ -643,42 +697,44 @@ export function resolveMatterConflictCheckRecord(
   const instructingName = matter.instructingContactId
     ? nameMap.get(matter.instructingContactId)
     : undefined;
-  const fallbackCleaverId =
-    matter.conflictClearedById || matter.leadFeeEarnerId || matter.responsiblePartnerId;
-  const clearedByName = fallbackCleaverId
-    ? nameMap.get(fallbackCleaverId) ?? fallbackCleaverId
-    : 'Fee earner';
+  const status = conflictStatusPillFromLegacy(matter.conflictCheckStatus);
+  const outcomeLabel = conflictOutcomeLabelFromLegacy(
+    matter.conflictCheckStatus,
+    status,
+  );
+  const lastRunById = matter.conflictClearedById || matter.leadFeeEarnerId || null;
+  const lastRunByName = lastRunById
+    ? nameMap.get(lastRunById) ?? lastRunById
+    : null;
+  const submittedById = matter.leadFeeEarnerId || null;
+  const submittedByName = submittedById
+    ? nameMap.get(submittedById) ?? submittedById
+    : null;
+  const isClearedOrApproved = status === 'Cleared' || status === 'Approved';
+  const approvedById = isClearedOrApproved
+    ? matter.conflictClearedById || null
+    : null;
+  const approvedByName = approvedById
+    ? nameMap.get(approvedById) ?? approvedById
+    : null;
+  const approvedAtDisplay = approvedById
+    ? formatDate(matter.conflictCheckDate) || ''
+    : null;
 
   return {
-    status:
-      matter.conflictCheckStatus === 'Pending conflict review' ||
-      matter.conflictCheckStatus === 'Referred to risk for review'
-        ? 'Referred'
-        : matter.conflictCheckStatus === 'Draft'
-          ? 'In progress'
-          : matter.conflictCheckStatus === 'Declined — Conflict of interest'
-            ? 'Declined'
-            : 'Cleared',
-    outcomeLabel:
-      matter.conflictCheckStatus === 'Pending conflict review' ||
-      matter.conflictCheckStatus === 'Referred to risk for review'
-        ? 'Referred to risk for review'
-        : matter.conflictCheckStatus === 'Draft'
-          ? 'Pending'
-          : matter.conflictCheckStatus === 'Declined — Conflict of interest'
-            ? 'Declined by Risk & Compliance'
-            : 'Cleared by fee earner',
+    status,
+    outcomeLabel,
     declarationConfirmed: true,
     reviewerMessage: matter.conflictNotes || '',
     lastRunAtDisplay: formatDate(matter.conflictCheckDate) || '',
-    lastRunById: matter.conflictClearedById || matter.leadFeeEarnerId || matter.responsiblePartnerId || '',
-    lastRunByName: clearedByName,
+    lastRunById,
+    lastRunByName,
     submittedAtDisplay: formatDate(matter.conflictCheckDate) || '',
-    submittedById: matter.leadFeeEarnerId || matter.responsiblePartnerId || '',
-    submittedByName: clearedByName,
-    approvedAtDisplay: formatDate(matter.conflictCheckDate) || '',
-    approvedById: matter.conflictClearedById || matter.responsiblePartnerId || '',
-    approvedByName: `${clearedByName} (Cleared by fee earner)`,
+    submittedById,
+    submittedByName,
+    approvedAtDisplay,
+    approvedById,
+    approvedByName,
     parties: [
       ...(matter.clientId
         ? [
@@ -724,8 +780,8 @@ export function resolveMatterConflictCheckRecord(
       {
         id: 'run-init-1',
         runAtDisplay: formatDate(matter.conflictCheckDate) || '',
-        runById: matter.conflictClearedById || matter.leadFeeEarnerId || matter.responsiblePartnerId || '',
-        runByName: clearedByName,
+        runById: lastRunById ?? '',
+        runByName: lastRunByName ?? '',
         searchTerms: [
           clientLabel,
           ...(instructingName ? [instructingName] : []),

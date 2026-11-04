@@ -1179,7 +1179,10 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       parties: fields.parties ?? [],
       conflictCheckStatus: fields.conflictCheckStatus ?? 'Clear',
       conflictCheckDate: fields.conflictCheckDate ?? day(createdOffset),
-      conflictClearedById: fields.conflictClearedById ?? 'P-000003',
+      conflictClearedById:
+        fields.conflictClearedById !== undefined
+          ? fields.conflictClearedById
+          : 'P-000003',
       conflictNotes: fields.conflictNotes ?? '',
       amlStatus: fields.amlStatus ?? 'Verified',
       amlCompletedAt: fields.amlCompletedAt ?? day(createdOffset + 1),

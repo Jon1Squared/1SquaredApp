@@ -19138,7 +19138,7 @@
       ],
       "conflictCheckStatus": "Potential conflict — escalated",
       "conflictCheckDate": "2026-10-14",
-      "conflictClearedById": "P-000003",
+      "conflictClearedById": null,
       "conflictNotes": "Coastline Outdoor Ltd occupies an adjacent strip on the boundary and is a counterparty on PEN001-0004. COLP (Bethan Rees) reviewing information barrier / consent requirements.",
       "amlStatus": "Pending",
       "amlCompletedAt": "2026-10-12",

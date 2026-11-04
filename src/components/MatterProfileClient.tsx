@@ -3121,7 +3121,14 @@ export function MatterProfileClient({
                 <h2 className="panel-title">
                   Matter opening record (Immutable PDF snapshot)
                 </h2>
-                <StatusPill label="Frozen history copy" tone="positive" />
+                <StatusPill
+                  label={
+                    openingSnapshot.saveMode === 'backfilled'
+                      ? 'Recorded after opening'
+                      : 'Frozen history copy'
+                  }
+                  tone="positive"
+                />
               </div>
               <div className="panel-actions" style={{ display: 'flex', gap: 8 }}>
                 <button
@@ -3855,7 +3862,11 @@ export function MatterProfileClient({
                     Complete Matter Opening Record (Immutable PDF Snapshot)
                   </h2>
                   <StatusPill
-                    label={`Schema ${openingSnapshot.version} · Frozen`}
+                    label={
+                      openingSnapshot.saveMode === 'backfilled'
+                        ? `Schema ${openingSnapshot.version} · Recorded after opening`
+                        : `Schema ${openingSnapshot.version} · Frozen`
+                    }
                     tone="positive"
                   />
                 </div>
