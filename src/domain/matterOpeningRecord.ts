@@ -651,13 +651,23 @@ export function resolveMatterConflictCheckRecord(
 
   return {
     status:
-      matter.conflictCheckStatus === 'Pending conflict review'
+      matter.conflictCheckStatus === 'Pending conflict review' ||
+      matter.conflictCheckStatus === 'Referred to risk for review'
         ? 'Referred'
-        : 'Cleared',
+        : matter.conflictCheckStatus === 'Draft'
+          ? 'In progress'
+          : matter.conflictCheckStatus === 'Declined — Conflict of interest'
+            ? 'Declined'
+            : 'Cleared',
     outcomeLabel:
-      matter.conflictCheckStatus === 'Pending conflict review'
+      matter.conflictCheckStatus === 'Pending conflict review' ||
+      matter.conflictCheckStatus === 'Referred to risk for review'
         ? 'Referred to risk for review'
-        : 'Cleared by fee earner',
+        : matter.conflictCheckStatus === 'Draft'
+          ? 'Pending'
+          : matter.conflictCheckStatus === 'Declined — Conflict of interest'
+            ? 'Declined by Risk & Compliance'
+            : 'Cleared by fee earner',
     declarationConfirmed: true,
     reviewerMessage: matter.conflictNotes || '',
     lastRunAtDisplay: formatDate(matter.conflictCheckDate) || '',

@@ -2592,8 +2592,8 @@ async function runMatterOpeningGate(params: {
         err.declaredHooks.includes('beforeMatterOpen')),
   );
   if (gateLoadFailure) {
-    errors.costsGovernance =
-      'A required costs check could not run. Please contact your administrator.';
+    errors.extensions =
+      "A required opening check couldn't run. Please contact your administrator.";
   }
 
   // 2. Key-dates opening gate (when the Key Dates module is enabled for the tenant).
@@ -2673,6 +2673,25 @@ async function runMatterOpeningGate(params: {
   };
 }
 
+function resolveNextMatterStatusId(params: {
+  input: { matterStatusId?: string | null };
+  existing: Matter | null;
+  saveMode: 'draft' | 'submit_cleared' | 'submit_referred' | undefined;
+  prospectiveStatus: string;
+  cmiIncompleteStatus: string;
+}): string {
+  const { input, existing, saveMode, prospectiveStatus, cmiIncompleteStatus } = params;
+  if (saveMode === 'draft' || saveMode === 'submit_referred') {
+    return prospectiveStatus;
+  }
+  if (saveMode === 'submit_cleared') {
+    return input.matterStatusId && input.matterStatusId !== prospectiveStatus
+      ? input.matterStatusId
+      : cmiIncompleteStatus;
+  }
+  return input.matterStatusId || existing?.matterStatusId || cmiIncompleteStatus;
+}
+
 function buildServerConflictCheckRecord(params: {
   submitted: ConflictCheckRecordInput | ConflictCheckRecord;
   stored: ConflictCheckRecord | null | undefined;
@@ -2699,28 +2718,50 @@ function buildServerConflictCheckRecord(params: {
 
   const isRiskDecisionStatus =
     submitted.status === 'Approved' || submitted.status === 'Declined';
+  const isUnauthorizedClearWithoutSaveMode =
+    submitted.status === 'Cleared' &&
+    saveMode !== 'submit_cleared' &&
+    Boolean(stored && stored.status !== 'Cleared');
   const status: ConflictCheckStatusPill =
-    isRiskDecisionStatus && !actorHasRiskView
+    (isRiskDecisionStatus && !actorHasRiskView) ||
+    isUnauthorizedClearWithoutSaveMode
       ? stored?.status ??
         (saveMode === 'submit_referred'
           ? 'Referred'
           : saveMode === 'submit_cleared'
             ? 'Cleared'
             : 'In progress')
-      : submitted.status;
+      : saveMode === 'submit_referred'
+        ? 'Referred'
+        : saveMode === 'submit_cleared' &&
+            (submitted.status === 'In progress' ||
+              submitted.status === 'Not started')
+          ? 'Cleared'
+          : submitted.status;
 
   const isRiskDecisionOutcome =
     submitted.outcomeLabel === 'Approved by Risk & Compliance' ||
     submitted.outcomeLabel === 'Approved with conditions' ||
     submitted.outcomeLabel === 'Declined by Risk & Compliance';
   const outcomeLabel: ConflictCheckRecord['outcomeLabel'] =
-    isRiskDecisionOutcome && !actorHasRiskView
-      ? stored?.outcomeLabel ??
-        (status === 'Referred'
+    (isRiskDecisionOutcome && !actorHasRiskView) ||
+    isUnauthorizedClearWithoutSaveMode ||
+    saveMode === 'submit_referred' ||
+    (saveMode === 'submit_cleared' &&
+      (submitted.status === 'In progress' || submitted.status === 'Not started'))
+      ? (isRiskDecisionOutcome && !actorHasRiskView) ||
+        isUnauthorizedClearWithoutSaveMode
+        ? stored?.outcomeLabel ??
+          (status === 'Referred'
+            ? 'Referred to risk for review'
+            : status === 'Cleared'
+              ? 'Cleared by fee earner'
+              : 'Pending')
+        : status === 'Referred'
           ? 'Referred to risk for review'
           : status === 'Cleared'
             ? 'Cleared by fee earner'
-            : 'Pending')
+            : submitted.outcomeLabel
       : submitted.outcomeLabel;
 
   const storedComments = stored?.comments ?? [];
@@ -2821,6 +2862,7 @@ export async function saveMatterRecord(
     id?: string;
     byId: string;
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
+    source?: 'pms_import';
   },
 ): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
   const store = getStore();
@@ -3453,6 +3495,27 @@ export async function saveMatterRecord(
     reviewedAtIso: now,
   });
 
+  const existingSnapshot = existing?.fieldValues?.['matterOpeningSnapshot'] as
+    | { saveMode?: string; capturedAt?: string }
+    | undefined;
+  const existingHasOpened = Boolean(
+    existing &&
+      existing.matterNumber !== 'DRAFT' &&
+      !existing.matterNumber.startsWith('DRAFT') &&
+      existing.matterStatusId !== prospectiveStatus &&
+      existingSnapshot &&
+      existingSnapshot.saveMode !== 'draft',
+  );
+  const nextStatusId = resolveNextMatterStatusId({
+    input,
+    existing,
+    saveMode: opts.saveMode,
+    prospectiveStatus,
+    cmiIncompleteStatus,
+  });
+  const isPmsImport = opts.source === 'pms_import';
+  const willOpen = !existingHasOpened && nextStatusId !== prospectiveStatus;
+
   const hasUnapprovedRestrictedMatch = hasUnapprovedRestrictedMatches(
     reconciledConflictMatches,
     existing?.conflictCheckRecord?.approvedRestrictedMatchIds,
@@ -3460,6 +3523,7 @@ export async function saveMatterRecord(
   const isApprovedByRiskInThisSave =
     actorHasRiskView && input.conflictCheckRecord?.status === 'Approved';
   if (
+    !isPmsImport &&
     hasUnapprovedRestrictedMatch &&
     !isApprovedByRiskInThisSave &&
     (opts.saveMode === 'submit_cleared' ||
@@ -3496,10 +3560,58 @@ export async function saveMatterRecord(
       : existing?.conflictCheckRecord
         ? {
             ...existing.conflictCheckRecord,
+            ...(opts.saveMode === 'submit_referred'
+              ? {
+                  status: 'Referred' as const,
+                  outcomeLabel: 'Referred to risk for review' as const,
+                }
+              : opts.saveMode === 'submit_cleared' &&
+                  (existing.conflictCheckRecord.status === 'In progress' ||
+                    existing.conflictCheckRecord.status === 'Not started')
+                ? {
+                    status: 'Cleared' as const,
+                    outcomeLabel: 'Cleared by fee earner' as const,
+                  }
+                : {}),
             parties: effectiveConflictParties,
             matches: reconciledConflictMatches,
           }
         : null;
+
+  if (willOpen && !isPmsImport) {
+    const fallbackStatusFromField =
+      input.conflictCheckStatus ??
+      (opts.saveMode === 'submit_referred'
+        ? 'Pending conflict review'
+        : isDraftSave
+          ? existing?.conflictCheckStatus ?? 'Draft'
+          : existing?.conflictCheckStatus ?? 'Clear');
+    const inferredConflictStatus: ConflictCheckStatusPill =
+      fallbackStatusFromField === 'Pending conflict review' ||
+      fallbackStatusFromField === 'Referred to risk for review'
+        ? 'Referred'
+        : fallbackStatusFromField === 'Draft'
+          ? 'In progress'
+          : fallbackStatusFromField === 'Declined — Conflict of interest'
+            ? 'Declined'
+            : 'Cleared';
+    const nextConflictStatus =
+      resolvedConflictCheckRecord?.status ??
+      existing?.conflictCheckRecord?.status ??
+      inferredConflictStatus;
+    const conflictAllowsOpening =
+      (nextConflictStatus === 'Cleared' && !hasUnapprovedRestrictedMatch) ||
+      nextConflictStatus === 'Approved';
+    if (!conflictAllowsOpening) {
+      return {
+        matter: null,
+        errors: {
+          conflict:
+            'This matter cannot open until its conflict check is cleared or approved by Risk.',
+        },
+      };
+    }
+  }
   const computedStaffStatus = computeStaffMatterStatus(
     {
       clientId: effectiveClientId,
@@ -3562,14 +3674,7 @@ export async function saveMatterRecord(
     id: existing?.id ?? nextId(store, 'M'),
     recordType: 'matter',
     recordOwnerId: input.leadFeeEarnerId || input.responsiblePartnerId || existing?.recordOwnerId || opts.byId,
-    recordStatusId:
-      isDraftSave || opts.saveMode === 'submit_referred'
-        ? prospectiveStatus
-        : opts.saveMode === 'submit_cleared'
-          ? input.matterStatusId && input.matterStatusId !== prospectiveStatus
-            ? input.matterStatusId
-            : cmiIncompleteStatus
-          : input.matterStatusId || existing?.recordStatusId || cmiIncompleteStatus,
+    recordStatusId: nextStatusId,
     createdById: existing?.createdById ?? opts.byId,
     createdAt: existing?.createdAt ?? now,
     updatedById: opts.byId,
@@ -3591,14 +3696,7 @@ export async function saveMatterRecord(
     additionalClientIds: resolvedAdditionalClientIds,
     parentMatterId: input.parentMatterId !== undefined ? input.parentMatterId : existing?.parentMatterId ?? null,
     relatedMatterIds: input.relatedMatterIds ?? existing?.relatedMatterIds ?? [],
-    matterStatusId:
-      isDraftSave || opts.saveMode === 'submit_referred'
-        ? prospectiveStatus
-        : opts.saveMode === 'submit_cleared'
-          ? input.matterStatusId && input.matterStatusId !== prospectiveStatus
-            ? input.matterStatusId
-            : cmiIncompleteStatus
-          : input.matterStatusId || existing?.matterStatusId || cmiIncompleteStatus,
+    matterStatusId: nextStatusId,
     sourceEnquiryId: input.sourceEnquiryId !== undefined ? input.sourceEnquiryId : existing?.sourceEnquiryId ?? null,
     sourceQuoteId: input.sourceQuoteId !== undefined ? input.sourceQuoteId : existing?.sourceQuoteId ?? null,
     practiceAreaId:
@@ -3641,7 +3739,13 @@ export async function saveMatterRecord(
       input.referrerContactId !== undefined ? input.referrerContactId : existing?.referrerContactId ?? null,
     ),
     parties: resolvedParties,
-    conflictCheckStatus: input.conflictCheckStatus ?? existing?.conflictCheckStatus ?? 'Clear',
+    conflictCheckStatus:
+      input.conflictCheckStatus ??
+      (opts.saveMode === 'submit_referred'
+        ? 'Pending conflict review'
+        : isDraftSave
+          ? existing?.conflictCheckStatus ?? 'Draft'
+          : existing?.conflictCheckStatus ?? 'Clear'),
     conflictCheckDate: input.conflictCheckDate !== undefined ? input.conflictCheckDate : existing?.conflictCheckDate ?? today,
     conflictClearedById: existing?.conflictClearedById ?? null,
     conflictNotes: input.conflictNotes ?? existing?.conflictNotes ?? '',
@@ -3704,20 +3808,7 @@ export async function saveMatterRecord(
   );
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
 
-  const existingSnapshot = existing?.fieldValues?.['matterOpeningSnapshot'] as
-    | { saveMode?: string; capturedAt?: string }
-    | undefined;
-  const existingHasOpened = Boolean(
-    existing &&
-      existing.matterNumber !== 'DRAFT' &&
-      !existing.matterNumber.startsWith('DRAFT') &&
-      existing.matterStatusId !== prospectiveStatus &&
-      existingSnapshot &&
-      existingSnapshot.saveMode !== 'draft',
-  );
-  const isOpeningEvent = !isDraftSave && !existingHasOpened;
-
-  // R108 & R131 & R173 & R178 & R179: Run active tenant extension hooks and unified matter opening gate
+  // R108 & R131 & R173 & R178 & R179 & R181: Run active tenant extension hooks and unified matter opening gate
   const host = getPlatformExtensionHost();
   const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
     store,
@@ -3750,19 +3841,22 @@ export async function saveMatterRecord(
     tenantCfg,
     costsHookInput,
   );
-  const gateResult = isOpeningEvent
-    ? await runMatterOpeningGate({
-        store,
-        matter,
-        isNewMatter: !existing,
-        extensionCtx,
-        tenantCfg,
-        costsHookInput,
-        now,
-      })
-    : null;
+  const gateResult =
+    !isDraftSave && !existingHasOpened && !isPmsImport
+      ? await runMatterOpeningGate({
+          store,
+          matter,
+          isNewMatter: !existing,
+          extensionCtx,
+          tenantCfg,
+          costsHookInput,
+          now,
+        })
+      : null;
 
-  if (gateResult && !gateResult.allowProceed) {
+  const shouldEnforceOpeningGate =
+    (willOpen || opts.saveMode === 'submit_referred') && !isPmsImport;
+  if (shouldEnforceOpeningGate && gateResult && !gateResult.allowProceed) {
     return {
       matter: null,
       errors: gateResult.errors,
@@ -3796,6 +3890,13 @@ export async function saveMatterRecord(
     gateResult?.governance ?? calcGovernance;
   if (gateResult) {
     matter.fieldValues['matterOpeningGate'] = gateResult.record;
+  } else if (isPmsImport && willOpen) {
+    const importedGateRecord: MatterOpeningGateRecord = {
+      allowProceed: true,
+      estimatedFeeGbp,
+      checkedAt: now,
+    };
+    matter.fieldValues['matterOpeningGate'] = importedGateRecord;
   } else if (!existingHasOpened) {
     const draftGateRecord: MatterOpeningGateRecord = {
       allowProceed: false,
@@ -3866,6 +3967,18 @@ export async function saveMatterRecord(
       byId: opts.byId,
       at: now,
     });
+    if (isPmsImport && willOpen) {
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: matter.id,
+        action: 'matter-imported-open',
+        field: 'PMS import',
+        oldValue: null,
+        newValue: `Imported already-open matter ${matter.matterNumber} from PMS (opening gate skipped)`,
+        byId: opts.byId,
+        at: now,
+      });
+    }
 
     if (matter.sourceEnquiryId) {
       finalizeEnquiryConversionToMatter(store, matter.sourceEnquiryId, matter, opts.byId, now);
@@ -7830,7 +7943,7 @@ export async function createRecordFromPms(
         teamMemberIds: Array.from(new Set([partnerId, leadId])),
         shortDescription: `${pm.work_type} (${pm.billing_basis}) — imported from PMS (${pm.matter_code}).`,
       },
-      { byId },
+      { byId, source: 'pms_import' },
     );
     if (res.errors || !res.matter) {
       return { ok: false, error: res.errors ? Object.values(res.errors).join(' ') : 'Matter could not be saved.' };

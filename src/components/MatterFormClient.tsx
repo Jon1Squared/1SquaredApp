@@ -7210,6 +7210,8 @@ export function MatterFormClient({
                 ) : null}
               </div>
               {serverSaveErrors.costsGovernance ||
+              serverSaveErrors.extensions ||
+              serverSaveErrors.keyDates ||
               serverSaveErrors.conflict ||
               serverSaveErrors.permission ||
               serverSaveErrors.access ? (
@@ -7226,6 +7228,8 @@ export function MatterFormClient({
                   }}
                 >
                   {serverSaveErrors.costsGovernance ||
+                    serverSaveErrors.extensions ||
+                    serverSaveErrors.keyDates ||
                     serverSaveErrors.conflict ||
                     serverSaveErrors.permission ||
                     serverSaveErrors.access}

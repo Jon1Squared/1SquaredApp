@@ -255,7 +255,11 @@ export async function saveMatterAction(
   } = {},
 ) {
   return withActorId(async (byId) => {
-    const res = await saveMatterRecord(payload, { ...opts, byId });
+    const res = await saveMatterRecord(payload, {
+      id: opts.id,
+      saveMode: opts.saveMode,
+      byId,
+    });
     revalidateAll();
     return res;
   });
@@ -557,7 +561,11 @@ export async function saveEnquiryAction(
   opts: { id?: string; asDraft?: boolean } = {},
 ) {
   return withActorId((byId) => {
-    const res = saveEnquiryRecord(payload, { ...opts, byId });
+    const res = saveEnquiryRecord(payload, {
+      id: opts.id,
+      asDraft: opts.asDraft,
+      byId,
+    });
     revalidateAll();
     return res;
   });

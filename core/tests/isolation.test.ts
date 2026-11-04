@@ -58,6 +58,7 @@ import {
 import {
   createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,
+  setTestEntraSessionOverride,
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
@@ -78,6 +79,7 @@ import {
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
 } from '../../src/server/services';
+import { saveMatterAction } from '../../src/app/actions';
 import { getStore } from '../../src/server/store';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
@@ -713,6 +715,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(gov?.requiresPartnerSignOff).toBe(true);
       expect(gov?.allowProceed).toBe(true);
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
 
@@ -978,8 +981,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             ),
         );
         expect(loadErrSaveRes.matter).toBeNull();
-        expect(loadErrSaveRes.errors?.costsGovernance).toBe(
-          'A required costs check could not run. Please contact your administrator.',
+        expect(loadErrSaveRes.errors?.extensions).toBe(
+          "A required opening check couldn't run. Please contact your administrator.",
         );
       } finally {
         if (prevPkgDir === undefined) {
@@ -2334,8 +2337,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           ),
         );
         expect(blockedRes.matter).toBeNull();
-        expect(blockedRes.errors?.costsGovernance).toBe(
-          'A required costs check could not run. Please contact your administrator.',
+        expect(blockedRes.errors?.extensions).toBe(
+          "A required opening check couldn't run. Please contact your administrator.",
         );
       } finally {
         if (prevPkgDir === undefined) {
@@ -2367,6 +2370,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'fee_earner',
       ]);
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });
@@ -2809,6 +2813,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         /must be referred to Risk/i,
       );
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });
@@ -3252,6 +3257,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ).toBeUndefined();
       });
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });
@@ -3356,6 +3362,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(serialized).not.toContain('ENQ-R170-DRAFT');
       expect(serialized).not.toContain('Unpublished personal draft enquiry');
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });
@@ -3453,6 +3460,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         infoSpy.mockRestore();
       }
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });
@@ -3632,6 +3640,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(partnerSignOffRes.errors).toBeUndefined();
       expect(partnerSignOffRes.matter?.matterStatusId).toBe(activeStatusId);
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });
@@ -4061,6 +4070,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(storedRecord.runs.some((r) => r.id === originalRunId)).toBe(true);
       expect(storedRecord.runs.some((r) => r.id === 'forged')).toBe(false);
     } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });
@@ -4320,7 +4330,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           )?.allowProceed,
         ).toBe(false);
         expect(signOffUnderLoadErr.warnings?.[0]).toBe(
-          'A required costs check could not run. Please contact your administrator.',
+          "A required opening check couldn't run. Please contact your administrator.",
         );
       } finally {
         if (prevPkgDir === undefined) {
@@ -4508,6 +4518,239 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(openWithKdRes.matter?.matterNumber).not.toBe('DRAFT');
     } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R181: saveMatterRecord enforces conflict-decision and opening gate on status transition out of Prospective, allows stage edits while Prospective, and saveMatterAction filters opts', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      const feeEarner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          (p.roles ?? []).includes('fee_earner') &&
+          !(p.roles ?? []).includes('partner') &&
+          !(p.roles ?? []).includes('managing_partner') &&
+          !(p.roles ?? []).includes('admin') &&
+          !(p.roles ?? []).includes('risk_compliance'),
+      )!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+      const baseEnquiry = store.enquiries[0]!;
+      const prospectiveStatusId = store.values.find(
+        (v) =>
+          v.listKey === 'matter_status' &&
+          v.label === 'Prospective / Enquiry',
+      )!.id;
+      const activeStatusId = store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label === 'Active',
+      )!.id;
+      const alternateStageId =
+        store.values.find(
+          (v) =>
+            v.listKey === 'matter_stage' && v.id !== baseMatter.stageId,
+        )?.id ?? 'matter_stage.stage_2_investigation_and_preparation';
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const makeSession = (
+        person: typeof partner,
+        roles: string[],
+        email: string,
+      ) => {
+        const cookie = createSignedEntraSessionCookie({
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id}`,
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: person.id,
+          email,
+          displayName: `${person.firstName} ${person.surname}`,
+          entraRoles: roles,
+          mappedRoles: roles,
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        });
+        return {
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: roles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+        };
+      };
+
+      const feeEarnerSession = makeSession(
+        feeEarner,
+        feeEarner.roles ?? ['fee_earner'],
+        'fee-earner-r181@notalawfirm.example',
+      );
+      const partnerSession = makeSession(
+        partner,
+        partner.roles ?? ['partner', 'managing_partner', 'admin'],
+        'partner-r181@notalawfirm.example',
+      );
+
+      // Seed a restricted enquiry invisible to feeEarner so the party produces a restricted conflict match
+      store.enquiries.push({
+        ...structuredClone(baseEnquiry),
+        id: 'ENQ-R181-RESTRICTED',
+        reference: 'ENQ-R181-RESTRICTED',
+        status: 'Draft',
+        firstName: 'Restricted',
+        lastName: 'CounterpartyR181',
+        summary: 'Private draft enquiry belonging to partner',
+        convertedMatterId: null,
+        createdById: partner.id,
+        takenById: partner.id,
+      });
+
+      // 1. Refer a matter with a restricted match, then attempt to open it by setting matterStatusId: Active with no saveMode
+      const referredRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R181 Referred Restricted Match Matter',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              responsiblePartnerId: partner.id,
+              supervisingPartnerId: partner.id,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+              parties: [
+                {
+                  id: 'pty-r181-1',
+                  name: 'Restricted CounterpartyR181',
+                  role: 'Opponent',
+                  entityType: 'person',
+                  linkedRecordId: null,
+                },
+              ],
+            },
+            { byId: feeEarner.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(referredRes.errors).toBeUndefined();
+      expect(referredRes.matter?.matterStatusId).toBe(prospectiveStatusId);
+      expect(referredRes.matter?.conflictCheckRecord?.status).toBe('Referred');
+      const referredId = referredRes.matter!.id;
+
+      const bypassOpenRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referredRes.matter!,
+              matterStatusId: activeStatusId,
+            },
+            { id: referredId, byId: feeEarner.id },
+          ),
+      );
+      expect(bypassOpenRes.matter).toBeNull();
+      expect(bypassOpenRes.errors?.conflict).toMatch(
+        /cannot open until its conflict check is cleared or approved by Risk/i,
+      );
+      expect(
+        getStore().matters.find((m) => m.id === referredId)?.matterStatusId,
+      ).toBe(prospectiveStatusId);
+
+      // 2. Edit while waiting for Risk: a referred matter above the £50,000 sign-off threshold with no sign-off allows a stage change (no saveMode) while keeping the matter Prospective and matterOpeningGate.allowProceed === false
+      const highEstimateDraftRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referredRes.matter!,
+              feeEstimateGbp: 75000,
+              agreedFeeCapGbp: 75000,
+            },
+            { id: referredId, byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(highEstimateDraftRes.errors).toBeUndefined();
+
+      const stageChangeRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...highEstimateDraftRes.matter!,
+              stageId: alternateStageId,
+            },
+            { id: referredId, byId: feeEarner.id },
+          ),
+      );
+      expect(stageChangeRes.errors).toBeUndefined();
+      expect(stageChangeRes.matter).not.toBeNull();
+      expect(stageChangeRes.matter?.matterStatusId).toBe(prospectiveStatusId);
+      expect(stageChangeRes.matter?.stageId).toBe(alternateStageId);
+      expect(
+        (
+          stageChangeRes.matter?.fieldValues['matterOpeningGate'] as {
+            allowProceed?: boolean;
+          }
+        )?.allowProceed,
+      ).toBe(false);
+
+      // 3. saveMatterAction filters opts so unknown/internal options (such as source: 'pms_import') cannot be passed from the client
+      setTestEntraSessionOverride(feeEarnerSession.verifiedSession);
+      const actionAttemptRes = await saveMatterAction(
+        {
+          ...stageChangeRes.matter!,
+          matterStatusId: activeStatusId,
+        },
+        {
+          id: referredId,
+          source: 'pms_import',
+          unknownOption: 'dropped',
+        } as unknown as {
+          id?: string;
+          saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
+        },
+      );
+      setTestEntraSessionOverride(undefined);
+      expect(actionAttemptRes.matter).toBeNull();
+      expect(actionAttemptRes.errors?.conflict).toMatch(
+        /cannot open until its conflict check is cleared or approved by Risk/i,
+      );
+
+      // 4. Server-only PMS import (opts.source === 'pms_import') opens the imported matter and writes a 'matter-imported-open' audit entry
+      const pmsImportRes = await runWithActiveActorSession(
+        partnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              matterNumber: 'PMS-R181-0001',
+              title: 'R181 Imported PMS Matter',
+              clientId: baseMatter.clientId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              workTypeSubcategoryId: baseMatter.workTypeSubcategoryId,
+              matterStatusId: activeStatusId,
+              responsiblePartnerId: partner.id,
+              leadFeeEarnerId: feeEarner.id,
+            },
+            { byId: partner.id, source: 'pms_import' },
+          ),
+      );
+      expect(pmsImportRes.errors).toBeUndefined();
+      expect(pmsImportRes.matter?.matterStatusId).toBe(activeStatusId);
+      expect(
+        getStore().audit.some(
+          (a) =>
+            a.recordId === pmsImportRes.matter?.id &&
+            a.action === 'matter-imported-open',
+        ),
+      ).toBe(true);
+    } finally {
+      setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
   });

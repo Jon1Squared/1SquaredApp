@@ -1387,7 +1387,8 @@ export type AuditAction =
   | 'keydate-reminder-escalate'
   | 'keydate-config-change'
   | 'keydate-export'
-  | 'matter-restriction-lift';
+  | 'matter-restriction-lift'
+  | 'matter-imported-open';
 
 export interface AuditEntry {
   id: string;
