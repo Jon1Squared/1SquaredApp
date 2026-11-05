@@ -1,7 +1,6 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { cookies } from 'next/headers';
 import type {
   AppRole,
   AutoTaskTrigger,
@@ -136,10 +135,7 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
-import {
-  createVerifiedSessionActorFromEntraSession,
-  ENTRA_SESSION_COOKIE,
-} from '@/server/entraAuth';
+import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
 import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
 
 function revalidateAll() {
@@ -154,25 +150,13 @@ function withActorId<R>(fn: (byId: string) => Promise<R> | R): Promise<R> {
   return withAuthenticatedActor((actor) => fn(actor.personId));
 }
 
-export async function switchUserAction(userId: string) {
+export async function switchUserAction(
+  userId: string,
+): Promise<{ ok: true; personId: string } | { ok: false; error: string }> {
   return withAuthenticatedActor(async () => {
     const res = await switchUserInDemoMode(userId);
-    if (res.ok && res.signedSession) {
-      try {
-        const cookieStore = await cookies();
-        cookieStore.set(ENTRA_SESSION_COOKIE, res.signedSession, {
-          httpOnly: true,
-          sameSite: 'lax',
-          path: '/',
-          secure: process.env.NODE_ENV === 'production',
-          maxAge: 60 * 60 * 8,
-        });
-      } catch {
-        // Ignore when called outside a Next.js request context in unit tests
-      }
-    }
     revalidateAll();
-    return res;
+    return { ok: true, personId: res.personId };
   });
 }
 

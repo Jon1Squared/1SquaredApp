@@ -22,6 +22,7 @@ import {
 import { formatDate } from '@/domain/dates';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import { enquiryDisplayName, isEnquiryOpen } from '@/domain/enquiries';
+import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
@@ -279,15 +280,6 @@ export function HomeClient({
       .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
   }, [tasks, effectiveWorkPerson.id, currentUser.id]);
 
-  const myOverdueTasks = useMemo(
-    () => myOpenTasks.filter((t) => t.dueAt.slice(0, 10) < todayIso),
-    [myOpenTasks, todayIso],
-  );
-  const myDueTodayTasks = useMemo(
-    () => myOpenTasks.filter((t) => t.dueAt.slice(0, 10) === todayIso),
-    [myOpenTasks, todayIso],
-  );
-
   // Enquiries assigned to the effective work person
   const myOpenEnquiries = useMemo(() => {
     return enquiries
@@ -513,15 +505,12 @@ export function HomeClient({
     switch (cardId) {
       // 01 Fee Earner
       case 'fe_tasks_due': {
-        const effectiveOpenTasks =
-          myOpenTasks.length > 0
-            ? myOpenTasks
-            : tasks.filter(
-                (t) =>
-                  isTaskOpen(t) &&
-                  (myTeamIds.size === 0 ||
-                    (t.assignedTeamId !== null && myTeamIds.has(t.assignedTeamId))),
-              );
+        const effectiveOpenTasks = selectHomeCandidateTasks({
+          tasks,
+          currentUserId: currentUser.id,
+          effectiveWorkPersonId: effectiveWorkPerson.id,
+          myTeamIds,
+        });
         const effectiveOverdueTasks = effectiveOpenTasks.filter(
           (t) => t.dueAt.slice(0, 10) < todayIso,
         );
@@ -1433,13 +1422,12 @@ export function HomeClient({
                 (t.assignedPersonId && supportedFeeEarnerIds.includes(t.assignedPersonId)) ||
                 t.assignedTeamId === 'TM-000001'),
           )
-        : myOpenTasks.length > 0
-          ? myOpenTasks
-          : tasks.filter(
-              (t) =>
-                isTaskOpen(t) &&
-                (myTeamIds.size === 0 || (t.assignedTeamId !== null && myTeamIds.has(t.assignedTeamId))),
-            );
+        : selectHomeCandidateTasks({
+            tasks,
+            currentUserId: currentUser.id,
+            effectiveWorkPersonId: effectiveWorkPerson.id,
+            myTeamIds,
+          });
 
     const unifiedItems: ToDoUnifiedItem[] = [];
 

@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {
   Bell,
   BookOpen,
@@ -30,7 +30,12 @@ import {
 } from '@/app/actions';
 import type { AttentionItem } from '@/domain/attention';
 import { formatDateTime } from '@/domain/dates';
-import type { LeftRailVisibility } from '@/domain/homeConfig';
+import {
+  canPreviewAnyHomeRole,
+  resolveHeaderDisplayedViewingRole,
+  resolveViewingRoleOptions,
+  type LeftRailVisibility,
+} from '@/domain/homeConfig';
 import { initials, personDisplayName } from '@/domain/names';
 import type { SearchDoc } from '@/domain/search';
 import { countMyUrgentBadgeTasks } from '@/domain/tasks';
@@ -38,6 +43,69 @@ import type { HomePagesConfig, NotificationItem, Person, Task } from '@/domain/t
 import type { EntraSessionPayload } from '@/server/entraAuth';
 import { CompactHeaderSearch, StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+
+interface ViewingAsRoleSelectProps {
+  activeViewingRole: string;
+  currentUserRoles: string[];
+  configuredRoleKeys: string[];
+  pathname: string;
+  roleMap: Map<string, string>;
+  onChangeRole: (
+    nextRole: string,
+    selectEl: HTMLSelectElement,
+    previousRole: string,
+  ) => void;
+}
+
+function ViewingAsRoleSelectInner({
+  activeViewingRole,
+  currentUserRoles,
+  configuredRoleKeys,
+  pathname,
+  roleMap,
+  onChangeRole,
+}: ViewingAsRoleSelectProps) {
+  const searchParams = useSearchParams();
+  const displayedViewingRole = resolveHeaderDisplayedViewingRole({
+    activeViewingRole,
+    pathname,
+    previewRoleParam: searchParams.get('previewRole'),
+    viewParam: searchParams.get('view'),
+    configuredRoleKeys,
+  });
+  const roleOptions = resolveViewingRoleOptions({
+    currentUserRoles,
+    configuredRoleKeys,
+    pathname,
+    displayedRoleKey: displayedViewingRole,
+  });
+
+  return (
+    <select
+      id="viewing-as-role-select"
+      name="viewingAsRole"
+      aria-label="Viewing as role"
+      value={displayedViewingRole}
+      onChange={(e) => onChangeRole(e.target.value, e.currentTarget, displayedViewingRole)}
+      style={{
+        border: 0,
+        background: 'transparent',
+        color: 'var(--text-primary)',
+        fontFamily: 'inherit',
+        fontSize: 13,
+        fontWeight: 700,
+        cursor: 'pointer',
+        paddingRight: 4,
+      }}
+    >
+      {roleOptions.map((rk) => (
+        <option key={rk} value={rk}>
+          {rk === 'risk_compliance' ? 'Risk / Compliance' : (roleMap.get(rk) ?? rk)}
+        </option>
+      ))}
+    </select>
+  );
+}
 
 interface AppShellProps {
   currentUser: Person;
@@ -138,11 +206,23 @@ export function AppShell({
 
   const demoMode = Boolean(homePagesConfig.firmSettings?.demoMode);
   const demoEmployees = useMemo(() => employees.filter((e) => e.demo), [employees]);
-  const isSystemAdmin = useMemo(
-    () =>
-      currentUserRoles.includes('system_admin') ||
-      currentUserRoles.includes('admin'),
+  const canPreviewAny = useMemo(
+    () => canPreviewAnyHomeRole(currentUserRoles),
     [currentUserRoles],
+  );
+  const configuredRoleKeys = useMemo(
+    () => homePagesConfig.roles.map((r) => r.key),
+    [homePagesConfig.roles],
+  );
+  const fallbackRoleOptions = useMemo(
+    () =>
+      resolveViewingRoleOptions({
+        currentUserRoles: canPreviewAny ? configuredRoleKeys : currentUserRoles,
+        configuredRoleKeys,
+        pathname,
+        displayedRoleKey: activeViewingRole,
+      }),
+    [canPreviewAny, configuredRoleKeys, currentUserRoles, pathname, activeViewingRole],
   );
 
   const navItems = useMemo(() => {
@@ -254,8 +334,17 @@ export function AppShell({
     return `/matters/${item.recordId}`;
   };
 
-  async function handleRoleChange(nextRole: string) {
-    await switchViewingRoleAction(nextRole);
+  async function handleRoleChange(
+    nextRole: string,
+    selectEl: HTMLSelectElement,
+    previousRole: string,
+  ) {
+    const res = await switchViewingRoleAction(nextRole);
+    if (!res.ok) {
+      selectEl.value = previousRole;
+      showToast(res.error ?? 'Role is not assigned to the current user.');
+      return;
+    }
     if (pathname === '/' && typeof window !== 'undefined' && window.location.search) {
       router.replace('/');
     }
@@ -406,38 +495,46 @@ export function AppShell({
               >
                 Viewing as
               </span>
-              <select
-                id="viewing-as-role-select"
-                name="viewingAsRole"
-                aria-label="Viewing as role"
-                value={activeViewingRole}
-                onChange={(e) => handleRoleChange(e.target.value)}
-                style={{
-                  border: 0,
-                  background: 'transparent',
-                  color: 'var(--text-primary)',
-                  fontFamily: 'inherit',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  paddingRight: 4,
-                }}
+              <Suspense
+                fallback={
+                  <select
+                    id="viewing-as-role-select"
+                    name="viewingAsRole"
+                    aria-label="Viewing as role"
+                    value={activeViewingRole}
+                    onChange={(e) =>
+                      handleRoleChange(e.target.value, e.currentTarget, activeViewingRole)
+                    }
+                    style={{
+                      border: 0,
+                      background: 'transparent',
+                      color: 'var(--text-primary)',
+                      fontFamily: 'inherit',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      paddingRight: 4,
+                    }}
+                  >
+                    {fallbackRoleOptions.map((rk) => (
+                      <option key={rk} value={rk}>
+                        {rk === 'risk_compliance'
+                          ? 'Risk / Compliance'
+                          : (roleMap.get(rk) ?? rk)}
+                      </option>
+                    ))}
+                  </select>
+                }
               >
-                {Array.from(
-                  new Set([
-                    ...(isSystemAdmin
-                      ? homePagesConfig.roles.map((r) => r.key)
-                      : currentUserRoles),
-                    ...(pathname.startsWith('/matters') ? ['fee_earner', 'risk_compliance'] : []),
-                  ]),
-                ).map((rk) => (
-                  <option key={rk} value={rk}>
-                    {rk === 'risk_compliance'
-                      ? 'Risk / Compliance'
-                      : (roleMap.get(rk) ?? rk)}
-                  </option>
-                ))}
-              </select>
+                <ViewingAsRoleSelectInner
+                  activeViewingRole={activeViewingRole}
+                  currentUserRoles={currentUserRoles}
+                  configuredRoleKeys={configuredRoleKeys}
+                  pathname={pathname}
+                  roleMap={roleMap}
+                  onChangeRole={handleRoleChange}
+                />
+              </Suspense>
             </label>
 
             {activeViewingRole === 'enquiries_coordinator' ? null : activeViewingRole === 'finance' ? (

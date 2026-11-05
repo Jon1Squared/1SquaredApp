@@ -759,8 +759,16 @@ export function resolveEmployeeRoles(person: Person, teams: Team[] = []): string
 }
 
 /**
+ * Returns true when the user holds the built-in `admin` role and may preview any configured Home role.
+ */
+export function canPreviewAnyHomeRole(userRoles: readonly string[]): boolean {
+  return userRoles.includes('admin');
+}
+
+/**
  * Resolve which role the user is currently viewing Home as.
- * Checks `lastViewingRoleByUserId[user.id]`, validated against the user's own `roles`.
+ * Checks `lastViewingRoleByUserId[user.id]`, validated against the user's own `roles`
+ * (or any configured Home role when `canPreviewAnyHomeRole(userRoles)` is true).
  * Falls back to `roles[0]`.
  */
 export function resolveActiveViewingRole(
@@ -771,16 +779,65 @@ export function resolveActiveViewingRole(
   if (!person) return 'fee_earner';
   const userRoles = resolveEmployeeRoles(person, teams);
   const remembered = config.lastViewingRoleByUserId?.[person.id];
-  const isSystemAdmin =
-    userRoles.includes('system_admin') || userRoles.includes('admin');
   if (
     remembered &&
     (userRoles.includes(remembered) ||
-      (isSystemAdmin && config.roles.some((r) => r.key === remembered)))
+      (canPreviewAnyHomeRole(userRoles) &&
+        config.roles.some((r) => r.key === remembered)))
   ) {
     return remembered;
   }
   return userRoles[0] || 'fee_earner';
+}
+
+/**
+ * Resolve the role key displayed in the header "Viewing as" selector, honouring `?previewRole=`
+ * and `?view=` query parameters on `/`.
+ */
+export function resolveHeaderDisplayedViewingRole(params: {
+  activeViewingRole: string;
+  pathname: string;
+  previewRoleParam?: string | null;
+  viewParam?: string | null;
+  configuredRoleKeys: readonly string[];
+}): string {
+  if (params.pathname === '/') {
+    const mappedView =
+      params.viewParam === 'finance'
+        ? 'finance'
+        : params.viewParam === 'risk_compliance'
+          ? 'risk_compliance'
+          : params.viewParam || null;
+    const requestedRole = params.previewRoleParam || mappedView;
+    if (requestedRole && params.configuredRoleKeys.includes(requestedRole)) {
+      return requestedRole;
+    }
+  }
+  return params.activeViewingRole;
+}
+
+/**
+ * Resolve the list of selectable role keys in the header "Viewing as" dropdown.
+ */
+export function resolveViewingRoleOptions(params: {
+  currentUserRoles: readonly string[];
+  configuredRoleKeys: readonly string[];
+  pathname: string;
+  displayedRoleKey?: string;
+}): string[] {
+  const canPreviewAny = canPreviewAnyHomeRole(params.currentUserRoles);
+  return Array.from(
+    new Set([
+      ...(canPreviewAny ? params.configuredRoleKeys : params.currentUserRoles),
+      ...(canPreviewAny && params.pathname.startsWith('/matters')
+        ? ['fee_earner', 'risk_compliance']
+        : []),
+      ...(params.displayedRoleKey &&
+      params.configuredRoleKeys.includes(params.displayedRoleKey)
+        ? [params.displayedRoleKey]
+        : []),
+    ]),
+  );
 }
 
 export interface LeftRailVisibility {

@@ -6,7 +6,7 @@ export const keyDatesExceptionsArticle: DocArticle = {
   section: 'key-dates-limitation',
   summary:
     'How risk, compliance, and managing partners monitor all 10 key date exception kinds (9 matter/diary compliance kinds plus the admin data-integrity orphan check) across teams and export audited reports.',
-  updated: '2026-11-04',
+  updated: '2026-11-05',
   body: `
 The **Compliance exceptions** tab in the [Key Dates & Limitation Diary](/key-dates) gives Risk & Compliance officers, Managing Partners, and Administrators (\`keydate:view_any_team\`) a real-time view of every key date governance exception across the firm.
 
@@ -17,7 +17,7 @@ The exceptions engine continuously evaluates open and closed matters against ten
 | Exception kind | When it triggers |
 | --- | --- |
 | \`matter_missing_required_date\` | An open matter is missing one or more \`requiredKeyDateTypeIds\` configured for its matter type (and no \`KeyDateNotApplicable\` record exists). |
-| \`verification_overdue\` | A proposed key date has remained in \`awaiting_verification\` for more than 5 working days. |
+| \`verification_overdue\` | A proposed key date has remained in \`awaiting_verification\` for the configured number of calendar days (\`exceptions.verificationOverdueDays\`, default 3) or more. |
 | \`critical_date_no_recent_activity\` | A confirmed critical key date is due within 90 days on a matter with no recorded activity in the last 30 days. |
 | \`closed_matter_open_dates\` | A closed or archived matter still has key dates in \`provisional\`, \`awaiting_verification\`, or \`confirmed\` status. |
 | \`calculated_from_unreviewed_rules\` | An active key date was calculated from a limitation rule set whose \`reviewStatus\` is \`'unreviewed'\`. |

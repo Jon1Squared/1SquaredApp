@@ -118,24 +118,48 @@ export interface DocumentGenerationClientSnapshot {
 declare global {
   var __oneSquaredDocRepo: TenantDocumentRepository | undefined;
   var __oneSquaredDocStorage: DocumentStorageProvider | undefined;
+  var __oneSquaredDevBlobKey: string | undefined;
+  var __oneSquaredDevBlobKeyWarned: boolean | undefined;
 }
 
 function isTestEnv(): boolean {
   return Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
 }
 
-function isTestOrDevEnv(): boolean {
-  return Boolean(
-    isTestEnv() ||
-      (process.env.NODE_ENV === 'development' &&
-        process.env.PLATFORM_ENVIRONMENT !== 'live'),
-  );
+function resolveDevFallbackSigningKey(): string {
+  if (process.env.NODE_ENV !== 'development') {
+    return '';
+  }
+  const tenantEnv = getActiveTenantConfiguration().environment;
+  if (tenantEnv !== 'dev' && tenantEnv !== 'test') {
+    return '';
+  }
+  const g = globalThis as typeof globalThis & {
+    __oneSquaredDevBlobKey?: string;
+    __oneSquaredDevBlobKeyWarned?: boolean;
+  };
+  g.__oneSquaredDevBlobKey ??= crypto.randomBytes(32).toString('hex');
+  if (!g.__oneSquaredDevBlobKeyWarned) {
+    g.__oneSquaredDevBlobKeyWarned = true;
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'blob_signing_ephemeral_dev_key_in_use',
+        environment: tenantEnv,
+        message:
+          'PLATFORM_BLOB_SIGNING_KEY is unset; using an ephemeral per-process development signing key.',
+      }),
+    );
+  }
+  return g.__oneSquaredDevBlobKey;
 }
 
 export function resolveTenantBlobSigningKey(tenantId: string): string {
   const baseSecret =
     process.env.PLATFORM_BLOB_SIGNING_KEY?.trim() ||
-    (isTestOrDevEnv() ? 'test-host-blob-signing-key-from-vault' : '');
+    (isTestEnv()
+      ? 'test-host-blob-signing-key-from-vault'
+      : resolveDevFallbackSigningKey());
   if (!baseSecret || (baseSecret.startsWith('<') && baseSecret.endsWith('>'))) {
     throw new Error(
       'STORAGE_CONFIG_ERROR: PLATFORM_BLOB_SIGNING_KEY must be configured in Key Vault / environment.',

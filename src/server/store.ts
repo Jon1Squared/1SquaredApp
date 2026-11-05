@@ -133,6 +133,78 @@ function resolveActiveFirmId(): string {
   return getActiveTenantConfiguration().tenantId;
 }
 
+export function repairOrphanTaxonomyIds(
+  parsed: Pick<FirmStore, 'matters' | 'enquiries' | 'quotes'>,
+  demo: Pick<FirmStore, 'matters' | 'enquiries' | 'quotes'>,
+  validIds: ReadonlySet<string>,
+): { repairedCount: number } {
+  let repairedCount = 0;
+
+  for (const m of demo.matters) {
+    const existingMatter = parsed.matters.find(
+      (x) => x.id === m.id || x.matterNumber === m.matterNumber,
+    );
+    if (!existingMatter) continue;
+    if (existingMatter.practiceAreaId && !validIds.has(existingMatter.practiceAreaId)) {
+      existingMatter.practiceAreaId = m.practiceAreaId;
+      repairedCount += 1;
+    }
+    if (
+      existingMatter.workTypeSubcategoryId &&
+      !validIds.has(existingMatter.workTypeSubcategoryId)
+    ) {
+      existingMatter.workTypeSubcategoryId = m.workTypeSubcategoryId;
+      repairedCount += 1;
+    }
+    if (existingMatter.stageId && !validIds.has(existingMatter.stageId)) {
+      existingMatter.stageId = m.stageId;
+      repairedCount += 1;
+    }
+    if (existingMatter.milestoneId && !validIds.has(existingMatter.milestoneId)) {
+      existingMatter.milestoneId = m.milestoneId;
+      repairedCount += 1;
+    }
+  }
+
+  for (const enq of demo.enquiries) {
+    const existingEnq = parsed.enquiries.find((x) => x.id === enq.id);
+    if (!existingEnq) continue;
+    if (existingEnq.practiceAreaId && !validIds.has(existingEnq.practiceAreaId)) {
+      existingEnq.practiceAreaId = enq.practiceAreaId;
+      repairedCount += 1;
+    }
+    if (
+      existingEnq.workTypeSubcategoryId &&
+      !validIds.has(existingEnq.workTypeSubcategoryId)
+    ) {
+      existingEnq.workTypeSubcategoryId = enq.workTypeSubcategoryId;
+      repairedCount += 1;
+    }
+  }
+
+  if (Array.isArray(parsed.quotes)) {
+    for (const q of demo.quotes) {
+      const existingQuote = parsed.quotes.find(
+        (x) => x.id === q.id || x.reference === q.reference,
+      );
+      if (!existingQuote) continue;
+      if (existingQuote.practiceAreaId && !validIds.has(existingQuote.practiceAreaId)) {
+        existingQuote.practiceAreaId = q.practiceAreaId;
+        repairedCount += 1;
+      }
+      if (
+        existingQuote.workTypeSubcategoryId &&
+        !validIds.has(existingQuote.workTypeSubcategoryId)
+      ) {
+        existingQuote.workTypeSubcategoryId = q.workTypeSubcategoryId;
+        repairedCount += 1;
+      }
+    }
+  }
+
+  return { repairedCount };
+}
+
 declare global {
   var __oneSquaredStore: FirmStore | undefined;
   var __oneSquaredStoreMtimeMs: number | undefined;
@@ -847,7 +919,10 @@ export function getStore(): FirmStore {
           }
         }
 
-        const seedValueIds = new Set(seedLists.values.map((v) => v.id));
+        const validTaxonomyIds = new Set<string>([
+          ...seedLists.values.map((v) => v.id),
+          ...(Array.isArray(parsed.values) ? parsed.values.map((v) => v.id) : []),
+        ]);
 
         for (const m of demo.matters) {
           const existingMatter = parsed.matters.find(
@@ -857,36 +932,12 @@ export function getStore(): FirmStore {
             parsed.matters.push(m);
             parsed.counters.M = Math.max(parsed.counters.M ?? 0, demo.counters.M);
             migrated = true;
-          } else {
-            if (m.fieldValues && Object.keys(m.fieldValues).length > 0) {
-              existingMatter.fieldValues = {
-                ...existingMatter.fieldValues,
-                ...m.fieldValues,
-              };
-              migrated = true;
-            }
-            if (
-              existingMatter.practiceAreaId &&
-              !seedValueIds.has(existingMatter.practiceAreaId)
-            ) {
-              existingMatter.practiceAreaId = m.practiceAreaId;
-              migrated = true;
-            }
-            if (
-              existingMatter.workTypeSubcategoryId &&
-              !seedValueIds.has(existingMatter.workTypeSubcategoryId)
-            ) {
-              existingMatter.workTypeSubcategoryId = m.workTypeSubcategoryId;
-              migrated = true;
-            }
-            if (existingMatter.stageId && !seedValueIds.has(existingMatter.stageId)) {
-              existingMatter.stageId = m.stageId;
-              migrated = true;
-            }
-            if (existingMatter.milestoneId && !seedValueIds.has(existingMatter.milestoneId)) {
-              existingMatter.milestoneId = m.milestoneId;
-              migrated = true;
-            }
+          } else if (m.fieldValues && Object.keys(m.fieldValues).length > 0) {
+            existingMatter.fieldValues = {
+              ...existingMatter.fieldValues,
+              ...m.fieldValues,
+            };
+            migrated = true;
           }
         }
 
@@ -896,22 +947,9 @@ export function getStore(): FirmStore {
             parsed.enquiries.push(enq);
             parsed.counters.ENQ = Math.max(parsed.counters.ENQ ?? 0, demo.counters.ENQ);
             migrated = true;
-          } else {
-            if (enq.id === 'ENQ-000009' && existingEnq.keyDate !== enq.keyDate) {
-              existingEnq.keyDate = enq.keyDate;
-              migrated = true;
-            }
-            if (existingEnq.practiceAreaId && !seedValueIds.has(existingEnq.practiceAreaId)) {
-              existingEnq.practiceAreaId = enq.practiceAreaId;
-              migrated = true;
-            }
-            if (
-              existingEnq.workTypeSubcategoryId &&
-              !seedValueIds.has(existingEnq.workTypeSubcategoryId)
-            ) {
-              existingEnq.workTypeSubcategoryId = enq.workTypeSubcategoryId;
-              migrated = true;
-            }
+          } else if (enq.id === 'ENQ-000009' && existingEnq.keyDate !== enq.keyDate) {
+            existingEnq.keyDate = enq.keyDate;
+            migrated = true;
           }
         }
 
@@ -928,23 +966,27 @@ export function getStore(): FirmStore {
               parsed.quotes.push(q);
               parsed.counters.QTE = Math.max(parsed.counters.QTE ?? 0, demo.counters.QTE);
               migrated = true;
-            } else {
-              if (
-                existingQuote.practiceAreaId &&
-                !seedValueIds.has(existingQuote.practiceAreaId)
-              ) {
-                existingQuote.practiceAreaId = q.practiceAreaId;
-                migrated = true;
-              }
-              if (
-                existingQuote.workTypeSubcategoryId &&
-                !seedValueIds.has(existingQuote.workTypeSubcategoryId)
-              ) {
-                existingQuote.workTypeSubcategoryId = q.workTypeSubcategoryId;
-                migrated = true;
-              }
             }
           }
+        }
+
+        const { repairedCount } = repairOrphanTaxonomyIds(parsed, demo, validTaxonomyIds);
+        if (repairedCount > 0) {
+          migrated = true;
+          let tenantId = 'unknown';
+          try {
+            tenantId = resolveActiveFirmId();
+          } catch {
+            // Fall back if tenant configuration is unavailable
+          }
+          console.info(
+            JSON.stringify({
+              level: 'info',
+              event: 'store.orphan_taxonomy_ids_repaired',
+              tenantId,
+              repairedCount,
+            }),
+          );
         }
 
         if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {

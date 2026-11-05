@@ -59,7 +59,7 @@ Each person sees the work and numbers that matter to their job the moment they s
 ### Role model
 
 - Add a `roles` list to each user: **Fee earner**, **Partner**, **Legal secretary**, **Enquiries coordinator**, **Finance**, **Risk and compliance**, **Managing partner**, **Admin**. Keep the list admin-editable so Business Development and Practice Manager can be added later.
-- A user's **home role** is the first in their list. The **Viewing as** select in the header lists only the user's own roles and switches Home instantly. Remember the last choice per user.
+- A user's **home role** is the first in their list. The **Viewing as** select in the header lists only the user's own roles (or every configured Home role when the user holds the built-in `admin` role via `canPreviewAnyHomeRole`) and switches Home instantly as a presentation-only preview. Remember the last choice per user.
 - Roles also control the side rail: **Finance** shows only for Finance, Partner and Managing partner; **Risk and compliance** only for Risk and compliance and Managing partner, as in the designs.
 
 ### Demo users

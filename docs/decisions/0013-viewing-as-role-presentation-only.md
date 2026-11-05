@@ -44,3 +44,10 @@ In the current codebase, the Home page and top bar allow a multi-role user to sw
 - Switching `"Viewing as"` in the UI can never grant or revoke server-side permissions or expose unauthorized data.
 - The privilege escalation bug in `switchViewingRoleAction` is eliminated.
 - UI navigation and server-side route/action enforcement are guaranteed to stay in sync because both read from `PermissionSet`.
+
+## Amendment (5 November 2026)
+
+- Users holding the built-in `admin` role may preview any configured Home role (`homePagesConfig.roles`) via the **Viewing as** selector (`switchViewingRole` and `resolveActiveViewingRole`).
+- Role preview remains strictly presentation-only and never widens permissions or data access (`resolvePermissions` and `getLeftRailVisibility` continue to evaluate the user's authoritative `PermissionSet`).
+- Every API endpoint and server action continues to enforce its own permission check independently of `activeViewingRole`.
+- The role-preview check uses the stable built-in role key `admin` via `canPreviewAnyHomeRole(userRoles)` in `src/domain/homeConfig.ts`.
