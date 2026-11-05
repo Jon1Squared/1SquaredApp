@@ -18,5 +18,9 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 15000,
     include: ['src/**/*.test.ts', 'core/tests/**/*.test.ts'],
+    env: {
+      PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+      PLATFORM_ENVIRONMENT: 'test',
+    },
   },
 });

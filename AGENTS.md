@@ -107,6 +107,7 @@ Node.js 24 is required (`node:sqlite`). Run everything from the repo root. Tests
 - Unit tests: `npm test` (all tests). For one file: `npx vitest run <path>`
 - Isolation tests: `npx vitest run isolation` (runs `core/tests/isolation.test.ts` and `core/tests/key-dates-isolation.test.ts`)
 - Lint: `npm run lint`
+- Full Platform CI verification: `npm run ci` (runs every step of `.github/workflows/ci.yml` with the exact CI environment variables)
 - PMS import: `npm run pms:import`
 
-CI (`.github/workflows/ci.yml`) runs `npm ci`, `npx tsc --noEmit`, `npx vitest run` and `npm run build`.
+CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm run generate:extensions`, `npx tsc --noEmit`, `npm run lint`, `node scripts/verify-invented-fixtures.mjs`, `npm test` (with `PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm` and `PLATFORM_ENVIRONMENT=test`, configured in `vitest.config.ts`) and `npm run build` (with `PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm` and `PLATFORM_ENVIRONMENT=live`). Run `npm run ci` locally before pushing to guarantee CI parity.

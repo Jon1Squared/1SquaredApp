@@ -1,5 +1,15 @@
 # 1Squared — Release Notes
 
+## Unreleased — Local & Platform CI Environment Parity (`chore/local-ci-parity`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Build & CI Verification Tooling (`vitest.config.ts`, `package.json`, `scripts/verify-ci.mjs`, `AGENTS.md`):**
+  - Pinned `PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm'` and `PLATFORM_ENVIRONMENT: 'test'` in `vitest.config.ts` so local `npx vitest run` and `npm test` runs match the GitHub Actions Platform CI environment (`ci.yml`).
+  - Added `npm run ci` (`scripts/verify-ci.mjs`) to execute all 7 Platform CI verification steps locally (`generate:extensions`, `tsc --noEmit`, `npm run lint`, `verify-invented-fixtures.mjs`, bundled extension registry verification, `npm test` under `PLATFORM_ENVIRONMENT=test`, and `npm run build` under `PLATFORM_ENVIRONMENT=live`).
+  - Updated in-app Help & Documentation (`src/docs/articles/deployment-and-security.ts`) and `AGENTS.md`.
+
+---
+
 ## Unreleased — Least-Privilege SharePoint Access via `Sites.Selected` (`feat/sharepoint-sites`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

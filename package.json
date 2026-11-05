@@ -11,6 +11,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "ci": "node scripts/verify-ci.mjs",
     "pms:import": "tsx scripts/import-pms.ts"
   },
   "dependencies": {
