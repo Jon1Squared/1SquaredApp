@@ -45,6 +45,7 @@ import {
   compileMatterFolderPermissions,
   compileTeamFolderPermissions,
   computeAdditiveTemplateDiff,
+  encodeMockTokenWithClaims,
   evaluateLibraryScopeScaleStatus,
   executeUserMatterDocumentOperation,
   findUnknownPathTokens,
@@ -66,9 +67,9 @@ import {
   sanitiseFolderNameSegment,
   PERMISSION_REGISTRY,
   validateDocumentConfigAgainstTenantData,
+  validateDocumentStoreConfig,
   validateMatterFolderTemplatesConfig,
   validateRawFolderNameSegment,
-  validateTenantConfig,
   validateTenantConfigWithWarnings,
   type DocumentAccessConfig,
   type DocumentRoutingRule,
@@ -4120,12 +4121,39 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           ],
         },
       };
-      const validation = validateTenantConfig(section31ExampleConfig);
-      expect(validation.store?.storeId).toBe('primary-sharepoint');
-      expect(validation.store?.auth.delegatedPermissionScope).toBe(
+      const validation = validateDocumentStoreConfig(section31ExampleConfig);
+      expect(validation.store.storeId).toBe('primary-sharepoint');
+      expect(validation.store.auth.delegatedPermissionScope).toBe(
         'Sites.Selected',
       );
       expect(validation.deprecationWarnings).toEqual([]);
+
+      // Store omitting delegatedPermissionScope returns Files.ReadWrite.All default and 1 deprecation warning
+      const storeWithoutScopeValidation = validateDocumentStoreConfig({
+        ...section31ExampleConfig,
+        auth: {
+          entraTenantId: section31ExampleConfig.auth.entraTenantId,
+          credentialMode: section31ExampleConfig.auth.credentialMode,
+          clientId: section31ExampleConfig.auth.clientId,
+          certificateKeyVaultSecretRef:
+            section31ExampleConfig.auth.certificateKeyVaultSecretRef,
+        },
+      });
+      expect(
+        storeWithoutScopeValidation.store.auth.delegatedPermissionScope,
+      ).toBe('Files.ReadWrite.All');
+      expect(storeWithoutScopeValidation.deprecationWarnings).toHaveLength(1);
+
+      // Store with an unknown key (e.g. auth.permissionMode) throws
+      expect(() =>
+        validateDocumentStoreConfig({
+          ...section31ExampleConfig,
+          auth: {
+            ...section31ExampleConfig.auth,
+            permissionMode: 'Sites.Selected',
+          },
+        }),
+      ).toThrow();
 
       // R191: Config omitting delegatedPermissionScope and sharepoint.siteId loads with v1.x default "Files.ReadWrite.All" and emits a ConfigDeprecationWarning
       const rawBase = JSON.parse(
@@ -4204,15 +4232,31 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         };
 
         const backend = new MockSharePointGraphBackend();
-        const tokenService = new DocumentStoreTokenService({
-          cache: new TenantScopedEncryptedTokenCache(),
-        });
-        const provider = new SharePointDocumentStoreProvider({
-          tenantContext: ctxA,
-          storeConfig,
-          tokenService,
-          backend,
-        });
+        const makeTokenService = (
+          appRoles: readonly string[],
+          delegatedScopes: readonly string[],
+        ) =>
+          new DocumentStoreTokenService({
+            cache: new TenantScopedEncryptedTokenCache(),
+            appTokenHandler: async (input) => ({
+              accessToken: encodeMockTokenWithClaims(
+                `app_tok_${input.tenantId}_${input.storeId}_graph`,
+                {
+                  roles: [...appRoles],
+                },
+              ),
+              expiresInSeconds: 3600,
+            }),
+            oboExchangeHandler: async (input) => ({
+              accessToken: encodeMockTokenWithClaims(
+                `obo_tok_${input.tenantId}_${input.storeId}_${input.entraObjectId}_${input.scope}`,
+                {
+                  scp: delegatedScopes.join(' '),
+                },
+              ),
+              expiresInSeconds: 3600,
+            }),
+          });
 
         const provCtx: ProvisioningAccessContext = {
           kind: 'provisioning',
@@ -4229,21 +4273,30 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         };
 
         // 1. Sites.Selected alone succeeds
-        const okHealth = await provider.testConnection(provCtx);
+        const okProvider = new SharePointDocumentStoreProvider({
+          tenantContext: ctxA,
+          storeConfig,
+          tokenService: makeTokenService(['Sites.Selected'], ['Sites.Selected']),
+          backend,
+        });
+        const okHealth = await okProvider.testConnection(provCtx);
         expect(okHealth.ok).toBe(true);
         expect(okHealth.roleVerificationStatus).toBe('verified');
 
         // 2. Each forbidden broad permission in app roles or delegated scp fails closed with excess_permissions_consented
         for (const broadPerm of FORBIDDEN_BROAD_SHAREPOINT_PERMISSIONS) {
           backend.clearStoreHealthResults();
-          tokenService.setSimulatedConsentedPermissions({
-            tenantId: ctxA.tenantId,
-            storeId: storeConfig.storeId,
-            appRoles: ['Sites.Selected', broadPerm],
-            delegatedScopes: ['Sites.Selected'],
+          const badAppProvider = new SharePointDocumentStoreProvider({
+            tenantContext: ctxA,
+            storeConfig,
+            tokenService: makeTokenService(
+              ['Sites.Selected', broadPerm],
+              ['Sites.Selected'],
+            ),
+            backend,
           });
 
-          const badAppHealth = await provider.testConnection(provCtx);
+          const badAppHealth = await badAppProvider.testConnection(provCtx);
           expect(badAppHealth.ok).toBe(false);
           expect(badAppHealth.errorCode).toBe('misconfigured');
           expect(badAppHealth.errorReasonCode).toBe(
@@ -4252,19 +4305,74 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           expect(badAppHealth.errorReason).toContain(broadPerm);
 
           backend.clearStoreHealthResults();
-          tokenService.setSimulatedConsentedPermissions({
-            tenantId: ctxA.tenantId,
-            storeId: storeConfig.storeId,
-            appRoles: ['Sites.Selected'],
-            delegatedScopes: ['Sites.Selected', broadPerm],
+          const badOboProvider = new SharePointDocumentStoreProvider({
+            tenantContext: ctxA,
+            storeConfig,
+            tokenService: makeTokenService(
+              ['Sites.Selected'],
+              ['Sites.Selected', broadPerm],
+            ),
+            backend,
           });
 
-          await expect(
-            provider.listItems(userCtx, {
+          let caughtUserError: unknown;
+          try {
+            await badOboProvider.listItems(userCtx, {
               storeId: storeConfig.storeId,
               libraryId: 'lib-matters',
               siteId: 'site-alpha-001',
               driveId: 'drive-alpha-matters',
+            });
+          } catch (err) {
+            caughtUserError = err;
+          }
+          expect(caughtUserError).toMatchObject({
+            code: 'misconfigured',
+            reason: 'excess_permissions_consented',
+          });
+          expect(normaliseDocumentStoreError(caughtUserError).userMessage).toBe(
+            GENERIC_USER_DOCUMENT_STORE_UNAVAILABLE_MESSAGE,
+          );
+        }
+
+        // 3. Cached OBO token path: verify both repeated acquisition and pre-cached excess-scope tokens fail closed on every call
+        const excessOboService = makeTokenService(
+          ['Sites.Selected'],
+          ['Sites.Selected', 'Files.ReadWrite.All'],
+        );
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(
+            excessOboService.acquireDelegatedUserToken({
+              accessContext: userCtx,
+              storeId: storeConfig.storeId,
+              authConfig: storeConfig.auth,
+            }),
+          ).rejects.toMatchObject({
+            code: 'misconfigured',
+            reason: 'excess_permissions_consented',
+          });
+        }
+
+        const preCachedTokenCache = new TenantScopedEncryptedTokenCache();
+        preCachedTokenCache.putUserToken({
+          ctx: ctxA,
+          entraObjectId: userCtx.entraObjectId,
+          storeId: storeConfig.storeId,
+          scope: 'Sites.Selected',
+          accessToken: encodeMockTokenWithClaims('obo_tok_precached_excess', {
+            scp: 'Sites.Selected Files.ReadWrite.All',
+          }),
+          expiresInSeconds: 3600,
+        });
+        const preCachedService = new DocumentStoreTokenService({
+          cache: preCachedTokenCache,
+        });
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(
+            preCachedService.acquireDelegatedUserToken({
+              accessContext: userCtx,
+              storeId: storeConfig.storeId,
+              authConfig: storeConfig.auth,
             }),
           ).rejects.toMatchObject({
             code: 'misconfigured',

@@ -141,10 +141,6 @@ export class MockSharePointGraphBackend {
   private simulateMissingSiteGrantsForStore = new Set<string>();
   private readonly siteGrantRoles = new Map<string, SharePointSiteGrantRole>();
   private readonly sitePermissionsReadForbidden = new Set<string>();
-  private readonly simulatedTokenClaims = new Map<
-    string,
-    { appRoles?: readonly string[]; delegatedScopes?: readonly string[] }
-  >();
   private readonly healthCache = new Map<
     string,
     { tenantId: string; storeId: string; result: DocumentStoreConnectionTestResult }
@@ -314,31 +310,6 @@ export class MockSharePointGraphBackend {
       ) ||
       this.sitePermissionsReadForbidden.has(params.storeId) ||
       this.sitePermissionsReadForbidden.has(params.siteId)
-    );
-  }
-
-  public setSimulatedTokenClaims(params: {
-    tenantId?: string;
-    storeId: string;
-    appRoles?: readonly string[];
-    delegatedScopes?: readonly string[];
-  }): void {
-    const key = `${params.tenantId ?? '*'}::${params.storeId}`;
-    this.simulatedTokenClaims.set(key, {
-      appRoles: params.appRoles ? [...params.appRoles] : undefined,
-      delegatedScopes: params.delegatedScopes
-        ? [...params.delegatedScopes]
-        : undefined,
-    });
-  }
-
-  public getSimulatedTokenClaims(
-    tenantId: string,
-    storeId: string,
-  ): { appRoles?: readonly string[]; delegatedScopes?: readonly string[] } | undefined {
-    return (
-      this.simulatedTokenClaims.get(`${tenantId}::${storeId}`) ??
-      this.simulatedTokenClaims.get(`*::${storeId}`)
     );
   }
 

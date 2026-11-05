@@ -38,7 +38,6 @@ import type {
   DocumentStoreProvider,
   DocumentUploadOptions,
   ProvisioningAccessContext,
-  SharePointRoleVerificationStatus,
   TenantContext,
   UserAccessContext,
 } from '../../api/index';
@@ -265,26 +264,9 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
       return;
     }
 
-    const tokenSim = this.tokenService.getSimulatedConsentedPermissions(
-      this.tenantContext.tenantId,
-      this.storeId,
-    );
-    const backendSim = this.backend.getSimulatedTokenClaims(
-      this.tenantContext.tenantId,
-      this.storeId,
-    );
-
     const check = verifyTokenClaimsForSitesSelected({
       appToken: options.appToken,
       oboToken: options.oboToken,
-      additionalAppRoles: [
-        ...(tokenSim?.appRoles ?? []),
-        ...(backendSim?.appRoles ?? []),
-      ],
-      additionalDelegatedScopes: [
-        ...(tokenSim?.delegatedScopes ?? []),
-        ...(backendSim?.delegatedScopes ?? []),
-      ],
     });
 
     if (!check.valid) {

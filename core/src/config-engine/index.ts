@@ -2274,78 +2274,22 @@ export const DocumentStoreConfigSubSchema =
   TenantConfigurationSchema.shape.documentStores.unwrap().element;
 
 /**
- * Validates a tenant configuration (or standalone `DocumentStoreConfig` entry) against
- * `tenant-config.schema.json` and the Zod configuration schema, rejecting unknown keys
- * and applying defaults.
+ * Validates a standalone `DocumentStoreConfig` entry against `DocumentStoreConfigSubSchema`
+ * (rejecting unknown keys and applying defaults) and returns any structured deprecation warnings.
  */
-export function validateTenantConfig(
-  rawConfig: Record<string, unknown>,
-  environmentOverlay: Record<string, unknown> = {},
-  environmentOverride?: PlatformEnvironment,
-  hostingModeOverride?: HostingMode,
-): TenantConfiguration & {
-  store?: DocumentStoreConfig;
-  deprecationWarnings?: ConfigDeprecationWarning[];
+export function validateDocumentStoreConfig(
+  rawStore: Record<string, unknown>,
+): {
+  store: DocumentStoreConfig;
+  deprecationWarnings: ConfigDeprecationWarning[];
 } {
-  const structuredDeprecationWarnings =
-    collectStructuredConfigDeprecationWarnings(rawConfig, environmentOverlay);
-
-  if (
-    typeof rawConfig.storeId === 'string' &&
-    typeof rawConfig.tenantId !== 'string'
-  ) {
-    const parsedStore = DocumentStoreConfigSubSchema.parse(rawConfig);
-    const wrapped = loadAndValidateTenantConfig(
-      {
-        schemaVersion: '1.0.0',
-        tenantId: 'validation-tenant',
-        displayName: 'Validation Tenant',
-        hostingMode: 'multi_tenant',
-        environment: 'test',
-        branding: {
-          primaryDomain: 'validation.example',
-          accentColorHex: '#2563EB',
-          logoAssetKey: 'logo.svg',
-        },
-        featureFlags: {
-          enableMatterCostsGovernance: true,
-          enablePmsLiveRateSync: false,
-          enableAiMatterExtraction: false,
-        },
-        matterCosts: {
-          rateSourceMode: 'pms_when_linked',
-          allowMatterRateOverrides: true,
-          partnerSignOffThresholdGbp: 25000,
-          rateCards: [],
-          disbursementPresets: [],
-        },
-        integrations: {
-          pmsConnectionSecretVaultRef: 'kv://kv-validation-test/pms-secret',
-          companiesHouseApiKeyVaultRef: 'kv://kv-validation-test/ch-secret',
-        },
-        enabledExtensions: [],
-        documentStores: [rawConfig],
-      },
-      environmentOverlay,
-      environmentOverride,
-      hostingModeOverride,
-    );
-    const result = Object.assign({}, wrapped, parsedStore, {
-      store: parsedStore,
-      deprecationWarnings: structuredDeprecationWarnings,
-    });
-    return result;
-  }
-
-  const parsedTenant = loadAndValidateTenantConfig(
-    rawConfig,
-    environmentOverlay,
-    environmentOverride,
-    hostingModeOverride,
-  );
-  return Object.assign({}, parsedTenant, {
-    deprecationWarnings: structuredDeprecationWarnings,
+  const store = DocumentStoreConfigSubSchema.parse(
+    rawStore,
+  ) as DocumentStoreConfig;
+  const deprecationWarnings = collectStructuredConfigDeprecationWarnings({
+    documentStores: [rawStore],
   });
+  return { store, deprecationWarnings };
 }
 
 /**

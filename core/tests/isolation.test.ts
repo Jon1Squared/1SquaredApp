@@ -76,7 +76,6 @@ import {
   flagMatterWriteOff,
   getAppSnapshot,
   getMatterPmsViewBundle,
-  isDemoModeEnabled,
   liftMatterRestriction,
   markEngagementLetterDrafted,
   recordInvoiceCreditControlAction,

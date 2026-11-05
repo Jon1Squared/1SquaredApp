@@ -185,7 +185,6 @@ export interface OboExchangeHandlerInput {
   userAssertionToken: string;
   entraObjectId: string;
   scope: string;
-  simulatedDelegatedScopes?: readonly string[];
 }
 
 export interface AppTokenAcquireHandlerInput {
@@ -197,7 +196,6 @@ export interface AppTokenAcquireHandlerInput {
   certificateKeyVaultSecretRef?: string;
   managedIdentityClientId?: string;
   scope: string;
-  simulatedAppRoles?: readonly string[];
 }
 
 export interface TokenProviderError extends Error {
@@ -439,10 +437,6 @@ export class DocumentStoreTokenService {
   private readonly appTokenHandler: (
     input: AppTokenAcquireHandlerInput,
   ) => Promise<TokenExchangeResult>;
-  private readonly simulatedPermissions = new Map<
-    string,
-    { appRoles?: readonly string[]; delegatedScopes?: readonly string[] }
-  >();
 
   public constructor(options?: {
     cache?: TenantScopedEncryptedTokenCache;
@@ -462,50 +456,6 @@ export class DocumentStoreTokenService {
 
   public getTokenCache(): TenantScopedEncryptedTokenCache {
     return this.cache;
-  }
-
-  public setSimulatedConsentedPermissions(params: {
-    tenantId?: string;
-    storeId: string;
-    appRoles?: readonly string[];
-    delegatedScopes?: readonly string[];
-  }): void {
-    const key = `${params.tenantId ?? '*'}::${params.storeId}`;
-    this.simulatedPermissions.set(key, {
-      appRoles: params.appRoles ? [...params.appRoles] : undefined,
-      delegatedScopes: params.delegatedScopes
-        ? [...params.delegatedScopes]
-        : undefined,
-    });
-  }
-
-  public getSimulatedConsentedPermissions(
-    tenantId: string,
-    storeId: string,
-  ): { appRoles?: readonly string[]; delegatedScopes?: readonly string[] } | undefined {
-    return (
-      this.simulatedPermissions.get(`${tenantId}::${storeId}`) ??
-      this.simulatedPermissions.get(`*::${storeId}`)
-    );
-  }
-
-  public clearSimulatedConsentedPermissions(
-    storeId?: string,
-    tenantId?: string,
-  ): void {
-    if (!storeId) {
-      this.simulatedPermissions.clear();
-      return;
-    }
-    if (tenantId) {
-      this.simulatedPermissions.delete(`${tenantId}::${storeId}`);
-    } else {
-      for (const k of this.simulatedPermissions.keys()) {
-        if (k.endsWith(`::${storeId}`)) {
-          this.simulatedPermissions.delete(k);
-        }
-      }
-    }
   }
 
   /**
@@ -545,18 +495,13 @@ export class DocumentStoreTokenService {
       authConfig.delegatedPermissionScope ??
       'Files.ReadWrite.All';
 
-    const sim = this.getSimulatedConsentedPermissions(
-      accessContext.tenantContext.tenantId,
-      storeId,
-    );
-
     const cached = this.cache.getUserToken({
       ctx: accessContext.tenantContext,
       entraObjectId: accessContext.entraObjectId,
       storeId,
       scope,
     });
-    if (cached && !sim?.delegatedScopes) {
+    if (cached) {
       if (scope === 'Sites.Selected') {
         const claimCheck = verifyTokenClaimsForSitesSelected({
           oboToken: cached,
@@ -600,13 +545,11 @@ export class DocumentStoreTokenService {
         userAssertionToken: accessContext.userAssertionToken,
         entraObjectId: accessContext.entraObjectId,
         scope,
-        simulatedDelegatedScopes: sim?.delegatedScopes,
       });
 
       if (scope === 'Sites.Selected') {
         const claimCheck = verifyTokenClaimsForSitesSelected({
           oboToken: exchanged.accessToken,
-          additionalDelegatedScopes: sim?.delegatedScopes,
         });
         if (!claimCheck.valid) {
           throw createDocumentStoreAuthError(
@@ -679,17 +622,13 @@ export class DocumentStoreTokenService {
     }
 
     const scope = params.scope ?? 'https://graph.microsoft.com/.default';
-    const sim = this.getSimulatedConsentedPermissions(
-      accessContext.tenantContext.tenantId,
-      storeId,
-    );
 
     const cached = this.cache.getAppToken({
       ctx: accessContext.tenantContext,
       storeId,
       scope,
     });
-    if (cached && !sim?.appRoles) {
+    if (cached) {
       return cached;
     }
 
@@ -729,7 +668,6 @@ export class DocumentStoreTokenService {
       certificateKeyVaultSecretRef: authConfig.certificateKeyVaultSecretRef,
       managedIdentityClientId: authConfig.managedIdentityClientId,
       scope,
-      simulatedAppRoles: sim?.appRoles,
     });
 
     this.cache.putAppToken({
@@ -756,7 +694,7 @@ async function defaultOboExchangeHandler(
     throw err;
   }
 
-  const scpList = input.simulatedDelegatedScopes ?? [
+  const scpList = [
     input.scope,
     'openid',
     'profile',
@@ -777,7 +715,7 @@ async function defaultOboExchangeHandler(
 async function defaultAppTokenAcquireHandler(
   input: AppTokenAcquireHandlerInput,
 ): Promise<TokenExchangeResult> {
-  const rolesList = input.simulatedAppRoles ?? [
+  const rolesList = [
     'Sites.Selected',
     'User.ReadBasic.All',
     'GroupMember.Read.All',

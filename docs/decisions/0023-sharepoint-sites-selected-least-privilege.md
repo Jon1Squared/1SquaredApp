@@ -77,7 +77,7 @@ All SharePoint site and permission settings remain per-tenant configuration vali
 To comply with **Rule 7** (backward compatibility within a major version: additive first, deprecate before removing) and resolve the discrepancy with `ADR-0018`:
 1. **v1.x Schema Default Retained:** `auth.delegatedPermissionScope` keeps `"Files.ReadWrite.All"` as the schema and config-engine default throughout v1.x (`tenant-config.schema.json`, `core/src/config-engine/index.ts`, and `tokenCache.ts`). Existing v1.x tenants that omit `delegatedPermissionScope` continue operating without a breaking change on upgrade. `sharepoint.siteId` remains optional so stores can resolve it via `resolveLocation` or `testConnection`.
 2. **Structured Deprecation Warning:** Whenever an enabled SharePoint store's effective `delegatedPermissionScope` is `"Files.ReadWrite.All"` (whether set explicitly or inherited from the v1.x default), `collectStructuredConfigDeprecationWarnings` and `validateTenantConfigWithWarnings` emit a `ConfigDeprecationWarning` advising the tenant administrator to migrate to `"Sites.Selected"` before v2.0.
-3. **Explicit `"Sites.Selected"` for New Stores:** The Admin UI (`DocumentStoresAdminPanel.tsx`), reference client configurations (`client-not-a-law-firm/config/base.json`), and onboarding runbooks explicitly set `"delegatedPermissionScope": "Sites.Selected"`.
+3. **Explicit `"Sites.Selected"` in Reference Config, Runbooks, and Admin UI:** Reference client configurations (`client-not-a-law-firm/config/base.json`) and onboarding runbooks set `"delegatedPermissionScope": "Sites.Selected"` explicitly; the Admin UI (`DocumentStoresAdminPanel.tsx`) lets administrators select `"Sites.Selected"` (marked as recommended) on existing stores and will default to `"Sites.Selected"` when store creation is added.
 4. **v2.0 Default Flip:** In v2.0, the schema default flips to `"Sites.Selected"`, and `"Files.ReadWrite.All"` will be removed in a subsequent major release.
 
 ### 2.3 Fail-Closed Excess Permission Detection (`excess_permissions_consented`)
@@ -149,11 +149,12 @@ Any tampered `siteId`, tampered `driveId`, or cross-tenant `siteId` is rejected 
 
 ## 3. Open Items to Confirm on a Dev M365 Tenant
 
-Before flipping this ADR from **Proposed** to **Accepted**, the following three behaviours must be verified against a live Microsoft 365 developer tenant and recorded in the test log:
+Before flipping this ADR from **Proposed** to **Accepted**, the following four items must be verified or completed against a live Microsoft 365 developer tenant and recorded in the test log:
 
 1. **DriveItem Permission Mutation under App-Only `Sites.Selected`:** Confirm that `POST /drives/{driveId}/items/{itemId}/invite` and `DELETE /drives/{driveId}/items/{itemId}/permissions/{permId}` succeed using an app-only token holding only Graph `Sites.Selected` (Application) + a site-level `fullcontrol` grant, without `Sites.FullControl.All`.
 2. **SharePoint REST Role Inheritance Calls under Certificate Auth:** Confirm that `POST https://{hostname}/sites/{site}/_api/web/lists(guid'...')/items(...)/breakroleinheritance(copyRoleAssignments=false,clearSubscopes=false)` and `resetroleinheritance` succeed using an app-only certificate token carrying SharePoint `Sites.Selected` (`00000003-0000-0ff1-ce00-000000000000/.default`) + a site-level `fullcontrol` grant.
 3. **Self-Inspection of Site Permission Grants (`GET /sites/{siteId}/permissions`):** Confirm whether an application holding only `Sites.Selected` + a site-level `fullcontrol` grant can call `GET /sites/{siteId}/permissions` to verify its own grant role, or whether Graph returns `403 Forbidden` (in which case the health check's `roleVerificationStatus: 'not_verified'` warning path is exercised).
+4. **Health Status Cache Location:** Move the per-`(tenantId, storeId)` health status cache (`setStoreHealthResult` / `getStoreHealthResult`) out of `MockSharePointGraphBackend` into a core tenant-keyed store independent of the backend before a real Microsoft Graph backend replaces the mock.
 
 ---
 
