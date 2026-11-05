@@ -38,6 +38,15 @@ function runStep(label, command, args, env = testEnv) {
   }
 }
 
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+if (nodeMajor !== 24) {
+  console.error(
+    `[CI Verify] FAILED: Node.js 24 is required to match Platform CI (found ${process.versions.node}).`,
+  );
+  process.exit(1);
+}
+console.log(`=== [CI Verify] Node.js ${process.versions.node} (matches Platform CI major 24) ===`);
+
 runStep('1/7 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
 runStep('2/7 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
 runStep('3/7 ESLint check', npmCmd, ['run', 'lint'], testEnv);

@@ -3,10 +3,13 @@
 ## Unreleased — Local & Platform CI Environment Parity (`chore/local-ci-parity`)
 
 ### Change Classification (Platform Architecture Standard Section 14)
-- **Build & CI Verification Tooling (`vitest.config.ts`, `package.json`, `scripts/verify-ci.mjs`, `AGENTS.md`):**
+- **Build & CI Verification Tooling (`.github/workflows/ci.yml`, `vitest.config.ts`, `package.json`, `scripts/verify-ci.mjs`, `AGENTS.md`, `CLAUDE.md`):**
   - Pinned `PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm'` and `PLATFORM_ENVIRONMENT: 'test'` in `vitest.config.ts` so local `npx vitest run` and `npm test` runs match the GitHub Actions Platform CI environment (`ci.yml`).
   - Added `npm run ci` (`scripts/verify-ci.mjs`) to execute all 7 Platform CI verification steps locally (`generate:extensions`, `tsc --noEmit`, `npm run lint`, `verify-invented-fixtures.mjs`, bundled extension registry verification, `npm test` under `PLATFORM_ENVIRONMENT=test`, and `npm run build` under `PLATFORM_ENVIRONMENT=live`).
-  - Updated in-app Help & Documentation (`src/docs/articles/deployment-and-security.ts`) and `AGENTS.md`.
+  - Updated `.github/workflows/ci.yml` (`on.push.branches`) to run Platform CI on pushes to `'chore/**'` and `'fix/**'` in addition to `main`, `develop`, and `'feat/**'` (R210).
+  - Added a Node.js 24 major-version pre-check to `scripts/verify-ci.mjs` before step 1 so `npm run ci` fails fast with a clear message if the local Node.js runtime does not match Platform CI (R211).
+  - Synchronised `CLAUDE.md` and `AGENTS.md` `## Commands` documentation for `npm run ci`, full CI pipeline steps, and trigger branch patterns (R212).
+  - Updated in-app Help & Documentation (`src/docs/articles/deployment-and-security.ts`).
 
 ---
 
