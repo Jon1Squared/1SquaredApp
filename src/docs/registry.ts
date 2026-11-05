@@ -27,6 +27,7 @@ import { keyDatesVerificationArticle } from './articles/key-dates-verification';
 import { mattersEnquiriesTasksNavigationArticle } from './articles/matters-enquiries-tasks-and-navigation';
 import { quickConflictCheck } from './articles/quick-conflict-check';
 import { sharepointDocumentStoreArticle } from './articles/sharepoint-document-store';
+import { sharepointSitesSelectedSetupArticle } from './articles/sharepoint-sites-selected-setup';
 
 export interface DocArticle {
   /** URL slug: /docs/<slug>. Keep stable once published, because screens link to it. */
@@ -70,6 +71,7 @@ export const ARTICLES: DocArticle[] = [
   keyDatesAdministrationArticle,
   documentGenerationArticle,
   sharepointDocumentStoreArticle,
+  sharepointSitesSelectedSetupArticle,
   quickConflictCheck,
   duplicateChecks,
 ];

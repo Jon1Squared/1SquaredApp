@@ -17,11 +17,148 @@ import crypto from 'node:crypto';
 import type {
   DocumentStoreAuthConfig,
   DocumentStoreErrorCode,
+  DocumentStoreErrorReason,
   ProvisioningAccessContext,
   TenantContext,
   UserAccessContext,
 } from '../../api/index';
 import { buildTenantCacheKey } from '../../tenancy/index';
+
+export const FORBIDDEN_BROAD_SHAREPOINT_PERMISSIONS = Object.freeze([
+  'Files.Read.All',
+  'Files.ReadWrite.All',
+  'Sites.Read.All',
+  'Sites.ReadWrite.All',
+  'Sites.Manage.All',
+  'Sites.FullControl.All',
+] as const);
+
+export const MINIMUM_SITES_SELECTED_PERMISSIONS = Object.freeze({
+  graphDelegated: ['Sites.Selected'] as const,
+  graphApplication: [
+    'Sites.Selected',
+    'User.ReadBasic.All',
+    'GroupMember.Read.All',
+  ] as const,
+  sharePointApplication: ['Sites.Selected'] as const,
+  siteGrantRole: 'fullcontrol' as const,
+});
+
+export interface DecodedTokenPermissionClaims {
+  readonly roles: string[];
+  readonly scp: string[];
+}
+
+export function encodeMockTokenWithClaims(
+  prefix: string,
+  claims: { roles?: readonly string[]; scp?: readonly string[] | string },
+): string {
+  const payloadObj: Record<string, unknown> = {};
+  if (claims.roles !== undefined) {
+    payloadObj.roles = [...claims.roles];
+  }
+  if (claims.scp !== undefined) {
+    payloadObj.scp = Array.isArray(claims.scp)
+      ? claims.scp.join(' ')
+      : claims.scp;
+  }
+  const encodedPayload = Buffer.from(
+    JSON.stringify(payloadObj),
+    'utf8',
+  ).toString('base64url');
+  return `${prefix}.${encodedPayload}`;
+}
+
+export function extractTokenPermissionClaims(
+  token: string,
+): DecodedTokenPermissionClaims {
+  if (!token || typeof token !== 'string') {
+    return { roles: [], scp: [] };
+  }
+
+  const parts = token.split('.');
+  // Check standard 3-part JWT (header.payload.signature) or 2-part mock token (prefix.payload)
+  const candidateSegments =
+    parts.length >= 3
+      ? [parts[1]!, parts[parts.length - 1]!]
+      : parts.length === 2
+        ? [parts[1]!]
+        : [];
+
+  for (const seg of candidateSegments) {
+    try {
+      const jsonText = Buffer.from(seg, 'base64url').toString('utf8');
+      if (!jsonText.startsWith('{')) continue;
+      const parsed = JSON.parse(jsonText) as {
+        roles?: unknown;
+        scp?: unknown;
+      };
+      const roles = Array.isArray(parsed.roles)
+        ? parsed.roles.filter((r): r is string => typeof r === 'string')
+        : [];
+      const scp =
+        typeof parsed.scp === 'string'
+          ? parsed.scp
+              .split(/\s+/)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : Array.isArray(parsed.scp)
+            ? parsed.scp.filter((s): s is string => typeof s === 'string')
+            : [];
+      return { roles, scp };
+    } catch {
+      // Fall through to next segment or legacy prefix check
+    }
+  }
+
+  return { roles: [], scp: [] };
+}
+
+export function verifyTokenClaimsForSitesSelected(params: {
+  appToken?: string;
+  oboToken?: string;
+  additionalAppRoles?: readonly string[];
+  additionalDelegatedScopes?: readonly string[];
+}): {
+  valid: boolean;
+  excessPermissions: string[];
+  roles: string[];
+  scp: string[];
+} {
+  const appClaims = params.appToken
+    ? extractTokenPermissionClaims(params.appToken)
+    : { roles: [], scp: [] };
+  const oboClaims = params.oboToken
+    ? extractTokenPermissionClaims(params.oboToken)
+    : { roles: [], scp: [] };
+
+  const roles = Array.from(
+    new Set([
+      ...appClaims.roles,
+      ...oboClaims.roles,
+      ...(params.additionalAppRoles ?? []),
+    ]),
+  );
+  const scp = Array.from(
+    new Set([
+      ...oboClaims.scp,
+      ...appClaims.scp,
+      ...(params.additionalDelegatedScopes ?? []),
+    ]),
+  );
+
+  const forbiddenSet = new Set<string>(FORBIDDEN_BROAD_SHAREPOINT_PERMISSIONS);
+  const excessPermissions = Array.from(
+    new Set([...roles, ...scp].filter((perm) => forbiddenSet.has(perm))),
+  );
+
+  return {
+    valid: excessPermissions.length === 0,
+    excessPermissions,
+    roles,
+    scp,
+  };
+}
 
 export interface EncryptedTokenEntry {
   cacheKey: string;
@@ -41,6 +178,7 @@ export interface TokenExchangeResult {
 
 export interface OboExchangeHandlerInput {
   tenantId: string;
+  storeId?: string;
   entraTenantId: string;
   clientId: string;
   certificateKeyVaultSecretRef?: string;
@@ -51,6 +189,7 @@ export interface OboExchangeHandlerInput {
 
 export interface AppTokenAcquireHandlerInput {
   tenantId: string;
+  storeId?: string;
   entraTenantId: string;
   credentialMode: 'client_certificate' | 'managed_identity';
   clientId?: string;
@@ -61,6 +200,7 @@ export interface AppTokenAcquireHandlerInput {
 
 export interface TokenProviderError extends Error {
   code: DocumentStoreErrorCode;
+  reason?: DocumentStoreErrorReason;
   claimsChallenge?: string;
 }
 
@@ -68,11 +208,15 @@ export function createDocumentStoreAuthError(
   code: DocumentStoreErrorCode,
   message: string,
   claimsChallenge?: string,
+  reason?: DocumentStoreErrorReason,
 ): TokenProviderError {
   const err = new Error(message) as TokenProviderError;
   err.code = code;
   if (claimsChallenge) {
     err.claimsChallenge = claimsChallenge;
+  }
+  if (reason) {
+    err.reason = reason;
   }
   return err;
 }
@@ -358,6 +502,19 @@ export class DocumentStoreTokenService {
       scope,
     });
     if (cached) {
+      if (scope === 'Sites.Selected') {
+        const claimCheck = verifyTokenClaimsForSitesSelected({
+          oboToken: cached,
+        });
+        if (!claimCheck.valid) {
+          throw createDocumentStoreAuthError(
+            'misconfigured',
+            'Documents for this matter are unavailable. Please contact your administrator.',
+            undefined,
+            'excess_permissions_consented',
+          );
+        }
+      }
       return cached;
     }
 
@@ -381,6 +538,7 @@ export class DocumentStoreTokenService {
     try {
       const exchanged = await this.oboExchangeHandler({
         tenantId: accessContext.tenantContext.tenantId,
+        storeId,
         entraTenantId: authConfig.entraTenantId,
         clientId: authConfig.clientId ?? 'platform-obo-client',
         certificateKeyVaultSecretRef: authConfig.certificateKeyVaultSecretRef,
@@ -388,6 +546,20 @@ export class DocumentStoreTokenService {
         entraObjectId: accessContext.entraObjectId,
         scope,
       });
+
+      if (scope === 'Sites.Selected') {
+        const claimCheck = verifyTokenClaimsForSitesSelected({
+          oboToken: exchanged.accessToken,
+        });
+        if (!claimCheck.valid) {
+          throw createDocumentStoreAuthError(
+            'misconfigured',
+            'Documents for this matter are unavailable. Please contact your administrator.',
+            undefined,
+            'excess_permissions_consented',
+          );
+        }
+      }
 
       this.cache.putUserToken({
         ctx: accessContext.tenantContext,
@@ -450,6 +622,7 @@ export class DocumentStoreTokenService {
     }
 
     const scope = params.scope ?? 'https://graph.microsoft.com/.default';
+
     const cached = this.cache.getAppToken({
       ctx: accessContext.tenantContext,
       storeId,
@@ -488,6 +661,7 @@ export class DocumentStoreTokenService {
 
     const acquired = await this.appTokenHandler({
       tenantId: accessContext.tenantContext.tenantId,
+      storeId,
       entraTenantId: authConfig.entraTenantId,
       credentialMode: authConfig.credentialMode,
       clientId: authConfig.clientId,
@@ -520,18 +694,39 @@ async function defaultOboExchangeHandler(
     throw err;
   }
 
+  const scpList = [
+    input.scope,
+    'openid',
+    'profile',
+    'email',
+  ];
+  const accessToken = encodeMockTokenWithClaims(
+    `obo_tok_${input.tenantId}_${input.entraObjectId}_${input.scope}`,
+    { scp: scpList },
+  );
+
   return {
-    accessToken: `obo_tok_${input.tenantId}_${input.entraObjectId}_${input.scope}`,
+    accessToken,
     expiresInSeconds: 3600,
-    scope: input.scope,
+    scope: scpList.join(' '),
   };
 }
 
 async function defaultAppTokenAcquireHandler(
   input: AppTokenAcquireHandlerInput,
 ): Promise<TokenExchangeResult> {
+  const rolesList = [
+    'Sites.Selected',
+    'User.ReadBasic.All',
+    'GroupMember.Read.All',
+  ];
+  const accessToken = encodeMockTokenWithClaims(
+    `app_tok_${input.tenantId}_${input.credentialMode}_${input.scope}`,
+    { roles: rolesList },
+  );
+
   return {
-    accessToken: `app_tok_${input.tenantId}_${input.credentialMode}_${input.scope}`,
+    accessToken,
     expiresInSeconds: 3600,
     scope: input.scope,
   };

@@ -70,6 +70,7 @@ import {
 import type { Matter, Person } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -108,10 +109,7 @@ export function resetDocumentStoreSingletonsForTesting(): void {
 export function loadActiveDocumentTenantConfig(
   store: FirmStore = getStore(),
 ): TenantConfiguration {
-  const rawBase = getActiveTenantConfiguration() as unknown as Record<
-    string,
-    unknown
-  >;
+  const activeConfig = getActiveTenantConfiguration();
 
   const override = store.documentStoreConfigOverride ?? {};
   const hasOverride =
@@ -121,9 +119,10 @@ export function loadActiveDocumentTenantConfig(
     override.documentAccess !== undefined ||
     override.matterFolderTemplates !== undefined;
   if (!hasOverride) {
-    return rawBase as unknown as TenantConfiguration;
+    return activeConfig;
   }
 
+  const rawBase = getActiveTenantRawBaseConfig();
   const overlay: Record<string, unknown> = {};
   if (override.documentStores) {
     overlay.documentStores = override.documentStores;
@@ -141,7 +140,20 @@ export function loadActiveDocumentTenantConfig(
     overlay.matterFolderTemplates = override.matterFolderTemplates;
   }
 
-  return loadAndValidateTenantConfig(rawBase, overlay);
+  const validated = loadAndValidateTenantConfig(
+    rawBase,
+    overlay,
+    activeConfig.environment,
+    activeConfig.hostingMode,
+  );
+  return {
+    ...activeConfig,
+    documentStores: validated.documentStores,
+    documentRouting: validated.documentRouting,
+    matterFolderNameTemplate: validated.matterFolderNameTemplate,
+    documentAccess: validated.documentAccess,
+    matterFolderTemplates: validated.matterFolderTemplates,
+  };
 }
 
 /**
@@ -278,7 +290,8 @@ export function ensureRepositorySyncedWithStore(
   if (!globalThis.__oneSquaredDocStoreHydratedTenants) {
     globalThis.__oneSquaredDocStoreHydratedTenants = new Set<string>();
   }
-  if (!globalThis.__oneSquaredDocStoreHydratedTenants.has(ctx.tenantId)) {
+  const hydrationKey = `${ctx.tenantId}:${ctx.postgresDatabaseName}`;
+  if (!globalThis.__oneSquaredDocStoreHydratedTenants.has(hydrationKey)) {
     for (const loc of store.matterDocumentLocations ?? []) {
       if (loc.tenantId === ctx.tenantId) {
         repo.putMatterLocation(ctx, loc);
@@ -304,7 +317,7 @@ export function ensureRepositorySyncedWithStore(
         repo.appendAuditEvent(ctx, audit);
       }
     }
-    globalThis.__oneSquaredDocStoreHydratedTenants.add(ctx.tenantId);
+    globalThis.__oneSquaredDocStoreHydratedTenants.add(hydrationKey);
   }
   return repo;
 }
@@ -2159,11 +2172,13 @@ export function saveAdminDocumentStoreConfiguration(params: {
   };
 
   // Validate against schema before saving
-  const rawBase = getActiveTenantConfiguration() as unknown as Record<
-    string,
-    unknown
-  >;
-  const validated = loadAndValidateTenantConfig(rawBase, nextOverride);
+  const rawBase = getActiveTenantRawBaseConfig();
+  const validated = loadAndValidateTenantConfig(
+    rawBase,
+    nextOverride,
+    currentConfig.environment,
+    currentConfig.hostingMode,
+  );
 
   // Also validate against tenant org structure & choice list IDs
   const workTypeIds = store.values
@@ -2188,6 +2203,18 @@ export function saveAdminDocumentStoreConfiguration(params: {
     templates: 'config:templates:updated' as const,
   };
 
+  const storeScopeMetadata =
+    params.section === 'stores' && params.documentStores
+      ? {
+          delegatedPermissionScopes: Object.fromEntries(
+            params.documentStores.map((ds) => [
+              ds.storeId,
+              ds.auth?.delegatedPermissionScope ?? 'Files.ReadWrite.All',
+            ]),
+          ),
+        }
+      : undefined;
+
   repo.appendAuditEvent(
     ctx,
     buildDocumentStoreAuditEvent({
@@ -2196,6 +2223,7 @@ export function saveAdminDocumentStoreConfiguration(params: {
       triggerEvent: `admin.${params.section}.saved`,
       action: actionMap[params.section],
       outcome: 'succeeded',
+      ...(storeScopeMetadata ? { metadata: storeScopeMetadata } : {}),
     }),
   );
   persistRepositoryToStore(ctx, repo, store);

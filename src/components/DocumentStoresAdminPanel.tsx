@@ -656,6 +656,39 @@ export function DocumentStoresAdminPanel({
                         }}
                       />
                     </label>
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <span style={{ fontWeight: 600 }}>
+                        Delegated Permission Scope
+                      </span>
+                      <select
+                        className="input"
+                        value={
+                          store.auth.delegatedPermissionScope ??
+                          'Files.ReadWrite.All'
+                        }
+                        onChange={(e) => {
+                          const next = [...storesDraft];
+                          next[sIdx] = {
+                            ...store,
+                            auth: {
+                              ...store.auth,
+                              delegatedPermissionScope: e.target.value as
+                                | 'Sites.Selected'
+                                | 'Files.ReadWrite.All',
+                            },
+                          };
+                          setStoresDraft(next);
+                        }}
+                      >
+                        <option value="Sites.Selected">
+                          Sites.Selected (Least-privilege — Recommended)
+                        </option>
+                        <option value="Files.ReadWrite.All">
+                          Files.ReadWrite.All (Legacy — Deprecated)
+                        </option>
+                      </select>
+                    </label>
                   </div>
 
                   {/* Libraries table */}
@@ -745,10 +778,27 @@ export function DocumentStoresAdminPanel({
                         <span>
                           {testRes.checks.permissionManagementSupported
                             ? '✓'
-                            : '✗'}{' '}
-                          Sites.Selected fullcontrol verified
+                            : testRes.roleVerificationStatus === 'not_verified'
+                              ? '⚠'
+                              : '✗'}{' '}
+                          {testRes.roleVerificationStatus === 'not_verified'
+                            ? 'Sites.Selected role not verified (403 on /permissions)'
+                            : 'Sites.Selected fullcontrol verified'}
                         </span>
                       </div>
+                      {testRes.warnings && testRes.warnings.length > 0 && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            color: '#92400e',
+                            background: '#fef3c7',
+                            padding: '6px 10px',
+                            borderRadius: 4,
+                          }}
+                        >
+                          {testRes.warnings.join(' ')}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

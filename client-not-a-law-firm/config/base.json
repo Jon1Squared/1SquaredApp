@@ -263,7 +263,7 @@
         "credentialMode": "client_certificate",
         "clientId": "22222222-3333-4444-5555-666666666666",
         "certificateKeyVaultSecretRef": "kv://kv-not-a-law-firm-dev/sp-provisioning-cert",
-        "delegatedPermissionScope": "Files.ReadWrite.All"
+        "delegatedPermissionScope": "Sites.Selected"
       },
       "sharepoint": {
         "hostname": "1squared1.sharepoint.com",

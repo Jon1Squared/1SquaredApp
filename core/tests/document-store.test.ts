@@ -29,6 +29,8 @@ import {
   CORE_VERSION,
   DocumentStoreProviderRegistry,
   DocumentStoreTokenService,
+  FORBIDDEN_BROAD_SHAREPOINT_PERMISSIONS,
+  GENERIC_USER_DOCUMENT_STORE_UNAVAILABLE_MESSAGE,
   GRAPH_RESUMABLE_UPLOAD_THRESHOLD_BYTES,
   SHAREPOINT_ROLE_MAPPING,
   SharePointDocumentStoreProvider,
@@ -38,10 +40,12 @@ import {
   applyTemplateAdditionsToOpenMattersJob,
   buildDocumentStoreAuditEvent,
   closeMatterFolderJob,
+  collectStructuredConfigDeprecationWarnings,
   compileDepartmentFolderPermissions,
   compileMatterFolderPermissions,
   compileTeamFolderPermissions,
   computeAdditiveTemplateDiff,
+  encodeMockTokenWithClaims,
   evaluateLibraryScopeScaleStatus,
   executeUserMatterDocumentOperation,
   findUnknownPathTokens,
@@ -59,11 +63,14 @@ import {
   resolveMatterDocumentRoute,
   resolveMatterFolderTemplate,
   resolveTenantFromVerifiedToken,
+  runTenantSharePointHealthCheckJob,
   sanitiseFolderNameSegment,
   PERMISSION_REGISTRY,
   validateDocumentConfigAgainstTenantData,
+  validateDocumentStoreConfig,
   validateMatterFolderTemplatesConfig,
   validateRawFolderNameSegment,
+  validateTenantConfigWithWarnings,
   type DocumentAccessConfig,
   type DocumentRoutingRule,
   type DocumentStoreConfig,
@@ -4076,6 +4083,697 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       } finally {
         store.matters = snapshotMatters;
         store.people = snapshotPeople;
+        saveStore(store);
+        resetDocumentStoreSingletonsForTesting();
+      }
+    });
+  });
+
+  describe('7. Least-Privilege Sites.Selected, Health Check, and Scope Guard (R190–R203)', () => {
+    it('R190 & R191: validates the §3.1 DocumentStoreConfig example unchanged, preserves v1.x Files.ReadWrite.All fallback with deprecation warning, and leaves siteId optional', () => {
+      // R190: Exact §3.1 DocumentStoreConfig example passes validateTenantConfig unchanged
+      const section31ExampleConfig = {
+        storeId: 'primary-sharepoint',
+        displayName: 'Primary Matter Document Store',
+        providerType: 'sharepoint',
+        isDefault: true,
+        enabled: true,
+        auth: {
+          entraTenantId: '11111111-2222-3333-4444-555555555555',
+          credentialMode: 'client_certificate',
+          clientId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          certificateKeyVaultSecretRef:
+            'kv://kv-tenant-prod/sp-provisioning-cert',
+          delegatedPermissionScope: 'Sites.Selected',
+        },
+        sharepoint: {
+          hostname: 'contoso.sharepoint.com',
+          siteRelativePath: '/sites/LegalMatters',
+          siteId:
+            'contoso.sharepoint.com,22222222-3333-4444-5555-666666666666,77777777-8888-9999-aaaa-bbbbbbbbbbbb',
+          libraries: [
+            {
+              libraryId: 'matters-active',
+              displayName: 'Active Matters',
+              libraryUrlSegment: 'Active Matters',
+              driveId: 'b!exampleDriveId001',
+            },
+          ],
+        },
+      };
+      const validation = validateDocumentStoreConfig(section31ExampleConfig);
+      expect(validation.store.storeId).toBe('primary-sharepoint');
+      expect(validation.store.auth.delegatedPermissionScope).toBe(
+        'Sites.Selected',
+      );
+      expect(validation.deprecationWarnings).toEqual([]);
+
+      // Store omitting delegatedPermissionScope returns Files.ReadWrite.All default and 1 deprecation warning
+      const storeWithoutScopeValidation = validateDocumentStoreConfig({
+        ...section31ExampleConfig,
+        auth: {
+          entraTenantId: section31ExampleConfig.auth.entraTenantId,
+          credentialMode: section31ExampleConfig.auth.credentialMode,
+          clientId: section31ExampleConfig.auth.clientId,
+          certificateKeyVaultSecretRef:
+            section31ExampleConfig.auth.certificateKeyVaultSecretRef,
+        },
+      });
+      expect(
+        storeWithoutScopeValidation.store.auth.delegatedPermissionScope,
+      ).toBe('Files.ReadWrite.All');
+      expect(storeWithoutScopeValidation.deprecationWarnings).toHaveLength(1);
+
+      // Store with an unknown key (e.g. auth.permissionMode) throws
+      expect(() =>
+        validateDocumentStoreConfig({
+          ...section31ExampleConfig,
+          auth: {
+            ...section31ExampleConfig.auth,
+            permissionMode: 'Sites.Selected',
+          },
+        }),
+      ).toThrow();
+
+      // R191: Config omitting delegatedPermissionScope and sharepoint.siteId loads with v1.x default "Files.ReadWrite.All" and emits a ConfigDeprecationWarning
+      const rawBase = JSON.parse(
+        fs.readFileSync(
+          path.resolve(
+            __dirname,
+            '../../client-not-a-law-firm/config/base.json',
+          ),
+          'utf-8',
+        ),
+      ) as Record<string, unknown>;
+
+      // R202: client-not-a-law-firm/config/base.json explicitly sets Sites.Selected and emits zero delegatedPermissionScope warnings
+      const baseWarnings = collectStructuredConfigDeprecationWarnings(rawBase);
+      expect(
+        baseWarnings.filter((w) =>
+          w.path.includes('delegatedPermissionScope'),
+        ),
+      ).toEqual([]);
+
+      const legacyConfigWithoutScope: Record<string, unknown> = structuredClone(
+        rawBase,
+      );
+      const stores = legacyConfigWithoutScope.documentStores as Array<
+        Record<string, unknown>
+      >;
+      const firstAuth = { ...(stores[0]!.auth as Record<string, unknown>) };
+      delete firstAuth.delegatedPermissionScope;
+      const firstSp = { ...(stores[0]!.sharepoint as Record<string, unknown>) };
+      delete firstSp.siteId;
+      stores[0] = { ...stores[0]!, auth: firstAuth, sharepoint: firstSp };
+
+      const loadedLegacy = loadAndValidateTenantConfig(legacyConfigWithoutScope);
+      expect(
+        loadedLegacy.documentStores?.[0]?.auth.delegatedPermissionScope,
+      ).toBe('Files.ReadWrite.All');
+      expect(loadedLegacy.documentStores?.[0]?.sharepoint?.siteId).toBeUndefined();
+
+      const structuredWarnings = collectStructuredConfigDeprecationWarnings(
+        legacyConfigWithoutScope,
+      );
+      const scopeWarning = structuredWarnings.find((w) =>
+        w.path.includes('delegatedPermissionScope'),
+      );
+      expect(scopeWarning).toBeDefined();
+      expect(scopeWarning?.path).toBe(
+        'documentStores[0].auth.delegatedPermissionScope',
+      );
+      expect(scopeWarning?.replacementPath).toContain('Sites.Selected');
+
+      const withWarnings = validateTenantConfigWithWarnings(
+        legacyConfigWithoutScope,
+      );
+      expect(
+        withWarnings.config.documentStores?.[0]?.auth.delegatedPermissionScope,
+      ).toBe('Files.ReadWrite.All');
+      expect(
+        withWarnings.deprecationWarnings.some((w: string) =>
+          w.includes('Files.ReadWrite.All'),
+        ),
+      ).toBe(true);
+    });
+
+    it('R192: fails closed when any broad SharePoint/Files permission is present in roles or scp under Sites.Selected and never logs token values', async () => {
+      const logSpy = vi.spyOn(console, 'log');
+      const warnSpy = vi.spyOn(console, 'warn');
+      const errorSpy = vi.spyOn(console, 'error');
+      try {
+        const ctxA = makeTenantContext({ tenantId: 'firm-alpha' });
+        const storeConfig: DocumentStoreConfig = {
+          ...makeGenericStores('alpha')[0]!,
+          auth: {
+            ...makeGenericStores('alpha')[0]!.auth,
+            delegatedPermissionScope: 'Sites.Selected',
+          },
+        };
+
+        const backend = new MockSharePointGraphBackend();
+        const makeTokenService = (
+          appRoles: readonly string[],
+          delegatedScopes: readonly string[],
+        ) =>
+          new DocumentStoreTokenService({
+            cache: new TenantScopedEncryptedTokenCache(),
+            appTokenHandler: async (input) => ({
+              accessToken: encodeMockTokenWithClaims(
+                `app_tok_${input.tenantId}_${input.storeId}_graph`,
+                {
+                  roles: [...appRoles],
+                },
+              ),
+              expiresInSeconds: 3600,
+            }),
+            oboExchangeHandler: async (input) => ({
+              accessToken: encodeMockTokenWithClaims(
+                `obo_tok_${input.tenantId}_${input.storeId}_${input.entraObjectId}_${input.scope}`,
+                {
+                  scp: delegatedScopes.join(' '),
+                },
+              ),
+              expiresInSeconds: 3600,
+            }),
+          });
+
+        const provCtx: ProvisioningAccessContext = {
+          kind: 'provisioning',
+          tenantContext: ctxA,
+          triggerEvent: 'test.r192',
+        };
+        const userCtx: UserAccessContext = {
+          kind: 'user',
+          tenantContext: ctxA,
+          actorUserId: ctxA.actorId,
+          entraObjectId: ctxA.entraObjectId!,
+          userUpn: ctxA.actorUpn,
+          userAssertionToken: 'secret-user-jwt-assertion-do-not-log',
+        };
+
+        // 1. Sites.Selected alone succeeds
+        const okProvider = new SharePointDocumentStoreProvider({
+          tenantContext: ctxA,
+          storeConfig,
+          tokenService: makeTokenService(['Sites.Selected'], ['Sites.Selected']),
+          backend,
+        });
+        const okHealth = await okProvider.testConnection(provCtx);
+        expect(okHealth.ok).toBe(true);
+        expect(okHealth.roleVerificationStatus).toBe('verified');
+
+        // 2. Each forbidden broad permission in app roles or delegated scp fails closed with excess_permissions_consented
+        for (const broadPerm of FORBIDDEN_BROAD_SHAREPOINT_PERMISSIONS) {
+          backend.clearStoreHealthResults();
+          const badAppProvider = new SharePointDocumentStoreProvider({
+            tenantContext: ctxA,
+            storeConfig,
+            tokenService: makeTokenService(
+              ['Sites.Selected', broadPerm],
+              ['Sites.Selected'],
+            ),
+            backend,
+          });
+
+          const badAppHealth = await badAppProvider.testConnection(provCtx);
+          expect(badAppHealth.ok).toBe(false);
+          expect(badAppHealth.errorCode).toBe('misconfigured');
+          expect(badAppHealth.errorReasonCode).toBe(
+            'excess_permissions_consented',
+          );
+          expect(badAppHealth.errorReason).toContain(broadPerm);
+
+          backend.clearStoreHealthResults();
+          const badOboProvider = new SharePointDocumentStoreProvider({
+            tenantContext: ctxA,
+            storeConfig,
+            tokenService: makeTokenService(
+              ['Sites.Selected'],
+              ['Sites.Selected', broadPerm],
+            ),
+            backend,
+          });
+
+          let caughtUserError: unknown;
+          try {
+            await badOboProvider.listItems(userCtx, {
+              storeId: storeConfig.storeId,
+              libraryId: 'lib-matters',
+              siteId: 'site-alpha-001',
+              driveId: 'drive-alpha-matters',
+            });
+          } catch (err) {
+            caughtUserError = err;
+          }
+          expect(caughtUserError).toMatchObject({
+            code: 'misconfigured',
+            reason: 'excess_permissions_consented',
+          });
+          expect(normaliseDocumentStoreError(caughtUserError).userMessage).toBe(
+            GENERIC_USER_DOCUMENT_STORE_UNAVAILABLE_MESSAGE,
+          );
+        }
+
+        // 3. Cached OBO token path: verify both repeated acquisition and pre-cached excess-scope tokens fail closed on every call
+        const excessOboService = makeTokenService(
+          ['Sites.Selected'],
+          ['Sites.Selected', 'Files.ReadWrite.All'],
+        );
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(
+            excessOboService.acquireDelegatedUserToken({
+              accessContext: userCtx,
+              storeId: storeConfig.storeId,
+              authConfig: storeConfig.auth,
+            }),
+          ).rejects.toMatchObject({
+            code: 'misconfigured',
+            reason: 'excess_permissions_consented',
+          });
+        }
+
+        const preCachedTokenCache = new TenantScopedEncryptedTokenCache();
+        preCachedTokenCache.putUserToken({
+          ctx: ctxA,
+          entraObjectId: userCtx.entraObjectId,
+          storeId: storeConfig.storeId,
+          scope: 'Sites.Selected',
+          accessToken: encodeMockTokenWithClaims('obo_tok_precached_excess', {
+            scp: 'Sites.Selected Files.ReadWrite.All',
+          }),
+          expiresInSeconds: 3600,
+        });
+        const preCachedService = new DocumentStoreTokenService({
+          cache: preCachedTokenCache,
+        });
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(
+            preCachedService.acquireDelegatedUserToken({
+              accessContext: userCtx,
+              storeId: storeConfig.storeId,
+              authConfig: storeConfig.auth,
+            }),
+          ).rejects.toMatchObject({
+            code: 'misconfigured',
+            reason: 'excess_permissions_consented',
+          });
+        }
+
+        // Verify no token values were logged
+        const allLogged = [
+          ...logSpy.mock.calls.flat(),
+          ...warnSpy.mock.calls.flat(),
+          ...errorSpy.mock.calls.flat(),
+        ]
+          .map(String)
+          .join(' ');
+        expect(allLogged).not.toContain('secret-user-jwt-assertion-do-not-log');
+        expect(allLogged).not.toContain('obo_tok_');
+        expect(allLogged).not.toContain('app_tok_');
+      } finally {
+        logSpy.mockRestore();
+        warnSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('R194, R195, R197, R198: enforces tri-state role verification (403 -> not_verified warning), tenant-scoped health caching, and generic British English user error message', async () => {
+      const ctxA = makeTenantContext({ tenantId: 'firm-alpha' });
+      const ctxB = makeTenantContext({
+        tenantId: 'firm-beta',
+        entraTenantId: 'entra-beta-001',
+        entraObjectId: 'oid-beta-001',
+      });
+      const storeA: DocumentStoreConfig = {
+        ...makeGenericStores('alpha')[0]!,
+        auth: {
+          ...makeGenericStores('alpha')[0]!.auth,
+          delegatedPermissionScope: 'Sites.Selected',
+        },
+      };
+      const storeB: DocumentStoreConfig = {
+        ...makeGenericStores('beta')[0]!,
+        auth: {
+          ...makeGenericStores('beta')[0]!.auth,
+          delegatedPermissionScope: 'Sites.Selected',
+        },
+      };
+
+      const backend = new MockSharePointGraphBackend();
+      const tokenService = new DocumentStoreTokenService({
+        cache: new TenantScopedEncryptedTokenCache(),
+      });
+      const providerA = new SharePointDocumentStoreProvider({
+        tenantContext: ctxA,
+        storeConfig: storeA,
+        tokenService,
+        backend,
+      });
+      const providerB = new SharePointDocumentStoreProvider({
+        tenantContext: ctxB,
+        storeConfig: storeB,
+        tokenService,
+        backend,
+      });
+
+      const provCtxA: ProvisioningAccessContext = {
+        kind: 'provisioning',
+        tenantContext: ctxA,
+        triggerEvent: 'test.r194',
+      };
+      const userCtxA: UserAccessContext = {
+        kind: 'user',
+        tenantContext: ctxA,
+        actorUserId: ctxA.actorId,
+        entraObjectId: ctxA.entraObjectId!,
+        userUpn: ctxA.actorUpn,
+        userAssertionToken: 'assertion-alpha',
+      };
+
+      // R194: When GET /sites/{siteId}/permissions returns 403, report roleVerificationStatus: 'not_verified' with warning and permissionManagementSupported: false
+      backend.setSimulateSitePermissionsReadForbidden({
+        tenantId: ctxA.tenantId,
+        storeId: storeA.storeId,
+        siteId: 'site-alpha-001',
+        forbidden: true,
+      });
+      const unverifiedRes = await providerA.testConnection(provCtxA);
+      expect(unverifiedRes.ok).toBe(true);
+      expect(unverifiedRes.roleVerificationStatus).toBe('not_verified');
+      expect(unverifiedRes.checks.permissionManagementSupported).toBe(false);
+      expect(unverifiedRes.warnings?.length).toBeGreaterThan(0);
+
+      // Reset 403 simulation and test insufficient grant role ('write' instead of 'fullcontrol')
+      backend.setSimulateSitePermissionsReadForbidden({
+        tenantId: ctxA.tenantId,
+        storeId: storeA.storeId,
+        siteId: 'site-alpha-001',
+        forbidden: false,
+      });
+      backend.setSitePermissionGrant({
+        tenantId: ctxA.tenantId,
+        storeId: storeA.storeId,
+        siteId: 'site-alpha-001',
+        role: 'write',
+      });
+      const insufficientRes = await providerA.testConnection(provCtxA);
+      expect(insufficientRes.ok).toBe(false);
+      expect(insufficientRes.errorCode).toBe('access_denied');
+      expect(insufficientRes.errorReasonCode).toBe(
+        'site_grant_role_insufficient',
+      );
+      expect(insufficientRes.roleVerificationStatus).toBe('insufficient');
+
+      // R195: Cached failed health check causes subsequent user and provisioning operations on Tenant A to fail closed
+      await expect(
+        providerA.listItems(userCtxA, {
+          storeId: storeA.storeId,
+          libraryId: 'lib-matters',
+          siteId: 'site-alpha-001',
+          driveId: 'drive-alpha-matters',
+        }),
+      ).rejects.toMatchObject({
+        code: 'access_denied',
+        reason: 'site_grant_role_insufficient',
+        message: GENERIC_USER_DOCUMENT_STORE_UNAVAILABLE_MESSAGE,
+      });
+
+      // R195: Tenant A's failed health cache never affects Tenant B
+      const provCtxB: ProvisioningAccessContext = {
+        kind: 'provisioning',
+        tenantContext: ctxB,
+        triggerEvent: 'test.r195.b',
+      };
+      const bHealth = await providerB.testConnection(provCtxB);
+      expect(bHealth.ok).toBe(true);
+
+      // R195: Scheduled health check job refuses to run without a valid tenantId
+      await expect(
+        runTenantSharePointHealthCheckJob({
+          tenantId: '',
+          tenantContext: ctxA,
+          stores: [storeA],
+          tokenService,
+          backend,
+        }),
+      ).rejects.toThrow(/TENANCY_JOB_ERROR/);
+
+      // R198: When site grant is 'none', admin sees diagnostic siteId, while non-admin user sees only generic British English message with zero GUIDs or hostnames
+      backend.setSitePermissionGrant({
+        tenantId: ctxA.tenantId,
+        storeId: storeA.storeId,
+        siteId: 'site-alpha-001',
+        role: 'none',
+      });
+      const noGrantHealth = await runTenantSharePointHealthCheckJob({
+        tenantId: ctxA.tenantId,
+        tenantContext: ctxA,
+        stores: [storeA],
+        tokenService,
+        backend,
+      });
+      expect(noGrantHealth[0]?.ok).toBe(false);
+      expect(noGrantHealth[0]?.errorCode).toBe('access_denied');
+      expect(noGrantHealth[0]?.errorReasonCode).toBe('site_access_not_granted');
+      expect(noGrantHealth[0]?.errorReason).toContain(
+        'SharePoint access not granted for site "site-alpha-001"',
+      );
+
+      try {
+        await providerA.listItems(userCtxA, {
+          storeId: storeA.storeId,
+          libraryId: 'lib-matters',
+          siteId: 'site-alpha-001',
+          driveId: 'drive-alpha-matters',
+        });
+        expect.unreachable('Expected listItems to fail closed');
+      } catch (err) {
+        const normalised = normaliseDocumentStoreError(err);
+        expect(normalised.code).toBe('access_denied');
+        expect(normalised.reason).toBe('site_access_not_granted');
+        expect(normalised.userMessage).toBe(
+          'Documents for this matter are unavailable. Please contact your administrator.',
+        );
+        expect(normalised.userMessage).not.toContain('site-alpha-001');
+        expect(normalised.userMessage).not.toContain('alpha.sharepoint.com');
+        expect(normalised.userMessage).not.toContain('app-alpha-001');
+      }
+    });
+
+    it('R196 & R201: rejects tampered siteId, tampered driveId, and cross-tenant siteId before backend.recordCall, and enforces the /search/query ban', async () => {
+      const ctxA = makeTenantContext({ tenantId: 'firm-alpha' });
+      const storeA: DocumentStoreConfig = {
+        ...makeGenericStores('alpha')[0]!,
+        auth: {
+          ...makeGenericStores('alpha')[0]!.auth,
+          delegatedPermissionScope: 'Sites.Selected',
+        },
+      };
+      const backend = new MockSharePointGraphBackend();
+      const tokenService = new DocumentStoreTokenService({
+        cache: new TenantScopedEncryptedTokenCache(),
+      });
+      const providerA = new SharePointDocumentStoreProvider({
+        tenantContext: ctxA,
+        storeConfig: storeA,
+        tokenService,
+        backend,
+      });
+      const provCtxA: ProvisioningAccessContext = {
+        kind: 'provisioning',
+        tenantContext: ctxA,
+        triggerEvent: 'test.r196',
+      };
+      const userCtxA: UserAccessContext = {
+        kind: 'user',
+        tenantContext: ctxA,
+        actorUserId: ctxA.actorId,
+        entraObjectId: ctxA.entraObjectId!,
+        userUpn: ctxA.actorUpn,
+        userAssertionToken: 'assertion-alpha',
+      };
+
+      backend.clearCallLog();
+
+      // (a) Tampered siteId rejected before backend.recordCall
+      await expect(
+        providerA.listItems(userCtxA, {
+          storeId: storeA.storeId,
+          libraryId: 'lib-matters',
+          siteId: 'site-tampered-999',
+          driveId: 'drive-alpha-matters',
+        }),
+      ).rejects.toMatchObject({
+        code: 'access_denied',
+        reason: 'site_or_drive_mismatch',
+      });
+      expect(backend.getCallLog()).toHaveLength(0);
+
+      // (b) Tampered driveId rejected before backend.recordCall
+      await expect(
+        providerA.getItem(userCtxA, {
+          storeId: storeA.storeId,
+          siteId: 'site-alpha-001',
+          driveId: 'drive-tampered-999',
+          itemId: 'root',
+        }),
+      ).rejects.toMatchObject({
+        code: 'access_denied',
+        reason: 'site_or_drive_mismatch',
+      });
+      expect(backend.getCallLog()).toHaveLength(0);
+
+      // (c) Tenant B's real siteId ('site-beta-001') sent from Tenant A rejected before backend.recordCall
+      await expect(
+        providerA.ensureFolderTree(
+          provCtxA,
+          {
+            storeId: storeA.storeId,
+            libraryId: 'lib-matters',
+            siteId: 'site-beta-001',
+            driveId: 'drive-alpha-matters',
+          },
+          [{ name: '01 Client Care', relativePath: '01 Client Care' }],
+        ),
+      ).rejects.toMatchObject({
+        code: 'access_denied',
+        reason: 'site_or_drive_mismatch',
+      });
+      expect(backend.getCallLog()).toHaveLength(0);
+
+      // R201: Static check that sharepointProvider.ts never uses /search/query
+      const providerSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../src/integrations/document-stores/sharepointProvider.ts',
+        ),
+        'utf-8',
+      );
+      expect(providerSource).not.toContain('/search/query');
+    });
+
+    it('R203: requires mfaVerified === true and writes a config:stores:updated audit entry when changing delegatedPermissionScope', () => {
+      const store = getStore();
+      const prevOverride = store.documentStoreConfigOverride;
+      try {
+        const cfg = getActiveTenantConfiguration();
+        const adminEmp = store.people.find((p) => p.id === 'P-000001')!;
+        if (!adminEmp.entraObjectId) {
+          adminEmp.entraObjectId = '00000000-0000-4000-8000-000000000001';
+        }
+        const adminSessionMfa = verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: adminEmp.id,
+            tenantId: cfg.tenantId,
+            oid: adminEmp.entraObjectId,
+            tid: '00000000-0000-4000-8000-000000000000',
+            sub: adminEmp.id,
+            email:
+              adminEmp.emails?.[0]?.address ?? 'carys@notalawfirm.example',
+            displayName: `${adminEmp.firstName} ${adminEmp.surname}`,
+            entraRoles: ['managing_partner', 'admin'],
+            mappedRoles: ['managing_partner', 'admin'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: '2026-11-05T10:00:00Z',
+            expiresAt: '2099-11-05T18:00:00Z',
+          }),
+        )!;
+        const adminSessionNoMfa = verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: adminEmp.id,
+            tenantId: cfg.tenantId,
+            oid: adminEmp.entraObjectId,
+            tid: '00000000-0000-4000-8000-000000000000',
+            sub: adminEmp.id,
+            email:
+              adminEmp.emails?.[0]?.address ?? 'carys@notalawfirm.example',
+            displayName: `${adminEmp.firstName} ${adminEmp.surname}`,
+            entraRoles: ['managing_partner', 'admin'],
+            mappedRoles: ['managing_partner', 'admin'],
+            entraGroups: [],
+            mfaVerified: false,
+            amr: ['pwd'],
+            authenticatedAt: '2026-11-05T10:00:00Z',
+            expiresAt: '2099-11-05T18:00:00Z',
+          }),
+        )!;
+
+        const dash = runWithActiveActorSession(
+          {
+            personId: adminEmp.id,
+            tenantId: cfg.tenantId,
+            tokenRoles: adminSessionMfa.mappedRoles,
+            expiresAtMs: Date.parse(adminSessionMfa.expiresAt),
+            verifiedSession: adminSessionMfa,
+          },
+          () =>
+            getDocumentStoresAdminDashboard('P-000001', {
+              session: adminSessionMfa,
+              mfaVerified: true,
+            }),
+        );
+        const updatedStores = dash.config.documentStores.map((ds) => ({
+          ...ds,
+          auth: {
+            ...ds.auth,
+            delegatedPermissionScope: 'Sites.Selected' as const,
+          },
+        }));
+
+        // Without MFA, saving store config is rejected
+        expect(() =>
+          runWithActiveActorSession(
+            {
+              personId: adminEmp.id,
+              tenantId: cfg.tenantId,
+              tokenRoles: adminSessionNoMfa.mappedRoles,
+              expiresAtMs: Date.parse(adminSessionNoMfa.expiresAt),
+              verifiedSession: adminSessionNoMfa,
+            },
+            () =>
+              saveAdminDocumentStoreConfiguration({
+                section: 'stores',
+                documentStores: updatedStores,
+                userId: 'P-000001',
+                session: adminSessionNoMfa,
+                mfaVerified: false,
+              }),
+          ),
+        ).toThrow(/MFA_REQUIRED/);
+
+        // With MFA, saving store config succeeds and records config:stores:updated with delegatedPermissionScopes metadata
+        const afterDash = runWithActiveActorSession(
+          {
+            personId: adminEmp.id,
+            tenantId: cfg.tenantId,
+            tokenRoles: adminSessionMfa.mappedRoles,
+            expiresAtMs: Date.parse(adminSessionMfa.expiresAt),
+            verifiedSession: adminSessionMfa,
+          },
+          () =>
+            saveAdminDocumentStoreConfiguration({
+              section: 'stores',
+              documentStores: updatedStores,
+              userId: 'P-000001',
+              session: adminSessionMfa,
+              mfaVerified: true,
+            }),
+        );
+        const latestAudit = afterDash.recentAuditEvents.find(
+          (e) => e.action === 'config:stores:updated',
+        );
+        expect(latestAudit).toBeDefined();
+        expect(latestAudit?.outcome).toBe('succeeded');
+        expect(latestAudit?.metadata?.delegatedPermissionScopes).toEqual(
+          Object.fromEntries(
+            updatedStores.map((ds) => [ds.storeId, 'Sites.Selected']),
+          ),
+        );
+      } finally {
+        store.documentStoreConfigOverride = prevOverride;
         saveStore(store);
         resetDocumentStoreSingletonsForTesting();
       }
