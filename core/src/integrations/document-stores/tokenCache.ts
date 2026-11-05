@@ -367,8 +367,7 @@ export class DocumentStoreTokenService {
         accessContext.tenantContext as {
           tenant?: { environment?: string };
         }
-      ).tenant?.environment ??
-      process.env.PLATFORM_ENVIRONMENT;
+      ).tenant?.environment;
     if (
       this.oboExchangeHandler === defaultOboExchangeHandler &&
       !(envName === 'dev' || envName === 'test')
@@ -476,8 +475,7 @@ export class DocumentStoreTokenService {
         accessContext.tenantContext as {
           tenant?: { environment?: string };
         }
-      ).tenant?.environment ??
-      process.env.PLATFORM_ENVIRONMENT;
+      ).tenant?.environment;
     if (
       this.appTokenHandler === defaultAppTokenAcquireHandler &&
       !(envName === 'dev' || envName === 'test')
