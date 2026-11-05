@@ -22,6 +22,7 @@ import {
 import { formatDate } from '@/domain/dates';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import { enquiryDisplayName, isEnquiryOpen } from '@/domain/enquiries';
+import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
@@ -279,15 +280,6 @@ export function HomeClient({
       .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
   }, [tasks, effectiveWorkPerson.id, currentUser.id]);
 
-  const myOverdueTasks = useMemo(
-    () => myOpenTasks.filter((t) => t.dueAt.slice(0, 10) < todayIso),
-    [myOpenTasks, todayIso],
-  );
-  const myDueTodayTasks = useMemo(
-    () => myOpenTasks.filter((t) => t.dueAt.slice(0, 10) === todayIso),
-    [myOpenTasks, todayIso],
-  );
-
   // Enquiries assigned to the effective work person
   const myOpenEnquiries = useMemo(() => {
     return enquiries
@@ -513,18 +505,30 @@ export function HomeClient({
     switch (cardId) {
       // 01 Fee Earner
       case 'fe_tasks_due': {
-        const total = myDueTodayTasks.length + myOverdueTasks.length;
+        const effectiveOpenTasks = selectHomeCandidateTasks({
+          tasks,
+          currentUserId: currentUser.id,
+          effectiveWorkPersonId: effectiveWorkPerson.id,
+          myTeamIds,
+        });
+        const effectiveOverdueTasks = effectiveOpenTasks.filter(
+          (t) => t.dueAt.slice(0, 10) < todayIso,
+        );
+        const effectiveDueTodayTasks = effectiveOpenTasks.filter(
+          (t) => t.dueAt.slice(0, 10) === todayIso,
+        );
+        const total = effectiveDueTodayTasks.length + effectiveOverdueTasks.length;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Tasks due / overdue</span>
-              {myOverdueTasks.length > 0 ? (
-                <StatusPill label={`${myOverdueTasks.length} overdue`} tone="alert" />
+              {effectiveOverdueTasks.length > 0 ? (
+                <StatusPill label={`${effectiveOverdueTasks.length} overdue`} tone="alert" />
               ) : null}
             </div>
             <div className="kpi-value">{total}</div>
             <div className="kpi-sub">
-              {myDueTodayTasks.length} due today · {myOpenTasks.length} open total
+              {effectiveDueTodayTasks.length} due today · {effectiveOpenTasks.length} open total
             </div>
           </div>
         );
@@ -1418,13 +1422,12 @@ export function HomeClient({
                 (t.assignedPersonId && supportedFeeEarnerIds.includes(t.assignedPersonId)) ||
                 t.assignedTeamId === 'TM-000001'),
           )
-        : myOpenTasks.length > 0
-          ? myOpenTasks
-          : tasks.filter(
-              (t) =>
-                isTaskOpen(t) &&
-                (myTeamIds.size === 0 || (t.assignedTeamId !== null && myTeamIds.has(t.assignedTeamId))),
-            );
+        : selectHomeCandidateTasks({
+            tasks,
+            currentUserId: currentUser.id,
+            effectiveWorkPersonId: effectiveWorkPerson.id,
+            myTeamIds,
+          });
 
     const unifiedItems: ToDoUnifiedItem[] = [];
 

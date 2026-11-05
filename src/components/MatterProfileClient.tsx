@@ -39,8 +39,11 @@ import {
   extractCriticalDates,
   fieldGroupsForSubcategory,
   findSubcategoryRule,
+  formatStageStatusLabel,
   type MatterModelField,
+  resolveOverviewPartyPresentation,
   specificFieldsForSubcategory,
+  stageStatus,
 } from '@/domain/matters';
 import {
   downloadConflictCheckPdf,
@@ -124,7 +127,8 @@ type MatterTab =
 
 interface StageStepItem {
   name: string;
-  meta: string;
+  completedDetail?: string;
+  upcomingDetail?: string;
 }
 
 function initialsOfName(name: string): string {
@@ -351,32 +355,32 @@ export function MatterProfileClient({
   const stageSteps = useMemo<StageStepItem[]>(() => {
     if (isBrightwaterTribunal || subcatLabel.toLowerCase().includes('tribunal')) {
       return [
-        { name: 'Intake', meta: 'Done 14 Aug' },
-        { name: 'ET3 response', meta: 'Filed 2 Sep' },
-        { name: 'Case management', meta: 'Done 30 Sep' },
-        { name: 'Drafting & negotiation', meta: 'Current' },
-        { name: 'Final hearing', meta: 'Listed Mar 2027' },
-        { name: 'Close', meta: '—' },
+        { name: 'Intake', completedDetail: 'Done 14 Aug' },
+        { name: 'ET3 response', completedDetail: 'Filed 2 Sep' },
+        { name: 'Case management', completedDetail: 'Done 30 Sep' },
+        { name: 'Drafting & negotiation' },
+        { name: 'Final hearing', upcomingDetail: 'Listed Mar 2027' },
+        { name: 'Close', upcomingDetail: '—' },
       ];
     }
     return [
       {
         name: 'Intake',
-        meta:
+        completedDetail:
           formatShortDayMonth(matter.openedAt) !== '—'
             ? `Done ${formatShortDayMonth(matter.openedAt)}`
             : 'Done',
       },
-      { name: 'Matter opening', meta: 'Completed' },
-      { name: 'Due diligence', meta: 'Completed' },
-      { name: 'Drafting & negotiation', meta: 'Current' },
+      { name: 'Matter opening' },
+      { name: 'Due diligence' },
+      { name: 'Drafting & negotiation' },
       {
         name: 'Execution / completion',
-        meta: matter.targetCompletionAt
+        upcomingDetail: matter.targetCompletionAt
           ? `Target ${formatShortDayMonth(matter.targetCompletionAt)}`
-          : 'Upcoming',
+          : undefined,
       },
-      { name: 'Close', meta: '—' },
+      { name: 'Close', upcomingDetail: '—' },
     ];
   }, [isBrightwaterTribunal, subcatLabel, matter.openedAt, matter.targetCompletionAt]);
 
@@ -741,25 +745,14 @@ export function MatterProfileClient({
     }
 
     for (const p of matter.parties) {
-      const lowerRole = p.role.toLowerCase();
-      const isOpponent =
-        lowerRole.includes('oppos') ||
-        lowerRole.includes('counterparty') ||
-        lowerRole.includes('tenant') ||
-        lowerRole.includes('claimant') ||
-        lowerRole.includes('defendant');
-      const isTribunal =
-        p.name.toLowerCase().includes('tribunal') ||
-        p.name.toLowerCase().includes('court') ||
-        lowerRole.includes('tribunal') ||
-        lowerRole.includes('court');
+      const presentation = resolveOverviewPartyPresentation(p);
       list.push({
         id: p.id,
         name: p.name,
         href: p.linkedRecordId ? hrefForId(p.linkedRecordId) : undefined,
-        sub: p.role,
-        badge: isTribunal ? 'Court / tribunal' : isOpponent ? 'Opponent' : p.role,
-        tone: isTribunal ? 'neutral' : isOpponent ? 'warning' : 'neutral',
+        sub: presentation.sub,
+        badge: presentation.badge,
+        tone: presentation.tone,
       });
     }
 
@@ -1368,14 +1361,11 @@ export function MatterProfileClient({
               <div className="panel-body padded">
                 <div className="matter-stage-grid">
                   {stageSteps.map((st, idx) => {
-                    const isFilled = idx <= currentStageIdx;
-                    const isCurrent = idx === currentStageIdx;
-                    const isUpcoming = idx > currentStageIdx;
-                    const metaText = isCurrent
-                      ? 'Current'
-                      : idx < currentStageIdx && st.meta === 'Current'
-                        ? 'Completed'
-                        : st.meta;
+                    const status = stageStatus(idx, currentStageIdx);
+                    const isFilled = status === 'completed' || status === 'current';
+                    const isCurrent = status === 'current';
+                    const isUpcoming = status === 'upcoming';
+                    const metaText = formatStageStatusLabel(idx, currentStageIdx, st);
                     return (
                       <div
                         key={st.name}
@@ -1884,7 +1874,9 @@ export function MatterProfileClient({
                     }}
                     onClick={() => setTab('tasks')}
                   >
-                    + Add
+                    {userKeyDatePermissions.includes('keydate:edit')
+                      ? '+ Add'
+                      : 'View all →'}
                   </button>
                 </div>
               </div>
@@ -2136,8 +2128,9 @@ export function MatterProfileClient({
                     <div className="worklist-main">
                       <div className="worklist-meta">Client reference</div>
                       <div className="worklist-title" style={{ marginTop: 2, marginBottom: 0 }}>
-                        {((matter.fieldValues['CORE-005'] as string) || '').trim() ||
-                          "[Client's own reference]"}
+                        {((matter.fieldValues['CORE-005'] as string) || '').trim() || (
+                          <span className="muted">Not recorded</span>
+                        )}
                       </div>
                     </div>
                   </li>
@@ -2146,8 +2139,20 @@ export function MatterProfileClient({
                     <div className="worklist-main">
                       <div className="worklist-meta">Claim value (estimated)</div>
                       <div className="worklist-title" style={{ marginTop: 2, marginBottom: 0 }}>
-                        {((matter.fieldValues['claimValue'] as string) || '').trim() ||
-                          (isBrightwaterTribunal ? '[Value band]' : sizeLabel || '[Value band]')}
+                        {(() => {
+                          const rawClaimValue = (
+                            (matter.fieldValues['claimValue'] as string) || ''
+                          ).trim();
+                          if (rawClaimValue) return rawClaimValue;
+                          if (
+                            !isBrightwaterTribunal &&
+                            sizeLabel &&
+                            sizeLabel.toLowerCase() !== 'unknown value'
+                          ) {
+                            return sizeLabel;
+                          }
+                          return <span className="muted">Not recorded</span>;
+                        })()}
                       </div>
                     </div>
                   </li>

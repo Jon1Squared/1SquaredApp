@@ -22,9 +22,6 @@ function brandVerifiedSessionActor(
 }
 
 declare const VERIFIED_ENTRA_SESSION_BRAND: unique symbol;
-const VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL = Symbol(
-  'VerifiedEntraSessionPayload',
-);
 const verifiedEntraSessionPayloads = new WeakSet<object>();
 
 export const ENTRA_PKCE_COOKIE = 'onesquared_entra_pkce';
@@ -55,12 +52,6 @@ export type VerifiedEntraSessionPayload = EntraSessionPayload & {
 function markAsVerifiedEntraSession(
   session: EntraSessionPayload,
 ): VerifiedEntraSessionPayload {
-  Object.defineProperty(session, VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL, {
-    value: true,
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
   verifiedEntraSessionPayloads.add(session);
   return session as VerifiedEntraSessionPayload;
 }
@@ -71,10 +62,7 @@ export function isVerifiedEntraSessionPayload(
   return Boolean(
     session &&
       typeof session === 'object' &&
-      verifiedEntraSessionPayloads.has(session) &&
-      (session as Record<symbol, unknown>)[
-        VERIFIED_ENTRA_SESSION_RUNTIME_SYMBOL
-      ] === true,
+      verifiedEntraSessionPayloads.has(session),
   );
 }
 

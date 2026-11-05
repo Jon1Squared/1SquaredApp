@@ -6,7 +6,7 @@ export const keyDatesVerificationArticle: DocArticle = {
   section: 'key-dates-limitation',
   summary:
     'How four-eyes verification prevents single-person calculation errors on limitation and critical dates, and why proposers cannot verify their own dates.',
-  updated: '2026-11-03',
+  updated: '2026-11-05',
   body: `
 Professional indemnity insurers and risk teams recommend "four-eyes" verification for limitation and other critical deadlines. 1Squared enforces two-step verification at the domain and data layers.
 
@@ -31,6 +31,6 @@ When \`verification.required\` is \`true\`, the \`appliesTo\` setting determines
 
 ## Overdue verification monitoring
 
-If a key date remains in \`awaiting_verification\` for more than 5 working days, it is automatically flagged as a \`verification_overdue\` exception in the [Compliance exceptions report](/docs/key-dates-exceptions).
+A proposed key date has remained in \`awaiting_verification\` for the configured number of calendar days (\`exceptions.verificationOverdueDays\`, default 3) or more when it is automatically flagged as a \`verification_overdue\` exception in the [Compliance exceptions report](/docs/key-dates-exceptions).
 `,
 };

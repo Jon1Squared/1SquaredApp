@@ -163,8 +163,11 @@ export function CompactHeaderSearch({
           aria-hidden="true"
         />
         <input
+          id={isHero ? 'hero-global-search-input' : 'header-global-search-input'}
+          name="q"
           type="search"
           role="combobox"
+          aria-label="Search or ask anything"
           aria-expanded={open && query.trim().length > 0}
           aria-controls={listboxId}
           aria-autocomplete="list"

@@ -45,6 +45,7 @@ import {
 } from '@/domain/enquiries';
 import type { FormatContext } from '@/domain/fieldRegistry';
 import {
+  canPreviewAnyHomeRole,
   createDefaultHomePagesConfig,
   createDefaultRoleConfigs,
   resolveActiveViewingRole,
@@ -411,7 +412,6 @@ export function isDemoModeEnabled(): boolean {
 export async function switchUserInDemoMode(targetUserId: string): Promise<{
   ok: boolean;
   personId: string;
-  signedSession: string;
 }> {
   const actor = await requireAuthenticatedActor();
   const store = getStore();
@@ -532,7 +532,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   });
   saveStore(store);
 
-  return { ok: true, personId: targetPerson.id, signedSession };
+  return { ok: true, personId: targetPerson.id };
 }
 
 export function activeEmployees(store: FirmStore = getStore()): Person[] {
@@ -8137,17 +8137,24 @@ export function switchViewingRole(
   const user = store.people.find((p) => p.id === userId);
   if (!user) return { ok: false, error: 'User not found.' };
 
-  const userRoles = resolveEmployeeRoles(user, store.teams);
-  if (!userRoles.includes(roleKey)) {
-    return { ok: false, error: 'Role is not assigned to the current user.' };
-  }
-
   if (!store.homePagesConfig) {
     store.homePagesConfig = createDefaultHomePagesConfig(
       new Date().toISOString(),
       getActiveTenantConfiguration().branding.primaryDomain,
     );
   }
+
+  const userRoles = resolveEmployeeRoles(user, store.teams);
+  const isValidConfiguredRole = store.homePagesConfig.roles.some(
+    (r) => r.key === roleKey,
+  );
+  if (
+    !userRoles.includes(roleKey) &&
+    !(canPreviewAnyHomeRole(userRoles) && isValidConfiguredRole)
+  ) {
+    return { ok: false, error: 'Role is not assigned to the current user.' };
+  }
+
   store.homePagesConfig.lastViewingRoleByUserId = {
     ...(store.homePagesConfig.lastViewingRoleByUserId ?? {}),
     [userId]: roleKey,

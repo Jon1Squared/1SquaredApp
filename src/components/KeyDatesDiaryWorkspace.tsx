@@ -57,7 +57,7 @@ const STATUS_OPTIONS: { value: KeyDateStatus; label: string }[] = [
 
 const EXCEPTION_KIND_LABELS: Record<KeyDateExceptionKind, string> = {
   matter_missing_required_date: 'Open matter missing required key date',
-  verification_overdue: 'Verification overdue (> 5 working days)',
+  verification_overdue: 'Verification overdue',
   critical_date_no_recent_activity: 'Critical date with no recent matter activity',
   closed_matter_open_dates: 'Closed matter with open key dates',
   calculated_from_unreviewed_rules: 'Calculated from unreviewed rule set',
@@ -102,6 +102,7 @@ function getMonthGridDays(yearMonth: string): { dateIso: string; inMonth: boolea
 export function KeyDatesDiaryWorkspace({
   currentUserId,
   userPermissions,
+  keyDatesConfig,
   initialDiaryEntries,
   initialExceptions,
   teams,
@@ -113,6 +114,15 @@ export function KeyDatesDiaryWorkspace({
 }: KeyDatesDiaryWorkspaceProps) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
+
+  const verificationOverdueDays = keyDatesConfig?.exceptions?.verificationOverdueDays ?? 3;
+  const exceptionKindLabels = useMemo<Record<KeyDateExceptionKind, string>>(
+    () => ({
+      ...EXCEPTION_KIND_LABELS,
+      verification_overdue: `Verification overdue (${verificationOverdueDays} days or more)`,
+    }),
+    [verificationOverdueDays],
+  );
 
   const canViewAnyTeam = userPermissions.includes('keydate:view_any_team');
   const canVerify = userPermissions.includes('keydate:verify');
@@ -936,8 +946,9 @@ export function KeyDatesDiaryWorkspace({
               <div>
                 <h2 style={{ margin: 0, fontSize: 18 }}>Compliance Exceptions Report</h2>
                 <p className="muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-                  Covers all 8 statutory &amp; operational key date exception kinds across teams.
-                  Exports are recorded in the immutable audit log.
+                  Covers all {Object.keys(EXCEPTION_KIND_LABELS).length} statutory &amp;
+                  operational key date exception kinds across teams. Exports are recorded in the
+                  immutable audit log.
                 </p>
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -990,7 +1001,7 @@ export function KeyDatesDiaryWorkspace({
             <div>
               <span className="field-label">Filter by exception kind</span>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
-                {(Object.keys(EXCEPTION_KIND_LABELS) as KeyDateExceptionKind[]).map((kind) => {
+                {(Object.keys(exceptionKindLabels) as KeyDateExceptionKind[]).map((kind) => {
                   const active = excKinds.includes(kind);
                   return (
                     <button
@@ -1005,7 +1016,7 @@ export function KeyDatesDiaryWorkspace({
                         )
                       }
                     >
-                      {EXCEPTION_KIND_LABELS[kind]}
+                      {exceptionKindLabels[kind]}
                     </button>
                   );
                 })}
@@ -1034,7 +1045,7 @@ export function KeyDatesDiaryWorkspace({
                     >
                       <div className="list-row__main">
                         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                          <StatusPill label={EXCEPTION_KIND_LABELS[ex.kind]} tone="alert" />
+                          <StatusPill label={exceptionKindLabels[ex.kind]} tone="alert" />
                           {team ? <StatusPill label={team.name} tone="neutral" /> : null}
                         </div>
                         <div style={{ marginTop: 6, fontWeight: 500 }}>{ex.detail}</div>

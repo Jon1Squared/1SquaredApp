@@ -35,9 +35,12 @@ import {
   extractCriticalDates,
   fieldGroupsForSubcategory,
   findSubcategoryRule,
+  formatStageStatusLabel,
   isFieldRequiredAtStage,
   MATTER_FIELD_MODEL,
+  resolveOverviewPartyPresentation,
   specificFieldsForSubcategory,
+  stageStatus,
 } from '../domain/matters';
 import {
   findEnquiryEntityMatches,
@@ -1003,5 +1006,40 @@ describe('System documentation', () => {
   });
 });
 
+describe('Matter overview stage status and party presentation (R223)', () => {
+  it('stageStatus returns exactly one current stage with every earlier stage completed', () => {
+    const statuses = [0, 1, 2, 3, 4, 5].map((idx) => stageStatus(idx, 1));
+    expect(statuses).toEqual([
+      'completed',
+      'current',
+      'upcoming',
+      'upcoming',
+      'upcoming',
+      'upcoming',
+    ]);
+    expect(statuses.filter((s) => s === 'current')).toHaveLength(1);
+    expect(formatStageStatusLabel(0, 1, { completedDetail: 'Done 8 Oct' })).toBe('Done 8 Oct');
+    expect(formatStageStatusLabel(1, 1)).toBe('Current');
+    expect(formatStageStatusLabel(3, 1)).toBe('Upcoming');
+  });
 
+  it('resolveOverviewPartyPresentation does not repeat the badge text in the subtitle', () => {
+    const structured = resolveOverviewPartyPresentation({
+      name: 'Castell Legal Search Ltd',
+      role: 'Connected to client · Other professional adviser',
+      relationshipCode: 'CC',
+      capacityCodes: ['CAP_OTHER_PROFESSIONAL_ADVISER'],
+    });
+    expect(structured.badge).toBe('Connected to client');
+    expect(structured.sub).toBe('Other professional adviser');
+    expect(structured.sub).not.toContain(structured.badge);
+
+    const fallback = resolveOverviewPartyPresentation({
+      name: 'Castell Legal Search Ltd',
+      role: 'Connected to client · Other professional adviser',
+    });
+    expect(fallback.badge).toBe('Connected to client');
+    expect(fallback.sub).toBe('Other professional adviser');
+  });
+});
 

@@ -474,7 +474,12 @@ export function PeopleListClient({
         </div>
       </div>
 
-      <div className="tabs-bar" role="tablist" aria-label="People directory views">
+      <div className="tabs-bar">
+        <div
+          role="tablist"
+          aria-label="People directory views"
+          style={{ display: 'flex', alignItems: 'center', gap: 24 }}
+        >
         <button
           type="button"
           role="tab"
@@ -520,6 +525,7 @@ export function PeopleListClient({
         >
           Archived ({archivedCount})
         </button>
+        </div>
         <div
           style={{
             marginLeft: 'auto',
@@ -544,6 +550,8 @@ export function PeopleListClient({
         primaryFilters={
           <>
             <select
+              id="people-filter-role"
+              name="peopleFilterRole"
               aria-label="Filter by relationship role"
               className="field-select list-filter-row__select"
               value={roleFilter}
@@ -557,6 +565,8 @@ export function PeopleListClient({
               ))}
             </select>
             <select
+              id="people-filter-status"
+              name="peopleFilterStatus"
               aria-label="Filter by relationship status"
               className="field-select list-filter-row__select"
               value={statusFilter}
@@ -580,6 +590,7 @@ export function PeopleListClient({
             </label>
             <select
               id="people-filter-owner"
+              name="peopleFilterOwner"
               aria-label="Filter by relationship owner"
               className="field-select"
               value={ownerFilter}

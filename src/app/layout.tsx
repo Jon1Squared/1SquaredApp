@@ -65,7 +65,16 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               tasks={snap.tasks}
               notifications={snap.notifications}
               firmName={snap.firm.name}
-              entraSession={entraSession}
+              entraSession={
+                entraSession
+                  ? {
+                      email: entraSession.email,
+                      displayName: entraSession.displayName,
+                      oid: entraSession.oid,
+                      mfaVerified: entraSession.mfaVerified,
+                    }
+                  : null
+              }
             >
               {children}
             </AppShell>

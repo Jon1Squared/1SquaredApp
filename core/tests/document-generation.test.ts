@@ -51,6 +51,7 @@ import {
 } from '@/server/documentGenerationServices';
 import {
   createSignedEntraSessionCookie,
+  isVerifiedEntraSessionPayload,
   setTestEntraSessionOverride,
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
@@ -1140,15 +1141,43 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       ),
     ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
 
-    // R1: Outside test mode, resolveTenantBlobSigningKey throws when PLATFORM_BLOB_SIGNING_KEY is unset (even if AUTH_SECRET is set)
+    // R1 & R213: Outside test mode, resolveTenantBlobSigningKey throws when PLATFORM_BLOB_SIGNING_KEY is unset in production/live/training, and uses an ephemeral per-process key in development (dev/test only)
     const prevKey = process.env.PLATFORM_BLOB_SIGNING_KEY;
     const prevAuth = process.env.AUTH_SECRET;
     const prevVitest = process.env.VITEST;
     const prevNodeEnv = process.env.NODE_ENV;
+    const prevPlatformEnv = process.env.PLATFORM_ENVIRONMENT;
     try {
       delete process.env.PLATFORM_BLOB_SIGNING_KEY;
       process.env.AUTH_SECRET = 'some-auth-secret-that-must-not-be-used';
       delete process.env.VITEST;
+
+      // 1. NODE_ENV=development + environment 'live' throws STORAGE_CONFIG_ERROR
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'development';
+      process.env.PLATFORM_ENVIRONMENT = 'live';
+      expect(() => resolveTenantBlobSigningKey('not-a-law-firm')).toThrow(
+        /STORAGE_CONFIG_ERROR/,
+      );
+
+      // 2. NODE_ENV=development + environment 'training' throws STORAGE_CONFIG_ERROR
+      process.env.PLATFORM_ENVIRONMENT = 'training';
+      expect(() => resolveTenantBlobSigningKey('not-a-law-firm')).toThrow(
+        /STORAGE_CONFIG_ERROR/,
+      );
+
+      // 3 & 4. NODE_ENV=development + environment 'dev' returns a 64-char hex key not derived from the test literal, and stays consistent across calls in the same process
+      process.env.PLATFORM_ENVIRONMENT = 'dev';
+      const testLiteralKey = crypto
+        .createHmac('sha256', 'test-host-blob-signing-key-from-vault')
+        .update('tenant-blob-signing:not-a-law-firm')
+        .digest('hex');
+      const devKey1 = resolveTenantBlobSigningKey('not-a-law-firm');
+      const devKey2 = resolveTenantBlobSigningKey('not-a-law-firm');
+      expect(devKey1).toMatch(/^[0-9a-f]{64}$/);
+      expect(devKey1).not.toBe(testLiteralKey);
+      expect(devKey2).toBe(devKey1);
+
+      // 5. NODE_ENV=production throws STORAGE_CONFIG_ERROR
       (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
       expect(() => resolveTenantBlobSigningKey('not-a-law-firm')).toThrow(
         /STORAGE_CONFIG_ERROR/,
@@ -1161,7 +1190,31 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       if (prevVitest === undefined) delete process.env.VITEST;
       else process.env.VITEST = prevVitest;
       (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+      if (prevPlatformEnv === undefined) delete process.env.PLATFORM_ENVIRONMENT;
+      else process.env.PLATFORM_ENVIRONMENT = prevPlatformEnv;
     }
+
+    // Verified Entra session payload is a plain object without Symbol properties (safe for React Server-to-Client component serialization)
+    const signedCookie = createSignedEntraSessionCookie({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      oid: '00000000-0000-0000-0000-000000000001',
+      tid: '00000000-0000-0000-0000-000000000099',
+      sub: 'sub-p-000001',
+      email: 'rhian.morgan@notalawfirm.example',
+      displayName: 'Rhian Morgan',
+      entraRoles: ['partner'],
+      mappedRoles: ['partner'],
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    const verifiedSession = verifySignedEntraSessionCookie(signedCookie);
+    expect(verifiedSession).not.toBeNull();
+    expect(isVerifiedEntraSessionPayload(verifiedSession)).toBe(true);
+    expect(Object.getOwnPropertySymbols(verifiedSession!)).toHaveLength(0);
 
     // R22: Forged untrustedRequestTenantOverride is rejected with TENANCY_FORGERY_DETECTED
     expect(() =>

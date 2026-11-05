@@ -6,7 +6,15 @@
 import rawModel from '@/seed/data/matterFieldModel.json';
 import { resolveLabel, valuesForList } from './lists';
 import type { KeyDate } from './keyDates.types';
-import type { ChoiceValue, Matter, Organisation, Person, PersonOrganisationLink } from './types';
+import { SEED_CAPACITIES, SEED_RELATIONSHIPS } from './matterParties';
+import type {
+  ChoiceValue,
+  Matter,
+  MatterParty,
+  Organisation,
+  Person,
+  PersonOrganisationLink,
+} from './types';
 
 export type RequiredLevel =
   | 'Opening'
@@ -563,3 +571,102 @@ export function deriveClientAttributes(
     billingContactId: null,
   };
 }
+
+/**
+ * Computes the stage progress status from the stage index and current stage index only.
+ */
+export function stageStatus(
+  idx: number,
+  currentIdx: number,
+): 'completed' | 'current' | 'upcoming' {
+  if (idx < currentIdx) return 'completed';
+  if (idx === currentIdx) return 'current';
+  return 'upcoming';
+}
+
+/**
+ * Formats the display label for a matter stage step from its index and optional date details.
+ */
+export function formatStageStatusLabel(
+  idx: number,
+  currentIdx: number,
+  details?: { completedDetail?: string; upcomingDetail?: string },
+): string {
+  const status = stageStatus(idx, currentIdx);
+  if (status === 'current') return 'Current';
+  if (status === 'completed') return details?.completedDetail || 'Completed';
+  return details?.upcomingDetail || 'Upcoming';
+}
+
+/**
+ * Resolves the party badge, subtitle, and tone for the Matter Overview party card,
+ * using structured `relationshipCode` and `capacityCodes` when available and falling
+ * back to splitting `party.role` on `' · '` without repeating the badge in the subtitle.
+ */
+export function resolveOverviewPartyPresentation(
+  party: Pick<MatterParty, 'name' | 'role' | 'relationshipCode' | 'capacityCodes'>,
+): {
+  badge: string;
+  sub: string;
+  tone: 'neutral' | 'warning' | 'positive';
+} {
+  const lowerRole = (party.role || '').toLowerCase();
+  const lowerName = (party.name || '').toLowerCase();
+  const isTribunal =
+    (party.relationshipCode === 'NO' &&
+      party.capacityCodes?.includes('CAP_COURT_TRIBUNAL')) ||
+    lowerName.includes('tribunal') ||
+    lowerName.includes('court') ||
+    lowerRole.includes('tribunal') ||
+    lowerRole.includes('court');
+  const isOpponent =
+    party.relationshipCode === 'OP' ||
+    party.relationshipCode === 'CP' ||
+    lowerRole.includes('oppos') ||
+    lowerRole.includes('counterparty') ||
+    lowerRole.includes('tenant') ||
+    lowerRole.includes('claimant') ||
+    lowerRole.includes('defendant');
+
+  const relLabel = party.relationshipCode
+    ? SEED_RELATIONSHIPS.find((r) => r.code === party.relationshipCode)?.label
+    : undefined;
+  const capLabels = (party.capacityCodes ?? [])
+    .map((code) => SEED_CAPACITIES.find((c) => c.code === code)?.label ?? code)
+    .filter(Boolean);
+
+  if (relLabel || capLabels.length > 0) {
+    const badge = isTribunal
+      ? 'Court / tribunal'
+      : isOpponent
+        ? 'Opponent'
+        : relLabel || 'Other party';
+    const sub =
+      capLabels.length > 0
+        ? capLabels.join(', ')
+        : relLabel && relLabel !== badge
+          ? relLabel
+          : party.role;
+    return {
+      badge,
+      sub,
+      tone: isTribunal ? 'neutral' : isOpponent ? 'warning' : 'neutral',
+    };
+  }
+
+  const roleParts = party.role.includes(' · ') ? party.role.split(' · ') : null;
+  const badge = isTribunal
+    ? 'Court / tribunal'
+    : isOpponent
+      ? 'Opponent'
+      : roleParts
+        ? roleParts[0]!
+        : 'Other party';
+  const sub = roleParts ? roleParts.slice(1).join(' · ') : party.role;
+  return {
+    badge,
+    sub,
+    tone: isTribunal ? 'neutral' : isOpponent ? 'warning' : 'neutral',
+  };
+}
+

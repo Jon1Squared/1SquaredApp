@@ -446,7 +446,12 @@ export function OrganisationsListClient({
         </div>
       </div>
 
-      <div className="tabs-bar" role="tablist" aria-label="Organisation directory views">
+      <div className="tabs-bar">
+        <div
+          role="tablist"
+          aria-label="Organisation directory views"
+          style={{ display: 'flex', alignItems: 'center', gap: 24 }}
+        >
         <button
           type="button"
           role="tab"
@@ -492,6 +497,7 @@ export function OrganisationsListClient({
         >
           Archived ({archivedCount})
         </button>
+        </div>
         <div
           style={{
             marginLeft: 'auto',
@@ -516,6 +522,8 @@ export function OrganisationsListClient({
         primaryFilters={
           <>
             <select
+              id="org-filter-relationship-type"
+              name="organisationsFilterRelationshipType"
               aria-label="Filter by relationship type"
               className="field-select list-filter-row__select"
               value={typeFilter}
@@ -529,6 +537,8 @@ export function OrganisationsListClient({
               ))}
             </select>
             <select
+              id="org-filter-status"
+              name="organisationsFilterStatus"
               aria-label="Filter by relationship status"
               className="field-select list-filter-row__select"
               value={statusFilter}
@@ -558,6 +568,7 @@ export function OrganisationsListClient({
               </label>
               <select
                 id="org-filter-type"
+                name="organisationsFilterOrganisationType"
                 aria-label="Filter by organisation type"
                 className="field-select"
                 value={orgTypeFilter}
@@ -577,6 +588,7 @@ export function OrganisationsListClient({
               </label>
               <select
                 id="org-filter-sector"
+                name="organisationsFilterSector"
                 aria-label="Filter by sector"
                 className="field-select"
                 value={sectorFilter}
@@ -596,6 +608,7 @@ export function OrganisationsListClient({
               </label>
               <select
                 id="org-filter-partner"
+                name="organisationsFilterRelationshipPartner"
                 aria-label="Filter by relationship partner"
                 className="field-select"
                 value={ownerFilter}

@@ -1,7 +1,6 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { cookies } from 'next/headers';
 import type {
   AppRole,
   AutoTaskTrigger,
@@ -151,11 +150,13 @@ function withActorId<R>(fn: (byId: string) => Promise<R> | R): Promise<R> {
   return withAuthenticatedActor((actor) => fn(actor.personId));
 }
 
-export async function switchUserAction(userId: string) {
+export async function switchUserAction(
+  userId: string,
+): Promise<{ ok: true; personId: string } | { ok: false; error: string }> {
   return withAuthenticatedActor(async () => {
     const res = await switchUserInDemoMode(userId);
     revalidateAll();
-    return res;
+    return { ok: true, personId: res.personId };
   });
 }
 

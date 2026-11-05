@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  canPreviewAnyHomeRole,
   createDefaultHomePagesConfig,
   createDefaultRoleConfigs,
   cyclePanelPlacement,
@@ -7,12 +8,20 @@ import {
   HEADLINE_CARD_DEFINITIONS,
   PANEL_DEFINITIONS,
   resolveEmployeeRoles,
+  resolveHeaderDisplayedViewingRole,
+  resolveViewingRoleOptions,
   setRolePanelPlacement,
   syncHomeRolesWithEmployeeRoles,
 } from './homeConfig';
 import { getLeftRailVisibility } from '../server/rbacRuntime';
 import { getPmsSource } from '@/pms/pmsSource';
 import { primaryEmail } from './names';
+import { switchUserAction } from '@/app/actions';
+import { setTestEntraSessionOverride } from '@/server/entraAuth';
+import {
+  getActiveTenantRawBaseConfig,
+  setActiveTenantConfigForTesting,
+} from '@/platform/tenantRuntime';
 import {
   addChoiceValue,
   addHomeRole,
@@ -157,6 +166,137 @@ describe('Role-based Home pages & configuration', () => {
     // Attempting to switch Rhian to a role she does not hold ('finance') is rejected
     const badSwitch = switchViewingRole('P-000001', 'finance');
     expect(badSwitch.ok).toBe(false);
+
+    // Negative test (R215): a user with only ['fee_earner'] (P-000002) switching to 'finance' gets ok: false
+    const feeEarnerSwitch = switchViewingRole('P-000002', 'finance');
+    expect(feeEarnerSwitch.ok).toBe(false);
+
+    // Positive test (R215): an administrator holding ['admin'] can preview any configured role via Viewing As
+    const adamAdmin = snap1.people.find(
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
+    )!;
+    updateEmployeeRolesAndSupports(
+      'P-000004',
+      { roles: ['admin'] },
+      adamAdmin.id,
+      { mfaVerified: true },
+    );
+    const adminSnap1 = getAppSnapshot('P-000004');
+    expect(adminSnap1.currentUserRoles).toEqual(['admin']);
+    expect(canPreviewAnyHomeRole(adminSnap1.currentUserRoles)).toBe(true);
+    const adminSwitch = switchViewingRole('P-000004', 'finance');
+    expect(adminSwitch.ok).toBe(true);
+    const adminSnap2 = getAppSnapshot('P-000004');
+    expect(adminSnap2.activeViewingRole).toBe('finance');
+
+    // Negative test (R215): an undefined legacy key (not 'admin') does not grant role preview
+    const undefinedLegacyKey = ['system', 'admin'].join('_');
+    expect(canPreviewAnyHomeRole([undefinedLegacyKey])).toBe(false);
+    updateEmployeeRolesAndSupports(
+      'P-000002',
+      { roles: [undefinedLegacyKey] },
+      adamAdmin.id,
+      { mfaVerified: true },
+    );
+    const invalidKeySwitch = switchViewingRole('P-000002', 'finance');
+    expect(invalidKeySwitch.ok).toBe(false);
+  });
+
+  it('resolves Viewing As dropdown options and URL preview role in the header (R216)', () => {
+    const configuredRoleKeys = createDefaultRoleConfigs().map((r) => r.key);
+
+    // Non-admin on /matters sees only their own assigned roles
+    expect(
+      resolveViewingRoleOptions({
+        currentUserRoles: ['partner'],
+        configuredRoleKeys,
+        pathname: '/matters',
+      }),
+    ).toEqual(['partner']);
+
+    // Admin on /matters sees all configured roles
+    expect(
+      resolveViewingRoleOptions({
+        currentUserRoles: ['admin'],
+        configuredRoleKeys,
+        pathname: '/matters',
+      }),
+    ).toEqual(configuredRoleKeys);
+
+    // Header displayed role honours ?previewRole= and ?view= on '/' when valid
+    expect(
+      resolveHeaderDisplayedViewingRole({
+        activeViewingRole: 'fee_earner',
+        pathname: '/',
+        previewRoleParam: 'finance',
+        viewParam: null,
+        configuredRoleKeys,
+      }),
+    ).toBe('finance');
+
+    expect(
+      resolveHeaderDisplayedViewingRole({
+        activeViewingRole: 'fee_earner',
+        pathname: '/',
+        previewRoleParam: null,
+        viewParam: 'risk_compliance',
+        configuredRoleKeys,
+      }),
+    ).toBe('risk_compliance');
+
+    // Unknown role keys are ignored
+    expect(
+      resolveHeaderDisplayedViewingRole({
+        activeViewingRole: 'fee_earner',
+        pathname: '/',
+        previewRoleParam: 'not_a_real_role',
+        viewParam: null,
+        configuredRoleKeys,
+      }),
+    ).toBe('fee_earner');
+  });
+
+  it('does not expose signedSession from switchUserAction in Demo Mode (R228)', async () => {
+    const rawBase = getActiveTenantRawBaseConfig();
+    setActiveTenantConfigForTesting(
+      {
+        ...rawBase,
+        featureFlags: {
+          ...(rawBase.featureFlags as Record<string, unknown>),
+          enableDemoMode: true,
+        },
+      },
+      {},
+    );
+    setTestEntraSessionOverride({
+      personId: 'P-000004',
+      tenantId: 'not-a-law-firm',
+      oid: '00000000-0000-4000-8000-000000000004',
+      tid: '11111111-2222-4333-8444-555555555555',
+      sub: 'P-000004',
+      email: 'adam.admin@notalawfirm.example',
+      displayName: 'Adam Admin',
+      entraRoles: ['admin'],
+      mappedRoles: ['admin'],
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    try {
+      const snap = getAppSnapshot('P-000004');
+      const felicity = snap.people.find(
+        (p) => primaryEmail(p) === 'felicity.fee-earner@notalawfirm.example',
+      )!;
+      const res = await switchUserAction(felicity.id);
+      expect(res).toEqual({ ok: true, personId: felicity.id });
+      expect('signedSession' in res).toBe(false);
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      setActiveTenantConfigForTesting(null, undefined);
+      resetAllDemoData('P-000001');
+    }
   });
 
   it('cycles panel placements Primary -> Summary -> Off and persists Admin › Home pages changes and resets', () => {

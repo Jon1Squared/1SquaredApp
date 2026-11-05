@@ -137,7 +137,8 @@ Implemented in `core/src/domain/rbac/resolver.ts` (and bridged for host entities
 ## 6. "Viewing As" (`activeViewingRole`) Isolation
 
 - Switching `"Viewing as"` only changes Home page layout and left-rail focus (`resolveActiveViewingRole` / `getLeftRailVisibility`).
-- It never mutates `Person.roles`, never affects `resolvePermissions`, and can never reveal `finance`, `risk`, or `admin` navigation items if the user's authoritative `userRoles` lack `finance:view`, `risk:view`, or `admin:access`.
+- Non-admin users may switch `"Viewing as"` only between their own authoritative assigned roles (`userRoles`). Users holding the built-in `admin` role (`canPreviewAnyHomeRole(userRoles)`) may select any configured Home role (`homePagesConfig.roles`) to preview its layout.
+- Preview is strictly presentation-only: it never mutates `Person.roles`, never affects `resolvePermissions`, and can never reveal `finance`, `risk`, or `admin` navigation items or widen data access if the user's authoritative `PermissionSet` lacks `finance:view`, `risk:view`, or `admin:access`. Every API endpoint and server action enforces its own permission check.
 
 ---
 

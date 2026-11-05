@@ -1684,14 +1684,14 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     'Commercial litigation, property disputes, construction & engineering, debt recovery and regulatory investigations.',
     ['P-000001', 'P-000006', 'P-000003'],
     ['P-000001'],
-    ['Dispute Resolution & Litigation'],
+    ['Dispute Resolution'],
   );
   const tmPrivateClient = addTeam(
     'Private Client, Trusts & Family',
     'Wills, trusts, probate, estate administration, powers of attorney and family law.',
     ['P-000005', 'P-000002', 'P-000010'],
     ['P-000005'],
-    ['Private Client, Trusts & Family'],
+    ['Private Client'],
   );
   const tmEmployment = addTeam(
     'Employment & HR',
@@ -1705,14 +1705,14 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     'Corporate lending, real estate finance, refinancing, security and insolvency.',
     ['P-000001', 'P-000007'],
     ['P-000007'],
-    ['Banking, Finance & Restructuring'],
+    ['Finance & Banking'],
   );
   const tmRegulatory = addTeam(
     'Regulatory, Public & Specialist',
     'Data protection, health & safety, licensing, public procurement and charities.',
     ['P-000003', 'P-000006'],
     ['P-000003'],
-    ['Regulatory, Public & Specialist'],
+    ['Regulatory & Compliance'],
   );
   const tmIntake = addTeam(
     'Intake',
@@ -1797,7 +1797,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     agreedFeeCapGbp: 5000,
     retainerMoniesOnAccountGbp: 0,
     stageId: v('matter_stage', 'Stage 1 — Inception & Onboarding'),
-    milestoneId: msId('Stage 1 — Inception & Onboarding', 'Engagement letter'),
+    milestoneId: msId('Stage 1 — Inception & Onboarding', 'Client care letter'),
     enquiryReceivedAt: day(-6),
     openedAt: day(-5),
     targetCompletionAt: day(75),
@@ -2158,8 +2158,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     instructingContactId: alunPugh.id,
     billingContactId: alunPugh.id,
     feeEstimateGbp: 12000,
-    stageId: v('matter_stage', 'Stage 3 — Execution & Delivery'),
-    milestoneId: msId('Stage 3 — Execution & Delivery', 'Main workstream'),
+    stageId: v('matter_stage', 'Stage 3 — Advice & Strategy'),
+    milestoneId: msId('Stage 3 — Advice & Strategy', 'Advice note / opinion'),
     tags: ['probate', 'estate administration', 'client account'],
   });
 
@@ -2244,8 +2244,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     feeEstimateGbp: 15000,
     closedAt: day(-63),
     completedAt: day(-63),
-    stageId: v('matter_stage', 'Stage 7 — Post-Completion & Closure'),
-    milestoneId: msId('Stage 7 — Post-Completion & Closure', 'File closure & archiving'),
+    stageId: v('matter_stage', 'Stage 7 — File Closure'),
+    milestoneId: msId('Stage 7 — File Closure', 'File archive'),
     tags: ['commercial property', 'completed'],
   });
 
@@ -2306,8 +2306,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     feeEstimateGbp: 2750,
     closedAt: day(-126),
     completedAt: day(-126),
-    stageId: v('matter_stage', 'Stage 7 — Post-Completion & Closure'),
-    milestoneId: msId('Stage 7 — Post-Completion & Closure', 'File closure & archiving'),
+    stageId: v('matter_stage', 'Stage 7 — File Closure'),
+    milestoneId: msId('Stage 7 — File Closure', 'File archive'),
     tags: ['mermaid quay', 'retail lease'],
   });
 
@@ -2318,7 +2318,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     shortDescription: 'Contested rent review arbitration and terminal schedule of dilapidations on Units 1–3 Marina Parade, Penarth.',
     clientId: penarth.id,
     practiceAreaId: v('work_type', 'Dispute Resolution'),
-    workTypeSubcategoryId: subId('Dispute Resolution', 'Property & real estate disputes'),
+    workTypeSubcategoryId: subId('Dispute Resolution', 'Court pleadings'),
     typeBadge: 'Disputes',
     matterTypeId: v('matter_type', 'Contentious'),
     clientTierId: penarth.clientTierId,
@@ -2334,8 +2334,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     instructingContactId: alun.id,
     billingContactId: seren.id,
     feeEstimateGbp: 18000,
-    stageId: v('matter_stage', 'Stage 3 — Execution & Delivery'),
-    milestoneId: msId('Stage 3 — Execution & Delivery', 'Main workstream'),
+    stageId: v('matter_stage', 'Stage 3 — Advice & Strategy'),
+    milestoneId: msId('Stage 3 — Advice & Strategy', 'Advice note / opinion'),
     tags: ['dilapidations', 'rent review', 'marina parade'],
   });
 
@@ -2347,7 +2347,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     clientId: tyGlas.id,
     matterStatusId: v('matter_status', 'Prospective / Enquiry'),
     practiceAreaId: v('work_type', 'Real Estate & Property'),
-    workTypeSubcategoryId: subId('Real Estate & Property', 'Commercial property — acquisitions & disposals'),
+    workTypeSubcategoryId: subId('Real Estate & Property', 'Commercial property'),
     typeBadge: 'Commercial',
     matterTypeId: v('matter_type', 'Transactional'),
     clientTierId: v('client_tier', 'Gold'),
@@ -2375,7 +2375,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     feeEstimateGbp: 28500,
     retainerMoniesOnAccountGbp: 0,
     stageId: v('matter_stage', 'Stage 1 — Inception & Onboarding'),
-    milestoneId: msId('Stage 1 — Inception & Onboarding', 'AML & CDD'),
+    milestoneId: msId('Stage 1 — Inception & Onboarding', 'AML / KYC checks'),
     targetCompletionAt: day(60),
     tags: ['high risk', 'offshore spv', 'edd', 'parc ty glas'],
     fieldValues: {
@@ -2493,7 +2493,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     phone: '07700 900544',
     address: addr('8 St Andrews Crescent', 'Cardiff', 'CF10 3DD', 'Home'),
     practiceAreaId: v('work_type', 'Employment & HR'),
-    workTypeSubcategoryId: subId('Employment & HR', 'Grievance, disciplinary & capability'),
+    workTypeSubcategoryId: subId('Employment & HR', 'Disciplinary & grievance'),
     urgencyId: v('enquiry_urgency', 'Standard'),
     keyDate: day(5),
     keyDateLabel: 'Disciplinary hearing date',
@@ -2565,7 +2565,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     phone: '029 2018 0611',
     address: addr('12 Mermaid Quay', 'Cardiff', 'CF10 5BZ', 'Work'),
     practiceAreaId: v('work_type', 'Real Estate & Property'),
-    workTypeSubcategoryId: subId('Real Estate & Property', 'Commercial property — acquisitions & disposals'),
+    workTypeSubcategoryId: subId('Real Estate & Property', 'Commercial property'),
     urgencyId: v('enquiry_urgency', 'Emergency'),
     keyDate: day(21),
     keyDateLabel: '28-day auction completion deadline',
@@ -2595,8 +2595,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     email: 'bryn.walters@pmail.example',
     phone: '0117 496 0421',
     address: addr('7 Clifton Down Road', 'Bristol', 'BS8 4BF', 'Home', 'Clifton'),
-    practiceAreaId: v('work_type', 'Private Client, Trusts & Family'),
-    workTypeSubcategoryId: subId('Private Client, Trusts & Family', 'Probate & estate administration'),
+    practiceAreaId: v('work_type', 'Private Client'),
+    workTypeSubcategoryId: subId('Private Client', 'Estate administration'),
     urgencyId: v('enquiry_urgency', 'Standard'),
     keyDate: day(45),
     keyDateLabel: 'IHT400 submission deadline (6 months from death)',
@@ -2619,8 +2619,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     callingOnBehalfOf: 'Bayview Retail Concessions Ltd',
     email: 'm.finch@bayviewconcessions.example',
     phone: '029 2018 0799',
-    practiceAreaId: v('work_type', 'Dispute Resolution & Litigation'),
-    workTypeSubcategoryId: subId('Dispute Resolution & Litigation', 'Property & real estate disputes'),
+    practiceAreaId: v('work_type', 'Dispute Resolution'),
+    workTypeSubcategoryId: subId('Dispute Resolution', 'Court pleadings'),
     urgencyId: v('enquiry_urgency', 'Urgent'),
     summary: 'Dispute with landlord Penarth Estates Ltd over service charge at Cardiff Bay Retail Park',
     notes: 'Prospective tenant client wished to challenge service charge apportionment at Cardiff Bay Retail Park. Penarth Estates Ltd is an existing Platinum client of the firm — declined due to direct conflict.',
@@ -2640,7 +2640,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     email: 'a.maddock@severnbiotech.example',
     phone: '0117 496 0884',
     practiceAreaId: v('work_type', 'Corporate & Commercial'),
-    workTypeSubcategoryId: subId('Corporate & Commercial', 'IP, IT & technology agreements'),
+    workTypeSubcategoryId: subId('Corporate & Commercial', 'Commercial contracts'),
     urgencyId: v('enquiry_urgency', 'Standard'),
     summary: 'European patent opposition before the EPO in Munich; needs patent attorney',
     notes: 'Requires specialist European Patent Attorney representation in chemical diagnostics opposition proceedings. Referred to Morgan Price IP practice.',
@@ -2659,8 +2659,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     email: 'keira.saunders@pmail.example',
     phone: '07700 900119',
     channelId: v('enquiry_channel', 'Web form'),
-    practiceAreaId: v('work_type', 'Private Client, Trusts & Family'),
-    workTypeSubcategoryId: subId('Private Client, Trusts & Family', 'Wills & estate planning'),
+    practiceAreaId: v('work_type', 'Private Client'),
+    workTypeSubcategoryId: subId('Private Client', 'Wills & codicils'),
     urgencyId: v('enquiry_urgency', 'Standard'),
     summary: 'Mirror wills enquiry via website form',
     notes: 'Submitted web enquiry asking about mirror wills and guardianship clauses. Three contact attempts made with no reply.',
@@ -3029,8 +3029,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     prospectPhone: '0117 496 0421',
     linkedEnquiryId: enq5.id,
     convertedMatterId: null,
-    practiceAreaId: v('work_type', 'Private Client, Trusts & Family'),
-    workTypeSubcategoryId: subId('Private Client, Trusts & Family', 'Probate & estate administration'),
+    practiceAreaId: v('work_type', 'Private Client'),
+    workTypeSubcategoryId: subId('Private Client', 'Estate administration'),
     scope:
       "Full estate administration for late uncle's estate (approx. £1.4m including Monmouthshire agricultural land and investment portfolio), including preparing IHT400 and agricultural relief schedule, applying for Grant of Probate, collecting assets, and preparing estate accounts.",
     assumptions:
@@ -3256,7 +3256,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     linkedEnquiryId: null,
     convertedMatterId: null,
     practiceAreaId: v('work_type', 'Employment & HR'),
-    workTypeSubcategoryId: subId('Employment & HR', 'Contracts, policies & handbooks'),
+    workTypeSubcategoryId: subId('Employment & HR', 'HR policies & handbooks'),
     scope:
       'Comprehensive review and update of Staff Handbook, hybrid working policy, disciplinary & grievance procedures, and senior executive service agreement template for 2026/27.',
     assumptions:

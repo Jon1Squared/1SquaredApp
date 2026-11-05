@@ -6,7 +6,7 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How Microsoft Entra ID OIDC sign-in and sign-out work in 1Squared, how role-based access control (RBAC) and Entra identity mapping are configured, and which administrative actions require multi-factor authentication (MFA).',
-  updated: '2026-11-04',
+  updated: '2026-11-05',
   body: `
 1Squared authenticates every user through **Microsoft Entra ID (OpenID Connect with PKCE)** and evaluates access on every server action and API route through the central **Role-Based Access Control (RBAC)** engine in \`@platform/core\`.
 
@@ -16,7 +16,8 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
 - **Cryptographic Token Verification**: On callback (\`/api/auth/callback/microsoft-entra-id\`), 1Squared exchanges the authorization code for an ID token and verifies its RS256 signature against Microsoft Entra’s JWKS discovery endpoint, along with \`aud\`, \`tid\`, \`iss\`, \`nonce\`, \`exp\`, \`nbf\`, and \`iat\` claims.
 - **Signed Session Cookie**: Once verified, 1Squared issues an HMAC-SHA256 signed \`httpOnly\` session cookie (\`onesquared_entra_session\`). The acting user identity is resolved exclusively from this verified session—never from client-writable cookies, URL parameters, or form fields.
 - **CSRF-Safe Sign-Out**: Signing out from the account menu submits a \`POST\` request to \`/api/auth/logout\` (\`GET\` requests return \`405 Method Not Allowed\`), clearing the session cookie immediately.
-- **Demo Mode User Switching**: Switching between seeded personas (\`demo: true\`) is blocked in production (\`NODE_ENV === 'production'\`) and in \`live\` tenant environments (\`enableDemoMode\` cannot be \`true\` when \`environment === 'live'\`). When \`featureFlags.enableDemoMode\` is enabled in a non-live, non-production tenant configuration (\`isDemoModeEnabled() === true\`; \`homePagesConfig.firmSettings.demoMode\` is derived from \`isDemoModeEnabled()\` and cannot be set independently), a signed-in user can only switch to a demo persona (\`demo: true\`) whose permissions are a subset of the permissions the signed-in user already holds and who does not have access to any restricted or staff matter (\`restrictedAccessUserIds\`) that the signed-in user cannot access.
+- **Demo Mode User Switching**: Switching between seeded personas (\`demo: true\`) is blocked in production (\`NODE_ENV === 'production'\`) and in \`live\` tenant environments (\`enableDemoMode\` cannot be \`true\` when \`environment === 'live'\`). The account menu hides the demo persona switcher whenever \`featureFlags.enableDemoMode\` is \`false\`. When \`featureFlags.enableDemoMode\` is enabled in a non-live, non-production tenant configuration (\`isDemoModeEnabled() === true\`; \`homePagesConfig.firmSettings.demoMode\` is derived from \`isDemoModeEnabled()\` and cannot be set independently), a signed-in user can only switch to a demo persona (\`demo: true\`) whose permissions are a subset of the permissions the signed-in user already holds and who does not have access to any restricted or staff matter (\`restrictedAccessUserIds\`) that the signed-in user cannot access.
+- **Role Preview ("Viewing as" Header Switcher)**: Multi-role employees can switch their active **Viewing as** role in the top bar between their assigned roles, and System Administrators holding the built-in \`admin\` role (\`canPreviewAnyHomeRole\`) can select any configured Home role in the **Viewing as** dropdown (\`switchViewingRole\` and \`resolveActiveViewingRole\`) to preview role-specific Home workspaces and left-rail navigation without changing their underlying RBAC permissions.
 
 ## 2. Employee matching, provisioning & authority modes
 
