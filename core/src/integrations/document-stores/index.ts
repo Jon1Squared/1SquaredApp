@@ -13,6 +13,7 @@
 import type {
   DocumentStoreConfig,
   DocumentStoreErrorCode,
+  DocumentStoreErrorReason,
   DocumentStoreProvider,
   DocumentStoreProviderType,
   TenantContext,
@@ -31,8 +32,12 @@ export const RESERVED_UNSUPPORTED_DOCUMENT_STORE_PROVIDERS = new Set<DocumentSto
   'netdocuments',
 ]);
 
+export const GENERIC_USER_DOCUMENT_STORE_UNAVAILABLE_MESSAGE =
+  'Documents for this matter are unavailable. Please contact your administrator.';
+
 export interface NormalisedDocumentStoreError extends Error {
   code: DocumentStoreErrorCode;
+  reason?: DocumentStoreErrorReason;
   userMessage: string;
   claimsChallenge?: string;
   retryAfterMs?: number;
@@ -49,8 +54,7 @@ const USER_FRIENDLY_ERROR_MESSAGES: Record<DocumentStoreErrorCode, string> = {
     'The document store is temporarily busy processing requests. Please try again in a moment.',
   unavailable:
     'The external document store is temporarily unavailable. Please try again shortly.',
-  misconfigured:
-    'The document store connection is misconfigured. Please contact your administrator.',
+  misconfigured: GENERIC_USER_DOCUMENT_STORE_UNAVAILABLE_MESSAGE,
   invalid_path:
     'The specified document store path or library does not match the routed matter configuration.',
   reauthentication_required:
@@ -65,6 +69,7 @@ export function normaliseDocumentStoreError(
   err: unknown,
 ): NormalisedDocumentStoreError {
   const existingCode = (err as { code?: DocumentStoreErrorCode })?.code;
+  const existingReason = (err as { reason?: DocumentStoreErrorReason })?.reason;
   const rawMessage =
     err instanceof Error
       ? err.message
@@ -110,7 +115,17 @@ export function normaliseDocumentStoreError(
 
   const normalised = new Error(rawMessage) as NormalisedDocumentStoreError;
   normalised.code = code;
-  normalised.userMessage = USER_FRIENDLY_ERROR_MESSAGES[code];
+  if (existingReason) {
+    normalised.reason = existingReason;
+  }
+  normalised.userMessage =
+    existingReason === 'site_access_not_granted' ||
+    existingReason === 'site_grant_role_insufficient' ||
+    existingReason === 'excess_permissions_consented' ||
+    existingReason === 'site_or_drive_mismatch' ||
+    code === 'misconfigured'
+      ? GENERIC_USER_DOCUMENT_STORE_UNAVAILABLE_MESSAGE
+      : USER_FRIENDLY_ERROR_MESSAGES[code];
   const claimsChallenge = (err as { claimsChallenge?: string })
     ?.claimsChallenge;
   if (claimsChallenge) {

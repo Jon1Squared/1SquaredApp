@@ -21,9 +21,19 @@ import type {
   DocumentPermissionGrant,
   DocumentPermissionSharingLink,
   DocumentPrincipalRef,
+  DocumentStoreConnectionTestResult,
   DocumentStoreErrorCode,
+  DocumentStoreErrorReason,
   DocumentStoreItem,
+  TenantContext,
 } from '../../api/index';
+import { buildTenantCacheKey } from '../../tenancy/index';
+
+export type SharePointSiteGrantRole =
+  | 'none'
+  | 'read'
+  | 'write'
+  | 'fullcontrol';
 
 export interface MockGraphCallLogEntry {
   timestamp: string;
@@ -98,14 +108,23 @@ export function createMockGraphError(
   code: DocumentStoreErrorCode,
   message: string,
   retryAfterMs?: number,
-): Error & { code: DocumentStoreErrorCode; retryAfterMs?: number } {
+  reason?: DocumentStoreErrorReason,
+): Error & {
+  code: DocumentStoreErrorCode;
+  retryAfterMs?: number;
+  reason?: DocumentStoreErrorReason;
+} {
   const err = new Error(message) as Error & {
     code: DocumentStoreErrorCode;
     retryAfterMs?: number;
+    reason?: DocumentStoreErrorReason;
   };
   err.code = code;
   if (retryAfterMs !== undefined) {
     err.retryAfterMs = retryAfterMs;
+  }
+  if (reason !== undefined) {
+    err.reason = reason;
   }
   return err;
 }
@@ -120,6 +139,16 @@ export class MockSharePointGraphBackend {
   private remainingThrottleResponses = 0;
   private throttleRetryAfterMs = 10;
   private simulateMissingSiteGrantsForStore = new Set<string>();
+  private readonly siteGrantRoles = new Map<string, SharePointSiteGrantRole>();
+  private readonly sitePermissionsReadForbidden = new Set<string>();
+  private readonly simulatedTokenClaims = new Map<
+    string,
+    { appRoles?: readonly string[]; delegatedScopes?: readonly string[] }
+  >();
+  private readonly healthCache = new Map<
+    string,
+    { tenantId: string; storeId: string; result: DocumentStoreConnectionTestResult }
+  >();
 
   public getCallLog(): readonly MockGraphCallLogEntry[] {
     return this.callLog;
@@ -134,11 +163,226 @@ export class MockSharePointGraphBackend {
     this.throttleRetryAfterMs = retryAfterMs;
   }
 
-  public setSimulateMissingSiteGrant(storeId: string, missing: boolean): void {
+  public setSimulateMissingSiteGrant(
+    storeId: string,
+    missing: boolean,
+    tenantId?: string,
+  ): void {
+    const key = tenantId ? `${tenantId}::${storeId}` : storeId;
     if (missing) {
-      this.simulateMissingSiteGrantsForStore.add(storeId);
+      this.simulateMissingSiteGrantsForStore.add(key);
+      this.siteGrantRoles.set(key, 'none');
     } else {
-      this.simulateMissingSiteGrantsForStore.delete(storeId);
+      this.simulateMissingSiteGrantsForStore.delete(key);
+      this.siteGrantRoles.delete(key);
+    }
+  }
+
+  public setSitePermissionGrant(params: {
+    tenantId?: string;
+    storeId?: string;
+    siteId?: string;
+    role: SharePointSiteGrantRole;
+  }): void {
+    const t = params.tenantId ?? '*';
+    if (params.storeId) {
+      const storeKey = `${t}::store::${params.storeId}`;
+      this.siteGrantRoles.set(storeKey, params.role);
+      if (params.role === 'none') {
+        this.simulateMissingSiteGrantsForStore.add(
+          params.tenantId ? `${params.tenantId}::${params.storeId}` : params.storeId,
+        );
+      } else {
+        this.simulateMissingSiteGrantsForStore.delete(
+          params.tenantId ? `${params.tenantId}::${params.storeId}` : params.storeId,
+        );
+        this.simulateMissingSiteGrantsForStore.delete(params.storeId);
+      }
+    }
+    if (params.siteId) {
+      const siteKey = `${t}::site::${params.siteId}`;
+      this.siteGrantRoles.set(siteKey, params.role);
+    }
+  }
+
+  public getSitePermissionGrantRole(params: {
+    tenantId: string;
+    storeId: string;
+    siteId?: string;
+  }): SharePointSiteGrantRole {
+    if (
+      this.simulateMissingSiteGrantsForStore.has(
+        `${params.tenantId}::${params.storeId}`,
+      ) ||
+      this.simulateMissingSiteGrantsForStore.has(params.storeId)
+    ) {
+      return 'none';
+    }
+
+    if (params.siteId) {
+      const byTenantSite = this.siteGrantRoles.get(
+        `${params.tenantId}::site::${params.siteId}`,
+      );
+      if (byTenantSite !== undefined) return byTenantSite;
+
+      // If another tenant explicitly registered a grant on its site, do not grant it to this tenant
+      for (const [k] of this.siteGrantRoles.entries()) {
+        if (
+          k.endsWith(`::site::${params.siteId}`) &&
+          !k.startsWith(`${params.tenantId}::`) &&
+          !k.startsWith('*::')
+        ) {
+          return 'none';
+        }
+      }
+
+      const byWildcardSite = this.siteGrantRoles.get(
+        `*::site::${params.siteId}`,
+      );
+      if (byWildcardSite !== undefined) return byWildcardSite;
+    }
+
+    const byTenantStore = this.siteGrantRoles.get(
+      `${params.tenantId}::store::${params.storeId}`,
+    );
+    if (byTenantStore !== undefined) return byTenantStore;
+
+    for (const [k] of this.siteGrantRoles.entries()) {
+      if (
+        k.endsWith(`::store::${params.storeId}`) &&
+        !k.startsWith(`${params.tenantId}::`) &&
+        !k.startsWith('*::')
+      ) {
+        return 'none';
+      }
+    }
+
+    const byWildcardStore = this.siteGrantRoles.get(
+      `*::store::${params.storeId}`,
+    );
+    if (byWildcardStore !== undefined) return byWildcardStore;
+
+    return 'fullcontrol';
+  }
+
+  public setSimulateSitePermissionsReadForbidden(
+    storeOrSiteIdOrParams:
+      | string
+      | {
+          tenantId?: string;
+          storeId?: string;
+          siteId?: string;
+          forbidden: boolean;
+        },
+    forbidden?: boolean,
+    tenantId?: string,
+  ): void {
+    if (typeof storeOrSiteIdOrParams === 'object') {
+      const p = storeOrSiteIdOrParams;
+      const targets = [p.storeId, p.siteId].filter(Boolean) as string[];
+      for (const t of targets) {
+        const key = p.tenantId ? `${p.tenantId}::${t}` : t;
+        if (p.forbidden) {
+          this.sitePermissionsReadForbidden.add(key);
+        } else {
+          this.sitePermissionsReadForbidden.delete(key);
+        }
+      }
+      return;
+    }
+    const key = tenantId
+      ? `${tenantId}::${storeOrSiteIdOrParams}`
+      : storeOrSiteIdOrParams;
+    if (forbidden) {
+      this.sitePermissionsReadForbidden.add(key);
+    } else {
+      this.sitePermissionsReadForbidden.delete(key);
+    }
+  }
+
+  public isSitePermissionsReadForbidden(params: {
+    tenantId: string;
+    storeId: string;
+    siteId: string;
+  }): boolean {
+    return (
+      this.sitePermissionsReadForbidden.has(
+        `${params.tenantId}::${params.storeId}`,
+      ) ||
+      this.sitePermissionsReadForbidden.has(
+        `${params.tenantId}::${params.siteId}`,
+      ) ||
+      this.sitePermissionsReadForbidden.has(params.storeId) ||
+      this.sitePermissionsReadForbidden.has(params.siteId)
+    );
+  }
+
+  public setSimulatedTokenClaims(params: {
+    tenantId?: string;
+    storeId: string;
+    appRoles?: readonly string[];
+    delegatedScopes?: readonly string[];
+  }): void {
+    const key = `${params.tenantId ?? '*'}::${params.storeId}`;
+    this.simulatedTokenClaims.set(key, {
+      appRoles: params.appRoles ? [...params.appRoles] : undefined,
+      delegatedScopes: params.delegatedScopes
+        ? [...params.delegatedScopes]
+        : undefined,
+    });
+  }
+
+  public getSimulatedTokenClaims(
+    tenantId: string,
+    storeId: string,
+  ): { appRoles?: readonly string[]; delegatedScopes?: readonly string[] } | undefined {
+    return (
+      this.simulatedTokenClaims.get(`${tenantId}::${storeId}`) ??
+      this.simulatedTokenClaims.get(`*::${storeId}`)
+    );
+  }
+
+  public setStoreHealthResult(
+    ctx: Pick<TenantContext, 'tenantId'>,
+    storeId: string,
+    result: DocumentStoreConnectionTestResult,
+  ): string {
+    const cacheKey = buildTenantCacheKey(ctx, 'docstore-health', storeId);
+    this.healthCache.set(cacheKey, {
+      tenantId: ctx.tenantId,
+      storeId,
+      result,
+    });
+    return cacheKey;
+  }
+
+  public getStoreHealthResult(
+    ctx: Pick<TenantContext, 'tenantId'>,
+    storeId: string,
+  ): DocumentStoreConnectionTestResult | null {
+    const cacheKey = buildTenantCacheKey(ctx, 'docstore-health', storeId);
+    const entry = this.healthCache.get(cacheKey);
+    if (!entry) return null;
+    if (entry.tenantId !== ctx.tenantId || entry.storeId !== storeId) {
+      throw new Error(
+        'TENANCY_ISOLATION_ERROR: Cross-tenant document store health cache access blocked.',
+      );
+    }
+    return entry.result;
+  }
+
+  public clearStoreHealthResults(tenantId?: string, storeId?: string): void {
+    if (!tenantId && !storeId) {
+      this.healthCache.clear();
+      return;
+    }
+    for (const [k, v] of this.healthCache.entries()) {
+      if (
+        (!tenantId || v.tenantId === tenantId) &&
+        (!storeId || v.storeId === storeId)
+      ) {
+        this.healthCache.delete(k);
+      }
     }
   }
 
@@ -243,10 +487,54 @@ export class MockSharePointGraphBackend {
       );
     }
 
-    if (this.simulateMissingSiteGrantsForStore.has(caller.storeId)) {
+    const siteGrantRole = this.getSitePermissionGrantRole({
+      tenantId: caller.tenantId,
+      storeId: caller.storeId,
+    });
+    if (siteGrantRole === 'none') {
       throw createMockGraphError(
         'access_denied',
-        'Application lacks Sites.Selected fullcontrol permission on the target SharePoint site.',
+        caller.identityKind === 'user'
+          ? 'Documents for this matter are unavailable. Please contact your administrator.'
+          : `SharePoint access not granted for site in store "${caller.storeId}".`,
+        undefined,
+        'site_access_not_granted',
+      );
+    }
+    if (
+      siteGrantRole === 'read' &&
+      (operation === 'uploadContent' ||
+        operation === 'createUploadSession' ||
+        operation === 'uploadChunk' ||
+        operation === 'createFolder' ||
+        operation === 'renameItem' ||
+        operation === 'moveItem' ||
+        operation === 'deleteItem' ||
+        operation === 'ensureFolderTree' ||
+        operation === 'setPermissions' ||
+        operation === 'breakRoleInheritance' ||
+        operation === 'resetRoleInheritance')
+    ) {
+      throw createMockGraphError(
+        'access_denied',
+        caller.identityKind === 'user'
+          ? 'Documents for this matter are unavailable. Please contact your administrator.'
+          : `SharePoint site grant role "read" is insufficient for operation "${operation}" in store "${caller.storeId}".`,
+        undefined,
+        'site_grant_role_insufficient',
+      );
+    }
+    if (
+      siteGrantRole === 'write' &&
+      (operation === 'setPermissions' ||
+        operation === 'breakRoleInheritance' ||
+        operation === 'resetRoleInheritance')
+    ) {
+      throw createMockGraphError(
+        'access_denied',
+        `SharePoint site grant role "write" is insufficient for permission management in store "${caller.storeId}"; "fullcontrol" is required.`,
+        undefined,
+        'site_grant_role_insufficient',
       );
     }
   }

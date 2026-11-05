@@ -1,5 +1,18 @@
 # 1Squared — Release Notes
 
+## Unreleased — Least-Privilege SharePoint Access via `Sites.Selected` (`feat/sharepoint-sites`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Core Feature & Configuration Option (`@platform/core`, `src/server/documentStoreServices.ts`):**
+  - Least-privilege SharePoint access using `Sites.Selected` (Delegated and Application on Microsoft Graph, plus `Sites.Selected` Application on Office 365 SharePoint Online) and a single `fullcontrol` site permission grant per configured site ([ADR-0023](./decisions/0023-sharepoint-sites-selected-least-privilege.md), amending [ADR-0018](./decisions/0018-two-identity-authentication-model.md)).
+  - Backward-compatible v1.x transition (Rule 7): `auth.delegatedPermissionScope` retains `"Files.ReadWrite.All"` as the v1.x schema default while `collectStructuredConfigDeprecationWarnings` emits a `ConfigDeprecationWarning` whenever `"Files.ReadWrite.All"` is used (explicitly or by default); the Admin UI and reference client configuration (`client-not-a-law-firm/config/base.json`) explicitly set `"Sites.Selected"`, and the default flips in v2.0.
+  - Fail-closed excess-permission detection (`verifyTokenClaimsForSitesSelected`): inspects decoded `roles` and `scp` claims (without ever logging token values) and fails closed (`code: 'misconfigured'`, `reason: 'excess_permissions_consented'`) if any broad permission (`Files.Read.All`, `Files.ReadWrite.All`, `Sites.Read.All`, `Sites.ReadWrite.All`, `Sites.Manage.All`, `Sites.FullControl.All`) remains consented when `delegatedPermissionScope === 'Sites.Selected'`.
+  - Tenant-scoped health check (`testConnection` and `runTenantSharePointHealthCheckJob` via `runTenantBackgroundJob`) with tri-state site grant verification (`roleVerificationStatus: 'verified' | 'not_verified' | 'insufficient'`), per-`(tenantId, storeId)` health result caching (`buildTenantCacheKey`), and fail-closed enforcement on unhealthy stores.
+  - Provider-level target scope guard (`assertStoreTargetScope`) before all 14 `backend.recordCall` sites in `SharePointDocumentStoreProvider`, rejecting tampered `siteId` or `driveId` values (`reason: 'site_or_drive_mismatch'`) before any Graph request is made.
+  - Non-admin error privacy: non-admin users see only `"Documents for this matter are unavailable. Please contact your administrator."` with zero GUIDs, `clientId`, `siteId`, or SharePoint hostnames.
+
+---
+
 ## Unreleased — External Document Store Integration (Phase 1: SharePoint Online)
 
 ### Change Classification (Platform Architecture Standard Section 14)

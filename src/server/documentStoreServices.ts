@@ -70,6 +70,7 @@ import {
 import type { Matter, Person } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -108,10 +109,7 @@ export function resetDocumentStoreSingletonsForTesting(): void {
 export function loadActiveDocumentTenantConfig(
   store: FirmStore = getStore(),
 ): TenantConfiguration {
-  const rawBase = getActiveTenantConfiguration() as unknown as Record<
-    string,
-    unknown
-  >;
+  const activeConfig = getActiveTenantConfiguration();
 
   const override = store.documentStoreConfigOverride ?? {};
   const hasOverride =
@@ -121,9 +119,10 @@ export function loadActiveDocumentTenantConfig(
     override.documentAccess !== undefined ||
     override.matterFolderTemplates !== undefined;
   if (!hasOverride) {
-    return rawBase as unknown as TenantConfiguration;
+    return activeConfig;
   }
 
+  const rawBase = getActiveTenantRawBaseConfig();
   const overlay: Record<string, unknown> = {};
   if (override.documentStores) {
     overlay.documentStores = override.documentStores;
@@ -2159,10 +2158,7 @@ export function saveAdminDocumentStoreConfiguration(params: {
   };
 
   // Validate against schema before saving
-  const rawBase = getActiveTenantConfiguration() as unknown as Record<
-    string,
-    unknown
-  >;
+  const rawBase = getActiveTenantRawBaseConfig();
   const validated = loadAndValidateTenantConfig(rawBase, nextOverride);
 
   // Also validate against tenant org structure & choice list IDs
@@ -2188,6 +2184,18 @@ export function saveAdminDocumentStoreConfiguration(params: {
     templates: 'config:templates:updated' as const,
   };
 
+  const storeScopeMetadata =
+    params.section === 'stores' && params.documentStores
+      ? {
+          delegatedPermissionScopes: Object.fromEntries(
+            params.documentStores.map((ds) => [
+              ds.storeId,
+              ds.auth?.delegatedPermissionScope ?? 'Files.ReadWrite.All',
+            ]),
+          ),
+        }
+      : undefined;
+
   repo.appendAuditEvent(
     ctx,
     buildDocumentStoreAuditEvent({
@@ -2196,6 +2204,7 @@ export function saveAdminDocumentStoreConfiguration(params: {
       triggerEvent: `admin.${params.section}.saved`,
       action: actionMap[params.section],
       outcome: 'succeeded',
+      ...(storeScopeMetadata ? { metadata: storeScopeMetadata } : {}),
     }),
   );
   persistRepositoryToStore(ctx, repo, store);

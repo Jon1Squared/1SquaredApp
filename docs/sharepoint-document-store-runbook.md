@@ -11,28 +11,27 @@ Related Architecture Decision Records:
 - [ADR-0019: Inheritance-Based Document Permission Model](./decisions/0019-inheritance-based-document-permission-model.md)
 - [ADR-0020: Document References and Zero-Content Storage](./decisions/0020-document-references-and-zero-content-storage.md)
 - [ADR-0021: Matter Folder Template Inheritance Model](./decisions/0021-matter-folder-template-inheritance-model.md)
+- [ADR-0023: Least-Privilege SharePoint Access via `Sites.Selected`](./decisions/0023-sharepoint-sites-selected-least-privilege.md)
 
 ---
 
-## 1. Create the Entra ID App Registration(s)
+## 1. Create the Entra ID App Registration and Configure Minimum Permissions
 
-1Squared uses **two distinct identity flows** (which can be configured on a single App Registration or separated into a User API App Registration + a Provisioning App Registration):
+1Squared uses **two distinct identity flows** on the configured Entra ID application (`auth.clientId`):
 
-1. **Delegated User Identity (On-Behalf-Of / OBO Flow):**
-   - Used for all interactive user operations (`listItems`, `getItem`, `downloadContent`, `uploadContent`, `createFolder`, `renameItem`, `moveItem`, `deleteItem`, `getWebUrl`, `getEffectiveAccess`).
-   - API permissions (Microsoft Graph -> **Delegated permissions**):
-     - `Files.ReadWrite.All` (Delegated — strictly bounded by the signed-in user's own SharePoint permissions)
-     - `Sites.Read.All` (Delegated)
-     - `openid`, `profile`, `email`, `offline_access`
-   - Expose an API scope on the 1Squared API App Registration (`api://<client-id>/access_as_user`) so the browser or Next.js server can acquire a user token and exchange it via OBO.
+| API / Resource | Permission Name | Type | Purpose in 1Squared |
+| :--- | :--- | :--- | :--- |
+| **Microsoft Graph** (`00000003-0000-0000-c000-000000000000`) | `Sites.Selected` | **Delegated** | User On-Behalf-Of (OBO) operations (`listItems`, `getItem`, `downloadContent`, `uploadContent`, `createFolder`, `renameItem`, `moveItem`, `deleteItem`, `getWebUrl`, `getEffectiveAccess`) scoped strictly to granted sites (`intersection(appSiteGrant, userSharePointACL)`). |
+| **Microsoft Graph** (`00000003-0000-0000-c000-000000000000`) | `Sites.Selected` | **Application** | Background folder provisioning and DriveItem permission management (`testConnection`, `resolveLocation`, `ensureFolderTree`, `getPermissions`, `setPermissions`) on granted sites only. |
+| **Office 365 SharePoint Online** (`00000003-0000-0ff1-ce00-000000000000`) | `Sites.Selected` | **Application** | SharePoint REST role inheritance calls (`breakroleinheritance` and `resetroleinheritance`) in `setPermissions` using certificate authentication. |
+| **Microsoft Graph** (`00000003-0000-0000-c000-000000000000`) | `User.ReadBasic.All` | **Application** | Used by `resolvePrincipal` (`GET /users/{upn}?$select=id,displayName,mail,userPrincipalName`) to resolve employee Entra Object IDs before first interactive sign-in. |
+| **Microsoft Graph** (`00000003-0000-0000-c000-000000000000`) | `GroupMember.Read.All` | **Application** | Used by `resolvePrincipal` (`GET /groups/{id}?$select=id,displayName`) to verify department, team, and oversight Entra security groups. |
 
-2. **Provisioning Application Identity (App-Only Certificate Flow):**
-   - Used **only** by background jobs and admin actions (`testConnection`, `resolveLocation`, `ensureFolderTree`, `getPermissions`, `setPermissions`, `resolvePrincipal`).
-   - API permissions (Microsoft Graph -> **Application permissions**):
-     - `Sites.Selected` (Application — grants **zero** access to any SharePoint site until explicitly granted per site in Step 3)
-     - `Group.Read.All` (Application — optional, used to verify Entra security group object IDs during connection tests)
-     - `User.Read.All` (Application — optional, used to resolve `Person.entraObjectId` by UPN for restricted-matter named participants who have not yet signed in)
-   - **Never** grant `Sites.FullControl.All` or `Sites.ReadWrite.All` (Application).
+- Expose an API scope on the 1Squared App Registration (`api://<client-id>/access_as_user`) alongside standard OIDC scopes (`openid`, `profile`, `email`, `offline_access`) so the server can exchange the user's token via OBO.
+- **Fail-Closed Excess-Permission Check (`excess_permissions_consented`):** When `auth.delegatedPermissionScope` is set to `"Sites.Selected"`, 1Squared inspects the `roles` and `scp` claims of acquired tokens (without ever logging token values) and **fails closed** (`code: "misconfigured"`, `reason: "excess_permissions_consented"`) if any of the following tenant-wide permissions remain consented on the application:
+  - `Files.Read.All` or `Files.ReadWrite.All`
+  - `Sites.Read.All` or `Sites.ReadWrite.All`
+  - `Sites.Manage.All` or `Sites.FullControl.All`
 
 ### Model A (`single_tenant`) vs Model B (`multi_tenant`)
 - **Model A (`single_tenant`):** Register the application as **Single tenant** inside the firm's Entra ID tenant (or use a User-Assigned Managed Identity for the provisioning identity).
@@ -66,21 +65,26 @@ az keyvault certificate download `
 ### Attach the Public Certificate to the App Registration
 1. In the [Microsoft Entra admin center](https://entra.microsoft.com), open **App registrations › `<1Squared App>` › Certificates & secrets › Certificates**.
 2. Click **Upload certificate** and select `sp-provisioning-cert.cer`.
-3. In the tenant configuration (`config/base.json`), reference only the Key Vault secret name in `provisioningAuth.certificateKeyVaultSecretName`:
+3. In the tenant configuration (`config/base.json`), reference only the Key Vault secret URI in `auth.certificateKeyVaultSecretRef` and set `auth.delegatedPermissionScope` to `"Sites.Selected"`:
    ```json
-   "provisioningAuth": {
-     "mode": "app_registration",
-     "tenantId": "<firm-entra-tenant-guid>",
-     "clientId": "<provisioning-app-client-guid>",
-     "certificateKeyVaultSecretName": "sp-provisioning-cert"
+   "auth": {
+     "entraTenantId": "<firm-entra-tenant-guid>",
+     "credentialMode": "client_certificate",
+     "clientId": "<1squared-app-client-guid>",
+     "certificateKeyVaultSecretRef": "kv://kv-<tenant-slug>-<env>/sp-provisioning-cert",
+     "delegatedPermissionScope": "Sites.Selected"
    }
    ```
 
 ---
 
-## 3. Grant `Sites.Selected` (`fullcontrol`) on the Target SharePoint Site
+## 3. Grant `Sites.Selected` (`fullcontrol`) on Each Target SharePoint Site
 
-Because the provisioning app holds `Sites.Selected`, it cannot access any SharePoint site until a SharePoint Administrator explicitly grants it permission on the target site(s). Managing folder permissions (`breakroleinheritance`, `resetroleinheritance`, and group role assignments) requires the `fullcontrol` role on the target site.
+Because both the delegated OBO flow and the application provisioning flow use `Sites.Selected` on the same `auth.clientId`, the application has **zero access** to any SharePoint site until a SharePoint Administrator explicitly grants it permission on each configured site.
+
+A **single** site permission grant with `roles: ["fullcontrol"]` for `auth.clientId` authorises both flows:
+- **Provisioning (`ProvisioningAccessContext`):** Requires `fullcontrol` on the target site to manage folder role assignments and break/reset role inheritance (`setPermissions`).
+- **Delegated User OBO (`UserAccessContext`):** Uses the site grant as an outer boundary while SharePoint strictly enforces the signed-in user's own folder and item permissions (`read`, `contribute`, `edit`, or `none`).
 
 ### Option A: Using Microsoft Graph API (Graph Explorer or `az rest`)
 
@@ -89,7 +93,7 @@ First, resolve the SharePoint `siteId`:
 GET https://graph.microsoft.com/v1.0/sites/{hostname}:/sites/{sitePath}
 ```
 
-Then grant `fullcontrol` to the 1Squared Provisioning App Registration on that site (must be called by a SharePoint Administrator):
+Then grant `fullcontrol` to the 1Squared App Registration on that site (must be called by a SharePoint Administrator):
 ```http
 POST https://graph.microsoft.com/v1.0/sites/{siteId}/permissions
 Content-Type: application/json
@@ -99,8 +103,8 @@ Content-Type: application/json
   "grantedToIdentities": [
     {
       "application": {
-        "id": "<provisioning-app-client-guid>",
-        "displayName": "1Squared Document Store Provisioning"
+        "id": "<1squared-app-client-guid>",
+        "displayName": "1Squared Document Store Integration"
       }
     }
   ]
@@ -113,8 +117,26 @@ Content-Type: application/json
 Connect-PnPOnline -Url "https://<tenant>.sharepoint.com/sites/<SiteName>" -Interactive
 
 Grant-PnPAzureADAppSitePermission `
-  -AppId "<provisioning-app-client-guid>" `
-  -DisplayName "1Squared Document Store Provisioning" `
+  -AppId "<1squared-app-client-guid>" `
+  -DisplayName "1Squared Document Store Integration" `
+  -Site "https://<tenant>.sharepoint.com/sites/<SiteName>" `
+  -Permissions FullControl
+```
+
+### Option C: Model A (`single_tenant`) with Azure Managed Identity (`credentialMode: "managed_identity"`)
+
+When a firm runs 1Squared in **Model A (`single_tenant`)** using an Azure Managed Identity for background provisioning (`credentialMode: "managed_identity"`) alongside an Entra App Registration for user OBO (`auth.clientId`):
+1. Grant `fullcontrol` on each target site to the **OBO App Registration** (`<1squared-app-client-guid>`) using Option A or B above so delegated user operations can reach the site.
+2. Also grant `fullcontrol` on each target site to the **Managed Identity Service Principal** (using its Application `appId` GUID):
+```powershell
+# Look up the Managed Identity's Application ID (appId)
+$miSp = Get-MgServicePrincipal -Filter "displayName eq 'mi-1squared-<tenant>-<env>'"
+
+# Grant FullControl on the target SharePoint site to both the OBO App and Managed Identity
+Connect-PnPOnline -Url "https://<tenant>.sharepoint.com/sites/<SiteName>" -Interactive
+Grant-PnPAzureADAppSitePermission `
+  -AppId $miSp.AppId `
+  -DisplayName $miSp.DisplayName `
   -Site "https://<tenant>.sharepoint.com/sites/<SiteName>" `
   -Permissions FullControl
 ```
@@ -154,15 +176,18 @@ Administrators never need to look up Graph `siteId` or `driveId` GUIDs manually:
 
 ---
 
-## 6. Run the Connection Test
+## 6. Run the Connection Test & Scheduled Tenant Health Check
 
-1. In **Administration › Document Stores & DMS › Document stores**, click **Test connection** on the configured store card.
-2. `provider.testConnection()` executes a non-destructive verification check under the provisioning identity and reports:
-   - Whether the SharePoint site (`siteId`) is reachable.
-   - Whether the document library (`driveId`) is reachable.
-   - Whether the provisioning application has `fullcontrol` (`Sites.Selected`) permission on the site.
-   - Whether all mapped Department and Team Entra Security Group GUIDs in `documentAccess` resolve in Entra ID.
-3. If any check fails, the UI displays a clear, non-sensitive error code and remediation message.
+1. In **Administration › Document Stores & DMS › Document stores** (requires `document_store:configure` and `mfaVerified === true`), click **Test connection** on the configured store card. The same verification also runs per tenant via `runTenantSharePointHealthCheckJob` (which requires a valid `tenantId` via `runTenantBackgroundJob`).
+2. `provider.testConnection()` executes a non-destructive verification check under the provisioning identity, caches the result per `(tenantId, storeId)`, and reports:
+   - **Credentials & least-privilege claims (`checks.credentialsValid`):** Confirms no forbidden broad permissions (`Files.ReadWrite.All`, `Sites.FullControl.All`, etc.) remain consented when `delegatedPermissionScope === "Sites.Selected"`.
+   - **Site reachability (`checks.targetSiteReachable`):** Confirms the SharePoint site (`siteId`) has been granted access (otherwise fails closed with `errorCode: "access_denied"`, `errorReasonCode: "site_access_not_granted"`).
+   - **Library reachability (`checks.librariesFound`):** Confirms each configured document library (`driveId`) is reachable.
+   - **Tri-state site grant role verification (`roleVerificationStatus`):**
+     - `"verified"`: `GET /sites/{siteId}/permissions` confirmed `fullcontrol` (`checks.permissionManagementSupported: true`).
+     - `"insufficient"`: Fails closed (`errorReasonCode: "site_grant_role_insufficient"`) if the site grant role is only `read` or `write`.
+     - `"not_verified"`: If `GET /sites/{siteId}/permissions` returns `403 Forbidden`, reports a warning (`checks.permissionManagementSupported: false`) without crashing or reporting a false pass.
+3. When a cached health check is `ok: false`, subsequent user and provisioning operations fail closed immediately. Non-admin users never see GUIDs, `clientId`, `siteId`, or SharePoint hostnames; they see only: `"Documents for this matter are unavailable. Please contact your administrator."`
 
 ---
 
@@ -178,3 +203,21 @@ Administrators never need to look up Graph `siteId` or `driveId` GUIDs manually:
 | `access_mismatch` | `warning` | 1Squared allowed a user to view a matter, but SharePoint returned `ACCESS_DENIED` (`403`) during a user-context operation. | Verify that the user is a member of the relevant Department or Team Entra Security Group in Microsoft Entra ID, then click **Acknowledge**. |
 | `missing_folder` | `high` | A provisioned `MatterDocumentLocation` points to a `providerRootItemId` that no longer exists in SharePoint. | Open the Matter's **Documents** tab and click **Retry provisioning** or **Link existing folder**. |
 | `orphaned_group` | `warning` | A Department or Team Entra group GUID in `documentAccess` could not be resolved in Entra ID. | Update the group's Object ID in **Routing & access** and click **Repair**. |
+
+---
+
+## 8. Migrating from `Files.ReadWrite.All` to `Sites.Selected` and Rollback Procedure
+
+### Migrating an Existing v1.x Tenant
+During v1.x, `auth.delegatedPermissionScope` retains `"Files.ReadWrite.All"` as the schema fallback so existing tenants do not break on upgrade, while emitting a structured `ConfigDeprecationWarning`. To migrate an existing tenant to `"Sites.Selected"`:
+1. In Microsoft Entra ID, add `Sites.Selected` (Delegated and Application on Microsoft Graph) and `Sites.Selected` (Application on Office 365 SharePoint Online) to the 1Squared App Registration and grant admin consent.
+2. Have a SharePoint Administrator grant `fullcontrol` on each configured SharePoint site (Step 3).
+3. In 1Squared (**Administration › Document Stores & DMS › Document stores**, with MFA verified), change **Delegated Permission Scope** to `Sites.Selected` and click **Save stores configuration** (writes a `config:stores:updated` audit event).
+4. Remove `Files.ReadWrite.All` (and any other broad `Files.*.All` / `Sites.*.All` permissions) from the Entra App Registration.
+5. Click **Test connection** in 1Squared and confirm `roleVerificationStatus: "verified"`.
+
+### Rollback Procedure
+No database migration is involved, and `TenantScopedEncryptedTokenCache` keys user OBO tokens by `scope` (`tenant:{tenantId}:obo:{entraTenantId}:{actorEntraObjectId}:{storeId}:{scope}`). To roll back a tenant to `"Files.ReadWrite.All"` without restarting services or flushing caches:
+1. Re-consent `Files.ReadWrite.All` (Delegated) on the Entra ID App Registration if it was revoked.
+2. In 1Squared (**Administration › Document Stores & DMS › Document stores**, with MFA verified), set **Delegated Permission Scope** back to `Files.ReadWrite.All` and click **Save stores configuration**.
+3. Click **Test connection** to refresh the store's cached health status.

@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type {
   DocumentGenerationConfig,
   DocumentPermission,
+  DocumentStoreConfig,
   ExtensionManifest,
   HomeRoleKey,
   HostingMode,
@@ -1936,6 +1937,57 @@ export const TenantConfigurationSchema = z
     }
   });
 
+export interface ConfigDeprecationWarning {
+  path: string;
+  deprecatedInVersion: string;
+  removalInMajorVersion: number;
+  replacementPath: string;
+  message: string;
+}
+
+export function collectStructuredConfigDeprecationWarnings(
+  baseConfig: Record<string, unknown>,
+  environmentOverlay: Record<string, unknown> = {},
+): ConfigDeprecationWarning[] {
+  const structured: ConfigDeprecationWarning[] = [];
+  const rawStores = Array.isArray(environmentOverlay.documentStores)
+    ? (environmentOverlay.documentStores as unknown[])
+    : Array.isArray(baseConfig.documentStores)
+      ? (baseConfig.documentStores as unknown[])
+      : typeof baseConfig.storeId === 'string' &&
+          typeof baseConfig.auth === 'object' &&
+          baseConfig.auth !== null
+        ? [baseConfig]
+        : [];
+
+  for (const [idx, rawStore] of rawStores.entries()) {
+    if (!rawStore || typeof rawStore !== 'object') continue;
+    const storeObj = rawStore as Record<string, unknown>;
+    const providerType = storeObj.providerType ?? 'sharepoint';
+    const enabled = storeObj.enabled !== false;
+    if (providerType !== 'sharepoint' || !enabled) continue;
+
+    const authObj =
+      typeof storeObj.auth === 'object' && storeObj.auth !== null
+        ? (storeObj.auth as Record<string, unknown>)
+        : {};
+    const effectiveScope =
+      authObj.delegatedPermissionScope ?? 'Files.ReadWrite.All';
+    if (effectiveScope === 'Files.ReadWrite.All') {
+      const pathStr = `documentStores[${idx}].auth.delegatedPermissionScope`;
+      structured.push({
+        path: pathStr,
+        deprecatedInVersion: '1.2.0',
+        removalInMajorVersion: 2,
+        replacementPath: `${pathStr} = "Sites.Selected"`,
+        message: `[DEPRECATED_CONFIG_KEY] ${pathStr}="Files.ReadWrite.All" is deprecated in v1.2.0 and will be removed in v2.0.0; migrate to "Sites.Selected" (ADR-0023).`,
+      });
+    }
+  }
+
+  return structured;
+}
+
 export function collectConfigDeprecationWarnings(
   baseConfig: Record<string, unknown>,
   environmentOverlay: Record<string, unknown> = {},
@@ -1998,6 +2050,14 @@ export function collectConfigDeprecationWarnings(
       '[DEPRECATED_CONFIG_KEY] branding.website is deprecated; use firm.website instead.',
     );
   }
+
+  for (const w of collectStructuredConfigDeprecationWarnings(
+    baseConfig,
+    environmentOverlay,
+  )) {
+    warnings.push(w.message);
+  }
+
   return warnings;
 }
 
@@ -2006,18 +2066,24 @@ export function validateTenantConfigWithWarnings(
   environmentOverlay: Record<string, unknown> = {},
   environmentOverride?: PlatformEnvironment,
   hostingModeOverride?: HostingMode,
-): { config: TenantConfiguration; deprecationWarnings: string[] } {
+): {
+  config: TenantConfiguration;
+  deprecationWarnings: string[];
+  structuredDeprecationWarnings: ConfigDeprecationWarning[];
+} {
   const deprecationWarnings = collectConfigDeprecationWarnings(
     baseConfig,
     environmentOverlay,
   );
+  const structuredDeprecationWarnings =
+    collectStructuredConfigDeprecationWarnings(baseConfig, environmentOverlay);
   const config = loadAndValidateTenantConfig(
     baseConfig,
     environmentOverlay,
     environmentOverride,
     hostingModeOverride,
   );
-  return { config, deprecationWarnings };
+  return { config, deprecationWarnings, structuredDeprecationWarnings };
 }
 
 export function loadAndValidateTenantConfig(
@@ -2204,6 +2270,83 @@ export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
 export const ConflictReviewConfigSubSchema =
   TenantConfigurationSchema.shape.conflictReview;
 export const FirmConfigSubSchema = TenantConfigurationSchema.shape.firm;
+export const DocumentStoreConfigSubSchema =
+  TenantConfigurationSchema.shape.documentStores.unwrap().element;
+
+/**
+ * Validates a tenant configuration (or standalone `DocumentStoreConfig` entry) against
+ * `tenant-config.schema.json` and the Zod configuration schema, rejecting unknown keys
+ * and applying defaults.
+ */
+export function validateTenantConfig(
+  rawConfig: Record<string, unknown>,
+  environmentOverlay: Record<string, unknown> = {},
+  environmentOverride?: PlatformEnvironment,
+  hostingModeOverride?: HostingMode,
+): TenantConfiguration & {
+  store?: DocumentStoreConfig;
+  deprecationWarnings?: ConfigDeprecationWarning[];
+} {
+  const structuredDeprecationWarnings =
+    collectStructuredConfigDeprecationWarnings(rawConfig, environmentOverlay);
+
+  if (
+    typeof rawConfig.storeId === 'string' &&
+    typeof rawConfig.tenantId !== 'string'
+  ) {
+    const parsedStore = DocumentStoreConfigSubSchema.parse(rawConfig);
+    const wrapped = loadAndValidateTenantConfig(
+      {
+        schemaVersion: '1.0.0',
+        tenantId: 'validation-tenant',
+        displayName: 'Validation Tenant',
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        branding: {
+          primaryDomain: 'validation.example',
+          accentColorHex: '#2563EB',
+          logoAssetKey: 'logo.svg',
+        },
+        featureFlags: {
+          enableMatterCostsGovernance: true,
+          enablePmsLiveRateSync: false,
+          enableAiMatterExtraction: false,
+        },
+        matterCosts: {
+          rateSourceMode: 'pms_when_linked',
+          allowMatterRateOverrides: true,
+          partnerSignOffThresholdGbp: 25000,
+          rateCards: [],
+          disbursementPresets: [],
+        },
+        integrations: {
+          pmsConnectionSecretVaultRef: 'kv://kv-validation-test/pms-secret',
+          companiesHouseApiKeyVaultRef: 'kv://kv-validation-test/ch-secret',
+        },
+        enabledExtensions: [],
+        documentStores: [rawConfig],
+      },
+      environmentOverlay,
+      environmentOverride,
+      hostingModeOverride,
+    );
+    const result = Object.assign({}, wrapped, parsedStore, {
+      store: parsedStore,
+      deprecationWarnings: structuredDeprecationWarnings,
+    });
+    return result;
+  }
+
+  const parsedTenant = loadAndValidateTenantConfig(
+    rawConfig,
+    environmentOverlay,
+    environmentOverride,
+    hostingModeOverride,
+  );
+  return Object.assign({}, parsedTenant, {
+    deprecationWarnings: structuredDeprecationWarnings,
+  });
+}
 
 /**
  * Validates a standalone `keyDates` configuration object against `keyDates.config.schema.json`

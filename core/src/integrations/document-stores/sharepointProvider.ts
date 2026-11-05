@@ -29,6 +29,7 @@ import type {
   DocumentStoreConfig,
   DocumentStoreContainerRef,
   DocumentStoreErrorCode,
+  DocumentStoreErrorReason,
   DocumentStoreFolderTreeNode,
   DocumentStoreItem,
   DocumentStoreItemRef,
@@ -37,16 +38,21 @@ import type {
   DocumentStoreProvider,
   DocumentUploadOptions,
   ProvisioningAccessContext,
+  SharePointRoleVerificationStatus,
   TenantContext,
   UserAccessContext,
 } from '../../api/index';
+import { runTenantBackgroundJob } from '../../tenancy/index';
 import {
   MockSharePointGraphBackend,
   createMockGraphError,
   type MockCallerIdentity,
 } from './mockSharePointGraph';
 import { parseSharePointLocationUrl } from './sharepointUrlParser';
-import { DocumentStoreTokenService } from './tokenCache';
+import {
+  DocumentStoreTokenService,
+  verifyTokenClaimsForSitesSelected,
+} from './tokenCache';
 
 export interface SharePointRoleDescriptor {
   readonly abstractLevel: Exclude<DocumentAccessLevel, 'none'>;
@@ -195,11 +201,115 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     return ctx;
   }
 
+  private assertStoreTargetScope(ref: {
+    siteId: string;
+    driveId: string;
+  }): void {
+    const sp = this.storeConfig.sharepoint;
+    if (!sp) {
+      throw createMockGraphError(
+        'misconfigured',
+        'Documents for this matter are unavailable. Please contact your administrator.',
+        undefined,
+        'site_or_drive_mismatch',
+      );
+    }
+    const expectedSiteId = sp.siteId ?? `site-${this.storeId}`;
+    if (!ref.siteId || ref.siteId !== expectedSiteId) {
+      throw createMockGraphError(
+        'access_denied',
+        'Documents for this matter are unavailable. Please contact your administrator.',
+        undefined,
+        'site_or_drive_mismatch',
+      );
+    }
+    const configuredDriveIds = new Set(
+      sp.libraries.map(
+        (lib) => lib.driveId ?? `drive-${this.storeId}-${lib.libraryId}`,
+      ),
+    );
+    if (!ref.driveId || !configuredDriveIds.has(ref.driveId)) {
+      throw createMockGraphError(
+        'access_denied',
+        'Documents for this matter are unavailable. Please contact your administrator.',
+        undefined,
+        'site_or_drive_mismatch',
+      );
+    }
+  }
+
+  private assertCachedStoreHealth(ctx: DocumentAccessContext): void {
+    const cachedHealth = this.backend.getStoreHealthResult(
+      this.tenantContext,
+      this.storeId,
+    );
+    if (cachedHealth && !cachedHealth.ok) {
+      const code = cachedHealth.errorCode ?? 'access_denied';
+      const reason = cachedHealth.errorReasonCode;
+      const message =
+        ctx.kind === 'user'
+          ? 'Documents for this matter are unavailable. Please contact your administrator.'
+          : (cachedHealth.errorReason ??
+            'Documents for this matter are unavailable. Please contact your administrator.');
+      throw createMockGraphError(code, message, undefined, reason);
+    }
+  }
+
+  private assertTokenClaimsLeastPrivilege(
+    ctx: DocumentAccessContext,
+    options: { appToken?: string; oboToken?: string },
+  ): void {
+    const effectiveDelegatedScope =
+      this.storeConfig.auth.delegatedPermissionScope ?? 'Files.ReadWrite.All';
+    if (effectiveDelegatedScope !== 'Sites.Selected') {
+      return;
+    }
+
+    const tokenSim = this.tokenService.getSimulatedConsentedPermissions(
+      this.tenantContext.tenantId,
+      this.storeId,
+    );
+    const backendSim = this.backend.getSimulatedTokenClaims(
+      this.tenantContext.tenantId,
+      this.storeId,
+    );
+
+    const check = verifyTokenClaimsForSitesSelected({
+      appToken: options.appToken,
+      oboToken: options.oboToken,
+      additionalAppRoles: [
+        ...(tokenSim?.appRoles ?? []),
+        ...(backendSim?.appRoles ?? []),
+      ],
+      additionalDelegatedScopes: [
+        ...(tokenSim?.delegatedScopes ?? []),
+        ...(backendSim?.delegatedScopes ?? []),
+      ],
+    });
+
+    if (!check.valid) {
+      const msg =
+        ctx.kind === 'user'
+          ? 'Documents for this matter are unavailable. Please contact your administrator.'
+          : `SharePoint store "${this.storeId}" is configured for Sites.Selected, but broader Microsoft Graph permissions (${check.excessPermissions.join(', ')}) remain consented in Microsoft Entra ID.`;
+      throw createMockGraphError(
+        'misconfigured',
+        msg,
+        undefined,
+        'excess_permissions_consented',
+      );
+    }
+  }
+
   private async resolveCallerIdentity(
     ctx: DocumentAccessContext,
     scope?: string,
+    skipCachedHealthGuard = false,
   ): Promise<MockCallerIdentity> {
     this.assertSameTenant(ctx);
+    if (!skipCachedHealthGuard) {
+      this.assertCachedStoreHealth(ctx);
+    }
     if (ctx.kind === 'user') {
       const accessToken = await this.tokenService.acquireDelegatedUserToken({
         accessContext: ctx,
@@ -207,6 +317,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
         authConfig: this.storeConfig.auth,
         scope,
       });
+      this.assertTokenClaimsLeastPrivilege(ctx, { oboToken: accessToken });
       return {
         tenantId: this.tenantContext.tenantId,
         storeId: this.storeId,
@@ -225,6 +336,9 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
       authConfig: this.storeConfig.auth,
       scope,
     });
+    if (!skipCachedHealthGuard) {
+      this.assertTokenClaimsLeastPrivilege(ctx, { appToken: accessToken });
+    }
     return {
       tenantId: this.tenantContext.tenantId,
       storeId: this.storeId,
@@ -285,6 +399,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
   ): Promise<DocumentStoreListPage> {
     const caller = await this.resolveCallerIdentity(context);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(containerRef);
       const folderItemId = containerRef.folderItemId ?? 'root';
       this.backend.recordCall(
         caller,
@@ -349,6 +464,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
   ): Promise<DocumentStoreItem> {
     const caller = await this.resolveCallerIdentity(context);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -380,6 +496,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const userCtx = this.assertUserContext(context);
     const caller = await this.resolveCallerIdentity(userCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -454,6 +571,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     }
 
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(containerRef);
       const folderItemId = containerRef.folderItemId ?? 'root';
       const { partition, item: parentFolder } = this.backend.getItemOrThrow(
         this.tenantContext.tenantId,
@@ -604,6 +722,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const userCtx = this.assertUserContext(context);
     const caller = await this.resolveCallerIdentity(userCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(containerRef);
       const folderItemId = containerRef.folderItemId ?? 'root';
       this.backend.recordCall(
         caller,
@@ -647,6 +766,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const userCtx = this.assertUserContext(context);
     const caller = await this.resolveCallerIdentity(userCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -703,6 +823,8 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
   ): Promise<DocumentStoreItem> {
     const caller = await this.resolveCallerIdentity(context);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
+      this.assertStoreTargetScope(destinationContainerRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -761,6 +883,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const userCtx = this.assertUserContext(context);
     const caller = await this.resolveCallerIdentity(userCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -797,6 +920,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const userCtx = this.assertUserContext(context);
     const caller = await this.resolveCallerIdentity(userCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -833,6 +957,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const userCtx = this.assertUserContext(context);
     const caller = await this.resolveCallerIdentity(userCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -865,15 +990,15 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const provCtx = this.assertProvisioningContext(context);
     const startMs = Date.now();
     try {
-      const caller = await this.resolveCallerIdentity(provCtx);
+      const caller = await this.resolveCallerIdentity(provCtx, undefined, true);
       const sp = this.storeConfig.sharepoint;
       if (!sp) {
-        return {
+        const missingSpResult: DocumentStoreConnectionTestResult = {
           ok: false,
           providerType: 'sharepoint',
           storeId: this.storeId,
           checkedAt: new Date().toISOString(),
-          latencyMs: Date.now() - startMs,
+          latencyMs: Math.max(1, Date.now() - startMs),
           errorCode: 'misconfigured',
           errorReason: 'SharePoint site and library settings are missing.',
           checks: {
@@ -883,7 +1008,17 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
             permissionManagementSupported: false,
           },
         };
+        this.backend.setStoreHealthResult(
+          this.tenantContext,
+          this.storeId,
+          missingSpResult,
+        );
+        return missingSpResult;
       }
+
+      this.assertTokenClaimsLeastPrivilege(provCtx, {
+        appToken: caller.accessToken,
+      });
 
       this.backend.recordCall(caller, 'graph_v1', 'testConnection');
 
@@ -901,12 +1036,76 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
         });
       }
 
-      return {
+      if (
+        this.backend.isSitePermissionsReadForbidden({
+          tenantId: this.tenantContext.tenantId,
+          storeId: this.storeId,
+          siteId,
+        })
+      ) {
+        const unverifiedResult: DocumentStoreConnectionTestResult = {
+          ok: true,
+          providerType: 'sharepoint',
+          storeId: this.storeId,
+          checkedAt: new Date().toISOString(),
+          latencyMs: Math.max(1, Date.now() - startMs),
+          roleVerificationStatus: 'not_verified',
+          warnings: [
+            `SharePoint site permission grant role could not be verified because GET /sites/${siteId}/permissions returned 403 Forbidden. Confirm that the site grant includes "fullcontrol" before provisioning folder permissions.`,
+          ],
+          checks: {
+            credentialsValid: true,
+            targetSiteReachable: true,
+            librariesFound: sp.libraries.length > 0,
+            permissionManagementSupported: false,
+          },
+        };
+        this.backend.setStoreHealthResult(
+          this.tenantContext,
+          this.storeId,
+          unverifiedResult,
+        );
+        return unverifiedResult;
+      }
+
+      const grantRole = this.backend.getSitePermissionGrantRole({
+        tenantId: this.tenantContext.tenantId,
+        storeId: this.storeId,
+        siteId,
+      });
+      if (grantRole !== 'fullcontrol') {
+        const insufficientResult: DocumentStoreConnectionTestResult = {
+          ok: false,
+          providerType: 'sharepoint',
+          storeId: this.storeId,
+          checkedAt: new Date().toISOString(),
+          latencyMs: Math.max(1, Date.now() - startMs),
+          errorCode: 'access_denied',
+          errorReasonCode: 'site_grant_role_insufficient',
+          roleVerificationStatus: 'insufficient',
+          errorReason: `SharePoint site permission grant role "${grantRole}" on site "${siteId}" (store "${this.storeId}") is insufficient. Folder permission management requires "fullcontrol".`,
+          checks: {
+            credentialsValid: true,
+            targetSiteReachable: true,
+            librariesFound: sp.libraries.length > 0,
+            permissionManagementSupported: false,
+          },
+        };
+        this.backend.setStoreHealthResult(
+          this.tenantContext,
+          this.storeId,
+          insufficientResult,
+        );
+        return insufficientResult;
+      }
+
+      const okResult: DocumentStoreConnectionTestResult = {
         ok: true,
         providerType: 'sharepoint',
         storeId: this.storeId,
         checkedAt: new Date().toISOString(),
         latencyMs: Math.max(1, Date.now() - startMs),
+        roleVerificationStatus: 'verified',
         checks: {
           credentialsValid: true,
           targetSiteReachable: true,
@@ -914,26 +1113,50 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
           permissionManagementSupported: true,
         },
       };
+      this.backend.setStoreHealthResult(
+        this.tenantContext,
+        this.storeId,
+        okResult,
+      );
+      return okResult;
     } catch (err) {
       const code =
         (err as { code?: DocumentStoreErrorCode })?.code ?? 'unavailable';
+      const reasonCode = (err as { reason?: DocumentStoreErrorReason })?.reason;
+      const siteIdForDiag =
+        this.storeConfig.sharepoint?.siteId ?? `site-${this.storeId}`;
       const reason =
-        err instanceof Error ? err.message : 'Connection check failed.';
-      return {
+        reasonCode === 'site_access_not_granted'
+          ? `SharePoint access not granted for site "${siteIdForDiag}" (store "${this.storeId}"). Grant Sites.Selected permissions to the application before use.`
+          : err instanceof Error
+            ? err.message
+            : 'Connection check failed.';
+      const failedResult: DocumentStoreConnectionTestResult = {
         ok: false,
         providerType: 'sharepoint',
         storeId: this.storeId,
         checkedAt: new Date().toISOString(),
         latencyMs: Math.max(1, Date.now() - startMs),
         errorCode: code,
+        ...(reasonCode ? { errorReasonCode: reasonCode } : {}),
         errorReason: reason,
         checks: {
           credentialsValid: code !== 'misconfigured',
-          targetSiteReachable: code !== 'not_found' && code !== 'unavailable',
+          targetSiteReachable:
+            code !== 'not_found' &&
+            code !== 'unavailable' &&
+            reasonCode !== 'site_access_not_granted',
           librariesFound: false,
-          permissionManagementSupported: code !== 'access_denied',
+          permissionManagementSupported:
+            code !== 'access_denied' && code !== 'misconfigured',
         },
       };
+      this.backend.setStoreHealthResult(
+        this.tenantContext,
+        this.storeId,
+        failedResult,
+      );
+      return failedResult;
     }
   }
 
@@ -1087,6 +1310,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const provCtx = this.assertProvisioningContext(context);
     const caller = await this.resolveCallerIdentity(provCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(rootRef);
       const rootFolderId = rootRef.folderItemId ?? 'root';
       this.backend.recordCall(
         caller,
@@ -1153,6 +1377,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const provCtx = this.assertProvisioningContext(context);
     const caller = await this.resolveCallerIdentity(provCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       this.backend.recordCall(
         caller,
         'graph_v1',
@@ -1194,6 +1419,7 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     const provCtx = this.assertProvisioningContext(context);
     const caller = await this.resolveCallerIdentity(provCtx);
     return this.executeWithResilience(() => {
+      this.assertStoreTargetScope(itemRef);
       const { partition, item } = this.backend.getItemOrThrow(
         this.tenantContext.tenantId,
         itemRef.siteId,
@@ -1284,4 +1510,66 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
       );
     });
   }
+}
+
+export interface SharePointHealthCheckJobInput {
+  jobId?: string;
+  tenantId: string;
+  correlationId?: string;
+  tenantContext: TenantContext;
+  stores: readonly DocumentStoreConfig[];
+  tokenService: DocumentStoreTokenService;
+  backend: MockSharePointGraphBackend;
+}
+
+/**
+ * Scheduled per-tenant background health check job (`R195`).
+ * Requires a valid `tenantId` via `runTenantBackgroundJob` (throws `TENANCY_JOB_ERROR` without one),
+ * verifies `tenantContext.tenantId === tenantId`, and caches the connection test result
+ * per `(tenantId, storeId)`.
+ */
+export async function runTenantSharePointHealthCheckJob(
+  input: SharePointHealthCheckJobInput,
+): Promise<DocumentStoreConnectionTestResult[]> {
+  return runTenantBackgroundJob(
+    {
+      jobId: input.jobId ?? `sp-health-${randomUUID()}`,
+      tenantId: input.tenantId,
+      correlationId:
+        input.correlationId ??
+        input.tenantContext?.correlationId ??
+        `corr-health-${randomUUID()}`,
+      payload: input,
+    },
+    async (job) => {
+      if (
+        !job.payload.tenantContext?.tenantId ||
+        job.payload.tenantContext.tenantId !== job.tenantId
+      ) {
+        throw new Error(
+          'TENANCY_ISOLATION_ERROR: Health check job tenantId must match TenantContext.tenantId.',
+        );
+      }
+      const results: DocumentStoreConnectionTestResult[] = [];
+      for (const storeConfig of job.payload.stores) {
+        if (!storeConfig.enabled || storeConfig.providerType !== 'sharepoint') {
+          continue;
+        }
+        const provider = new SharePointDocumentStoreProvider({
+          tenantContext: job.payload.tenantContext,
+          storeConfig,
+          tokenService: job.payload.tokenService,
+          backend: job.payload.backend,
+        });
+        const provCtx: ProvisioningAccessContext = {
+          kind: 'provisioning',
+          tenantContext: job.payload.tenantContext,
+          triggerEvent: 'scheduled.store.health_check',
+        };
+        const res = await provider.testConnection(provCtx);
+        results.push(res);
+      }
+      return results;
+    },
+  );
 }

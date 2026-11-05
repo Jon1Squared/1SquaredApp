@@ -836,6 +836,17 @@ export type DocumentStoreErrorCode =
   | 'invalid_path'
   | 'reauthentication_required';
 
+export type DocumentStoreErrorReason =
+  | 'site_access_not_granted'
+  | 'site_grant_role_insufficient'
+  | 'excess_permissions_consented'
+  | 'site_or_drive_mismatch';
+
+export type SharePointRoleVerificationStatus =
+  | 'verified'
+  | 'not_verified'
+  | 'insufficient';
+
 export interface DocumentStoreCapabilities {
   readonly versions: boolean;
   readonly checkInOut: boolean;
@@ -964,6 +975,9 @@ export interface DocumentStoreConnectionTestResult {
   readonly latencyMs: number;
   readonly errorCode?: DocumentStoreErrorCode;
   readonly errorReason?: string;
+  readonly errorReasonCode?: DocumentStoreErrorReason;
+  readonly roleVerificationStatus?: SharePointRoleVerificationStatus;
+  readonly warnings?: readonly string[];
   readonly checks: {
     readonly credentialsValid: boolean;
     readonly targetSiteReachable: boolean;

@@ -10,6 +10,7 @@ import {
   CORE_TENANT_MIGRATIONS,
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
+  DocumentStoreTokenService,
   ExtensionHookPointSchema,
   ExtensionHost,
   ExtensionManifestSchema,
@@ -21,11 +22,16 @@ import {
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
   runTenantBackgroundJob,
+  runTenantSharePointHealthCheckJob,
+  SharePointDocumentStoreProvider,
   TenantMigrationRunner,
+  TenantScopedEncryptedTokenCache,
   validateExtensionManifest,
   validateMigrationCatalogueOrder,
+  type DocumentStoreConfig,
   type PlatformExtension,
 } from '@platform/core';
+import { MockSharePointGraphBackend } from '../src/testing';
 import extensionManifestJsonSchema from '../schemas/extension-manifest.schema.json';
 import tenantConfigJsonSchema from '../schemas/tenant-config.schema.json';
 import { generateExtensionRegistry } from '../../scripts/generate-extension-registry';
@@ -6091,5 +6097,169 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
+  });
+
+  it('enforces two-tenant SharePoint Sites.Selected grant isolation, tampered siteId/driveId rejection, and cached health isolation (R195, R196)', async () => {
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantAToken,
+      hostingMode: 'multi_tenant',
+      environment: 'dev',
+      correlationId: 'corr-sp-iso-a',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantBToken,
+      hostingMode: 'multi_tenant',
+      environment: 'dev',
+      correlationId: 'corr-sp-iso-b',
+    });
+
+    const storeA: DocumentStoreConfig = {
+      storeId: 'store-alpha',
+      displayName: 'Alpha SharePoint Store',
+      providerType: 'sharepoint',
+      isDefault: true,
+      enabled: true,
+      auth: {
+        entraTenantId: '11111111-1111-1111-1111-111111111111',
+        credentialMode: 'client_certificate',
+        clientId: 'aaaaaaaa-1111-1111-1111-111111111111',
+        certificateKeyVaultSecretRef: 'kv://kv-alpha/sp-cert',
+        delegatedPermissionScope: 'Sites.Selected',
+      },
+      sharepoint: {
+        hostname: 'alpha.sharepoint.com',
+        siteRelativePath: '/sites/AlphaMatters',
+        siteId: 'site-alpha-001',
+        libraries: [
+          {
+            libraryId: 'lib-matters',
+            displayName: 'Matters',
+            libraryUrlSegment: 'Matters',
+            driveId: 'drive-alpha-001',
+          },
+        ],
+      },
+    };
+
+    const storeB: DocumentStoreConfig = {
+      storeId: 'store-beta',
+      displayName: 'Beta SharePoint Store',
+      providerType: 'sharepoint',
+      isDefault: true,
+      enabled: true,
+      auth: {
+        entraTenantId: '22222222-2222-2222-2222-222222222222',
+        credentialMode: 'client_certificate',
+        clientId: 'bbbbbbbb-2222-2222-2222-222222222222',
+        certificateKeyVaultSecretRef: 'kv://kv-beta/sp-cert',
+        delegatedPermissionScope: 'Sites.Selected',
+      },
+      sharepoint: {
+        hostname: 'beta.sharepoint.com',
+        siteRelativePath: '/sites/BetaMatters',
+        siteId: 'site-beta-001',
+        libraries: [
+          {
+            libraryId: 'lib-matters',
+            displayName: 'Matters',
+            libraryUrlSegment: 'Matters',
+            driveId: 'drive-beta-001',
+          },
+        ],
+      },
+    };
+
+    const backend = new MockSharePointGraphBackend();
+    const tokenService = new DocumentStoreTokenService({
+      cache: new TenantScopedEncryptedTokenCache(),
+    });
+    const providerA = new SharePointDocumentStoreProvider({
+      tenantContext: ctxA,
+      storeConfig: storeA,
+      tokenService,
+      backend,
+    });
+    const providerB = new SharePointDocumentStoreProvider({
+      tenantContext: ctxB,
+      storeConfig: storeB,
+      tokenService,
+      backend,
+    });
+
+    // Tenant A has fullcontrol on site-alpha-001, while Tenant B has NO grant on site-beta-001
+    backend.setSitePermissionGrant({
+      tenantId: ctxA.tenantId,
+      storeId: storeA.storeId,
+      siteId: 'site-alpha-001',
+      role: 'fullcontrol',
+    });
+    backend.setSitePermissionGrant({
+      tenantId: ctxB.tenantId,
+      storeId: storeB.storeId,
+      siteId: 'site-beta-001',
+      role: 'none',
+    });
+
+    const [healthA] = await runTenantSharePointHealthCheckJob({
+      tenantId: ctxA.tenantId,
+      tenantContext: ctxA,
+      stores: [storeA],
+      tokenService,
+      backend,
+    });
+    const [healthB] = await runTenantSharePointHealthCheckJob({
+      tenantId: ctxB.tenantId,
+      tenantContext: ctxB,
+      stores: [storeB],
+      tokenService,
+      backend,
+    });
+
+    expect(healthA?.ok).toBe(true);
+    expect(healthB?.ok).toBe(false);
+    expect(healthB?.errorReasonCode).toBe('site_access_not_granted');
+
+    // Tenant A's grant never gives Tenant B access to Tenant B's site, nor can Tenant A target Tenant B's siteId or driveId
+    await expect(
+      providerB.ensureFolderTree(
+        {
+          kind: 'provisioning',
+          tenantContext: ctxB,
+          triggerEvent: 'test.b',
+        },
+        {
+          storeId: storeB.storeId,
+          libraryId: 'lib-matters',
+          siteId: 'site-beta-001',
+          driveId: 'drive-beta-001',
+        },
+        [{ name: '01 Client Care', relativePath: '01 Client Care' }],
+      ),
+    ).rejects.toMatchObject({
+      code: 'access_denied',
+      reason: 'site_access_not_granted',
+    });
+
+    backend.clearCallLog();
+    await expect(
+      providerA.ensureFolderTree(
+        {
+          kind: 'provisioning',
+          tenantContext: ctxA,
+          triggerEvent: 'test.a.tampered',
+        },
+        {
+          storeId: storeA.storeId,
+          libraryId: 'lib-matters',
+          siteId: 'site-beta-001',
+          driveId: 'drive-alpha-001',
+        },
+        [{ name: '01 Client Care', relativePath: '01 Client Care' }],
+      ),
+    ).rejects.toMatchObject({
+      code: 'access_denied',
+      reason: 'site_or_drive_mismatch',
+    });
+    expect(backend.getCallLog()).toHaveLength(0);
   });
 });

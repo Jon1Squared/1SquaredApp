@@ -6,11 +6,11 @@ export const sharepointDocumentStoreArticle: DocArticle = {
   section: 'documents-dms',
   summary:
     'How 1Squared connects to Microsoft SharePoint Online, automatically provisions matter folder trees by work type, enforces per-user permissions and ethical walls, and detects permission drift.',
-  updated: '2026-11-04',
+  updated: '2026-11-05',
   body: `
 1Squared connects to your firm’s **Microsoft 365 SharePoint Online** document store model so fee earners can browse, upload, organise, and co-author matter documents inside 1Squared while all files remain governed by SharePoint library and folder permissions. (In Phase 1, \`SharePointDocumentStoreProvider\` runs against the built-in \`MockSharePointGraphBackend\` contract simulation harness; live Microsoft Graph HTTP transport and Key Vault certificate exchange are scheduled for Phase 2.)
 
-> **Core security principle**: Whenever a user views, uploads, downloads, or deletes a document in 1Squared, the action is performed **as that individual user** via Microsoft Graph On-Behalf-Of (OBO) authentication. SharePoint enforces each user’s own permissions and records their identity in the Microsoft 365 audit trail.
+> **Core security principle**: Whenever a user views, uploads, downloads, or deletes a document in 1Squared, the action is performed **as that individual user** via Microsoft Graph On-Behalf-Of (OBO) authentication using least-privilege **\`Sites.Selected\`** permissions (see [Granting least-privilege SharePoint access with Sites.Selected](/docs/sharepoint-sites-selected-setup)). SharePoint enforces each user’s own permissions and records their identity in the Microsoft 365 audit trail.
 
 ## 1. How matter folders are organised in SharePoint
 
@@ -77,7 +77,7 @@ If a person who is an existing client or counterparty on an open matter is subse
 
 System administrators with \`document_store:configure\`, \`document_template:configure\`, or \`document_access:review\` permissions (and a multi-factor authenticated session) can manage the integration under **Administration → Document Stores (SharePoint)**:
 
-- **Connected Stores & Connection Test**: Verify the application certificate identity (\`Sites.Selected\`), inspect the resolved SharePoint \`siteId\` and \`driveId\`, and paste any SharePoint library URL to resolve its canonical Microsoft Graph identifiers.
+- **Connected Stores & Connection Test**: Verify the application certificate identity (\`Sites.Selected\`), select the delegated permission scope (\`Sites.Selected\` recommended vs legacy \`Files.ReadWrite.All\`), inspect the tri-state site grant verification status (\`verified\`, \`not_verified\`, or \`insufficient\`), and paste any SharePoint library URL to resolve its canonical Microsoft Graph identifiers. For full IT onboarding and rollback steps, see [Granting least-privilege SharePoint access with Sites.Selected](/docs/sharepoint-sites-selected-setup).
 - **Department & Team Group Mappings**: Review the mapping between 1Squared departments/teams and Microsoft Entra ID security group Object IDs (\`entraGroupId\`), along with their default access levels (\`read\` vs \`write\`).
 - **Matter Folder Templates**: Inspect the active base and work-type folder templates configured for the tenant.
 - **Permission Drift Reconciliation**: Run an on-demand or scheduled drift check across provisioned matters. The reconciliation engine compares each matter’s intended security policy in 1Squared against the live SharePoint folder permissions and flags:

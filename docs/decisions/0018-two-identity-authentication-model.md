@@ -1,8 +1,8 @@
 # ADR-0018: Two-Identity Authentication Model (Delegated User OBO and Application Provisioning)
 
 - **Date:** 2026-11-02
-- **Status:** Proposed
-- **Related:** [ADR-0012](./0012-role-source-of-truth-and-entra-identity-mapping.md), [ADR-0017](./0017-document-store-provider-abstraction.md)
+- **Status:** Proposed (Amended by [ADR-0023](./0023-sharepoint-sites-selected-least-privilege.md))
+- **Related:** [ADR-0012](./0012-role-source-of-truth-and-entra-identity-mapping.md), [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0023](./0023-sharepoint-sites-selected-least-privilege.md)
 
 ## Context
 
@@ -32,7 +32,7 @@ We evaluated Microsoft Graph's delegated permission scopes for SharePoint `drive
 1. **`Sites.Selected` (Delegated):** Microsoft Graph exposes `Sites.Selected` as both an application permission and a delegated permission. When granted as a delegated permission and paired with a site-level permission grant (`POST /sites/{siteId}/permissions` granting `read` or `write` to the 1Squared client application), the OBO token is restricted to **only** the SharePoint sites explicitly authorised for 1Squared, while SharePoint still enforces the signed-in user's own item/folder ACLs (`effectivePermissions = intersection(userSharePointACL, appDelegatedScope)`).
 2. **`Files.ReadWrite.All` (Delegated):** Also enforces the signed-in user's own SharePoint ACLs (the user cannot access any site or file they do not already have SharePoint rights to), but allows the OBO token to reach any SharePoint site or OneDrive the user has access to across the tenant.
 
-**Decision:** Default to **delegated `Sites.Selected`** as the primary recommended scope (`userAccess.delegatedScope: 'Sites.Selected' | 'Files.ReadWrite.All'`, defaulting to `'Sites.Selected'`). Because both permissions evaluate the intersection of the app's delegated grant and the user's SharePoint permissions, `Sites.Selected` provides the narrowest blast radius (restricting the app to the firm's designated matter repository site(s) only), while `Files.ReadWrite.All` remains configurable for firms that prefer not to create a second site-permission grant for the delegated client ID.
+**Decision (Amended by [ADR-0023](./0023-sharepoint-sites-selected-least-privilege.md)):** Use `auth.delegatedPermissionScope: 'Sites.Selected' | 'Files.ReadWrite.All'` on `DocumentStoreAuthConfig`. To preserve backward compatibility within v1.x (Rule 7), the schema default remains `'Files.ReadWrite.All'` during the v1.x transition while emitting a structured `ConfigDeprecationWarning` whenever `'Files.ReadWrite.All'` is used (explicitly or by default); the Admin UI writes `'Sites.Selected'` explicitly for new stores, and the schema default flips to `'Sites.Selected'` in v2.0. When both delegated OBO and application provisioning share the same `auth.clientId`, a single `POST /sites/{siteId}/permissions` grant with `roles: ["fullcontrol"]` satisfies both identities without requiring a second site-permission grant. See [ADR-0023](./0023-sharepoint-sites-selected-least-privilege.md) for the complete minimum permission table, fail-closed excess-permission check, and v1.x → v2.0 transition plan.
 
 ### 3. Application Provisioning Permission (`provisioning` Context)
 
