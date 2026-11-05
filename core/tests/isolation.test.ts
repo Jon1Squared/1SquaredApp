@@ -5956,4 +5956,140 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       resetAllDemoData('P-000001');
     }
   });
+
+  it('R189: buildServerConflictCheckRecord derives outcomeLabel from the final status for fee earners without risk:view', async () => {
+    resetAllDemoData('P-000001');
+    const store = getStore();
+    const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+    const templateMatter = store.matters.find((m) => m.id === 'M-000001')!;
+    expect(feeEarner).toBeDefined();
+    expect(templateMatter).toBeDefined();
+
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const cookie = createSignedEntraSessionCookie({
+      personId: feeEarner.id,
+      tenantId: 'not-a-law-firm',
+      oid: feeEarner.entraObjectId ?? `00000000-0000-4000-8000-${feeEarner.id}`,
+      tid: '11111111-2222-3333-4444-000000000000',
+      sub: feeEarner.id,
+      email: 'fee-earner-r189@notalawfirm.example',
+      displayName: `${feeEarner.firstName} ${feeEarner.surname}`,
+      entraRoles: feeEarner.roles ?? ['fee_earner'],
+      mappedRoles: feeEarner.roles ?? ['fee_earner'],
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: nowIso,
+      expiresAt,
+    });
+    const feeEarnerSession = {
+      personId: feeEarner.id,
+      tenantId: 'not-a-law-firm',
+      tokenRoles: feeEarner.roles ?? ['fee_earner'],
+      expiresAtMs: Date.parse(expiresAt),
+      verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+    };
+
+    try {
+      // 1. Probe E2: new matter saved as a draft, then submit_cleared with the draft's outcomeLabel: 'Pending' (and status 'Cleared' + outcomeLabel: 'Pending') stores 'Cleared by fee earner'
+      const draftRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R189 Draft Then Submit Cleared Matter',
+              clientId: templateMatter.clientId,
+              practiceAreaId: templateMatter.practiceAreaId,
+              workTypeSubcategoryId: templateMatter.workTypeSubcategoryId,
+              responsiblePartnerId: templateMatter.responsiblePartnerId,
+              supervisingPartnerId: templateMatter.supervisingPartnerId,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 4500,
+            },
+            { byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(draftRes.errors).toBeUndefined();
+      expect(draftRes.matter?.conflictCheckRecord?.status).toBe('In progress');
+      expect(draftRes.matter?.conflictCheckRecord?.outcomeLabel).toBe(
+        'Pending',
+      );
+
+      const submitClearedFromDraftRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...draftRes.matter!,
+              conflictCheckRecord: {
+                ...draftRes.matter!.conflictCheckRecord!,
+                status: 'Cleared',
+                outcomeLabel: 'Pending',
+              },
+            },
+            {
+              id: draftRes.matter!.id,
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(submitClearedFromDraftRes.errors).toBeUndefined();
+      expect(
+        submitClearedFromDraftRes.matter?.conflictCheckRecord?.status,
+      ).toBe('Cleared');
+      expect(
+        submitClearedFromDraftRes.matter?.conflictCheckRecord?.outcomeLabel,
+      ).toBe('Cleared by fee earner');
+
+      // 2. Fee earner plain save with status: 'Referred' and outcomeLabel: 'Cleared by fee earner' stores 'Referred to risk for review'
+      const referredMismatchRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R189 Referred Outcome Mismatch Matter',
+              clientId: templateMatter.clientId,
+              practiceAreaId: templateMatter.practiceAreaId,
+              workTypeSubcategoryId: templateMatter.workTypeSubcategoryId,
+              responsiblePartnerId: templateMatter.responsiblePartnerId,
+              supervisingPartnerId: templateMatter.supervisingPartnerId,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 4500,
+            },
+            { byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(referredMismatchRes.errors).toBeUndefined();
+      const plainSaveReferredRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...referredMismatchRes.matter!,
+              conflictCheckRecord: {
+                ...referredMismatchRes.matter!.conflictCheckRecord!,
+                status: 'Referred',
+                outcomeLabel: 'Cleared by fee earner',
+              },
+            },
+            {
+              id: referredMismatchRes.matter!.id,
+              byId: feeEarner.id,
+            },
+          ),
+      );
+      expect(plainSaveReferredRes.errors).toBeUndefined();
+      expect(plainSaveReferredRes.matter?.conflictCheckRecord?.status).toBe(
+        'Referred',
+      );
+      expect(
+        plainSaveReferredRes.matter?.conflictCheckRecord?.outcomeLabel,
+      ).toBe('Referred to risk for review');
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
 });

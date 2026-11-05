@@ -2726,6 +2726,19 @@ function resolveNextMatterStatusId(params: {
   return input.matterStatusId || existing?.matterStatusId || cmiIncompleteStatus;
 }
 
+function feeEarnerOutcomeLabelFor(
+  status: ConflictCheckStatusPill,
+): ConflictCheckRecord['outcomeLabel'] {
+  switch (status) {
+    case 'Cleared':
+      return 'Cleared by fee earner';
+    case 'Referred':
+      return 'Referred to risk for review';
+    default:
+      return 'Pending';
+  }
+}
+
 function buildServerConflictCheckRecord(params: {
   submitted: ConflictCheckRecordInput | ConflictCheckRecord;
   stored: ConflictCheckRecord | null | undefined;
@@ -2793,31 +2806,20 @@ function buildServerConflictCheckRecord(params: {
           : 'Cleared'
         : submitted.status;
 
-  const isRiskDecisionOutcome =
-    submitted.outcomeLabel === 'Approved by Risk & Compliance' ||
-    submitted.outcomeLabel === 'Approved with conditions' ||
-    submitted.outcomeLabel === 'Declined by Risk & Compliance';
-  const outcomeLabel: ConflictCheckRecord['outcomeLabel'] =
-    (isRiskDecisionOutcome && !actorHasRiskView) ||
-    fallsBackToStored ||
-    saveMode === 'submit_referred' ||
-    (saveMode === 'submit_cleared' &&
-      (submitted.status === 'In progress' ||
-        submitted.status === 'Not started' ||
-        submitted.status === 'Referred'))
-      ? (isRiskDecisionOutcome && !actorHasRiskView) || fallsBackToStored
-        ? stored?.outcomeLabel ??
-          (status === 'Referred'
+  const outcomeLabel: ConflictCheckRecord['outcomeLabel'] = fallsBackToStored
+    ? stored?.outcomeLabel ?? feeEarnerOutcomeLabelFor(status)
+    : !actorHasRiskView
+      ? feeEarnerOutcomeLabelFor(status)
+      : saveMode === 'submit_referred'
+        ? 'Referred to risk for review'
+        : saveMode === 'submit_cleared' &&
+            (submitted.status === 'In progress' ||
+              submitted.status === 'Not started' ||
+              submitted.status === 'Referred')
+          ? status === 'Referred'
             ? 'Referred to risk for review'
-            : status === 'Cleared'
-              ? 'Cleared by fee earner'
-              : 'Pending')
-        : status === 'Referred'
-          ? 'Referred to risk for review'
-          : status === 'Cleared'
-            ? 'Cleared by fee earner'
-            : submitted.outcomeLabel
-      : submitted.outcomeLabel;
+            : 'Cleared by fee earner'
+          : submitted.outcomeLabel;
 
   const storedComments = stored?.comments ?? [];
   const storedCommentIds = new Set(storedComments.map((c) => c.id));
