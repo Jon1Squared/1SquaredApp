@@ -1120,6 +1120,8 @@ export function EnquiriesListClient({
         primaryFilters={
           <>
             <select
+              id="enq-filter-type"
+              name="enquiriesFilterType"
               aria-label="Filter by type"
               className="field-select list-filter-row__select"
               value={typeFilter}
@@ -1130,6 +1132,8 @@ export function EnquiriesListClient({
               <option value="quote">Quotes</option>
             </select>
             <select
+              id="enq-filter-urgency"
+              name="enquiriesFilterUrgency"
               aria-label="Filter by urgency"
               className="field-select list-filter-row__select"
               value={urgencyFilter}
@@ -1143,6 +1147,8 @@ export function EnquiriesListClient({
               ))}
             </select>
             <select
+              id="enq-filter-status"
+              name="enquiriesFilterStatus"
               aria-label="Filter by status"
               className="field-select list-filter-row__select"
               value={statusFilter}
@@ -1190,6 +1196,7 @@ export function EnquiriesListClient({
               </label>
               <select
                 id="enq-filter-pa"
+                name="enquiriesFilterPracticeArea"
                 aria-label="Filter by practice area"
                 className="field-select"
                 value={practiceAreaFilter}
@@ -1209,6 +1216,7 @@ export function EnquiriesListClient({
               </label>
               <select
                 id="enq-filter-team"
+                name="enquiriesFilterTeam"
                 aria-label="Filter by team"
                 className="field-select"
                 value={teamFilter}
@@ -1230,6 +1238,7 @@ export function EnquiriesListClient({
               </label>
               <select
                 id="enq-filter-channel"
+                name="enquiriesFilterChannel"
                 aria-label="Filter by channel"
                 className="field-select"
                 value={channelFilter}
@@ -1249,6 +1258,7 @@ export function EnquiriesListClient({
               </label>
               <select
                 id="enq-filter-fee-basis"
+                name="enquiriesFilterFeeBasis"
                 aria-label="Filter by fee basis"
                 className="field-select"
                 value={feeBasisFilter}
@@ -1268,6 +1278,7 @@ export function EnquiriesListClient({
               </label>
               <select
                 id="enq-filter-fee-earner"
+                name="enquiriesFilterFeeEarner"
                 aria-label="Filter by fee earner"
                 className="field-select"
                 value={feeEarnerFilter}
@@ -1311,6 +1322,7 @@ export function EnquiriesListClient({
               </label>
               <select
                 id="enq-filter-followup-due"
+                name="enquiriesFilterFollowUpDue"
                 aria-label="Filter by follow-up due"
                 className="field-select"
                 value={followUpDueFilter}

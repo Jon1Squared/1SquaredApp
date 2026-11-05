@@ -26,7 +26,7 @@
   /* Text */
   --color-text: #14212f;
   --color-text-muted: #4f5d6b;
-  --color-text-subtle: #52606d;
+  --color-text-subtle: #7a8794;
   --color-text-on-primary: #ffffff;
 
   /* Primary (teal) – primary actions and links only */
@@ -1154,7 +1154,7 @@ mark {
   background: transparent;
   font-size: 13.5px;
   font-weight: 500;
-  color: var(--text-secondary, #475569);
+  color: var(--text-secondary);
   cursor: pointer;
   white-space: nowrap;
   border-bottom: 2px solid transparent;

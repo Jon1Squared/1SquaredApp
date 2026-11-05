@@ -57,7 +57,7 @@ const STATUS_OPTIONS: { value: KeyDateStatus; label: string }[] = [
 
 const EXCEPTION_KIND_LABELS: Record<KeyDateExceptionKind, string> = {
   matter_missing_required_date: 'Open matter missing required key date',
-  verification_overdue: 'Verification overdue (> 5 working days)',
+  verification_overdue: 'Verification overdue',
   critical_date_no_recent_activity: 'Critical date with no recent matter activity',
   closed_matter_open_dates: 'Closed matter with open key dates',
   calculated_from_unreviewed_rules: 'Calculated from unreviewed rule set',
@@ -119,7 +119,7 @@ export function KeyDatesDiaryWorkspace({
   const exceptionKindLabels = useMemo<Record<KeyDateExceptionKind, string>>(
     () => ({
       ...EXCEPTION_KIND_LABELS,
-      verification_overdue: `Verification overdue (> ${verificationOverdueDays} days)`,
+      verification_overdue: `Verification overdue (${verificationOverdueDays} days or more)`,
     }),
     [verificationOverdueDays],
   );
@@ -946,8 +946,9 @@ export function KeyDatesDiaryWorkspace({
               <div>
                 <h2 style={{ margin: 0, fontSize: 18 }}>Compliance Exceptions Report</h2>
                 <p className="muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-                  Covers all 10 statutory &amp; operational key date exception kinds across teams.
-                  Exports are recorded in the immutable audit log.
+                  Covers all {Object.keys(EXCEPTION_KIND_LABELS).length} statutory &amp;
+                  operational key date exception kinds across teams. Exports are recorded in the
+                  immutable audit log.
                 </p>
               </div>
               <div style={{ display: 'flex', gap: 8 }}>

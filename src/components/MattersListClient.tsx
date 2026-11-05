@@ -532,6 +532,8 @@ export function MattersListClient({
             primaryFilters={
               <>
                 <select
+                  id="matters-filter-practice-area"
+                  name="mattersFilterPracticeArea"
                   aria-label="Filter by practice area"
                   className="field-select list-filter-row__select"
                   value={practiceAreaId}
@@ -545,6 +547,8 @@ export function MattersListClient({
                   ))}
                 </select>
                 <select
+                  id="matters-filter-status"
+                  name="mattersFilterStatus"
                   aria-label="Filter by matter status"
                   className="field-select list-filter-row__select"
                   value={statusFilter}
@@ -574,6 +578,7 @@ export function MattersListClient({
                   </label>
                   <select
                     id="matter-filter-fe"
+                    name="mattersFilterFeeEarner"
                     aria-label="Filter by lead fee earner"
                     className="field-select"
                     value={feeEarnerFilter}
@@ -593,6 +598,7 @@ export function MattersListClient({
                   </label>
                   <select
                     id="matter-filter-billing"
+                    name="mattersFilterBillingBasis"
                     aria-label="Filter by billing basis"
                     className="field-select"
                     value={billingBasisFilter}

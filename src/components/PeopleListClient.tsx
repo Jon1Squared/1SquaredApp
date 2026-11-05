@@ -550,6 +550,8 @@ export function PeopleListClient({
         primaryFilters={
           <>
             <select
+              id="people-filter-role"
+              name="peopleFilterRole"
               aria-label="Filter by relationship role"
               className="field-select list-filter-row__select"
               value={roleFilter}
@@ -563,6 +565,8 @@ export function PeopleListClient({
               ))}
             </select>
             <select
+              id="people-filter-status"
+              name="peopleFilterStatus"
               aria-label="Filter by relationship status"
               className="field-select list-filter-row__select"
               value={statusFilter}
@@ -586,6 +590,7 @@ export function PeopleListClient({
             </label>
             <select
               id="people-filter-owner"
+              name="peopleFilterOwner"
               aria-label="Filter by relationship owner"
               className="field-select"
               value={ownerFilter}

@@ -120,7 +120,10 @@ interface AppShellProps {
   tasks: Task[];
   notifications: NotificationItem[];
   firmName?: string;
-  entraSession?: EntraSessionPayload | null;
+  entraSession?: Pick<
+    EntraSessionPayload,
+    'email' | 'displayName' | 'oid' | 'mfaVerified'
+  > | null;
   children: React.ReactNode;
 }
 
@@ -489,7 +492,7 @@ export function AppShell({
                   fontSize: 11,
                   textTransform: 'uppercase',
                   letterSpacing: '0.06em',
-                  color: 'var(--text-muted)',
+                  color: 'var(--color-text-muted)',
                   fontWeight: 700,
                 }}
               >
