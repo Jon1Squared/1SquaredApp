@@ -454,7 +454,12 @@ export function MattersListClient({
         </div>
       </div>
 
-      <div className="tabs-bar" role="tablist" aria-label="Matter views">
+      <div className="tabs-bar">
+        <div
+          role="tablist"
+          aria-label="Matter views"
+          style={{ display: 'flex', alignItems: 'center', gap: 24 }}
+        >
             <button
               type="button"
               role="tab"
@@ -502,6 +507,7 @@ export function MattersListClient({
             >
               Advisory ({advisoryCount})
             </button>
+        </div>
             <div
               style={{
                 marginLeft: 'auto',

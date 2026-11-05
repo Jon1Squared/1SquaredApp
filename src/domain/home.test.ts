@@ -157,6 +157,23 @@ describe('Role-based Home pages & configuration', () => {
     // Attempting to switch Rhian to a role she does not hold ('finance') is rejected
     const badSwitch = switchViewingRole('P-000001', 'finance');
     expect(badSwitch.ok).toBe(false);
+
+    // System Administrator with only ['system_admin'] assigned can preview any configured role via Viewing As
+    const adamAdmin = snap1.people.find(
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
+    )!;
+    updateEmployeeRolesAndSupports(
+      'P-000004',
+      { roles: ['system_admin'] },
+      adamAdmin.id,
+      { mfaVerified: true },
+    );
+    const adminSnap1 = getAppSnapshot('P-000004');
+    expect(adminSnap1.currentUserRoles).toEqual(['system_admin']);
+    const adminSwitch = switchViewingRole('P-000004', 'finance');
+    expect(adminSwitch.ok).toBe(true);
+    const adminSnap2 = getAppSnapshot('P-000004');
+    expect(adminSnap2.activeViewingRole).toBe('finance');
   });
 
   it('cycles panel placements Primary -> Summary -> Off and persists Admin › Home pages changes and resets', () => {

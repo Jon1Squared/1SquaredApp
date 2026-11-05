@@ -137,8 +137,13 @@ export function AppShell({
   }, [homePagesConfig.roles]);
 
   const demoMode = Boolean(homePagesConfig.firmSettings?.demoMode);
-  const realEmployees = useMemo(() => employees.filter((e) => !e.demo), [employees]);
   const demoEmployees = useMemo(() => employees.filter((e) => e.demo), [employees]);
+  const isSystemAdmin = useMemo(
+    () =>
+      currentUserRoles.includes('system_admin') ||
+      currentUserRoles.includes('admin'),
+    [currentUserRoles],
+  );
 
   const navItems = useMemo(() => {
     const items: {
@@ -402,6 +407,8 @@ export function AppShell({
                 Viewing as
               </span>
               <select
+                id="viewing-as-role-select"
+                name="viewingAsRole"
                 aria-label="Viewing as role"
                 value={activeViewingRole}
                 onChange={(e) => handleRoleChange(e.target.value)}
@@ -418,7 +425,9 @@ export function AppShell({
               >
                 {Array.from(
                   new Set([
-                    ...currentUserRoles,
+                    ...(isSystemAdmin
+                      ? homePagesConfig.roles.map((r) => r.key)
+                      : currentUserRoles),
                     ...(pathname.startsWith('/matters') ? ['fee_earner', 'risk_compliance'] : []),
                   ]),
                 ).map((rk) => (
@@ -648,7 +657,7 @@ export function AppShell({
               <button
                 type="button"
                 className="avatar-btn"
-                aria-label={`Account menu (${userName})`}
+                aria-label={`Account menu (${userName}, ${userInitials})`}
                 aria-expanded={avatarOpen}
                 onClick={() => setAvatarOpen((o) => !o)}
               >
@@ -716,9 +725,21 @@ export function AppShell({
                               type="button"
                               className={`popover-menu__item ${isCurrent ? 'popover-menu__item--active' : ''}`}
                               onClick={async () => {
-                                await switchUserAction(emp.id);
-                                setAvatarOpen(false);
-                                router.refresh();
+                                try {
+                                  const res = await switchUserAction(emp.id);
+                                  if (!res.ok) {
+                                    showToast('Could not switch demo persona.');
+                                    return;
+                                  }
+                                  setAvatarOpen(false);
+                                  router.refresh();
+                                } catch (err) {
+                                  showToast(
+                                    err instanceof Error
+                                      ? err.message
+                                      : 'Could not switch demo persona.',
+                                  );
+                                }
                               }}
                             >
                               <span>{name}</span>
@@ -734,37 +755,6 @@ export function AppShell({
                       </div>
                     </>
                   ) : null}
-
-                  <div className="popover-menu__divider" />
-                  <div className="popover-menu__header">
-                    <span className="section-label">Act as employee</span>
-                  </div>
-                  <div className="popover-menu__list">
-                    {realEmployees.map((emp) => {
-                      const name = personDisplayName(emp);
-                      const isCurrent = emp.id === currentUser.id;
-                      return (
-                        <button
-                          key={emp.id}
-                          type="button"
-                          className={`popover-menu__item ${isCurrent ? 'popover-menu__item--active' : ''}`}
-                          onClick={async () => {
-                            await switchUserAction(emp.id);
-                            setAvatarOpen(false);
-                            router.refresh();
-                          }}
-                        >
-                          <span>{name}</span>
-                          <span
-                            className="muted"
-                            style={{ fontSize: '0.8rem', marginLeft: 'auto' }}
-                          >
-                            {emp.jobTitle.split(',')[0]}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
               ) : null}
             </div>

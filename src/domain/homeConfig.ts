@@ -771,7 +771,13 @@ export function resolveActiveViewingRole(
   if (!person) return 'fee_earner';
   const userRoles = resolveEmployeeRoles(person, teams);
   const remembered = config.lastViewingRoleByUserId?.[person.id];
-  if (remembered && userRoles.includes(remembered)) {
+  const isSystemAdmin =
+    userRoles.includes('system_admin') || userRoles.includes('admin');
+  if (
+    remembered &&
+    (userRoles.includes(remembered) ||
+      (isSystemAdmin && config.roles.some((r) => r.key === remembered)))
+  ) {
     return remembered;
   }
   return userRoles[0] || 'fee_earner';

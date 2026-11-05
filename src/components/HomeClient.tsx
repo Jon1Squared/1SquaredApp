@@ -513,18 +513,33 @@ export function HomeClient({
     switch (cardId) {
       // 01 Fee Earner
       case 'fe_tasks_due': {
-        const total = myDueTodayTasks.length + myOverdueTasks.length;
+        const effectiveOpenTasks =
+          myOpenTasks.length > 0
+            ? myOpenTasks
+            : tasks.filter(
+                (t) =>
+                  isTaskOpen(t) &&
+                  (myTeamIds.size === 0 ||
+                    (t.assignedTeamId !== null && myTeamIds.has(t.assignedTeamId))),
+              );
+        const effectiveOverdueTasks = effectiveOpenTasks.filter(
+          (t) => t.dueAt.slice(0, 10) < todayIso,
+        );
+        const effectiveDueTodayTasks = effectiveOpenTasks.filter(
+          (t) => t.dueAt.slice(0, 10) === todayIso,
+        );
+        const total = effectiveDueTodayTasks.length + effectiveOverdueTasks.length;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Tasks due / overdue</span>
-              {myOverdueTasks.length > 0 ? (
-                <StatusPill label={`${myOverdueTasks.length} overdue`} tone="alert" />
+              {effectiveOverdueTasks.length > 0 ? (
+                <StatusPill label={`${effectiveOverdueTasks.length} overdue`} tone="alert" />
               ) : null}
             </div>
             <div className="kpi-value">{total}</div>
             <div className="kpi-sub">
-              {myDueTodayTasks.length} due today · {myOpenTasks.length} open total
+              {effectiveDueTodayTasks.length} due today · {effectiveOpenTasks.length} open total
             </div>
           </div>
         );

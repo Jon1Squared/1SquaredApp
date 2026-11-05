@@ -753,12 +753,19 @@ export function MatterProfileClient({
         p.name.toLowerCase().includes('court') ||
         lowerRole.includes('tribunal') ||
         lowerRole.includes('court');
+      const roleParts = p.role.includes(' · ') ? p.role.split(' · ') : null;
       list.push({
         id: p.id,
         name: p.name,
         href: p.linkedRecordId ? hrefForId(p.linkedRecordId) : undefined,
-        sub: p.role,
-        badge: isTribunal ? 'Court / tribunal' : isOpponent ? 'Opponent' : p.role,
+        sub: roleParts ? roleParts.slice(1).join(' · ') : p.role,
+        badge: isTribunal
+          ? 'Court / tribunal'
+          : isOpponent
+            ? 'Opponent'
+            : roleParts
+              ? roleParts[0]
+              : 'Other party',
         tone: isTribunal ? 'neutral' : isOpponent ? 'warning' : 'neutral',
       });
     }
@@ -1373,9 +1380,16 @@ export function MatterProfileClient({
                     const isUpcoming = idx > currentStageIdx;
                     const metaText = isCurrent
                       ? 'Current'
-                      : idx < currentStageIdx && st.meta === 'Current'
-                        ? 'Completed'
-                        : st.meta;
+                      : isUpcoming
+                        ? st.meta === 'Current' ||
+                          st.meta === 'Completed' ||
+                          st.meta.startsWith('Done') ||
+                          st.meta.startsWith('Filed')
+                          ? 'Upcoming'
+                          : st.meta
+                        : st.meta === 'Current'
+                          ? 'Completed'
+                          : st.meta;
                     return (
                       <div
                         key={st.name}
@@ -1884,7 +1898,9 @@ export function MatterProfileClient({
                     }}
                     onClick={() => setTab('tasks')}
                   >
-                    + Add
+                    {userKeyDatePermissions.includes('keydate:edit')
+                      ? '+ Add'
+                      : 'View all →'}
                   </button>
                 </div>
               </div>

@@ -847,6 +847,8 @@ export function getStore(): FirmStore {
           }
         }
 
+        const seedValueIds = new Set(seedLists.values.map((v) => v.id));
+
         for (const m of demo.matters) {
           const existingMatter = parsed.matters.find(
             (x) => x.id === m.id || x.matterNumber === m.matterNumber,
@@ -855,12 +857,36 @@ export function getStore(): FirmStore {
             parsed.matters.push(m);
             parsed.counters.M = Math.max(parsed.counters.M ?? 0, demo.counters.M);
             migrated = true;
-          } else if (m.fieldValues && Object.keys(m.fieldValues).length > 0) {
-            existingMatter.fieldValues = {
-              ...existingMatter.fieldValues,
-              ...m.fieldValues,
-            };
-            migrated = true;
+          } else {
+            if (m.fieldValues && Object.keys(m.fieldValues).length > 0) {
+              existingMatter.fieldValues = {
+                ...existingMatter.fieldValues,
+                ...m.fieldValues,
+              };
+              migrated = true;
+            }
+            if (
+              existingMatter.practiceAreaId &&
+              !seedValueIds.has(existingMatter.practiceAreaId)
+            ) {
+              existingMatter.practiceAreaId = m.practiceAreaId;
+              migrated = true;
+            }
+            if (
+              existingMatter.workTypeSubcategoryId &&
+              !seedValueIds.has(existingMatter.workTypeSubcategoryId)
+            ) {
+              existingMatter.workTypeSubcategoryId = m.workTypeSubcategoryId;
+              migrated = true;
+            }
+            if (existingMatter.stageId && !seedValueIds.has(existingMatter.stageId)) {
+              existingMatter.stageId = m.stageId;
+              migrated = true;
+            }
+            if (existingMatter.milestoneId && !seedValueIds.has(existingMatter.milestoneId)) {
+              existingMatter.milestoneId = m.milestoneId;
+              migrated = true;
+            }
           }
         }
 
@@ -870,9 +896,22 @@ export function getStore(): FirmStore {
             parsed.enquiries.push(enq);
             parsed.counters.ENQ = Math.max(parsed.counters.ENQ ?? 0, demo.counters.ENQ);
             migrated = true;
-          } else if (enq.id === 'ENQ-000009' && existingEnq.keyDate !== enq.keyDate) {
-            existingEnq.keyDate = enq.keyDate;
-            migrated = true;
+          } else {
+            if (enq.id === 'ENQ-000009' && existingEnq.keyDate !== enq.keyDate) {
+              existingEnq.keyDate = enq.keyDate;
+              migrated = true;
+            }
+            if (existingEnq.practiceAreaId && !seedValueIds.has(existingEnq.practiceAreaId)) {
+              existingEnq.practiceAreaId = enq.practiceAreaId;
+              migrated = true;
+            }
+            if (
+              existingEnq.workTypeSubcategoryId &&
+              !seedValueIds.has(existingEnq.workTypeSubcategoryId)
+            ) {
+              existingEnq.workTypeSubcategoryId = enq.workTypeSubcategoryId;
+              migrated = true;
+            }
           }
         }
 
@@ -882,10 +921,28 @@ export function getStore(): FirmStore {
           migrated = true;
         } else {
           for (const q of demo.quotes) {
-            if (!parsed.quotes.some((x) => x.id === q.id || x.reference === q.reference)) {
+            const existingQuote = parsed.quotes.find(
+              (x) => x.id === q.id || x.reference === q.reference,
+            );
+            if (!existingQuote) {
               parsed.quotes.push(q);
               parsed.counters.QTE = Math.max(parsed.counters.QTE ?? 0, demo.counters.QTE);
               migrated = true;
+            } else {
+              if (
+                existingQuote.practiceAreaId &&
+                !seedValueIds.has(existingQuote.practiceAreaId)
+              ) {
+                existingQuote.practiceAreaId = q.practiceAreaId;
+                migrated = true;
+              }
+              if (
+                existingQuote.workTypeSubcategoryId &&
+                !seedValueIds.has(existingQuote.workTypeSubcategoryId)
+              ) {
+                existingQuote.workTypeSubcategoryId = q.workTypeSubcategoryId;
+                migrated = true;
+              }
             }
           }
         }

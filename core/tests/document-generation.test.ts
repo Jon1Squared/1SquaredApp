@@ -51,6 +51,7 @@ import {
 } from '@/server/documentGenerationServices';
 import {
   createSignedEntraSessionCookie,
+  isVerifiedEntraSessionPayload,
   setTestEntraSessionOverride,
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
@@ -1149,6 +1150,8 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       delete process.env.PLATFORM_BLOB_SIGNING_KEY;
       process.env.AUTH_SECRET = 'some-auth-secret-that-must-not-be-used';
       delete process.env.VITEST;
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'development';
+      expect(resolveTenantBlobSigningKey('not-a-law-firm')).toMatch(/^[0-9a-f]{64}$/);
       (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
       expect(() => resolveTenantBlobSigningKey('not-a-law-firm')).toThrow(
         /STORAGE_CONFIG_ERROR/,
@@ -1162,6 +1165,28 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       else process.env.VITEST = prevVitest;
       (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
     }
+
+    // Verified Entra session payload is a plain object without Symbol properties (safe for React Server-to-Client component serialization)
+    const signedCookie = createSignedEntraSessionCookie({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      oid: '00000000-0000-0000-0000-000000000001',
+      tid: '00000000-0000-0000-0000-000000000099',
+      sub: 'sub-p-000001',
+      email: 'rhian.morgan@notalawfirm.example',
+      displayName: 'Rhian Morgan',
+      entraRoles: ['partner'],
+      mappedRoles: ['partner'],
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    const verifiedSession = verifySignedEntraSessionCookie(signedCookie);
+    expect(verifiedSession).not.toBeNull();
+    expect(isVerifiedEntraSessionPayload(verifiedSession)).toBe(true);
+    expect(Object.getOwnPropertySymbols(verifiedSession!)).toHaveLength(0);
 
     // R22: Forged untrustedRequestTenantOverride is rejected with TENANCY_FORGERY_DETECTED
     expect(() =>

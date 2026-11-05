@@ -446,7 +446,12 @@ export function OrganisationsListClient({
         </div>
       </div>
 
-      <div className="tabs-bar" role="tablist" aria-label="Organisation directory views">
+      <div className="tabs-bar">
+        <div
+          role="tablist"
+          aria-label="Organisation directory views"
+          style={{ display: 'flex', alignItems: 'center', gap: 24 }}
+        >
         <button
           type="button"
           role="tab"
@@ -492,6 +497,7 @@ export function OrganisationsListClient({
         >
           Archived ({archivedCount})
         </button>
+        </div>
         <div
           style={{
             marginLeft: 'auto',

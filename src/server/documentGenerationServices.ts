@@ -124,10 +124,18 @@ function isTestEnv(): boolean {
   return Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
 }
 
+function isTestOrDevEnv(): boolean {
+  return Boolean(
+    isTestEnv() ||
+      (process.env.NODE_ENV === 'development' &&
+        process.env.PLATFORM_ENVIRONMENT !== 'live'),
+  );
+}
+
 export function resolveTenantBlobSigningKey(tenantId: string): string {
   const baseSecret =
     process.env.PLATFORM_BLOB_SIGNING_KEY?.trim() ||
-    (isTestEnv() ? 'test-host-blob-signing-key-from-vault' : '');
+    (isTestOrDevEnv() ? 'test-host-blob-signing-key-from-vault' : '');
   if (!baseSecret || (baseSecret.startsWith('<') && baseSecret.endsWith('>'))) {
     throw new Error(
       'STORAGE_CONFIG_ERROR: PLATFORM_BLOB_SIGNING_KEY must be configured in Key Vault / environment.',

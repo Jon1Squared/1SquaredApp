@@ -474,7 +474,12 @@ export function PeopleListClient({
         </div>
       </div>
 
-      <div className="tabs-bar" role="tablist" aria-label="People directory views">
+      <div className="tabs-bar">
+        <div
+          role="tablist"
+          aria-label="People directory views"
+          style={{ display: 'flex', alignItems: 'center', gap: 24 }}
+        >
         <button
           type="button"
           role="tab"
@@ -520,6 +525,7 @@ export function PeopleListClient({
         >
           Archived ({archivedCount})
         </button>
+        </div>
         <div
           style={{
             marginLeft: 'auto',

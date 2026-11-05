@@ -3225,7 +3225,7 @@ export function PersonFormClient({
                                   alignItems: 'center',
                                 }}
                               >
-                                <label className="field-label">
+                                <label className="field-label" htmlFor="emp-line-manager">
                                   Line manager{' '}
                                   {!empIsTopOfHierarchy ? (
                                     <span style={{ color: 'var(--coral, #d94a27)' }}>*</span>
@@ -3253,6 +3253,7 @@ export function PersonFormClient({
                                 </label>
                               </div>
                               <EmployeeSelect
+                                id="emp-line-manager"
                                 employees={employees.filter((e) => e.id !== existing?.id)}
                                 allPeople={allPeople}
                                 values={values}
@@ -3268,9 +3269,12 @@ export function PersonFormClient({
                             </div>
 
                             <div className="field-group">
-                              <label className="field-label">Supervising partner or supervisor</label>
+                              <label className="field-label" htmlFor="emp-supervising-partner">
+                                Supervising partner or supervisor
+                              </label>
                               <EmployeeSelect
-                                employees={employees.filter((e) => e.id !== existing?.id)}
+                                id="emp-supervising-partner"
+                                employees={employees}
                                 allPeople={allPeople}
                                 values={values}
                                 value={empSupervisingPartnerId}
@@ -3279,10 +3283,11 @@ export function PersonFormClient({
                             </div>
 
                             <div className="field-group">
-                              <label className="field-label">
+                              <label className="field-label" htmlFor="emp-timesheet-approver">
                                 Timesheet approver (defaults to line manager)
                               </label>
                               <EmployeeSelect
+                                id="emp-timesheet-approver"
                                 employees={employees.filter((e) => e.id !== existing?.id)}
                                 allPeople={allPeople}
                                 values={values}
@@ -3292,10 +3297,11 @@ export function PersonFormClient({
                             </div>
 
                             <div className="field-group">
-                              <label className="field-label">
+                              <label className="field-label" htmlFor="emp-holiday-approver">
                                 Holiday approver (defaults to line manager)
                               </label>
                               <EmployeeSelect
+                                id="emp-holiday-approver"
                                 employees={employees.filter((e) => e.id !== existing?.id)}
                                 allPeople={allPeople}
                                 values={values}
@@ -3305,8 +3311,11 @@ export function PersonFormClient({
                             </div>
 
                             <div className="field-group">
-                              <label className="field-label">Onboarding buddy</label>
+                              <label className="field-label" htmlFor="emp-onboarding-buddy">
+                                Onboarding buddy
+                              </label>
                               <EmployeeSelect
+                                id="emp-onboarding-buddy"
                                 employees={employees.filter((e) => e.id !== existing?.id)}
                                 allPeople={allPeople}
                                 values={values}

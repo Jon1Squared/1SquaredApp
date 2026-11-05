@@ -1,5 +1,18 @@
 # 1Squared — Release Notes
 
+## Unreleased — Interactive Browser Audit Fixes (`fix/testing-fixes`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Host Application Bug Fixes, Accessibility (`a11y`) & Seed Data Alignment (`src/server/`, `src/domain/`, `src/components/`, `src/app/`, `src/seed/`, `src/docs/`):**
+  - **Document Generation Local Development Signing Key (`src/server/documentGenerationServices.ts`):** Allowed the development fallback blob signing key in `resolveTenantBlobSigningKey` when `NODE_ENV === 'development'` and `PLATFORM_ENVIRONMENT !== 'live'`, preventing `500` `STORAGE_CONFIG_ERROR` responses during local interactive document generation while continuing to require `PLATFORM_BLOB_SIGNING_KEY` in `production` and `live` environments.
+  - **React Server-to-Client Session Serialisation (`src/server/entraAuth.ts`):** Removed the non-enumerable `Symbol` property from `VerifiedEntraSessionPayload` in `markAsVerifiedEntraSession` (relying on the module-private `WeakSet` brand check in `isVerifiedEntraSessionPayload`), eliminating React 19 Flight's Server-to-Client `Symbol` serialisation error when passing `entraSession` to client components.
+  - **Account Menu Persona Switcher & System Admin Role Preview (`src/components/AppShell.tsx`, `src/app/actions.ts`, `src/domain/homeConfig.ts`, `src/server/services.ts`):** Removed the unconditional **Act as employee** list from the account menu when `featureFlags.enableDemoMode` is `false`, persisted the signed session cookie (`ENTRA_SESSION_COOKIE`) in `switchUserAction` when Demo Mode is active, and enabled `system_admin` / `admin` users to preview any configured role via the **Viewing as** header dropdown (`switchViewingRole` and `resolveActiveViewingRole`).
+  - **Fee Earner Home KPI & Employee Supervising Partner Select (`src/components/HomeClient.tsx`, `src/components/PersonFormClient.tsx`):** Aligned the Fee Earner `Tasks due / overdue` KPI card (`fe_tasks_due`) with the `To Do` widget's team fallback when `myOpenTasks` is empty, and included the employee being edited in the `Supervising partner or supervisor` `<EmployeeSelect>` list so self-supervised equity partners are not mislabelled `(Left)`.
+  - **WCAG 2.1 AA Accessibility & UI Polish (`src/app/globals.css`, `src/components/PersonFormClient.tsx`, `src/components/MattersListClient.tsx`, `src/components/EnquiriesListClient.tsx`, `src/components/PeopleListClient.tsx`, `src/components/OrganisationsListClient.tsx`, `src/components/SearchBox.tsx`, `src/components/MatterProfileClient.tsx`, `src/components/KeyDatesDiaryWorkspace.tsx`, `src/seed/demo.ts`, `src/server/store.ts`):** Associated all `<EmployeeSelect>` dropdowns with `<label htmlFor>`, moved `role="tablist"` onto a tab-only wrapper excluding `<Link>` action buttons, darkened `--color-text-subtle` (`#52606d`) and `.form-tab-btn` (`#475569`) to pass WCAG AA 4.5:1 contrast, aligned `button.avatar-btn` `aria-label` with its visible initials (`label-content-name-mismatch`), added `id`/`name`/`aria-label` attributes to global search and role switcher controls, aligned seeded practice area/subcategory/stage/milestone IDs with `taxonomy.json`, and updated matter stage progress, party badge, Overview Key Dates button, and Key Dates exception labels.
+  - Updated in-app Help & Documentation (`src/docs/articles/authentication-rbac-and-mfa.ts`).
+
+---
+
 ## Unreleased — Local & Platform CI Environment Parity (`chore/local-ci-parity`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

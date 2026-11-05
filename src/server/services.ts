@@ -8137,17 +8137,23 @@ export function switchViewingRole(
   const user = store.people.find((p) => p.id === userId);
   if (!user) return { ok: false, error: 'User not found.' };
 
-  const userRoles = resolveEmployeeRoles(user, store.teams);
-  if (!userRoles.includes(roleKey)) {
-    return { ok: false, error: 'Role is not assigned to the current user.' };
-  }
-
   if (!store.homePagesConfig) {
     store.homePagesConfig = createDefaultHomePagesConfig(
       new Date().toISOString(),
       getActiveTenantConfiguration().branding.primaryDomain,
     );
   }
+
+  const userRoles = resolveEmployeeRoles(user, store.teams);
+  const isSystemAdmin =
+    userRoles.includes('system_admin') || userRoles.includes('admin');
+  const isValidConfiguredRole = store.homePagesConfig.roles.some(
+    (r) => r.key === roleKey,
+  );
+  if (!userRoles.includes(roleKey) && !(isSystemAdmin && isValidConfiguredRole)) {
+    return { ok: false, error: 'Role is not assigned to the current user.' };
+  }
+
   store.homePagesConfig.lastViewingRoleByUserId = {
     ...(store.homePagesConfig.lastViewingRoleByUserId ?? {}),
     [userId]: roleKey,
