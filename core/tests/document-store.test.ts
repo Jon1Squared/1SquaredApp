@@ -4032,7 +4032,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
               ...openMatter,
               title: `${openMatter.title} (Title edited after lift)`,
             },
-            { id: openMatter.id, byId: 'P-000001', saveMode: 'draft' },
+            { id: openMatter.id, byId: 'P-000001' },
           ),
         );
         expect(postLiftSave.errors).toBeUndefined();

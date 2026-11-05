@@ -5500,4 +5500,279 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       resetAllDemoData('P-000001');
     }
   });
+
+  it('R186: an open matter cannot be moved back to Prospective or saved as a draft, and submit_referred + Risk approval preserve open status and matterOpeningSnapshot', async () => {
+    resetAllDemoData('P-000001');
+    const store = getStore();
+    const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+    const riskOfficer = store.people.find(
+      (p) => p.isEmployee && (p.roles ?? []).includes('risk_compliance'),
+    )!;
+    expect(feeEarner).toBeDefined();
+    expect(riskOfficer).toBeDefined();
+
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const makeSession = (
+      person: typeof feeEarner,
+      roles: string[],
+      email: string,
+    ) => {
+      const cookie = createSignedEntraSessionCookie({
+        personId: person.id,
+        tenantId: 'not-a-law-firm',
+        oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id}`,
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: person.id,
+        email,
+        displayName: `${person.firstName} ${person.surname}`,
+        entraRoles: roles,
+        mappedRoles: roles,
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      return {
+        personId: person.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: roles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+      };
+    };
+
+    const feeEarnerSession = makeSession(
+      feeEarner,
+      feeEarner.roles ?? ['fee_earner'],
+      'fee-earner-r186@notalawfirm.example',
+    );
+    const riskSession = makeSession(
+      riskOfficer,
+      riskOfficer.roles ?? ['risk_compliance'],
+      'risk-r186@notalawfirm.example',
+    );
+
+    const activeStatusId = store.values.find(
+      (v) => v.listKey === 'matter_status' && v.label === 'Active',
+    )!.id;
+    const prospectiveStatusId = store.values.find(
+      (v) =>
+        v.listKey === 'matter_status' && v.label === 'Prospective / Enquiry',
+    )!.id;
+
+    try {
+      // 1. Existing open matters M-000003 and M-000001 straight from the fixture
+      for (const openMatterId of ['M-000003', 'M-000001'] as const) {
+        const fixtureOpen = structuredClone(
+          getStore().matters.find((m) => m.id === openMatterId)!,
+        );
+        expect(fixtureOpen).toBeDefined();
+        expect(fixtureOpen.matterStatusId).toBe(activeStatusId);
+        const originalMatterNumber = fixtureOpen.matterNumber;
+
+        // (a) draft save on an open matter is refused and leaves the matter Active
+        const draftSaveRes = await runWithActiveActorSession(
+          feeEarnerSession,
+          () =>
+            saveMatterRecord(
+              { ...fixtureOpen },
+              {
+                id: openMatterId,
+                byId: feeEarner.id,
+                saveMode: 'draft',
+              },
+            ),
+        );
+        expect(draftSaveRes.matter).toBeNull();
+        expect(draftSaveRes.errors?.form).toMatch(
+          /opened, so it can no longer be saved as a draft/i,
+        );
+        const afterDraftAttempt = getStore().matters.find(
+          (m) => m.id === openMatterId,
+        )!;
+        expect(afterDraftAttempt.matterStatusId).toBe(activeStatusId);
+        expect(afterDraftAttempt.matterNumber).toBe(originalMatterNumber);
+
+        // (b) plain save with matterStatusId set to Prospective is refused and leaves the matter Active
+        const prospectiveSaveRes = await runWithActiveActorSession(
+          feeEarnerSession,
+          () =>
+            saveMatterRecord(
+              {
+                ...fixtureOpen,
+                matterStatusId: prospectiveStatusId,
+              },
+              {
+                id: openMatterId,
+                byId: feeEarner.id,
+              },
+            ),
+        );
+        expect(prospectiveSaveRes.matter).toBeNull();
+        expect(prospectiveSaveRes.errors?.matterStatusId).toMatch(
+          /open matter cannot be moved back to Prospective/i,
+        );
+        const afterProspectiveAttempt = getStore().matters.find(
+          (m) => m.id === openMatterId,
+        )!;
+        expect(afterProspectiveAttempt.matterStatusId).toBe(activeStatusId);
+        expect(afterProspectiveAttempt.matterNumber).toBe(originalMatterNumber);
+
+        // (c) submit_referred save on an open matter succeeds, records Referred, and keeps the matter Active
+        const referSaveRes = await runWithActiveActorSession(
+          feeEarnerSession,
+          () =>
+            saveMatterRecord(
+              { ...fixtureOpen },
+              {
+                id: openMatterId,
+                byId: feeEarner.id,
+                saveMode: 'submit_referred',
+              },
+            ),
+        );
+        expect(referSaveRes.errors).toBeUndefined();
+        expect(referSaveRes.matter).not.toBeNull();
+        expect(referSaveRes.matter?.matterStatusId).toBe(activeStatusId);
+        expect(referSaveRes.matter?.matterNumber).toBe(originalMatterNumber);
+        expect(referSaveRes.matter?.conflictCheckRecord?.status).toBe(
+          'Referred',
+        );
+        expect(referSaveRes.matter?.conflictCheckStatus).toBe(
+          'Pending conflict review',
+        );
+
+        const snapshotBeforeRiskApproval = structuredClone(
+          referSaveRes.matter?.fieldValues?.['matterOpeningSnapshot'],
+        );
+        expect(snapshotBeforeRiskApproval).toBeDefined();
+
+        // (d) Risk user approves through updateMatterConflictRecord; matter stays Active and matterOpeningSnapshot is unchanged
+        const riskApproveRes = runWithActiveActorSession(riskSession, () =>
+          updateMatterConflictRecord(
+            openMatterId,
+            {
+              ...referSaveRes.matter!.conflictCheckRecord!,
+              status: 'Approved',
+              outcomeLabel: 'Approved by Risk & Compliance',
+            },
+            riskOfficer.id,
+          ),
+        );
+        expect(riskApproveRes.errors).toBeUndefined();
+        expect(riskApproveRes.matter).not.toBeNull();
+        expect(riskApproveRes.matter?.matterStatusId).toBe(activeStatusId);
+        expect(riskApproveRes.matter?.conflictCheckRecord?.status).toBe(
+          'Approved',
+        );
+        expect(riskApproveRes.matter?.conflictCheckStatus).toBe(
+          'Approved by Risk & Compliance',
+        );
+        expect(
+          riskApproveRes.matter?.fieldValues?.['matterOpeningSnapshot'],
+        ).toEqual(snapshotBeforeRiskApproval);
+      }
+
+      // 2. Newly created and opened matter also refuses draft and Prospective saves and preserves status/snapshot on referral + Risk approval
+      const templateOpen = getStore().matters.find(
+        (m) => m.id === 'M-000001',
+      )!;
+      const newOpenedRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              title: 'R186 Newly Opened Matter',
+              clientId: templateOpen.clientId,
+              practiceAreaId: templateOpen.practiceAreaId,
+              workTypeSubcategoryId: templateOpen.workTypeSubcategoryId,
+              responsiblePartnerId: templateOpen.responsiblePartnerId,
+              supervisingPartnerId: templateOpen.supervisingPartnerId,
+              leadFeeEarnerId: feeEarner.id,
+              feeEstimateGbp: 5000,
+              matterStatusId: activeStatusId,
+            },
+            {
+              byId: feeEarner.id,
+              saveMode: 'submit_cleared',
+            },
+          ),
+      );
+      expect(newOpenedRes.errors).toBeUndefined();
+      expect(newOpenedRes.matter).not.toBeNull();
+      const newOpenId = newOpenedRes.matter!.id;
+      const initialOpenedSnapshot = structuredClone(
+        newOpenedRes.matter!.fieldValues?.['matterOpeningSnapshot'],
+      );
+      expect(initialOpenedSnapshot).toBeDefined();
+
+      const newDraftAttempt = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            { ...newOpenedRes.matter! },
+            { id: newOpenId, byId: feeEarner.id, saveMode: 'draft' },
+          ),
+      );
+      expect(newDraftAttempt.matter).toBeNull();
+      expect(newDraftAttempt.errors?.form).toMatch(
+        /opened, so it can no longer be saved as a draft/i,
+      );
+
+      const newProspectiveAttempt = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            {
+              ...newOpenedRes.matter!,
+              matterStatusId: prospectiveStatusId,
+            },
+            { id: newOpenId, byId: feeEarner.id },
+          ),
+      );
+      expect(newProspectiveAttempt.matter).toBeNull();
+      expect(newProspectiveAttempt.errors?.matterStatusId).toMatch(
+        /open matter cannot be moved back to Prospective/i,
+      );
+
+      const newReferRes = await runWithActiveActorSession(
+        feeEarnerSession,
+        () =>
+          saveMatterRecord(
+            { ...newOpenedRes.matter! },
+            { id: newOpenId, byId: feeEarner.id, saveMode: 'submit_referred' },
+          ),
+      );
+      expect(newReferRes.errors).toBeUndefined();
+      expect(newReferRes.matter?.matterStatusId).not.toBe(prospectiveStatusId);
+      expect(newReferRes.matter?.conflictCheckRecord?.status).toBe('Referred');
+      expect(
+        newReferRes.matter?.fieldValues?.['matterOpeningSnapshot'],
+      ).toEqual(initialOpenedSnapshot);
+
+      const newRiskApproveRes = runWithActiveActorSession(riskSession, () =>
+        updateMatterConflictRecord(
+          newOpenId,
+          {
+            ...newReferRes.matter!.conflictCheckRecord!,
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+          },
+          riskOfficer.id,
+        ),
+      );
+      expect(newRiskApproveRes.errors).toBeUndefined();
+      expect(newRiskApproveRes.matter?.conflictCheckRecord?.status).toBe(
+        'Approved',
+      );
+      expect(
+        newRiskApproveRes.matter?.fieldValues?.['matterOpeningSnapshot'],
+      ).toEqual(initialOpenedSnapshot);
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
 });

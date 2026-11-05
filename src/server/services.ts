@@ -2678,11 +2678,25 @@ async function runMatterOpeningGate(params: {
 function resolveNextMatterStatusId(params: {
   input: { matterStatusId?: string | null };
   existing: Matter | null;
+  existingHasOpened: boolean;
   saveMode: 'draft' | 'submit_cleared' | 'submit_referred' | undefined;
   prospectiveStatus: string;
   cmiIncompleteStatus: string;
 }): string {
-  const { input, existing, saveMode, prospectiveStatus, cmiIncompleteStatus } = params;
+  const {
+    input,
+    existing,
+    existingHasOpened,
+    saveMode,
+    prospectiveStatus,
+    cmiIncompleteStatus,
+  } = params;
+  if (existingHasOpened && existing) {
+    const requested = input.matterStatusId;
+    return requested && requested !== prospectiveStatus
+      ? requested
+      : existing.matterStatusId;
+  }
   if (saveMode === 'draft' || saveMode === 'submit_referred') {
     return prospectiveStatus;
   }
@@ -2846,15 +2860,24 @@ function buildServerConflictCheckRecord(params: {
     submittedByName: isNewSubmission
       ? actorDisplayName
       : stored?.submittedByName ?? null,
-    approvedAtDisplay: isRiskApprovalOrDecline
-      ? displayNow
-      : stored?.approvedAtDisplay ?? null,
-    approvedById: isRiskApprovalOrDecline
-      ? actorId
-      : stored?.approvedById ?? null,
-    approvedByName: isRiskApprovalOrDecline
-      ? actorDisplayName
-      : stored?.approvedByName ?? null,
+    approvedAtDisplay:
+      status === 'Referred'
+        ? null
+        : isRiskApprovalOrDecline
+          ? displayNow
+          : stored?.approvedAtDisplay ?? null,
+    approvedById:
+      status === 'Referred'
+        ? null
+        : isRiskApprovalOrDecline
+          ? actorId
+          : stored?.approvedById ?? null,
+    approvedByName:
+      status === 'Referred'
+        ? null
+        : isRiskApprovalOrDecline
+          ? actorDisplayName
+          : stored?.approvedByName ?? null,
     ...(approvedRestrictedMatchIds !== undefined
       ? { approvedRestrictedMatchIds }
       : {}),
@@ -3521,14 +3544,33 @@ export async function saveMatterRecord(
       existing.matterStatusId !== prospectiveStatus &&
       !existing.matterNumber.startsWith('DRAFT'),
   );
+  const isPmsImport = opts.source === 'pms_import';
+  if (existingHasOpened && !isPmsImport) {
+    if (opts.saveMode === 'draft') {
+      return {
+        matter: null,
+        errors: {
+          form: 'This matter has opened, so it can no longer be saved as a draft.',
+        },
+      };
+    }
+    if (input.matterStatusId === prospectiveStatus) {
+      return {
+        matter: null,
+        errors: {
+          matterStatusId: 'An open matter cannot be moved back to Prospective.',
+        },
+      };
+    }
+  }
   const nextStatusId = resolveNextMatterStatusId({
     input,
     existing,
+    existingHasOpened,
     saveMode: opts.saveMode,
     prospectiveStatus,
     cmiIncompleteStatus,
   });
-  const isPmsImport = opts.source === 'pms_import';
   const willOpen = !existingHasOpened && nextStatusId !== prospectiveStatus;
 
   const storedConflictRecord =
@@ -3603,6 +3645,9 @@ export async function saveMatterRecord(
               ? {
                   status: 'Referred' as const,
                   outcomeLabel: 'Referred to risk for review' as const,
+                  approvedAtDisplay: null,
+                  approvedById: null,
+                  approvedByName: null,
                 }
               : opts.saveMode === 'submit_cleared' &&
                   (storedConflictRecord.status === 'In progress' ||
@@ -3895,7 +3940,9 @@ export async function saveMatterRecord(
       : null;
 
   const shouldEnforceOpeningGate =
-    (willOpen || opts.saveMode === 'submit_referred') && !isPmsImport;
+    !existingHasOpened &&
+    (willOpen || opts.saveMode === 'submit_referred') &&
+    !isPmsImport;
   if (shouldEnforceOpeningGate && gateResult && !gateResult.allowProceed) {
     return {
       matter: null,
@@ -3968,7 +4015,13 @@ export async function saveMatterRecord(
     const cleanFieldVals = { ...matter.fieldValues };
     delete cleanFieldVals['matterOpeningSnapshot'];
     const backfilledSnapshot = resolveMatterOpeningSnapshot(
-      { ...matter, fieldValues: cleanFieldVals },
+      {
+        ...matter,
+        conflictCheckRecord: storedConflictRecord ?? matter.conflictCheckRecord,
+        conflictCheckStatus:
+          existing?.conflictCheckStatus ?? matter.conflictCheckStatus,
+        fieldValues: cleanFieldVals,
+      },
       store.people,
       store.organisations,
       store.values,
@@ -4059,7 +4112,10 @@ export async function saveMatterRecord(
       byId: opts.byId,
       at: now,
     });
-    if (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred') {
+    if (
+      !existingHasOpened &&
+      (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred')
+    ) {
       writeAudit(store, {
         recordType: 'matter',
         recordId: matter.id,
@@ -4719,10 +4775,17 @@ export function updateMatterConflictRecord(
       matter.conflictClearedById = null;
     }
     matter.conflictCheckDate = today;
-    const prospectiveStatusId = vid('matter_status', 'Prospective / Enquiry');
+    const defaultStatus = vid('matter_status', 'Active');
+    const prospectiveStatusId =
+      store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label === 'Prospective / Enquiry',
+      )?.id ?? defaultStatus;
+    const matterHasOpened =
+      matter.matterStatusId !== prospectiveStatusId &&
+      !matter.matterNumber.startsWith('DRAFT');
     if (
       sanitisedRecord.status === 'Approved' &&
-      matter.matterStatusId === prospectiveStatusId
+      !matterHasOpened
     ) {
       if (hasPassedOpeningGate) {
         const activeStatusId = vid('matter_status', 'Active');
