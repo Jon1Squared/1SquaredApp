@@ -13,12 +13,14 @@ import {
   type IntakeSourceDocument,
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
+import { AuthorisationError } from '@/domain/rbac';
+import { resolveConfiguredFirmPrimaryDomain } from '@/domain/employment';
 import { vid } from '@/seed/lists';
 import {
   createOrUpdateLink,
-  getCurrentUserId,
   saveOrganisationRecord,
   savePersonRecord,
+  withAuthenticatedActor,
 } from '@/server/services';
 import { getStore } from '@/server/store';
 
@@ -2437,10 +2439,13 @@ function ensureContactInCrm(
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as {
-      documents?: IntakeSourceDocument[];
-      apiKeyOverride?: string;
-    };
+    return await withAuthenticatedActor(async (actor) => {
+      const byId = actor.personId;
+
+      const body = (await req.json()) as {
+        documents?: IntakeSourceDocument[];
+        apiKeyOverride?: string;
+      };
     const documents = body.documents ?? [];
     if (!Array.isArray(documents) || documents.length === 0) {
       return NextResponse.json(
@@ -2461,7 +2466,6 @@ export async function POST(req: Request) {
     }
 
     const store = getStore();
-    const byId = await getCurrentUserId();
     const employees = store.people.filter((p) => p.isEmployee);
 
     const practiceAreas = store.values.filter(
@@ -2598,7 +2602,7 @@ export async function POST(req: Request) {
           emails: [
             {
               id: `em-${Date.now()}-fe`,
-              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@onesquared.law`,
+              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@${resolveConfiguredFirmPrimaryDomain()}`,
               typeId: vid('email_type', 'Work'),
               isPrimary: true,
             },
@@ -2632,14 +2636,21 @@ export async function POST(req: Request) {
       }
     }
 
-    const latestStore = getStore();
-    return NextResponse.json({
-      extraction: enriched,
-      organisations: latestStore.organisations,
-      people: latestStore.people,
-      links: latestStore.links,
+      const latestStore = getStore();
+      return NextResponse.json({
+        extraction: enriched,
+        organisations: latestStore.organisations,
+        people: latestStore.people,
+        links: latestStore.links,
+      });
     });
   } catch (err) {
+    if (err instanceof AuthorisationError && err.code === 'UNAUTHENTICATED') {
+      return NextResponse.json(
+        { error: 'Authentication is required.' },
+        { status: 401 },
+      );
+    }
     return NextResponse.json(
       {
         error: err instanceof Error ? err.message : 'Failed to extract from documents.',

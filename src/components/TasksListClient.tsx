@@ -14,7 +14,6 @@ import {
   isTaskOpen,
   isTaskOverdue,
   isUserTeamLeadFor,
-  resolveUserAppRole,
   userTeams,
 } from '@/domain/tasks';
 import type {
@@ -48,6 +47,7 @@ interface Props {
   quotes?: Quote[];
   values: ChoiceValue[];
   currentUserId: string;
+  currentUserRole?: import('@/domain/types').AppRole;
 }
 
 type TasksTab = 'my' | 'team' | 'created' | 'all';
@@ -114,6 +114,7 @@ export function TasksListClient({
   quotes = [],
   values,
   currentUserId,
+  currentUserRole,
 }: Props) {
   const router = useRouter();
 
@@ -121,10 +122,7 @@ export function TasksListClient({
     () => people.find((p) => p.id === currentUserId) ?? null,
     [people, currentUserId],
   );
-  const appRole = useMemo(
-    () => resolveUserAppRole(currentUser, teams, values),
-    [currentUser, teams, values],
-  );
+  const appRole = currentUserRole ?? currentUser?.appRole ?? 'fee_earner';
   const myTeams = useMemo(() => userTeams(currentUserId, teams), [currentUserId, teams]);
   const myTeamIds = useMemo(() => new Set(myTeams.map((t) => t.id)), [myTeams]);
 

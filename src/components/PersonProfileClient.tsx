@@ -23,7 +23,6 @@ import { enquiryDisplayName } from '@/domain/enquiries';
 import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, personFullName, primaryEmail } from '@/domain/names';
-import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import {
   maskBankDetails,
   maskNationalInsuranceNumber,
@@ -41,6 +40,7 @@ import type {
   MergeHistory,
   Note,
   Organisation,
+  OrgStructureCatalogue,
   Person,
   PersonOrganisationLink,
   Task,
@@ -48,6 +48,7 @@ import type {
 } from '@/domain/types';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
+import { DocumentListSection } from './DocumentListSection';
 import {
   AuditAndMergeSection,
   KeyValue,
@@ -66,6 +67,7 @@ const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'works_at_firm', label: 'Works at the firm' },
   { key: 'matters', label: 'Matters' },
+  { key: 'documents', label: 'Documents' },
   { key: 'activity', label: 'Activity' },
   { key: 'finance', label: 'Finance' },
   { key: 'contact', label: 'Contact details' },
@@ -88,6 +90,7 @@ interface Props {
   enquiries?: Enquiry[];
   currentUserId?: string;
   currentUserRole?: AppRole;
+  canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
   pmsView?: ClientPmsViewBundle;
   values: ChoiceValue[];
@@ -98,6 +101,8 @@ interface Props {
   duplicateCandidates: Person[];
   mergedFromId?: string | null;
   initialTab?: string;
+  firmName?: string;
+  orgStructure: OrgStructureCatalogue;
 }
 
 export function PersonProfileClient({
@@ -111,6 +116,7 @@ export function PersonProfileClient({
   enquiries = [],
   currentUserId = 'P-0001',
   currentUserRole = 'admin',
+  canTakeByTaskId,
   canViewFinance = true,
   pmsView,
   values,
@@ -121,6 +127,8 @@ export function PersonProfileClient({
   duplicateCandidates,
   mergedFromId,
   initialTab,
+  firmName = 'Firm',
+  orgStructure,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -196,8 +204,6 @@ export function PersonProfileClient({
     }
     return false;
   }, [person, roleLabels, mainOrg, values, matters]);
-
-  const orgStructure = useMemo(() => buildDefaultOrgStructure(), []);
 
   const visibleTabs = useMemo(
     () =>
@@ -1989,7 +1995,20 @@ export function PersonProfileClient({
           </div>
         )}
 
-        {tab === 'activity' && (
+        {tab === 'documents' && (
+        <DocumentListSection
+          entityType="person"
+          entityId={person.id}
+          person={person}
+          matters={matters}
+          people={allPeople}
+          organisations={organisations}
+          values={values}
+          currentUserId={currentUserId}
+        />
+      )}
+
+      {tab === 'activity' && (
           <div className="client-card">
             <NotesSection
               recordType="person"
@@ -2082,7 +2101,7 @@ export function PersonProfileClient({
         {person.isEmployee ? (
           <>
             <span>·</span>
-            <span>Not A Law Firm LLP ({resolveLabel(values, person.departmentId)})</span>
+            <span>{firmName} ({resolveLabel(values, person.departmentId)})</span>
           </>
         ) : mainOrg ? (
           <>
@@ -2288,6 +2307,7 @@ export function PersonProfileClient({
             people={allPeople}
             values={values}
             currentUserId={currentUserId}
+            canTakeByTaskId={canTakeByTaskId}
           />
 
           {person.isEmployee ? (
@@ -2925,6 +2945,19 @@ export function PersonProfileClient({
           <KeyValue label="Data source">{resolveLabel(values, person.sourceId)}</KeyValue>
           <KeyValue label="Last verified date">{formatDate(person.lastVerifiedAt)}</KeyValue>
         </div>
+      )}
+
+      {tab === 'documents' && (
+        <DocumentListSection
+          entityType="person"
+          entityId={person.id}
+          person={person}
+          matters={matters}
+          people={allPeople}
+          organisations={organisations}
+          values={values}
+          currentUserId={currentUserId}
+        />
       )}
 
       {tab === 'activity' && (

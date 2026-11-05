@@ -5,6 +5,7 @@
  */
 import rawModel from '@/seed/data/matterFieldModel.json';
 import { resolveLabel, valuesForList } from './lists';
+import type { KeyDate } from './keyDates.types';
 import type { ChoiceValue, Matter, Organisation, Person, PersonOrganisationLink } from './types';
 
 export type RequiredLevel =
@@ -393,8 +394,24 @@ export function resolveFieldOptions(
 export function extractCriticalDates(
   matter: Matter,
   subcategoryLabel?: string,
+  matterKeyDates?: readonly KeyDate[],
 ): { fieldId: string; label: string; date: string }[] {
   const out: { fieldId: string; label: string; date: string }[] = [];
+  if (Array.isArray(matterKeyDates)) {
+    for (const kd of matterKeyDates) {
+      if (
+        kd.matterId === matter.id &&
+        kd.status !== 'superseded' &&
+        kd.status !== 'waived'
+      ) {
+        out.push({
+          fieldId: kd.id,
+          label: `${kd.title} (${kd.status})`,
+          date: kd.dueDate,
+        });
+      }
+    }
+  }
   if (matter.targetCompletionAt) {
     out.push({
       fieldId: 'CORE-059',

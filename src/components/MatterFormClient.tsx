@@ -34,11 +34,14 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import {
+  runMatterConflictSearchAction,
   saveMatterAction,
   saveTaskAction,
+  signOffMatterCostsAction,
   switchViewingRoleAction,
   updateMatterConflictRecordAction,
 } from '@/app/actions';
+import type { PartnerCostSignOffRecord } from '@/domain/matterFieldValues';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import {
   enquiryDisplayName,
@@ -67,7 +70,6 @@ import {
 import { resolveOrgDepartment } from '@/domain/orgStructure';
 import {
   calculateDisbursementsTotal,
-  createDefaultMatterCostsConfig,
   lookupRatesForMatter,
   mapBillingBasisLabelToWorkBasis,
   mapWorkBasisToBillingBasisId,
@@ -100,6 +102,7 @@ import type {
   ConflictCheckMatch,
   ConflictCheckParty,
   ConflictCheckRecord,
+  ConflictCheckRecordInput,
   ConflictCheckRunAudit,
   ConflictCheckStatusPill,
   ConflictConditionType,
@@ -120,6 +123,7 @@ import type {
   MatterPartyIdentifiers,
   MatterPartyTaxonomy,
   Organisation,
+  OrgStructureCatalogue,
   Person,
   PersonOrganisationLink,
   Quote,
@@ -154,8 +158,16 @@ interface MatterFormClientProps {
   customFields?: CustomFieldDefinition[];
   employees: Person[];
   currentUser: Person;
+  orgStructure: OrgStructureCatalogue;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
-  matterCostsConfig?: MatterCostsConfig;
+  matterCostsConfig: MatterCostsConfig;
+  canReassignOwnership?: boolean;
+  canSignOffCosts?: boolean;
+  initialSignOffEstimateGbp?: number | null;
+  suggestedMatterGovernanceAssignees?: {
+    riskReviewerId: string | null;
+    practiceManagerId: string | null;
+  };
 }
 
 type OptionalTabKey =
@@ -530,6 +542,11 @@ function statusPillTone(
   return 'neutral';
 }
 
+let nextClientItemSeq = 1;
+function nextClientItemId(prefix: string): string {
+  return `${prefix}-${++nextClientItemSeq}`;
+}
+
 export function MatterFormClient({
   existing,
   isReopenedDraft = false,
@@ -550,17 +567,19 @@ export function MatterFormClient({
   customFields = [],
   employees: initialEmployees,
   currentUser,
+  orgStructure,
   matterPartyTaxonomy,
   matterCostsConfig,
+  canReassignOwnership = false,
+  canSignOffCosts = false,
+  initialSignOffEstimateGbp = null,
+  suggestedMatterGovernanceAssignees,
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
   const today = toIsoDate(new Date());
 
-  const costsConfig = useMemo(
-    () => matterCostsConfig ?? createDefaultMatterCostsConfig(values),
-    [matterCostsConfig, values],
-  );
+  const costsConfig = matterCostsConfig;
 
   const taxonomy = useMemo(
     () => matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(values),
@@ -587,15 +606,21 @@ export function MatterFormClient({
   }, [initialEmployees, people]);
 
   useEffect(() => {
-    setPeople(mergePeopleWithEnquiries(initialPeople, enquiries, values));
+    queueMicrotask(() => {
+      setPeople(mergePeopleWithEnquiries(initialPeople, enquiries, values));
+    });
   }, [initialPeople, enquiries, values]);
 
   useEffect(() => {
-    setOrganisations(initialOrganisations);
+    queueMicrotask(() => {
+      setOrganisations(initialOrganisations);
+    });
   }, [initialOrganisations]);
 
   useEffect(() => {
-    setLinks(initialLinks);
+    queueMicrotask(() => {
+      setLinks(initialLinks);
+    });
   }, [initialLinks]);
 
   const card1Ref = useRef<HTMLElement | null>(null);
@@ -760,6 +785,33 @@ export function MatterFormClient({
       initialSubcatVal?.parentId ??
       userMatterDefaults.practiceAreaId,
   );
+  const [owningDepartmentId, setOwningDepartmentId] = useState<string>(
+    () =>
+      existing?.owningDepartmentId ??
+      resolveOrgDepartment(
+        existing?.practiceAreaId ??
+          initialQuote?.practiceAreaId ??
+          initialEnquiry?.practiceAreaId ??
+          initialSubcatVal?.parentId ??
+          userMatterDefaults.practiceAreaId,
+        orgStructure,
+      )?.id ??
+      '',
+  );
+  const [owningDepartmentExplicitlyChosen, setOwningDepartmentExplicitlyChosen] =
+    useState<boolean>(() => Boolean(existing?.owningDepartmentId));
+  const [owningTeamId, setOwningTeamId] = useState<string>(
+    () => existing?.owningTeamId ?? '',
+  );
+  const availableOwningTeams = useMemo(
+    () =>
+      orgStructure.teamsOrPracticeGroups.filter(
+        (t) =>
+          t.active &&
+          (!owningDepartmentId || t.parentDepartmentId === owningDepartmentId),
+      ),
+    [orgStructure, owningDepartmentId],
+  );
   const [workTypeSubcategoryId, setWorkTypeSubcategoryId] = useState<string>(() => {
     if (existing?.workTypeSubcategoryId) return existing.workTypeSubcategoryId;
     if (initialQuote?.workTypeSubcategoryId) return initialQuote.workTypeSubcategoryId;
@@ -847,11 +899,13 @@ export function MatterFormClient({
     if (prevUserIdRef.current !== currentUser.id) {
       prevUserIdRef.current = currentUser.id;
       if (!existing && !initialScenario && !initialEnquiry && !initialQuote) {
-        setPracticeAreaId(userMatterDefaults.practiceAreaId);
-        setWorkTypeSubcategoryId('');
-        setResponsiblePartnerId(userMatterDefaults.responsiblePartnerId);
-        setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId);
-        setSupervisingPartnerId(userMatterDefaults.responsiblePartnerId);
+        queueMicrotask(() => {
+          setPracticeAreaId(userMatterDefaults.practiceAreaId);
+          setWorkTypeSubcategoryId('');
+          setResponsiblePartnerId(userMatterDefaults.responsiblePartnerId);
+          setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId);
+          setSupervisingPartnerId(userMatterDefaults.responsiblePartnerId);
+        });
       }
     }
   }, [
@@ -1440,12 +1494,14 @@ export function MatterFormClient({
       practiceAreaId,
       preferredSource: costRateSource === 'pms' ? 'pms' : 'app_table',
     });
-    if (lookedUp.rateCard.id) setCostRateCardId(lookedUp.rateCard.id);
-    setCostRateSource(lookedUp.activeSource);
-    setPartnerRateGbp(String(lookedUp.partnerRateGbp));
-    setAssociateRateGbp(String(lookedUp.associateRateGbp));
-    setTraineeRateGbp(String(lookedUp.traineeRateGbp));
-    setCustomGradeRates(lookedUp.customGrades);
+    queueMicrotask(() => {
+      if (lookedUp.rateCard.id) setCostRateCardId(lookedUp.rateCard.id);
+      setCostRateSource(lookedUp.activeSource);
+      setPartnerRateGbp(String(lookedUp.partnerRateGbp));
+      setAssociateRateGbp(String(lookedUp.associateRateGbp));
+      setTraineeRateGbp(String(lookedUp.traineeRateGbp));
+      setCustomGradeRates(lookedUp.customGrades);
+    });
   }, [practiceAreaId, costsConfig, costRateSource]);
 
   function handleSelectWorkBasis(nextBasis: MatterCostWorkBasis) {
@@ -1475,7 +1531,7 @@ export function MatterFormClient({
     if (!desc) return;
     const amountGbp = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : 0;
     const entry: MatterDisbursementEntry = {
-      id: `DISB-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: nextClientItemId('DISB'),
       description: desc,
       amountGbp,
       vatApplicable: preset ? (preset.vatApplicable ?? true) : newDisbursementVat,
@@ -1964,7 +2020,9 @@ export function MatterFormClient({
         v.label.toLowerCase().startsWith(targetLabel),
     );
     if (matchVal && matchVal.id !== riskRatingId) {
-      setRiskRatingId(matchVal.id);
+      queueMicrotask(() => {
+        setRiskRatingId(matchVal.id);
+      });
     }
   }, [riskAssessmentSummary.overallRisk, values, riskRatingId]);
 
@@ -2067,7 +2125,12 @@ export function MatterFormClient({
   const [pastedDocContent, setPastedDocContent] = useState<string>('');
   const [previewDocId, setPreviewDocId] = useState<string | null>(null);
   const [showClaudeKeyConfig, setShowClaudeKeyConfig] = useState<boolean>(false);
-  const [claudeApiKeyOverride, setClaudeApiKeyOverride] = useState<string>('');
+  const [claudeApiKeyOverride, setClaudeApiKeyOverride] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return window.localStorage.getItem('onesquared_claude_api_key') ?? '';
+    }
+    return '';
+  });
   const [extractingAi, setExtractingAi] = useState<boolean>(false);
   const [aiExtractionResult, setAiExtractionResult] =
     useState<MatterAiExtractionResult | null>(null);
@@ -2079,13 +2142,6 @@ export function MatterFormClient({
   >({});
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
   const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const savedKey = window.localStorage.getItem('onesquared_claude_api_key');
-      if (savedKey) setClaudeApiKeyOverride(savedKey);
-    }
-  }, []);
 
   function handleClaudeKeyChange(val: string) {
     setClaudeApiKeyOverride(val);
@@ -2310,9 +2366,6 @@ export function MatterFormClient({
 
     // 1. Section 1: Matter Details & Team
     if (mPracticeArea?.matchedId) {
-      prevWorkTypeKeyRef.current = `${mPracticeArea.matchedId}__${
-        mWorkType?.matchedId ?? workTypeSubcategoryId
-      }`;
       setPracticeAreaId(mPracticeArea.matchedId);
       nextCitations['practiceArea'] = {
         sourceDoc: mPracticeArea.sourceDoc,
@@ -2329,8 +2382,6 @@ export function MatterFormClient({
       };
     }
     if (res.client?.matchedRecordId) {
-      // Prevent clientIds useEffect from overwriting extracted clientRelationshipStatus
-      prevClientsKeyRef.current = res.client.matchedRecordId;
       setClientIds([res.client.matchedRecordId]);
       nextCitations['client'] = {
         sourceDoc: res.client.sourceDoc,
@@ -2390,9 +2441,11 @@ export function MatterFormClient({
           confidence: s.confidence,
         };
       }
-      setRiskAnswers(nextAnswers);
-      setRiskFollowUps(nextFollowUps);
-      setExpandedRiskSectionIds(MATTER_RISK_SECTIONS.map((sec) => sec.id));
+      queueMicrotask(() => {
+        setRiskAnswers(nextAnswers);
+        setRiskFollowUps(nextFollowUps);
+        setExpandedRiskSectionIds(MATTER_RISK_SECTIONS.map((sec) => sec.id));
+      });
     }
 
     if (mKeyDates.length > 0) {
@@ -2585,22 +2638,14 @@ export function MatterFormClient({
 
   // Sync Reviewer mode when top bar "Viewing as" changes to Risk / Compliance
   useEffect(() => {
-    if (activeViewingRole === 'risk_compliance') {
-      setIsReviewerMode(true);
-    } else {
-      setIsReviewerMode(false);
-    }
+    queueMicrotask(() => {
+      if (activeViewingRole === 'risk_compliance') {
+        setIsReviewerMode(true);
+      } else {
+        setIsReviewerMode(false);
+      }
+    });
   }, [activeViewingRole]);
-
-  // Apply URL scenario if passed
-  useEffect(() => {
-    if (initialScenario === 'fast') applyDemoPreset('fast_path');
-    else if (initialScenario === 'results') applyDemoPreset('partly_complete');
-    else if (initialScenario === 'draft') applyDemoPreset('reopened_draft');
-    else if (initialScenario === 'referred') applyDemoPreset('referred_submitted');
-    else if (initialScenario === 'reviewer') applyDemoPreset('reviewer_view');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialScenario]);
 
   // Origin screen information for the "← Back to ..." link and Cancel button
   const [referrerInfo, setReferrerInfo] = useState<{ label: string; href: string } | null>(
@@ -2613,36 +2658,38 @@ export function MatterFormClient({
       const refUrl = new URL(document.referrer);
       if (refUrl.origin !== window.location.origin) return;
       const p = refUrl.pathname;
+      let nextInfo: { label: string; href: string } | null = null;
       if (p.startsWith('/people/')) {
         const pid = p.split('/')[2];
         const found = people.find((x) => x.id === pid);
-        if (found) {
-          setReferrerInfo({ label: personDisplayName(found), href: p });
-          return;
-        }
-        setReferrerInfo({ label: 'People', href: '/people' });
+        nextInfo = found
+          ? { label: personDisplayName(found), href: p }
+          : { label: 'People', href: '/people' };
       } else if (p.startsWith('/organisations/')) {
         const oid = p.split('/')[2];
         const found = organisations.find((x) => x.id === oid);
-        if (found) {
-          setReferrerInfo({ label: found.legalName, href: p });
-          return;
-        }
-        setReferrerInfo({ label: 'Organisations', href: '/organisations' });
+        nextInfo = found
+          ? { label: found.legalName, href: p }
+          : { label: 'Organisations', href: '/organisations' };
       } else if (p.startsWith('/enquiries/')) {
-        setReferrerInfo({ label: 'Enquiry', href: p });
+        nextInfo = { label: 'Enquiry', href: p };
       } else if (p.startsWith('/matters/')) {
-        setReferrerInfo({ label: 'Matters', href: '/matters' });
+        nextInfo = { label: 'Matters', href: '/matters' };
       } else if (p === '/people') {
-        setReferrerInfo({ label: 'People', href: '/people' });
+        nextInfo = { label: 'People', href: '/people' };
       } else if (p === '/organisations') {
-        setReferrerInfo({ label: 'Organisations', href: '/organisations' });
+        nextInfo = { label: 'Organisations', href: '/organisations' };
       } else if (p === '/matters') {
-        setReferrerInfo({ label: 'Matters', href: '/matters' });
+        nextInfo = { label: 'Matters', href: '/matters' };
       } else if (p === '/tasks') {
-        setReferrerInfo({ label: 'Tasks', href: '/tasks' });
+        nextInfo = { label: 'Tasks', href: '/tasks' };
       } else if (p === '/') {
-        setReferrerInfo({ label: 'Home', href: '/' });
+        nextInfo = { label: 'Home', href: '/' };
+      }
+      if (nextInfo) {
+        queueMicrotask(() => {
+          setReferrerInfo(nextInfo);
+        });
       }
     } catch {
       // ignore invalid referrer URL
@@ -2714,7 +2761,6 @@ export function MatterFormClient({
 
   const [leaveWarningModalOpen, setLeaveWarningModalOpen] = useState<boolean>(false);
   const [leaveWarningTargetHref, setLeaveWarningTargetHref] = useState<string | null>(null);
-  const initialSnapshotRef = useRef<string | null>(null);
   const [restoredSessionDirty, setRestoredSessionDirty] = useState<boolean>(false);
 
   // Clear any legacy sessionStorage draft keys so cancelled/abandoned form details are never remembered
@@ -2784,16 +2830,12 @@ export function MatterFormClient({
     ],
   );
 
-  useEffect(() => {
-    if (initialSnapshotRef.current === null) {
-      initialSnapshotRef.current = currentFormStateSignature;
-    }
-  }, [currentFormStateSignature]);
+  const [initialSnapshot, setInitialSnapshot] = useState<string>(
+    () => currentFormStateSignature,
+  );
 
   const isFormModified =
-    (initialSnapshotRef.current !== null &&
-      initialSnapshotRef.current !== currentFormStateSignature) ||
-    restoredSessionDirty;
+    initialSnapshot !== currentFormStateSignature || restoredSessionDirty;
 
   const hasUnsavedChanges =
     workflowState === 'editing' &&
@@ -3694,428 +3736,60 @@ export function MatterFormClient({
     return results.slice(0, 6);
   }, [newPartyName, organisations, people, enquiries]);
 
-  // Build conflict matches for a given list of parties
-  function computeMatchesForParties(
-    partiesList: ConflictCheckParty[],
-    preserveExistingDispositions = true,
-  ): ConflictCheckMatch[] {
-    const prevByPartyAndRec = new Map<string, ConflictCheckMatch>();
-    if (preserveExistingDispositions) {
-      for (const m of matches) {
-        prevByPartyAndRec.set(`${m.partyName.toLowerCase()}__${m.matchedRecordName.toLowerCase()}`, m);
+  // Run conflict search handler (executes server-side across all tenant matters, including restricted matters)
+  async function handleRunConflictSearch() {
+    try {
+      const serverRes = await runMatterConflictSearchAction({
+        currentMatterId: savedDraftMatterId ?? existing?.id ?? null,
+        sourceEnquiryId:
+          existing?.sourceEnquiryId ??
+          initialEnquiry?.id ??
+          initialQuote?.linkedEnquiryId ??
+          null,
+        parties: allPartiesToCheck,
+        previousMatches: matches,
+      });
+      if (serverRes.errors && Object.keys(serverRes.errors).length > 0) {
+        showToast(
+          serverRes.errors.permission ||
+            'The conflict search couldn’t run. Please try again.',
+        );
+        return;
       }
+      const computed = serverRes.matches;
+      const runTime =
+        serverRes.run?.runAtDisplay || formatDateTime(new Date().toISOString());
+      const runnerName =
+        serverRes.run?.runByName ||
+        `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
+
+      setMatches(computed);
+      setHasRunSearch(true);
+      setLastRunAtDisplay(runTime);
+      setLastRunByName(runnerName);
+      setPartiesChangedSinceSearch(false);
+      setReopenedDraftBanner(null);
+
+      const potCount = computed.filter((m) => m.disposition === 'potential_conflict').length;
+      const newAudit: ConflictCheckRunAudit = serverRes.run ?? {
+        id: `run-${Date.now()}`,
+        runAtDisplay: runTime,
+        runById: currentUser.id,
+        runByName: runnerName,
+        searchTerms: allPartiesToCheck.map((p) => p.name),
+        partiesCount: allPartiesToCheck.length,
+        matchesCount: computed.length,
+        potentialConflictsCount: potCount,
+      };
+      setSearchRuns((prev) => [newAudit, ...prev]);
+      showToast(
+        `Conflict search completed · ${allPartiesToCheck.length} parties checked · ${computed.length} ${
+          computed.length === 1 ? 'match' : 'matches'
+        }`,
+      );
+    } catch {
+      showToast('The conflict search couldn’t run. Please try again.');
     }
-
-    const generated: ConflictCheckMatch[] = [];
-
-    for (const party of partiesList) {
-      const lower = party.name.trim().toLowerCase();
-      if (!lower) continue;
-
-      if (party.isClientFixed) {
-        // Check client party against otherPartiesNamed on enquiries (excluding current source enquiry)
-        for (const enq of enquiries) {
-          if (enq.anonymisedAt || enq.id === initialEnquiry?.id || enq.id === existing?.sourceEnquiryId) {
-            continue;
-          }
-          const enqOtherEntries = (enq.otherPartiesNamed ?? '')
-            .split(/[,;/\n]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          const matchedEnqOther = enqOtherEntries.find((entry) => {
-            const eLower = entry.toLowerCase();
-            return eLower === lower || eLower.includes(lower) || lower.includes(eLower);
-          });
-          if (matchedEnqOther) {
-            const callerName = enquiryDisplayName(enq, 'Enquirer');
-            const ownerPerson =
-              people.find((p) => p.id === (enq.assignedToId || enq.takenById)) ??
-              people.find((p) => p.id === 'P-000001');
-            const ownerName = ownerPerson ? personDisplayName(ownerPerson) : 'Rhian Morgan';
-            const key = `${lower}__${matchedEnqOther.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            generated.push({
-              id: prev?.id ?? `match-client-enq-other-${party.id}-${enq.id}`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.id,
-              matchedRecordName: matchedEnqOther,
-              matchedRecordType: party.entityType,
-              strength: matchedEnqOther.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Other party named on Enquiry ${enq.reference} (Caller: ${callerName}) · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `Instructing client matches other party "${matchedEnqOther}" named on enquiry ${enq.reference}`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-              reviewerDecision: prev?.reviewerDecision ?? null,
-              reviewerConditionType: prev?.reviewerConditionType ?? null,
-              reviewerNote: prev?.reviewerNote ?? '',
-            });
-          }
-        }
-        continue;
-      }
-
-      // 1. Coastline Outdoor Ltd (Demo match 1)
-      if (lower.includes('coastline outdoor')) {
-        const key = `${lower}__coastline outdoor ltd`;
-        const prev = prevByPartyAndRec.get(key);
-        generated.push({
-          id: prev?.id ?? `match-coastline-${party.id}`,
-          partyId: party.id,
-          partyName: party.name,
-          matchedRecordId: 'O-000014',
-          matchedRecordName: 'Coastline Outdoor Ltd',
-          matchedRecordType: 'organisation',
-          strength: 'Exact',
-          whereFound: 'Opposing party (Tenant) on PEN001-0004 · Open',
-          matterId: 'M-000001',
-          matterNumber: 'PEN001-0004',
-          responsiblePartnerId: 'P-000001',
-          responsiblePartnerName: 'Rhian Morgan',
-          dateLabel: '17 Sep 2026',
-          matchedOn: 'Exact legal name, company number (08419203) & registered address',
-          disposition: prev ? prev.disposition : null,
-          note: prev ? prev.note : '',
-          reviewerDecision: prev?.reviewerDecision ?? null,
-          reviewerConditionType: prev?.reviewerConditionType ?? null,
-          reviewerNote: prev?.reviewerNote ?? '',
-        });
-        continue;
-      }
-
-      // 2. Morgan Price Solicitors (Demo match 2)
-      if (lower.includes('morgan price')) {
-        const key = `${lower}__morgan price solicitors`;
-        const prev = prevByPartyAndRec.get(key);
-        generated.push({
-          id: prev?.id ?? `match-morganprice-${party.id}`,
-          partyId: party.id,
-          partyName: party.name,
-          matchedRecordId: 'O-000008',
-          matchedRecordName: 'Morgan Price Solicitors',
-          matchedRecordType: 'organisation',
-          strength: 'Exact',
-          whereFound: 'Connected to other side (Solicitor) on PEN001-0004 · Open',
-          matterId: 'M-000001',
-          matterNumber: 'PEN001-0004',
-          responsiblePartnerId: 'P-000001',
-          responsiblePartnerName: 'Rhian Morgan',
-          dateLabel: '17 Sep 2026',
-          matchedOn: 'Exact firm name, email domain (@morganprice.example) & Cardiff address',
-          disposition: prev ? prev.disposition : null,
-          note: prev ? prev.note : '',
-          reviewerDecision: prev?.reviewerDecision ?? null,
-          reviewerConditionType: prev?.reviewerConditionType ?? null,
-          reviewerNote: prev?.reviewerNote ?? '',
-        });
-        continue;
-      }
-
-      // 3. Harbourline Housing Association (Demo match 3 — existing client on HAR001-0003)
-      if (lower.includes('harbourline')) {
-        const key = `${lower}__harbourline housing association`;
-        const prev = prevByPartyAndRec.get(key);
-        generated.push({
-          id: prev?.id ?? `match-harbourline-${party.id}`,
-          partyId: party.id,
-          partyName: party.name,
-          matchedRecordId: 'O-000002',
-          matchedRecordName: 'Harbourline Housing Association',
-          matchedRecordType: 'organisation',
-          strength: 'Exact',
-          whereFound: 'Client on HAR001-0003 · Open',
-          matterId: 'M-000005',
-          matterNumber: 'HAR001-0003',
-          responsiblePartnerId: 'P-000001',
-          responsiblePartnerName: 'Rhian Morgan',
-          dateLabel: '24 Jul 2026',
-          matchedOn: 'Exact legal name, active client record & relationship partner Rhian Morgan',
-          disposition: prev ? prev.disposition : null,
-          note: prev ? prev.note : '',
-          reviewerDecision: prev?.reviewerDecision ?? null,
-          reviewerConditionType: prev?.reviewerConditionType ?? null,
-          reviewerNote: prev?.reviewerNote ?? '',
-        });
-        continue;
-      }
-
-      // 4. General search across matters, enquiries, organisations, and people
-      let matchedForParty = false;
-      for (const m of matters) {
-        if (m.id === existing?.id) continue;
-        const clientOrg = organisations.find((o) => o.id === m.clientId);
-        const clientPerson = people.find((p) => p.id === m.clientId);
-        const mClientName =
-          clientOrg?.legalName || (clientPerson ? personDisplayName(clientPerson) : '');
-        const respPartner =
-          people.find((p) => p.id === m.responsiblePartnerId) ??
-          people.find((p) => p.id === 'P-000001');
-        const respPartnerName = respPartner ? personDisplayName(respPartner) : 'Rhian Morgan';
-
-        if (mClientName && mClientName.toLowerCase().includes(lower)) {
-          const key = `${lower}__${mClientName.toLowerCase()}`;
-          const prev = prevByPartyAndRec.get(key);
-          generated.push({
-            id: prev?.id ?? `match-${party.id}-${m.id}`,
-            partyId: party.id,
-            partyName: party.name,
-            matchedRecordId: m.clientId,
-            matchedRecordName: mClientName,
-            matchedRecordType: m.clientId.startsWith('O-') ? 'organisation' : 'person',
-            strength: mClientName.toLowerCase() === lower ? 'Exact' : 'Close',
-            whereFound: `Client on ${m.matterNumber} · Open`,
-            matterId: m.id,
-            matterNumber: m.matterNumber,
-            responsiblePartnerId: m.responsiblePartnerId,
-            responsiblePartnerName: respPartnerName,
-            dateLabel: '12 Aug 2026',
-            matchedOn: 'Name, email & address match across active matters',
-            disposition: prev?.disposition ?? null,
-            note: prev?.note ?? '',
-          });
-          matchedForParty = true;
-          break;
-        }
-
-        const matchedParty = m.parties.find((pt) => pt.name.toLowerCase().includes(lower));
-        if (matchedParty) {
-          const key = `${lower}__${matchedParty.name.toLowerCase()}`;
-          const prev = prevByPartyAndRec.get(key);
-          generated.push({
-            id: prev?.id ?? `match-${party.id}-${matchedParty.id}`,
-            partyId: party.id,
-            partyName: party.name,
-            matchedRecordId: matchedParty.linkedRecordId || m.id,
-            matchedRecordName: matchedParty.name,
-            matchedRecordType: matchedParty.linkedRecordId?.startsWith('O-')
-              ? 'organisation'
-              : 'person',
-            strength: matchedParty.name.toLowerCase() === lower ? 'Exact' : 'Close',
-            whereFound: `${formatPartyRoleDisplay(
-              taxonomy,
-              matchedParty.relationshipCode,
-              matchedParty.capacityCodes,
-              matchedParty.role,
-            )} on ${m.matterNumber} · Open`,
-            matterId: m.id,
-            matterNumber: m.matterNumber,
-            responsiblePartnerId: m.responsiblePartnerId,
-            responsiblePartnerName: respPartnerName,
-            dateLabel: '17 Sep 2026',
-            matchedOn: 'Counterparty name & linked contact details',
-            disposition: prev?.disposition ?? null,
-            note: prev?.note ?? '',
-          });
-          matchedForParty = true;
-          break;
-        }
-      }
-
-      // 5. Search across Enquiries (caller name, callingOnBehalfOf, and otherPartiesNamed)
-      if (!matchedForParty) {
-        for (const enq of enquiries) {
-          if (enq.anonymisedAt || enq.id === initialEnquiry?.id || enq.id === existing?.sourceEnquiryId) {
-            continue;
-          }
-          const enqCallerName = enquiryDisplayName(enq, '').trim();
-          const enqBehalf = (enq.callingOnBehalfOf ?? '').trim();
-          const enqOtherEntries = (enq.otherPartiesNamed ?? '')
-            .split(/[,;/\n]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          const ownerPerson =
-            people.find((p) => p.id === (enq.assignedToId || enq.takenById)) ??
-            people.find((p) => p.id === 'P-000001');
-          const ownerName = ownerPerson ? personDisplayName(ownerPerson) : 'Rhian Morgan';
-
-          const callerMatch =
-            enqCallerName &&
-            (enqCallerName.toLowerCase().includes(lower) ||
-              lower.includes(enqCallerName.toLowerCase()) ||
-              Boolean(personNameLooseMatch(party.name, enqCallerName)));
-          if (callerMatch) {
-            const key = `${lower}__${enqCallerName.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            const matchedDetails = [
-              'Caller name',
-              enq.email ? `email (${enq.email})` : null,
-              enq.phone ? `phone (${enq.phone})` : null,
-              enq.address?.postcode ? `postcode (${enq.address.postcode})` : null,
-            ]
-              .filter(Boolean)
-              .join(', ');
-            generated.push({
-              id: prev?.id ?? `match-${party.id}-${enq.id}-caller`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.linkedPersonId || enq.id,
-              matchedRecordName: enqCallerName,
-              matchedRecordType: 'person',
-              strength: enqCallerName.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Enquirer on ${enq.reference} · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `${matchedDetails} saved on enquiry ${enq.reference}`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-            });
-            matchedForParty = true;
-            break;
-          }
-
-          const behalfMatch =
-            enqBehalf &&
-            (enqBehalf.toLowerCase().includes(lower) ||
-              lower.includes(enqBehalf.toLowerCase()) ||
-              Boolean(organisationNameLooseMatch(party.name, enqBehalf)));
-          if (behalfMatch) {
-            const key = `${lower}__${enqBehalf.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            generated.push({
-              id: prev?.id ?? `match-${party.id}-${enq.id}-behalf`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.linkedOrganisationId || enq.id,
-              matchedRecordName: enqBehalf,
-              matchedRecordType: 'organisation',
-              strength: enqBehalf.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Prospective client organisation on ${enq.reference} · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `Organisation name saved on enquiry ${enq.reference} (Caller: ${enqCallerName || 'Unknown'})`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-            });
-            matchedForParty = true;
-            break;
-          }
-
-          const matchedEnqOther = enqOtherEntries.find((entry) => {
-            const eLower = entry.toLowerCase();
-            return (
-              eLower.includes(lower) ||
-              lower.includes(eLower) ||
-              Boolean(personNameLooseMatch(party.name, entry)) ||
-              Boolean(organisationNameLooseMatch(party.name, entry))
-            );
-          });
-          if (matchedEnqOther) {
-            const key = `${lower}__${matchedEnqOther.toLowerCase()}`;
-            const prev = prevByPartyAndRec.get(key);
-            generated.push({
-              id: prev?.id ?? `match-${party.id}-${enq.id}-other`,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: enq.id,
-              matchedRecordName: matchedEnqOther,
-              matchedRecordType: party.entityType,
-              strength: matchedEnqOther.toLowerCase() === lower ? 'Exact' : 'Close',
-              whereFound: `Other party named on Enquiry ${enq.reference} (Caller: ${enqCallerName || 'Unknown'}) · ${enq.status}`,
-              matterId: enq.id,
-              matterNumber: enq.reference,
-              responsiblePartnerId: enq.assignedToId || enq.takenById || 'P-000001',
-              responsiblePartnerName: ownerName,
-              dateLabel: formatDate(enq.receivedAt),
-              matchedOn: `Named as other party on enquiry ${enq.reference}`,
-              disposition: prev?.disposition ?? null,
-              note: prev?.note ?? '',
-            });
-            matchedForParty = true;
-            break;
-          }
-        }
-      }
-
-      // 6. Search standalone People and Organisations (including people saved in enquiries)
-      if (!matchedForParty) {
-        const matchedPerson = people.find((p) => {
-          if (p.mergedIntoId || p.demo || p.isEmployee) return false;
-          const pName = personDisplayName(p).toLowerCase();
-          return (
-            pName.includes(lower) ||
-            lower.includes(pName) ||
-            Boolean(personNameLooseMatch(party.name, personDisplayName(p)))
-          );
-        });
-        if (matchedPerson) {
-          const pName = personDisplayName(matchedPerson);
-          const key = `${lower}__${pName.toLowerCase()}`;
-          const prev = prevByPartyAndRec.get(key);
-          const ownerPerson =
-            people.find((p) => p.id === matchedPerson.relationshipOwnerId) ??
-            people.find((p) => p.id === 'P-000001');
-          const ownerName = ownerPerson ? personDisplayName(ownerPerson) : 'Rhian Morgan';
-          generated.push({
-            id: prev?.id ?? `match-${party.id}-${matchedPerson.id}`,
-            partyId: party.id,
-            partyName: party.name,
-            matchedRecordId: matchedPerson.id,
-            matchedRecordName: pName,
-            matchedRecordType: 'person',
-            strength: pName.toLowerCase() === lower ? 'Exact' : 'Close',
-            whereFound: matchedPerson.id.startsWith('ENQ-')
-              ? `Enquiry contact (${matchedPerson.id})`
-              : `Contact record (${matchedPerson.id})`,
-            matterId: matchedPerson.id,
-            matterNumber: matchedPerson.id,
-            responsiblePartnerId: matchedPerson.relationshipOwnerId || 'P-000001',
-            responsiblePartnerName: ownerName,
-            dateLabel: matchedPerson.firstKnownAt || '12 Aug 2026',
-            matchedOn: 'Contact name, email & address match in People directory',
-            disposition: prev?.disposition ?? null,
-            note: prev?.note ?? '',
-          });
-        }
-      }
-    }
-
-    return generated;
-  }
-
-  // Run conflict search handler
-  function handleRunConflictSearch() {
-    const computed = computeMatchesForParties(allPartiesToCheck, true);
-    const runTime = '22 Oct 2026, 17:42';
-    const runnerName =
-      currentUser.id === 'P-000003'
-        ? 'Bethan R.'
-        : `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
-
-    setMatches(computed);
-    setHasRunSearch(true);
-    setLastRunAtDisplay(runTime);
-    setLastRunByName(runnerName);
-    setPartiesChangedSinceSearch(false);
-    setReopenedDraftBanner(null);
-
-    const potCount = computed.filter((m) => m.disposition === 'potential_conflict').length;
-    const newAudit: ConflictCheckRunAudit = {
-      id: `run-${Date.now()}`,
-      runAtDisplay: runTime,
-      runById: currentUser.id,
-      runByName: runnerName,
-      searchTerms: allPartiesToCheck.map((p) => p.name),
-      partiesCount: allPartiesToCheck.length,
-      matchesCount: computed.length,
-      potentialConflictsCount: potCount,
-    };
-    setSearchRuns((prev) => [newAudit, ...prev]);
-    showToast(
-      `Conflict search completed · ${allPartiesToCheck.length} parties checked · ${computed.length} ${
-        computed.length === 1 ? 'match' : 'matches'
-      }`,
-    );
   }
 
   function resetAddPartyForm() {
@@ -4246,9 +3920,7 @@ export function MatterFormClient({
       resetAddPartyForm();
     } else {
       const created: ConflictCheckParty = {
-        id:
-          customParty?.id ??
-          `party-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: customParty?.id ?? nextClientItemId('party'),
         name: nameToUse,
         entityType: typeToUse,
         role: legacyRole,
@@ -4326,9 +3998,9 @@ export function MatterFormClient({
         relationshipCode: 'TP',
         capacityCodes: ['CAP_LANDLORD'],
         connectedToPartyId: null,
-        identifiers: { companyNumber: 'RS 30214R', registeredTown: 'Cardiff' },
+        identifiers: { companyNumber: 'DEMO-RS0002', registeredTown: 'Cardiff' },
         linkedRecordId: 'O-000002',
-        subtitle: 'Co. no. RS 30214R · Cardiff',
+        subtitle: 'Co. no. DEMO-RS0002 · Cardiff',
       });
     }
   }
@@ -4398,7 +4070,7 @@ export function MatterFormClient({
     for (const lp of linkedPeople) {
       const isDir = (lp.jobTitle || '').toLowerCase().includes('director');
       relatedToAdd.push({
-        id: `rel-${lp.id}-${Date.now()}`,
+        id: nextClientItemId(`rel-${lp.id}`),
         name: personDisplayName(lp),
         entityType: 'person',
         role: 'Related party',
@@ -4421,7 +4093,7 @@ export function MatterFormClient({
         );
         if (parentOrg) {
           relatedToAdd.push({
-            id: `rel-org-${parentOrg.id}-${Date.now()}`,
+            id: nextClientItemId(`rel-org-${parentOrg.id}`),
             name: parentOrg.legalName,
             entityType: 'organisation',
             role: 'Related party',
@@ -4440,7 +4112,7 @@ export function MatterFormClient({
       );
       for (const child of childOrgs) {
         relatedToAdd.push({
-          id: `rel-org-${child.id}-${Date.now()}`,
+          id: nextClientItemId(`rel-org-${child.id}`),
           name: child.legalName,
           entityType: 'organisation',
           role: 'Related party',
@@ -4662,8 +4334,11 @@ export function MatterFormClient({
     setInstructingContactCapacityCodes(['CAP_REPRESENTATIVE', 'CAP_DECISION_MAKER']);
     if (realEstatePa) setPracticeAreaId(realEstatePa.id);
     if (landlordTenantSub) setWorkTypeSubcategoryId(landlordTenantSub.id);
-    setResponsiblePartnerId('P-000001');
-    setLeadFeeEarnerId('P-000002');
+    const presetPartnerId = userMatterDefaults.responsiblePartnerId || currentUser.id;
+    const presetPartnerPerson = people.find((p) => p.id === presetPartnerId) ?? currentUser;
+    const presetPartnerName = personDisplayName(presetPartnerPerson);
+    setResponsiblePartnerId(presetPartnerId);
+    setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId || currentUser.id);
 
     setTitle('Lease renewal — Unit 7, Cardiff Bay Retail Park');
 
@@ -4701,10 +4376,10 @@ export function MatterFormClient({
       relationshipCode: 'TP',
       capacityCodes: ['CAP_LANDLORD'],
       connectedToPartyId: null,
-      identifiers: { companyNumber: 'RS 30214R', registeredTown: 'Cardiff' },
+      identifiers: { companyNumber: 'DEMO-RS0002', registeredTown: 'Cardiff' },
       alignment: 'third_party',
       linkedRecordId: 'O-000002',
-      subtitle: 'Co. no. RS 30214R · Cardiff',
+      subtitle: 'Co. no. DEMO-RS0002 · Cardiff',
     };
 
     const mCoastline: ConflictCheckMatch = {
@@ -4718,8 +4393,8 @@ export function MatterFormClient({
       whereFound: 'Opposing party (Tenant) on PEN001-0004 · Open',
       matterId: 'M-000001',
       matterNumber: 'PEN001-0004',
-      responsiblePartnerId: 'P-000001',
-      responsiblePartnerName: 'Rhian Morgan',
+      responsiblePartnerId: presetPartnerId,
+      responsiblePartnerName: presetPartnerName,
       dateLabel: '17 Sep 2026',
       matchedOn: 'Exact legal name, company number (08419203) & Cardiff address',
       disposition: 'same_no_conflict',
@@ -4737,8 +4412,8 @@ export function MatterFormClient({
       whereFound: 'Connected to other side (Solicitor) on PEN001-0004 · Open',
       matterId: 'M-000001',
       matterNumber: 'PEN001-0004',
-      responsiblePartnerId: 'P-000001',
-      responsiblePartnerName: 'Rhian Morgan',
+      responsiblePartnerId: presetPartnerId,
+      responsiblePartnerName: presetPartnerName,
       dateLabel: '17 Sep 2026',
       matchedOn: 'Exact firm name & Cardiff office address',
       disposition: 'same_no_conflict',
@@ -4756,18 +4431,18 @@ export function MatterFormClient({
       whereFound: 'Client on HAR001-0003 · Open',
       matterId: 'M-000005',
       matterNumber: 'HAR001-0003',
-      responsiblePartnerId: 'P-000001',
-      responsiblePartnerName: 'Rhian Morgan',
+      responsiblePartnerId: presetPartnerId,
+      responsiblePartnerName: presetPartnerName,
       dateLabel: '24 Jul 2026',
-      matchedOn: 'Exact legal name & active client record (responsible partner Rhian Morgan)',
+      matchedOn: `Exact legal name & active client record (responsible partner ${presetPartnerName})`,
       disposition: 'potential_conflict',
-      note: 'Existing client on HAR001-0003 (responsible partner Rhian Morgan). Harbourline holds a neighbouring estate road easement at Cardiff Bay Retail Park.',
+      note: `Existing client on HAR001-0003 (responsible partner ${presetPartnerName}). Harbourline holds a neighbouring estate road easement at Cardiff Bay Retail Park.`,
       reviewerDecision: 'approve_with_conditions',
       reviewerConditionType: 'consent_obtained',
       reviewerNote:
         'Unrelated subject matter to HAR001-0003; written informed consent obtained from both Penarth Estates Ltd and Harbourline Housing Association.',
-      reviewedById: 'P-000003',
-      reviewedByName: 'Bethan Rees',
+      reviewedById: currentUser.id,
+      reviewedByName: personDisplayName(currentUser),
       reviewedAt: '22 Oct 2026, 17:50',
     };
 
@@ -4776,7 +4451,7 @@ export function MatterFormClient({
       setMatches([mCoastline]);
       setHasRunSearch(true);
       setLastRunAtDisplay('22 Oct 2026, 17:42');
-      setLastRunByName('Bethan R.');
+      setLastRunByName(personDisplayName(currentUser));
       setPartiesChangedSinceSearch(false);
       setDeclarationConfirmed(true);
       setReviewerMessage('');
@@ -4787,8 +4462,8 @@ export function MatterFormClient({
         {
           id: 'run-fast-1',
           runAtDisplay: '22 Oct 2026, 17:42',
-          runById: 'P-000003',
-          runByName: 'Bethan R.',
+          runById: currentUser.id,
+          runByName: personDisplayName(currentUser),
           searchTerms: ['Penarth Estates Ltd', 'Alun Davies', 'Coastline Outdoor Ltd'],
           partiesCount: 3,
           matchesCount: 1,
@@ -4802,14 +4477,14 @@ export function MatterFormClient({
     setOtherParties([pCoastline, pMorganPrice, pHarbourline]);
     setHasRunSearch(true);
     setLastRunAtDisplay('22 Oct 2026, 17:42');
-    setLastRunByName('Bethan R.');
+    setLastRunByName(personDisplayName(currentUser));
     setPartiesChangedSinceSearch(false);
     setSearchRuns([
       {
         id: 'run-full-1',
         runAtDisplay: '22 Oct 2026, 17:42',
-        runById: 'P-000003',
-        runByName: 'Bethan R.',
+        runById: currentUser.id,
+        runByName: personDisplayName(currentUser),
         searchTerms: [
           'Penarth Estates Ltd',
           'Alun Davies',
@@ -4864,11 +4539,24 @@ export function MatterFormClient({
     }
   }
 
+  // Apply URL scenario if passed
+  useEffect(() => {
+    if (!initialScenario) return;
+    queueMicrotask(() => {
+      if (initialScenario === 'fast') applyDemoPreset('fast_path');
+      else if (initialScenario === 'results') applyDemoPreset('partly_complete');
+      else if (initialScenario === 'draft') applyDemoPreset('reopened_draft');
+      else if (initialScenario === 'referred') applyDemoPreset('referred_submitted');
+      else if (initialScenario === 'reviewer') applyDemoPreset('reviewer_view');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialScenario]);
+
   // Build snapshot object for saving
   function buildConflictRecordSnapshot(
     overrideStatus?: ConflictCheckStatusPill,
     overrideOutcome?: ConflictCheckRecord['outcomeLabel'],
-  ): ConflictCheckRecord {
+  ): ConflictCheckRecordInput {
     const statusToUse = overrideStatus ?? conflictStatusPillLabel;
     const outcomeToUse: ConflictCheckRecord['outcomeLabel'] =
       overrideOutcome ??
@@ -4887,29 +4575,12 @@ export function MatterFormClient({
         statusToUse === 'In progress'
           ? null
           : formatDateTime(new Date().toISOString()),
-      submittedById: leadFeeEarnerId || currentUser.id,
       submittedByName:
         people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))
           ? personDisplayName(
               people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))!,
             )
           : personDisplayName(currentUser),
-      approvedAtDisplay:
-        statusToUse === 'Approved' || statusToUse === 'Cleared'
-          ? formatDateTime(new Date().toISOString())
-          : null,
-      approvedById:
-        statusToUse === 'Approved'
-          ? 'P-000003'
-          : statusToUse === 'Cleared'
-            ? leadFeeEarnerId || currentUser.id
-            : null,
-      approvedByName:
-        statusToUse === 'Approved'
-          ? 'Bethan Rees (COLP)'
-          : statusToUse === 'Cleared'
-            ? 'Cleared by fee earner'
-            : null,
       parties: allPartiesToCheck,
       matches,
       runs: searchRuns,
@@ -4939,6 +4610,79 @@ export function MatterFormClient({
   const [savedDraftMatterId, setSavedDraftMatterId] = useState<string | null>(
     existing?.id ?? null,
   );
+  const [serverSaveErrors, setServerSaveErrors] = useState<Record<string, string>>({});
+  const [partnerCostSignOff, setPartnerCostSignOff] =
+    useState<PartnerCostSignOffRecord | null>(
+      () =>
+        (existing?.fieldValues?.['partnerCostSignOff'] as
+          | PartnerCostSignOffRecord
+          | undefined) ?? null,
+    );
+  const [savedEstimateGbp, setSavedEstimateGbp] = useState<number | null>(() => {
+    if (initialSignOffEstimateGbp != null) return initialSignOffEstimateGbp;
+    if (!existing) return null;
+    return Number(
+      existing.feeEstimateGbp ??
+        existing.agreedFeeCapGbp ??
+        initialMatterCosts.totalEstimateGbp ??
+        initialMatterCosts.agreedCapGbp ??
+        0,
+    );
+  });
+  const [signOffNote, setSignOffNote] = useState<string>('');
+  const [signingOffCosts, setSigningOffCosts] = useState<boolean>(false);
+
+  const currentFormEstimateGbp = Number(
+    numericFeeEstimateGbp ??
+      numericAgreedCapGbp ??
+      initialMatterCosts.totalEstimateGbp ??
+      initialMatterCosts.agreedCapGbp ??
+      0,
+  );
+  const hasUnsavedEstimateChanges =
+    savedEstimateGbp === null || currentFormEstimateGbp !== savedEstimateGbp;
+
+  async function handleSignOffMatterCosts() {
+    const targetId = savedDraftMatterId ?? existing?.id;
+    if (!targetId) {
+      showToast('Save the draft matter first before signing off costs.');
+      return;
+    }
+    if (hasUnsavedEstimateChanges) {
+      showToast('Save your changes before signing off');
+      return;
+    }
+    setSigningOffCosts(true);
+    try {
+      const res = await signOffMatterCostsAction(
+        targetId,
+        signOffNote.trim() || undefined,
+      );
+      setSigningOffCosts(false);
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        showToast(
+          Object.values(res.errors)[0] ?? 'Could not sign off matter costs',
+        );
+        return;
+      }
+      if (res.matter) {
+        const record =
+          (res.matter.fieldValues?.['partnerCostSignOff'] as
+            | PartnerCostSignOffRecord
+            | undefined) ?? null;
+        setPartnerCostSignOff(record);
+        if (record?.signedOffEstimateGbp != null) {
+          setSavedEstimateGbp(record.signedOffEstimateGbp);
+        }
+        setSignOffNote('');
+        showToast(res.warnings?.[0] ?? 'Partner cost sign-off recorded');
+        router.refresh();
+      }
+    } catch {
+      setSigningOffCosts(false);
+      showToast('Could not sign off matter costs');
+    }
+  }
 
   const [assignModalOpen, setAssignModalOpen] = useState<boolean>(false);
   const [assignSubmitting, setAssignSubmitting] = useState<boolean>(false);
@@ -4972,22 +4716,11 @@ export function MatterFormClient({
       );
     }
 
-    // Include COLP (e.g. Bethan Rees)
-    const colpEmp =
-      employees.find((e) => e.id === 'P-000003') ??
-      employees.find((e) =>
-        (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('colp'),
-      );
-    if (colpEmp) {
-      addPerson(colpEmp.id, 'COLP');
+    if (suggestedMatterGovernanceAssignees?.riskReviewerId) {
+      addPerson(suggestedMatterGovernanceAssignees.riskReviewerId, 'Risk & Compliance');
     }
-
-    // Include Practice Manager (e.g. Catrin Hopkins)
-    const practiceMgrEmp = employees.find((e) =>
-      (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('practice manager'),
-    );
-    if (practiceMgrEmp) {
-      addPerson(practiceMgrEmp.id, 'Practice manager');
+    if (suggestedMatterGovernanceAssignees?.practiceManagerId) {
+      addPerson(suggestedMatterGovernanceAssignees.practiceManagerId, 'Practice manager');
     }
 
     return list;
@@ -5000,6 +4733,7 @@ export function MatterFormClient({
     newTeamPersonId,
     employees,
     people,
+    suggestedMatterGovernanceAssignees,
   ]);
 
   const initialSelectedAssignPersonIds = useMemo<string[]>(() => {
@@ -5017,6 +4751,7 @@ export function MatterFormClient({
   // Save draft handler
   async function handleSaveDraft() {
     setSaving(true);
+    setServerSaveErrors({});
     try {
       const snapshot = buildConflictRecordSnapshot('In progress', 'Pending');
       const matterParties: MatterParty[] = otherParties.map(toMatterParty);
@@ -5037,6 +4772,8 @@ export function MatterFormClient({
             (initialEnquiry?.receivedAt ? initialEnquiry.receivedAt.slice(0, 10) : undefined),
           practiceAreaId,
           workTypeSubcategoryId,
+          owningDepartmentId: owningDepartmentId || undefined,
+          owningTeamId: owningTeamId || undefined,
           typeBadge,
           matterTypeId,
           billingBasisId,
@@ -5054,7 +4791,6 @@ export function MatterFormClient({
           instructingContactId,
           billingContactId,
           parties: matterParties,
-          conflictCheckStatus: 'Draft',
           conflictCheckRecord: snapshot,
           feeEstimateGbp: feeEstimateGbp ? Number(feeEstimateGbp) : null,
           agreedFeeCapGbp: agreedFeeCapGbp ? Number(agreedFeeCapGbp) : null,
@@ -5087,8 +4823,19 @@ export function MatterFormClient({
         { id: savedDraftMatterId ?? existing?.id, saveMode: 'draft' },
       );
       setSaving(false);
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setServerSaveErrors(res.errors);
+        showToast(Object.values(res.errors)[0] ?? 'Could not save draft');
+        return;
+      }
       if (res.matter) {
         setSavedDraftMatterId(res.matter.id);
+        setSavedEstimateGbp(currentFormEstimateGbp);
+        setPartnerCostSignOff(
+          (res.matter.fieldValues?.['partnerCostSignOff'] as
+            | PartnerCostSignOffRecord
+            | undefined) ?? null,
+        );
         if (typeof window !== 'undefined') {
           try {
             sessionStorage.removeItem(sessionDraftKey);
@@ -5096,7 +4843,7 @@ export function MatterFormClient({
             // ignore
           }
         }
-        initialSnapshotRef.current = currentFormStateSignature;
+        setInitialSnapshot(currentFormStateSignature);
         setRestoredSessionDirty(false);
         const draftLabel = clientDisplayName || title.trim() || 'Untitled matter';
         showToast(
@@ -5115,6 +4862,7 @@ export function MatterFormClient({
 
   async function handleConfirmAssignTask(payload: CreateTaskSubmitPayload) {
     setAssignSubmitting(true);
+    setServerSaveErrors({});
     try {
       let targetMatterId = savedDraftMatterId ?? existing?.id ?? null;
       if (!isEditingExistingMatter) {
@@ -5139,6 +4887,8 @@ export function MatterFormClient({
                 : undefined),
             practiceAreaId,
             workTypeSubcategoryId,
+            owningDepartmentId: owningDepartmentId || undefined,
+            owningTeamId: owningTeamId || undefined,
             typeBadge,
             matterTypeId,
             billingBasisId,
@@ -5157,7 +4907,6 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckStatus: 'Draft',
             conflictCheckRecord: snapshot,
             feeEstimateGbp: feeEstimateGbp ? Number(feeEstimateGbp) : null,
             agreedFeeCapGbp: agreedFeeCapGbp ? Number(agreedFeeCapGbp) : null,
@@ -5189,10 +4938,22 @@ export function MatterFormClient({
           },
           { id: targetMatterId ?? undefined, saveMode: 'draft' },
         );
+        if (draftRes.errors && Object.keys(draftRes.errors).length > 0) {
+          setServerSaveErrors(draftRes.errors);
+          setAssignSubmitting(false);
+          showToast(Object.values(draftRes.errors)[0] ?? 'Could not save draft');
+          return;
+        }
         if (draftRes.matter) {
           targetMatterId = draftRes.matter.id;
           setSavedDraftMatterId(draftRes.matter.id);
-          initialSnapshotRef.current = currentFormStateSignature;
+          setSavedEstimateGbp(currentFormEstimateGbp);
+          setPartnerCostSignOff(
+            (draftRes.matter.fieldValues?.['partnerCostSignOff'] as
+              | PartnerCostSignOffRecord
+              | undefined) ?? null,
+          );
+          setInitialSnapshot(currentFormStateSignature);
           setRestoredSessionDirty(false);
         }
       }
@@ -5373,6 +5134,7 @@ export function MatterFormClient({
   async function handleSaveExistingMatter() {
     if (!canSaveExisting || !existing) return;
     setSaving(true);
+    setServerSaveErrors({});
     try {
       const {
         finalTeamMemberIds,
@@ -5395,6 +5157,8 @@ export function MatterFormClient({
           additionalClientIds: clientIds.slice(1),
           practiceAreaId,
           workTypeSubcategoryId,
+          owningDepartmentId: owningDepartmentId || undefined,
+          owningTeamId: owningTeamId || undefined,
           typeBadge,
           matterTypeId,
           billingBasisId,
@@ -5425,8 +5189,20 @@ export function MatterFormClient({
           targetCompletionAt,
           conflictCheckRecord: existing.conflictCheckRecord
             ? {
-                ...existing.conflictCheckRecord,
+                status: existing.conflictCheckRecord.status,
+                outcomeLabel: existing.conflictCheckRecord.outcomeLabel,
+                declarationConfirmed: existing.conflictCheckRecord.declarationConfirmed,
+                reviewerMessage: existing.conflictCheckRecord.reviewerMessage,
+                lastRunAtDisplay: existing.conflictCheckRecord.lastRunAtDisplay,
+                lastRunById: existing.conflictCheckRecord.lastRunById,
+                lastRunByName: existing.conflictCheckRecord.lastRunByName,
+                savedDraftAtDisplay: existing.conflictCheckRecord.savedDraftAtDisplay,
+                submittedAtDisplay: existing.conflictCheckRecord.submittedAtDisplay,
+                submittedByName: existing.conflictCheckRecord.submittedByName,
                 parties: [...fixedClientParties, ...finalOtherParties],
+                matches: existing.conflictCheckRecord.matches,
+                runs: existing.conflictCheckRecord.runs,
+                comments: existing.conflictCheckRecord.comments,
               }
             : undefined,
           fieldValues: updatedFieldValues,
@@ -5434,6 +5210,11 @@ export function MatterFormClient({
         { id: existing.id },
       );
       setSaving(false);
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setServerSaveErrors(res.errors);
+        showToast(Object.values(res.errors)[0] ?? 'Could not save matter changes');
+        return;
+      }
       if (res.matter) {
         showToast(`Saved changes to ${res.matter.matterNumber}`);
         router.push(`/matters/${res.matter.id}`);
@@ -5453,6 +5234,7 @@ export function MatterFormClient({
     }
     if (!canSubmit) return;
     setSaving(true);
+    setServerSaveErrors({});
     try {
       const {
         finalTeamMemberIds,
@@ -5507,6 +5289,8 @@ export function MatterFormClient({
             matterStatusId: cmiIncompleteStatusId,
             practiceAreaId,
             workTypeSubcategoryId,
+            owningDepartmentId: owningDepartmentId || undefined,
+            owningTeamId: owningTeamId || undefined,
             typeBadge,
             matterTypeId,
             billingBasisId,
@@ -5524,9 +5308,7 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckStatus: 'Cleared',
             conflictCheckDate: today,
-            conflictClearedById: leadFeeEarnerId || currentUser.id,
             conflictNotes: matches
               .map((m) => `${m.partyName}: ${m.note}`)
               .filter(Boolean)
@@ -5549,6 +5331,11 @@ export function MatterFormClient({
           { id: savedDraftMatterId ?? existing?.id, saveMode: 'submit_cleared' },
         );
         setSaving(false);
+        if (res.errors && Object.keys(res.errors).length > 0) {
+          setServerSaveErrors(res.errors);
+          showToast(Object.values(res.errors)[0] ?? 'Could not open matter');
+          return;
+        }
         if (res.matter) {
           if (typeof window !== 'undefined') {
             try {
@@ -5573,7 +5360,7 @@ export function MatterFormClient({
           'Referred',
           'Referred to risk for review',
         );
-        await saveMatterAction(
+        const res = await saveMatterAction(
           {
             title: title.trim(),
             shortDescription,
@@ -5584,6 +5371,8 @@ export function MatterFormClient({
             enquiryReceivedAt: resolvedEnquiryReceivedAt,
             practiceAreaId,
             workTypeSubcategoryId,
+            owningDepartmentId: owningDepartmentId || undefined,
+            owningTeamId: owningTeamId || undefined,
             typeBadge,
             matterTypeId,
             billingBasisId,
@@ -5601,16 +5390,29 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckStatus: 'Pending conflict review',
             conflictCheckDate: today,
             conflictNotes: reviewerMessage,
             stageId: intakeCompleteStageId,
+            feeEstimateGbp: feeEstimateGbp ? Number(feeEstimateGbp) : null,
+            agreedFeeCapGbp: agreedFeeCapGbp ? Number(agreedFeeCapGbp) : null,
+            retainerMoniesOnAccountGbp: retainerMoniesOnAccountGbp
+              ? Number(retainerMoniesOnAccountGbp)
+              : null,
             conflictCheckRecord: snapshot,
             fieldValues: updatedFieldValues,
           },
           { id: savedDraftMatterId ?? existing?.id, saveMode: 'submit_referred' },
         );
         setSaving(false);
+        if (res.errors && Object.keys(res.errors).length > 0) {
+          setServerSaveErrors(res.errors);
+          showToast(Object.values(res.errors)[0] ?? 'Could not submit matter');
+          return;
+        }
+        if (res.matter) {
+          setSavedDraftMatterId(res.matter.id);
+          setSavedEstimateGbp(currentFormEstimateGbp);
+        }
         setWorkflowState('referred_readonly');
         showToast(
           'Referred to Risk & Compliance · Task created for risk team · Status: Pending conflict review',
@@ -5642,14 +5444,17 @@ export function MatterFormClient({
     const snapshot = buildConflictRecordSnapshot(nextStatus, nextOutcome);
     setWorkflowState(decision === 'approve' ? 'approved' : 'declined');
 
+    let warningMsg: string | undefined;
     if (existing?.id) {
-      await updateMatterConflictRecordAction(existing.id, snapshot);
+      const res = await updateMatterConflictRecordAction(existing.id, snapshot);
+      warningMsg = res?.warnings?.[0];
     }
     setSaving(false);
     showToast(
-      decision === 'approve'
-        ? `Conflict check ${hasConditions ? 'approved with conditions' : 'approved'} · Recorded on conflict check record`
-        : 'Conflict check declined · Recorded on conflict check record',
+      warningMsg ??
+        (decision === 'approve'
+          ? `Conflict check ${hasConditions ? 'approved with conditions' : 'approved'} · Recorded on conflict check record`
+          : 'Conflict check declined · Recorded on conflict check record'),
     );
   }
 
@@ -5658,10 +5463,11 @@ export function MatterFormClient({
     const added: ConflictReviewerComment = {
       id: `c-${Date.now()}`,
       authorId: currentUser.id,
-      authorName: isReviewerMode ? 'Bethan Rees' : personDisplayName(currentUser),
-      authorRole: isReviewerMode
-        ? 'Head of Risk & Compliance (COLP)'
-        : currentUser.jobTitle || 'Fee earner',
+      authorName: personDisplayName(currentUser),
+      authorRole:
+        currentUser.employment?.jobTitle ||
+        currentUser.jobTitle ||
+        (isReviewerMode ? 'Risk & Compliance' : 'Fee earner'),
       atDisplay: '22 Oct 2026, 17:49',
       text: newCommentText.trim(),
     };
@@ -5935,7 +5741,7 @@ export function MatterFormClient({
                 <span>
                   <strong>Submitted and referred to Risk &amp; Compliance</strong> (22 Oct 2026, 17:46).
                   Matter status is <strong>Pending conflict review</strong> and a task has been assigned
-                  to the Risk team (Bethan Rees). Snapshot is locked read-only.
+                  to the Risk team. Snapshot is locked read-only.
                 </span>
               </div>
               <button
@@ -5955,7 +5761,7 @@ export function MatterFormClient({
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <ShieldCheck size={17} style={{ flexShrink: 0 }} />
                 <span>
-                  <strong>Viewing as Risk / Compliance (Bethan Rees, COLP).</strong> Fee earner inputs
+                  <strong>Viewing as Risk / Compliance ({personDisplayName(currentUser)}).</strong> Fee earner inputs
                   are read-only. Review each flagged potential conflict below and record your decision.
                 </span>
               </div>
@@ -7232,6 +7038,15 @@ export function MatterFormClient({
                   onChange={(e) => {
                     const nextPa = e.target.value;
                     setPracticeAreaId(nextPa);
+                    if (
+                      (!isEditingExistingMatter || canReassignOwnership) &&
+                      !owningDepartmentExplicitlyChosen &&
+                      !owningTeamId
+                    ) {
+                      const nextOrgDept = resolveOrgDepartment(nextPa, orgStructure);
+                      const nextOwningDeptId = nextOrgDept?.id ?? '';
+                      setOwningDepartmentId(nextOwningDeptId);
+                    }
                     const firstSub = values
                       .filter(
                         (v) =>
@@ -7316,6 +7131,106 @@ export function MatterFormClient({
                   ))}
                 </select>
               </div>
+
+              <div className="field-group">
+                <label className="field-label" htmlFor="nm-owning-department">
+                  Owning department (document routing)
+                </label>
+                <select
+                  id="nm-owning-department"
+                  className="field-select"
+                  value={owningDepartmentId}
+                  disabled={isReadOnlyFeeEarner || (isEditingExistingMatter && !canReassignOwnership)}
+                  onChange={(e) => {
+                    const nextDeptId = e.target.value;
+                    setOwningDepartmentExplicitlyChosen(Boolean(nextDeptId));
+                    setOwningDepartmentId(nextDeptId);
+                    if (
+                      owningTeamId &&
+                      !orgStructure.teamsOrPracticeGroups.some(
+                        (t) => t.id === owningTeamId && t.parentDepartmentId === nextDeptId,
+                      )
+                    ) {
+                      setOwningTeamId('');
+                    }
+                  }}
+                >
+                  <option value="">Select owning department…</option>
+                  {orgStructure.departments
+                    .filter((d) => d.active || d.id === owningDepartmentId)
+                    .map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name} ({d.code}){!d.active ? ' (Inactive)' : ''}
+                      </option>
+                    ))}
+                </select>
+                {isEditingExistingMatter && !canReassignOwnership ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Reassigning an opened matter’s owning department requires matter ownership reassignment permission.
+                  </div>
+                ) : null}
+                {serverSaveErrors.owningDepartmentId ? (
+                  <div className="field-error" style={{ color: 'var(--status-alert)', fontSize: 12, marginTop: 4 }}>
+                    {serverSaveErrors.owningDepartmentId}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="field-group">
+                <label className="field-label" htmlFor="nm-owning-team">
+                  Owning team / practice group (document routing)
+                </label>
+                <select
+                  id="nm-owning-team"
+                  className="field-select"
+                  value={owningTeamId}
+                  disabled={isReadOnlyFeeEarner || (isEditingExistingMatter && !canReassignOwnership)}
+                  onChange={(e) => setOwningTeamId(e.target.value)}
+                >
+                  <option value="">Select owning team…</option>
+                  {availableOwningTeams.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name} ({t.code})
+                    </option>
+                  ))}
+                </select>
+                {isEditingExistingMatter && !canReassignOwnership ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Reassigning an opened matter’s owning team requires matter ownership reassignment permission.
+                  </div>
+                ) : null}
+                {serverSaveErrors.owningTeamId ? (
+                  <div className="field-error" style={{ color: 'var(--status-alert)', fontSize: 12, marginTop: 4 }}>
+                    {serverSaveErrors.owningTeamId}
+                  </div>
+                ) : null}
+              </div>
+              {serverSaveErrors.costsGovernance ||
+              serverSaveErrors.extensions ||
+              serverSaveErrors.keyDates ||
+              serverSaveErrors.conflict ||
+              serverSaveErrors.permission ||
+              serverSaveErrors.access ? (
+                <div
+                  className="field-group field-group--full"
+                  role="alert"
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    background: 'rgba(220, 38, 38, 0.08)',
+                    border: '1px solid var(--status-alert)',
+                    color: 'var(--status-alert)',
+                    fontSize: 13,
+                  }}
+                >
+                  {serverSaveErrors.costsGovernance ||
+                    serverSaveErrors.extensions ||
+                    serverSaveErrors.keyDates ||
+                    serverSaveErrors.conflict ||
+                    serverSaveErrors.permission ||
+                    serverSaveErrors.access}
+                </div>
+              ) : null}
 
               {/* Responsible partner and fee earner */}
               <div className="field-group">
@@ -8748,6 +8663,87 @@ export function MatterFormClient({
                     </div>
                   ) : null}
                 </div>
+
+                {partnerCostSignOff ||
+                (canSignOffCosts && (savedDraftMatterId || existing?.id)) ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 12,
+                      padding: '10px 14px',
+                      borderRadius: 10,
+                      border: '1px solid var(--border-subtle)',
+                      background: 'var(--bg-surface-subtle)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4,
+                        fontSize: 12.5,
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
+                      {partnerCostSignOff ? (
+                        <div>
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            Partner cost sign-off completed
+                          </strong>{' '}
+                          by {partnerCostSignOff.byName} (
+                          {formatGbp(partnerCostSignOff.signedOffEstimateGbp ?? 0)})
+                          {partnerCostSignOff.note ? ` · "${partnerCostSignOff.note}"` : ''}
+                        </div>
+                      ) : (
+                        <span>
+                          High-value fee estimates require partner cost sign-off before opening.
+                        </span>
+                      )}
+                      {canSignOffCosts && (savedDraftMatterId || existing?.id) ? (
+                        <span>
+                          {hasUnsavedEstimateChanges
+                            ? 'Save your changes before signing off'
+                            : `You're signing off ${formatGbp(savedEstimateGbp ?? 0)}`}
+                        </span>
+                      ) : null}
+                    </div>
+                    {canSignOffCosts && (savedDraftMatterId || existing?.id) ? (
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <input
+                          type="text"
+                          className="field-input"
+                          style={{ height: 32, width: 220, fontSize: 12 }}
+                          placeholder="Optional sign-off note…"
+                          aria-label="Partner cost sign-off note"
+                          value={signOffNote}
+                          onChange={(e) => setSignOffNote(e.target.value)}
+                          disabled={signingOffCosts || hasUnsavedEstimateChanges}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          disabled={signingOffCosts || hasUnsavedEstimateChanges}
+                          onClick={handleSignOffMatterCosts}
+                        >
+                          <ShieldCheck size={14} />
+                          <span>
+                            {partnerCostSignOff ? 'Re-sign off costs' : 'Sign off costs'}
+                          </span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </section>
@@ -10668,7 +10664,7 @@ export function MatterFormClient({
                     }}
                   >
                     Last run {lastRunAtDisplay || '22 Oct 2026, 17:42'} by{' '}
-                    {lastRunByName || 'Bethan R.'}
+                    {lastRunByName || personDisplayName(currentUser) || 'Fee earner'}
                   </div>
                 ) : null}
               </div>
@@ -10792,6 +10788,12 @@ export function MatterFormClient({
                                     label={`${m.strength} match`}
                                     tone={strengthPillTone(m.strength)}
                                   />
+                                  {m.restricted ? (
+                                    <StatusPill
+                                      label="Refer to Risk"
+                                      tone="alert"
+                                    />
+                                  ) : null}
                                   <span
                                     style={{
                                       fontSize: 13,
@@ -10802,18 +10804,20 @@ export function MatterFormClient({
                                     {m.whereFound}
                                   </span>
                                 </div>
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    color: 'var(--text-secondary)',
-                                    marginTop: 3,
-                                  }}
-                                >
-                                  Responsible partner:{' '}
-                                  <strong>{m.responsiblePartnerName}</strong> · Date:{' '}
-                                  {m.dateLabel}
-                                  {m.matchedOn ? ` · Matched on: ${m.matchedOn}` : ''}
-                                </div>
+                                {!m.restricted ? (
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      color: 'var(--text-secondary)',
+                                      marginTop: 3,
+                                    }}
+                                  >
+                                    Responsible partner:{' '}
+                                    <strong>{m.responsiblePartnerName || '—'}</strong> · Date:{' '}
+                                    {m.dateLabel || '—'}
+                                    {m.matchedOn ? ` · Matched on: ${m.matchedOn}` : ''}
+                                  </div>
+                                ) : null}
                               </div>
 
                               {/* 3 Segmented disposition buttons */}
@@ -10824,7 +10828,7 @@ export function MatterFormClient({
                               >
                                 <button
                                   type="button"
-                                  disabled={isReadOnlyFeeEarner}
+                                  disabled={isReadOnlyFeeEarner || Boolean(m.restricted)}
                                   className={`conflict-seg-btn ${
                                     m.disposition === 'not_the_same'
                                       ? 'conflict-seg-btn--active'
@@ -10838,7 +10842,7 @@ export function MatterFormClient({
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={isReadOnlyFeeEarner}
+                                  disabled={isReadOnlyFeeEarner || Boolean(m.restricted)}
                                   className={`conflict-seg-btn ${
                                     m.disposition === 'same_no_conflict'
                                       ? 'conflict-seg-btn--active conflict-seg-btn--green'
@@ -10917,7 +10921,7 @@ export function MatterFormClient({
                                   <span className="conflict-reviewer-box__title">
                                     <ShieldCheck size={14} />
                                     <span>
-                                      Risk / Compliance Reviewer Decision (COLP)
+                                      Risk / Compliance Reviewer Decision
                                     </span>
                                   </span>
                                   <div
@@ -12517,6 +12521,7 @@ export function MatterFormClient({
                   values={values}
                   customFields={customFields}
                   currentUserId={currentUser.id}
+                  orgStructure={orgStructure}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingPerson={(existingPerson) => {
                     handleAddClientsToMatter(
@@ -12993,6 +12998,7 @@ export function MatterFormClient({
                       values={values}
                       customFields={customFields}
                       currentUserId={currentUser.id}
+                      orgStructure={orgStructure}
                       onCancelModal={resetAddPartyForm}
                       onSelectExistingPerson={(existingPerson) => {
                         addPersonRecordToMatter(

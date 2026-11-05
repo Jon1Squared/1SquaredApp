@@ -2,12 +2,12 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import {
   applyEffectiveDatedEmploymentHistory,
   applyLeaverEffects,
+  buildSensitiveSubmissionPayload,
   calculateHrRetentionDate,
   calculateProbationEndDate,
-  canUserAccessMatter,
   computeStaffMatterStatus,
+  emptyDiversityAnswers,
   filterEmployeesForMatterDepartment,
-  filterEmploymentForUser,
   findOpenMattersWherePersonIsParty,
   findRecordsOwnedByLeavers,
   formatEmployeeSelectorOptionLabel,
@@ -18,11 +18,15 @@ import {
   maskBankDetails,
   maskNationalInsuranceNumber,
   migrateEmployeesToEmploymentRecords,
-  resolveEmployeePermissions,
   resolveNewMatterDepartmentDefaults,
   validateEmploymentRecord,
   validateNationalInsuranceNumber,
 } from './employment';
+import {
+  canUserAccessMatter,
+  filterEmploymentForUser,
+  resolveEmployeePermissions,
+} from '../server/rbacRuntime';
 import {
   buildDefaultOrgStructure,
   mapLegacyEmployeeRoleToRoleType,
@@ -37,6 +41,11 @@ import {
   saveMatterRecord,
   savePersonRecord,
 } from '../server/services';
+import {
+  createSignedEntraSessionCookie,
+  verifySignedEntraSessionCookie,
+} from '../server/entraAuth';
+import { runWithActiveActorSession } from './rbac';
 import type { EmploymentRecord, Person } from './types';
 
 describe('Employee section, conversion paths, migration & permissions', () => {
@@ -185,7 +194,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         engagementType: 'Employee',
       });
 
-      const org = buildDefaultOrgStructure();
+      const org = buildDefaultOrgStructure({ legalName: 'Test Firm LLP' });
       const resolvedRealEstate = resolveOrgDepartment('department.real_estate', org);
       expect(resolvedRealEstate?.id).toBe('DEPT-RE');
       expect(resolvedRealEstate?.parentDivisionId).toBe('DIV-LEGAL');
@@ -207,6 +216,8 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         [...store.people, customPerson],
         store.values,
         store.orgStructure,
+        store.pmsLinks,
+        'notalawfirm.example',
       );
 
       expect(migration.report.migratedCount).toBeGreaterThanOrEqual(1);
@@ -370,7 +381,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       );
     });
 
-    it('Path C (Employee -> Client): marks matter as staff matter with restricted access and shows Right-to-Work evidence on file without auto-completing Client ID verification', () => {
+    it('Path C (Employee -> Client): marks matter as staff matter with restricted access and shows Right-to-Work evidence on file without auto-completing Client ID verification', async () => {
       const store = getStore();
       const employeeClient = store.people.find((p) => p.id === 'P-000002')!;
       const initialVerificationStatus = employeeClient.verificationStatusId;
@@ -394,27 +405,56 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(staffCheck.restrictedAccessUserIds).toContain('P-000001');
 
       const templateMatter = store.matters[0];
-      const matterRes = saveMatterRecord(
+      const verifiedSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000001',
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      const matterRes = await runWithActiveActorSession(
         {
-          title: 'Residential purchase for staff member',
-          clientId: 'P-000002',
-          practiceAreaId: templateMatter.practiceAreaId,
-          workTypeSubcategoryId: templateMatter.workTypeSubcategoryId,
-          responsiblePartnerId: 'P-000001',
-          supervisingPartnerId: 'P-000001',
-          leadFeeEarnerId: 'P-000001',
-          teamMemberIds: [],
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          tokenRoles: ['partner'],
+          expiresAtMs: Date.now() + 3600_000,
+          verifiedSession,
         },
-        { byId: 'P-000001' },
+        () =>
+          saveMatterRecord(
+            {
+              title: 'Residential purchase for staff member',
+              clientId: 'P-000002',
+              practiceAreaId: templateMatter.practiceAreaId,
+              workTypeSubcategoryId: templateMatter.workTypeSubcategoryId,
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000001',
+              teamMemberIds: [],
+            },
+            { byId: 'P-000001' },
+          ),
       );
       expect(matterRes.errors).toBeUndefined();
-      expect(matterRes.matter.isStaffMatter).toBe(true);
+      expect(matterRes.matter).not.toBeNull();
+      expect(matterRes.matter!.isStaffMatter).toBe(true);
 
       // Involved partner P-000001 can access; uninvolved fee earner P-000005 cannot browse by default
       const p1 = store.people.find((p) => p.id === 'P-000001')!;
       const p5 = store.people.find((p) => p.id === 'P-000005')!;
-      expect(canUserAccessMatter(matterRes.matter, 'P-000001', p1)).toBe(true);
-      expect(canUserAccessMatter(matterRes.matter, 'P-000005', p5)).toBe(false);
+      expect(canUserAccessMatter(matterRes.matter!, 'P-000001', p1)).toBe(true);
+      expect(canUserAccessMatter(matterRes.matter!, 'P-000005', p5)).toBe(false);
     });
 
     it('Path D (Employee -> Leaver -> Contact): sets status to Leaver, deactivates firm-issued email/extension, keeps personal contact details & marketing consent, hides from employee selectors, and supports reassigning owned records', () => {
@@ -471,6 +511,42 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(firmEmail?.active).toBe(false);
       expect(keptPersonal?.active).toBe(true);
       expect(leaverUpdated.marketingConsentId).toBe('marketing_consent.opted_in');
+
+      // R154: An email on the configured primaryDomain is deactivated on leave even if firmIssued was false, whereas a personal domain is never inferred as the firm's
+      const unflaggedFirmDomainEmail = {
+        id: 'em-unflagged-firm-5',
+        address: 'unflagged.work@notalawfirm.example',
+        typeId: 'email_type.other',
+        isPrimary: false,
+        firmIssued: false,
+        active: true,
+      };
+      const secondLeaverSave = savePersonRecord(
+        {
+          ...leaverUpdated,
+          emails: [...leaverUpdated.emails, unflaggedFirmDomainEmail],
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          keepAsContactOnLeave: true,
+          employmentSubmitted: {
+            ...leaverUpdated.employment!,
+            status: 'Leaver',
+          },
+        },
+      );
+      expect(
+        secondLeaverSave.person.emails.find(
+          (e) => e.address === 'unflagged.work@notalawfirm.example',
+        )?.active,
+      ).toBe(false);
+      expect(
+        secondLeaverSave.person.emails.find(
+          (e) => e.address === 'personal.contact@example.com',
+        )?.active,
+      ).toBe(true);
 
       // Selector rules: Leaver is no longer selectable, and existing references show "Left"
       expect(isSelectableInEmployeeDropdown(leaverUpdated)).toBe(false);
@@ -574,6 +650,166 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       );
       expect(logRes.error).toBeUndefined();
       expect(logRes.auditEntry?.action).toBe('view-payroll');
+    });
+
+    it('preserves existing employeeSensitiveRecords[id] when saving a person without sensitiveSubmitted (R76)', () => {
+      const store = getStore();
+      const target = store.people.find((p) => p.id === 'P-000002')!;
+
+      // First save a sensitive record on P-000002 as HR Admin P-000004
+      savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: {
+            reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
+          },
+        },
+      );
+      expect(
+        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+      ).toBe('Ergonomic standing desk and dual monitors');
+
+      const sensitiveAuditCountBefore = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'update-sensitive',
+      ).length;
+
+      // Form helper sends null unless the sensitive section was both revealed and edited
+      expect(
+        buildSensitiveSubmissionPayload({
+          isEmployee: true,
+          canSensitive: true,
+          sensitiveRevealed: false,
+          sensitiveEdited: false,
+          reasonableAdjustments: '',
+          diversityAnswers: emptyDiversityAnswers(),
+        }),
+      ).toBeNull();
+      expect(
+        buildSensitiveSubmissionPayload({
+          isEmployee: true,
+          canSensitive: true,
+          sensitiveRevealed: true,
+          sensitiveEdited: false,
+          reasonableAdjustments: 'Opened but not edited',
+          diversityAnswers: emptyDiversityAnswers(),
+        }),
+      ).toBeNull();
+      expect(
+        buildSensitiveSubmissionPayload({
+          isEmployee: true,
+          canSensitive: true,
+          sensitiveRevealed: true,
+          sensitiveEdited: true,
+          reasonableAdjustments: 'Screen reader licence',
+          diversityAnswers: emptyDiversityAnswers(),
+        }),
+      ).toEqual({
+        reasonableAdjustmentsNeeded: 'Screen reader licence',
+        diversity: emptyDiversityAnswers(),
+      });
+
+      // Server enforcement: even if a caller sends a blank sensitiveSubmitted payload without opening/editing
+      // the sensitive section, savePersonRecord refuses to overwrite the existing sensitive record
+      const uneditedServerAttempt = savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+          preferredName: 'Daf',
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: {
+            reasonableAdjustmentsNeeded: '',
+            diversity: emptyDiversityAnswers(),
+          },
+          sensitiveSectionOpened: false,
+          sensitiveSectionEdited: false,
+        },
+      );
+      expect(uneditedServerAttempt.errors).toBeUndefined();
+      expect(
+        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+      ).toBe('Ergonomic standing desk and dual monitors');
+
+      // Now save P-000002 again (e.g. updating preferredName) without revealing/submitting sensitive section
+      const updateRes = savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+          preferredName: 'Daf',
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: null,
+        },
+      );
+      expect(updateRes.errors).toBeUndefined();
+      expect(
+        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+      ).toBe('Ergonomic standing desk and dual monitors');
+      const sensitiveAuditCountAfter = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'update-sensitive',
+      ).length;
+      expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);
+
+      // When both sensitiveSectionOpened and sensitiveSectionEdited are true, server applies the update
+      savePersonRecord(
+        {
+          ...target,
+          firstName: target.firstName,
+          surname: target.surname,
+        },
+        {
+          id: target.id,
+          byId: 'P-000004',
+          worksAtFirm: true,
+          employmentSubmitted: target.employment,
+          sensitiveSubmitted: {
+            reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
+          },
+          sensitiveSectionOpened: true,
+          sensitiveSectionEdited: true,
+        },
+      );
+
+      // R103 & R76: Calling getEmployeeDetailsForUser without logViewSensitive: true returns sensitive: null and writes no view-sensitive audit entry
+      const viewAuditCountBefore = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'view-sensitive',
+      ).length;
+      const unrevealed = getEmployeeDetailsForUser(target.id, 'P-000004');
+      expect(unrevealed.sensitive).toBeNull();
+      const viewAuditCountAfterUnrevealed = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'view-sensitive',
+      ).length;
+      expect(viewAuditCountAfterUnrevealed).toBe(viewAuditCountBefore);
+
+      // Revealing on demand via getEmployeeDetailsForUser with logViewSensitive: true returns the preserved record and logs view-sensitive
+      const revealed = getEmployeeDetailsForUser(target.id, 'P-000004', {
+        logViewSensitive: true,
+      });
+      expect(revealed.sensitive?.reasonableAdjustmentsNeeded).toBe(
+        'Ergonomic standing desk and dual monitors',
+      );
+      const viewAuditCountAfterRevealed = store.audit.filter(
+        (a) => a.recordId === target.id && a.action === 'view-sensitive',
+      ).length;
+      expect(viewAuditCountAfterRevealed).toBe(viewAuditCountBefore + 1);
     });
   });
 

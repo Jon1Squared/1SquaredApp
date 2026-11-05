@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -27,6 +27,8 @@ import {
 } from 'lucide-react';
 import {
   addNoteAction,
+  liftMatterRestrictionAction,
+  markEngagementLetterDraftedAction,
   saveMatterAction,
   saveTaskAction,
   updateMatterConflictRecordAction,
@@ -48,12 +50,6 @@ import {
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
 } from '@/domain/matterOpeningRecord';
-import {
-  assembleClientCareLetter,
-  downloadClientCareDocx,
-  downloadClientCarePdf,
-  type SavedAssembledDocument,
-} from '@/domain/documentAssembly';
 import { hrefForId, personDisplayName } from '@/domain/names';
 import type {
   AppRole,
@@ -70,11 +66,22 @@ import type {
   Team,
 } from '@/domain/types';
 import type { MatterPmsViewBundle } from '@/server/services';
-import { DocumentAssemblyModal } from './DocumentAssemblyModal';
+import { DocumentGenerationModal } from './DocumentGenerationModal';
+import { DocumentListSection } from './DocumentListSection';
+import { KeyDatesPanel } from './KeyDatesPanel';
+import { MatterDocumentStoreSection } from './MatterDocumentStoreSection';
 import { MatterFinanceTab } from './MatterFinanceTab';
 import { RecordTasksSection } from './RecordTasksSection';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import type {
+  KeyDate,
+  KeyDateCalendarSync,
+  KeyDateNotApplicable,
+  KeyDatePermission,
+  KeyDateReminderState,
+  KeyDatesConfig,
+} from '@/domain/keyDates.types';
 
 interface MatterProfileClientProps {
   matter: Matter;
@@ -88,7 +95,18 @@ interface MatterProfileClientProps {
   quotes?: Quote[];
   currentUserId?: string;
   currentUserRole?: AppRole;
+  currentUser?: Person;
+  employees?: Person[];
+  keyDatesConfig?: KeyDatesConfig;
+  keyDates?: KeyDate[];
+  keyDateNotApplicable?: KeyDateNotApplicable[];
+  keyDateReminderStates?: KeyDateReminderState[];
+  keyDateCalendarSyncs?: KeyDateCalendarSync[];
+  userKeyDatePermissions?: KeyDatePermission[];
+  canVerifyByKeyDateId?: Record<string, { allowed: boolean; reason?: string }>;
+  canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
+  canLiftRestriction?: boolean;
   pmsView?: MatterPmsViewBundle;
   notes: Note[];
   audit: AuditEntry[];
@@ -174,7 +192,18 @@ export function MatterProfileClient({
   quotes = [],
   currentUserId = 'P-0001',
   currentUserRole = 'admin',
+  currentUser,
+  employees,
+  keyDatesConfig,
+  keyDates = [],
+  keyDateNotApplicable = [],
+  keyDateReminderStates = [],
+  keyDateCalendarSyncs = [],
+  userKeyDatePermissions = [],
+  canVerifyByKeyDateId,
+  canTakeByTaskId,
   canViewFinance = true,
+  canLiftRestriction = false,
   pmsView,
   notes,
   audit,
@@ -197,6 +226,13 @@ export function MatterProfileClient({
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [savingNote, setSavingNote] = useState(false);
+  const [liftOpen, setLiftOpen] = useState(false);
+  const [liftType, setLiftType] = useState<'ethical_wall' | 'staff_matter'>(
+    matter.hasEthicalWall ? 'ethical_wall' : 'staff_matter',
+  );
+  const [liftReason, setLiftReason] = useState('');
+  const [liftingRestriction, setLiftingRestriction] = useState(false);
+  const [liftError, setLiftError] = useState<string | null>(null);
   const [completedDemoTaskIds, setCompletedDemoTaskIds] = useState<Set<string>>(() => new Set());
 
   const isBrightwaterTribunal = matter.matterNumber === 'BRI001-0003';
@@ -210,34 +246,6 @@ export function MatterProfileClient({
     ConflictCheckRecord['runs']
   >([]);
   const [docAssemblyOpen, setDocAssemblyOpen] = useState(false);
-  const [editingSavedDoc, setEditingSavedDoc] = useState<SavedAssembledDocument | null>(null);
-  const [localSavedDocs, setLocalSavedDocs] = useState<SavedAssembledDocument[]>(
-    () =>
-      ((matter.fieldValues?.['assembledDocuments'] as
-        | SavedAssembledDocument[]
-        | undefined) ?? []),
-  );
-
-  async function handleSaveAssembledDocument(savedDoc: SavedAssembledDocument) {
-    const nextList = [
-      savedDoc,
-      ...localSavedDocs.filter((d) => d.id !== savedDoc.id),
-    ];
-    setLocalSavedDocs(nextList);
-    await saveMatterAction({
-      ...matter,
-      engagementLetterStatus:
-        matter.engagementLetterStatus === 'Signed'
-          ? 'Signed'
-          : 'Drafted',
-      fieldValues: {
-        ...(matter.fieldValues ?? {}),
-        assembledDocuments: nextList,
-      },
-    });
-    showToast(`Saved ${savedDoc.fileName} to Matter documents`);
-    router.refresh();
-  }
 
   const nameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -329,11 +337,16 @@ export function MatterProfileClient({
     return 3; // Stage 4 of 6 (0-indexed = 3)
   }, [stageLabel]);
 
-  const [currentStageIdx, setCurrentStageIdx] = useState<number>(initialStageIdx);
-
-  useEffect(() => {
-    setCurrentStageIdx(initialStageIdx);
-  }, [initialStageIdx]);
+  const [stageIdxState, setStageIdxState] = useState<{
+    baseIdx: number;
+    value: number;
+  }>({ baseIdx: initialStageIdx, value: initialStageIdx });
+  const currentStageIdx =
+    stageIdxState.baseIdx === initialStageIdx
+      ? stageIdxState.value
+      : initialStageIdx;
+  const setCurrentStageIdx = (next: number) =>
+    setStageIdxState({ baseIdx: initialStageIdx, value: next });
 
   const stageSteps = useMemo<StageStepItem[]>(() => {
     if (isBrightwaterTribunal || subcatLabel.toLowerCase().includes('tribunal')) {
@@ -368,6 +381,7 @@ export function MatterProfileClient({
   }, [isBrightwaterTribunal, subcatLabel, matter.openedAt, matter.targetCompletionAt]);
 
   async function persistStageIdx(nextIdx: number) {
+    const prevIdx = currentStageIdx;
     const bounded = Math.max(0, Math.min(stageSteps.length - 1, nextIdx));
     setCurrentStageIdx(bounded);
     const matchingStage = values.find(
@@ -377,7 +391,7 @@ export function MatterProfileClient({
         v.label.toLowerCase().startsWith(`stage ${bounded + 1}`),
     );
     if (matchingStage) {
-      await saveMatterAction(
+      const res = await saveMatterAction(
         {
           title: matter.title,
           clientId: matter.clientId,
@@ -387,6 +401,11 @@ export function MatterProfileClient({
         },
         { id: matter.id },
       );
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setCurrentStageIdx(prevIdx);
+        showToast(Object.values(res.errors)[0] ?? 'Could not update matter stage');
+        return;
+      }
       router.refresh();
     }
     showToast(`Moved matter to Stage ${bounded + 1}: ${stageSteps[bounded].name}`);
@@ -1037,13 +1056,26 @@ export function MatterProfileClient({
             type="button"
             className="btn btn--secondary"
             onClick={() => {
-              setEditingSavedDoc(null);
               setDocAssemblyOpen(true);
             }}
           >
             <FileText size={16} />
             <span>Generate document</span>
           </button>
+          {canLiftRestriction && (matter.isStaffMatter || matter.hasEthicalWall) ? (
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                setLiftType(matter.hasEthicalWall ? 'ethical_wall' : 'staff_matter');
+                setLiftError(null);
+                setLiftOpen((o) => !o);
+              }}
+            >
+              <ShieldCheck size={16} />
+              <span>Lift restriction</span>
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn btn--secondary"
@@ -1058,6 +1090,120 @@ export function MatterProfileClient({
           </Link>
         </div>
       </div>
+
+      {/* Lift Restriction Drawer */}
+      {liftOpen && canLiftRestriction && (matter.isStaffMatter || matter.hasEthicalWall) ? (
+        <div
+          className="home-panel"
+          style={{ padding: '18px 22px', marginBottom: 22 }}
+        >
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+            Lift matter restriction
+          </div>
+          {matter.isStaffMatter && matter.hasEthicalWall ? (
+            <div style={{ marginBottom: 10 }}>
+              <label className="field-label" htmlFor="lift-restriction-type">
+                Restriction to lift
+              </label>
+              <select
+                id="lift-restriction-type"
+                className="field-select"
+                value={liftType}
+                onChange={(e) =>
+                  setLiftType(e.target.value as 'ethical_wall' | 'staff_matter')
+                }
+                style={{ marginTop: 4 }}
+              >
+                <option value="ethical_wall">Information barrier (ethical wall)</option>
+                <option value="staff_matter">Staff matter restriction</option>
+              </select>
+            </div>
+          ) : null}
+          <label className="field-label" htmlFor="lift-restriction-reason">
+            Written reason (recorded in the audit trail)
+          </label>
+          <textarea
+            id="lift-restriction-reason"
+            rows={2}
+            className="field-textarea"
+            placeholder="Record the compliance approval and reason for lifting this restriction…"
+            value={liftReason}
+            onChange={(e) => setLiftReason(e.target.value)}
+            style={{ marginTop: 6, marginBottom: 10 }}
+          />
+          {liftError ? (
+            <div
+              role="alert"
+              style={{
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: 'rgba(220, 38, 38, 0.08)',
+                border: '1px solid var(--status-alert)',
+                color: 'var(--status-alert)',
+                fontSize: 12,
+                marginBottom: 10,
+              }}
+            >
+              {liftError}
+            </div>
+          ) : null}
+          <div className="btn-row" style={{ justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => {
+                setLiftOpen(false);
+                setLiftError(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              disabled={liftingRestriction}
+              onClick={async () => {
+                setLiftingRestriction(true);
+                setLiftError(null);
+                try {
+                  const res = await liftMatterRestrictionAction(
+                    matter.id,
+                    liftType,
+                    liftReason,
+                  );
+                  setLiftingRestriction(false);
+                  if (res.errors && Object.keys(res.errors).length > 0) {
+                    const msg =
+                      res.errors.mfa ||
+                      res.errors.permission ||
+                      res.errors.reason ||
+                      res.errors.access ||
+                      Object.values(res.errors)[0] ||
+                      'Could not lift matter restriction.';
+                    setLiftError(msg);
+                    showToast(msg);
+                    return;
+                  }
+                  setLiftOpen(false);
+                  setLiftReason('');
+                  showToast('Matter restriction lifted');
+                  router.refresh();
+                } catch (err) {
+                  setLiftingRestriction(false);
+                  const msg =
+                    err instanceof Error
+                      ? err.message
+                      : 'Could not lift matter restriction.';
+                  setLiftError(msg);
+                  showToast(msg);
+                }
+              }}
+            >
+              {liftingRestriction ? 'Lifting…' : 'Confirm lift restriction'}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {/* Add Note Drawer */}
       {noteOpen ? (
@@ -2071,103 +2217,35 @@ export function MatterProfileClient({
 
       {/* ===================== TAB: DOCUMENTS ===================== */}
       {tab === 'documents' ? (
-        <section className="home-panel">
-          <div className="panel-header">
-            <div className="panel-title-group">
-              <h2 className="panel-title">Matter documents</h2>
+        <div className="home-col">
+          <MatterDocumentStoreSection
+            matterId={matter.id}
+            matterNumber={matter.matterNumber}
+          />
+          <DocumentListSection
+            entityType="matter"
+            entityId={matter.id}
+            matter={matter}
+            people={people}
+            organisations={organisations}
+            values={values}
+            currentUserId={currentUserId}
+          />
+          <section className="home-panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2 className="panel-title">Archived &amp; DMS Matter Records</h2>
+              </div>
+              <div className="panel-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <StatusPill
+                  label={isSeededDemoMatter ? 'SharePoint / DMS linked' : 'Matter opening record archived'}
+                  tone="neutral"
+                />
+              </div>
             </div>
-            <div className="panel-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <StatusPill
-                label={isSeededDemoMatter ? 'SharePoint / DMS linked' : 'Matter opening record archived'}
-                tone="neutral"
-              />
-              <button
-                type="button"
-                className="btn btn--primary btn--sm"
-                onClick={() => {
-                  setEditingSavedDoc(null);
-                  setDocAssemblyOpen(true);
-                }}
-              >
-                <FileText size={14} />
-                <span>+ Assemble Client Care Letter</span>
-              </button>
-            </div>
-          </div>
-          <div className="panel-body">
-            <ul className="worklist">
-              {localSavedDocs.map((docItem) => {
-                const assembledDoc = assembleClientCareLetter(docItem.answers);
-                return (
-                  <li key={docItem.id} className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <FileText
-                          size={14}
-                          style={{
-                            display: 'inline',
-                            verticalAlign: 'text-bottom',
-                            marginRight: 6,
-                            color: 'var(--color-primary)',
-                          }}
-                        />
-                        <strong>{docItem.fileName}</strong>
-                      </div>
-                      <div className="worklist-meta">
-                        {docItem.templateName} (v{docItem.version}) · Assembled{' '}
-                        {formatDateTime(docItem.createdAt)} by {docItem.createdByName} ·{' '}
-                        {docItem.answers.feeBasisMode === 'fixed'
-                          ? `Fixed fee (£${docItem.answers.fixedFeeAmount})`
-                          : `Hourly rates (Est. £${docItem.answers.estimateAmount})`}
-                      </div>
-                    </div>
-                    <div
-                      className="worklist-right"
-                      style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                    >
-                      <StatusPill label={`Assembled v${docItem.version}`} tone="positive" />
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        style={{ borderRadius: 999 }}
-                        onClick={() => {
-                          setEditingSavedDoc(docItem);
-                          setDocAssemblyOpen(true);
-                        }}
-                      >
-                        <Edit3 size={13} />
-                        <span>Edit answers</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        style={{ borderRadius: 999 }}
-                        onClick={() => {
-                          downloadClientCareDocx(assembledDoc, docItem.fileName);
-                          showToast(`Downloaded Word document: ${docItem.fileName}`);
-                        }}
-                      >
-                        <Download size={13} />
-                        <span>.docx</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        style={{ borderRadius: 999 }}
-                        onClick={() => {
-                          const pdfName = docItem.fileName.replace(/\.docx$/i, '.pdf');
-                          downloadClientCarePdf(assembledDoc, pdfName);
-                          showToast(`Downloaded PDF: ${pdfName}`);
-                        }}
-                      >
-                        <Download size={13} />
-                        <span>.pdf</span>
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-              <li className="worklist-row">
+            <div className="panel-body">
+              <ul className="worklist">
+                <li className="worklist-row">
                 <div className="worklist-main">
                   <div className="worklist-title">
                     <FileText
@@ -2252,12 +2330,29 @@ export function MatterProfileClient({
               ) : null}
             </ul>
           </div>
-        </section>
+          </section>
+        </div>
       ) : null}
 
       {/* ===================== TAB: TASKS & DATES ===================== */}
       {tab === 'tasks' ? (
         <div className="home-col">
+          {keyDatesConfig && currentUser ? (
+            <KeyDatesPanel
+              matter={matter}
+              config={keyDatesConfig}
+              keyDates={keyDates}
+              notApplicableRecords={keyDateNotApplicable}
+              reminderStates={keyDateReminderStates}
+              calendarSyncs={keyDateCalendarSyncs}
+              currentUser={currentUser}
+              userPermissions={userKeyDatePermissions}
+              canVerifyByKeyDateId={canVerifyByKeyDateId}
+              teams={teams}
+              employees={employees ?? people.filter((p) => p.isEmployee)}
+            />
+          ) : null}
+
           <section className="home-panel">
             <div className="panel-header">
               <div className="panel-title-group">
@@ -2306,6 +2401,7 @@ export function MatterProfileClient({
             people={people}
             values={values}
             currentUserId={currentUserId}
+            canTakeByTaskId={canTakeByTaskId}
           />
         </div>
       ) : null}
@@ -3025,7 +3121,14 @@ export function MatterProfileClient({
                 <h2 className="panel-title">
                   Matter opening record (Immutable PDF snapshot)
                 </h2>
-                <StatusPill label="Frozen history copy" tone="positive" />
+                <StatusPill
+                  label={
+                    openingSnapshot.saveMode === 'backfilled'
+                      ? 'Recorded after opening'
+                      : 'Frozen history copy'
+                  }
+                  tone="positive"
+                />
               </div>
               <div className="panel-actions" style={{ display: 'flex', gap: 8 }}>
                 <button
@@ -3759,7 +3862,11 @@ export function MatterProfileClient({
                     Complete Matter Opening Record (Immutable PDF Snapshot)
                   </h2>
                   <StatusPill
-                    label={`Schema ${openingSnapshot.version} · Frozen`}
+                    label={
+                      openingSnapshot.saveMode === 'backfilled'
+                        ? `Schema ${openingSnapshot.version} · Recorded after opening`
+                        : `Schema ${openingSnapshot.version} · Frozen`
+                    }
                     tone="positive"
                   />
                 </div>
@@ -4053,21 +4160,27 @@ export function MatterProfileClient({
         </div>
       ) : null}
 
-      <DocumentAssemblyModal
+      <DocumentGenerationModal
         open={docAssemblyOpen}
         onClose={() => {
           setDocAssemblyOpen(false);
-          setEditingSavedDoc(null);
         }}
+        sourceEntityType="matter"
         matter={matter}
         people={people}
         organisations={organisations}
         values={values}
-        quotes={quotes}
-        enquiries={enquiries}
         currentUserId={currentUserId}
-        initialSavedDoc={editingSavedDoc}
-        onSaveAssembledDocument={handleSaveAssembledDocument}
+        onDocumentGenerated={(doc) => {
+          if (
+            doc.documentType === 'Client Care Letter' &&
+            matter.engagementLetterStatus !== 'Signed'
+          ) {
+            void markEngagementLetterDraftedAction(matter.id);
+          }
+          showToast(`Generated ${doc.fileName}`);
+          router.refresh();
+        }}
       />
     </div>
   );

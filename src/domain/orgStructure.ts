@@ -19,26 +19,324 @@ import type {
 
 export const DEFAULT_LEGAL_ENTITY_ID = 'LE-PV-LLP';
 
-export function buildDefaultOrgStructure(): OrgStructureCatalogue {
+export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
+  {
+    id: 'DEPT-RE',
+    name: 'Real Estate',
+    code: 'RE',
+    parentDivisionId: 'DIV-LEGAL',
+    defaultCostCentreId: 'CC-RE',
+    defaultProfitCentreId: 'PC-RE',
+    legacyChoiceValueId: 'department.real_estate',
+    active: true,
+  },
+  {
+    id: 'DEPT-CORP',
+    name: 'Corporate & Commercial',
+    code: 'CORP',
+    parentDivisionId: 'DIV-LEGAL',
+    defaultCostCentreId: 'CC-CORP',
+    defaultProfitCentreId: 'PC-CORP',
+    legacyChoiceValueId: 'department.corporate_and_commercial',
+    active: true,
+  },
+  {
+    id: 'DEPT-DR',
+    name: 'Dispute Resolution',
+    code: 'DR',
+    parentDivisionId: 'DIV-LEGAL',
+    defaultCostCentreId: 'CC-DR',
+    defaultProfitCentreId: 'PC-DR',
+    legacyChoiceValueId: 'department.dispute_resolution',
+    active: true,
+  },
+  {
+    id: 'DEPT-PC',
+    name: 'Private Client',
+    code: 'PC',
+    parentDivisionId: 'DIV-LEGAL',
+    defaultCostCentreId: 'CC-PC',
+    defaultProfitCentreId: 'PC-PC',
+    legacyChoiceValueId: 'department.private_client',
+    active: true,
+  },
+  {
+    id: 'DEPT-EMP',
+    name: 'Employment',
+    code: 'EMP',
+    parentDivisionId: 'DIV-LEGAL',
+    defaultCostCentreId: 'CC-EMP',
+    defaultProfitCentreId: 'PC-EMP',
+    legacyChoiceValueId: 'department.employment',
+    active: true,
+  },
+  {
+    id: 'DEPT-RISK',
+    name: 'Risk & Compliance',
+    code: 'RISK',
+    parentDivisionId: 'DIV-BS',
+    defaultCostCentreId: 'CC-RISK',
+    defaultProfitCentreId: 'PC-CENTRAL',
+    legacyChoiceValueId: 'department.risk_and_compliance',
+    active: true,
+  },
+  {
+    id: 'DEPT-FIN',
+    name: 'Finance',
+    code: 'FIN',
+    parentDivisionId: 'DIV-BS',
+    defaultCostCentreId: 'CC-FIN',
+    defaultProfitCentreId: 'PC-CENTRAL',
+    legacyChoiceValueId: 'department.finance',
+    active: true,
+  },
+  {
+    id: 'DEPT-BD',
+    name: 'Business Development',
+    code: 'BD',
+    parentDivisionId: 'DIV-BS',
+    defaultCostCentreId: 'CC-BD',
+    defaultProfitCentreId: 'PC-CENTRAL',
+    legacyChoiceValueId: 'department.business_development',
+    active: true,
+  },
+  {
+    id: 'DEPT-OPS',
+    name: 'Operations',
+    code: 'OPS',
+    parentDivisionId: 'DIV-BS',
+    defaultCostCentreId: 'CC-OPS',
+    defaultProfitCentreId: 'PC-CENTRAL',
+    legacyChoiceValueId: 'department.operations',
+    active: true,
+  },
+  {
+    id: 'DEPT-IT',
+    name: 'IT & Systems',
+    code: 'IT',
+    parentDivisionId: 'DIV-BS',
+    defaultCostCentreId: 'CC-IT',
+    defaultProfitCentreId: 'PC-CENTRAL',
+    legacyChoiceValueId: 'department.it_and_systems',
+    active: true,
+  },
+  {
+    id: 'DEPT-HR',
+    name: 'People & HR',
+    code: 'HR',
+    parentDivisionId: 'DIV-BS',
+    defaultCostCentreId: 'CC-HR',
+    defaultProfitCentreId: 'PC-CENTRAL',
+    legacyChoiceValueId: null,
+    active: true,
+  },
+];
+
+export const DEFAULT_ORG_OFFICES: OrgOffice[] = [
+  {
+    id: 'OFF-CDF',
+    name: 'Cardiff',
+    code: 'CDF',
+    parentLegalEntityId: 'LE-PV-LLP',
+    address: {
+      id: 'addr-off-cdf',
+      typeId: 'address_type.work',
+      line1: '3 Bute Dock Chambers, Mount Stuart Square',
+      line2: '',
+      town: 'Cardiff',
+      county: 'South Glamorgan',
+      postcode: 'CF10 5FQ',
+      countryId: 'country.united_kingdom',
+    },
+    active: true,
+  },
+  {
+    id: 'OFF-BRI',
+    name: 'Bristol',
+    code: 'BRI',
+    parentLegalEntityId: 'LE-PV-LLP',
+    address: {
+      id: 'addr-off-bri',
+      typeId: 'address_type.work',
+      line1: '21 Redcliffe Quay',
+      line2: '',
+      town: 'Bristol',
+      county: 'Bristol',
+      postcode: 'BS1 6HU',
+      countryId: 'country.united_kingdom',
+    },
+    active: true,
+  },
+  {
+    id: 'OFF-LON',
+    name: 'London',
+    code: 'LON',
+    parentLegalEntityId: 'LE-PV-LLP',
+    address: {
+      id: 'addr-off-lon',
+      typeId: 'address_type.work',
+      line1: '9 Temple Row Chambers, Fleet Street',
+      line2: '',
+      town: 'London',
+      county: 'Greater London',
+      postcode: 'EC4Y 1AA',
+      countryId: 'country.united_kingdom',
+    },
+    active: true,
+  },
+];
+
+export const DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS: OrgTeamOrPracticeGroup[] = [
+  {
+    id: 'TPG-RE-COMM',
+    name: 'Commercial Property',
+    code: 'RE-COM',
+    parentDepartmentId: 'DEPT-RE',
+    active: true,
+  },
+  {
+    id: 'TPG-RE-RES',
+    name: 'Residential Conveyancing',
+    code: 'RE-RES',
+    parentDepartmentId: 'DEPT-RE',
+    active: true,
+  },
+  {
+    id: 'TPG-RE-DEV',
+    name: 'Property Development & Planning',
+    code: 'RE-DEV',
+    parentDepartmentId: 'DEPT-RE',
+    active: true,
+  },
+  {
+    id: 'TPG-CORP-MA',
+    name: 'M&A and Corporate Finance',
+    code: 'CORP-MA',
+    parentDepartmentId: 'DEPT-CORP',
+    active: true,
+  },
+  {
+    id: 'TPG-CORP-COM',
+    name: 'Commercial & Technology',
+    code: 'CORP-COM',
+    parentDepartmentId: 'DEPT-CORP',
+    active: true,
+  },
+  {
+    id: 'TPG-DR-COM',
+    name: 'Commercial Litigation',
+    code: 'DR-COM',
+    parentDepartmentId: 'DEPT-DR',
+    active: true,
+  },
+  {
+    id: 'TPG-DR-PROP',
+    name: 'Property Litigation',
+    code: 'DR-PROP',
+    parentDepartmentId: 'DEPT-DR',
+    active: true,
+  },
+  {
+    id: 'TPG-PC-WILLS',
+    name: 'Wills, Trusts & Probate',
+    code: 'PC-WTP',
+    parentDepartmentId: 'DEPT-PC',
+    active: true,
+  },
+  {
+    id: 'TPG-PC-TAX',
+    name: 'Private Wealth & Tax',
+    code: 'PC-TAX',
+    parentDepartmentId: 'DEPT-PC',
+    active: true,
+  },
+  {
+    id: 'TPG-EMP-ADV',
+    name: 'Employment Advisory & Tribunals',
+    code: 'EMP-ADV',
+    parentDepartmentId: 'DEPT-EMP',
+    active: true,
+  },
+  {
+    id: 'TPG-RISK-AML',
+    name: 'Conflicts, AML & Regulatory',
+    code: 'RISK-AML',
+    parentDepartmentId: 'DEPT-RISK',
+    active: true,
+  },
+  {
+    id: 'TPG-FIN-OPS',
+    name: 'Billing, Credit Control & Cashiering',
+    code: 'FIN-OPS',
+    parentDepartmentId: 'DEPT-FIN',
+    active: true,
+  },
+  {
+    id: 'TPG-BD-INTAKE',
+    name: 'Client Intake & Marketing',
+    code: 'BD-INT',
+    parentDepartmentId: 'DEPT-BD',
+    active: true,
+  },
+  {
+    id: 'TPG-OPS-SEC',
+    name: 'Secretarial & Workplace Operations',
+    code: 'OPS-SEC',
+    parentDepartmentId: 'DEPT-OPS',
+    active: true,
+  },
+  {
+    id: 'TPG-IT-SYS',
+    name: 'Business Systems & Infrastructure',
+    code: 'IT-SYS',
+    parentDepartmentId: 'DEPT-IT',
+    active: true,
+  },
+  {
+    id: 'TPG-HR-OPS',
+    name: 'HR & Talent Development',
+    code: 'HR-OPS',
+    parentDepartmentId: 'DEPT-HR',
+    active: true,
+  },
+];
+
+export function buildDefaultOrgStructure(options: {
+  legalName: string;
+  shortCode?: string;
+}): OrgStructureCatalogue {
+  const legalName = options?.legalName?.trim();
+  if (!legalName) {
+    throw new Error(
+      'ORG_STRUCTURE_CONFIG_ERROR: options.legalName is required when building the default organisation structure.',
+    );
+  }
+  const baseName =
+    legalName.replace(/\s+(LLP|Ltd|Limited|PLC)$/i, '').trim() || legalName;
+  const codePrefix = (
+    options.shortCode?.trim() ||
+    baseName.replace(/[^A-Za-z0-9]/g, '').toUpperCase() ||
+    'FIRM'
+  ).slice(0, 4);
   const legalEntities: OrgLegalEntity[] = [
     {
       id: 'LE-PV-LLP',
-      name: 'Not A Law Firm LLP',
-      code: 'NALFLLP',
+      name: legalName,
+      code: `${codePrefix}LLP`,
       isDefault: true,
       active: true,
     },
     {
       id: 'LE-PV-SERV',
-      name: 'Not A Law Firm Services Ltd',
-      code: 'NALFSRV',
+      name: `${baseName} Services Ltd`,
+      code: `${codePrefix}SRV`,
       isDefault: false,
       active: true,
     },
     {
       id: 'LE-PV-TRUST',
-      name: 'Not A Law Firm Trustees Ltd',
-      code: 'NALFTRU',
+      name: `${baseName} Trustees Ltd`,
+      code: `${codePrefix}TRU`,
       isDefault: false,
       active: true,
     },
@@ -61,287 +359,15 @@ export function buildDefaultOrgStructure(): OrgStructureCatalogue {
     },
   ];
 
-  const departments: OrgDepartment[] = [
-    {
-      id: 'DEPT-RE',
-      name: 'Real Estate',
-      code: 'RE',
-      parentDivisionId: 'DIV-LEGAL',
-      defaultCostCentreId: 'CC-RE',
-      defaultProfitCentreId: 'PC-RE',
-      legacyChoiceValueId: 'department.real_estate',
-      active: true,
-    },
-    {
-      id: 'DEPT-CORP',
-      name: 'Corporate & Commercial',
-      code: 'CORP',
-      parentDivisionId: 'DIV-LEGAL',
-      defaultCostCentreId: 'CC-CORP',
-      defaultProfitCentreId: 'PC-CORP',
-      legacyChoiceValueId: 'department.corporate_and_commercial',
-      active: true,
-    },
-    {
-      id: 'DEPT-DR',
-      name: 'Dispute Resolution',
-      code: 'DR',
-      parentDivisionId: 'DIV-LEGAL',
-      defaultCostCentreId: 'CC-DR',
-      defaultProfitCentreId: 'PC-DR',
-      legacyChoiceValueId: 'department.dispute_resolution',
-      active: true,
-    },
-    {
-      id: 'DEPT-PC',
-      name: 'Private Client',
-      code: 'PC',
-      parentDivisionId: 'DIV-LEGAL',
-      defaultCostCentreId: 'CC-PC',
-      defaultProfitCentreId: 'PC-PC',
-      legacyChoiceValueId: 'department.private_client',
-      active: true,
-    },
-    {
-      id: 'DEPT-EMP',
-      name: 'Employment',
-      code: 'EMP',
-      parentDivisionId: 'DIV-LEGAL',
-      defaultCostCentreId: 'CC-EMP',
-      defaultProfitCentreId: 'PC-EMP',
-      legacyChoiceValueId: 'department.employment',
-      active: true,
-    },
-    {
-      id: 'DEPT-RISK',
-      name: 'Risk & Compliance',
-      code: 'RISK',
-      parentDivisionId: 'DIV-BS',
-      defaultCostCentreId: 'CC-RISK',
-      defaultProfitCentreId: 'PC-CENTRAL',
-      legacyChoiceValueId: 'department.risk_and_compliance',
-      active: true,
-    },
-    {
-      id: 'DEPT-FIN',
-      name: 'Finance',
-      code: 'FIN',
-      parentDivisionId: 'DIV-BS',
-      defaultCostCentreId: 'CC-FIN',
-      defaultProfitCentreId: 'PC-CENTRAL',
-      legacyChoiceValueId: 'department.finance',
-      active: true,
-    },
-    {
-      id: 'DEPT-BD',
-      name: 'Business Development',
-      code: 'BD',
-      parentDivisionId: 'DIV-BS',
-      defaultCostCentreId: 'CC-BD',
-      defaultProfitCentreId: 'PC-CENTRAL',
-      legacyChoiceValueId: 'department.business_development',
-      active: true,
-    },
-    {
-      id: 'DEPT-OPS',
-      name: 'Operations',
-      code: 'OPS',
-      parentDivisionId: 'DIV-BS',
-      defaultCostCentreId: 'CC-OPS',
-      defaultProfitCentreId: 'PC-CENTRAL',
-      legacyChoiceValueId: 'department.operations',
-      active: true,
-    },
-    {
-      id: 'DEPT-IT',
-      name: 'IT & Systems',
-      code: 'IT',
-      parentDivisionId: 'DIV-BS',
-      defaultCostCentreId: 'CC-IT',
-      defaultProfitCentreId: 'PC-CENTRAL',
-      legacyChoiceValueId: 'department.it_and_systems',
-      active: true,
-    },
-    {
-      id: 'DEPT-HR',
-      name: 'People & HR',
-      code: 'HR',
-      parentDivisionId: 'DIV-BS',
-      defaultCostCentreId: 'CC-HR',
-      defaultProfitCentreId: 'PC-CENTRAL',
-      legacyChoiceValueId: null,
-      active: true,
-    },
-  ];
+  const departments: OrgDepartment[] = DEFAULT_ORG_DEPARTMENTS.map((dept) => ({ ...dept }));
 
-  const teamsOrPracticeGroups: OrgTeamOrPracticeGroup[] = [
-    {
-      id: 'TPG-RE-COMM',
-      name: 'Commercial Property',
-      code: 'RE-COM',
-      parentDepartmentId: 'DEPT-RE',
-      active: true,
-    },
-    {
-      id: 'TPG-RE-RES',
-      name: 'Residential Conveyancing',
-      code: 'RE-RES',
-      parentDepartmentId: 'DEPT-RE',
-      active: true,
-    },
-    {
-      id: 'TPG-RE-DEV',
-      name: 'Property Development & Planning',
-      code: 'RE-DEV',
-      parentDepartmentId: 'DEPT-RE',
-      active: true,
-    },
-    {
-      id: 'TPG-CORP-MA',
-      name: 'M&A and Corporate Finance',
-      code: 'CORP-MA',
-      parentDepartmentId: 'DEPT-CORP',
-      active: true,
-    },
-    {
-      id: 'TPG-CORP-COM',
-      name: 'Commercial & Technology',
-      code: 'CORP-COM',
-      parentDepartmentId: 'DEPT-CORP',
-      active: true,
-    },
-    {
-      id: 'TPG-DR-COM',
-      name: 'Commercial Litigation',
-      code: 'DR-COM',
-      parentDepartmentId: 'DEPT-DR',
-      active: true,
-    },
-    {
-      id: 'TPG-DR-PROP',
-      name: 'Property Litigation',
-      code: 'DR-PROP',
-      parentDepartmentId: 'DEPT-DR',
-      active: true,
-    },
-    {
-      id: 'TPG-PC-WILLS',
-      name: 'Wills, Trusts & Probate',
-      code: 'PC-WTP',
-      parentDepartmentId: 'DEPT-PC',
-      active: true,
-    },
-    {
-      id: 'TPG-PC-TAX',
-      name: 'Private Wealth & Tax',
-      code: 'PC-TAX',
-      parentDepartmentId: 'DEPT-PC',
-      active: true,
-    },
-    {
-      id: 'TPG-EMP-ADV',
-      name: 'Employment Advisory & Tribunals',
-      code: 'EMP-ADV',
-      parentDepartmentId: 'DEPT-EMP',
-      active: true,
-    },
-    {
-      id: 'TPG-RISK-AML',
-      name: 'Conflicts, AML & Regulatory',
-      code: 'RISK-AML',
-      parentDepartmentId: 'DEPT-RISK',
-      active: true,
-    },
-    {
-      id: 'TPG-FIN-OPS',
-      name: 'Billing, Credit Control & Cashiering',
-      code: 'FIN-OPS',
-      parentDepartmentId: 'DEPT-FIN',
-      active: true,
-    },
-    {
-      id: 'TPG-BD-INTAKE',
-      name: 'Client Intake & Marketing',
-      code: 'BD-INT',
-      parentDepartmentId: 'DEPT-BD',
-      active: true,
-    },
-    {
-      id: 'TPG-OPS-SEC',
-      name: 'Secretarial & Workplace Operations',
-      code: 'OPS-SEC',
-      parentDepartmentId: 'DEPT-OPS',
-      active: true,
-    },
-    {
-      id: 'TPG-IT-SYS',
-      name: 'Business Systems & Infrastructure',
-      code: 'IT-SYS',
-      parentDepartmentId: 'DEPT-IT',
-      active: true,
-    },
-    {
-      id: 'TPG-HR-OPS',
-      name: 'HR & Talent Development',
-      code: 'HR-OPS',
-      parentDepartmentId: 'DEPT-HR',
-      active: true,
-    },
-  ];
+  const teamsOrPracticeGroups: OrgTeamOrPracticeGroup[] =
+    DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS.map((tpg) => ({ ...tpg }));
 
-  const offices: OrgOffice[] = [
-    {
-      id: 'OFF-CDF',
-      name: 'Cardiff',
-      code: 'CDF',
-      parentLegalEntityId: 'LE-PV-LLP',
-      address: {
-        id: 'addr-off-cdf',
-        typeId: 'address_type.work',
-        line1: '3 Bute Dock Chambers, Mount Stuart Square',
-        line2: '',
-        town: 'Cardiff',
-        county: 'South Glamorgan',
-        postcode: 'CF10 5FQ',
-        countryId: 'country.united_kingdom',
-      },
-      active: true,
-    },
-    {
-      id: 'OFF-BRI',
-      name: 'Bristol',
-      code: 'BRI',
-      parentLegalEntityId: 'LE-PV-LLP',
-      address: {
-        id: 'addr-off-bri',
-        typeId: 'address_type.work',
-        line1: '21 Redcliffe Quay',
-        line2: '',
-        town: 'Bristol',
-        county: 'Bristol',
-        postcode: 'BS1 6HU',
-        countryId: 'country.united_kingdom',
-      },
-      active: true,
-    },
-    {
-      id: 'OFF-LON',
-      name: 'London',
-      code: 'LON',
-      parentLegalEntityId: 'LE-PV-LLP',
-      address: {
-        id: 'addr-off-lon',
-        typeId: 'address_type.work',
-        line1: '9 Temple Row Chambers, Fleet Street',
-        line2: '',
-        town: 'London',
-        county: 'Greater London',
-        postcode: 'EC4Y 1AA',
-        countryId: 'country.united_kingdom',
-      },
-      active: true,
-    },
-  ];
+  const offices: OrgOffice[] = DEFAULT_ORG_OFFICES.map((office) => ({
+    ...office,
+    address: { ...office.address },
+  }));
 
   const costCentres: OrgCostCentre[] = [
     { id: 'CC-RE', code: 'CC-101', name: '101 · Real Estate', parentDepartmentId: 'DEPT-RE', active: true },
@@ -469,15 +495,16 @@ export function mapRoleTypeToLegacyEmployeeRoleId(
  */
 export function resolveOrgDepartment(
   deptIdOrLegacyId: string | null | undefined,
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
 ): OrgDepartment | null {
   if (!deptIdOrLegacyId) return null;
+  const departments = orgStructure?.departments ?? DEFAULT_ORG_DEPARTMENTS;
   const trimmed = deptIdOrLegacyId.trim();
-  const byId = orgStructure.departments.find((d) => d.id === trimmed);
+  const byId = departments.find((d) => d.id === trimmed);
   if (byId) return byId;
-  const byLegacy = orgStructure.departments.find((d) => d.legacyChoiceValueId === trimmed);
+  const byLegacy = departments.find((d) => d.legacyChoiceValueId === trimmed);
   if (byLegacy) return byLegacy;
-  const byName = orgStructure.departments.find(
+  const byName = departments.find(
     (d) => d.name.toLowerCase() === trimmed.toLowerCase(),
   );
   if (byName) return byName;
@@ -489,12 +516,13 @@ export function resolveOrgDepartment(
  */
 export function resolveOrgOffice(
   officeIdOrName: string | null | undefined,
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'offices'>,
 ): OrgOffice | null {
   if (!officeIdOrName) return null;
+  const offices = orgStructure?.offices ?? DEFAULT_ORG_OFFICES;
   const trimmed = officeIdOrName.trim();
   return (
-    orgStructure.offices.find(
+    offices.find(
       (o) =>
         o.id === trimmed ||
         o.name.toLowerCase() === trimmed.toLowerCase() ||

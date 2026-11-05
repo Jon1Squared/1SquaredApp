@@ -51,7 +51,59 @@
       "properties": {
         "primaryDomain": { "type": "string" },
         "accentColorHex": { "type": "string", "default": "#1f6feb" },
-        "logoAssetKey": { "type": "string", "default": "default-logo.svg" }
+        "logoAssetKey": { "type": "string", "default": "default-logo.svg" },
+        "contactEmail": {
+          "type": "string",
+          "default": "",
+          "deprecated": true,
+          "description": "Deprecated: use firm.contactEmail instead. Optional public contact email address for document headers and footers"
+        },
+        "website": {
+          "type": "string",
+          "default": "",
+          "deprecated": true,
+          "description": "Deprecated: use firm.website instead. Optional public website URL or hostname for document headers and footers"
+        }
+      }
+    },
+    "firm": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Firm contact details for generated documents",
+      "properties": {
+        "contactEmail": {
+          "type": "string",
+          "default": "",
+          "pattern": "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+          "description": "Public firm contact email address for document headers and footers (blank if not set)"
+        },
+        "website": {
+          "type": "string",
+          "default": "",
+          "pattern": "^$|^(https?://)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(/\\S*)?$",
+          "description": "Public firm website URL or hostname for document headers and footers (blank if not set)"
+        }
+      }
+    },
+    "conflictReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Routing configuration for referred matter conflict review tasks",
+      "properties": {
+        "assigneeTeamKey": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
+          "default": null,
+          "description": "Stable team ID or organisation team code of the team that receives referred conflict reviews"
+        },
+        "assigneeRoleKey": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.:-]{1,63}$",
+          "default": null,
+          "description": "Optional role key or employee_role.* key used to pick an assignee within the team"
+        }
       }
     },
     "featureFlags": {
@@ -65,7 +117,12 @@
       "properties": {
         "enableMatterCostsGovernance": { "type": "boolean", "default": true },
         "enablePmsLiveRateSync": { "type": "boolean", "default": true },
-        "enableAiMatterExtraction": { "type": "boolean", "default": false }
+        "enableAiMatterExtraction": { "type": "boolean", "default": false },
+        "enableDemoMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Demo Mode user switching for designated demo personas in non-live environments"
+        }
       }
     },
     "matterCosts": {
@@ -214,6 +271,347 @@
       "type": "array",
       "items": { "type": "string" },
       "default": []
+    },
+    "documentGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Document generation feature settings, storage provider, approval workflow, usage reporting, and role permission defaults",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master feature flag for the document generation module"
+        },
+        "maxTemplateSizeMb": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 10,
+          "description": "Maximum allowed upload size for .docx templates in MiB"
+        },
+        "defaultOutputFormat": {
+          "type": "string",
+          "enum": ["docx", "pdf"],
+          "default": "docx",
+          "description": "Default output format when generating documents"
+        },
+        "allowUserFormatOverride": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether users can choose between .docx and .pdf at generation time"
+        },
+        "storageProvider": {
+          "type": "string",
+          "enum": ["local-fs", "azure-blob", "sharepoint", "imanage", "netdocuments"],
+          "default": "local-fs",
+          "description": "Configured document storage provider"
+        },
+        "approval": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requireApproval": { "type": "boolean", "default": true },
+            "allowSelfApproval": { "type": "boolean", "default": false }
+          }
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "retentionMonths": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120,
+              "default": 24
+            },
+            "lowUseThreshold": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000,
+              "default": 5
+            },
+            "showUserLevelDetail": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "permissions": {
+          "type": "object",
+          "deprecated": true,
+          "description": "Deprecated: use top-level rbac.roles instead (ADR-0011).",
+          "additionalProperties": false,
+          "properties": {
+            "roleDefaults": {
+              "type": "object",
+              "deprecated": true,
+              "additionalProperties": false,
+              "properties": {
+                "document_template:view": { "type": "array", "items": { "type": "string" } },
+                "document_template:build": { "type": "array", "items": { "type": "string" } },
+                "document_template:approve": { "type": "array", "items": { "type": "string" } },
+                "document_template:view_usage": { "type": "array", "items": { "type": "string" } },
+                "document_template:view_usage_by_user": { "type": "array", "items": { "type": "string" } },
+                "document:generate": { "type": "array", "items": { "type": "string" } },
+                "document:view": { "type": "array", "items": { "type": "string" } },
+                "document:delete": { "type": "array", "items": { "type": "string" } },
+                "finance:view": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "customDocumentTypes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label"],
+            "properties": {
+              "key": { "type": "string" },
+              "label": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Central configuration-driven RBAC: role definitions, department grants, relationship grants, and Entra ID identity mapping",
+      "properties": {
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label", "permissions"],
+            "properties": {
+              "key": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+              "label": { "type": "string" },
+              "shortLabel": { "type": "string" },
+              "description": { "type": "string" },
+              "isBuiltIn": { "type": "boolean" },
+              "permissions": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "departmentGrants": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "relationshipGrants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["relationship", "permissions"],
+            "properties": {
+              "relationship": {
+                "type": "string",
+                "enum": [
+                  "is_team_lead_of_any_team",
+                  "is_team_lead_of_target_team",
+                  "is_line_manager_of_target",
+                  "is_supporting_target_fee_earner"
+                ]
+              },
+              "permissions": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "description": { "type": "string" }
+            }
+          }
+        },
+        "identityMapping": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authorityMode": {
+              "type": "string",
+              "enum": ["token_only", "hybrid", "store_only"],
+              "default": "hybrid"
+            },
+            "entraGroupToRoleKey": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "entraAppRoleToRoleKey": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "requireMfaForAdminPermissions": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "documentStores": {
+      "type": "array",
+      "description": "Configured external document stores for the tenant (multi-store supported with at most one default)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["storeId", "displayName", "providerType", "auth"],
+        "properties": {
+          "storeId": { "type": "string", "minLength": 1 },
+          "displayName": { "type": "string", "minLength": 1 },
+          "providerType": {
+            "type": "string",
+            "enum": ["sharepoint", "azure_blob", "imanage", "netdocuments"]
+          },
+          "isDefault": { "type": "boolean", "default": false },
+          "enabled": { "type": "boolean", "default": true },
+          "auth": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["entraTenantId"],
+            "properties": {
+              "entraTenantId": { "type": "string", "minLength": 1 },
+              "credentialMode": {
+                "type": "string",
+                "enum": ["client_certificate", "managed_identity"],
+                "default": "client_certificate"
+              },
+              "clientId": { "type": "string" },
+              "certificateKeyVaultSecretRef": {
+                "type": "string",
+                "pattern": "^kv://[a-z0-9-]+/[a-z0-9-]+$"
+              },
+              "managedIdentityClientId": { "type": "string" },
+              "delegatedPermissionScope": {
+                "type": "string",
+                "enum": ["Files.ReadWrite.All", "Sites.Selected"],
+                "default": "Files.ReadWrite.All"
+              }
+            }
+          },
+          "sharepoint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hostname", "siteRelativePath", "libraries"],
+            "properties": {
+              "hostname": { "type": "string", "minLength": 3 },
+              "siteRelativePath": {
+                "type": "string",
+                "pattern": "^/(sites|teams)/[A-Za-z0-9._-]+$"
+              },
+              "siteId": { "type": "string" },
+              "libraries": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["libraryId", "displayName", "libraryUrlSegment"],
+                  "properties": {
+                    "libraryId": { "type": "string", "minLength": 1 },
+                    "displayName": { "type": "string", "minLength": 1 },
+                    "libraryUrlSegment": { "type": "string", "minLength": 1 },
+                    "driveId": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "documentRouting": {
+      "type": "array",
+      "description": "Ordered storage routing rules mapping matters to a store, library, and basePath (first match wins)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["match", "storeId", "libraryId", "basePath"],
+        "properties": {
+          "ruleId": { "type": "string" },
+          "match": {
+            "oneOf": [
+              { "type": "string", "const": "default" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "departmentId": { "type": "string" },
+                  "teamId": { "type": "string" },
+                  "workTypeId": { "type": "string" }
+                }
+              }
+            ]
+          },
+          "storeId": { "type": "string" },
+          "libraryId": { "type": "string" },
+          "basePath": {
+            "type": "string",
+            "default": "{departmentCode}/{teamCode}"
+          }
+        }
+      }
+    },
+    "matterFolderNameTemplate": {
+      "type": "string",
+      "default": "{matterNumber} - {matterDescription}",
+      "description": "Template for naming each matter root folder"
+    },
+    "documentAccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Inheritance-based document access policy and Entra ID security group mappings for departments and teams",
+      "properties": {
+        "departmentEntraGroups": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "teamEntraGroups": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "uniqueScopeWarningThreshold": {
+          "type": "integer",
+          "default": 4000
+        },
+        "autoRemediateDrift": {
+          "type": "boolean",
+          "default": false
+        },
+        "defaultPolicy": {
+          "type": "object"
+        },
+        "policiesByStore": {
+          "type": "object"
+        }
+      }
+    },
+    "matterFolderTemplates": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Versioned matter folder templates with inheritance (workType -> department -> default)",
+      "required": ["default"],
+      "properties": {
+        "default": { "type": "object" },
+        "byDepartment": { "type": "object" },
+        "byWorkType": { "type": "object" }
+      }
+    },
+    "keyDates": {
+      "$ref": "./keyDates.config.schema.json",
+      "description": "Key dates and limitation module configuration"
     }
   }
 }

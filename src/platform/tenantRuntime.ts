@@ -1,8 +1,10 @@
+import 'server-only';
+
 /**
  * Platform Runtime Bridge connecting the Next.js host (`onesquared`) to:
  * - Layer 1: `@platform/core` (Tenancy, Config Engine, Extension Host, PostgreSQL Database-per-Tenant)
- * - Layer 2: `client-not-a-law-firm/config/base.json` (Schema-validated Tenant Configuration)
- * - Layer 3: `client-not-a-law-firm/extensions/nalf-matter-costs-governance` (Bespoke Client Extension)
+ * - Layer 2: Tenant configuration package (`PLATFORM_TENANT_PACKAGE_DIR/config/base.json`)
+ * - Layer 3: Registered tenant extensions on `@platform/core-api`
  */
 
 import {
@@ -13,12 +15,138 @@ import {
   PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
+  validateExtensionManifest,
+  type ExtensionManifest,
   type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
-import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
-import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
-import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
+import type { PlatformExtension } from '@platform/core-api';
+import { BUNDLED_TENANT_EXTENSIONS } from './generated/extensionRegistry';
+
+let testBaseConfigOverride: Record<string, unknown> | null = null;
+let testDevOverlayOverride: Record<string, unknown> | null | undefined =
+  undefined;
+
+const fileJsonCache = new Map<string, Record<string, unknown>>();
+
+export function setActiveTenantConfigForTesting(
+  baseConfig: Record<string, unknown> | null,
+  devOverlay?: Record<string, unknown> | null,
+): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setActiveTenantConfigForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  testBaseConfigOverride = baseConfig;
+  testDevOverlayOverride = devOverlay;
+  cachedHost = null;
+  cachedHostKey = null;
+  cachedHostLoadErrors = [];
+}
+
+function resolveTenantPackageDir(): string {
+  const configured = process.env.PLATFORM_TENANT_PACKAGE_DIR?.trim();
+  if (configured) {
+    return configured;
+  }
+  if (
+    process.env.NODE_ENV !== 'test' ||
+    typeof window !== 'undefined' ||
+    typeof process.getBuiltinModule !== 'function'
+  ) {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: PLATFORM_TENANT_PACKAGE_DIR must be configured to resolve tenant configuration.',
+    );
+  }
+  const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
+  const entries = fs.readdirSync(process.cwd(), { withFileTypes: true });
+  const candidate = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('client-'))
+    .map((entry) => entry.name)
+    .sort()
+    .find((dirName) =>
+      fs.existsSync(path.join(process.cwd(), dirName, 'config', 'base.json')),
+    );
+  if (!candidate) {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: PLATFORM_TENANT_PACKAGE_DIR is not set and no client-* tenant package directory was found.',
+    );
+  }
+  return candidate;
+}
+
+export function getActiveTenantBaseConfigPath(): string {
+  const folder = resolveTenantPackageDir();
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    return `${folder}/config/base.json`;
+  }
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
+  const packageRoot = path.resolve(process.cwd(), folder);
+  return path.join(packageRoot, 'config', 'base.json');
+}
+
+export function getActiveTenantEnvironmentOverlayPath(
+  env: 'dev' | 'test' | 'training' | 'live' = 'dev',
+): string {
+  const folder = resolveTenantPackageDir();
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    return `${folder}/config/environments/${env}.json`;
+  }
+  const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
+  const packageRoot = path.resolve(process.cwd(), folder);
+  const envDirCandidate = path.join(packageRoot, 'config', 'environments', `${env}.json`);
+  const directCandidate = path.join(packageRoot, 'config', `${env}.json`);
+  if (!fs.existsSync(envDirCandidate) && fs.existsSync(directCandidate)) {
+    return directCandidate;
+  }
+  return envDirCandidate;
+}
+
+function readJsonConfigFile(
+  filePath: string,
+  optional = false,
+): Record<string, unknown> {
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    throw new Error(
+      `TENANT_CONFIG_ERROR: Cannot read tenant configuration file "${filePath}" outside Node.js runtime.`,
+    );
+  }
+  const cached = fileJsonCache.get(filePath);
+  if (cached) {
+    return cached;
+  }
+  const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+  if (!fs.existsSync(filePath)) {
+    if (optional) {
+      return {};
+    }
+    throw new Error(
+      `TENANT_CONFIG_ERROR: Tenant configuration file not found at "${filePath}".`,
+    );
+  }
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    fileJsonCache.set(filePath, parsed);
+    return parsed;
+  } catch (err) {
+    throw new Error(
+      `TENANT_CONFIG_ERROR: Invalid JSON in tenant configuration file "${filePath}": ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+export function getActiveTenantRawBaseConfig(): Record<string, unknown> {
+  if (process.env.NODE_ENV === 'test' && testBaseConfigOverride) {
+    return testBaseConfigOverride;
+  }
+  return readJsonConfigFile(getActiveTenantBaseConfigPath(), false);
+}
 
 export interface PlatformArchitectureSnapshot {
   coreVersion: string;
@@ -43,13 +171,304 @@ export interface PlatformArchitectureSnapshot {
   }[];
 }
 
+export declare const VERIFIED_SESSION_BRAND: unique symbol;
+
+export interface UnbrandedSessionActorInput {
+  id?: string;
+  sub?: string;
+  name: string;
+  email?: string;
+  upn?: string;
+  roles?: readonly string[];
+  groups?: readonly string[];
+  entraObjectId?: string;
+  entraTenantId?: string;
+  mfaVerified?: boolean;
+  tenantId?: string;
+  untrustedRequestTenantOverride?: string;
+  correlationId?: string;
+}
+
+export type VerifiedSessionActorInput = UnbrandedSessionActorInput & {
+  readonly [VERIFIED_SESSION_BRAND]: true;
+};
+
+export interface ExtensionLoadError {
+  tenantId: string;
+  extensionDir: string;
+  extensionId?: string;
+  declaredHooks: readonly string[] | null;
+  error: string;
+}
+
 let cachedHost: ExtensionHost | null = null;
+let cachedHostKey: string | null = null;
+let cachedHostLoadErrors: ExtensionLoadError[] = [];
 let cachedCluster: PostgresTenantCluster | null = null;
 
-export function getPlatformExtensionHost(): ExtensionHost {
+export function getExtensionHostLoadErrors(): readonly ExtensionLoadError[] {
   if (!cachedHost) {
-    cachedHost = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
-    cachedHost.registerExtension(notALawFirmMatterCostsExtension);
+    return cachedHostLoadErrors;
+  }
+  const tenantConfig = getActiveTenantConfiguration();
+  const registeredIds = new Set(
+    cachedHost
+      .getActiveExtensionsForTenant(tenantConfig)
+      .map((ext) => ext.manifest.id),
+  );
+  return cachedHostLoadErrors.filter(
+    (err) =>
+      !(
+        err.error.startsWith('EXTENSION_NOT_REGISTERED:') &&
+        err.extensionId &&
+        registeredIds.has(err.extensionId)
+      ),
+  );
+}
+
+function isPlatformExtensionCandidate(
+  value: unknown,
+): value is PlatformExtension {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.manifest === 'object' &&
+    candidate.manifest !== null &&
+    typeof (candidate.manifest as Record<string, unknown>).id === 'string' &&
+    typeof candidate.hooks === 'object' &&
+    candidate.hooks !== null
+  );
+}
+
+function assertManifestMatchesFile(
+  fileManifest: ExtensionManifest,
+  exportedManifest: ExtensionManifest,
+): void {
+  const validatedExported = validateExtensionManifest(exportedManifest);
+  const normalise = (m: ExtensionManifest) => ({
+    id: m.id,
+    name: m.name,
+    version: m.version,
+    description: m.description,
+    supportedCoreApiRange: m.supportedCoreApiRange,
+    permissions: [...m.permissions],
+    hooks: [...m.hooks],
+    uiSlots: [...(m.uiSlots ?? [])],
+    hookTimeoutMs: m.hookTimeoutMs ?? 2000,
+  });
+  if (
+    JSON.stringify(normalise(fileManifest)) !==
+    JSON.stringify(normalise(validatedExported))
+  ) {
+    throw new Error(
+      `EXTENSION_MANIFEST_MISMATCH: Exported manifest for "${exportedManifest.id}" does not match manifest.json for "${fileManifest.id}".`,
+    );
+  }
+}
+
+function loadTenantPackageExtensions(
+  host: ExtensionHost,
+  packageDir: string,
+  tenantConfig: Pick<TenantConfiguration, 'tenantId' | 'enabledExtensions'>,
+): ExtensionLoadError[] {
+  const loadErrors: ExtensionLoadError[] = [];
+  if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
+    return loadErrors;
+  }
+  const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
+  const path = process.getBuiltinModule('node:path') as typeof import('node:path');
+  const nodeModule = process.getBuiltinModule('node:module') as typeof import('node:module');
+  const nodeCrypto = process.getBuiltinModule('node:crypto') as typeof import('node:crypto');
+  const packageRoot = path.resolve(process.cwd(), packageDir);
+  const extensionsRoot = path.join(packageRoot, 'extensions');
+  const enabledSet = new Set(tenantConfig.enabledExtensions ?? []);
+  const req = nodeModule.createRequire(path.join(process.cwd(), 'package.json'));
+  const entries = fs.existsSync(extensionsRoot)
+    ? fs
+        .readdirSync(extensionsRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort()
+    : [];
+  for (const extDirName of entries) {
+    const extDir = path.join(extensionsRoot, extDirName);
+    const manifestPath = path.join(extDir, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      if (enabledSet.size > 0) {
+        const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
+        const message = `EXTENSION_MANIFEST_NOT_FOUND: manifest.json is missing in "${extDir}".`;
+        loadErrors.push({
+          tenantId: tenantConfig.tenantId,
+          extensionDir: extDirName,
+          extensionId: extDirName,
+          declaredHooks: null,
+          error: message,
+        });
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'extension_load_failed',
+            tenantId: tenantConfig.tenantId,
+            correlationId: loadCorrelationId,
+            extensionDir: extDirName,
+            extensionId: extDirName,
+            error: message,
+          }),
+        );
+      }
+      continue;
+    }
+    let resolvedExtensionId = extDirName;
+    let declaredHooks: readonly string[] | null = null;
+    try {
+      const rawManifestJson = JSON.parse(
+        fs.readFileSync(manifestPath, 'utf8'),
+      ) as Record<string, unknown>;
+      const candidateId =
+        typeof rawManifestJson?.id === 'string' && rawManifestJson.id.trim()
+          ? rawManifestJson.id.trim()
+          : extDirName;
+      resolvedExtensionId = candidateId;
+      if (!enabledSet.has(candidateId) && !enabledSet.has(extDirName)) {
+        continue;
+      }
+      const validatedManifest = validateExtensionManifest(rawManifestJson);
+      resolvedExtensionId = validatedManifest.id;
+      declaredHooks = validatedManifest.hooks;
+
+      const entryCandidates = [
+        path.join(extDir, 'src', 'index.js'),
+        path.join(extDir, 'index.js'),
+        path.join(extDir, 'src', 'index.ts'),
+        path.join(extDir, 'index.ts'),
+      ];
+      const entryPath = entryCandidates.find((candidate) =>
+        fs.existsSync(candidate),
+      );
+
+      let candidates: PlatformExtension[] = [];
+      if (entryPath) {
+        try {
+          const loadedModule = req(entryPath) as Record<string, unknown>;
+          candidates = Object.values(loadedModule).filter(
+            isPlatformExtensionCandidate,
+          );
+        } catch (requireErr) {
+          const bundled = BUNDLED_TENANT_EXTENSIONS[validatedManifest.id];
+          if (bundled) {
+            console.warn(
+              JSON.stringify({
+                level: 'warn',
+                event: 'extension_require_fallback_to_bundled_registry',
+                tenantId: tenantConfig.tenantId,
+                correlationId: `ext-load-${nodeCrypto.randomUUID()}`,
+                extensionDir: extDirName,
+                extensionId: validatedManifest.id,
+                reason:
+                  requireErr instanceof Error
+                    ? requireErr.message
+                    : String(requireErr),
+              }),
+            );
+            candidates = [bundled];
+          } else {
+            throw requireErr;
+          }
+        }
+      } else if (BUNDLED_TENANT_EXTENSIONS[validatedManifest.id]) {
+        candidates = [BUNDLED_TENANT_EXTENSIONS[validatedManifest.id]];
+      } else {
+        throw new Error(
+          `EXTENSION_ENTRY_NOT_FOUND: No entry module found in "${extDir}".`,
+        );
+      }
+
+      if (candidates.length === 0) {
+        throw new Error(
+          `EXTENSION_EXPORT_MISSING: Module in "${extDir}" did not export a valid PlatformExtension.`,
+        );
+      }
+
+      for (const exportedValue of candidates) {
+        assertManifestMatchesFile(validatedManifest, exportedValue.manifest);
+        host.registerExtension(exportedValue);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
+      loadErrors.push({
+        tenantId: tenantConfig.tenantId,
+        extensionDir: extDirName,
+        extensionId: resolvedExtensionId,
+        declaredHooks,
+        error: message,
+      });
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'extension_load_failed',
+          tenantId: tenantConfig.tenantId,
+          correlationId: loadCorrelationId,
+          extensionDir: extDirName,
+          extensionId: resolvedExtensionId,
+          error: message,
+        }),
+      );
+    }
+  }
+
+  const registeredIds = new Set(
+    host
+      .getActiveExtensionsForTenant(tenantConfig as TenantConfiguration)
+      .map((ext) => ext.manifest.id),
+  );
+  for (const enabledId of enabledSet) {
+    if (
+      !registeredIds.has(enabledId) &&
+      !loadErrors.some(
+        (err) =>
+          err.extensionId === enabledId || err.extensionDir === enabledId,
+      )
+    ) {
+      const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
+      const message = `EXTENSION_NOT_REGISTERED: Enabled extension "${enabledId}" was not found or failed to register.`;
+      loadErrors.push({
+        tenantId: tenantConfig.tenantId,
+        extensionDir: enabledId,
+        extensionId: enabledId,
+        declaredHooks: null,
+        error: message,
+      });
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'extension_load_failed',
+          tenantId: tenantConfig.tenantId,
+          correlationId: loadCorrelationId,
+          extensionDir: enabledId,
+          extensionId: enabledId,
+          error: message,
+        }),
+      );
+    }
+  }
+
+  return loadErrors;
+}
+
+export function getPlatformExtensionHost(): ExtensionHost {
+  const packageDir = resolveTenantPackageDir();
+  const tenantConfig = getActiveTenantConfiguration();
+  const hostKey = `${packageDir}::${tenantConfig.tenantId}::${(tenantConfig.enabledExtensions ?? []).join(',')}`;
+  if (!cachedHost || cachedHostKey !== hostKey) {
+    const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+    cachedHostLoadErrors = loadTenantPackageExtensions(
+      host,
+      packageDir,
+      tenantConfig,
+    );
+    cachedHost = host;
+    cachedHostKey = hostKey;
   }
   return cachedHost;
 }
@@ -68,43 +487,86 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
   const hostingMode =
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
+  const baseCfg = getActiveTenantRawBaseConfig();
+  const isTestEnv = process.env.NODE_ENV === 'test';
+  const overlayCfg =
+    isTestEnv && testDevOverlayOverride !== undefined
+      ? (testDevOverlayOverride ?? {})
+      : isTestEnv && testBaseConfigOverride
+        ? {}
+        : readJsonConfigFile(
+            getActiveTenantEnvironmentOverlayPath(env),
+            true,
+          );
   return loadAndValidateTenantConfig(
-    notALawFirmBaseConfig,
-    notALawFirmDevOverlay,
+    baseCfg,
+    overlayCfg,
     env,
     hostingMode,
   );
 }
 
-export function resolveCurrentTenantContext(actor?: {
-  id: string;
-  name: string;
-  email?: string;
-  roles?: string[];
-}): TenantContext {
-  const cfg = getActiveTenantConfiguration();
+export function resolveCurrentTenantContext(
+  actor?: VerifiedSessionActorInput | null,
+  configOverride?: Pick<
+    TenantConfiguration,
+    'tenantId' | 'hostingMode' | 'environment' | 'branding'
+  >,
+): TenantContext {
+  const actorId = (actor?.id ?? actor?.sub ?? '').trim();
+  if (!actor || !actorId) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Missing or unverified OIDC session claims. TenantContext requires an authenticated actor.',
+    );
+  }
+  const actorEmail = (actor.email ?? actor.upn ?? '').trim();
+  if (!actorEmail) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session actor is missing required email/UPN claim.',
+    );
+  }
+  const actorOid = (actor.entraObjectId ?? '').trim();
+  if (!actorOid) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session actor is missing required entraObjectId (oid) claim.',
+    );
+  }
+  const cfg = configOverride ?? getActiveTenantConfiguration();
+  const sessionTenantId = (actor.tenantId ?? '').trim();
+  if (!sessionTenantId) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC session actor is missing required tenantId claim.',
+    );
+  }
+  if (sessionTenantId !== cfg.tenantId) {
+    throw new Error(
+      'TENANCY_FORGERY_DETECTED: Request attempted to override authenticated session tenantId.',
+    );
+  }
   return resolveTenantFromVerifiedToken({
     verifiedToken: {
       __verifiedByOidcMiddleware: true,
-      sub: actor?.id ?? 'P-000001',
-      tenantId: cfg.tenantId,
-      email: actor?.email ?? `user@${cfg.branding.primaryDomain}`,
-      name: actor?.name ?? 'Authenticated User',
-      roles: actor?.roles ?? ['fee_earner', 'admin'],
-      mfaVerified: true,
+      sub: actorId,
+      tenantId: sessionTenantId,
+      email: actorEmail,
+      ...(actor.upn ? { upn: actor.upn } : {}),
+      name: actor.name,
+      roles: actor.roles ? [...actor.roles] : [],
+      ...(actor.groups ? { groups: [...actor.groups] } : {}),
+      ...(actor.entraObjectId ? { entraObjectId: actor.entraObjectId } : {}),
+      ...(actor.entraTenantId ? { entraTenantId: actor.entraTenantId } : {}),
+      mfaVerified: actor.mfaVerified ?? false,
     },
     hostingMode: cfg.hostingMode,
     environment: cfg.environment,
-    correlationId: `req-${Date.now()}`,
+    correlationId: actor.correlationId ?? `req-${Date.now()}`,
+    untrustedRequestTenantOverride: actor.untrustedRequestTenantOverride,
   });
 }
 
-export function getPlatformArchitectureSnapshot(actor?: {
-  id: string;
-  name: string;
-  email?: string;
-  roles?: string[];
-}): PlatformArchitectureSnapshot {
+export function getPlatformArchitectureSnapshot(
+  actor: VerifiedSessionActorInput,
+): PlatformArchitectureSnapshot {
   const tenantConfig = getActiveTenantConfiguration();
   const tenantCtx = resolveCurrentTenantContext(actor);
   const pgConfig = resolveTenantPostgresConfig(tenantCtx);

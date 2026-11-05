@@ -28,12 +28,11 @@ import {
 } from '@/domain/customFields';
 import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
 import { whereUsed } from '@/domain/fieldRegistry';
-import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { canDeactivate, resolveLabel, valuesForList } from '@/domain/lists';
 import { buildDefaultMatterPartyTaxonomy } from '@/domain/matterParties';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
-import { findPracticeAreaRoutingClashes, resolveUserAppRole, userTeams } from '@/domain/tasks';
+import { findPracticeAreaRoutingClashes, userTeams } from '@/domain/tasks';
 import type {
   AppRole,
   ChoiceList,
@@ -45,6 +44,7 @@ import type {
   EnquirySettings,
   FormSection,
   HomePagesConfig,
+  HomeRoleKey,
   ListGroup,
   Matter,
   MatterCostsConfig,
@@ -58,17 +58,27 @@ import type {
   Team,
 } from '@/domain/types';
 import type { PmsAdminSnapshot } from '@/server/services';
+import { DocumentStoresAdminPanel } from './DocumentStoresAdminPanel';
+import { DocumentTemplatesAdminPanel } from './DocumentTemplatesAdminPanel';
 import { HomePagesAdminSection } from './HomePagesAdminSection';
 import { MatterCostsAdminSection } from './MatterCostsAdminSection';
 import { MatterPartiesAdminSection } from './MatterPartiesAdminSection';
 import { PmsLinksAdminSection } from './PmsLinksAdminSection';
+import { RbacAdminSection } from './RbacAdminSection';
+import { KeyDatesAdminPanel } from './KeyDatesAdminPanel';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
+import type { KeyDatePermission, KeyDatesConfig } from '@/domain/keyDates.types';
 
 export type AdminTab =
   | 'home-pages'
+  | 'rbac-and-entra'
   | 'org-structure'
   | 'rates-and-costs'
+  | 'document-templates'
+  | 'document-stores'
+  | 'key-dates'
   | 'lists'
   | 'custom-fields'
   | 'teams'
@@ -157,10 +167,24 @@ interface Props {
   enquiries: Enquiry[];
   pmsAdmin?: PmsAdminSnapshot;
   homePagesConfig?: HomePagesConfig;
+  defaultRoleConfigs?: import('@/domain/types').RoleHomeConfig[];
   orgStructure?: OrgStructureCatalogue;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterPartyMigrationReport?: MatterPartyMigrationReport;
   matterCostsConfig?: MatterCostsConfig;
+  currentUserId?: string;
+  currentUserPermissions?: PermissionKey[];
+  appRoleByPersonId?: Record<string, AppRole>;
+  rolesByPersonId?: Record<string, HomeRoleKey[]>;
+  permissionsByPersonId?: Record<string, PermissionKey[]>;
+  rbacConfig: RbacConfiguration;
+  keyDatesConfig?: KeyDatesConfig;
+  currentUserKeyDatePermissions?: KeyDatePermission[];
+  entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
+  entraEnvStatus?: import('@/server/entraAuth').EntraEnvStatus;
+  authError?: string;
+  authSuccess?: boolean;
+  firmName?: string;
 }
 
 export function AdminClient({
@@ -179,15 +203,29 @@ export function AdminClient({
   enquiries,
   pmsAdmin,
   homePagesConfig,
+  defaultRoleConfigs,
   orgStructure: orgStructureProp,
   matterPartyTaxonomy,
   matterPartyMigrationReport,
   matterCostsConfig,
+  currentUserId,
+  currentUserPermissions,
+  appRoleByPersonId = {},
+  rolesByPersonId = {},
+  permissionsByPersonId = {},
+  rbacConfig,
+  keyDatesConfig,
+  currentUserKeyDatePermissions = [],
+  entraSession,
+  entraEnvStatus,
+  authError,
+  authSuccess,
+  firmName = 'Firm',
 }: Props) {
   const { showToast } = useToast();
   const [tab, setTab] = useState<AdminTab>(initialTab);
   const [orgCatalogue, setOrgCatalogue] = useState<OrgStructureCatalogue>(
-    () => orgStructureProp ?? buildDefaultOrgStructure(),
+    () => orgStructureProp ?? buildDefaultOrgStructure({ legalName: firmName || 'Firm' }),
   );
   const [newDivName, setNewDivName] = useState('');
   const [newDivCode, setNewDivCode] = useState('');
@@ -1216,6 +1254,24 @@ export function AdminClient({
         <button
           type="button"
           role="tab"
+          aria-selected={tab === 'document-templates'}
+          className={`tab-btn ${tab === 'document-templates' ? 'tab-btn--active' : ''}`}
+          onClick={() => setTab('document-templates')}
+        >
+          Document templates &amp; usage
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'document-stores'}
+          className={`tab-btn ${tab === 'document-stores' ? 'tab-btn--active' : ''}`}
+          onClick={() => setTab('document-stores')}
+        >
+          Document Stores &amp; DMS
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={tab === 'enquiry-settings'}
           className={`tab-btn ${tab === 'enquiry-settings' ? 'tab-btn--active' : ''}`}
           onClick={() => setTab('enquiry-settings')}
@@ -1231,6 +1287,17 @@ export function AdminClient({
         >
           Task settings
         </button>
+        {keyDatesConfig ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'key-dates'}
+            className={`tab-btn ${tab === 'key-dates' ? 'tab-btn--active' : ''}`}
+            onClick={() => setTab('key-dates')}
+          >
+            Key dates &amp; limitation ({keyDatesConfig.keyDateTypes?.length ?? 0} types)
+          </button>
+        ) : null}
         <button
           type="button"
           role="tab"
@@ -1248,6 +1315,15 @@ export function AdminClient({
           onClick={() => setTab('employees')}
         >
           Firm employees ({employees.length})
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'rbac-and-entra'}
+          className={`tab-btn ${tab === 'rbac-and-entra' ? 'tab-btn--active' : ''}`}
+          onClick={() => setTab('rbac-and-entra')}
+        >
+          RBAC &amp; Entra ID
         </button>
         {pmsAdmin ? (
           <button
@@ -1270,6 +1346,31 @@ export function AdminClient({
           Demo data
         </button>
       </div>
+
+      {/* TAB: RBAC & ENTRA ID */}
+      {tab === 'rbac-and-entra' && (
+        <RbacAdminSection
+          currentUserId={currentUserId}
+          currentUserPermissions={currentUserPermissions}
+          permissionsByPersonId={permissionsByPersonId}
+          rbacConfig={rbacConfig}
+          people={people}
+          teams={teams}
+          orgStructure={orgCatalogue}
+          entraSession={entraSession}
+          entraEnvStatus={entraEnvStatus}
+          authError={authError}
+          authSuccess={authSuccess}
+        />
+      )}
+
+      {/* TAB: KEY DATES & LIMITATION */}
+      {tab === 'key-dates' && keyDatesConfig && (
+        <KeyDatesAdminPanel
+          initialConfig={keyDatesConfig}
+          userPermissions={currentUserKeyDatePermissions}
+        />
+      )}
 
       {/* TAB 1: CHOICE LISTS */}
       {tab === 'lists' && (
@@ -2677,7 +2778,7 @@ export function AdminClient({
                 <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
                   All core application fields remain available to every client. Additional client
                   fields, their screen locations, and mandatory status are saved per client in{' '}
-                  <code>client-not-a-law-firm/config/base.json</code>.
+                  <code>config/base.json</code>.
                 </div>
               </div>
               <StatusPill label="Layer 2 · Client Configuration" tone="positive" />
@@ -2928,7 +3029,7 @@ export function AdminClient({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <div className="list-section__header" style={{ marginBottom: 4 }}>
             <p className="muted" style={{ margin: 0 }}>
-              Managed reference tables for Not A Law Firm LLP&apos;s hierarchical organisation
+              Managed reference tables for {firmName}&apos;s hierarchical organisation
               structure: <strong>Legal Entity → Division → Department → Team / Practice Group</strong>,
               plus <strong>Offices</strong>, <strong>Cost Centres</strong>, and{' '}
               <strong>Profit Centres</strong>. Selecting a Department on an employee record
@@ -3699,7 +3800,7 @@ export function AdminClient({
         <div>
           <div className="list-section__header" style={{ marginBottom: 14 }}>
             <p className="muted">
-              Firm employees of Not A Law Firm LLP. Each employee has a multi-role array (the
+              Firm employees of {firmName}. Each employee has a multi-role array (the
               first role is their Home page role, additional roles appear in &ldquo;Viewing as&rdquo;),
               optional supported fee earners (for Legal secretaries), and an application permission
               role.
@@ -3709,9 +3810,10 @@ export function AdminClient({
             </Link>
           </div>
           {employees.map((emp) => {
-            const resolvedRole = resolveUserAppRole(emp, teams, values);
+            const resolvedRole =
+              appRoleByPersonId[emp.id] ?? emp.appRole ?? 'fee_earner';
             const empTeams = userTeams(emp.id, teams);
-            const empRoles = resolveEmployeeRoles(emp, teams);
+            const empRoles = rolesByPersonId[emp.id] ?? emp.roles ?? [];
             const availableRoles = homePagesConfig?.roles ?? [];
             const realEmpsForSupport = employees.filter((e) => !e.demo && e.id !== emp.id);
             const showsWorkPerson = emp.showsWorkOfId
@@ -3869,8 +3971,16 @@ export function AdminClient({
         </div>
       )}
 
+      {/* TAB: DOCUMENT TEMPLATES & USAGE */}
+      {tab === 'document-templates' && (
+        <DocumentTemplatesAdminPanel currentUserId={people[0]?.id ?? 'P-0001'} />
+      )}
+
+      {/* TAB: DOCUMENT STORES & DMS */}
+      {tab === 'document-stores' && <DocumentStoresAdminPanel />}
+
       {/* TAB: RATES & MATTER COSTS */}
-      {tab === 'rates-and-costs' && (
+      {tab === 'rates-and-costs' && matterCostsConfig && (
         <MatterCostsAdminSection
           initialConfig={matterCostsConfig}
           values={values}
@@ -3881,9 +3991,17 @@ export function AdminClient({
       {tab === 'home-pages' && homePagesConfig && (
         <HomePagesAdminSection
           initialConfig={homePagesConfig}
+          defaultRoleConfigs={defaultRoleConfigs}
           activeViewingRole={activeViewingRole}
+          rolesByPersonId={rolesByPersonId}
           people={people}
           teams={teams}
+          values={values}
+          onNavigateToEmployeeRoles={() => {
+            setTab('lists');
+            setSelectedListKey('employee_role');
+            setOpenListGroups((prev) => new Set([...prev, 'people']));
+          }}
         />
       )}
 
@@ -3927,7 +4045,7 @@ export function AdminClient({
 
           <div className="subcard">
             <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
-              Load Not A Law Firm LLP demo dataset
+              Load {firmName} demo dataset
             </h2>
             <p className="muted" style={{ marginBottom: 16 }}>
               Restores the seeded people, employees, organisations, links, matters, teams, enquiries,

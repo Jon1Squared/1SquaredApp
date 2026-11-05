@@ -1,4 +1,5 @@
 import {
+  ChoiceValue,
   HomePagesConfig,
   HomeRoleKey,
   PanelCategory,
@@ -8,6 +9,11 @@ import {
   RoleHomeConfig,
   Team,
 } from './types';
+import {
+  resolvePermissions,
+  resolvePersonAuthoritativeRoles,
+  type RbacConfiguration,
+} from './rbac';
 
 export interface PanelDefinition {
   id: PanelId;
@@ -393,15 +399,41 @@ export const HEADLINE_CARD_DEFINITIONS: HeadlineCardDefinition[] = [
   { id: 'mp_open_matters', label: 'Open matters & conversion', source: 'Both', defaultRoles: ['managing_partner', 'admin'] },
 ];
 
-export function createDefaultRoleConfigs(): RoleHomeConfig[] {
+export const EMPLOYEE_ROLE_TO_HOME_ROLE_KEY: Record<string, string> = {
+  'employee_role.fee_earner': 'fee_earner',
+  'employee_role.partner': 'partner',
+  'employee_role.support_staff': 'legal_secretary',
+  'employee_role.business_development': 'enquiries_coordinator',
+  'employee_role.finance': 'finance',
+  'employee_role.risk_and_compliance': 'risk_compliance',
+  'employee_role.practice_manager': 'managing_partner',
+  'employee_role.system_administrator': 'admin',
+};
+
+export const HOME_ROLE_KEY_TO_EMPLOYEE_ROLE_ID: Record<string, string> = {
+  fee_earner: 'employee_role.fee_earner',
+  partner: 'employee_role.partner',
+  legal_secretary: 'employee_role.support_staff',
+  enquiries_coordinator: 'employee_role.business_development',
+  finance: 'employee_role.finance',
+  risk_compliance: 'employee_role.risk_and_compliance',
+  managing_partner: 'employee_role.practice_manager',
+  admin: 'employee_role.system_administrator',
+};
+
+export function createDefaultRoleConfigs(primaryDomain?: string): RoleHomeConfig[] {
+  const domain = primaryDomain?.trim();
+  const buildEmail = (localPart: string): string | undefined =>
+    domain ? `${localPart}@${domain}` : undefined;
   return [
     {
       key: 'fee_earner',
-      label: 'Fee earner / Solicitor',
+      employeeRoleId: 'employee_role.fee_earner',
+      label: 'Fee earner',
       shortLabel: 'Fee earner',
       purpose: "Today's tasks, enquiries to call back, active matters, key dates and personal WIP.",
       designNumber: '01',
-      demoUserEmail: 'felicity.fee-earner@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('felicity.fee-earner'),
       headlineCardIds: ['fe_tasks_due', 'fe_enquiries_contact', 'fe_active_matters', 'fe_hours_month', 'fe_unbilled_wip'],
       primaryPanels: [
         'to_do',
@@ -414,11 +446,12 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
     },
     {
       key: 'partner',
-      label: 'Partner / Head of Department',
-      shortLabel: 'Partner / HoD',
+      employeeRoleId: 'employee_role.partner',
+      label: 'Partner',
+      shortLabel: 'Partner',
       purpose: 'Matters needing attention, sign-offs, team capacity, WIP to bill, aged debt and key clients.',
       designNumber: '02',
-      demoUserEmail: 'patrick.partner@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('patrick.partner'),
       headlineCardIds: ['pt_supervised_matters', 'pt_team_wip', 'pt_overdue_debt', 'pt_sign_offs', 'pt_enquiries_month'],
       primaryPanels: [
         'matters_needing_partner_attention',
@@ -436,11 +469,12 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
     },
     {
       key: 'legal_secretary',
-      label: 'Legal secretary / Paralegal',
-      shortLabel: 'Legal secretary',
+      employeeRoleId: 'employee_role.support_staff',
+      label: 'Support staff',
+      shortLabel: 'Support staff',
       purpose: 'Delegated tasks across supported fee earners, letters to send, matter openings and completions.',
       designNumber: '03',
-      demoUserEmail: 'simone.secretary@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('simone.secretary'),
       headlineCardIds: ['ls_tasks_queue', 'ls_letters_docs', 'ls_matter_openings', 'ls_completions_7d', 'ls_unbilled_disb'],
       primaryPanels: [
         'team_tasks_for_supported_fee_earners',
@@ -457,11 +491,12 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
     },
     {
       key: 'enquiries_coordinator',
-      label: 'Enquiries coordinator / Reception',
-      shortLabel: 'Intake',
+      employeeRoleId: 'employee_role.business_development',
+      label: 'Business development',
+      shortLabel: 'Business development',
       purpose: 'Inline enquiry capture, live callback SLA countdowns, unassigned queue and conversion funnel.',
       designNumber: '04',
-      demoUserEmail: 'ethel.enquiries@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('ethel.enquiries'),
       headlineCardIds: ['ec_callbacks_due', 'ec_unassigned', 'ec_awaiting_fe', 'ec_converted_month', 'ec_no_response'],
       primaryPanels: [
         'quick_enquiry_capture',
@@ -479,11 +514,12 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
     },
     {
       key: 'finance',
-      label: 'Finance / Credit control / Cashier',
+      employeeRoleId: 'employee_role.finance',
+      label: 'Finance',
       shortLabel: 'Finance',
       purpose: 'Aged debt bands, credit control chase queue, WIP ready to bill and client account ledger.',
       designNumber: '05',
-      demoUserEmail: 'frank.finance@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('frank.finance'),
       headlineCardIds: ['fin_total_debt', 'fin_overdue_debt', 'fin_unbilled_wip', 'fin_unbilled_disb', 'fin_client_account'],
       primaryPanels: ['aged_debt_by_age_band', 'overdue_invoices_worklist', 'wip_ready_to_bill'],
       summaryPanels: [
@@ -496,11 +532,12 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
     },
     {
       key: 'risk_compliance',
-      label: 'Risk & compliance (MLRO / COLP)',
-      shortLabel: 'Risk / MLRO',
+      employeeRoleId: 'employee_role.risk_and_compliance',
+      label: 'Risk and compliance',
+      shortLabel: 'Risk & compliance',
       purpose: 'AML & CDD queue, conflict checks awaiting decision, high-risk matters and undertakings.',
       designNumber: '06',
-      demoUserEmail: 'rita.risk@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('rita.risk'),
       headlineCardIds: ['rc_aml_pending', 'rc_conflicts_pending', 'rc_high_risk_matters', 'rc_overdue_tasks', 'rc_sra_breaches'],
       primaryPanels: [
         'aml_and_cdd_queue',
@@ -518,11 +555,12 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
     },
     {
       key: 'managing_partner',
-      label: 'Managing partner / Executive',
-      shortLabel: 'Managing partner',
+      employeeRoleId: 'employee_role.practice_manager',
+      label: 'Practice manager',
+      shortLabel: 'Practice manager',
       purpose: 'Firm-wide billing vs budget, lockup, departmental performance, conversion and client concentration.',
       designNumber: '07',
-      demoUserEmail: 'martha.managing-partner@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('martha.managing-partner'),
       headlineCardIds: ['mp_fees_ytd', 'mp_cash_month', 'mp_firm_wip', 'mp_total_debt', 'mp_open_matters'],
       primaryPanels: [
         'firm_financial_pulse',
@@ -540,11 +578,12 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
     },
     {
       key: 'admin',
-      label: 'System Administrator',
-      shortLabel: 'Admin',
+      employeeRoleId: 'employee_role.system_administrator',
+      label: 'System administrator',
+      shortLabel: 'System administrator',
       purpose: 'System configuration, role Home page layout management, and full executive overview.',
       designNumber: '00',
-      demoUserEmail: 'adam.admin@notalawfirm.co.uk',
+      demoUserEmail: buildEmail('adam.admin'),
       headlineCardIds: ['mp_fees_ytd', 'mp_cash_month', 'mp_firm_wip', 'mp_total_debt', 'mp_open_matters'],
       primaryPanels: [
         'firm_financial_pulse',
@@ -563,9 +602,110 @@ export function createDefaultRoleConfigs(): RoleHomeConfig[] {
   ];
 }
 
-export function createDefaultHomePagesConfig(now = '2026-10-16T09:00:00Z'): HomePagesConfig {
+/**
+ * Synchronises `homePagesConfig.roles` with the active `employee_role` items
+ * in the People section of the Taxonomy (`values.filter(v => v.listKey === 'employee_role')`).
+ * Also removes any deprecated test roles (`test_role`).
+ */
+export function syncHomeRolesWithEmployeeRoles(
+  roles: RoleHomeConfig[],
+  values: ChoiceValue[],
+  defaults?: RoleHomeConfig[],
+): RoleHomeConfig[] {
+  const defaultRoles =
+    defaults && defaults.length > 0 ? defaults : createDefaultRoleConfigs();
+  const cleanedRoles = (roles ?? []).filter((r) => r.key !== 'test_role');
+  const employeeRoleValues = values
+    .filter((v) => v.listKey === 'employee_role' && v.active)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+
+  if (employeeRoleValues.length === 0) {
+    return cleanedRoles.length > 0 ? cleanedRoles : defaultRoles;
+  }
+
+  const matchedKeys = new Set<string>();
+  const result: RoleHomeConfig[] = [];
+
+  // First keep existing roles that match an active `employee_role` item, updating their label/employeeRoleId
+  for (const existing of cleanedRoles) {
+    const linkedId = existing.employeeRoleId ?? HOME_ROLE_KEY_TO_EMPLOYEE_ROLE_ID[existing.key] ?? `employee_role.${existing.key}`;
+    const matchingVal = employeeRoleValues.find(
+      (v) =>
+        v.id === linkedId ||
+        EMPLOYEE_ROLE_TO_HOME_ROLE_KEY[v.id] === existing.key ||
+        v.id === `employee_role.${existing.key}`,
+    );
+    if (matchingVal) {
+      matchedKeys.add(existing.key);
+      result.push({
+        ...existing,
+        employeeRoleId: matchingVal.id,
+        label: matchingVal.label,
+        shortLabel: existing.shortLabel || matchingVal.label,
+      });
+    } else if (!existing.isBuiltIn) {
+      // Preserve custom role if it isn't deactivated in employee_role
+      const inactiveMatch = values.find(
+        (v) =>
+          v.listKey === 'employee_role' &&
+          !v.active &&
+          (v.id === linkedId || v.id === `employee_role.${existing.key}`),
+      );
+      if (!inactiveMatch) {
+        matchedKeys.add(existing.key);
+        result.push({
+          ...existing,
+          employeeRoleId: linkedId,
+        });
+      }
+    }
+  }
+
+  // Ensure any new active `employee_role` taxonomy item has a corresponding RoleHomeConfig
+  const fallbackTemplate =
+    result.find((r) => r.key === 'fee_earner') ?? defaultRoles[0];
+
+  for (const val of employeeRoleValues) {
+    const mappedKey =
+      EMPLOYEE_ROLE_TO_HOME_ROLE_KEY[val.id] ?? val.id.replace(/^employee_role\./, '');
+    if (matchedKeys.has(mappedKey) || result.some((r) => r.employeeRoleId === val.id)) {
+      continue;
+    }
+    const defaultMatch = defaultRoles.find(
+      (d) => d.key === mappedKey || d.employeeRoleId === val.id,
+    );
+    if (defaultMatch) {
+      matchedKeys.add(defaultMatch.key);
+      result.push({
+        ...defaultMatch,
+        employeeRoleId: val.id,
+        label: val.label,
+      });
+    } else {
+      matchedKeys.add(mappedKey);
+      result.push({
+        key: mappedKey,
+        employeeRoleId: val.id,
+        label: val.label,
+        shortLabel: val.label,
+        purpose: val.description || `Tailored Home page for ${val.label}.`,
+        headlineCardIds: [...fallbackTemplate.headlineCardIds],
+        primaryPanels: [...fallbackTemplate.primaryPanels],
+        summaryPanels: [...fallbackTemplate.summaryPanels],
+        isBuiltIn: false,
+      });
+    }
+  }
+
+  return result;
+}
+
+export function createDefaultHomePagesConfig(
+  now = '2026-10-16T09:00:00Z',
+  primaryDomain?: string,
+): HomePagesConfig {
   return {
-    roles: createDefaultRoleConfigs(),
+    roles: createDefaultRoleConfigs(primaryDomain),
     firmSettings: {
       demoMode: false,
       workingDayPaceHours: null,
@@ -615,48 +755,7 @@ export function setRolePanelPlacement(
  * The first element (`roles[0]`) is the employee's default Home role.
  */
 export function resolveEmployeeRoles(person: Person, teams: Team[] = []): string[] {
-  if (Array.isArray(person.roles) && person.roles.length > 0) {
-    return person.roles;
-  }
-  const job = (person.jobTitle || '').toLowerCase();
-  const isTeamLead = teams.some((t) => t.active && t.leadIds.includes(person.id));
-
-  if (job.includes('managing partner')) {
-    return ['managing_partner', 'partner'];
-  }
-  if (job.includes('compliance') || job.includes('mlro') || job.includes('colp') || job.includes('risk')) {
-    return isTeamLead || job.includes('partner') ? ['risk_compliance', 'partner'] : ['risk_compliance'];
-  }
-  if (job.includes('credit control') || job.includes('cashier') || job.includes('finance') || job.includes('accounts')) {
-    return ['finance'];
-  }
-  if (job.includes('secretary') || job.includes('PA') || job.includes('legal assistant')) {
-    return ['legal_secretary'];
-  }
-  if (
-    job.includes('intake') ||
-    job.includes('enquir') ||
-    job.includes('reception') ||
-    person.appRole === 'call_handler'
-  ) {
-    return ['enquiries_coordinator'];
-  }
-  if (person.appRole === 'admin') {
-    return [
-      'admin',
-      'fee_earner',
-      'partner',
-      'legal_secretary',
-      'enquiries_coordinator',
-      'finance',
-      'risk_compliance',
-      'managing_partner',
-    ];
-  }
-  if (job.includes('partner') || isTeamLead || person.appRole === 'team_lead') {
-    return ['partner', 'fee_earner'];
-  }
-  return ['fee_earner'];
+  return resolvePersonAuthoritativeRoles(person, teams);
 }
 
 /**
@@ -682,6 +781,7 @@ export interface LeftRailVisibility {
   home: boolean;
   enquiries: boolean;
   tasks: boolean;
+  keyDates: boolean;
   matters: boolean;
   contacts: boolean;
   finance: boolean;
@@ -693,32 +793,56 @@ export interface LeftRailVisibility {
  * Compute left-rail item visibility based on the user's active viewing role and full role list.
  * Matches docs/role-home-pages.md and docs/designs/home/01..07.
  */
-export function getLeftRailVisibility(activeRole: string, userRoles: string[] = [activeRole]): LeftRailVisibility {
-  const effectiveRoles = new Set([activeRole, ...userRoles]);
+export function getLeftRailVisibility(
+  activeRole: string,
+  userRoles: string[] = [activeRole],
+  options?: { config?: { rbac: RbacConfiguration }; tenantId?: string },
+): LeftRailVisibility {
+  const activeTenantId = options?.tenantId?.trim() || '';
+  const rbacConfig = options?.config?.rbac;
+  if (!rbacConfig || !activeTenantId) {
+    throw new Error(
+      'RBAC_CONFIG_REQUIRED: getLeftRailVisibility needs config.rbac and tenantId.',
+    );
+  }
+  const config = { rbac: rbacConfig };
+  const authoritativeRoles = userRoles.length > 0 ? userRoles : [activeRole];
+  const userPerms = resolvePermissions({
+    context: {
+      tenantId: activeTenantId,
+      correlationId: '',
+      actorId: '__rail_user__',
+      actorRoles: authoritativeRoles,
+      mfaVerified: false,
+    },
+    actor: { userId: '__rail_user__', roles: authoritativeRoles },
+    config,
+  });
+  const activeRolePerms = resolvePermissions({
+    context: {
+      tenantId: activeTenantId,
+      correlationId: '',
+      actorId: '__rail_active_role__',
+      actorRoles: [activeRole],
+      mfaVerified: false,
+    },
+    actor: { userId: '__rail_active_role__', roles: [activeRole] },
+    config,
+  });
+
   const isFinanceView = activeRole === 'finance';
   const isIntakeView = activeRole === 'enquiries_coordinator';
 
-  const canSeeFinance =
-    activeRole === 'finance' ||
-    activeRole === 'partner' ||
-    activeRole === 'managing_partner' ||
-    activeRole === 'admin';
-
-  const canSeeRisk =
-    activeRole === 'risk_compliance' ||
-    activeRole === 'managing_partner' ||
-    activeRole === 'admin';
-
-  const canSeeAdmin =
-    activeRole === 'partner' ||
-    activeRole === 'managing_partner' ||
-    activeRole === 'admin' ||
-    effectiveRoles.has('admin');
+  const canSeeKeyDates = userPerms.has('keydate:view');
+  const canSeeFinance = userPerms.has('finance:view') && activeRolePerms.has('finance:view');
+  const canSeeRisk = userPerms.has('risk:view') && activeRolePerms.has('risk:view');
+  const canSeeAdmin = userPerms.has('admin:access');
 
   return {
     home: true,
     enquiries: !isFinanceView,
     tasks: true,
+    keyDates: canSeeKeyDates,
     matters: !isIntakeView,
     contacts: true,
     finance: canSeeFinance,

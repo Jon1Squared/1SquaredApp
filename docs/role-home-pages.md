@@ -68,14 +68,14 @@ Create one demo employee per role with an alliterative name, so each set-up is e
 
 | Demo user | Email | Role | Team | Shows the work of | Design |
 | --- | --- | --- | --- | --- | --- |
-| Felicity Fee-Earner | felicity.fee-earner@pembrokevaughan.co.uk | Fee earner | Real Estate & Property | Dafydd Evans | `01-fee-earner.html` |
-| Patrick Partner | patrick.partner@pembrokevaughan.co.uk | Partner (team lead) | Real Estate & Property | Rhian Morgan | `02-partner.html` |
-| Simone Secretary | simone.secretary@pembrokevaughan.co.uk | Legal secretary | Real Estate & Property | Sarah Cole | `03-legal-secretary.html` |
-| Ethel Enquiries | ethel.enquiries@pembrokevaughan.co.uk | Enquiries coordinator | Intake | Lowri Ellis | `04-enquiries-coordinator.html` |
-| Frank Finance | frank.finance@pembrokevaughan.co.uk | Finance | Accounts | Nia Jenkins | `05-finance-credit-control.html` |
-| Rita Risk | rita.risk@pembrokevaughan.co.uk | Risk and compliance | Risk & Compliance | Bethan Rees | `06-risk-compliance.html` |
-| Martha Managing-Partner | martha.managing-partner@pembrokevaughan.co.uk | Managing partner, Partner | Corporate & Commercial | Gethin Lloyd | `07-managing-partner.html` |
-| Adam Admin | adam.admin@pembrokevaughan.co.uk | Admin, and every other role | IT | None | `00-overview-admin.html` |
+| Felicity Fee-Earner | felicity.fee-earner@pembrokevaughan.example | Fee earner | Real Estate & Property | Dafydd Evans | `01-fee-earner.html` |
+| Patrick Partner | patrick.partner@pembrokevaughan.example | Partner (team lead) | Real Estate & Property | Rhian Morgan | `02-partner.html` |
+| Simone Secretary | simone.secretary@pembrokevaughan.example | Legal secretary | Real Estate & Property | Sarah Cole | `03-legal-secretary.html` |
+| Ethel Enquiries | ethel.enquiries@pembrokevaughan.example | Enquiries coordinator | Intake | Lowri Ellis | `04-enquiries-coordinator.html` |
+| Frank Finance | frank.finance@pembrokevaughan.example | Finance | Accounts | Nia Jenkins | `05-finance-credit-control.html` |
+| Rita Risk | rita.risk@pembrokevaughan.example | Risk and compliance | Risk & Compliance | Bethan Rees | `06-risk-compliance.html` |
+| Martha Managing-Partner | martha.managing-partner@pembrokevaughan.example | Managing partner, Partner | Corporate & Commercial | Gethin Lloyd | `07-managing-partner.html` |
+| Adam Admin | adam.admin@pembrokevaughan.example | Admin, and every other role | IT | None | `00-overview-admin.html` |
 
 Create **Lowri Ellis** as a real employee in the Intake team if she doesn't exist; the designs use her.
 

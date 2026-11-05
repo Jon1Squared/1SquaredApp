@@ -6,7 +6,7 @@ import type {
   AppRole,
   AutoTaskTrigger,
   CapacityGroupName,
-  ConflictCheckRecord,
+  ConflictCheckRecordInput,
   ContactLogMethod,
   ContactLogOutcome,
   CustomFieldRecordType,
@@ -53,12 +53,14 @@ import {
   dismissDuplicateMatch,
   executeMerge,
   flagMatterWriteOff,
-  getCurrentUserId,
+  getEmployeeDetailsForUser,
+  liftMatterRestriction,
   linkPmsRecord,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
   logQuoteFollowUpRecord,
   markAllNotificationsRead,
+  markEngagementLetterDrafted,
   markNotificationRead,
   markQuoteSentRecord,
   prepareEnquiryConversion,
@@ -76,6 +78,7 @@ import {
   resetAllDemoData,
   resetHomePagesConfig,
   reviseQuoteRecord,
+  runMatterConflictSearchRecord,
   saveCustomFieldDefinition,
   saveEnquiryRecord,
   saveEnquirySettingsRecord,
@@ -91,28 +94,69 @@ import {
   type SaveQuoteInput,
   saveTaskRecord,
   saveTaskSettingsRecord,
+  signOffMatterCostsRecord,
   syncMatterCostsRatesFromPms,
   updateMatterConflictRecord,
   saveTeamRecord,
   sendEnquiryEmailRecord,
+  switchUserInDemoMode,
   switchViewingRole,
   takeTaskRecord,
   unlinkPmsRecord,
   updateChoiceValue,
   updateEmployeeRolesAndSupports,
   updateEmployeeRoleSetting,
+  previewRbacOverrides,
+  updatePersonPermissionOverrides,
+  updateTenantRbacConfig,
   updateWorkTypeProfiles,
-  USER_COOKIE,
+  withAuthenticatedActor,
+  previewLimitationCalculationRecord,
+  createOrProposeKeyDateRecord,
+  proposeProvisionalKeyDateRecord,
+  verifyProposedKeyDateRecord,
+  rejectProposedKeyDateRecord,
+  supersedeConfirmedKeyDateRecord,
+  resolveKeyDateOutcomeRecord,
+  reassignKeyDateTeamRecord,
+  recordKeyDateNotApplicableRecord,
+  acknowledgeKeyDateReminderRecord,
+  runKeyDateReminderSchedulerRecord,
+  queryKeyDatesTeamDiaryRecord,
+  getKeyDateExceptionsReportRecord,
+  exportKeyDateExceptionsReportRecord,
+  saveKeyDatesConfigRecord,
 } from '@/server/services';
+import type {
+  KeyDateCalculation,
+  KeyDateExceptionKind,
+  KeyDatesConfig,
+  KeyDateSource,
+  StandstillPeriod,
+  TeamDiaryQuery,
+} from '@/domain/keyDates.types';
+import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
+import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
+import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
 
 function revalidateAll() {
-  revalidatePath('/', 'layout');
+  try {
+    revalidatePath('/', 'layout');
+  } catch {
+    // Ignore when called outside Next.js static generation / request context in unit tests
+  }
+}
+
+function withActorId<R>(fn: (byId: string) => Promise<R> | R): Promise<R> {
+  return withAuthenticatedActor((actor) => fn(actor.personId));
 }
 
 export async function switchUserAction(userId: string) {
-  const jar = await cookies();
-  jar.set(USER_COOKIE, userId, { path: '/', maxAge: 60 * 60 * 24 * 365 });
-  revalidateAll();
+  return withAuthenticatedActor(async () => {
+    const res = await switchUserInDemoMode(userId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function savePersonAction(
@@ -125,6 +169,8 @@ export async function savePersonAction(
     worksAtFirm?: boolean;
     employmentSubmitted?: Partial<EmploymentRecord> | null;
     sensitiveSubmitted?: Partial<EmployeeSensitiveRecord> | null;
+    sensitiveSectionOpened?: boolean;
+    sensitiveSectionEdited?: boolean;
     keepAsContactOnLeave?: boolean;
     initialLink?: {
       organisationId: string;
@@ -137,10 +183,11 @@ export async function savePersonAction(
     } | null;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = savePersonRecord(payload, { ...opts, byId });
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = savePersonRecord(payload, { ...opts, byId });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function logEmployeeRestrictedAccessAction(
@@ -148,20 +195,34 @@ export async function logEmployeeRestrictedAccessAction(
   section: 'payroll' | 'sensitive',
   fieldDetail?: string,
 ) {
-  const byId = await getCurrentUserId();
-  const res = logEmployeeRestrictedAccess(personId, section, byId, fieldDetail);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = logEmployeeRestrictedAccess(personId, section, byId, fieldDetail);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function revealEmployeeSensitiveRecordAction(personId: string) {
+  return withActorId((byId) => {
+    const res = getEmployeeDetailsForUser(personId, byId, { logViewSensitive: true });
+    revalidateAll();
+    return {
+      ok: !res.errors?.sensitivePermission && !res.errors?.notFound,
+      sensitive: res.sensitive,
+      errors: res.errors,
+    };
+  });
 }
 
 export async function reassignLeaverOwnedRecordsAction(
   fromLeaverId: string,
   toEmployeeId: string,
 ) {
-  const byId = await getCurrentUserId();
-  const res = reassignLeaverOwnedRecords(fromLeaverId, toEmployeeId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = reassignLeaverOwnedRecords(fromLeaverId, toEmployeeId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveOrganisationAction(
@@ -173,38 +234,85 @@ export async function saveOrganisationAction(
     matchedDuplicateIds?: string[];
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = saveOrganisationRecord(payload, { ...opts, byId });
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveOrganisationRecord(payload, { ...opts, byId });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveMatterAction(
-  payload: Partial<Matter> & {
+  payload: Omit<
+    Partial<Matter>,
+    'conflictClearedById' | 'conflictCheckRecord' | 'conflictCheckStatus'
+  > & {
     title: string;
     clientId: string;
     practiceAreaId: string;
     workTypeSubcategoryId: string;
+    conflictCheckRecord?: ConflictCheckRecordInput;
   },
   opts: {
     id?: string;
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
   } = {},
 ) {
-  const byId = await getCurrentUserId();
-  const res = saveMatterRecord(payload, { ...opts, byId });
-  revalidateAll();
-  return res;
+  return withActorId(async (byId) => {
+    const res = await saveMatterRecord(payload, {
+      id: opts.id,
+      saveMode: opts.saveMode,
+      byId,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function signOffMatterCostsAction(matterId: string, note?: string) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await signOffMatterCostsRecord(matterId, actor.personId, note);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function markEngagementLetterDraftedAction(matterId: string) {
+  return withActorId((byId) => {
+    const res = markEngagementLetterDrafted(matterId, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function liftMatterRestrictionAction(
+  matterId: string,
+  restriction: 'staff_matter' | 'ethical_wall',
+  reason: string,
+) {
+  return withActorId((byId) => {
+    const res = liftMatterRestriction(matterId, restriction, reason, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function runMatterConflictSearchAction(
+  input: Parameters<typeof runMatterConflictSearchRecord>[0],
+) {
+  return withAuthenticatedActor((actor) => {
+    return runMatterConflictSearchRecord(input, actor.personId);
+  });
 }
 
 export async function updateMatterConflictRecordAction(
   matterId: string,
-  record: ConflictCheckRecord,
+  record: ConflictCheckRecordInput,
 ) {
-  const byId = await getCurrentUserId();
-  const res = updateMatterConflictRecord(matterId, record, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = updateMatterConflictRecord(matterId, record, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveLinkAction(input: {
@@ -221,36 +329,41 @@ export async function saveLinkAction(input: {
   endDate: string | null;
   contactStatusId: string | null;
 }) {
-  const byId = await getCurrentUserId();
-  const link = createOrUpdateLink(input, byId);
-  revalidateAll();
-  return link;
+  return withActorId((byId) => {
+    const link = createOrUpdateLink(input, byId);
+    revalidateAll();
+    return link;
+  });
 }
 
 export async function deleteLinkAction(linkId: string) {
-  const byId = await getCurrentUserId();
-  deleteLink(linkId, byId);
-  revalidateAll();
+  return withActorId((byId) => {
+    deleteLink(linkId, byId);
+    revalidateAll();
+  });
 }
 
 export async function addNoteAction(recordType: RecordType | 'matter', recordId: string, text: string) {
-  const byId = await getCurrentUserId();
-  const note = addNoteToRecord(recordType, recordId, text, byId);
-  revalidateAll();
-  return note;
+  return withActorId((byId) => {
+    const note = addNoteToRecord(recordType, recordId, text, byId);
+    revalidateAll();
+    return note;
+  });
 }
 
 export async function dismissDuplicateAction(recordType: RecordType, recordId: string, otherId: string | null) {
-  const byId = await getCurrentUserId();
-  dismissDuplicateMatch(recordType, recordId, otherId, byId);
-  revalidateAll();
+  return withActorId((byId) => {
+    dismissDuplicateMatch(recordType, recordId, otherId, byId);
+    revalidateAll();
+  });
 }
 
 export async function mergeRecordsAction(recordType: RecordType, survivorId: string, mergedId: string) {
-  const byId = await getCurrentUserId();
-  const hist = executeMerge(recordType, survivorId, mergedId, byId);
-  revalidateAll();
-  return hist;
+  return withActorId((byId) => {
+    const hist = executeMerge(recordType, survivorId, mergedId, byId);
+    revalidateAll();
+    return hist;
+  });
 }
 
 export async function addChoiceValueAction(input: {
@@ -261,10 +374,11 @@ export async function addChoiceValueAction(input: {
   parentId?: string | null;
   meta?: Record<string, string>;
 }) {
-  const byId = await getCurrentUserId();
-  const val = addChoiceValue(input, byId);
-  revalidateAll();
-  return val;
+  return withActorId((byId) => {
+    const val = addChoiceValue(input, byId);
+    revalidateAll();
+    return val;
+  });
 }
 
 export async function updateChoiceValueAction(
@@ -277,16 +391,18 @@ export async function updateChoiceValueAction(
     meta?: Record<string, string>;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = updateChoiceValue(id, patch, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = updateChoiceValue(id, patch, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function reorderChoiceValueAction(id: string, direction: -1 | 1) {
-  const byId = await getCurrentUserId();
-  reorderChoiceValue(id, direction, byId);
-  revalidateAll();
+  return withActorId((byId) => {
+    reorderChoiceValue(id, direction, byId);
+    revalidateAll();
+  });
 }
 
 export async function createMatterStageGroupAction(input: {
@@ -295,10 +411,11 @@ export async function createMatterStageGroupAction(input: {
   mode: 'from_default' | 'scratch';
   selectedDefaultStageIds?: string[];
 }) {
-  const byId = await getCurrentUserId();
-  const res = createMatterStageGroup(input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = createMatterStageGroup(input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveCustomFieldAction(input: {
@@ -311,40 +428,46 @@ export async function saveCustomFieldAction(input: {
   active?: boolean;
   options?: string[];
 }) {
-  const byId = await getCurrentUserId();
-  const def = saveCustomFieldDefinition(input, byId);
-  revalidateAll();
-  return def;
+  return withActorId((byId) => {
+    const def = saveCustomFieldDefinition(input, byId);
+    revalidateAll();
+    return def;
+  });
 }
 
 export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
-  const byId = await getCurrentUserId();
-  reorderCustomField(id, direction, byId);
-  revalidateAll();
+  return withActorId((byId) => {
+    reorderCustomField(id, direction, byId);
+    revalidateAll();
+  });
 }
 
 export async function resetDemoDataAction() {
-  const byId = await getCurrentUserId();
-  resetAllDemoData(byId);
-  revalidateAll();
+  return withActorId((byId) => {
+    resetAllDemoData(byId);
+    revalidateAll();
+  });
 }
 
 export async function clearAllDataAction() {
-  const byId = await getCurrentUserId();
-  clearAllDataToCleanDeployment(byId);
-  revalidateAll();
+  return withActorId((byId) => {
+    clearAllDataToCleanDeployment(byId);
+    revalidateAll();
+  });
 }
 
 export async function markNotificationReadAction(id: string) {
-  const userId = await getCurrentUserId();
-  markNotificationRead(id, userId);
-  revalidateAll();
+  return withActorId((userId) => {
+    markNotificationRead(id, userId);
+    revalidateAll();
+  });
 }
 
 export async function markAllNotificationsReadAction() {
-  const userId = await getCurrentUserId();
-  markAllNotificationsRead(userId);
-  revalidateAll();
+  return withActorId((userId) => {
+    markAllNotificationsRead(userId);
+    revalidateAll();
+  });
 }
 
 export async function saveTeamAction(input: {
@@ -356,30 +479,37 @@ export async function saveTeamAction(input: {
   practiceAreaIds: string[];
   active?: boolean;
 }) {
-  const byId = await getCurrentUserId();
-  const res = saveTeamRecord(input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveTeamRecord(input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function updateEmployeeRoleAction(personId: string, appRole: AppRole | null) {
-  const byId = await getCurrentUserId();
-  updateEmployeeRoleSetting(personId, appRole, byId);
-  revalidateAll();
+  return withAuthenticatedActor((actor) => {
+    const res = updateEmployeeRoleSetting(personId, appRole, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveEnquirySettingsAction(patch: Partial<EnquirySettings>) {
-  const byId = await getCurrentUserId();
-  const res = saveEnquirySettingsRecord(patch, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveEnquirySettingsRecord(patch, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveTaskSettingsAction(settings: TaskSettings) {
-  const byId = await getCurrentUserId();
-  const res = saveTaskSettingsRecord(settings, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveTaskSettingsRecord(settings, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveTaskAction(input: {
@@ -397,24 +527,27 @@ export async function saveTaskAction(input: {
   linkedRecords?: TaskLinkedRecord[];
   autoTrigger?: AutoTaskTrigger | null;
 }) {
-  const byId = await getCurrentUserId();
-  const res = saveTaskRecord(input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveTaskRecord(input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function takeTaskAction(taskId: string) {
-  const byId = await getCurrentUserId();
-  const res = takeTaskRecord(taskId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = takeTaskRecord(taskId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function addTaskCommentAction(taskId: string, text: string) {
-  const byId = await getCurrentUserId();
-  const res = addTaskCommentRecord(taskId, text, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = addTaskCommentRecord(taskId, text, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveEnquiryAction(
@@ -430,10 +563,15 @@ export async function saveEnquiryAction(
   },
   opts: { id?: string; asDraft?: boolean } = {},
 ) {
-  const byId = await getCurrentUserId();
-  const res = saveEnquiryRecord(payload, { ...opts, byId });
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveEnquiryRecord(payload, {
+      id: opts.id,
+      asDraft: opts.asDraft,
+      byId,
+    });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function assignEnquiryAction(
@@ -441,10 +579,11 @@ export async function assignEnquiryAction(
   assignedToId: string | null,
   assignedTeamId?: string | null,
 ) {
-  const byId = await getCurrentUserId();
-  const res = assignEnquiryRecord(enquiryId, assignedToId, assignedTeamId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = assignEnquiryRecord(enquiryId, assignedToId, assignedTeamId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function logEnquiryContactAction(
@@ -456,10 +595,11 @@ export async function logEnquiryContactAction(
     note: string;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = logEnquiryContactRecord(enquiryId, input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = logEnquiryContactRecord(enquiryId, input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function sendEnquiryEmailAction(
@@ -471,10 +611,11 @@ export async function sendEnquiryEmailAction(
     bodyText: string;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = sendEnquiryEmailRecord(enquiryId, input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = sendEnquiryEmailRecord(enquiryId, input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function closeEnquiryAction(
@@ -487,17 +628,19 @@ export async function closeEnquiryAction(
     referredToName?: string;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = closeEnquiryRecord(enquiryId, input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = closeEnquiryRecord(enquiryId, input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function reopenEnquiryAction(enquiryId: string) {
-  const byId = await getCurrentUserId();
-  const res = reopenEnquiryRecord(enquiryId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = reopenEnquiryRecord(enquiryId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function prepareEnquiryConversionAction(
@@ -508,17 +651,19 @@ export async function prepareEnquiryConversionAction(
     createForBusiness?: boolean;
   } = {},
 ) {
-  const byId = await getCurrentUserId();
-  const res = prepareEnquiryConversion(enquiryId, opts, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = prepareEnquiryConversion(enquiryId, opts, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function anonymiseExpiredEnquiriesAction(specificEnquiryId?: string) {
-  const byId = await getCurrentUserId();
-  const count = anonymiseExpiredEnquiries(byId, specificEnquiryId);
-  revalidateAll();
-  return { count };
+  return withActorId((byId) => {
+    const count = anonymiseExpiredEnquiries(byId, specificEnquiryId);
+    revalidateAll();
+    return { count };
+  });
 }
 
 export async function linkPmsRecordAction(
@@ -526,61 +671,65 @@ export async function linkPmsRecordAction(
   onesquaredId: string,
   pmsCode: string,
 ) {
-  const byId = await getCurrentUserId();
-  const res = linkPmsRecord(entityType, onesquaredId, pmsCode, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = linkPmsRecord(entityType, onesquaredId, pmsCode, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function unlinkPmsRecordAction(linkId: string) {
-  const byId = await getCurrentUserId();
-  unlinkPmsRecord(linkId, byId);
-  revalidateAll();
+  return withActorId((byId) => {
+    unlinkPmsRecord(linkId, byId);
+    revalidateAll();
+  });
 }
 
 export async function rerunAutomaticPmsMatchingAction() {
-  const byId = await getCurrentUserId();
-  const res = rerunAutomaticPmsMatching(byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = rerunAutomaticPmsMatching(byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function createRecordFromPmsAction(entityType: PmsEntityType, pmsCode: string) {
-  const byId = await getCurrentUserId();
-  const res = createRecordFromPms(entityType, pmsCode, byId);
-  revalidateAll();
-  return res;
+  return withActorId(async (byId) => {
+    const res = await createRecordFromPms(entityType, pmsCode, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function switchViewingRoleAction(roleKey: string) {
-  const userId = await getCurrentUserId();
-  let res = switchViewingRole(userId, roleKey);
-  if (!res.ok && (roleKey === 'risk_compliance' || roleKey === 'fee_earner')) {
-    const { getAppSnapshot: getSnap } = await import('@/server/services');
-    const snap = getSnap(userId);
-    const nextRoles = Array.from(new Set([...snap.currentUserRoles, roleKey]));
-    updateEmployeeRolesAndSupports(userId, { roles: nextRoles }, userId);
-    res = switchViewingRole(userId, roleKey);
-  }
-  revalidateAll();
-  return res;
+  return withActorId((userId) => {
+    const res = switchViewingRole(userId, roleKey);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveHomePagesConfigAction(input: {
   roles?: RoleHomeConfig[];
   firmSettings?: Partial<HomeFirmSettings>;
 }) {
-  const byId = await getCurrentUserId();
-  const res = saveHomePagesConfig(input, byId);
-  revalidateAll();
-  return res;
+  return withAuthenticatedActor((actor) => {
+    const res = saveHomePagesConfig(input, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function resetHomePagesConfigAction() {
-  const byId = await getCurrentUserId();
-  const res = resetHomePagesConfig(byId);
-  revalidateAll();
-  return res;
+  return withAuthenticatedActor((actor) => {
+    const res = resetHomePagesConfig(actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function addHomeRoleAction(input: {
@@ -590,10 +739,13 @@ export async function addHomeRoleAction(input: {
   purpose: string;
   copyFromRoleKey?: string;
 }) {
-  const byId = await getCurrentUserId();
-  const res = addHomeRole(input, byId);
-  revalidateAll();
-  return res;
+  return withAuthenticatedActor((actor) => {
+    const res = addHomeRole(input, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function updateEmployeeRolesAndSupportsAction(
@@ -603,45 +755,98 @@ export async function updateEmployeeRolesAndSupportsAction(
     supportsIds?: string[];
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = updateEmployeeRolesAndSupports(personId, input, byId);
-  revalidateAll();
-  return res;
+  return withAuthenticatedActor((actor) => {
+    const res = updateEmployeeRolesAndSupports(personId, input, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function previewRbacOverridesAction(
+  personId: string,
+  draftOverrides: {
+    grant: PermissionKey[];
+    revoke: PermissionKey[];
+    rbacConfig?: RbacConfiguration;
+  },
+) {
+  return withAuthenticatedActor((actor) =>
+    previewRbacOverrides(personId, draftOverrides, actor.personId, {
+      mfaVerified: actor.session.mfaVerified === true,
+    }),
+  );
+}
+
+export async function updatePersonPermissionOverridesAction(
+  personId: string,
+  input: {
+    grant: PermissionKey[];
+    revoke: PermissionKey[];
+    reason?: string;
+    entraObjectId?: string | null;
+  },
+) {
+  return withAuthenticatedActor((actor) => {
+    const res = updatePersonPermissionOverrides(personId, input, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function updateTenantRbacConfigAction(
+  patch: Partial<RbacConfiguration>,
+) {
+  return withAuthenticatedActor((actor) => {
+    const res = updateTenantRbacConfig(patch, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function approveSignOffAction(signOffId: string) {
-  const byId = await getCurrentUserId();
-  const res = approveSignOff(signOffId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = approveSignOff(signOffId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function discussSignOffAction(signOffId: string, note: string) {
-  const byId = await getCurrentUserId();
-  const res = discussSignOff(signOffId, note, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = discussSignOff(signOffId, note, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function requestMatterBillAction(matterCode: string) {
-  const byId = await getCurrentUserId();
-  const res = requestMatterBill(matterCode, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = requestMatterBill(matterCode, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function flagMatterWriteOffAction(matterCode: string, amountGbp: number) {
-  const byId = await getCurrentUserId();
-  const res = flagMatterWriteOff(matterCode, amountGbp, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = flagMatterWriteOff(matterCode, amountGbp, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function remindTeamLeadOverdueComplianceAction(teamId: string) {
-  const byId = await getCurrentUserId();
-  const res = remindTeamLeadOverdueCompliance(teamId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = remindTeamLeadOverdueCompliance(teamId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function recordInvoiceCreditControlActionAction(input: {
@@ -651,17 +856,19 @@ export async function recordInvoiceCreditControlActionAction(input: {
   actionType: 'log_call' | 'send_reminder' | 'escalate';
   note?: string;
 }) {
-  const byId = await getCurrentUserId();
-  const res = recordInvoiceCreditControlAction(input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = recordInvoiceCreditControlAction(input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveOrgStructureAction(nextCatalogue: OrgStructureCatalogue) {
-  const byId = await getCurrentUserId();
-  const res = saveOrgStructure(nextCatalogue, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveOrgStructure(nextCatalogue, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveMatterPartyRelationshipAction(input: {
@@ -671,24 +878,27 @@ export async function saveMatterPartyRelationshipAction(input: {
   active?: boolean;
   isNew?: boolean;
 }) {
-  const byId = await getCurrentUserId();
-  const res = saveMatterPartyRelationship(input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveMatterPartyRelationship(input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function reorderMatterPartyRelationshipAction(code: string, direction: -1 | 1) {
-  const byId = await getCurrentUserId();
-  const res = reorderMatterPartyRelationship(code, direction, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = reorderMatterPartyRelationship(code, direction, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function deleteMatterPartyRelationshipAction(code: string) {
-  const byId = await getCurrentUserId();
-  const res = deleteMatterPartyRelationship(code, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = deleteMatterPartyRelationship(code, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveMatterPartyCapacityAction(input: {
@@ -701,44 +911,49 @@ export async function saveMatterPartyCapacityAction(input: {
   active?: boolean;
   isNew?: boolean;
 }) {
-  const byId = await getCurrentUserId();
-  const res = saveMatterPartyCapacity(input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveMatterPartyCapacity(input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function deleteMatterPartyCapacityAction(code: string) {
-  const byId = await getCurrentUserId();
-  const res = deleteMatterPartyCapacity(code, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = deleteMatterPartyCapacity(code, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function updateWorkTypeProfilesAction(
   workTypeSubcategoryId: string,
   profiles: WorkTypeProfileCode[],
 ) {
-  const byId = await getCurrentUserId();
-  const res = updateWorkTypeProfiles(workTypeSubcategoryId, profiles, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = updateWorkTypeProfiles(workTypeSubcategoryId, profiles, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveQuoteAction(
   input: SaveQuoteInput,
   opts: { id?: string; markAsSent?: boolean } = {},
 ) {
-  const byId = await getCurrentUserId();
-  const res = saveQuoteRecord(input, { ...opts, byId });
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveQuoteRecord(input, { ...opts, byId });
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function markQuoteSentAction(quoteId: string) {
-  const byId = await getCurrentUserId();
-  const res = markQuoteSentRecord(quoteId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = markQuoteSentRecord(quoteId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function logQuoteFollowUpAction(
@@ -749,10 +964,11 @@ export async function logQuoteFollowUpAction(
     nextFollowUpDate: string | null;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = logQuoteFollowUpRecord(quoteId, input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = logQuoteFollowUpRecord(quoteId, input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function reviseQuoteAction(
@@ -772,10 +988,11 @@ export async function reviseQuoteAction(
     markAsSent?: boolean;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = reviseQuoteRecord(quoteId, input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = reviseQuoteRecord(quoteId, input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function recordQuoteOutcomeAction(
@@ -786,32 +1003,508 @@ export async function recordQuoteOutcomeAction(
     note?: string;
   },
 ) {
-  const byId = await getCurrentUserId();
-  const res = recordQuoteOutcomeRecord(quoteId, input, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = recordQuoteOutcomeRecord(quoteId, input, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function prepareQuoteConversionAction(quoteId: string) {
-  const byId = await getCurrentUserId();
-  const res = prepareQuoteConversionRecord(quoteId, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = prepareQuoteConversionRecord(quoteId, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function saveMatterCostsConfigAction(config: MatterCostsConfig) {
-  const byId = await getCurrentUserId();
-  const res = saveMatterCostsConfig(config, byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = saveMatterCostsConfig(config, byId);
+    revalidateAll();
+    return res;
+  });
 }
 
 export async function syncMatterCostsRatesFromPmsAction() {
-  const byId = await getCurrentUserId();
-  const res = syncMatterCostsRatesFromPms(byId);
-  revalidateAll();
-  return res;
+  return withActorId((byId) => {
+    const res = syncMatterCostsRatesFromPms(byId);
+    revalidateAll();
+    return res;
+  });
 }
+
+// ------------------------------------------------------------------ Document Generation Actions
+import {
+  approveTemplateVersionService,
+  deleteGeneratedDocumentService,
+  downloadGeneratedDocumentService,
+  exportTemplatePackageService,
+  generateDocumentService,
+  getDocumentGenerationSnapshotForUser,
+  getTemplateUsageReportService,
+  importTemplatePackageService,
+  previewTemplateService,
+  rejectTemplateVersionService,
+  retireTemplateService,
+  rollbackTemplateVersionService,
+  submitTemplateVersionService,
+  updateDocumentGenerationConfigService,
+  updateTemplateDraftService,
+  uploadTemplateDraftService,
+} from '@/server/documentGenerationServices';
+import type {
+  DocumentGenerationConfig,
+  DocumentOutputFormat,
+  PromptedFieldDefinition,
+  TemplateAvailabilityRules,
+  TemplatePackageManifest,
+  TemplatePlaceholderMapping,
+  TemplateUsageReportFilter,
+} from '@platform/core';
+
+export async function getDocumentGenerationSnapshotAction() {
+  return withAuthenticatedActor((actor) =>
+    getDocumentGenerationSnapshotForUser(actor.personId, actor.session),
+  );
+}
+
+export async function uploadTemplateDraftAction(input: {
+  templateId?: string;
+  code: string;
+  name: string;
+  description: string;
+  category: string;
+  tags?: string[];
+  outputDocumentType: string;
+  filenamePattern: string;
+  availabilityRules: TemplateAvailabilityRules;
+  fileName: string;
+  docxBase64: string;
+  fieldMappings?: Record<string, TemplatePlaceholderMapping>;
+  promptedFields?: PromptedFieldDefinition[];
+  changeNote?: string;
+}) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await uploadTemplateDraftService(
+      input,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function updateTemplateDraftAction(input: {
+  versionId: string;
+  fieldMappings: Record<string, TemplatePlaceholderMapping>;
+  promptedFields: PromptedFieldDefinition[];
+  templateMetadata?: {
+    name?: string;
+    description?: string;
+    category?: string;
+    tags?: string[];
+    outputDocumentType?: string;
+    filenamePattern?: string;
+    availabilityRules?: TemplateAvailabilityRules;
+  };
+  changeNote?: string;
+}) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await updateTemplateDraftService(
+      input,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function submitTemplateVersionAction(
+  versionId: string,
+  changeNote?: string,
+) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await submitTemplateVersionService(
+      versionId,
+      changeNote,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function approveTemplateVersionAction(versionId: string) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await approveTemplateVersionService(
+      versionId,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function rejectTemplateVersionAction(
+  versionId: string,
+  rejectionReason: string,
+) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await rejectTemplateVersionService(
+      versionId,
+      rejectionReason,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function retireTemplateAction(templateId: string) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await retireTemplateService(
+      templateId,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function rollbackTemplateVersionAction(
+  templateId: string,
+  targetVersionId: string,
+) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await rollbackTemplateVersionService(
+      templateId,
+      targetVersionId,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function exportTemplatePackageAction(
+  templateId: string,
+  versionId?: string,
+) {
+  return withAuthenticatedActor((actor) =>
+    exportTemplatePackageService(
+      templateId,
+      versionId,
+      actor.personId,
+      actor.session,
+    ),
+  );
+}
+
+export async function importTemplatePackageAction(pkg: TemplatePackageManifest) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await importTemplatePackageService(
+      pkg,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function previewTemplateAction(input: {
+  versionId: string;
+  matterId?: string | null;
+  organisationId?: string | null;
+  personId?: string | null;
+  recipientPartyId?: string | null;
+  promptedValues?: Record<string, unknown>;
+  outputFormat?: DocumentOutputFormat;
+}) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await previewTemplateService(
+      input,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function generateDocumentAction(input: {
+  templateId: string;
+  sourceEntityType: 'matter' | 'client';
+  matterId?: string | null;
+  organisationId?: string | null;
+  personId?: string | null;
+  recipientPartyId?: string | null;
+  recipientPartyEntityType?: 'organisation' | 'person' | null;
+  promptedValues?: Record<string, unknown>;
+  outputFormat?: DocumentOutputFormat;
+}) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await generateDocumentService(
+      input,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function downloadGeneratedDocumentAction(documentId: string) {
+  return withAuthenticatedActor((actor) =>
+    downloadGeneratedDocumentService(documentId, actor.personId, actor.session),
+  );
+}
+
+export async function deleteGeneratedDocumentAction(documentId: string) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await deleteGeneratedDocumentService(
+      documentId,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function getTemplateUsageReportAction(
+  filter: TemplateUsageReportFilter = {},
+) {
+  return withAuthenticatedActor((actor) =>
+    getTemplateUsageReportService(filter, actor.personId, actor.session),
+  );
+}
+
+export async function updateDocumentGenerationConfigAction(patch: Partial<DocumentGenerationConfig>) {
+  return withAuthenticatedActor(async (actor) => {
+    const res = await updateDocumentGenerationConfigService(
+      patch,
+      actor.personId,
+      actor.session,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+// ============================================================================
+// Key Dates & Limitation Server Actions (§1–§9)
+// ============================================================================
+
+export async function previewLimitationCalculationAction(input: {
+  ruleSetId: string;
+  ruleId: string;
+  triggerValues: Record<string, string>;
+  standstillPeriods?: StandstillPeriod[];
+  calendarCodeOverride?: string;
+}) {
+  return withActorId((byId) =>
+    previewLimitationCalculationRecord(input, byId),
+  );
+}
+
+export async function createOrProposeKeyDateAction(input: {
+  matterId?: string;
+  enquiryId?: string;
+  keyDateTypeId: string;
+  title?: string;
+  dueDate: string;
+  dueTime?: string;
+  isCritical?: boolean;
+  source?: KeyDateSource;
+  teamId?: string;
+  responsiblePersonIds?: string[];
+  calculation?: KeyDateCalculation;
+  notes?: string;
+  sourceDocumentId?: string;
+  intent?: 'provisional' | 'propose';
+}) {
+  return withActorId(async (byId) => {
+    const res = await createOrProposeKeyDateRecord(input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function proposeProvisionalKeyDateAction(keyDateId: string) {
+  return withActorId(async (byId) => {
+    const res = await proposeProvisionalKeyDateRecord(keyDateId, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function verifyProposedKeyDateAction(keyDateId: string) {
+  return withActorId(async (byId) => {
+    const res = await verifyProposedKeyDateRecord(keyDateId, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function rejectProposedKeyDateAction(
+  keyDateId: string,
+  reason: string,
+) {
+  return withActorId(async (byId) => {
+    const res = await rejectProposedKeyDateRecord(keyDateId, reason, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function supersedeConfirmedKeyDateAction(
+  keyDateId: string,
+  updates: {
+    title?: string;
+    dueDate: string;
+    dueTime?: string;
+    isCritical?: boolean;
+    teamId?: string;
+    responsiblePersonIds?: string[];
+    calculation?: KeyDateCalculation;
+    notes?: string;
+    intent?: 'provisional' | 'propose';
+  },
+  reason: string,
+) {
+  return withActorId(async (byId) => {
+    const res = await supersedeConfirmedKeyDateRecord(
+      keyDateId,
+      updates,
+      reason,
+      byId,
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function resolveKeyDateOutcomeAction(
+  keyDateId: string,
+  input: {
+    kind: 'met' | 'missed' | 'waived';
+    note?: string;
+    evidenceDocumentId?: string;
+  },
+) {
+  return withActorId(async (byId) => {
+    const res = await resolveKeyDateOutcomeRecord(keyDateId, input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function reassignKeyDateTeamAction(
+  keyDateId: string,
+  input: {
+    teamId: string;
+    responsiblePersonIds?: string[];
+    reason?: string;
+  },
+) {
+  return withActorId(async (byId) => {
+    const res = await reassignKeyDateTeamRecord(keyDateId, input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function recordKeyDateNotApplicableAction(input: {
+  matterId: string;
+  keyDateTypeId: string;
+  reason: string;
+}) {
+  return withActorId((byId) => {
+    const res = recordKeyDateNotApplicableRecord(input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
+  return withActorId((byId) => {
+    const res = acknowledgeKeyDateReminderRecord(keyDateId, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function runKeyDateReminderSchedulerAction() {
+  return withAuthenticatedActor((actor) => {
+    const tenantCtx = resolveCurrentTenantContext(
+      createVerifiedSessionActorFromEntraSession(actor.session),
+    );
+    const res = runKeyDateReminderSchedulerRecord({
+      tenantCtx,
+      session: actor.session,
+      byId: actor.personId,
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function queryKeyDatesTeamDiaryAction(
+  query: TeamDiaryQuery,
+  todayIso?: string,
+) {
+  return withActorId((byId) =>
+    queryKeyDatesTeamDiaryRecord(query, byId, todayIso),
+  );
+}
+
+export async function getKeyDateExceptionsReportAction(
+  filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
+  todayIso?: string,
+) {
+  return withActorId((byId) =>
+    getKeyDateExceptionsReportRecord(filter, byId, todayIso),
+  );
+}
+
+export async function exportKeyDateExceptionsReportAction(
+  filter: {
+    teamIds?: string[];
+    kinds?: KeyDateExceptionKind[];
+    format?: 'csv' | 'json';
+  } = {},
+  todayIso?: string,
+) {
+  return withActorId((byId) => {
+    const res = exportKeyDateExceptionsReportRecord(filter, byId, todayIso);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function saveKeyDatesConfigAction(
+  newConfig: KeyDatesConfig,
+  reason: string,
+) {
+  return withAuthenticatedActor((actor) => {
+    const res = saveKeyDatesConfigRecord(newConfig, reason, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
 
 
 

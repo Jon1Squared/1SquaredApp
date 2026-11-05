@@ -23,7 +23,7 @@ export interface CompaniesHouseCompanyRecord {
 
 export const DEMO_COMPANIES_HOUSE_RECORDS: CompaniesHouseCompanyRecord[] = [
   {
-    companyNumber: '08451290',
+    companyNumber: 'DEMO-000101',
     companyName: 'Cambrian Maritime & Logistics Ltd',
     companyStatus: 'Active',
     organisationTypeLabel: 'Company',
@@ -49,7 +49,7 @@ export const DEMO_COMPANIES_HOUSE_RECORDS: CompaniesHouseCompanyRecord[] = [
     ],
   },
   {
-    companyNumber: '04477120',
+    companyNumber: 'DEMO-000005',
     companyName: 'Severn Estuary Holdings plc',
     companyStatus: 'Active',
     organisationTypeLabel: 'plc',
@@ -75,7 +75,7 @@ export const DEMO_COMPANIES_HOUSE_RECORDS: CompaniesHouseCompanyRecord[] = [
     ],
   },
   {
-    companyNumber: 'OC419204',
+    companyNumber: 'DEMO-OC0102',
     companyName: 'Brecon Capital Partners LLP',
     companyStatus: 'Active',
     organisationTypeLabel: 'LLP',
@@ -101,7 +101,7 @@ export const DEMO_COMPANIES_HOUSE_RECORDS: CompaniesHouseCompanyRecord[] = [
     ],
   },
   {
-    companyNumber: '11209483',
+    companyNumber: 'DEMO-000103',
     companyName: 'Gower Renewable Energy Developments Ltd',
     companyStatus: 'Active',
     organisationTypeLabel: 'Company',
@@ -126,7 +126,7 @@ export const DEMO_COMPANIES_HOUSE_RECORDS: CompaniesHouseCompanyRecord[] = [
     ],
   },
   {
-    companyNumber: '09638105',
+    companyNumber: 'DEMO-000104',
     companyName: 'Clifton Fine Properties & Estates Ltd',
     companyStatus: 'Active',
     organisationTypeLabel: 'Company',
@@ -154,7 +154,7 @@ export const DEMO_COMPANIES_HOUSE_RECORDS: CompaniesHouseCompanyRecord[] = [
     ],
   },
   {
-    companyNumber: '10542891',
+    companyNumber: 'DEMO-000105',
     companyName: 'Valleys Community Housing Trust',
     companyStatus: 'Active',
     organisationTypeLabel: 'Non-profit',
@@ -179,7 +179,7 @@ export const DEMO_COMPANIES_HOUSE_RECORDS: CompaniesHouseCompanyRecord[] = [
     ],
   },
   {
-    companyNumber: '12894011',
+    companyNumber: 'DEMO-000106',
     companyName: 'Taff Vale Construction & Civil Engineering Ltd',
     companyStatus: 'Active',
     organisationTypeLabel: 'Company',

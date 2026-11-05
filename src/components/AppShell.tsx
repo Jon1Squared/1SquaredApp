@@ -8,6 +8,7 @@ import {
   BookOpen,
   Briefcase,
   Building2,
+  CalendarClock,
   CheckSquare,
   FileText,
   Home,
@@ -34,6 +35,7 @@ import { initials, personDisplayName } from '@/domain/names';
 import type { SearchDoc } from '@/domain/search';
 import { countMyUrgentBadgeTasks } from '@/domain/tasks';
 import type { HomePagesConfig, NotificationItem, Person, Task } from '@/domain/types';
+import type { EntraSessionPayload } from '@/server/entraAuth';
 import { CompactHeaderSearch, StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
@@ -49,6 +51,8 @@ interface AppShellProps {
   attention: AttentionItem[];
   tasks: Task[];
   notifications: NotificationItem[];
+  firmName?: string;
+  entraSession?: EntraSessionPayload | null;
   children: React.ReactNode;
 }
 
@@ -64,6 +68,8 @@ export function AppShell({
   attention,
   tasks,
   notifications,
+  firmName = 'Firm',
+  entraSession = null,
   children,
 }: AppShellProps) {
   const pathname = usePathname();
@@ -73,19 +79,23 @@ export function AppShell({
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [avatarOpen, setAvatarOpen] = useState(false);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('onesquared_theme');
+      if (saved === 'dark' || saved === 'light') {
+        return saved;
+      }
+    }
+    return 'light';
+  });
 
   const newRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem('onesquared_theme') as 'light' | 'dark' | null;
-    if (saved === 'dark' || saved === 'light') {
-      setTheme(saved);
-      document.documentElement.dataset.theme = saved;
-    }
-  }, []);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   function toggleTheme() {
     const next = theme === 'light' ? 'dark' : 'light';
@@ -162,6 +172,14 @@ export function AppShell({
         icon: CheckSquare,
         match: (p) => p.startsWith('/tasks'),
         visible: leftRailVisibility.tasks,
+      },
+      {
+        key: 'keyDates',
+        href: '/key-dates',
+        label: 'Key dates',
+        icon: CalendarClock,
+        match: (p) => p.startsWith('/key-dates'),
+        visible: leftRailVisibility.keyDates,
       },
       {
         key: 'matters',
@@ -309,6 +327,55 @@ export function AppShell({
           </div>
 
           <div className="top-bar__right">
+            {entraSession ? (
+              <Link
+                href="/admin/rbac-and-entra"
+                title={`Signed in via Microsoft Entra ID as ${entraSession.email || entraSession.displayName} (oid: ${entraSession.oid})`}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '4px 10px',
+                  borderRadius: 6,
+                  background: 'rgba(13, 92, 99, 0.1)',
+                  border: '1px solid rgba(13, 92, 99, 0.3)',
+                  color: 'var(--brand-teal, #0D5C63)',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textDecoration: 'none',
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: '50%',
+                    background: '#16a34a',
+                  }}
+                />
+                <span>
+                  Entra ID{entraSession.mfaVerified ? ' · MFA' : ''}
+                </span>
+              </Link>
+            ) : (
+              <a
+                href={`/api/auth/login?returnTo=${encodeURIComponent(pathname || '/')}`}
+                className="btn btn--ghost btn--sm"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  padding: '5px 10px',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <span>Sign in with Microsoft</span>
+              </a>
+            )}
+
             <label
               className="role-switcher"
               style={{
@@ -596,7 +663,7 @@ export function AppShell({
                   <div className="popover-menu__header">
                     <div className="popover-menu__title">{userName}</div>
                     <div className="popover-menu__sub">
-                      {currentUser.jobTitle || 'Not A Law Firm LLP'}
+                      {currentUser.jobTitle || firmName}
                     </div>
                   </div>
                   <Link
@@ -610,6 +677,26 @@ export function AppShell({
                     {theme === 'light' ? <Moon size={15} /> : <Sun size={15} />}
                     <span>Switch to {theme === 'light' ? 'dark' : 'light'} mode</span>
                   </button>
+                  {entraSession ? (
+                    <form action="/api/auth/logout" method="POST" style={{ margin: 0 }}>
+                      <button
+                        type="submit"
+                        className="popover-menu__item"
+                        style={{ width: '100%', textAlign: 'left' }}
+                        onClick={() => setAvatarOpen(false)}
+                      >
+                        <span>Sign out of Microsoft Entra ({entraSession.email || entraSession.displayName})</span>
+                      </button>
+                    </form>
+                  ) : (
+                    <a
+                      href={`/api/auth/login?returnTo=${encodeURIComponent(pathname || '/')}`}
+                      className="popover-menu__item"
+                      onClick={() => setAvatarOpen(false)}
+                    >
+                      <span>Sign in with Microsoft Entra ID</span>
+                    </a>
+                  )}
 
                   {demoMode && demoEmployees.length > 0 ? (
                     <>

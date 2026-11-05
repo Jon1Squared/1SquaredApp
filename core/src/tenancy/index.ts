@@ -15,17 +15,24 @@ import type {
   PlatformEnvironment,
   TenantContext,
 } from '../api/index';
+import {
+  isEntraMfaVerified,
+  mapEntraTokenClaimsToVerifiedOidcToken,
+  type EntraIdRawTokenClaims,
+  type VerifiedOidcTokenClaims,
+} from '../domain/rbac/entra';
 
-export interface VerifiedOidcTokenClaims {
-  /** Marker confirming the token was verified by the OIDC authentication middleware. */
-  readonly __verifiedByOidcMiddleware: true;
-  readonly sub: string;
-  readonly tenantId: string;
-  readonly email: string;
-  readonly name: string;
-  readonly roles: readonly string[];
-  readonly mfaVerified: boolean;
-}
+export * from './migrations/index';
+export * from './blobStorage';
+export * from './documentRepository';
+export * from './documentStoreRepository';
+export * from './keyDateRepository';
+export {
+  isEntraMfaVerified,
+  mapEntraTokenClaimsToVerifiedOidcToken,
+  type EntraIdRawTokenClaims,
+  type VerifiedOidcTokenClaims,
+};
 
 export interface ResolveTenantInput {
   verifiedToken: VerifiedOidcTokenClaims;
@@ -93,7 +100,17 @@ export function resolveTenantFromVerifiedToken(
     actorId: verifiedToken.sub,
     actorName: verifiedToken.name,
     actorEmail: verifiedToken.email,
+    ...(verifiedToken.upn ? { actorUpn: verifiedToken.upn } : {}),
     actorRoles: Object.freeze([...verifiedToken.roles]),
+    ...(verifiedToken.groups
+      ? { actorGroups: Object.freeze([...verifiedToken.groups]) }
+      : {}),
+    ...(verifiedToken.entraObjectId
+      ? { entraObjectId: verifiedToken.entraObjectId }
+      : {}),
+    ...(verifiedToken.entraTenantId
+      ? { entraTenantId: verifiedToken.entraTenantId }
+      : {}),
     mfaVerified: Boolean(verifiedToken.mfaVerified),
     hostingMode,
     environment,
@@ -110,8 +127,8 @@ export function resolveTenantPostgresConfig(
   const slug = normaliseTenantSlug(ctx.tenantId);
   const host =
     ctx.hostingMode === 'single_tenant'
-      ? `${ ctx.tenantId }-pg-${ ctx.environment }.postgres.database.azure.com`
-      : `platform-shared-pool-${ ctx.environment }.postgres.database.azure.com`;
+      ? `${ctx.tenantId}-pg-${ctx.environment}.postgres.database.azure.com`
+      : `platform-shared-pool-${ctx.environment}.postgres.database.azure.com`;
 
   return {
     host,
@@ -138,7 +155,9 @@ export class PostgresTenantCluster {
     Map<string, TenantScopedRecord>
   >();
 
-  private getDatabaseForTenant(ctx: TenantContext): Map<string, TenantScopedRecord> {
+  private getDatabaseForTenant(
+    ctx: TenantContext,
+  ): Map<string, TenantScopedRecord> {
     if (!ctx?.tenantId || !ctx?.postgresDatabaseName) {
       throw new Error(
         'TENANCY_ISOLATION_ERROR: Data access requires a valid TenantContext.',
@@ -226,3 +245,6 @@ export function runTenantBackgroundJob<TPayload, TResult>(
   }
   return handler(job);
 }
+
+export * from './keyDateRepository';
+

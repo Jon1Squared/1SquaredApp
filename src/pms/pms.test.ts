@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildPmsDatabaseFromWorkbook, resolveWorkbookPath } from './importPms';
 import { DemoDbPmsSource } from './pmsSource';
@@ -5,21 +8,27 @@ import { openXlsxWorkbook, parseMoney } from './xlsxReader';
 
 describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   it('builds the SQLite database idempotently from 1Squared_PMS_Demo_Data.xlsx', () => {
-    const run1 = buildPmsDatabaseFromWorkbook();
-    const run2 = buildPmsDatabaseFromWorkbook();
-    expect(run1.asAtDate).toBe('2026-10-16');
-    expect(run1.counts).toEqual({
-      fee_earners: 8,
-      clients: 10,
-      matters: 20,
-      fee_estimates: 23,
-      time_entries: 740,
-      disbursements: 16,
-      invoices: 51,
-      payments: 40,
-      client_account: 15,
-    });
-    expect(run2.counts).toEqual(run1.counts);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-test-'));
+    const tmpDbPath = path.join(tmpDir, 'pms-demo.sqlite');
+    try {
+      const run1 = buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
+      const run2 = buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
+      expect(run1.asAtDate).toBe('2026-10-16');
+      expect(run1.counts).toEqual({
+        fee_earners: 8,
+        clients: 10,
+        matters: 20,
+        fee_estimates: 23,
+        time_entries: 740,
+        disbursements: 16,
+        invoices: 51,
+        payments: 40,
+        client_account: 15,
+      });
+      expect(run2.counts).toEqual(run1.counts);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('reproduces every row and total of check_matters via v_matter_financials', () => {
@@ -242,7 +251,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { attentionList } = await import('@/domain/attention');
     const { getAppSnapshot } = await import('@/server/services');
 
-    const snap = getAppSnapshot();
+    const snap = getAppSnapshot('P-000001');
     const allRecords = [...snap.people, ...snap.organisations];
     const today = new Date('2026-10-16T10:00:00Z');
 
@@ -282,7 +291,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { getAppSnapshot } = await import('@/server/services');
     const { getActiveTenantConfiguration } = await import('@/platform/tenantRuntime');
 
-    const snap = getAppSnapshot();
+    const snap = getAppSnapshot('P-000001');
     const tenantConfig = getActiveTenantConfiguration();
     const mappings = tenantConfig.integrations.pmsSync?.fieldMappings ?? [];
     expect(mappings.length).toBeGreaterThan(0);
@@ -338,6 +347,117 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
           d.ownership === 'onesquared_master',
       ),
     ).toBe(true);
+  });
+
+  it('enforces Ofcom drama phone ranges and allow-listed invented email domains across imported PMS data and seed (R49, R74)', async () => {
+    const source = new DemoDbPmsSource();
+    const clients = source.listClients();
+    const feeEarners = source.listFeeEarners();
+
+    const ofcomDramaRegex =
+      /^(01632\s?960\d{3}|020\s?7946\s?0\d{3}|029\s?2018\s?0\d{3}|0117\s?496\s?0\d{3}|07700\s?900\d{3}|08081\s?570\d{3}|0909\s?8790\d{3})$/;
+    const allowedDomainRegex =
+      /@(example\.(com|org|net)|[a-z0-9.-]+\.(example|test))$/i;
+
+    for (const c of clients) {
+      if (c.phone.trim()) {
+        expect(c.phone.trim()).toMatch(ofcomDramaRegex);
+      }
+      if (c.email.trim()) {
+        expect(c.email.trim()).toMatch(allowedDomainRegex);
+      }
+      if (c.company_number.trim()) {
+        expect(c.company_number.trim()).toMatch(/^DEMO-/);
+      }
+    }
+
+    for (const fe of feeEarners) {
+      expect(fe.email.trim()).toMatch(allowedDomainRegex);
+    }
+
+    const { getAppSnapshot } = await import('@/server/services');
+    const snap = getAppSnapshot('P-000001');
+    for (const p of snap.people) {
+      for (const em of p.emails) {
+        expect(em.address.trim()).toMatch(allowedDomainRegex);
+      }
+      for (const ph of p.phones) {
+        expect(ph.number.trim()).toMatch(ofcomDramaRegex);
+      }
+    }
+    for (const enq of snap.enquiries) {
+      if (enq.email?.trim()) expect(enq.email.trim()).toMatch(allowedDomainRegex);
+      if (enq.phone?.trim()) expect(enq.phone.trim()).toMatch(ofcomDramaRegex);
+    }
+    for (const qte of snap.quotes) {
+      if (qte.prospectEmail?.trim()) expect(qte.prospectEmail.trim()).toMatch(allowedDomainRegex);
+      if (qte.prospectPhone?.trim()) expect(qte.prospectPhone.trim()).toMatch(ofcomDramaRegex);
+    }
+
+    // R49 & R130: Verify single canonical workbook (data/pms/1Squared_PMS_Demo_Data.xlsx) across every sheet and raw src/seed/demo.ts source text
+    const wbPath = path.join(
+      process.cwd(),
+      'data',
+      'pms',
+      '1Squared_PMS_Demo_Data.xlsx',
+    );
+    expect(fs.existsSync(wbPath)).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(process.cwd(), 'docs', '1Squared_PMS_Demo_Data.xlsx'),
+      ),
+    ).toBe(false);
+    const wb = openXlsxWorkbook(wbPath);
+    expect(wb.sheetNames.length).toBeGreaterThan(0);
+    const emailCandidateRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const phoneHeaderRe = /phone|mobile|tel/i;
+    for (const sheetName of wb.sheetNames) {
+      const rows = wb.getSheetRows(sheetName);
+      for (const row of rows) {
+        for (const [colName, rawVal] of Object.entries(row)) {
+          const val = rawVal?.trim();
+          if (!val) continue;
+          if (/email/i.test(colName) || emailCandidateRe.test(val)) {
+            expect(val, `${wbPath} [${sheetName}.${colName}] email`).toMatch(
+              allowedDomainRegex,
+            );
+          }
+          if (phoneHeaderRe.test(colName)) {
+            expect(val, `${wbPath} [${sheetName}.${colName}] phone`).toMatch(
+              ofcomDramaRegex,
+            );
+          }
+        }
+      }
+      const matrix = wb.getSheetMatrix(sheetName);
+      for (const mRow of matrix) {
+        for (const [colRef, rawCell] of Object.entries(mRow.cells)) {
+          const cellVal = rawCell?.trim();
+          if (cellVal && emailCandidateRe.test(cellVal)) {
+            expect(
+              cellVal,
+              `${wbPath} [${sheetName}!${colRef}${mRow.rowNumber}] cell email`,
+            ).toMatch(allowedDomainRegex);
+          }
+        }
+      }
+    }
+
+    const seedSourceText = fs.readFileSync(
+      path.join(process.cwd(), 'src', 'seed', 'demo.ts'),
+      'utf8',
+    );
+    const phoneFieldRe =
+      /(?:["']?(?:phone|mobile|directPhone|mainPhone|prospectPhone|number)["']?\s*:\s*["']([^"']+)["']|\bphone\(\s*["']([^"']+)["'])/g;
+    const matchedSeedPhones: string[] = [];
+    for (const m of seedSourceText.matchAll(phoneFieldRe)) {
+      const ph = (m[1] ?? m[2] ?? '').trim();
+      if (ph && !ph.includes('${')) {
+        matchedSeedPhones.push(ph);
+        expect(ph, 'src/seed/demo.ts phone literal').toMatch(ofcomDramaRegex);
+      }
+    }
+    expect(matchedSeedPhones.length).toBeGreaterThan(20);
   });
 });
 

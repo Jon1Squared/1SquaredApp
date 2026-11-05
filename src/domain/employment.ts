@@ -6,8 +6,10 @@ import { addDays, toIsoDate } from './dates';
 import { resolveLabel } from './lists';
 import { personDisplayName } from './names';
 import {
-  buildDefaultOrgStructure,
   DEFAULT_LEGAL_ENTITY_ID,
+  DEFAULT_ORG_DEPARTMENTS,
+  DEFAULT_ORG_OFFICES,
+  DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
   resolveOrgDepartment,
@@ -76,12 +78,15 @@ export const CONTRACT_TYPES: ContractType[] = [
   'Zero hours',
 ];
 
+import {
+  ALL_EMPLOYEE_PERMISSIONS as CORE_ALL_EMPLOYEE_PERMISSIONS,
+  canPersonAccessMatter,
+  resolvePersonPermissionSet,
+  type ResolvePersonPermissionsOptions,
+} from './rbac';
+
 export const ALL_EMPLOYEE_PERMISSIONS: EmployeePermission[] = [
-  'employee:view_core',
-  'employee:edit_core',
-  'employee:hr_restricted',
-  'employee:payroll',
-  'employee:sensitive',
+  ...CORE_ALL_EMPLOYEE_PERMISSIONS,
 ];
 
 export const DIVERSITY_OPTIONS = {
@@ -147,86 +152,27 @@ export function isFeeEarnerRoleType(
 }
 
 /**
- * Resolves the employee data permissions for a user.
- * If `user.employeePermissions` is explicitly set, returns it directly.
- * Otherwise derives sensible defaults from the user's role / department / line management status.
+ * Resolves the employee data permissions for a user by delegating to the single
+ * central `@platform/core` permission resolver (`resolvePersonPermissionSet`, ADR-0010 & ADR-0011).
+ *
+ * All department grants (`DEPT-HR`, `DEPT-FIN`, `DEPT-RISK`, etc.) and relationship grants
+ * come from tenant configuration (`rbac.departmentGrants` and `rbac.relationshipGrants`).
+ * Supports unified `user.permissionOverrides` (`grant` / `revoke`) as well as transitional
+ * `user.employeePermissions`.
  */
 export function resolveEmployeePermissions(
   user: Person | null | undefined,
   allPeople: Person[] = [],
   teams: Team[] = [],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): EmployeePermission[] {
   if (!user) return [];
-  if (Array.isArray(user.employeePermissions)) {
-    return user.employeePermissions;
-  }
-
-  const perms = new Set<EmployeePermission>();
-  const roles = user.roles ?? [];
-  const empRole = user.employeeRoleId ?? '';
-  const dept = user.departmentId ?? user.employment?.departmentId ?? '';
-
-  // System administrators & Managing Partners get full HR, payroll, and sensitive permissions
-  if (
-    user.appRole === 'admin' ||
-    roles.includes('admin') ||
-    roles.includes('managing_partner') ||
-    empRole === 'employee_role.system_administrator' ||
-    dept === 'DEPT-HR'
-  ) {
-    return [...ALL_EMPLOYEE_PERMISSIONS];
-  }
-
-  // Partners, Practice Managers, and Risk & Compliance
-  if (
-    roles.includes('partner') ||
-    empRole === 'employee_role.partner' ||
-    empRole === 'employee_role.practice_manager'
-  ) {
-    perms.add('employee:view_core');
-    perms.add('employee:edit_core');
-    perms.add('employee:hr_restricted');
-  }
-
-  if (
-    roles.includes('risk_compliance') ||
-    empRole === 'employee_role.risk_and_compliance' ||
-    dept === 'DEPT-RISK' ||
-    dept === 'department.risk_and_compliance'
-  ) {
-    perms.add('employee:view_core');
-    perms.add('employee:edit_core');
-    perms.add('employee:hr_restricted');
-    perms.add('employee:sensitive');
-  }
-
-  // Finance / Payroll staff
-  if (
-    roles.includes('finance') ||
-    empRole === 'employee_role.finance' ||
-    dept === 'DEPT-FIN' ||
-    dept === 'department.finance'
-  ) {
-    perms.add('employee:view_core');
-    perms.add('employee:payroll');
-  }
-
-  // Line managers & team leads get core view & edit
-  const isLineManager = allPeople.some(
-    (p) => p.employment?.lineManagerId === user.id || p.employment?.supervisingPartnerId === user.id,
-  );
-  const isTeamLead = teams.some((t) => t.active && t.leadIds.includes(user.id));
-  if (isLineManager || isTeamLead || user.appRole === 'team_lead') {
-    perms.add('employee:view_core');
-    perms.add('employee:edit_core');
-  }
-
-  // Default for other employees: view_core
-  if (user.isEmployee || user.employment) {
-    perms.add('employee:view_core');
-  }
-
-  return Array.from(perms);
+  const resolved = resolvePersonPermissionSet(user, {
+    ...rbacOptions,
+    allPeople,
+    teams,
+  });
+  return ALL_EMPLOYEE_PERMISSIONS.filter((perm) => resolved.has(perm));
 }
 
 export function hasEmployeePermission(
@@ -234,8 +180,14 @@ export function hasEmployeePermission(
   perm: EmployeePermission,
   allPeople: Person[] = [],
   teams: Team[] = [],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
-  return resolveEmployeePermissions(user, allPeople, teams).includes(perm);
+  return resolveEmployeePermissions(
+    user,
+    allPeople,
+    teams,
+    rbacOptions,
+  ).includes(perm);
 }
 
 /**
@@ -248,9 +200,12 @@ export function filterEmploymentForUser(
   allPeople: Person[] = [],
   teams: Team[] = [],
   orgStructure?: OrgStructureCatalogue,
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): EmploymentRecord | null {
   if (!employment) return null;
-  const perms = new Set(resolveEmployeePermissions(user, allPeople, teams));
+  const perms = new Set(
+    resolveEmployeePermissions(user, allPeople, teams, rbacOptions),
+  );
   if (!perms.has('employee:view_core')) {
     return null;
   }
@@ -694,7 +649,7 @@ export function applyEffectiveDatedEmploymentHistory(
   }
 
   // Effective-dated charge-out rate history for fee earners
-  let feeEarner = incoming.feeEarner ? structuredClone(incoming.feeEarner) : null;
+  const feeEarner = incoming.feeEarner ? structuredClone(incoming.feeEarner) : null;
   if (feeEarner && feeEarner.chargeOutRateGbp !== null && feeEarner.chargeOutRateGbp !== undefined) {
     const rateFrom = feeEarner.chargeOutRateEffectiveFrom || effectiveFrom;
     const prevRate = existing?.feeEarner?.chargeOutRateGbp ?? null;
@@ -775,6 +730,11 @@ export function findOpenMattersWherePersonIsParty(
  * Conversion path 2 (Employee -> Client):
  * Determines if a matter involves a current employee as a client, marking it as a staff matter
  * with restricted access so colleagues cannot browse it by default.
+ *
+ * ADR-0014: `restrictedAccessUserIds` stores ONLY the named matter participants
+ * (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `teamMemberIds`).
+ * Oversight role holders (`admin`, `managing_partner`, `risk_compliance`) are evaluated
+ * dynamically via the `matter:restricted:access` permission rather than stored in the list.
  */
 export function computeStaffMatterStatus(
   matter: {
@@ -799,24 +759,12 @@ export function computeStaffMatterStatus(
     return { isStaffMatter: false, restrictedAccessUserIds: [] };
   }
 
-  // Only the matter team, Risk/Compliance, and System Admins can browse a staff matter by default
   const allowed = new Set<string>();
   if (matter.responsiblePartnerId) allowed.add(matter.responsiblePartnerId);
   if (matter.supervisingPartnerId) allowed.add(matter.supervisingPartnerId);
   if (matter.leadFeeEarnerId) allowed.add(matter.leadFeeEarnerId);
   for (const tid of matter.teamMemberIds ?? []) {
     if (tid) allowed.add(tid);
-  }
-  for (const p of people) {
-    if (
-      p.appRole === 'admin' ||
-      p.roles?.includes('admin') ||
-      p.roles?.includes('risk_compliance') ||
-      p.employeeRoleId === 'employee_role.system_administrator' ||
-      p.employeeRoleId === 'employee_role.risk_and_compliance'
-    ) {
-      allowed.add(p.id);
-    }
   }
 
   return {
@@ -826,36 +774,16 @@ export function computeStaffMatterStatus(
 }
 
 /**
- * Checks whether a user can view a matter (enforces restricted access on staff matters).
+ * Checks whether a user can view a matter (enforces restricted access on staff matters
+ * via `matter:restricted:access` permission + named matter participants, ADR-0014).
  */
 export function canUserAccessMatter(
   matter: Matter,
   userId: string,
   user?: Person | null,
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
-  if (!matter.isStaffMatter) return true;
-  if (
-    user &&
-    (user.appRole === 'admin' ||
-      user.roles?.includes('admin') ||
-      user.roles?.includes('risk_compliance') ||
-      user.employeeRoleId === 'employee_role.system_administrator' ||
-      user.employeeRoleId === 'employee_role.risk_and_compliance')
-  ) {
-    return true;
-  }
-  if (
-    matter.responsiblePartnerId === userId ||
-    matter.supervisingPartnerId === userId ||
-    matter.leadFeeEarnerId === userId ||
-    matter.teamMemberIds.includes(userId)
-  ) {
-    return true;
-  }
-  if (Array.isArray(matter.restrictedAccessUserIds)) {
-    return matter.restrictedAccessUserIds.includes(userId);
-  }
-  return false;
+  return canPersonAccessMatter(matter, userId, user, rbacOptions);
 }
 
 /**
@@ -900,6 +828,35 @@ export function getRightToWorkEvidenceOnFile(person: Person | null | undefined):
  * applies HR retention rules to employment data separately from contact data,
  * and keeps the person record as a contact if they have other roles or the user chooses to.
  */
+export function resolveConfiguredFirmPrimaryDomain(
+  configOverride?: { branding?: { primaryDomain?: string } } | null,
+): string {
+  const primaryDomain = configOverride?.branding?.primaryDomain
+    ?.trim()
+    .toLowerCase();
+  if (!primaryDomain) {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: Tenant configuration is missing branding.primaryDomain.',
+    );
+  }
+  return primaryDomain;
+}
+
+function isConfiguredFirmDomainEmail(
+  address: string,
+  firmWorkEmail?: string | null,
+  primaryDomain?: string | null,
+): boolean {
+  const lower = address.trim().toLowerCase();
+  if (!lower) return false;
+  if (firmWorkEmail && lower === firmWorkEmail.trim().toLowerCase()) {
+    return true;
+  }
+  const normalizedDomain = primaryDomain?.trim().toLowerCase() ?? '';
+  if (!normalizedDomain) return false;
+  return lower.endsWith(`@${normalizedDomain}`);
+}
+
 export function applyLeaverEffects(
   person: {
     emails: Email[];
@@ -909,22 +866,27 @@ export function applyLeaverEffects(
   employment: EmploymentRecord,
   leavingDate: string,
   keepAsContact: boolean = true,
+  primaryDomain?: string | null,
 ): {
   emails: Email[];
   phones: Phone[];
   relationshipRoleIds: string[];
   employment: EmploymentRecord;
 } {
+  const configuredDomain = resolveConfiguredFirmPrimaryDomain({
+    branding: { primaryDomain: primaryDomain ?? undefined },
+  });
   const endDt = leavingDate || new Date().toISOString().slice(0, 10);
 
   // Deactivate firm-issued emails and phones
   const updatedEmails = person.emails.map((em) => {
     const isFirmDomain =
       em.firmIssued ||
-      em.address.toLowerCase().endsWith('@notalawfirm.co.uk') ||
-      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.co.uk') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.example');
+      isConfiguredFirmDomainEmail(
+        em.address,
+        employment.systems?.firmWorkEmail,
+        configuredDomain,
+      );
     if (isFirmDomain) {
       return { ...em, firmIssued: true, active: false, isPrimary: false };
     }
@@ -1024,7 +986,7 @@ export function generateNextEmployeeNumber(people: Person[]): string {
 export function resolveDefaultDepartmentPartnerId(
   deptId: string,
   allPeople: Person[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
 ): string {
   // Prefer a Partner/Member in the same department
   const sameDeptPartners = allPeople.filter((p) => {
@@ -1047,16 +1009,25 @@ export function resolveDefaultDepartmentPartnerId(
     sameDeptPartners[0];
   if (primaryPartner) return primaryPartner.id;
 
-  if (deptId === 'DEPT-PC') return 'P-000005';
-  if (deptId === 'DEPT-CORP') {
-    const gethin = allPeople.find(
-      (p) => !p.demo && p.firstName === 'Gethin' && p.surname === 'Lloyd',
+  // Fallback dynamically to any active Managing Partner or Partner in the firm (zero hardcoded DEPT-* or P-00000* IDs)
+  const anyFirmPartner =
+    allPeople.find(
+      (p) =>
+        !p.demo &&
+        !p.mergedIntoId &&
+        (p.isEmployee || p.employment) &&
+        p.roles?.includes('managing_partner'),
+    ) ??
+    allPeople.find(
+      (p) =>
+        !p.demo &&
+        !p.mergedIntoId &&
+        (p.isEmployee || p.employment) &&
+        (p.roles?.includes('partner') ||
+          p.employeeRoleId === 'employee_role.partner' ||
+          p.employment?.roleType === 'Partner/Member'),
     );
-    return gethin?.id ?? 'P-000007';
-  }
-  if (deptId === 'DEPT-EMP') return 'P-000005';
-  if (deptId === 'DEPT-RISK') return 'P-000003';
-  return 'P-000001';
+  return anyFirmPartner?.id ?? allPeople[0]?.id ?? '';
 }
 
 /**
@@ -1065,12 +1036,21 @@ export function resolveDefaultDepartmentPartnerId(
 export function createDefaultEmploymentRecord(opts: {
   person: Partial<Person> & { id: string; firstName: string; surname: string };
   allPeople: Person[];
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure?: Pick<
+    OrgStructureCatalogue,
+    'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
+  >;
   byId: string;
   nowIso?: string;
   status?: EmploymentStatus;
+  primaryDomain?: string | null;
 }): EmploymentRecord {
-  const orgStructure = opts.orgStructure ?? buildDefaultOrgStructure();
+  const orgStructure = opts.orgStructure ?? {
+    departments: DEFAULT_ORG_DEPARTMENTS,
+    offices: DEFAULT_ORG_OFFICES,
+    teamsOrPracticeGroups: DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
+    defaultProbationMonths: 6,
+  };
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const today = nowIso.slice(0, 10);
 
@@ -1097,20 +1077,19 @@ export function createDefaultEmploymentRecord(opts: {
     orgStructure,
   );
   const managingPartnerId =
-    opts.allPeople.find((p) => !p.demo && p.roles?.includes('managing_partner'))?.id ??
-    'P-000001';
+    opts.allPeople.find((p) => !p.demo && p.roles?.includes('managing_partner'))?.id ?? null;
 
   const defaultLineManagerId = isTop
     ? null
     : opts.person.id === deptPartnerId
-      ? managingPartnerId !== opts.person.id
+      ? managingPartnerId && managingPartnerId !== opts.person.id
         ? managingPartnerId
-        : 'P-000001'
-      : deptPartnerId;
+        : null
+      : deptPartnerId || null;
 
   const defaultSupervisingPartnerId =
     resolvedDept.parentDivisionId === 'DIV-LEGAL' || isFeeEarnerRoleType(roleType)
-      ? deptPartnerId
+      ? deptPartnerId || null
       : null;
 
   const empNumber = generateNextEmployeeNumber(opts.allPeople);
@@ -1127,12 +1106,15 @@ export function createDefaultEmploymentRecord(opts: {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]/g, '');
 
+  const configuredDomain = resolveConfiguredFirmPrimaryDomain({
+    branding: { primaryDomain: opts.primaryDomain ?? undefined },
+  });
   const firmEmail =
     opts.person.emails?.find(
       (e) =>
-        e.address.toLowerCase().includes('@notalawfirm') ||
-        e.address.toLowerCase().includes('@pembrokevaughan'),
-    )?.address ?? `${slugFirst}.${slugSurname}@notalawfirm.co.uk`;
+        e.firmIssued ||
+        isConfiguredFirmDomainEmail(e.address, null, configuredDomain),
+    )?.address ?? `${slugFirst}.${slugSurname}@${configuredDomain}`;
   const firmPhone = opts.person.phones?.[0]?.number ?? '';
 
   const record: EmploymentRecord = {
@@ -1293,8 +1275,17 @@ export function createDefaultEmploymentRecord(opts: {
 export function migrateEmployeesToEmploymentRecords(
   people: Person[],
   values: ChoiceValue[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure: Pick<
+    OrgStructureCatalogue,
+    'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
+  > = {
+    departments: DEFAULT_ORG_DEPARTMENTS,
+    offices: DEFAULT_ORG_OFFICES,
+    teamsOrPracticeGroups: DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
+    defaultProbationMonths: 6,
+  },
   pmsLinks: PmsLink[] = [],
+  primaryDomain?: string | null,
   nowIso: string = new Date().toISOString(),
 ): { people: Person[]; report: EmployeeMigrationReport } {
   const unmappedRecords: UnmappedEmployeeMigrationItem[] = [];
@@ -1309,35 +1300,47 @@ export function migrateEmployeesToEmploymentRecords(
     }
 
     if (person.employment) {
-      // Repair legacy seeded supervisingPartnerId/lineManagerId if pointing to non-employee P-000013 or missing on legal dept
+      // Repair legacy seeded supervisingPartnerId/lineManagerId if pointing to a non-employee or missing on legal dept
       const empDept = resolveOrgDepartment(
         person.employment.departmentId || person.departmentId,
         orgStructure,
       );
       const deptPartnerId = empDept
         ? resolveDefaultDepartmentPartnerId(empDept.id, people, orgStructure)
-        : 'P-000001';
+        : '';
+      const managingPartnerId =
+        people.find((p) => !p.demo && p.roles?.includes('managing_partner'))?.id ?? '';
       let patchedEmp = person.employment;
       const supPerson = patchedEmp.supervisingPartnerId
         ? people.find((x) => x.id === patchedEmp.supervisingPartnerId)
         : null;
       const supInvalid =
         !supPerson || (!supPerson.isEmployee && !supPerson.employment);
+      const lineMgrPerson = patchedEmp.lineManagerId
+        ? people.find((x) => x.id === patchedEmp.lineManagerId)
+        : null;
+      const lineMgrInvalid =
+        Boolean(patchedEmp.lineManagerId) &&
+        (!lineMgrPerson || (!lineMgrPerson.isEmployee && !lineMgrPerson.employment));
       const shouldFixDefaultDeptPartner =
         empDept &&
         empDept.parentDivisionId === 'DIV-LEGAL' &&
+        Boolean(deptPartnerId) &&
         (supInvalid ||
-          (patchedEmp.supervisingPartnerId === 'P-000001' &&
-            deptPartnerId !== 'P-000001' &&
+          lineMgrInvalid ||
+          (Boolean(managingPartnerId) &&
+            patchedEmp.supervisingPartnerId === managingPartnerId &&
+            deptPartnerId !== managingPartnerId &&
             patchedEmp.updatedAt === patchedEmp.createdAt));
       if (shouldFixDefaultDeptPartner) {
         patchedEmp = {
           ...patchedEmp,
           supervisingPartnerId: deptPartnerId,
           lineManagerId:
-            patchedEmp.lineManagerId === 'P-000013' ||
-            (patchedEmp.lineManagerId === 'P-000001' &&
-              deptPartnerId !== 'P-000001' &&
+            lineMgrInvalid ||
+            (Boolean(managingPartnerId) &&
+              patchedEmp.lineManagerId === managingPartnerId &&
+              deptPartnerId !== managingPartnerId &&
               person.id !== deptPartnerId)
               ? deptPartnerId
               : patchedEmp.lineManagerId,
@@ -1347,6 +1350,7 @@ export function migrateEmployeesToEmploymentRecords(
       const synced = syncPersonWorkContactFlags(
         { ...person, employment: patchedEmp },
         orgStructure,
+        primaryDomain,
       );
       updatedPeople.push(synced);
       continue;
@@ -1388,9 +1392,10 @@ export function migrateEmployeesToEmploymentRecords(
       person,
       allPeople: [...updatedPeople, ...people.filter((p) => !updatedPeople.some((u) => u.id === p.id))],
       orgStructure,
-      byId: person.updatedById || 'P-000004',
+      byId: person.updatedById || person.createdById || person.id,
       nowIso,
       status: 'Active',
+      primaryDomain,
     });
 
     if (mappedRole) {
@@ -1421,6 +1426,7 @@ export function migrateEmployeesToEmploymentRecords(
         employment: emp,
       },
       orgStructure,
+      primaryDomain,
     );
 
     updatedPeople.push(migratedPerson);
@@ -1443,7 +1449,8 @@ export function migrateEmployeesToEmploymentRecords(
  */
 export function syncPersonWorkContactFlags(
   person: Person,
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
+  primaryDomain?: string | null,
 ): Person {
   const emp = person.employment;
   if (!emp) {
@@ -1458,12 +1465,11 @@ export function syncPersonWorkContactFlags(
   const emails = (person.emails ?? []).map((em) => {
     const isFirm =
       em.firmIssued ||
-      em.address.toLowerCase().endsWith('@notalawfirm.co.uk') ||
-      em.address.toLowerCase().endsWith('@notalawfirm.example') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.co.uk') ||
-      em.address.toLowerCase().endsWith('@pembrokevaughan.example') ||
-      (emp.systems?.firmWorkEmail &&
-        em.address.toLowerCase() === emp.systems.firmWorkEmail.toLowerCase());
+      isConfiguredFirmDomainEmail(
+        em.address,
+        emp.systems?.firmWorkEmail,
+        primaryDomain,
+      );
     if (isFirm) {
       return {
         ...em,
@@ -1565,7 +1571,7 @@ const PRACTICE_AREA_TO_ORG_DEPT_IDS: Record<string, string[]> = {
 export function resolvePracticeAreaIdForPersonDepartment(
   person: Person | null | undefined,
   practiceAreas: ChoiceValue[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
 ): string {
   if (!person) return '';
   const dept = resolveOrgDepartment(
@@ -1596,10 +1602,11 @@ export function resolvePracticeAreaIdForPersonDepartment(
 export function resolveOrgDepartmentIdsForPracticeArea(
   practiceAreaId: string | null | undefined,
   practiceAreas: ChoiceValue[],
-  orgStructure: OrgStructureCatalogue = buildDefaultOrgStructure(),
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
 ): Set<string> {
   const result = new Set<string>();
   if (!practiceAreaId) return result;
+  const departments = orgStructure?.departments ?? DEFAULT_ORG_DEPARTMENTS;
 
   const direct = PRACTICE_AREA_TO_ORG_DEPT_IDS[practiceAreaId];
   if (direct) {
@@ -1609,7 +1616,7 @@ export function resolveOrgDepartmentIdsForPracticeArea(
   const pa = practiceAreas.find((p) => p.id === practiceAreaId);
   if (pa) {
     const paLower = pa.label.trim().toLowerCase();
-    for (const dept of orgStructure.departments) {
+    for (const dept of departments) {
       const deptLower = dept.name.trim().toLowerCase();
       if (
         deptLower === paLower ||
@@ -1648,11 +1655,11 @@ export function filterEmployeesForMatterDepartment(opts: {
   employees: Person[];
   practiceAreaId: string | null | undefined;
   practiceAreas: ChoiceValue[];
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>;
   includeSupervisingPartners?: boolean;
   preserveSelectedId?: string | null;
 }): Person[] {
-  const orgStructure = opts.orgStructure ?? buildDefaultOrgStructure();
+  const orgStructure = opts.orgStructure;
   const baseEmployees = opts.employees.filter(
     (e) => !e.demo || e.id === opts.preserveSelectedId,
   );
@@ -1682,7 +1689,7 @@ export function filterEmployeesForMatterDepartment(opts: {
   const result = [...inDept];
 
   // If filtering for Responsible Partner and the department's members have a supervising partner
-  // who sits across departments (e.g. Dispute Resolution supervised by Rhian Morgan), include them
+  // who sits across departments, include them
   if (opts.includeSupervisingPartners) {
     for (const member of inDept) {
       const supId = member.employment?.supervisingPartnerId;
@@ -1719,13 +1726,13 @@ export function resolveNewMatterDepartmentDefaults(opts: {
   allPeople: Person[];
   employees: Person[];
   practiceAreas: ChoiceValue[];
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>;
 }): {
   practiceAreaId: string;
   responsiblePartnerId: string | null;
   leadFeeEarnerId: string | null;
 } {
-  const orgStructure = opts.orgStructure ?? buildDefaultOrgStructure();
+  const orgStructure = opts.orgStructure;
   const user = opts.currentUser;
   if (!user) {
     return { practiceAreaId: '', responsiblePartnerId: null, leadFeeEarnerId: null };
@@ -1785,3 +1792,31 @@ export function resolveNewMatterDepartmentDefaults(opts: {
     leadFeeEarnerId,
   };
 }
+
+/**
+ * Builds the sensitive information submission payload for `savePersonAction` / `savePersonRecord` (R76).
+ * Returns `null` unless the person works at the firm, the actor has `employee:sensitive`,
+ * and the sensitive section was both opened (`sensitiveRevealed`) and edited (`sensitiveEdited`).
+ */
+export function buildSensitiveSubmissionPayload(params: {
+  isEmployee: boolean;
+  canSensitive: boolean;
+  sensitiveRevealed: boolean;
+  sensitiveEdited: boolean;
+  reasonableAdjustments: string;
+  diversityAnswers: DiversityMonitoringAnswers;
+}): Partial<EmployeeSensitiveRecord> | null {
+  if (
+    !params.isEmployee ||
+    !params.canSensitive ||
+    !params.sensitiveRevealed ||
+    !params.sensitiveEdited
+  ) {
+    return null;
+  }
+  return {
+    reasonableAdjustmentsNeeded: params.reasonableAdjustments.trim(),
+    diversity: params.diversityAnswers,
+  };
+}
+

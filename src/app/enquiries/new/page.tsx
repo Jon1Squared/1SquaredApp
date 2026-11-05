@@ -1,22 +1,24 @@
 import { EnquiryFormClient } from '@/components/EnquiryFormClient';
-import { getAppSnapshot, getCurrentUserId } from '@/server/services';
+import { getAppSnapshot, withPageActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
 export default async function NewEnquiryPage() {
-  const userId = await getCurrentUserId();
-  const snap = getAppSnapshot(userId);
+  return withPageActor(async (actor) => {
+    const snap = getAppSnapshot(actor.personId);
 
-  return (
-    <EnquiryFormClient
-      people={snap.people}
-      organisations={snap.organisations}
-      matters={snap.matters}
-      enquiries={snap.enquiries}
-      teams={snap.teams}
-      values={snap.values}
-      customFields={snap.customFields}
-      currentUserId={snap.currentUserId}
-    />
-  );
+    return (
+      <EnquiryFormClient
+        people={snap.people}
+        organisations={snap.organisations}
+        matters={snap.matters}
+        enquiries={snap.enquiries}
+        teams={snap.teams}
+        values={snap.values}
+        customFields={snap.customFields}
+        currentUserId={snap.currentUserId}
+        firmName={snap.firm.name}
+      />
+    );
+  });
 }

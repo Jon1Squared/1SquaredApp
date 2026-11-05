@@ -78,6 +78,22 @@ export function MarkdownContent({ source }: { source: string }) {
       continue;
     }
 
+    if (trimmed.startsWith('```')) {
+      i++;
+      const codeLines: string[] = [];
+      while (i < lines.length && !lines[i]!.trim().startsWith('```')) {
+        codeLines.push(lines[i++]!);
+      }
+      if (i < lines.length) i++;
+      const ck = key();
+      blocks.push(
+        <pre key={ck} style={{ overflowX: 'auto', padding: '0.75rem 1rem', borderRadius: 8, background: 'rgba(15, 23, 42, 0.06)', fontSize: '0.85rem', lineHeight: 1.5 }}>
+          <code>{codeLines.join('\n')}</code>
+        </pre>,
+      );
+      continue;
+    }
+
     const heading = /^(#{1,3})\s+(.*)$/.exec(trimmed);
     if (heading) {
       const level = heading[1]!.length;
@@ -157,7 +173,7 @@ export function MarkdownContent({ source }: { source: string }) {
     const para: string[] = [];
     while (i < lines.length) {
       const t = lines[i]!.trim();
-      if (!t || /^(#{1,3}\s|\||>|[-*]\s|\d+\.\s)/.test(t)) break;
+      if (!t || /^(#{1,3}\s|\||>|[-*]\s|\d+\.\s|```)/.test(t)) break;
       para.push(t);
       i++;
     }

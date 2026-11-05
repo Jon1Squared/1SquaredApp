@@ -26,6 +26,9 @@ export type ListGroup =
   | 'tasks'
   | 'custom';
 
+/**
+ * @deprecated Replaced by granular permissions (`task:claim_any`, `task:reassign_any`, `enquiry:intake_view`, `admin:access`) in `PERMISSION_REGISTRY` (ADR-0016).
+ */
 export type AppRole = 'call_handler' | 'fee_earner' | 'team_lead' | 'admin';
 
 export interface ChoiceList {
@@ -109,7 +112,7 @@ export interface Email {
   address: string;
   typeId: string | null;
   isPrimary: boolean;
-  /** True when issued by the firm (e.g. @pembrokevaughan.co.uk); marked inactive when the person leaves. */
+  /** True when issued by the firm (matching branding.primaryDomain); marked inactive when the person leaves. */
   firmIssued?: boolean;
   /** Defaults to true; set to false when deactivated on leaving the firm. */
   active?: boolean;
@@ -239,6 +242,63 @@ export type EmployeePermission =
   | 'employee:hr_restricted'
   | 'employee:payroll'
   | 'employee:sensitive';
+
+export type DocumentPermission =
+  | 'document_template:view'
+  | 'document_template:build'
+  | 'document_template:approve'
+  | 'document_template:view_usage'
+  | 'document_template:view_usage_by_user'
+  | 'document_template:configure'
+  | 'document:generate'
+  | 'document:view'
+  | 'document:download'
+  | 'document:upload'
+  | 'document:edit'
+  | 'document:delete'
+  | 'document:provision'
+  | 'document_store:configure'
+  | 'document_access:review'
+  | 'finance:view';
+
+export type KeyDatePermissionKey =
+  | 'keydate:view'
+  | 'keydate:view_any_team'
+  | 'keydate:edit'
+  | 'keydate:verify'
+  | 'keydate:override_calculation'
+  | 'keydate:resolve'
+  | 'keydate:waive'
+  | 'keydate:configure';
+
+export type PermissionKey =
+  | EmployeePermission
+  | DocumentPermission
+  | KeyDatePermissionKey
+  | 'finance:view_matter'
+  | 'finance:credit_control'
+  | 'finance:manage_links'
+  | 'risk:view'
+  | 'matter:create'
+  | 'matter:edit'
+  | 'matter:costs:sign_off'
+  | 'matter:reassign_ownership'
+  | 'matter:restricted:access'
+  | 'matter:restriction:lift'
+  | 'task:claim_any'
+  | 'task:reassign_any'
+  | 'enquiry:intake_view'
+  | 'admin:access'
+  | 'rbac:manage_config'
+  | 'rbac:manage_user_overrides';
+
+export interface PersonPermissionOverrides {
+  grant: PermissionKey[];
+  revoke: PermissionKey[];
+  reason?: string;
+  updatedAt?: string;
+  updatedByUserId?: string;
+}
 
 export interface EmploymentAssignmentHistoryEntry {
   id: string;
@@ -495,7 +555,12 @@ export interface Person extends RecordBase {
   /** Related employment record attached to the person (never a separate duplicate person). */
   employment?: EmploymentRecord | null;
   /** Explicit employee data permissions for this user (overrides role defaults when present). */
+  permissionOverrides?: PersonPermissionOverrides | null;
+  /** Immutable Microsoft Entra ID Object GUID (`oid` claim) for federated OIDC identity matching. */
+  entraObjectId?: string | null;
   employeePermissions?: EmployeePermission[];
+  /** Explicit document generation permissions for this user (overrides role defaults when present). */
+  documentPermissions?: DocumentPermission[];
   /** Explicit app permission role for Enquiries & Tasks (falls back to employeeRole + team lead status). */
   appRole?: AppRole | null;
   /** Role keys for Role-based Home pages (first role is the user's Home role). */
@@ -730,6 +795,7 @@ export interface ConflictCheckMatch {
   responsiblePartnerName: string;
   dateLabel: string;
   matchedOn?: string;
+  restricted?: boolean;
   disposition: ConflictMatchDisposition | null;
   note: string;
   reviewerDecision?: ConflictReviewerDecisionType | null;
@@ -781,11 +847,22 @@ export interface ConflictCheckRecord {
   approvedAtDisplay?: string | null;
   approvedById?: string | null;
   approvedByName?: string | null;
+  /** Server-owned list of restricted match IDs present when Risk & Compliance approved this record. */
+  approvedRestrictedMatchIds?: string[];
   parties: ConflictCheckParty[];
   matches: ConflictCheckMatch[];
   runs: ConflictCheckRunAudit[];
   comments: ConflictReviewerComment[];
 }
+
+export type ConflictCheckRecordInput = Omit<
+  ConflictCheckRecord,
+  | 'approvedById'
+  | 'approvedByName'
+  | 'approvedAtDisplay'
+  | 'submittedById'
+  | 'approvedRestrictedMatchIds'
+>;
 
 export interface Matter extends RecordBase {
   recordType: 'matter';
@@ -857,11 +934,30 @@ export interface Matter extends RecordBase {
   // All Core (CORE-001..075), Field Group (FG01..FG09) and Subcategory-specific fields stored keyed by Field ID
   fieldValues: Record<string, unknown>;
   /** Full built-in conflict check snapshot & audit record */
-  conflictCheckRecord?: ConflictCheckRecord | null;
+  conflictCheckRecord?: ConflictCheckRecord;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
-  /** User IDs permitted to view/access this matter when isStaffMatter is true. */
+  /** True when an ethical wall / information barrier applies to this matter. */
+  hasEthicalWall?: boolean;
+  /** User IDs permitted to view/access this matter when isStaffMatter or hasEthicalWall is true. */
   restrictedAccessUserIds?: string[];
+  /** Recorded restriction lifts so ordinary saves do not reinstate lifted restrictions unless a new trigger occurs. */
+  restrictionLift?: {
+    ethicalWall?: {
+      liftedAt: string;
+      byId: string;
+      liftedBarrierMatchIds: string[];
+    };
+    staffMatter?: {
+      liftedAt: string;
+      byId: string;
+      liftedParticipantIds: string[];
+    };
+  };
+  /** Optional explicit owning OrgDepartment ID (e.g. 'DEPT-RE') for document routing & security. */
+  owningDepartmentId?: string | null;
+  /** Optional explicit owning OrgTeamOrPracticeGroup ID (e.g. 'TPG-RE-RES') for document routing & security. */
+  owningTeamId?: string | null;
 }
 
 // ------------------------------------------------------------------ Teams
@@ -920,6 +1016,8 @@ export interface Task {
   completedAt: string | null;
   comments: TaskComment[];
   autoTrigger?: AutoTaskTrigger | null;
+  linkedKeyDateId?: string | null;
+  idempotencyKey?: string | null;
 }
 
 // ------------------------------------------------------------------ Enquiries
@@ -1273,7 +1371,24 @@ export type AuditAction =
   | 'view-payroll'
   | 'view-sensitive'
   | 'update-payroll'
-  | 'update-sensitive';
+  | 'update-sensitive'
+  | 'keydate-create'
+  | 'keydate-update'
+  | 'keydate-propose'
+  | 'keydate-verify'
+  | 'keydate-reject'
+  | 'keydate-override-calculation'
+  | 'keydate-supersede'
+  | 'keydate-resolve'
+  | 'keydate-waive'
+  | 'keydate-reassign-team'
+  | 'keydate-not-applicable'
+  | 'keydate-reminder-acknowledge'
+  | 'keydate-reminder-escalate'
+  | 'keydate-config-change'
+  | 'keydate-export'
+  | 'matter-restriction-lift'
+  | 'matter-imported-open';
 
 export interface AuditEntry {
   id: string;
@@ -1288,7 +1403,8 @@ export interface AuditEntry {
     | 'customField'
     | 'system'
     | 'employee_payroll'
-    | 'employee_sensitive';
+    | 'employee_sensitive'
+    | 'key_date';
   recordId: string;
   action: AuditAction;
   field: string | null;
@@ -1296,6 +1412,7 @@ export interface AuditEntry {
   newValue: string | null;
   byId: string;
   at: string;
+  reason?: string | null;
   snapshot?: unknown;
 }
 
@@ -1339,6 +1456,8 @@ export interface PmsLink {
 // ------------------------------------------------------------------ Role-based Home Pages
 export type BuiltInHomeRoleKey =
   | 'fee_earner'
+  | 'supervisor'
+  | 'intake'
   | 'partner'
   | 'legal_secretary'
   | 'enquiries_coordinator'
@@ -1406,6 +1525,8 @@ export type PanelCategory =
   | 'Firm-wide executive';
 
 export interface RoleHomeConfig {
+  /** Linked ChoiceValue ID from `employee_role` in the People taxonomy (`employee_role.<slug>`). */
+  employeeRoleId?: string;
   key: HomeRoleKey;
   label: string;
   shortLabel: string;
@@ -1454,7 +1575,7 @@ export interface SignOffItem {
   subtitle: string;
   requestedById: string;
   requestedAt: string;
-  assignedPartnerId: string;
+  assignedPartnerId: string | null;
   status: 'Pending' | 'Approved' | 'Discussing';
   approvedById?: string | null;
   approvedAt?: string | null;

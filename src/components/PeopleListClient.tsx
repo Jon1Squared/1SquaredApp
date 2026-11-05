@@ -35,6 +35,7 @@ interface Props {
   employees: Person[];
   enquiries?: Enquiry[];
   currentUserId?: string;
+  firmName?: string;
 }
 
 type PeopleTab = 'all' | 'external' | 'enquiry' | 'employee' | 'archived';
@@ -78,6 +79,7 @@ export function PeopleListClient({
   employees,
   enquiries = [],
   currentUserId = '',
+  firmName = 'Firm',
 }: Props) {
   const router = useRouter();
 
@@ -163,7 +165,7 @@ export function PeopleListClient({
               const mainOrg = mainLink
                 ? orgById.get(mainLink.organisationId)?.legalName ?? ''
                 : p.isEmployee
-                  ? 'Not A Law Firm LLP'
+                  ? firmName
                   : '';
               const email = primaryEmail(p) ?? '';
               const phone = p.phones[0]?.number ?? '';
@@ -254,6 +256,7 @@ export function PeopleListClient({
     orgById,
     values,
     sort,
+    firmName,
   ]);
 
   const getRowUrgency = (row: PeopleListRow): UrgencyEdgeKind => {
@@ -317,7 +320,7 @@ export function PeopleListClient({
           return <span className="muted">—</span>;
         }
         const p = row.person;
-        if (p.isEmployee) return 'Not A Law Firm LLP';
+        if (p.isEmployee) return firmName;
         const mainLink = mainLinkFor(p.id, links);
         const mainOrg = mainLink ? orgById.get(mainLink.organisationId) : undefined;
         if (mainOrg) {
@@ -341,7 +344,7 @@ export function PeopleListClient({
         const p = row.person;
         const mainLink = mainLinkFor(p.id, links);
         const mainOrg = p.isEmployee
-          ? 'Not A Law Firm LLP'
+          ? firmName
           : mainLink
             ? orgById.get(mainLink.organisationId)?.legalName
             : '';
@@ -461,7 +464,7 @@ export function PeopleListClient({
     };
 
     return [personCol, orgCol, statusCol, contactCol, ownerCol, locationCol];
-  }, [values, orgById, links, empById]);
+  }, [values, orgById, links, empById, firmName]);
 
   return (
     <div className="page-list">

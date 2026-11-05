@@ -31,6 +31,7 @@ import {
   type AddressLike,
   type LooseNameMatch,
 } from './normalise';
+import type { ResolvePersonPermissionsOptions } from './rbac';
 import { isUserTeamLeadFor, resolveUserAppRole } from './tasks';
 import type {
   ChoiceValue,
@@ -1203,13 +1204,24 @@ export function canUserReopenEnquiry(
   teams: Team[],
   people: Person[],
   values: ChoiceValue[],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
   if (isEnquiryOpen(enquiry)) return false;
-  const user = people.find((p) => p.id === userId) ?? null;
-  const role = resolveUserAppRole(user, teams, values);
-  if (role === 'admin') return true;
   if (enquiry.assignedToId === userId) return true;
   if (isUserTeamLeadFor(userId, enquiry.assignedTeamId, teams)) return true;
+  const user = people.find((p) => p.id === userId) ?? null;
+  if (!user) return false;
+  if (
+    user.appRole === 'admin' ||
+    user.employeeRoleId === 'employee_role.system_administrator' ||
+    user.roles?.includes('admin')
+  ) {
+    return true;
+  }
+  if (rbacOptions?.config?.rbac) {
+    const role = resolveUserAppRole(user, teams, values, rbacOptions);
+    if (role === 'admin') return true;
+  }
   return false;
 }
 

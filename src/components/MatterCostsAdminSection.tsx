@@ -6,7 +6,6 @@ import {
   saveMatterCostsConfigAction,
   syncMatterCostsRatesFromPmsAction,
 } from '@/app/actions';
-import { createDefaultMatterCostsConfig } from '@/domain/matterCosts';
 import type {
   ChoiceValue,
   CustomGradeRateRow,
@@ -19,7 +18,7 @@ import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
 interface Props {
-  initialConfig?: MatterCostsConfig;
+  initialConfig: MatterCostsConfig;
   values: ChoiceValue[];
 }
 
@@ -27,9 +26,7 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
 
-  const [config, setConfig] = useState<MatterCostsConfig>(() =>
-    initialConfig ?? createDefaultMatterCostsConfig(values),
-  );
+  const [config, setConfig] = useState<MatterCostsConfig>(initialConfig);
 
   const [newCardName, setNewCardName] = useState('');
   const [newCardPracticeAreaId, setNewCardPracticeAreaId] = useState<string>('');
@@ -61,24 +58,26 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
   function handleAddRateCard() {
     if (!newCardName.trim()) return;
     const pa = practiceAreas.find((p) => p.id === newCardPracticeAreaId);
-    const created: RateCardEntry = {
-      id: `RC-CUSTOM-${Date.now()}`,
-      name: newCardName.trim(),
-      practiceAreaId: pa?.id ?? null,
-      pmsDepartmentCode: pa?.label ?? 'Custom / Client Tier',
-      partnerRateGbp: Number(newCardPartnerRate) || 375,
-      associateRateGbp: Number(newCardAssociateRate) || 265,
-      traineeRateGbp: Number(newCardTraineeRate) || 150,
-      pmsPartnerRateGbp: null,
-      pmsAssociateRateGbp: null,
-      pmsTraineeRateGbp: null,
-      customGrades: [],
-      active: true,
-    };
-    setConfig((prev) => ({
-      ...prev,
-      rateCards: [...prev.rateCards, created],
-    }));
+    setConfig((prev) => {
+      const created: RateCardEntry = {
+        id: `RC-CUSTOM-${prev.rateCards.length + 1}`,
+        name: newCardName.trim(),
+        practiceAreaId: pa?.id ?? null,
+        pmsDepartmentCode: pa?.label ?? 'Custom / Client Tier',
+        partnerRateGbp: Number(newCardPartnerRate) || 375,
+        associateRateGbp: Number(newCardAssociateRate) || 265,
+        traineeRateGbp: Number(newCardTraineeRate) || 150,
+        pmsPartnerRateGbp: null,
+        pmsAssociateRateGbp: null,
+        pmsTraineeRateGbp: null,
+        customGrades: [],
+        active: true,
+      };
+      return {
+        ...prev,
+        rateCards: [...prev.rateCards, created],
+      };
+    });
     setNewCardName('');
     setNewCardPracticeAreaId('');
   }
@@ -190,12 +189,12 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <strong style={{ fontSize: 14 }}>
-              Three-Layer Platform Architecture · Active Tenant: Not A Law Firm LLP (notalawfirm.co.uk)
+              Three-Layer Platform Architecture · Active Profile: {config.clientProfileName}
             </strong>
             <StatusPill label="PostgreSQL DB-per-Tenant" tone="positive" />
             <StatusPill label="Model A (Azure Single-Tenant) & Model B (Multi-Tenant)" tone="neutral" />
           </div>
-          <code style={{ fontSize: 12 }}>pg_tenant_not_a_law_firm_dev</code>
+          <code style={{ fontSize: 12 }}>DB-per-Tenant Runtime</code>
         </div>
 
         <div className="form-grid-3" style={{ gap: 12 }}>
@@ -233,7 +232,7 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
               <StatusPill label="Schema Validated" tone="positive" />
             </div>
             <div style={{ fontSize: 12.5 }} className="muted">
-              Declarative JSON in <code>client-not-a-law-firm/config/</code> (rate cards, custom grades, disbursement presets, PMS sync mode, Key Vault refs).
+              Declarative tenant JSON configuration (rate cards, custom grades, disbursement presets, PMS sync mode, Key Vault refs).
             </div>
           </div>
 
@@ -249,10 +248,10 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
               <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                 Layer 3 · Client Extensions
               </span>
-              <StatusPill label="nalf-matter-costs-governance v1.2.0" tone="warning" />
+              <StatusPill label="Extension Host Active" tone="warning" />
             </div>
             <div style={{ fontSize: 12.5 }} className="muted">
-              Sandboxed plugin in <code>client-not-a-law-firm/extensions/</code> implementing <code>beforeMatterCostsCalculate</code> &amp; <code>beforeMatterOpen</code> hooks.
+              Sandboxed tenant extension plugins implementing <code>beforeMatterCostsCalculate</code> &amp; <code>beforeMatterOpen</code> hooks via <code>ExtensionHost</code>.
             </div>
           </div>
         </div>

@@ -2,17 +2,15 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
-First, run the development server:
+Node.js 24 is required (`node:sqlite`). From the repository root:
 
 ```bash
+npm ci
+npm run generate:extensions
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
+
+> **Note:** `npm run generate:extensions` writes the gitignored `src/platform/generated/extensionRegistry.ts` from the active tenant's extension manifests (when `PLATFORM_TENANT_PACKAGE_DIR` is set). `npm run build` and `npm test` run it automatically via `prebuild` and `pretest`, and it must be run manually before `npm run dev` or `npx tsc --noEmit` on a fresh checkout.
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 

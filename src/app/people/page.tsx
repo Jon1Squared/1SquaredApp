@@ -1,20 +1,22 @@
 import { PeopleListClient } from '@/components/PeopleListClient';
-import { getAppSnapshot, getCurrentUserId } from '@/server/services';
+import { getAppSnapshot, withPageActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
 export default async function PeoplePage() {
-  const userId = await getCurrentUserId();
-  const snap = getAppSnapshot(userId);
-  return (
-    <PeopleListClient
-      people={snap.people}
-      organisations={snap.organisations}
-      links={snap.links}
-      values={snap.values}
-      employees={snap.employees}
-      enquiries={snap.enquiries}
-      currentUserId={snap.currentUserId}
-    />
-  );
+  return withPageActor(async (actor) => {
+    const snap = getAppSnapshot(actor.personId);
+    return (
+      <PeopleListClient
+        people={snap.people}
+        organisations={snap.organisations}
+        links={snap.links}
+        values={snap.values}
+        employees={snap.employees}
+        enquiries={snap.enquiries}
+        currentUserId={snap.currentUserId}
+        firmName={snap.firm.name}
+      />
+    );
+  });
 }

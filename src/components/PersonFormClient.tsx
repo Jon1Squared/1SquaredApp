@@ -7,10 +7,12 @@ import { ChevronDown, Eye, EyeOff, ShieldAlert } from 'lucide-react';
 import {
   logEmployeeRestrictedAccessAction,
   reassignLeaverOwnedRecordsAction,
+  revealEmployeeSensitiveRecordAction,
   savePersonAction,
 } from '@/app/actions';
 import { findPersonDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
 import {
+  buildSensitiveSubmissionPayload,
   calculateHrRetentionDate,
   calculateProbationEndDate,
   CONTRACT_TYPES,
@@ -28,7 +30,6 @@ import {
    type LeaverOwnedRecordItem,
   maskBankDetails,
   maskNationalInsuranceNumber,
-  resolveEmployeePermissions,
   validateNationalInsuranceNumber,
 } from '@/domain/employment';
 import {
@@ -41,7 +42,6 @@ import { InfoPopover } from './InfoPopover';
 import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import {
-  buildDefaultOrgStructure,
   DEFAULT_LEGAL_ENTITY_ID,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
@@ -95,10 +95,12 @@ interface Props {
   values: ChoiceValue[];
   customFields: CustomFieldDefinition[];
   currentUserId: string;
-  orgStructure?: OrgStructureCatalogue;
+  orgStructure: OrgStructureCatalogue;
   currentUserEmployeePermissions?: EmployeePermission[];
   existingSensitive?: EmployeeSensitiveRecord | null;
   leaverOwnedRecords?: LeaverOwnedRecordItem[];
+  firmPrimaryDomain?: string;
+  firmName?: string;
   embeddedInModal?: boolean;
   nameOnlyMandatory?: boolean;
   modalTitle?: string;
@@ -172,10 +174,12 @@ export function PersonFormClient({
   values,
   customFields,
   currentUserId,
-  orgStructure: orgStructureProp,
+  orgStructure,
   currentUserEmployeePermissions,
   existingSensitive = null,
   leaverOwnedRecords: leaverOwnedRecordsProp,
+  firmPrimaryDomain,
+  firmName = 'Firm',
   embeddedInModal = false,
   nameOnlyMandatory = false,
   modalTitle,
@@ -197,22 +201,15 @@ export function PersonFormClient({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [continueAnyway, setContinueAnyway] = useState(false);
 
-  const orgStructure = useMemo(
-    () => orgStructureProp ?? buildDefaultOrgStructure(),
-    [orgStructureProp],
-  );
-
   const currentUser = useMemo(
     () => allPeople.find((p) => p.id === currentUserId) ?? null,
     [allPeople, currentUserId],
   );
 
-  const userPerms = useMemo<Set<EmployeePermission>>(() => {
-    if (Array.isArray(currentUserEmployeePermissions)) {
-      return new Set(currentUserEmployeePermissions);
-    }
-    return new Set(resolveEmployeePermissions(currentUser, allPeople));
-  }, [currentUserEmployeePermissions, currentUser, allPeople]);
+  const userPerms = useMemo<Set<EmployeePermission>>(
+    () => new Set(currentUserEmployeePermissions ?? []),
+    [currentUserEmployeePermissions],
+  );
 
   const canViewCore = userPerms.has('employee:view_core');
   const canEditCore = userPerms.has('employee:edit_core');
@@ -672,6 +669,7 @@ export function PersonFormClient({
     }),
   );
   const [sensitiveRevealed, setSensitiveRevealed] = useState<boolean>(false);
+  const [sensitiveEdited, setSensitiveEdited] = useState<boolean>(false);
 
   // 8. Systems and access
   const [sysNetworkLogin, setSysNetworkLogin] = useState<string>(
@@ -685,11 +683,13 @@ export function PersonFormClient({
   );
   const [sysFirmWorkEmail, setSysFirmWorkEmail] = useState<string>(
     existingEmp?.systems?.firmWorkEmail ??
-      existing?.emails?.find(
-        (e) =>
-          e.address.toLowerCase().includes('@notalawfirm') ||
-          e.address.toLowerCase().includes('@pembrokevaughan'),
-      )?.address ??
+      existing?.emails?.find((e) => {
+        if (e.firmIssued) return true;
+        const domain = firmPrimaryDomain?.trim().toLowerCase();
+        return Boolean(
+          domain && e.address.toLowerCase().endsWith(`@${domain}`),
+        );
+      })?.address ??
       '',
   );
   const [sysDpTrainingDate, setSysDpTrainingDate] = useState<string>(
@@ -837,11 +837,14 @@ export function PersonFormClient({
     setSensitiveRevealed(true);
     if (existing?.id) {
       startTransition(async () => {
-        await logEmployeeRestrictedAccessAction(
-          existing.id,
-          'sensitive',
-          'Opened sensitive & diversity monitoring section in UI',
-        );
+        const res = await revealEmployeeSensitiveRecordAction(existing.id);
+        if (res.ok && res.sensitive) {
+          setReasonableAdjustments(res.sensitive.reasonableAdjustmentsNeeded ?? '');
+          setDiversityAnswers({
+            ...emptyDiversityAnswers(),
+            ...(res.sensitive.diversity ?? {}),
+          });
+        }
       });
     }
   };
@@ -1441,12 +1444,14 @@ export function PersonFormClient({
         : null;
 
     const sensitivePayload: Partial<EmployeeSensitiveRecord> | null =
-      isEmployee && canSensitive
-        ? {
-            reasonableAdjustmentsNeeded: reasonableAdjustments.trim(),
-            diversity: diversityAnswers,
-          }
-        : null;
+      buildSensitiveSubmissionPayload({
+        isEmployee,
+        canSensitive,
+        sensitiveRevealed,
+        sensitiveEdited,
+        reasonableAdjustments,
+        diversityAnswers,
+      });
 
     const mappedLegacyRoleId = isEmployee
       ? mapRoleTypeToLegacyEmployeeRoleId(empRoleType, employeeRoleId)
@@ -1520,6 +1525,8 @@ export function PersonFormClient({
           worksAtFirm: isEmployee,
           employmentSubmitted: employmentPayload,
           sensitiveSubmitted: sensitivePayload,
+          sensitiveSectionOpened: sensitiveRevealed,
+          sensitiveSectionEdited: sensitiveEdited,
           keepAsContactOnLeave: empKeepAsContactOnLeave,
           initialLink:
             !existing && linkOrgId
@@ -2117,7 +2124,7 @@ export function PersonFormClient({
                           disabled
                           value={
                             isEmployee
-                              ? 'Not A Law Firm LLP (Employee)'
+                              ? `${firmName} (Employee)`
                               : 'Manage on person record'
                           }
                         />
@@ -2472,7 +2479,7 @@ export function PersonFormClient({
                   ) : (
                     <p className="muted" style={{ margin: 0, fontSize: '0.88rem' }}>
                       {isEmployee
-                        ? 'This person is marked as an employee of Not A Law Firm LLP.'
+                        ? `This person is marked as an employee of ${firmName}.`
                         : 'Organisation links can be managed from the person record page.'}
                     </p>
                   )}
@@ -4414,7 +4421,10 @@ export function PersonFormClient({
                                   rows={2}
                                   placeholder="Record any workplace adjustments agreed with the colleague"
                                   value={reasonableAdjustments}
-                                  onChange={(e) => setReasonableAdjustments(e.target.value)}
+                                  onChange={(e) => {
+                                    setReasonableAdjustments(e.target.value);
+                                    setSensitiveEdited(true);
+                                  }}
                                 />
                               </div>
 
@@ -4509,12 +4519,13 @@ export function PersonFormClient({
                                   <select
                                     className="field-select"
                                     value={diversityAnswers[q.key] ?? 'Prefer not to say'}
-                                    onChange={(e) =>
+                                    onChange={(e) => {
                                       setDiversityAnswers({
                                         ...diversityAnswers,
                                         [q.key]: e.target.value,
-                                      })
-                                    }
+                                      });
+                                      setSensitiveEdited(true);
+                                    }}
                                   >
                                     {q.options.map((opt) => (
                                       <option key={opt} value={opt}>
@@ -4586,7 +4597,11 @@ export function PersonFormClient({
                               type="email"
                               className="field-input"
                               disabled={!canEditCore}
-                              placeholder="name@notalawfirm.co.uk"
+                              placeholder={
+                                firmPrimaryDomain
+                                  ? `name@${firmPrimaryDomain}`
+                                  : 'name@firm-domain'
+                              }
                               value={sysFirmWorkEmail}
                               onChange={(e) => setSysFirmWorkEmail(e.target.value)}
                             />

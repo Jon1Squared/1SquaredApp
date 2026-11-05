@@ -2,6 +2,13 @@
 
 All code in this repository must follow the Platform Architecture Standard in `docs/architecture-standard.md`. Every pull request is reviewed independently against that standard. Changes that break these rules will be rejected, so follow them from the start.
 
+You also act as the senior developer and reviewer on this codebase. Be direct: a clear "this breaks rule 4, here is why" is more useful than a polite approval.
+
+Reference documents (read before any architecture decision or review; not loaded automatically):
+- `docs/architecture-standard.md` (the standard, sections 1 to 16)
+- `docs/rbac-reference.md` (role keys, permissions and helpers)
+- `docs/decisions/` (architecture decision records)
+
 ## Architecture rules
 
 1. Never put client-specific code, names or IDs in the core.
@@ -14,6 +21,7 @@ All code in this repository must follow the Platform Architecture Standard in `d
 8. Database migrations must be backward compatible (expand, then contract), reversible, and tracked per tenant.
 9. Any change touching data access needs two-tenant isolation tests, including tampered record IDs and forged tenant claims.
 10. If a request conflicts with these rules, stop and explain before coding.
+11. Every change must create or update the relevant pages in the application's Help & documentation section, in the same pull request.
 
 ## Before you write code
 
@@ -32,9 +40,73 @@ All code in this repository must follow the Platform Architecture Standard in `d
 - Infrastructure changes are Bicep only, in `core/infra/`.
 - Test fixtures use invented data only. Never real client names or data.
 
+### Tenancy and identity
+
+- `TenantContext` is built only from `VerifiedOidcTokenClaims` (`sub`, `tenantId`, `roles`, `mfaVerified`) in `src/platform/tenantRuntime.ts`.
+- The hosted model is database per tenant. Application-level `WHERE tenantId = ...` filters alone are not isolation.
+- Administrative actions require `mfaVerified === true`.
+
+### Roles and permissions
+
+- Use the existing helpers rather than re-implementing checks: `hasEmployeePermission`, `resolveEmployeePermissions`, `filterEmploymentForUser`, `canUserTakeTask`, `canUserReassignTask`, `isUserTeamLeadFor`, `getLeftRailVisibility`.
+- Payroll and sensitive HR reads and writes must write audit entries (`view-payroll`, `view-sensitive`, `update-payroll`, `update-sensitive`).
+- Staff matters (`isStaffMatter`) are restricted to `restrictedAccessUserIds`. Any new query, report, search or export that returns matters must respect this.
+- Hiding a nav item is not access control. Every API endpoint enforces its own permission check.
+- New code compares stable keys (`HomeRoleKey`, `employee_role.*` IDs), never display labels. The label matching in `resolveUserAppRole` is known technical debt: flag it, don't copy it.
+- Roles are defined in the core; clients map their own roles through configuration.
+- Extensions get only the permissions in their manifest (`ExtensionPermission`).
+
 ## Before you open a pull request
 
 - Work on a feature branch and target `develop`. Never commit directly to `main` or `develop`.
 - Add tests (unit, contract and two-tenant isolation tests where relevant) and make sure CI passes.
-- Update documentation and release notes.
+- Update the Help & documentation pages, documentation and release notes.
 - In the PR description, state the change class, how it works in both hosting models, and any migration or rollback steps.
+
+## Working style
+
+- Before writing code for anything non-trivial, state the change class and which layer it belongs in.
+- Prefer the smallest change that meets the need. Don't refactor unrelated code without asking.
+- When reviewing, group findings as Blocking (breaks the standard, or a security or isolation risk), Should fix, and Suggestions, with file and line for each.
+- Use British English in user-facing text and documentation.
+
+## Project layout
+
+- `core/`: the platform core. No client-specific code.
+  - `core/src/api/`: public extension API (`@platform/core-api`). The only thing extensions may import.
+  - `core/src/index.ts`: core entry point (`@platform/core`).
+  - `core/src/tenancy/`: tenant-scoped data layer, repositories, blob storage and per-tenant migrations (`migrations/`).
+  - `core/src/config-engine/`, `core/src/extension-host/`, `core/src/domain/`, `core/src/integrations/`: configuration, extension host, core domain logic and integrations.
+  - `core/schemas/`: JSON schemas for tenant configuration, extension manifests and feature configuration.
+  - `core/infra/`: Bicep infrastructure (`main.bicep`).
+  - `core/tests/`: core unit, RBAC, isolation and integration tests.
+  - `core/docs/`: core documentation.
+- `client-not-a-law-firm/`: invented test client, with `config/` (for example `base.json`) and `extensions/`.
+- `src/`: Next.js host application (transitional, see ADR 0001).
+  - `src/app/`: routes and server actions (`actions.ts`).
+  - `src/components/`: React components.
+  - `src/domain/`: host domain logic and tests (`*.test.ts`, `__tests__/`).
+  - `src/docs/`: in-app Help & documentation (`articles/`, `registry.ts`). Rule 11 changes go here.
+  - `src/platform/`: tenant runtime (`tenantRuntime.ts`).
+  - `src/server/`: services and the transitional JSON store (`store.ts`).
+  - `src/pms/`, `src/seed/`: PMS integration and seed data.
+- `data/`: invented local data (`pembroke-vaughan.json`, `pms/pms-demo.sqlite`, `storage/`).
+- `schemas/`: key dates configuration schema and example (also present in `core/schemas/`).
+- `scripts/`: one-off scripts (`import-pms.ts`).
+- `docs/`: the standard, RBAC reference, ADRs (`decisions/`), guides, runbooks and `release-notes.md`.
+- `.github/workflows/`: Platform CI (`ci.yml`) and Claude review (`claude-review.yml`).
+
+## Commands
+
+Node.js 24 is required (`node:sqlite`). Run everything from the repo root. Tests use Vitest (`vitest.config.ts`) and pick up `src/**/*.test.ts` and `core/tests/**/*.test.ts`.
+
+- Install: `npm ci`
+- Dev server: `npm run dev`
+- Build: `npm run build`
+- Type check: `npx tsc --noEmit`
+- Unit tests: `npm test` (all tests). For one file: `npx vitest run <path>`
+- Isolation tests: `npx vitest run isolation` (runs `core/tests/isolation.test.ts` and `core/tests/key-dates-isolation.test.ts`)
+- Lint: `npm run lint`
+- PMS import: `npm run pms:import`
+
+CI (`.github/workflows/ci.yml`) runs `npm ci`, `npx tsc --noEmit`, `npx vitest run` and `npm run build`.

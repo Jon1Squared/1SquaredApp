@@ -5,6 +5,7 @@
  */
 import { addDays, calculateFirstContactDue, toIsoDate } from '@/domain/dates';
 import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import type {
   Address,
   AuditEntry,
@@ -23,6 +24,7 @@ import type {
   Person,
   PersonOrganisationLink,
   Phone,
+  PmsLink,
   Quote,
   SignOffItem,
   Task,
@@ -185,9 +187,38 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     departmentId: null,
   });
 
+  const includeSyntheticEntraOids = (() => {
+    if (process.env.NODE_ENV === 'production') {
+      return false;
+    }
+    try {
+      const cfg = getActiveTenantConfiguration();
+      if (cfg.environment === 'live') {
+        return false;
+      }
+      if (cfg.featureFlags?.enableDemoMode === true) {
+        return true;
+      }
+      if (cfg.featureFlags?.enableDemoMode === false) {
+        return false;
+      }
+      return process.env.NODE_ENV === 'test';
+    } catch {
+      return process.env.NODE_ENV === 'test';
+    }
+  })();
+
   const people: Person[] = [];
   const addPerson = (id: string, createdOffset: number, fields: Partial<Person>) => {
-    const p = { ...personDefaults(id, createdOffset), ...fields };
+    const defaultEntraOid =
+      includeSyntheticEntraOids && fields.isEmployee && fields.entraObjectId === undefined
+        ? `00000000-0000-4000-8000-${id.replace(/[^0-9]/g, '').padStart(12, '0')}`
+        : undefined;
+    const p = {
+      ...personDefaults(id, createdOffset),
+      ...(defaultEntraOid ? { entraObjectId: defaultEntraOid } : {}),
+      ...fields,
+    };
     people.push(p);
     return p;
   };
@@ -219,8 +250,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       surname,
       jobTitle,
       emails: [
-        email(`${slugFirst}.${slugSurname}@notalawfirm.co.uk`),
-        email(`${slugFirst}.${slugSurname}@notalawfirm.example`, 'Work', false),
+        email(`${slugFirst}.${slugSurname}@notalawfirm.example`),
       ],
       phones: [phone(phoneByOffice[office], 'Direct')],
       addresses: [officeAddr[office]],
@@ -365,8 +395,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const penarth = addOrg(1, -700, {
     legalName: 'Penarth Estates Ltd',
-    companyNumber: '09412736',
-    vatNumber: 'GB 318 4471 26',
+    companyNumber: 'DEMO-000001',
+    vatNumber: 'GB 000 0001 01',
     registeredAddress: addr('Marina House, 14 Ferry Road', 'Penarth', 'CF64 1TQ', 'Registered office', '', 'Vale of Glamorgan'),
     correspondenceAddress: addr('Marina House, 14 Ferry Road', 'Penarth', 'CF64 1TQ', 'Correspondence', '', 'Vale of Glamorgan'),
     website: 'https://penarthestates.example',
@@ -384,7 +414,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     legalName: 'Harbourline Housing Association',
     otherNames: [otherName('Harbourline Homes', 'Trading name', 'org_name_type')],
     organisationTypeId: v('organisation_type', 'Non-profit'),
-    companyNumber: 'RS 30214R',
+    companyNumber: 'DEMO-RS0002',
     registeredAddress: addr('Harbour Court, 2 Stuart Street', 'Cardiff', 'CF10 5BW', 'Registered office'),
     website: 'https://harbourline.example',
     mainPhone: '029 2018 0520',
@@ -404,8 +434,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const brightwater = addOrg(3, -400, {
     legalName: 'Brightwater Care Group Ltd',
-    companyNumber: '11870552',
-    vatNumber: 'GB 274 1180 93',
+    companyNumber: 'DEMO-000003',
+    vatNumber: 'GB 000 0003 03',
     registeredAddress: addr('Brightwater House, 40 Whiteladies Road', 'Bristol', 'BS8 2LG', 'Registered office'),
     website: 'https://brightwatercare.example',
     mainPhone: '0117 496 0730',
@@ -424,7 +454,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const bayCafes = addOrg(4, -520, {
     legalName: 'Bay Cafés Ltd',
     otherNames: [otherName('Bay Cafés', 'Trading name', 'org_name_type')],
-    companyNumber: '10933377',
+    companyNumber: 'DEMO-000004',
     registeredAddress: addr('Unit 6, Mermaid Quay', 'Cardiff', 'CF10 5BZ', 'Registered office'),
     mainPhone: '029 2018 0633',
     generalEmail: 'hello@baycafes.example',
@@ -442,8 +472,8 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const severn = addOrg(5, -650, {
     legalName: 'Severn Holdings plc',
     organisationTypeId: v('organisation_type', 'plc'),
-    companyNumber: '04477120',
-    vatNumber: 'GB 145 7720 18',
+    companyNumber: 'DEMO-000005',
+    vatNumber: 'GB 000 0005 05',
     registeredAddress: addr('Severn House, 1 Temple Quay', 'Bristol', 'BS1 6DZ', 'Registered office'),
     website: 'https://severnholdings.example',
     mainPhone: '0117 496 0810',
@@ -458,7 +488,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const severnLogistics = addOrg(6, -640, {
     legalName: 'Severn Logistics Ltd',
-    companyNumber: '05591834',
+    companyNumber: 'DEMO-000006',
     parentOrganisationId: severn.id,
     registeredAddress: addr('Severn House, 1 Temple Quay', 'Bristol', 'BS1 6DZ', 'Registered office'),
     correspondenceAddress: addr('Avonmouth Distribution Park, Kings Weston Lane', 'Bristol', 'BS11 8AZ', 'Correspondence'),
@@ -472,7 +502,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const severnProperty = addOrg(7, -630, {
     legalName: 'Severn Freight Services Ltd',
     otherNames: [otherName('Severn Property Investments Ltd', 'Former name', 'org_name_type')],
-    companyNumber: '06628419',
+    companyNumber: 'DEMO-000007',
     parentOrganisationId: severn.id,
     registeredAddress: addr('Unit 12, Avonmouth Way', 'Bristol', 'BS11 9HX', 'Registered office'),
     clientReference: 'SEV003',
@@ -483,7 +513,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     legalName: 'Hughes Lloyd Accountants LLP',
     otherNames: [otherName('Hughes Lloyd', 'Trading name', 'org_name_type')],
     organisationTypeId: v('organisation_type', 'LLP'),
-    companyNumber: 'OC398812',
+    companyNumber: 'DEMO-OC0008',
     registeredAddress: addr('7 Windsor Place', 'Cardiff', 'CF10 3BX', 'Registered office'),
     website: 'https://hugheslloyd.example',
     mainPhone: '029 2018 0745',
@@ -524,7 +554,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const cadwyn = addOrg(11, -850, {
     legalName: 'Cadwyn Surveying & Valuation Ltd',
-    companyNumber: '08831240',
+    companyNumber: 'DEMO-000011',
     registeredAddress: addr('Cadwyn House, 55 Cowbridge Road East', 'Cardiff', 'CF11 9AU', 'Registered office'),
     mainPhone: '029 2018 0950',
     relationshipTypeIds: [v('organisation_relationship_type', 'Experts and consultants')],
@@ -536,7 +566,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const castell = addOrg(12, -880, {
     legalName: 'Castell Legal Search Ltd',
     organisationTypeId: v('organisation_type', 'Supplier'),
-    companyNumber: '09177452',
+    companyNumber: 'DEMO-000012',
     registeredAddress: addr('Unit 4, Castell Business Park', 'Caerphilly', 'CF83 3ED', 'Registered office'),
     mainPhone: '029 2018 0977',
     generalEmail: 'orders@castellsearch.example',
@@ -549,7 +579,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const tyGlas = addOrg(13, -20, {
     legalName: 'Tŷ Glas Developments Ltd',
-    companyNumber: '13562077',
+    companyNumber: 'DEMO-000013',
     registeredAddress: addr('Tŷ Glas, 9 Heol y Deri', 'Cardiff', 'CF14 6HF', 'Registered office'),
     website: 'https://tyglas.example',
     mainPhone: '029 2018 0988',
@@ -574,7 +604,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const westernVale = addOrg(14, -45, {
     legalName: 'Western Vale Homes Ltd',
-    companyNumber: '12904415',
+    companyNumber: 'DEMO-000014',
     registeredAddress: addr('Vale Court, 3 Station Road', 'Llantrisant', 'CF72 8EG', 'Registered office'),
     website: 'https://westernvalehomes.example',
     relationshipTypeIds: [v('organisation_relationship_type', 'Prospect')],
@@ -590,7 +620,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
 
   const coastline = addOrg(15, -200, {
     legalName: 'Coastline Outdoor Ltd',
-    companyNumber: '10455893',
+    companyNumber: 'DEMO-000015',
     registeredAddress: addr('Coastline House, 12 Ocean Way', 'Cardiff', 'CF24 5PE', 'Registered office'),
     relationshipTypeIds: [v('organisation_relationship_type', 'Counterparty')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1049,12 +1079,47 @@ export function buildDemoData(today: Date = new Date()): DemoData {
   const msId = (stage: string, milestone: string) =>
     v('matter_stage', `${stage.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '_')} ${milestone}`);
 
+  const seedPracticeAreaOrgAssignment: Record<
+    string,
+    { owningDepartmentId: string; owningTeamId: string }
+  > = {
+    [v('work_type', 'Real Estate & Property')]: {
+      owningDepartmentId: 'DEPT-RE',
+      owningTeamId: 'TPG-RE-COMM',
+    },
+    [v('work_type', 'Corporate & Commercial')]: {
+      owningDepartmentId: 'DEPT-CORP',
+      owningTeamId: 'TPG-CORP-MA',
+    },
+    [v('work_type', 'Banking, Finance & Restructuring')]: {
+      owningDepartmentId: 'DEPT-CORP',
+      owningTeamId: 'TPG-CORP-MA',
+    },
+    [v('work_type', 'Dispute Resolution & Litigation')]: {
+      owningDepartmentId: 'DEPT-DR',
+      owningTeamId: 'TPG-DR-COM',
+    },
+    [v('work_type', 'Private Client, Trusts & Family')]: {
+      owningDepartmentId: 'DEPT-PC',
+      owningTeamId: 'TPG-PC-WILLS',
+    },
+    [v('work_type', 'Employment & HR')]: {
+      owningDepartmentId: 'DEPT-EMP',
+      owningTeamId: 'TPG-EMP-ADV',
+    },
+    [v('work_type', 'Regulatory, Public & Specialist')]: {
+      owningDepartmentId: 'DEPT-RISK',
+      owningTeamId: 'TPG-RISK-AML',
+    },
+  };
+
   const addMatter = (
     createdOffset: number,
     fields: Partial<Matter> & Pick<Matter, 'matterNumber' | 'title' | 'clientId' | 'practiceAreaId' | 'workTypeSubcategoryId'>,
   ): Matter => {
     const id = `M-${String(++mn).padStart(6, '0')}`;
     const createdBy = fields.leadFeeEarnerId || 'P-000001';
+    const seedOrg = seedPracticeAreaOrgAssignment[fields.practiceAreaId];
     const m: Matter = {
       id,
       recordType: 'matter',
@@ -1083,6 +1148,14 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       matterStatusId: fields.matterStatusId ?? v('matter_status', 'Active'),
       practiceAreaId: fields.practiceAreaId,
       workTypeSubcategoryId: fields.workTypeSubcategoryId,
+      owningDepartmentId:
+        fields.owningDepartmentId !== undefined
+          ? fields.owningDepartmentId
+          : seedOrg?.owningDepartmentId,
+      owningTeamId:
+        fields.owningTeamId !== undefined
+          ? fields.owningTeamId
+          : seedOrg?.owningTeamId,
       typeBadge: fields.typeBadge ?? 'Transactional',
       matterTypeId: fields.matterTypeId ?? v('matter_type', 'Transactional'),
       clientTierId: fields.clientTierId ?? null,
@@ -1106,7 +1179,10 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       parties: fields.parties ?? [],
       conflictCheckStatus: fields.conflictCheckStatus ?? 'Clear',
       conflictCheckDate: fields.conflictCheckDate ?? day(createdOffset),
-      conflictClearedById: fields.conflictClearedById ?? 'P-000003',
+      conflictClearedById:
+        fields.conflictClearedById !== undefined
+          ? fields.conflictClearedById
+          : 'P-000003',
       conflictNotes: fields.conflictNotes ?? '',
       amlStatus: fields.amlStatus ?? 'Verified',
       amlCompletedAt: fields.amlCompletedAt ?? day(createdOffset + 1),
@@ -1128,7 +1204,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
       retentionPeriod: fields.retentionPeriod ?? '6 years',
       destructionDueAt: fields.destructionDueAt ?? null,
       fieldValues: fields.fieldValues ?? {},
-      conflictCheckRecord: fields.conflictCheckRecord ?? null,
+      conflictCheckRecord: fields.conflictCheckRecord ?? undefined,
     };
     matters.push(m);
     return m;
@@ -1749,7 +1825,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Gethin',
     surname: 'Lloyd',
     jobTitle: 'Managing Partner, Corporate & Commercial',
-    emails: [email('gethin.lloyd@notalawfirm.co.uk')],
+    emails: [email('gethin.lloyd@notalawfirm.example')],
     phones: [phone('029 2018 0112', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1767,7 +1843,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Aled',
     surname: 'Thomas',
     jobTitle: 'Senior Associate',
-    emails: [email('aled.thomas@notalawfirm.co.uk')],
+    emails: [email('aled.thomas@notalawfirm.example')],
     phones: [phone('029 2018 0113', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1785,7 +1861,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Ffion',
     surname: 'Davies',
     jobTitle: 'Chartered Legal Executive',
-    emails: [email('ffion.davies@notalawfirm.co.uk')],
+    emails: [email('ffion.davies@notalawfirm.example')],
     phones: [phone('029 2018 0116', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1804,7 +1880,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Sarah',
     surname: 'Cole',
     jobTitle: 'Legal Secretary',
-    emails: [email('sarah.cole@notalawfirm.co.uk')],
+    emails: [email('sarah.cole@notalawfirm.example')],
     phones: [phone('029 2018 0121', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1823,7 +1899,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Lowri',
     surname: 'Ellis',
     jobTitle: 'Enquiries Coordinator',
-    emails: [email('lowri.ellis@notalawfirm.co.uk')],
+    emails: [email('lowri.ellis@notalawfirm.example')],
     phones: [phone('029 2018 0122', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1842,7 +1918,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Nia',
     surname: 'Jenkins',
     jobTitle: 'Credit Control Manager',
-    emails: [email('nia.jenkins@notalawfirm.co.uk')],
+    emails: [email('nia.jenkins@notalawfirm.example')],
     phones: [phone('029 2018 0123', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1870,7 +1946,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Felicity',
     surname: 'Fee-Earner',
     jobTitle: 'Solicitor (Demo)',
-    emails: [email('felicity.fee-earner@notalawfirm.co.uk')],
+    emails: [email('felicity.fee-earner@notalawfirm.example')],
     phones: [phone('029 2018 0191', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1890,7 +1966,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Patrick',
     surname: 'Partner',
     jobTitle: 'Partner, Head of Department (Demo)',
-    emails: [email('patrick.partner@notalawfirm.co.uk')],
+    emails: [email('patrick.partner@notalawfirm.example')],
     phones: [phone('029 2018 0192', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1910,7 +1986,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Simone',
     surname: 'Secretary',
     jobTitle: 'Legal Secretary (Demo)',
-    emails: [email('simone.secretary@notalawfirm.co.uk')],
+    emails: [email('simone.secretary@notalawfirm.example')],
     phones: [phone('029 2018 0193', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1931,7 +2007,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Ethel',
     surname: 'Enquiries',
     jobTitle: 'Enquiries Coordinator (Demo)',
-    emails: [email('ethel.enquiries@notalawfirm.co.uk')],
+    emails: [email('ethel.enquiries@notalawfirm.example')],
     phones: [phone('029 2018 0194', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1952,7 +2028,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Frank',
     surname: 'Finance',
     jobTitle: 'Credit Control Manager (Demo)',
-    emails: [email('frank.finance@notalawfirm.co.uk')],
+    emails: [email('frank.finance@notalawfirm.example')],
     phones: [phone('029 2018 0195', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1972,7 +2048,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Rita',
     surname: 'Risk',
     jobTitle: 'MLRO & COLP (Demo)',
-    emails: [email('rita.risk@notalawfirm.co.uk')],
+    emails: [email('rita.risk@notalawfirm.example')],
     phones: [phone('029 2018 0196', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -1992,7 +2068,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Martha',
     surname: 'Managing-Partner',
     jobTitle: 'Managing Partner (Demo)',
-    emails: [email('martha.managing-partner@notalawfirm.co.uk')],
+    emails: [email('martha.managing-partner@notalawfirm.example')],
     phones: [phone('029 2018 0197', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -2012,7 +2088,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     firstName: 'Adam',
     surname: 'Admin',
     jobTitle: 'Systems Administrator (Demo)',
-    emails: [email('adam.admin@notalawfirm.co.uk')],
+    emails: [email('adam.admin@notalawfirm.example')],
     phones: [phone('029 2018 0198', 'Direct')],
     addresses: [addr('3 Bute Dock Chambers, Mount Stuart Square', 'Cardiff', 'CF10 5FQ', 'Work')],
     relationshipStatusId: v('relationship_status', 'Active'),
@@ -2666,7 +2742,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     lastName: 'Tranter',
     callingOnBehalfOf: 'Tranter Haulage Ltd',
     email: 'huw@tranterhaulage.example',
-    phone: '01633 496120',
+    phone: '01632 960120',
     channelId: v('enquiry_channel', 'Web form'),
     sourceId: v('origin', 'Website / Digital Enquiry'),
     practiceAreaId: v('work_type', 'Real Estate & Property'),
@@ -2689,7 +2765,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     lastName: 'Rees-Jones',
     callingOnBehalfOf: 'Gower Renewables Ltd',
     email: 'elin@gowerrenewables.example',
-    phone: '01792 496310',
+    phone: '01632 960310',
     channelId: v('enquiry_channel', 'Referral'),
     sourceId: v('origin', 'Professional Referral — Accountant'),
     referrerPersonId: gareth.id,
@@ -2808,7 +2884,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     prospectName: 'Huw Tranter',
     prospectOrganisationName: 'Tranter Haulage Ltd',
     prospectEmail: 'huw@tranterhaulage.example',
-    prospectPhone: '01633 496120',
+    prospectPhone: '01632 960120',
     linkedEnquiryId: enq11.id,
     convertedMatterId: null,
     practiceAreaId: v('work_type', 'Real Estate & Property'),
@@ -3025,7 +3101,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     linkedPersonId: alun.id,
     prospectName: 'Alun Davies',
     prospectOrganisationName: penarth.legalName,
-    prospectEmail: 'a.davies@penarthestates.co.uk',
+    prospectEmail: 'a.davies@penarthestates.example',
     prospectPhone: '029 2018 0101',
     linkedEnquiryId: null,
     convertedMatterId: null,
@@ -3088,7 +3164,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     prospectName: 'Megan Lloyd-Anne',
     prospectOrganisationName: 'Cambria Foodservice Ltd',
     prospectEmail: 'm.lloyd@cambriafoodservice.example',
-    prospectPhone: '029 2044 8810',
+    prospectPhone: '029 2018 0881',
     linkedEnquiryId: null,
     convertedMatterId: null,
     practiceAreaId: v('work_type', 'Corporate & Commercial'),
@@ -3175,7 +3251,7 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     linkedPersonId: seren.id,
     prospectName: 'Seren Jenkins',
     prospectOrganisationName: castell.legalName,
-    prospectEmail: 's.jenkins@castellhomes.co.uk',
+    prospectEmail: 's.jenkins@castellhomes.example',
     prospectPhone: '029 2018 0220',
     linkedEnquiryId: null,
     convertedMatterId: null,
@@ -3819,7 +3895,10 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     },
   ];
 
-  const homePagesConfig = createDefaultHomePagesConfig(ts(0, 9));
+  const homePagesConfig = createDefaultHomePagesConfig(
+    ts(0, 9),
+    getActiveTenantConfiguration().branding.primaryDomain,
+  );
 
   // Notifications for demo users
   const notifications: NotificationItem[] = [
@@ -4058,4 +4137,84 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     },
   };
 }
+
+export function buildInitialSeedMatterPmsLinks(
+  matters: Matter[],
+  existingLinks: PmsLink[] = [],
+  nowIso: string = new Date().toISOString(),
+): PmsLink[] {
+  const seededMatterLinks: PmsLink[] = [...existingLinks];
+  const addSeedMatterLink = (matterId: string | undefined, pmsCode: string) => {
+    if (!matterId) return;
+    if (
+      seededMatterLinks.some(
+        (l) =>
+          l.entityType === 'matter' &&
+          (l.onesquaredId === matterId || l.pmsCode === pmsCode),
+      )
+    ) {
+      return;
+    }
+    seededMatterLinks.push({
+      id: `PMSL-M-${pmsCode}`,
+      entityType: 'matter',
+      onesquaredId: matterId,
+      pmsCode,
+      matchedBy: 'seed',
+      matchedAt: nowIso,
+    });
+  };
+
+  addSeedMatterLink(
+    matters.find(
+      (m) => m.matterNumber === 'PEN001-0004' || m.matterNumber === 'PEN001-0001',
+    )?.id,
+    'PEN001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PEN001-0002')?.id,
+    'PEN001-0002',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PRI001-0001')?.id,
+    'PRI001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PUG001-0001')?.id,
+    'PUG001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.id === 'M-000007')?.id,
+    'BRI001-0001',
+  );
+  addSeedMatterLink(
+    matters.find(
+      (m) => m.matterNumber === 'BRI001-0003' && m.title.includes('Afon Care'),
+    )?.id,
+    'BRI001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'SEV001-0001')?.id,
+    'SEV001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'PEN001-0003')?.id,
+    'PEN001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'HAR001-0003')?.id,
+    'HAR001-0003',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'BAY001-0001')?.id,
+    'BAY001-0001',
+  );
+  addSeedMatterLink(
+    matters.find((m) => m.matterNumber === 'JON002-0001')?.id,
+    'SJO001-0001',
+  );
+
+  return seededMatterLinks;
+}
+
 

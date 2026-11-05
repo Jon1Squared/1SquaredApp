@@ -1,5 +1,6 @@
 import { HomeClient } from '@/components/HomeClient';
-import { getAppSnapshot, getCurrentUserId } from '@/server/services';
+import { getEntraSession } from '@/server/entraAuth';
+import { getAppSnapshot, withPageActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,9 +9,13 @@ export default async function HomePage({
 }: {
   searchParams?: Promise<{ view?: string; previewRole?: string }>;
 }) {
-  const userId = await getCurrentUserId();
-  const snap = getAppSnapshot(userId);
-  const resolvedParams = searchParams ? await searchParams : {};
+  const entraSession = await getEntraSession();
+  if (!entraSession) {
+    return null;
+  }
+  return withPageActor(async (actor) => {
+    const snap = getAppSnapshot(actor.personId);
+    const resolvedParams = searchParams ? await searchParams : {};
 
   // Allow left-rail Finance / Risk shortcuts or Admin Preview links to override the displayed role view
   const requestedRole = resolvedParams.previewRole || resolvedParams.view;
@@ -52,4 +57,5 @@ export default async function HomePage({
       pmsClientAccountByMatterCode={snap.pmsClientAccountByMatterCode}
     />
   );
+  });
 }

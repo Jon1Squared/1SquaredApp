@@ -9,7 +9,11 @@
  */
 import { formatDate } from './dates';
 import { resolveLabel } from './lists';
-import { normaliseEmail, normaliseOrgName, normaliseRegNumber, normaliseText } from './normalise';
+import { normaliseEmail, normaliseRegNumber, normaliseText } from './normalise';
+import {
+  resolvePersonPermissionSet,
+  type ResolvePersonPermissionsOptions,
+} from './rbac';
 import { resolveUserAppRole } from './tasks';
 import type {
   AppRole,
@@ -25,7 +29,7 @@ import type {
   PmsFieldMappingEntry,
   PmsOutboundCommand,
   PmsOutboundCommandType,
-} from '../../core/src/api/index';
+} from '@platform/core-api';
 import type { PmsClient, PmsFeeEarner, PmsMatter, PmsMatterFinancials } from '@/pms/types';
 
 /** Format GBP currency with £ and 2 decimal places; negatives in brackets. */
@@ -64,16 +68,14 @@ export function formatPmsAsAtLabel(asAtDate: string = '2026-10-16'): string {
 export function canUserViewFinance(
   user: Person | null | undefined,
   teams: Team[],
-  values: ChoiceValue[],
+  values: ChoiceValue[] = [],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
   if (!user) return true;
-  const appRole: AppRole = resolveUserAppRole(user, teams, values);
+  const appRole: AppRole = resolveUserAppRole(user, teams, values, rbacOptions);
   if (appRole === 'call_handler') return false;
-  const empRoleLabel = resolveLabel(values, user.employeeRoleId).toLowerCase();
-  if (empRoleLabel.includes('support staff') && appRole !== 'admin' && appRole !== 'team_lead') {
-    return false;
-  }
-  return true;
+  const perms = resolvePersonPermissionSet(user, { ...rbacOptions, teams });
+  return perms.has('finance:view_matter') || perms.has('finance:view');
 }
 
 export interface PmsSuggestedMatch {
@@ -169,7 +171,7 @@ export function computeAutomaticPmsLinks(
     }
   }
 
-  // 3. Employees <-> PMS fee_earners on work email (or local-part across @notalawfirm.co.uk / @pembrokevaughan.co.uk)
+  // 3. Employees <-> PMS fee_earners on work email (or local-part across configured firm domains)
   for (const emp of people) {
     if (emp.mergedIntoId || !emp.isEmployee) continue;
     if (usedOneSquared.has(`employee:${emp.id}`)) continue;
@@ -317,9 +319,6 @@ export function findOneSquaredIdForPmsCode(
     null
   );
 }
-
-// Keep normaliseOrgName referenced for potential fuzzy matching
-void normaliseOrgName;
 
 /**
  * Extract the 1Squared value for a configured field mapping key across core fields,

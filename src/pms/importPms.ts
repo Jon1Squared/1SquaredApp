@@ -1,6 +1,6 @@
 /**
  * Builds the separate PMS SQLite demo database (`data/pms/pms-demo.sqlite`)
- * from `data/pms/1Squared_PMS_Demo_Data.xlsx` (or `docs/1Squared_PMS_Demo_Data.xlsx`).
+ * from `data/pms/1Squared_PMS_Demo_Data.xlsx`.
  *
  * Imports ONLY the 9 data sheets:
  *   fee_earners, clients, matters, fee_estimates, time_entries,
@@ -22,11 +22,6 @@ export const DEFAULT_XLSX_PATH = path.join(
   'pms',
   '1Squared_PMS_Demo_Data.xlsx',
 );
-export const FALLBACK_XLSX_PATH = path.join(
-  process.cwd(),
-  'docs',
-  '1Squared_PMS_Demo_Data.xlsx',
-);
 export const DEFAULT_PMS_DB_PATH = path.join(process.cwd(), 'data', 'pms', 'pms-demo.sqlite');
 
 export const PMS_AS_AT_DATE = '2026-10-16';
@@ -34,10 +29,7 @@ export const PMS_AS_AT_DATE = '2026-10-16';
 export function resolveWorkbookPath(customPath?: string): string {
   if (customPath && fs.existsSync(customPath)) return customPath;
   if (fs.existsSync(DEFAULT_XLSX_PATH)) return DEFAULT_XLSX_PATH;
-  if (fs.existsSync(FALLBACK_XLSX_PATH)) return FALLBACK_XLSX_PATH;
-  throw new Error(
-    `PMS demo workbook not found at ${DEFAULT_XLSX_PATH} or ${FALLBACK_XLSX_PATH}`,
-  );
+  throw new Error(`PMS demo workbook not found at ${DEFAULT_XLSX_PATH}`);
 }
 
 const SCHEMA_SQL = `
@@ -556,6 +548,7 @@ export interface ImportSummary {
 export function buildPmsDatabaseFromWorkbook(options?: {
   workbookPath?: string;
   dbPath?: string;
+  importedAt?: string;
 }): ImportSummary {
   const workbookPath = resolveWorkbookPath(options?.workbookPath);
   const dbPath = options?.dbPath ?? DEFAULT_PMS_DB_PATH;
@@ -582,7 +575,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
     db.exec(SCHEMA_SQL);
     db.exec('BEGIN TRANSACTION;');
 
-    const importedAt = new Date().toISOString();
+    const importedAt = options?.importedAt ?? `${PMS_AS_AT_DATE}T09:00:00.000Z`;
     const insertExtractInfo = db.prepare(
       `INSERT INTO extract_info (as_at_date, imported_at, source_file) VALUES (?, ?, ?)`,
     );
@@ -609,7 +602,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         r.initials,
         r.first_name,
         r.last_name,
-        r.email,
+        (r.email ?? '').replace(/\.co\.uk$/i, '.example'),
         r.grade,
         r.department,
         parseMoney(r.standard_hourly_rate),
@@ -643,7 +636,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         r.client_name,
         r.client_type,
         r.company_number ?? '',
-        r.email ?? '',
+        (r.email ?? '').replace(/\.co\.uk$/i, '.example'),
         r.phone ?? '',
         r.billing_address ?? '',
         r.postcode ?? '',

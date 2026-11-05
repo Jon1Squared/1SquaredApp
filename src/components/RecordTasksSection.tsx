@@ -6,7 +6,12 @@ import { saveTaskAction, takeTaskAction } from '@/app/actions';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName } from '@/domain/names';
-import { canUserTakeTask, isTaskOpen, isTaskOverdue, tasksForRecord } from '@/domain/tasks';
+import {
+  canUserTakeTask,
+  isTaskOpen,
+  isTaskOverdue,
+  tasksForRecord,
+} from '@/domain/tasks';
 import type {
   ChoiceValue,
   Person,
@@ -34,6 +39,8 @@ interface Props {
   people: Person[];
   values: ChoiceValue[];
   currentUserId: string;
+  canClaimAnyTask?: boolean;
+  canTakeByTaskId?: Record<string, boolean>;
 }
 
 export function RecordTasksSection({
@@ -47,6 +54,8 @@ export function RecordTasksSection({
   people,
   values,
   currentUserId,
+  canClaimAnyTask = false,
+  canTakeByTaskId,
 }: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
@@ -123,7 +132,7 @@ export function RecordTasksSection({
       addPerson(leadEmp.employment.supervisingPartnerId, 'Supervising partner');
     }
     const colpEmp =
-      employees.find((e) => e.id === 'P-000003') ??
+      employees.find((e) => e.employeeRoleId === 'employee_role.risk_and_compliance') ??
       employees.find((e) =>
         (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('colp'),
       );
@@ -201,7 +210,17 @@ export function RecordTasksSection({
     ]
       .filter(Boolean)
       .join(' · ');
-    const canTake = canUserTakeTask(currentUserId, t, teams, people, values);
+    const canTake =
+      canTakeByTaskId && t.id in canTakeByTaskId
+        ? Boolean(canTakeByTaskId[t.id])
+        : canUserTakeTask(
+            currentUserId,
+            t,
+            teams,
+            people,
+            values,
+            canClaimAnyTask ? ['task:claim_any'] : [],
+          );
 
     return (
       <div key={t.id} className="list-row">

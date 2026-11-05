@@ -19,7 +19,6 @@ import {
 } from '@/domain/dates';
 import { enquiryStatusTone, urgencyTone } from '@/domain/badges';
 import {
-  canUserReopenEnquiry,
   enquiryDisplayName,
   failedContactAttemptsCount,
   findEnquiryEntityMatches,
@@ -63,6 +62,8 @@ interface Props {
   enquirySettings: EnquirySettings;
   audit: AuditEntry[];
   currentUserId: string;
+  canReopen?: boolean;
+  canTakeByTaskId?: Record<string, boolean>;
 }
 
 export function EnquiryProfileClient({
@@ -76,6 +77,8 @@ export function EnquiryProfileClient({
   enquirySettings,
   audit,
   currentUserId,
+  canReopen = false,
+  canTakeByTaskId,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -229,7 +232,6 @@ export function EnquiryProfileClient({
   const open = isEnquiryOpen(enquiry);
   const routed = isEnquiryRouted(enquiry);
   const availableActions = getAvailableEnquiryActions(enquiry, currentUserId);
-  const canReopen = canUserReopenEnquiry(currentUserId, enquiry, teams, people, values);
   const suggestNoResponse = shouldSuggestNoResponse(
     enquiry,
     enquirySettings.failedAttemptsBeforeSuggestNoResponse || 3,
@@ -1070,6 +1072,7 @@ export function EnquiryProfileClient({
         people={people}
         values={values}
         currentUserId={currentUserId}
+        canTakeByTaskId={canTakeByTaskId}
       />
 
       {/* AUDIT TRAIL & PRIVACY */}

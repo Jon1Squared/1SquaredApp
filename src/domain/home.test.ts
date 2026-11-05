@@ -1,18 +1,20 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createDefaultHomePagesConfig,
   createDefaultRoleConfigs,
   cyclePanelPlacement,
-  getLeftRailVisibility,
   getPanelPlacement,
   HEADLINE_CARD_DEFINITIONS,
   PANEL_DEFINITIONS,
   resolveEmployeeRoles,
   setRolePanelPlacement,
+  syncHomeRolesWithEmployeeRoles,
 } from './homeConfig';
+import { getLeftRailVisibility } from '../server/rbacRuntime';
 import { getPmsSource } from '@/pms/pmsSource';
 import { primaryEmail } from './names';
 import {
+  addChoiceValue,
   addHomeRole,
   approveSignOff,
   discussSignOff,
@@ -28,6 +30,10 @@ import {
 
 describe('Role-based Home pages & configuration', () => {
   beforeEach(() => {
+    resetAllDemoData('P-000001');
+  });
+
+  afterAll(() => {
     resetAllDemoData('P-000001');
   });
 
@@ -60,32 +66,32 @@ describe('Role-based Home pages & configuration', () => {
     expect(demoUsers.length).toBe(8);
 
     const demoEmails = demoUsers.map((d) => primaryEmail(d));
-    expect(demoEmails).toContain('felicity.fee-earner@notalawfirm.co.uk');
-    expect(demoEmails).toContain('patrick.partner@notalawfirm.co.uk');
-    expect(demoEmails).toContain('simone.secretary@notalawfirm.co.uk');
-    expect(demoEmails).toContain('ethel.enquiries@notalawfirm.co.uk');
-    expect(demoEmails).toContain('frank.finance@notalawfirm.co.uk');
-    expect(demoEmails).toContain('rita.risk@notalawfirm.co.uk');
-    expect(demoEmails).toContain('martha.managing-partner@notalawfirm.co.uk');
-    expect(demoEmails).toContain('adam.admin@notalawfirm.co.uk');
+    expect(demoEmails).toContain('felicity.fee-earner@notalawfirm.example');
+    expect(demoEmails).toContain('patrick.partner@notalawfirm.example');
+    expect(demoEmails).toContain('simone.secretary@notalawfirm.example');
+    expect(demoEmails).toContain('ethel.enquiries@notalawfirm.example');
+    expect(demoEmails).toContain('frank.finance@notalawfirm.example');
+    expect(demoEmails).toContain('rita.risk@notalawfirm.example');
+    expect(demoEmails).toContain('martha.managing-partner@notalawfirm.example');
+    expect(demoEmails).toContain('adam.admin@notalawfirm.example');
 
     // Felicity shows Dafydd Evans (P-000002)
     const felicity = demoUsers.find(
-      (d) => primaryEmail(d) === 'felicity.fee-earner@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'felicity.fee-earner@notalawfirm.example',
     );
     expect(felicity?.showsWorkOfId).toBe('P-000002');
     expect(felicity?.roles).toEqual(['fee_earner']);
 
     // Martha Managing-Partner has both managing_partner and partner roles
     const martha = demoUsers.find(
-      (d) => primaryEmail(d) === 'martha.managing-partner@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'martha.managing-partner@notalawfirm.example',
     );
     expect(martha?.showsWorkOfId).toBeTruthy();
     expect(martha?.roles).toEqual(['managing_partner', 'partner']);
 
     // Adam Admin has all roles
     const adam = demoUsers.find(
-      (d) => primaryEmail(d) === 'adam.admin@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'adam.admin@notalawfirm.example',
     );
     expect(adam?.showsWorkOfId).toBeNull();
     expect(adam?.roles).toContain('admin');
@@ -94,7 +100,7 @@ describe('Role-based Home pages & configuration', () => {
 
     // Simone Secretary supports Rhian Morgan (P-000001) and Dafydd Evans (P-000002)
     const simone = demoUsers.find(
-      (d) => primaryEmail(d) === 'simone.secretary@notalawfirm.co.uk',
+      (d) => primaryEmail(d) === 'simone.secretary@notalawfirm.example',
     );
     expect(simone?.supportsIds).toContain('P-000001');
     expect(simone?.supportsIds).toContain('P-000002');
@@ -169,28 +175,38 @@ describe('Role-based Home pages & configuration', () => {
     const updatedPartner = setRolePanelPlacement(partnerRole, 'aged_debt_by_age_band', 'summary');
     expect(updatedPartner.summaryPanels).toContain('aged_debt_by_age_band');
 
+    const adminUser = getAppSnapshot('P-000001').people.find(
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
+    )!;
     const updatedRoles = defaults.roles.map((r) => (r.key === 'partner' ? updatedPartner : r));
-    saveHomePagesConfig(
+    const saveRes = saveHomePagesConfig(
       {
         roles: updatedRoles,
         firmSettings: { demoMode: true },
       },
-      'P-000001',
+      adminUser.id,
+      { mfaVerified: true },
     );
+    expect(saveRes.ok).toBe(true);
 
     const snapAfterSave = getAppSnapshot('P-000001');
     const savedPartner = snapAfterSave.homePagesConfig.roles.find((r) => r.key === 'partner')!;
     expect(savedPartner.summaryPanels).toContain('aged_debt_by_age_band');
-    expect(snapAfterSave.homePagesConfig.firmSettings.demoMode).toBe(true);
+    // demoMode comes strictly from schema-validated tenant configuration, never from user-writable store state
+    expect(snapAfterSave.homePagesConfig.firmSettings.demoMode).toBe(false);
 
     // Reset to defaults removes 'aged_debt_by_age_band' from Partner summary
-    resetHomePagesConfig('P-000001');
+    const resetRes = resetHomePagesConfig(adminUser.id, { mfaVerified: true });
+    expect(resetRes.ok).toBe(true);
     const snapAfterReset = getAppSnapshot('P-000001');
     const resetPartner = snapAfterReset.homePagesConfig.roles.find((r) => r.key === 'partner')!;
     expect(resetPartner.summaryPanels).not.toContain('aged_debt_by_age_band');
   });
 
   it('allows adding a custom role in Admin › Home pages and assigning roles/supports to employees', () => {
+    const adminUser = getAppSnapshot('P-000001').people.find(
+      (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
+    )!;
     const res = addHomeRole(
       {
         label: 'Business Development',
@@ -198,15 +214,16 @@ describe('Role-based Home pages & configuration', () => {
         purpose: 'Enquiry pipeline, referral sources and key client relationships.',
         copyFromRoleKey: 'partner',
       },
-      'P-000001',
+      adminUser.id,
+      { mfaVerified: true },
     );
     expect(res.ok).toBe(true);
     expect(res.role?.key).toBe('business_development');
-
     const empUpdate = updateEmployeeRolesAndSupports(
       'P-000002',
       { roles: ['fee_earner', 'business_development'] },
-      'P-000001',
+      adminUser.id,
+      { mfaVerified: true },
     );
     expect(empUpdate.ok).toBe(true);
 
@@ -271,5 +288,47 @@ describe('Role-based Home pages & configuration', () => {
     expect(woRes.ok).toBe(true);
     const snapFinal = getAppSnapshot('P-000001');
     expect(snapFinal.signOffs.some((s) => s.matterNumber === 'TGL001-0002')).toBe(true);
+  });
+
+  it('links configurable Home page roles to Employee Roles in the People taxonomy and removes test_role', () => {
+    const snapBefore = getAppSnapshot('P-000001');
+    const synced = syncHomeRolesWithEmployeeRoles(
+      [
+        ...snapBefore.homePagesConfig.roles,
+        {
+          key: 'test_role',
+          label: 'Test Role',
+          shortLabel: 'Test Role',
+          purpose: 'Temporary test role',
+          headlineCardIds: [],
+          primaryPanels: [],
+          summaryPanels: [],
+        },
+      ],
+      snapBefore.values,
+    );
+    expect(synced.some((r) => r.key === 'test_role')).toBe(false);
+    expect(synced.find((r) => r.key === 'fee_earner')?.employeeRoleId).toBe(
+      'employee_role.fee_earner',
+    );
+    expect(synced.find((r) => r.key === 'partner')?.employeeRoleId).toBe(
+      'employee_role.partner',
+    );
+
+    // Adding a new Employee Role in Taxonomy › People › Employee roles automatically creates a configurable Home role
+    addChoiceValue(
+      {
+        listKey: 'employee_role',
+        label: 'Costs Lawyer',
+        description: 'Specialist costs draftsman and litigator',
+      },
+      'P-000001',
+    );
+    const snapAfter = getAppSnapshot('P-000001');
+    const costsRole = snapAfter.homePagesConfig.roles.find(
+      (r) => r.employeeRoleId === 'employee_role.costs_lawyer',
+    );
+    expect(costsRole).toBeDefined();
+    expect(costsRole?.label).toBe('Costs Lawyer');
   });
 });
