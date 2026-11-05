@@ -140,7 +140,20 @@ export function loadActiveDocumentTenantConfig(
     overlay.matterFolderTemplates = override.matterFolderTemplates;
   }
 
-  return loadAndValidateTenantConfig(rawBase, overlay);
+  const validated = loadAndValidateTenantConfig(
+    rawBase,
+    overlay,
+    activeConfig.environment,
+    activeConfig.hostingMode,
+  );
+  return {
+    ...activeConfig,
+    documentStores: validated.documentStores,
+    documentRouting: validated.documentRouting,
+    matterFolderNameTemplate: validated.matterFolderNameTemplate,
+    documentAccess: validated.documentAccess,
+    matterFolderTemplates: validated.matterFolderTemplates,
+  };
 }
 
 /**
@@ -277,7 +290,8 @@ export function ensureRepositorySyncedWithStore(
   if (!globalThis.__oneSquaredDocStoreHydratedTenants) {
     globalThis.__oneSquaredDocStoreHydratedTenants = new Set<string>();
   }
-  if (!globalThis.__oneSquaredDocStoreHydratedTenants.has(ctx.tenantId)) {
+  const hydrationKey = `${ctx.tenantId}:${ctx.postgresDatabaseName}`;
+  if (!globalThis.__oneSquaredDocStoreHydratedTenants.has(hydrationKey)) {
     for (const loc of store.matterDocumentLocations ?? []) {
       if (loc.tenantId === ctx.tenantId) {
         repo.putMatterLocation(ctx, loc);
@@ -303,7 +317,7 @@ export function ensureRepositorySyncedWithStore(
         repo.appendAuditEvent(ctx, audit);
       }
     }
-    globalThis.__oneSquaredDocStoreHydratedTenants.add(ctx.tenantId);
+    globalThis.__oneSquaredDocStoreHydratedTenants.add(hydrationKey);
   }
   return repo;
 }
@@ -2159,7 +2173,12 @@ export function saveAdminDocumentStoreConfiguration(params: {
 
   // Validate against schema before saving
   const rawBase = getActiveTenantRawBaseConfig();
-  const validated = loadAndValidateTenantConfig(rawBase, nextOverride);
+  const validated = loadAndValidateTenantConfig(
+    rawBase,
+    nextOverride,
+    currentConfig.environment,
+    currentConfig.hostingMode,
+  );
 
   // Also validate against tenant org structure & choice list IDs
   const workTypeIds = store.values
