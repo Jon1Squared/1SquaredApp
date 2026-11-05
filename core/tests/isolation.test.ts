@@ -5775,4 +5775,185 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       resetAllDemoData('P-000001');
     }
   });
+
+  it('R187: a fee earner cannot set an open matter conflict check back to In progress or Not started via saveMatterRecord or updateMatterConflictRecord, while submit_referred still records Referred and keeps the matter Active', async () => {
+    resetAllDemoData('P-000001');
+    const store = getStore();
+    const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+    expect(feeEarner).toBeDefined();
+
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const cookie = createSignedEntraSessionCookie({
+      personId: feeEarner.id,
+      tenantId: 'not-a-law-firm',
+      oid: feeEarner.entraObjectId ?? `00000000-0000-4000-8000-${feeEarner.id}`,
+      tid: '11111111-2222-3333-4444-000000000000',
+      sub: feeEarner.id,
+      email: 'fee-earner-r187@notalawfirm.example',
+      displayName: `${feeEarner.firstName} ${feeEarner.surname}`,
+      entraRoles: feeEarner.roles ?? ['fee_earner'],
+      mappedRoles: feeEarner.roles ?? ['fee_earner'],
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: nowIso,
+      expiresAt,
+    });
+    const feeEarnerSession = {
+      personId: feeEarner.id,
+      tenantId: 'not-a-law-firm',
+      tokenRoles: feeEarner.roles ?? ['fee_earner'],
+      expiresAtMs: Date.parse(expiresAt),
+      verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+    };
+
+    const activeStatusId = store.values.find(
+      (v) => v.listKey === 'matter_status' && v.label === 'Active',
+    )!.id;
+
+    try {
+      for (const openMatterId of ['M-000005', 'M-000003'] as const) {
+        const fixtureOpen = structuredClone(
+          getStore().matters.find((m) => m.id === openMatterId)!,
+        );
+        expect(fixtureOpen).toBeDefined();
+        expect(fixtureOpen.matterStatusId).toBe(activeStatusId);
+
+        // Save 1: plain save backfills conflictCheckRecord as Cleared
+        const save1Res = await runWithActiveActorSession(
+          feeEarnerSession,
+          () =>
+            saveMatterRecord(
+              { ...fixtureOpen },
+              { id: openMatterId, byId: feeEarner.id },
+            ),
+        );
+        expect(save1Res.errors).toBeUndefined();
+        expect(save1Res.matter).not.toBeNull();
+        expect(save1Res.matter?.matterStatusId).toBe(activeStatusId);
+        expect(save1Res.matter?.conflictCheckRecord?.status).toBe('Cleared');
+        expect(save1Res.matter?.conflictCheckRecord?.outcomeLabel).toBe(
+          'Cleared by fee earner',
+        );
+        expect(save1Res.matter?.conflictCheckStatus).toBe('Clear');
+
+        // Save 2a: plain save attempting to set conflictCheckRecord.status back to 'In progress' / 'Pending'
+        const saveInProgressRes = await runWithActiveActorSession(
+          feeEarnerSession,
+          () =>
+            saveMatterRecord(
+              {
+                ...save1Res.matter!,
+                conflictCheckRecord: {
+                  ...save1Res.matter!.conflictCheckRecord!,
+                  status: 'In progress',
+                  outcomeLabel: 'Pending',
+                },
+              },
+              { id: openMatterId, byId: feeEarner.id },
+            ),
+        );
+        expect(saveInProgressRes.errors).toBeUndefined();
+        expect(saveInProgressRes.matter).not.toBeNull();
+        expect(saveInProgressRes.matter?.matterStatusId).toBe(activeStatusId);
+        expect(saveInProgressRes.matter?.conflictCheckRecord?.status).toBe(
+          'Cleared',
+        );
+        expect(
+          saveInProgressRes.matter?.conflictCheckRecord?.outcomeLabel,
+        ).toBe('Cleared by fee earner');
+        expect(saveInProgressRes.matter?.conflictCheckStatus).toBe('Clear');
+
+        // Save 2b: repeat with 'Not started' / 'Pending'
+        const saveNotStartedRes = await runWithActiveActorSession(
+          feeEarnerSession,
+          () =>
+            saveMatterRecord(
+              {
+                ...save1Res.matter!,
+                conflictCheckRecord: {
+                  ...save1Res.matter!.conflictCheckRecord!,
+                  status: 'Not started',
+                  outcomeLabel: 'Pending',
+                },
+              },
+              { id: openMatterId, byId: feeEarner.id },
+            ),
+        );
+        expect(saveNotStartedRes.errors).toBeUndefined();
+        expect(saveNotStartedRes.matter).not.toBeNull();
+        expect(saveNotStartedRes.matter?.matterStatusId).toBe(activeStatusId);
+        expect(saveNotStartedRes.matter?.conflictCheckRecord?.status).toBe(
+          'Cleared',
+        );
+        expect(
+          saveNotStartedRes.matter?.conflictCheckRecord?.outcomeLabel,
+        ).toBe('Cleared by fee earner');
+        expect(saveNotStartedRes.matter?.conflictCheckStatus).toBe('Clear');
+
+        // Direct updateMatterConflictRecord attempt to reset to 'In progress' or 'Not started' is refused with errors.conflict
+        for (const resetStatus of ['In progress', 'Not started'] as const) {
+          const updateResetRes = runWithActiveActorSession(
+            feeEarnerSession,
+            () =>
+              updateMatterConflictRecord(
+                openMatterId,
+                {
+                  ...save1Res.matter!.conflictCheckRecord!,
+                  status: resetStatus,
+                  outcomeLabel: 'Pending',
+                },
+                feeEarner.id,
+              ),
+          );
+          expect(updateResetRes.matter).toBeNull();
+          expect(updateResetRes.errors?.conflict).toMatch(
+            /opened.*cannot be reset.*referred to Risk/i,
+          );
+          const storedAfterResetAttempt = getStore().matters.find(
+            (m) => m.id === openMatterId,
+          )!;
+          expect(storedAfterResetAttempt.conflictCheckRecord?.status).toBe(
+            'Cleared',
+          );
+          expect(storedAfterResetAttempt.conflictCheckStatus).toBe('Clear');
+        }
+
+        // submit_referred on the open matter still gives Referred and keeps the matter Active
+        const referRes = await runWithActiveActorSession(
+          feeEarnerSession,
+          () =>
+            saveMatterRecord(
+              {
+                ...save1Res.matter!,
+                conflictCheckRecord: {
+                  ...save1Res.matter!.conflictCheckRecord!,
+                  status: 'Referred',
+                  outcomeLabel: 'Referred to risk for review',
+                },
+              },
+              {
+                id: openMatterId,
+                byId: feeEarner.id,
+                saveMode: 'submit_referred',
+              },
+            ),
+        );
+        expect(referRes.errors).toBeUndefined();
+        expect(referRes.matter).not.toBeNull();
+        expect(referRes.matter?.matterStatusId).toBe(activeStatusId);
+        expect(referRes.matter?.conflictCheckRecord?.status).toBe('Referred');
+        expect(referRes.matter?.conflictCheckRecord?.outcomeLabel).toBe(
+          'Referred to risk for review',
+        );
+        expect(referRes.matter?.conflictCheckStatus).toBe(
+          'Pending conflict review',
+        );
+      }
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
 });
