@@ -16,7 +16,12 @@
 2. Put the new key in Key Vault (secret `ideal-postcodes-api-key`) and in local `.env.local`. Do the same with the Anthropic key (`anthropic-api-key`) in every environment that uses AI extraction.
 3. Turn on GitHub secret scanning and push protection for the repository.
 
-The code can be built and merged before step 1. P5 moves to Completed only once the product owner confirms the old key is revoked.
+Status at 6 November 2026:
+- Step 1 is **deferred** by the product owner while in test, because the existing key has credits. The key is now in local `.env.local` as `IDEAL_POSTCODES_API_KEY`. It must be rotated before real client data, wider repository access, or stage 0 exit.
+- Step 2 is done locally for the Anthropic key. Key Vault follows when an Azure environment exists.
+- Step 3 is done.
+
+The code can be built and merged before step 1. P5 moves to Completed only once the old key is revoked.
 
 ## What is wrong today
 
@@ -90,7 +95,7 @@ The code can be built and merged before step 1. P5 moves to Completed only once 
 3. The AI extraction screen has no key box, any key saved in a browser is removed, and the route ignores keys sent from the browser.
 4. CI runs on `s0-*` pushes and has a secret-scan step. A fake `ak_…` value planted in a scratch branch makes it fail.
 5. `npm run ci` passes.
-6. The old key has been revoked (manual; confirmed by the product owner).
+6. The old key has been revoked (manual; confirmed by the product owner). Deferred while in test; until then P5 stays Partly built.
 
 ## Pull request description must state
 

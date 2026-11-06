@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Backlog | P1 |
-| Decision | D2, [ADR 0025](../../decisions/0025-permission-enforcement-pattern.md). Must be **Accepted** before building, and ADR 0010 accepted alongside it. |
+| Decision | D2, [ADR 0025](../../decisions/0025-permission-enforcement-pattern.md). **Accepted** 6 November 2026, together with ADR 0010 (amended). |
 | Stage plan | `docs/roadmap/stage-0-plan.md`, phase 0A |
 | Branch | `s0-02-permission-guard`, targeting `develop` |
 | Change class | Host security infrastructure; no new feature. Layer: `src/server` and `src/app`. Uses core `requirePermission` and `PERMISSION_REGISTRY` without changing them. |
@@ -59,7 +59,6 @@
   - `CLAUDE.md` and `AGENTS.md`, "Roles and permissions": add "Every server action and API route uses `guardedAction` / `guardedRoute` and has a policy in `src/server/actionPermissions.ts`."
   - `docs/release-notes.md`.
   - `docs/roadmap/feature-list.md`: P1 "What exists" gains the registry, guard and baseline. The status stays Partly built.
-  - ADR 0025 and ADR 0010: status changed to Accepted, once approved.
 
 ## Tests
 
@@ -91,7 +90,7 @@ A fixture-string case proves that the guard catches an unlisted action.
 3. Permissions are resolved with the session's real `mfaVerified` value.
 4. No user-visible behaviour changes, except that the pilot action returns `ActionDenied` instead of throwing.
 5. `npm run ci` passes.
-6. ADR 0025 is accepted, and the developer docs, help article and release notes are updated.
+6. The developer docs, help article and release notes are updated (ADR 0025 is already accepted).
 
 ## Pull request description must state
 

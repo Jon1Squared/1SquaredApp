@@ -1,8 +1,12 @@
 # ADR-0010: Central Permission Registry and Single Permission Resolver
 
 - **Date:** 2026-11-01
-- **Status:** Proposed
+- **Status:** Accepted (6 November 2026, with the amendment below)
 - **Supersedes:** Permission resolution aspects of [ADR-0004](./0004-document-permissions-and-finance-view.md)
+
+## Amendment (6 November 2026)
+
+The permission table in section 1 is the original set of 24 keys. The registry has grown since, for example with document store, document access and `keydate:*` permissions. **`PERMISSION_REGISTRY` in `core/src/domain/rbac/registry.ts` is the authoritative list.** New keys are added there under the rules in this ADR (additive, versioned, with sensitivity and `requiresMfa`), and this table is not updated. Server-side enforcement of these permissions on every action and route follows [ADR 0025](./0025-permission-enforcement-pattern.md).
 
 ## Context
 
