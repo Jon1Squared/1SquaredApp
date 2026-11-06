@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { Manrope, Source_Sans_3 } from 'next/font/google';
+import localFont from 'next/font/local';
 import './globals.css';
 import { AppShell } from '@/components/AppShell';
 import { LoginScreen } from '@/components/LoginScreen';
@@ -8,16 +8,18 @@ import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { getEntraEnvStatus, getEntraSession } from '@/server/entraAuth';
 import { getAppSnapshot, withPageActor } from '@/server/services';
 
-const manrope = Manrope({
+const manrope = localFont({
+  src: './fonts/Manrope-VariableFont_wght.woff2',
   variable: '--font-manrope',
-  subsets: ['latin', 'latin-ext'],
-  weight: ['700', '800'],
+  weight: '700 800',
+  display: 'swap',
 });
 
-const sourceSans = Source_Sans_3({
+const sourceSans = localFont({
+  src: './fonts/SourceSans3-VariableFont_wght.woff2',
   variable: '--font-source-sans',
-  subsets: ['latin', 'latin-ext'],
-  weight: ['400', '600', '700'],
+  weight: '400 700',
+  display: 'swap',
 });
 
 export async function generateMetadata(): Promise<Metadata> {
