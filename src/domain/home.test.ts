@@ -135,11 +135,22 @@ describe('Role-based Home pages & configuration', () => {
     expect(ecRail.finance).toBe(false);
     expect(ecRail.risk).toBe(false);
 
-    // Finance: Enquiries hidden, Finance visible
+    // Finance: Enquiries and Key Dates hidden, Finance visible
     const finRail = getLeftRailVisibility('finance', ['finance']);
     expect(finRail.enquiries).toBe(false);
+    expect(finRail.keyDates).toBe(false);
     expect(finRail.finance).toBe(true);
     expect(finRail.risk).toBe(false);
+
+    // R244: getAppSnapshot keeps leftRailVisibility.keyDates false when the Home role hides key dates
+    // even if the employee (P-000009, Finance, team lead of Accounts) holds keydate:view via team-lead grant
+    const financeSnapshot = getAppSnapshot('P-000009');
+    expect(financeSnapshot.activeViewingRole).toBe('finance');
+    expect(financeSnapshot.leftRailVisibility?.keyDates).toBe(false);
+
+    const feeEarnerSnapshot = getAppSnapshot('P-000002');
+    expect(feeEarnerSnapshot.activeViewingRole).toBe('fee_earner');
+    expect(feeEarnerSnapshot.leftRailVisibility?.keyDates).toBe(true);
 
     // Risk & compliance: Risk visible, Finance hidden
     const riskRail = getLeftRailVisibility('risk_compliance', ['risk_compliance']);

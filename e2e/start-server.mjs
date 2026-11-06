@@ -5,14 +5,13 @@ import path from 'node:path';
 const rootDir = process.cwd();
 const seedFile = path.join(rootDir, 'data', 'seed-not-a-law-firm.json');
 const runtimeFile = path.join(rootDir, 'data', 'runtime-store.json');
-const buildIdFile = path.join(rootDir, '.next', 'BUILD_ID');
 const port = process.env.PLAYWRIGHT_PORT || '3100';
 
 // 1. Reset runtime store from seed data before starting the server
 fs.copyFileSync(seedFile, runtimeFile);
 
-// 2. Build if a production build is not already present
-if (!fs.existsSync(buildIdFile)) {
+// 2. Always run a fresh production build with PLATFORM_ENVIRONMENT=test unless E2E_SKIP_BUILD=1 is set
+if (process.env.E2E_SKIP_BUILD !== '1') {
   execSync('npm run build', {
     cwd: rootDir,
     stdio: 'inherit',
