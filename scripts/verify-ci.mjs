@@ -184,9 +184,8 @@ if (staticFiles.length === 0) {
   console.error('[CI Verify] FAILED: .next/static contains no files after production build.');
   process.exit(1);
 }
-const bundleSecretPattern = new RegExp(
-  '\\b' + 'ak' + '_[A-Za-z0-9]{20,}\\b|' + 'sk-ant' + '-',
-);
+const BUNDLE_SECRET_REGEX_SOURCE = '\\bak_[A-Za-z0-9]{20,}\\b|sk-ant-';
+const bundleSecretPattern = new RegExp(BUNDLE_SECRET_REGEX_SOURCE);
 for (const filePath of staticFiles) {
   const content = fs.readFileSync(filePath, 'utf8');
   if (bundleSecretPattern.test(content)) {

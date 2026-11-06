@@ -9,14 +9,24 @@ import { withAuthenticatedActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
+const SAFE_CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
+
+function resolveSafeCorrelationId(headerValue: string | null): string {
+  const trimmed = headerValue?.trim() ?? '';
+  if (SAFE_CORRELATION_ID_PATTERN.test(trimmed)) {
+    return trimmed;
+  }
+  return `corr-addr-${crypto.randomUUID()}`;
+}
+
 export async function GET(req: Request): Promise<Response> {
   try {
     return await withAuthenticatedActor(async (actor) => {
       const logContext = {
         tenantId: actor.tenantId,
-        correlationId:
-          req.headers.get('x-correlation-id')?.trim() ||
-          `corr-addr-${crypto.randomUUID()}`,
+        correlationId: resolveSafeCorrelationId(
+          req.headers.get('x-correlation-id'),
+        ),
       };
 
       const url = new URL(req.url);

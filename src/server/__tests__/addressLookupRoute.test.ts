@@ -109,6 +109,57 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     expect(clientResult.error).toBe("Address lookup isn't configured");
   });
 
+  it('validates client-supplied x-correlation-id and replaces unsafe or over-long values with corr-addr-… (R237)', async () => {
+    delete process.env.IDEAL_POSTCODES_API_KEY;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // 1. Valid bounded header is preserved
+    resetAddressLookupNotConfiguredWarningForTests();
+    await addressLookupGet(
+      new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA', {
+        headers: { 'x-correlation-id': 'client-req:12345_ok.1' },
+      }),
+    );
+    const validWarn = JSON.parse(String(warnSpy.mock.calls[0]?.[0] ?? '')) as {
+      correlationId?: string;
+    };
+    expect(validWarn.correlationId).toBe('client-req:12345_ok.1');
+
+    // 2. Header containing a newline or unsafe characters is replaced
+    warnSpy.mockClear();
+    resetAddressLookupNotConfiguredWarningForTests();
+    await addressLookupGet({
+      url: 'http://localhost:3000/api/address-lookup?q=CF10%201AA',
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === 'x-correlation-id'
+            ? 'corr-injected\n{"event":"forged"}'
+            : null,
+      },
+    } as unknown as Request);
+    const newlineWarn = JSON.parse(
+      String(warnSpy.mock.calls[0]?.[0] ?? ''),
+    ) as {
+      correlationId?: string;
+    };
+    expect(newlineWarn.correlationId).toMatch(/^corr-addr-[0-9a-f-]{36}$/i);
+
+    // 3. Header longer than 128 characters is replaced
+    warnSpy.mockClear();
+    resetAddressLookupNotConfiguredWarningForTests();
+    await addressLookupGet(
+      new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA', {
+        headers: { 'x-correlation-id': 'a'.repeat(129) },
+      }),
+    );
+    const overlongWarn = JSON.parse(
+      String(warnSpy.mock.calls[0]?.[0] ?? ''),
+    ) as {
+      correlationId?: string;
+    };
+    expect(overlongWarn.correlationId).toMatch(/^corr-addr-[0-9a-f-]{36}$/i);
+  });
+
   it('with the key set and fetch mocked, the outbound URL carries the server key and the response body contains no key', async () => {
     const serverKey = 'test-ideal-postcodes-key-placeholder';
     process.env.IDEAL_POSTCODES_API_KEY = serverKey;
