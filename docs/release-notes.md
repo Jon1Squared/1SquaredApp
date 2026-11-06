@@ -1,5 +1,14 @@
 # 1Squared — Release Notes
 
+## Unreleased — Self-Hosted Local Fonts Build Fix (`fix/build-local-fonts`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Host Build Fix (`src/app/layout.tsx`, `src/app/fonts/`, `src/docs/articles/deployment-and-security.ts`):**
+  - Replaced `next/font/google` (`Manrope` and `Source_Sans_3`) in `src/app/layout.tsx` with `next/font/local` backed by self-hosted variable `.woff2` font files (`src/app/fonts/Manrope-VariableFont_wght.woff2` covering weights 700–800 and `src/app/fonts/SourceSans3-VariableFont_wght.woff2` covering weights 400–700, both covering Latin and Latin Extended including Welsh `ŵ`/`ŷ` glyphs) and their SIL Open Font License files (`OFL-Manrope.txt`, `OFL-SourceSans3.txt`).
+  - Fonts are now served directly from the repository; production builds (`npm run build`) succeed on a clean checkout without `.next/cache` and require no build-time internet access in either hosting model.
+
+---
+
 ## Unreleased — Stage 0 Roadmap and Decisions (`chore/stage-0-plan`)
 
 ### Change Classification (Platform Architecture Standard Section 14)
