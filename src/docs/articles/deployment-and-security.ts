@@ -6,7 +6,7 @@ export const deploymentAndSecurityArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared isolates every firm’s data in a dedicated database, supports firm-specific customisations without forking the core, and runs identically in 1Squared UK Cloud or your firm’s own Azure subscription.',
-  updated: '2026-11-04',
+  updated: '2026-11-06',
   body: `
 Law firms evaluating practice management platforms traditionally face an uncomfortable compromise between **multi-tenant SaaS** (easy upgrades, but your client and matter records sit in a shared database alongside rival firms) and **bespoke on-premises forks** (isolated infrastructure, but every customisation makes upgrades slow, expensive, and fragile).
 
@@ -43,7 +43,7 @@ Whether you choose 1Squared Hosted Cloud or Self-Hosted Azure, **no two law firm
 | **Database Row-Level Security (RLS)** | Every table also carries a \`tenant_id\` column protected by PostgreSQL \`FORCE ROW LEVEL SECURITY\` bound to \`current_setting('app.current_tenant_id')\`. Even if an application query omitted a filter, the database kernel refuses to return rows without a matching session tenant. |
 | **Dedicated File Storage** | Exports and attachments stored by 1Squared reside in a dedicated Azure Blob Storage container per firm, accessed only through short-lived, tenant-scoped SAS tokens. |
 | **Isolated Cache, Search & Background Jobs** | Redis cache keys, search indices, and background queue jobs are mandatorily prefixed with the firm’s \`tenantId\`. Background workers refuse to execute any job payload lacking a verified tenant context. |
-| **Key Vault Secret Isolation** | Secrets, certificates, and encryption keys live in Azure Key Vault with per-tenant RBAC (\`Key Vault Secrets User\`) and support customer-managed keys (CMK). In \`core/infra/main.bicep\`, Key Vault enforces \`networkAcls.defaultAction: 'Deny'\` with \`publicNetworkAccess: 'Enabled'\`, \`bypass: 'AzureServices'\`, and \`virtualNetworkRules\` restricted to the App Service VNet integration subnet (\`snet-appservice\`) so App Service can resolve \`@Microsoft.KeyVault(...)\` secret references at runtime, and \`entraClientId\` and \`entraRedirectUri\` are required deployment parameters with no empty defaults. Secrets are never stored in code or configuration files. |
+| **Key Vault Secret Isolation** | Secrets, certificates, and encryption keys live in Azure Key Vault with per-tenant RBAC (\`Key Vault Secrets User\`) and support customer-managed keys (CMK). In \`core/infra/main.bicep\`, Key Vault enforces \`networkAcls.defaultAction: 'Deny'\` with \`publicNetworkAccess: 'Enabled'\`, \`bypass: 'AzureServices'\`, and \`virtualNetworkRules\` restricted to the App Service VNet integration subnet (\`snet-appservice\`) so App Service can resolve \`@Microsoft.KeyVault(...)\` secret references at runtime (\`entra-client-secret\`, \`auth-secret\`, \`blob-signing-key\`, \`ideal-postcodes-api-key\` for \`IDEAL_POSTCODES_API_KEY\`, and \`anthropic-api-key\` for \`ANTHROPIC_API_KEY\`), and \`entraClientId\` and \`entraRedirectUri\` are required deployment parameters with no empty defaults. Address lookup (\`/api/address-lookup\`) and AI matter extraction (\`/api/matters/extract\`) run strictly on the server; no API keys or secrets are stored in code or configuration files, sent to the browser, or accepted from browser requests. |
 
 ## 3. External document store & SharePoint security
 
@@ -97,7 +97,7 @@ Every change to the 1Squared platform must pass automated **Two-Tenant Isolation
 1. **Cross-Tenant ID Tampering**: The test suite provisions two independent firms (*Tenant A* and *Tenant B*) and verifies that if an authenticated user in *Tenant A* attempts to read, modify, or delete a record belonging to *Tenant B* by guessing or tampering with its ID, the data layer returns \`null\` and blocks the request.
 2. **Forged Claim Rejection**: The test suite injects mismatched or forged \`tenantId\` parameters into request payloads and verifies that the platform ignores user-supplied tenant fields in favour of the verified OIDC token claim.
 3. **Extension Sandbox Enforcement**: Automated tests verify that extensions cannot import core internals, access ungranted permissions, or exceed execution timeouts.
-4. **Environment & Production Build Parity**: Test suites execute under \`PLATFORM_ENVIRONMENT=test\` (pinned in \`vitest.config.ts\`), fixture checks verify RFC 2606 and Ofcom drama data (\`scripts/verify-invented-fixtures.mjs\`), and production builds verify under \`PLATFORM_ENVIRONMENT=live\` so demo-only settings cannot leak into live builds.
+4. **Secret Scanning, Environment & Production Build Parity**: Automated \`gitleaks\` secret scanning (\`.gitleaks.toml\`) blocks hard-coded keys before dependencies install, test suites execute under \`PLATFORM_ENVIRONMENT=test\` (pinned in \`vitest.config.ts\`), fixture checks verify RFC 2606 and Ofcom drama data (\`scripts/verify-invented-fixtures.mjs\`), and production builds verify under \`PLATFORM_ENVIRONMENT=live\` so demo-only settings cannot leak into live builds.
 
 ## 6. Prospective client slide deck blueprint (8 slides)
 

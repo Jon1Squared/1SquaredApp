@@ -2444,23 +2444,28 @@ export async function POST(req: Request) {
 
       const body = (await req.json()) as {
         documents?: IntakeSourceDocument[];
-        apiKeyOverride?: string;
       };
+
+    const rawClaudeKey = (process.env.ANTHROPIC_API_KEY ?? '').trim();
+    const claudeKey =
+      !rawClaudeKey || /^@Microsoft\.KeyVault\(/i.test(rawClaudeKey)
+        ? ''
+        : rawClaudeKey;
+    if (!claudeKey) {
+      return NextResponse.json(
+        {
+          code: 'NOT_CONFIGURED',
+          error: "AI extraction isn't configured. Ask your administrator.",
+          message: "AI extraction isn't configured. Ask your administrator.",
+        },
+        { status: 503 },
+      );
+    }
+
     const documents = body.documents ?? [];
     if (!Array.isArray(documents) || documents.length === 0) {
       return NextResponse.json(
         { error: 'Please upload or paste at least one email or document first.' },
-        { status: 400 },
-      );
-    }
-
-    const claudeKey = (body.apiKeyOverride || process.env.ANTHROPIC_API_KEY || '').trim();
-    if (!claudeKey) {
-      return NextResponse.json(
-        {
-          error:
-            'Claude API key required. Paste your Anthropic API key (sk-ant-...) in the Claude API key box or set ANTHROPIC_API_KEY in .env.local.',
-        },
         { status: 400 },
       );
     }

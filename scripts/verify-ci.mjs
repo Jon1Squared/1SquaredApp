@@ -18,6 +18,56 @@ const liveBuildEnv = {
   PLATFORM_ENVIRONMENT: 'live',
 };
 
+function resolveGitleaksBinary() {
+  const direct = spawnSync(isWin ? 'gitleaks.exe' : 'gitleaks', ['version'], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  if (direct.status === 0) {
+    return isWin ? 'gitleaks.exe' : 'gitleaks';
+  }
+
+  if (isWin && process.env.LOCALAPPDATA) {
+    const wingetLinks = path.join(
+      process.env.LOCALAPPDATA,
+      'Microsoft',
+      'WinGet',
+      'Links',
+      'gitleaks.exe',
+    );
+    if (fs.existsSync(wingetLinks)) {
+      return wingetLinks;
+    }
+
+    const wingetPackagesDir = path.join(
+      process.env.LOCALAPPDATA,
+      'Microsoft',
+      'WinGet',
+      'Packages',
+    );
+    if (fs.existsSync(wingetPackagesDir)) {
+      const entries = fs.readdirSync(wingetPackagesDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name.startsWith('Gitleaks.Gitleaks')) {
+          const candidate = path.join(
+            wingetPackagesDir,
+            entry.name,
+            'gitleaks.exe',
+          );
+          if (fs.existsSync(candidate)) {
+            return candidate;
+          }
+        }
+      }
+    }
+  }
+
+  console.error(
+    '[CI Verify] FAILED: gitleaks is not installed or not on PATH. Install it locally first (for example `winget install gitleaks` on Windows or `brew install gitleaks` on macOS).',
+  );
+  process.exit(1);
+}
+
 function runStep(label, command, args, env = testEnv) {
   console.log(`\n=== [CI Verify] ${label} ===`);
   const useShell = isWin && command.endsWith('.cmd');
@@ -47,17 +97,24 @@ if (nodeMajor !== 24) {
 }
 console.log(`=== [CI Verify] Node.js ${process.versions.node} (matches Platform CI major 24) ===`);
 
-runStep('1/7 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
-runStep('2/7 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
-runStep('3/7 ESLint check', npmCmd, ['run', 'lint'], testEnv);
+const gitleaksBin = resolveGitleaksBinary();
 runStep(
-  '4/7 Verify invented-only fixture data in data/ and src/seed/',
+  '1/8 Secret scan (gitleaks)',
+  gitleaksBin,
+  ['dir', '.', '--config', '.gitleaks.toml', '--redact'],
+  testEnv,
+);
+runStep('2/8 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
+runStep('3/8 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
+runStep('4/8 ESLint check', npmCmd, ['run', 'lint'], testEnv);
+runStep(
+  '5/8 Verify invented-only fixture data in data/ and src/seed/',
   process.execPath,
   ['scripts/verify-invented-fixtures.mjs'],
   testEnv,
 );
 
-console.log('\n=== [CI Verify] 5/7 Verify generated extension registry contains bundled extension ===');
+console.log('\n=== [CI Verify] 6/8 Verify generated extension registry contains bundled extension ===');
 const registryPath = path.resolve(
   process.cwd(),
   'src/platform/generated/extensionRegistry.ts',
@@ -73,13 +130,13 @@ if (!registryContent.includes('extModule_0')) {
 }
 
 runStep(
-  '6/7 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
+  '7/8 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
   npmCmd,
   ['test'],
   testEnv,
 );
 runStep(
-  '7/7 Verify production build (PLATFORM_ENVIRONMENT=live)',
+  '8/8 Verify production build (PLATFORM_ENVIRONMENT=live)',
   npmCmd,
   ['run', 'build'],
   liveBuildEnv,

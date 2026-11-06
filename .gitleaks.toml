@@ -1,0 +1,37 @@
+title = "1Squared Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ideal-postcodes-api-key"
+description = "Ideal Postcodes API key"
+regex = '''\bak_[A-Za-z0-9]{20,}\b'''
+keywords = ["ak_"]
+
+[allowlist]
+description = "Ignore git-ignored local files, build outputs, dependencies, and invented test placeholders"
+paths = [
+  '''(^|[\\/])\.git([\\/]|$)''',
+  '''(^|[\\/])node_modules([\\/]|$)''',
+  '''(^|[\\/])\.next([\\/]|$)''',
+  '''(^|[\\/])out([\\/]|$)''',
+  '''(^|[\\/])build([\\/]|$)''',
+  '''(^|[\\/])coverage([\\/]|$)''',
+  '''(^|[\\/])\.env$''',
+  '''(^|[\\/])\.env\.local$''',
+  '''(^|[\\/])\.env\.(development|production|test|staging)(\.local)?$''',
+  '''(^|[\\/])data[\\/]storage([\\/]|$)''',
+  '''(^|[\\/])data[\\/]runtime-store\.json$''',
+  '''(^|[\\/])src[\\/]platform[\\/]generated([\\/]|$)''',
+]
+regexes = [
+  '''<YOUR_[A-Z0-9_]+>''',
+  '''<GENERATE_WITH_OPENSSL_RAND_BASE64_32>''',
+  '''^\s*ANTHROPIC_API_KEY=$''',
+  '''KD-[A-Z0-9-]+''',
+  '''test-dummy-secret-not-real''',
+  '''test-secret-do-not-use-in-production''',
+  '''test-ideal-postcodes-key-placeholder''',
+  '''test-anthropic-key-placeholder''',
+]
