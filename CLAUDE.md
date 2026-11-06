@@ -22,6 +22,7 @@ Rules:
 - Never attempt the manual setup tasks in section 8 of the stage plan (accounts, tenants, mailboxes, DNS, Azure subscriptions, key rotation). If a slice needs one, list it as a blocker in the slice plan and the PR description, and stop that part of the work.
 - If a slice needs a decision record from section 4 of the stage plan that is not yet Accepted, draft it first and ask for approval before building.
 - If the code contradicts the plan, or a slice's scope looks wrong, say so and propose a change to the plan. Never change the scope silently.
+- Slices are built in work packages (stage plan section 5b): build the package's slices in order, each on its own branch with its own commits and backlog update, then hand the whole package back for one review. Don't push or open pull requests unless asked.
 
 ## Architecture rules
 
