@@ -155,13 +155,12 @@ function buildGuardedActorContext(
  *   service return values and thrown errors pass through unchanged (ADR 0025 §4).
  */
 export async function guardedAction<R>(
-  name: RegisteredActionName | string,
+  name: RegisteredActionName,
   fn: (actor: GuardedActorContext) => Promise<R> | R,
-  policyOverride?: ActionPolicy,
 ): Promise<R> {
-  const policy =
-    policyOverride ??
-    (ACTION_PERMISSIONS as Record<string, ActionPolicy | undefined>)[name];
+  const policy = (
+    ACTION_PERMISSIONS as Record<string, ActionPolicy | undefined>
+  )[name];
   if (!policy) {
     throw new Error(
       `UNREGISTERED_ACTION_POLICY: Server action "${name}" has no entry in ACTION_PERMISSIONS.`,
@@ -248,18 +247,17 @@ export function guardedRoute<
   Ctx = unknown,
   Res extends Response = Response,
 >(
-  name: RegisteredRouteName | string,
+  name: RegisteredRouteName,
   handler: (
     request: Req,
     context: Ctx,
     actor?: GuardedActorContext,
   ) => Promise<Res> | Res,
-  policyOverride?: ActionPolicy,
 ): (request?: Req, context?: Ctx) => Promise<Res> {
   return async (request?: Req, context?: Ctx): Promise<Res> => {
-    const policy =
-      policyOverride ??
-      (ROUTE_PERMISSIONS as Record<string, ActionPolicy | undefined>)[name];
+    const policy = (
+      ROUTE_PERMISSIONS as Record<string, ActionPolicy | undefined>
+    )[name];
     if (!policy) {
       throw new Error(
         `UNREGISTERED_ROUTE_POLICY: Route "${name}" has no entry in ROUTE_PERMISSIONS.`,

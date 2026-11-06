@@ -9,6 +9,7 @@
   - **Session MFA Propagation (`src/domain/rbac.ts`):** Updated `resolvePersonPermissionSet` to read `mfaVerified` from the active verified session when not explicitly passed, so services resolving permissions for the active actor see the session's real MFA state.
   - **Guard & Runtime Tests (`src/server/__tests__/actionPermissionGuard.test.ts`, `src/server/__tests__/authorize.test.ts`):** Added static source-scanning guard tests verifying that every exported action and route handler has a valid policy and wrapper call, and runtime tests covering `UNAUTHENTICATED`, `FORBIDDEN`, `MFA_REQUIRED`, viewing-as non-escalation, forged tenant claims, MFA state propagation, route parameter forwarding, and PII-free denial logs.
   - Updated `docs/rbac-reference.md`, `src/docs/articles/authentication-rbac-and-mfa.ts`, `AGENTS.md`, `CLAUDE.md`, and `docs/roadmap/feature-list.md` (`P1`).
+  - Review fixes R239, R241: rebased onto `s0-01-remove-secrets`, registered and wrapped `GET /api/address-lookup` (11 route handlers across 8 files), removed `policyOverride` from `guardedAction` and `guardedRoute` (narrowing `name` to `RegisteredActionName` / `RegisteredRouteName`), and enforced two-argument wrapper calls in `actionPermissionGuard.test.ts`.
 
 ---
 

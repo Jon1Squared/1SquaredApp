@@ -559,6 +559,10 @@ export const ACTION_PERMISSIONS = {
 export type RegisteredActionName = keyof typeof ACTION_PERMISSIONS;
 
 export const ROUTE_PERMISSIONS = {
+  'GET /api/address-lookup': {
+    kind: 'authenticated',
+    reason: 'Public UK postcode data; reads no tenant data (S0-01).',
+  },
   'GET /api/auth/login': {
     kind: 'public',
     reason: 'Starts the Microsoft Entra ID OIDC PKCE sign-in flow.',

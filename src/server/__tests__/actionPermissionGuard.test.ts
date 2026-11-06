@@ -92,6 +92,122 @@ export function parseExportedRoutesFromFiles(
   return handlers;
 }
 
+export function countWrapperCallArguments(
+  source: string,
+  wrapperName: 'guardedAction' | 'guardedRoute',
+  expectedName: string,
+): number | null {
+  const escaped = expectedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const callRegex = new RegExp(
+    `\\b${wrapperName}\\s*\\(\\s*['"]${escaped}['"]`,
+  );
+  const match = callRegex.exec(source);
+  if (!match) {
+    return null;
+  }
+
+  const openParenOffset = match[0].indexOf('(');
+  const startIdx = match.index + openParenOffset + 1;
+
+  let parenDepth = 1;
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let inString: "'" | '"' | '`' | null = null;
+  let inLineComment = false;
+  let inBlockComment = false;
+  const topLevelCommaIndices: number[] = [];
+  let closeParenIdx = -1;
+
+  for (let i = startIdx; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1];
+
+    if (inLineComment) {
+      if (ch === '\n') {
+        inLineComment = false;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (ch === '\\') {
+        i += 1;
+        continue;
+      }
+      if (ch === inString) {
+        inString = null;
+      }
+      continue;
+    }
+
+    if (ch === '/' && next === '/') {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      inString = ch;
+      continue;
+    }
+
+    if (ch === '(') {
+      parenDepth += 1;
+    } else if (ch === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) {
+        closeParenIdx = i;
+        break;
+      }
+    } else if (ch === '{') {
+      braceDepth += 1;
+    } else if (ch === '}') {
+      braceDepth = Math.max(0, braceDepth - 1);
+    } else if (ch === '[') {
+      bracketDepth += 1;
+    } else if (ch === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+    } else if (
+      ch === ',' &&
+      parenDepth === 1 &&
+      braceDepth === 0 &&
+      bracketDepth === 0
+    ) {
+      topLevelCommaIndices.push(i);
+    }
+  }
+
+  if (closeParenIdx === -1) {
+    return null;
+  }
+
+  const splitPoints = [startIdx, ...topLevelCommaIndices, closeParenIdx];
+  const segments: string[] = [];
+  for (let i = 0; i < splitPoints.length - 1; i += 1) {
+    const segStart = i === 0 ? splitPoints[i] : splitPoints[i] + 1;
+    const segEnd = splitPoints[i + 1];
+    segments.push(source.slice(segStart, segEnd).trim());
+  }
+
+  if (segments.length > 0 && segments[segments.length - 1] === '') {
+    segments.pop();
+  }
+
+  return segments.filter((s) => s.length > 0).length;
+}
+
 export function validateActionAndRouteGuard(params: {
   actionsSource: string;
   routeHandlers: RouteHandlerSourceEntry[];
@@ -102,7 +218,7 @@ export function validateActionAndRouteGuard(params: {
   const errors: string[] = [];
   const actions = parseExportedActionsFromSource(params.actionsSource);
 
-  // 1. Every exported action has a policy and calls guardedAction('<ownName>', ...)
+  // 1. Every exported action has a policy and calls guardedAction('<ownName>', fn) with at most 2 arguments
   const seenActionNames = new Set<string>();
   for (const act of actions) {
     seenActionNames.add(act.name);
@@ -118,6 +234,17 @@ export function validateActionAndRouteGuard(params: {
       errors.push(
         `Action "${act.name}" in src/app/actions.ts does not call guardedAction('${act.name}', ...).`,
       );
+    } else {
+      const argCount = countWrapperCallArguments(
+        act.body,
+        'guardedAction',
+        act.name,
+      );
+      if (argCount !== null && argCount > 2) {
+        errors.push(
+          `Action "${act.name}" in src/app/actions.ts passes ${argCount} arguments to guardedAction; only (name, fn) are allowed.`,
+        );
+      }
     }
   }
 
@@ -130,7 +257,7 @@ export function validateActionAndRouteGuard(params: {
     }
   }
 
-  // 3. Every route handler has a policy and calls guardedRoute('<METHOD> /api/...', ...)
+  // 3. Every route handler has a policy and calls guardedRoute('<METHOD> /api/...', handler) with at most 2 arguments
   const seenRouteKeys = new Set<string>();
   for (const rte of params.routeHandlers) {
     seenRouteKeys.add(rte.routeKey);
@@ -147,6 +274,17 @@ export function validateActionAndRouteGuard(params: {
       errors.push(
         `Route handler "${rte.routeKey}" does not wrap export const ${rte.method} = guardedRoute('${rte.routeKey}', ...).`,
       );
+    } else {
+      const argCount = countWrapperCallArguments(
+        rte.fileContent,
+        'guardedRoute',
+        rte.routeKey,
+      );
+      if (argCount !== null && argCount > 2) {
+        errors.push(
+          `Route handler "${rte.routeKey}" passes ${argCount} arguments to guardedRoute; only (name, handler) are allowed.`,
+        );
+      }
     }
   }
 
@@ -210,10 +348,10 @@ describe('S0-02: server action and API route permission guard (ADR 0025)', () =>
   const routeFiles = walkRouteFiles(API_DIR);
   const routeHandlers = parseExportedRoutesFromFiles(routeFiles);
 
-  it('discovers all 106 exported server actions and all 10 API route handlers, and validates their policies and wrappers', () => {
+  it('discovers all 106 exported server actions and all 11 API route handlers, and validates their policies and wrappers', () => {
     const actions = parseExportedActionsFromSource(actionsSource);
     expect(actions.length).toBe(106);
-    expect(routeHandlers.length).toBe(10);
+    expect(routeHandlers.length).toBe(11);
 
     const validationErrors = validateActionAndRouteGuard({
       actionsSource,
@@ -236,7 +374,7 @@ describe('S0-02: server action and API route permission guard (ADR 0025)', () =>
     expect(MAX_KNOWN_GAPS).toBe(55);
   });
 
-  it('catches an unlisted action, a mismatched guardedAction name, an unregistered permission key, a missing reason, or a gap count breach on fixture strings', () => {
+  it('catches an unlisted action, a mismatched guardedAction name, a 3rd policyOverride argument, an unregistered permission key, a missing reason, or a gap count breach on fixture strings', () => {
     const fixtureActionsSource = `
 export async function listedAction() {
   return guardedAction('listedAction', () => ({ ok: true }));
@@ -248,6 +386,10 @@ export async function unlistedSecretAction() {
 
 export async function wrongWrapperNameAction() {
   return guardedAction('listedAction', () => ({ ok: true }));
+}
+
+export async function overriddenPolicyAction() {
+  return guardedAction('overriddenPolicyAction', () => ({ ok: true }), { kind: 'public', reason: 'bypass' });
 }
 `;
 
@@ -261,6 +403,10 @@ export async function wrongWrapperNameAction() {
         kind: 'authenticated',
         reason: '   ',
       },
+      overriddenPolicyAction: {
+        kind: 'authenticated',
+        reason: 'Valid reason in table.',
+      },
       staleDeletedAction: {
         kind: 'gap',
         slice: 'S0-03',
@@ -269,9 +415,21 @@ export async function wrongWrapperNameAction() {
 
     const errors = validateActionAndRouteGuard({
       actionsSource: fixtureActionsSource,
-      routeHandlers: [],
+      routeHandlers: [
+        {
+          routeKey: 'GET /api/test-override',
+          method: 'GET',
+          routePath: '/api/test-override',
+          fileContent: `export const GET = guardedRoute('GET /api/test-override', async () => new Response(), { kind: 'public', reason: 'bypass' });`,
+        },
+      ],
       actionPolicies: fixturePolicies,
-      routePolicies: {},
+      routePolicies: {
+        'GET /api/test-override': {
+          kind: 'authenticated',
+          reason: 'Valid route reason in table.',
+        },
+      },
       maxKnownGaps: 0,
     });
 
@@ -285,6 +443,12 @@ export async function wrongWrapperNameAction() {
         ),
         expect.stringContaining(
           'Action "wrongWrapperNameAction" in src/app/actions.ts does not call guardedAction(\'wrongWrapperNameAction\'',
+        ),
+        expect.stringContaining(
+          'Action "overriddenPolicyAction" in src/app/actions.ts passes 3 arguments to guardedAction; only (name, fn) are allowed.',
+        ),
+        expect.stringContaining(
+          'Route handler "GET /api/test-override" passes 3 arguments to guardedRoute; only (name, handler) are allowed.',
         ),
         expect.stringContaining(
           'ACTION_PERMISSIONS contains "staleDeletedAction", which is not exported',
