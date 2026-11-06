@@ -22,6 +22,7 @@ import {
   savePersonRecord,
   withAuthenticatedActor,
 } from '@/server/services';
+import { readServerSecret } from '@/server/serverSecrets';
 import { getStore } from '@/server/store';
 
 export const dynamic = 'force-dynamic';
@@ -2446,11 +2447,7 @@ export async function POST(req: Request) {
         documents?: IntakeSourceDocument[];
       };
 
-    const rawClaudeKey = (process.env.ANTHROPIC_API_KEY ?? '').trim();
-    const claudeKey =
-      !rawClaudeKey || /^@Microsoft\.KeyVault\(/i.test(rawClaudeKey)
-        ? ''
-        : rawClaudeKey;
+    const claudeKey = readServerSecret('ANTHROPIC_API_KEY');
     if (!claudeKey) {
       return NextResponse.json(
         {

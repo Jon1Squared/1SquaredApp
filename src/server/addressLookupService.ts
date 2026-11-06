@@ -1,22 +1,36 @@
 import 'server-only';
 
 import type { AddressSuggestion, ResolvedUkAddress } from '@/domain/addressLookup';
+import { readServerSecret } from '@/server/serverSecrets';
 
 export const ADDRESS_LOOKUP_NOT_CONFIGURED_MESSAGE =
   "Address lookup isn't configured";
 
 const IDEAL_POSTCODES_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 
+export interface AddressLookupLogContext {
+  tenantId: string;
+  correlationId: string;
+}
+
 let loggedNotConfiguredWarning = false;
 
-export function getIdealPostcodesApiKey(): string | null {
-  const raw = (process.env.IDEAL_POSTCODES_API_KEY ?? '').trim();
-  if (!raw || /^@Microsoft\.KeyVault\(/i.test(raw)) {
+export function resetAddressLookupNotConfiguredWarningForTests(): void {
+  loggedNotConfiguredWarning = false;
+}
+
+export function getIdealPostcodesApiKey(
+  logContext?: AddressLookupLogContext,
+): string | null {
+  const secret = readServerSecret('IDEAL_POSTCODES_API_KEY');
+  if (!secret) {
     if (!loggedNotConfiguredWarning) {
       loggedNotConfiguredWarning = true;
       console.warn(
         JSON.stringify({
           event: 'address_lookup.not_configured',
+          tenantId: logContext?.tenantId ?? 'unknown',
+          correlationId: logContext?.correlationId ?? 'corr-addr-uncorrelated',
           message:
             'IDEAL_POSTCODES_API_KEY is unset or is an unresolved Key Vault reference.',
         }),
@@ -24,7 +38,7 @@ export function getIdealPostcodesApiKey(): string | null {
     }
     return null;
   }
-  return raw;
+  return secret;
 }
 
 export type AddressSearchServiceResult =
@@ -58,6 +72,7 @@ export type AddressResolveServiceResult =
  */
 export async function searchAddresses(
   query: string,
+  logContext?: AddressLookupLogContext,
 ): Promise<AddressSearchServiceResult> {
   const trimmed = typeof query === 'string' ? query.trim() : '';
   if (trimmed.length < 3) {
@@ -78,7 +93,7 @@ export async function searchAddresses(
     };
   }
 
-  const apiKey = getIdealPostcodesApiKey();
+  const apiKey = getIdealPostcodesApiKey(logContext);
   if (!apiKey) {
     return {
       ok: false,
@@ -156,6 +171,7 @@ export async function searchAddresses(
  */
 export async function resolveAddress(
   id: string,
+  logContext?: AddressLookupLogContext,
 ): Promise<AddressResolveServiceResult> {
   const trimmedId = typeof id === 'string' ? id.trim() : '';
   if (
@@ -173,7 +189,7 @@ export async function resolveAddress(
     };
   }
 
-  const apiKey = getIdealPostcodesApiKey();
+  const apiKey = getIdealPostcodesApiKey(logContext);
   if (!apiKey) {
     return {
       ok: false,

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { AuthorisationError } from '@/domain/rbac';
 import {
@@ -10,18 +11,25 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request): Promise<Response> {
   try {
-    return await withAuthenticatedActor(async () => {
+    return await withAuthenticatedActor(async (actor) => {
+      const logContext = {
+        tenantId: actor.tenantId,
+        correlationId:
+          req.headers.get('x-correlation-id')?.trim() ||
+          `corr-addr-${crypto.randomUUID()}`,
+      };
+
       const url = new URL(req.url);
       const id = url.searchParams.get('id');
       const query = url.searchParams.get('q');
 
       if (id !== null) {
-        const result = await resolveAddress(id);
+        const result = await resolveAddress(id, logContext);
         return NextResponse.json(result.body, { status: result.status });
       }
 
       if (query !== null) {
-        const result = await searchAddresses(query);
+        const result = await searchAddresses(query, logContext);
         return NextResponse.json(result.body, { status: result.status });
       }
 

@@ -121,7 +121,7 @@ Node.js 24 is required (`node:sqlite`). Run everything from the repo root. Tests
 - Unit tests: `npm test` (all tests). For one file: `npx vitest run <path>`
 - Isolation tests: `npx vitest run isolation` (runs `core/tests/isolation.test.ts` and `core/tests/key-dates-isolation.test.ts`)
 - Lint: `npm run lint`
-- Secret scan: `gitleaks dir . --config .gitleaks.toml --redact` (requires `gitleaks` v8 on PATH; install locally with `winget install gitleaks`)
+- Secret scan: `gitleaks dir . --config .gitleaks.toml --redact` (requires `gitleaks` v8 on PATH; install locally with `winget install gitleaks --version 8.30.1`)
 - Full Platform CI check: `npm run ci` (runs every step of `.github/workflows/ci.yml` locally with the same environment variables; requires Node.js 24 and `gitleaks`; stop the dev server first if you also run `npm ci`)
 - PMS import: `npm run pms:import`
 

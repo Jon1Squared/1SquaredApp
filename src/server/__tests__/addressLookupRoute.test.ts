@@ -5,6 +5,7 @@ import {
   resolveAddressSuggestion,
   searchAddressSuggestions,
 } from '@/domain/addressLookup';
+import { resetAddressLookupNotConfiguredWarningForTests } from '@/server/addressLookupService';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
 
 const ORIGINAL_IDEAL_KEY = process.env.IDEAL_POSTCODES_API_KEY;
@@ -30,12 +31,14 @@ const TEST_SESSION = {
 describe('S0-01: /api/address-lookup route and addressLookup client helper', () => {
   beforeEach(() => {
     clearAddressLookupCaches();
+    resetAddressLookupNotConfiguredWarningForTests();
     setTestEntraSessionOverride(TEST_SESSION);
     delete process.env.IDEAL_POSTCODES_API_KEY;
   });
 
   afterEach(() => {
     clearAddressLookupCaches();
+    resetAddressLookupNotConfiguredWarningForTests();
     setTestEntraSessionOverride(null);
     if (ORIGINAL_IDEAL_KEY === undefined) {
       delete process.env.IDEAL_POSTCODES_API_KEY;
@@ -53,8 +56,9 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     expect(res.status).toBe(401);
   });
 
-  it('returns 503 with "Address lookup isn\'t configured" when the key is unset or an unresolved Key Vault reference, and searchAddressSuggestions surfaces that message', async () => {
+  it('returns 503 with "Address lookup isn\'t configured" when the key is unset or an unresolved Key Vault reference, logs tenantId and correlationId without query text (R230), and searchAddressSuggestions surfaces that message', async () => {
     delete process.env.IDEAL_POSTCODES_API_KEY;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const unsetRes = await addressLookupGet(
       new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA'),
@@ -66,6 +70,19 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     };
     expect(unsetJson.code).toBe('NOT_CONFIGURED');
     expect(unsetJson.message).toBe("Address lookup isn't configured");
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const rawWarnPayload = String(warnSpy.mock.calls[0]?.[0] ?? '');
+    expect(rawWarnPayload).not.toContain('CF10');
+    expect(rawWarnPayload).not.toContain('1AA');
+    const parsedWarn = JSON.parse(rawWarnPayload) as {
+      event?: string;
+      tenantId?: string;
+      correlationId?: string;
+    };
+    expect(parsedWarn.event).toBe('address_lookup.not_configured');
+    expect(parsedWarn.tenantId).toBe('not-a-law-firm');
+    expect(parsedWarn.correlationId).toMatch(/^corr-addr-[0-9a-f-]{36}$/i);
 
     process.env.IDEAL_POSTCODES_API_KEY =
       '@Microsoft.KeyVault(SecretUri=https://kv-test.vault.azure.net/secrets/ideal-postcodes-api-key/)';

@@ -87,11 +87,7 @@ export async function searchAddressSuggestions(
       return { suggestions: [], error: msg };
     }
 
-    const rawHits = Array.isArray(data?.suggestions)
-      ? data.suggestions
-      : Array.isArray(data?.result?.hits)
-        ? data.result.hits
-        : [];
+    const rawHits = Array.isArray(data?.suggestions) ? data.suggestions : [];
     const suggestions: AddressSuggestion[] = rawHits
       .filter(
         (h: unknown): h is { id: string; suggestion: string; udprn?: number } =>
