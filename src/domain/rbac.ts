@@ -195,6 +195,7 @@ export interface ActiveActorTokenSession {
   tenantId: string;
   personId: string;
   tokenRoles: readonly string[];
+  mfaVerified?: boolean;
   expiresAtMs: number;
   verifiedSession?: unknown;
 }
@@ -386,13 +387,24 @@ export function resolvePersonPermissionSet(
     ? Boolean(user.supportsIds?.includes(options.targetPersonId))
     : false;
 
-  const mfaVerified =
-    options.mfaVerified ?? options.context?.mfaVerified ?? false;
   const isEvaluatingContextActor =
     !options.context?.actorId || options.context.actorId === user.id;
-  const sessionTokenRoles = isEvaluatingContextActor
-    ? getActiveSessionTokenRolesForPerson(user.id, activeTenantId)
+  const activeActorSession = isEvaluatingContextActor
+    ? getStoredActorSessionForPerson(user.id, activeTenantId)
     : undefined;
+  const sessionMfaVerified =
+    activeActorSession?.mfaVerified ??
+    (
+      activeActorSession?.verifiedSession as
+        | { mfaVerified?: boolean }
+        | undefined
+    )?.mfaVerified;
+  const mfaVerified =
+    options.mfaVerified ??
+    options.context?.mfaVerified ??
+    sessionMfaVerified ??
+    false;
+  const sessionTokenRoles = activeActorSession?.tokenRoles;
   const contextActorRoles =
     options.tokenRoles ??
     (isEvaluatingContextActor
