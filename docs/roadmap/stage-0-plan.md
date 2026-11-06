@@ -62,10 +62,10 @@ Each of these gets a decision record in `docs/decisions/` before the slices that
 |---|---|---|---|---|
 | D1 | Hosting platform. The standard confirms Azure Container Apps, but `main.bicep` provisions a Linux App Service. | **Container Apps**, as the standard says. Replace the App Service resources in Bicep. Use Container Apps jobs for scheduled work (D6) and a separate container app for the PDF converter. Shared platform resources and per-tenant resources become separate Bicep modules. [ADR 0024](../decisions/0024-azure-container-apps-hosting.md). | Decided | S0-13 |
 | D2 | Permission enforcement pattern | One helper (for example `authorize(actor, permission, resource?)`) used by every server action and route, plus a registry mapping each action to its permission. A guard test enumerates exports and fails on any undeclared action. Start the guard with a baseline list of known gaps that can only shrink. [ADR 0025](../decisions/0025-permission-enforcement-pattern.md), building on ADR 0010. | Decided | S0-02 |
-| D3 | Persistence and migration | Postgres database per tenant (already confirmed). One repository per module behind the tenant-scoped data layer. Because there is no live client data yet, cut over module by module with a one-off import from the JSON store, rather than dual-writing. | Proposed | S0-14 |
-| D4 | Finance data delivery | Take finance out of the app snapshot. Load it on demand through gated endpoints, so it never reaches someone without permission. | Proposed | S0-10 |
+| D3 | Persistence and migration | Postgres database per tenant (already confirmed). One repository per module behind the tenant-scoped data layer. Because there is no live client data yet, cut over module by module with a one-off import from the JSON store, rather than dual-writing. Draft: [ADR 0028](../decisions/0028-tenant-database-and-repositories.md). | Proposed | S0-14 |
+| D4 | Finance data delivery | Take finance out of the app snapshot. Load it on demand through gated endpoints, so it never reaches someone without permission. Draft: [ADR 0029](../decisions/0029-finance-data-delivery.md). | Proposed | S0-10 |
 | D5 | Demo mode | **A separate demo tenant** loaded from seed data. Product components never check whether demo data is present. Unbuilt features show an honest empty state or are hidden. Until S0-17 the demo tenant is a separate non-live deployment. [ADR 0026](../decisions/0026-separate-demo-tenant.md). | Decided | S0-11a, S0-11b |
-| D6 | Scheduler | Container Apps jobs on a timer (follows D1), running a tenant-aware job runner that iterates tenants and refuses to run a job without a tenant context, as the standard requires. | Proposed | S0-19 |
+| D6 | Scheduler | Container Apps jobs on a timer (follows D1), running a tenant-aware job runner that iterates tenants and refuses to run a job without a tenant context, as the standard requires. Draft: [ADR 0030](../decisions/0030-tenant-aware-scheduler.md). | Proposed | S0-19 |
 | D7 | Registers engine design | Register types defined as configuration (fields, states, owner, due dates, approval rules, reminder schedule). One core implementation for records, lifecycle, approvals (no self-approval, approver rules), reminders through the scheduler, and audit. Extension points for client-specific steps. Key dates stay separate for now and may move onto the engine later. | Proposed | S0-24 |
 | D8 | Contact personas (Q1) | One person record, linked in different capacities; the capacity is chosen on each matter, and the conflict search follows all of them. | Proposed | S0-21 |
 | D9 | Email delivery | **One `EmailSender` interface in the core, with adapters chosen per tenant in configuration** (credentials as Key Vault references): a dev catcher such as Mailpit for dev and test; Microsoft Graph sending app-only from a 1Squared.co.uk shared mailbox, restricted to that mailbox with Exchange Online RBAC for Applications, for the demo tenant and pilots; Azure Communication Services Email later for the hosted service; and Graph from the firm’s own mailbox for client-hosted installations. Non-live and demo tenants only send to an allow-list of recipients. Teams delivery later. [ADR 0027](../decisions/0027-email-sender-interface.md). | Decided | S0-26 |
@@ -88,7 +88,7 @@ Do these first, in this order (S0-27 sits between S0-02 and S0-03). S0-01 should
 |---|---|---|---|---|
 | S0-01 | Rotate the Ideal Postcodes key; move it to Key Vault behind a server-side lookup route. Read the key only from the server-side setting `IDEAL_POSTCODES_API_KEY`: no `NEXT_PUBLIC_` variant and no fallback in code. Remove `apiKeyOverride` from the extraction route and clear any key saved in browsers; add the two Key Vault references to `main.bicep`; add secret scanning to CI; run CI on `s0-*` branches. | P5 | S | Manual: key rotation |
 | S0-02 | Permission helper, action-to-permission registry and guard test, with a baseline of current gaps. Decision record D2. | P1 | M | – |
-| S0-27 | Role journey smoke tests: Playwright tests that sign in as each built-in role (test-only sign-in) and walk its main journeys, run in CI. The safety net for S0-03 to S0-07. | P10 | M | S0-02 |
+| S0-27 | Role journey smoke tests: Playwright tests that sign in as each built-in role (test-only sign-in: a Playwright global setup mints a signed session cookie with a test-only `AUTH_SECRET`; no sign-in bypass in product code) and walk its main journeys, run in CI. The safety net for S0-03 to S0-07. | P10 | M | S0-02 |
 | S0-03 | Lock down destructive and approval actions: clear and reset data (admin, MFA, non-live only, audited); approve and discuss sign-off (permission, matter access, assigned partner, no self-approval); enquiry anonymisation (permission, retention check always applied). Person save (B11): reject `roles`, `permissionOverrides`, `appRole`, `employeePermissions` and `documentPermissions` in `savePersonRecord` (they change only through the RBAC actions, with self-escalation checks), require create or edit permission for contact changes and `employee:edit_core` whenever employee status, role, department or employment changes. Ethical walls (B12): `canAccessMatter` in the core treats `hasEthicalWall` as restricted even when the allow-list is empty (fail closed), with two-tenant and tampered-ID tests. | P1, B3, B11, B12 | L | S0-02, S0-27 |
 | S0-04 | Admin saves: teams, lists, custom fields, picklists, org structure, enquiry and task settings, matter costs config, party taxonomy, PMS links. All require admin permissions and MFA. | P1, E8 | M | S0-02 |
 | S0-05 | Record actions: task save and reassign; task comments (matter access); enquiry create, edit, assign, close and reopen permissions; merge and party relationships; leaver reassignment (permission, confirm leaver, respect restricted matters, re-permission SharePoint folders, audit each moved record). | P1, B8, B9, item 13 | L | S0-02 |
@@ -166,6 +166,24 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 | B11, B12 | S0-03 |
 | B10 | S0-06 |
 
+## 5b. Work packages
+
+To cut the number of hand-offs, slices are built and reviewed in five work packages. Antigravity builds every slice in a package in order; Claude Code reviews the package once and returns one fix list; Antigravity applies the fixes once.
+
+| Package | Slices, in order | Starts | Blocked by |
+|---|---|---|---|
+| WP1 Safety foundations | S0-01 review fixes (R229–R235), S0-02, S0-27, S0-08 | Now | Nothing |
+| WP2 Lock-down and bug fixes | S0-03, S0-04, S0-05, S0-06, S0-07, S0-09, S0-12 | After WP1 merges | Nothing |
+| WP3 Finance and demo | S0-10, S0-11a, S0-11b | After WP2 | D4 accepted; demo Entra app (manual) |
+| WP4 Make it solid (0B) | S0-13 to S0-20 | After D3 and D6 are accepted | Azure subscription access (manual) |
+| WP5 Make it shared (0C) | S0-21 to S0-26, S0-28, S0-29 | After WP4 | D7, D8, D10, D11; Teams app, mailbox and CFA/DBA caps (manual) |
+
+Rules:
+- Each slice keeps its own branch (`s0-NN-short-name`, from `develop` or stacked on the slice it depends on), its own commits and its own `feature-list.md` update.
+- The builder does not push or open pull requests. It hands the whole package back with a report per slice.
+- After the review fixes, the product owner pushes and opens one pull request per slice, merged in dependency order.
+- S0-11a sits in WP3, with the demo tenant that replaces the demo content, to keep WP1 reviewable.
+
 ## 6. How to run each slice
 
 1. **Plan.** In Claude Code plan mode: “Plan slice S0-NN from `docs/roadmap/stage-0-plan.md`. Read the backlog rows it lists, the architecture standard and CLAUDE.md. List the files you will change, the tests you will add (including two-tenant tests), any decision record needed, and the `feature-list.md` rows to update. Don’t write code yet.”
@@ -174,7 +192,7 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 4. **Review the pull request** with the other tool, against section 14 of the standard and this slice’s acceptance criteria.
 5. **Update** `feature-list.md` statuses (strict Completed bar), the Help & documentation pages and `docs/release-notes.md` in the same pull request, then merge.
 
-Keep one tool editing a branch at a time.
+Keep one tool editing a branch at a time. With work packages (section 5b), steps 1 to 5 run once per package: one prompt, one build of all its slices, one review, one round of fixes, then one pull request per slice.
 
 ## 7. Risks
 
@@ -217,3 +235,4 @@ These need a person with the right admin access. Claude Code should list them in
 | 6 Nov 2026 | Ideal Postcodes key rotation deferred while in test; must happen before real client data, wider repository access or stage 0 exit. GitHub secret scanning and push protection are on. Anthropic key set locally. |
 | 6 Nov 2026 | Stage 0 delivers all of items 28 to 32: added S0-28 (negotiated rates, CFA/DBA) and S0-29 (Teams and digests), widened S0-22 and S0-26, added D10 and D11 and the coverage table (section 5a). |
 | 6 Nov 2026 | Antigravity review of the plan (findings AG1–AG12): added B11 (person save allows self-granted roles) and B12 (ethical walls fail open) to S0-03, which grows to L; widened S0-07 (both conflict searches) and S0-09 (all merge references, no employee merges; now L); two-tenant tests for S0-24 and S0-25; S0-01 and S0-02 slice plans and ADRs 0024 and 0025 corrected. AG12 rejected (the cited references are not in the documents). |
+| 6 Nov 2026 | Work packages (section 5b): five packages, one review each; S0-11a moved to WP3. Draft ADRs 0028 (D3), 0029 (D4) and 0030 (D6) added as Proposed. |
