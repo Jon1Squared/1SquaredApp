@@ -42,6 +42,8 @@ Stage 0 is done when every statement below is true and has been confirmed by re-
 
 **In scope:** items 28 to 32; P1 to P12; bugs B1, B3, B4, B5, B7, B8, B9 and B10.
 
+Stage 0 delivers everything listed under "What’s missing" for items 28 to 32, so that each meets the Completed bar. That includes the work-type behaviour (29), negotiated rates and CFA/DBA (30), and Teams delivery and digests (32). Section 5a maps every stage 0 backlog row to its slices.
+
 **Out of scope:** new features from stages 1 to 5. B2 and B6 stay in stage 1, although B6 becomes simple once matter numbers come from a database sequence (slice S0-16). Undertakings, complaints and the other registers are built on the engine in stages 2 and 3, not here.
 
 **Before the first hosted client (not stage 0; recorded so they aren't lost):**
@@ -67,8 +69,10 @@ Each of these gets a decision record in `docs/decisions/` before the slices that
 | D7 | Registers engine design | Register types defined as configuration (fields, states, owner, due dates, approval rules, reminder schedule). One core implementation for records, lifecycle, approvals (no self-approval, approver rules), reminders through the scheduler, and audit. Extension points for client-specific steps. Key dates stay separate for now and may move onto the engine later. | Proposed | S0-24 |
 | D8 | Contact personas (Q1) | One person record, linked in different capacities; the capacity is chosen on each matter, and the conflict search follows all of them. | Proposed | S0-21 |
 | D9 | Email delivery | **One `EmailSender` interface in the core, with adapters chosen per tenant in configuration** (credentials as Key Vault references): a dev catcher such as Mailpit for dev and test; Microsoft Graph sending app-only from a 1Squared.co.uk shared mailbox, restricted to that mailbox with Exchange Online RBAC for Applications, for the demo tenant and pilots; Azure Communication Services Email later for the hosted service; and Graph from the firm’s own mailbox for client-hosted installations. Non-live and demo tenants only send to an allow-list of recipients. Teams delivery later. [ADR 0027](../decisions/0027-email-sender-interface.md). | Decided | S0-26 |
+| D10 | Fee arrangements model | Rates resolved in a fixed order: matter rate, then client (organisation or client group) rate, then rate card by department and grade. Each negotiated rate has effective dates and an audit trail. CFA and DBA are added as fee bases, with their terms (success fee, uplift, percentage of damages, caps) held as tenant configuration with validation, not hard-coded. Statutory caps are configured defaults, confirmed by the product owner. | Proposed | S0-28 |
+| D11 | Teams delivery and digests | Digests: a scheduled job (D6) builds a per-user daily or weekly summary of unread notifications, tasks due and key dates, and sends it by email (ADR 0027), respecting each user’s preferences. Teams: activity-feed notifications through Microsoft Graph (`TeamsActivity.Send`) from a 1Squared Teams app, using the same per-tenant adapter pattern as email. Amends ADR 0027, point 5 (“Teams delivery later”). | Proposed | S0-29 |
 
-Decision records not yet written (D3, D4, D6, D7 and D8) are drafted in the planning step of the slice that needs them. Each must be approved and merged, as the first commit of that slice's pull request, before the rest of the slice is built.
+Decision records not yet written (D3, D4, D6, D7, D8, D10 and D11) are drafted in the planning step of the slice that needs them. Each must be approved and merged, as the first commit of that slice's pull request, before the rest of the slice is built.
 
 ## 5. Phases and slices
 
@@ -116,18 +120,50 @@ Do these first, in this order (S0-27 sits between S0-02 and S0-03). S0-01 should
 
 ### Phase 0C: Make it shared
 
-S0-24 (the registers engine) can start once S0-17 and S0-19 are done, and can run alongside the other 0C slices. It must be finished before stage 2’s undertakings and stage 3’s registers. S0-26 can be brought forward if real email is needed for demos sooner; the `EmailSender` interface does not depend on the store migration, only notification scheduling does.
+S0-24 (the registers engine) can start once S0-17 and S0-19 are done, and can run alongside the other 0C slices. It must be finished before stage 2’s undertakings and stage 3’s registers. S0-26 can be brought forward if real email is needed for demos sooner; the `EmailSender` interface does not depend on the store migration, only notification scheduling does. S0-28 and S0-29 are needed for items 30 and 32 to meet the Completed bar.
 
 | Slice | Work | Backlog IDs | Size | Depends on |
 |---|---|---|---|---|
 | S0-21 | Clients, contacts and parties: persona decision (D8), merge execution tests, two-tenant test, help. | 28, Q1 | M | S0-16 |
-| S0-22 | Departments and work types: tests and help; add configuration points for work types to drive task templates, risk questions and retention (schema only, used in later stages). | 29 | M | S0-17 |
+| S0-22 | Departments and work types: tests and help. Work types drive (a) automatic task templates, chosen by work type when a matter opens; (b) the risk questionnaire, with questions varying by work type, building on S0-08’s server-side scoring; and (c) retention periods, setting the matter destruction date on closure. All three are tenant configuration with schema entries. Also advances items 4, 9 and 23. | 29 | L | S0-17, S0-08 |
 | S0-23 | Rates and charging: tests for rate lookup, the costs snapshot and quote maths; VAT rate as tenant configuration. | 30 | M | S0-17 |
 | S0-24 | Registers engine in the core (D7), with sign-offs migrated onto it as the first consumer; contract tests for its extension points. | 31 | L | S0-17, S0-19 |
 | S0-25 | Search: server-side search covering documents, quotes and key dates, respecting visibility; tests. | 32 | M | S0-17 |
-| S0-26 | Email and notifications (D9): the `EmailSender` interface and the dev catcher, Graph and placeholder ACS adapters; tenant configuration for provider, sender address, Key Vault references and recipient allow-list (schema change, backward compatible); notification email delivery with user preferences; tests, including that a non-live tenant never sends outside its allow-list. Enquiry and quote sending (items 1 and 3) are wired to it in stage 1. | 32 | M | S0-19 |
+| S0-26 | Email and notifications (D9): the `EmailSender` interface and the dev catcher, Graph and placeholder ACS adapters; tenant configuration for provider, sender address, Key Vault references and recipient allow-list (schema change, backward compatible); notification email delivery with user preferences (channel and frequency per notification type); tests, including that a non-live tenant never sends outside its allow-list. Enquiry and quote sending (items 1 and 3) are wired to it in stage 1. | 32 | M | S0-19 |
+| S0-28 | Negotiated rates and CFA/DBA (D10): client- and matter-level rate overrides with effective dates and precedence; rate lookup uses them in quotes, matter costs and the costs snapshot; CFA and DBA fee bases with configurable, validated terms; tests for every precedence path and fee basis; two-tenant test; help. | 30 | L | S0-23 |
+| S0-29 | Teams delivery and digests (D11): digest job on the scheduler, per-user preferences, digest email through `EmailSender`; Teams activity-feed adapter behind a per-tenant setting (default off); tests, including that a non-live tenant never sends outside its allow-list; help. | 32 | M | S0-26, S0-19 |
 
 **Exit review:** re-run the status review against section 2 of this plan. Stage 1 planning starts when every exit criterion is met.
+
+## 5a. Coverage of the stage 0 backlog
+
+Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new stage 0 backlog row must be added to this table, with a slice, in the same pull request.
+
+| Backlog | Slices |
+|---|---|
+| 28 Clients, contacts and parties | S0-04, S0-05, S0-09, S0-16, S0-21 |
+| 29 Departments and work types | S0-04, S0-17, S0-22 |
+| 30 Rates and charging | S0-04, S0-23, S0-28 |
+| 31 Registers engine | S0-24 |
+| 32 Search and notifications | S0-11a, S0-25, S0-26, S0-29 |
+| P1 Permission checks | S0-02 to S0-07, S0-10 |
+| P2 Off the transitional store | S0-14 to S0-17, S0-20 |
+| P3 PMS per tenant | S0-18 |
+| P4 Finance exposure | S0-10 |
+| P5 Secrets | S0-01 (plus the deferred key rotation) |
+| P6 Demo content | S0-11a, S0-11b |
+| P7 Ignored settings | S0-06, S0-12 |
+| P8 Two-tenant tests | S0-15 to S0-18, S0-21 |
+| P9 Scheduler | S0-19 |
+| P10 Test coverage | S0-27, and tests in every slice |
+| P11 Help articles | Every slice |
+| P12 Infrastructure | S0-13 |
+| B1 | S0-08 |
+| B3 | S0-03 |
+| B4 | S0-09 |
+| B5, B7 | S0-07 |
+| B8, B9 | S0-05 |
+| B10 | S0-06 |
 
 ## 6. How to run each slice
 
@@ -147,6 +183,7 @@ Keep one tool editing a branch at a time.
 | The permission sweep breaks working screens. | The guard test’s baseline list lets gaps close one at a time; add an end-to-end test of each role’s main journeys before S0-03. |
 | Removing demo content weakens sales demos. | The demo tenant (D5) keeps a full demo, from seed data only. |
 | Hosting mismatch (D1) causes rework in infrastructure. | Decide D1 before S0-13. |
+| Adding the work-type, fee arrangement and Teams work (S0-22, S0-28, S0-29) makes stage 0 longer. | These slices are in phase 0C and run in parallel once their dependencies are met. Stage 1 planning (not building) can start during phase 0C. |
 | Stage 0 runs long and delays visible progress. | Phase 0A is short and urgent. If needed, stage 1 planning (not building) can start during phase 0C. |
 
 ## 8. Manual setup tasks (not for Claude Code)
@@ -160,6 +197,8 @@ These need a person with the right admin access. Claude Code should list them in
 | Register an Entra ID app for email, grant Mail.Send through Exchange Online RBAC for Applications scoped to that mailbox only, and do not grant the tenant-wide Graph Mail.Send permission. | S0-26 | Use a certificate or managed identity rather than a client secret if possible; store references in Key Vault. |
 | Add SPF, DKIM and DMARC records for 1Squared.co.uk if they aren’t already in place. | S0-26 | Helps demo emails reach inboxes rather than spam. |
 | Confirm Azure subscription access for creating the Container Apps environment and database. | S0-13 | |
+| Create and approve the 1Squared Teams app (manifest upload by a Teams administrator) and grant `TeamsActivity.Send` to its app registration. | S0-29 | |
+| Confirm the CFA and DBA cap values to use as configuration defaults. | S0-28 | A product owner decision, not legal advice. |
 | Turn on GitHub secret scanning and push protection for the repository. | S0-01 | **Done** (confirmed 6 November 2026). Complements the CI scan. |
 | Put `ANTHROPIC_API_KEY` in Key Vault (and local `.env.local`) for environments that use AI extraction. | S0-01 | **Local `.env.local` done** (6 November 2026). Key Vault follows when an Azure environment exists (S0-13). The browser key box is removed. |
 | Create the demo deployment's Entra app registration and test users for each role. | S0-11b, S0-27 | Invented names only. |
@@ -175,3 +214,4 @@ These need a person with the right admin access. Claude Code should list them in
 | 6 Nov 2026 | Plan v3: checked against the code at `a0a5534`. ADRs 0024 (D1), 0026 (D5) and 0027 (D9) accepted; ADR 0025 (D2) proposed. Added S0-27, split S0-11 into S0-11a and S0-11b, recorded the pre-go-live items, added the AI data-flow record to S0-06, and set the rule that the Ideal Postcodes key is read only from server-side `IDEAL_POSTCODES_API_KEY`. |
 | 6 Nov 2026 | D2 decided: ADR 0025 accepted, and ADR 0010 accepted with an amendment (the registry file is the authoritative permission list). |
 | 6 Nov 2026 | Ideal Postcodes key rotation deferred while in test; must happen before real client data, wider repository access or stage 0 exit. GitHub secret scanning and push protection are on. Anthropic key set locally. |
+| 6 Nov 2026 | Stage 0 delivers all of items 28 to 32: added S0-28 (negotiated rates, CFA/DBA) and S0-29 (Teams and digests), widened S0-22 and S0-26, added D10 and D11 and the coverage table (section 5a). |
