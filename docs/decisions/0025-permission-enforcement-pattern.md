@@ -7,7 +7,7 @@
 
 ## Context
 
-The host application has 106 exported server actions, all in `src/app/actions.ts`, and 7 API route handlers under `src/app/api/`. At commit `a0a5534`:
+The host application has 106 exported server actions, all in `src/app/actions.ts`, and 10 API route handlers in 7 route files under `src/app/api/`. At commit `a0a5534`:
 
 - **Every action checks only that someone is signed in** (`withActorId` or `withAuthenticatedActor`). Where a permission check exists, it is inside the service the action calls. The checks take several forms: core `requirePermission`, `hasPersonPermission` / `requirePersonPermission`, `hasDocumentPermission`, `hasKeyDatePermission` and `canPersonAccessMatter`.
 - **53 actions call services that check no permission at all.** These include clearing all data, approving sign-offs, merging records and saving Admin settings. This is backlog gap P1.
@@ -37,8 +37,9 @@ The host application has 106 exported server actions, all in `src/app/actions.ts
 3. **Resource checks stay next to the data.** Matter access, the assigned partner and the no-self-approval rule all need the record, so they stay in the services. Services use one helper, `authorizeResource(permissions, resource)`, which wraps core `canAccessMatter` and is extended per record type. The action policy is the first gate and the resource check is the second.
 
 4. **One denial shape.**
-   - Actions return `ActionDenied = { ok: false, denied: true, code: 'UNAUTHENTICATED' | 'FORBIDDEN' | 'MFA_REQUIRED', message }` and never throw for a denial. Next.js hides thrown error messages in production builds.
-   - Routes return 401 or 403 with `{ error, code }`.
+   - Actions return `ActionDenied = { ok: false, denied: true, code: 'UNAUTHENTICATED' | 'FORBIDDEN' | 'MFA_REQUIRED', message, error }`, where `error` is `` `${code}: ${message}` ``, so screens that already read `error` keep working. They never throw for a denial, because Next.js hides thrown error messages in production builds.
+   - Routes return 401 or 403 with `{ error, code }`. `guardedRoute` passes the Next.js route context (`params`) to the handler.
+   - **During the transition**, the wrapper returns `ActionDenied` only for policies it enforces itself (`enforcedBy: 'action'`). For `enforcedBy: 'service'`, `authenticated` and `gap` policies, service results and thrown errors, and existing route error responses, pass through unchanged. Each slice that switches an entry to `enforcedBy: 'action'` updates the affected screens and tests.
    - Client components check with `isActionDenied(result)` and show the message.
    - Services raise `AuthorisationError`, and the wrapper converts it to `ActionDenied`.
    - Every denial is logged with the correlation ID, tenant ID, action name and code. It never includes personal data.

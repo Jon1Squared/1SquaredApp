@@ -40,11 +40,11 @@ The code can be built and merged before step 1. P5 moves to Completed only once 
   - It never logs the query or the address.
 - `src/app/api/address-lookup/route.ts` (new):
   - `GET ?q=` returns suggestions, and `GET ?id=` returns a resolved address.
-  - It returns 401 when not signed in, and 503 `{ code: 'NOT_CONFIGURED' }` when there is no key.
+  - It returns 401 when not signed in, and 503 `{ code: 'NOT_CONFIGURED', message: "Address lookup isn't configured" }` when there is no key. The browser code already shows `data.message`, so the forms display that text (review finding AG7).
   - It uses `withAuthenticatedActor`, or `guardedRoute` with an `authenticated` policy if S0-02 has merged first (reason: public postcode data, no tenant data).
 - `src/domain/addressLookup.ts`:
   - Delete `DEFAULT_API_KEY` and the `NEXT_PUBLIC_` read.
-  - Both exported functions call `/api/address-lookup` and keep their signatures and browser caches.
+  - Both exported functions call `/api/address-lookup` and keep their signatures and browser caches. A 503 or `code: 'NOT_CONFIGURED'` maps to the error "Address lookup isn't configured".
   - `EnquiryFormClient.tsx` and `FormControls.tsx` need no changes.
 
 **AI extraction**
@@ -81,7 +81,7 @@ The code can be built and merged before step 1. P5 moves to Completed only once 
 
 - `src/server/__tests__/addressLookupRoute.test.ts`:
   - returns 401 without a session (`setTestEntraSessionOverride(undefined)`)
-  - returns 503 when the key is unset, or is an unresolved Key Vault reference
+  - returns 503 with the "Address lookup isn't configured" message when the key is unset, or is an unresolved Key Vault reference, and `searchAddressSuggestions` surfaces that message
   - with the key set and `fetch` mocked, the outbound URL carries the server key and the response body contains no key
   - a query that is too short returns an empty list without calling `fetch`
 - `core/tests/entra-auth.test.ts`: an extraction POST with `apiKeyOverride` and no server key returns 503, and `fetch` to `api.anthropic.com` is never called.

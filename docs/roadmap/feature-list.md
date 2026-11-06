@@ -4,7 +4,7 @@ This is the master backlog for 1Squared. The Word document is a copy for sharing
 
 ## How to maintain this file (people and AI tools)
 
-- **Never renumber.** IDs (1–45, F1–F18, P1–P12, B1–B10, E1–E9, Q1–Q2) are stable references used in plans, branches and pull requests. New items take the next free number in their series.
+- **Never renumber.** IDs (1–45, F1–F18, P1–P12, B1–B12, E1–E9, Q1–Q2) are stable references used in plans, branches and pull requests. New items take the next free number in their series.
 - **Update statuses in the same pull request** that changes the code, and add the PR number to the item's "What exists" text where useful.
 - **Use the strict bar.** Completed means the item works end to end, with server-side permission checks, tests (including two-tenant tests where it touches data) and a help article. Otherwise use Partly built.
 - **Statuses:** Completed · Partly built · Built differently (exists in another form, often read-only from the PMS) · Not started · Suggested (future idea, not agreed) · Open (questions).
@@ -81,7 +81,7 @@ This is the master backlog for 1Squared. The Word document is a copy for sharing
 
 | No. | Item | Description | What exists | What’s missing | Stage | Status |
 |---|---|---|---|---|---|---|
-| 33 | Information barriers | Restricting access to a client or matter beyond staff matters, set from a conflict decision and recorded with who approved it. | Staff matters and ethical walls through allow-lists, lift with permission, visibility filtering everywhere, redacted conflict hits, and barriers on generated documents and SharePoint matter folders (tested, ADR 0014). | Ethical wall flag not checked directly. Manual wall screen. Barriers on people, organisations and non-matter documents. Four firm-wide finance roll-ups not filtered. | 1 | Partly built |
+| 33 | Information barriers | Restricting access to a client or matter beyond staff matters, set from a conflict decision and recorded with who approved it. | Staff matters and ethical walls through allow-lists, lift with permission, visibility filtering everywhere, redacted conflict hits, and barriers on generated documents and SharePoint matter folders (tested, ADR 0014). | Ethical wall flag not checked directly (fixed in stage 0 as B12, S0-03). Manual wall screen. Barriers on people, organisations and non-matter documents. Four firm-wide finance roll-ups not filtered. | 1 | Partly built |
 | 34 | Intake integrations | ID verification and sanctions screening provider, e-signature for engagement letters, and payment links for money on account. | UK address lookup (Ideal Postcodes). | ID verification, sanctions screening, e-signature, payments, live Companies House (currently invents results). Remove the hard-coded API key. | 1 | Partly built |
 | 35 | Data migration and import | Loading clients, matters, key dates, undertakings and documents from a firm’s current system, with reconciliation reports. | Demo PMS workbook import, per-tenant schema migrations, PMS record linking. | User-facing import of clients, contacts and matters with mapping, validation, reconciliation and rollback. | 5 | Built differently |
 
@@ -100,6 +100,8 @@ Fix the High items in stage 0, before any real client data goes in.
 | B10 | AI extraction creates employees | E7 | The extraction route can create employee records (including with a Partner job title) with only a sign-in check. Job titles feed role resolution. | Never create employees from extraction; require create permissions for people and organisations. | High | 0 | Not started |
 | B2 | Client Care Letter not marked as drafted | 5 | The seeded template sets the document type to client_care, but the screen checks for “Client Care Letter”, so the engagement letter is never marked drafted. | Use one shared document type constant; add a test. | Medium | 1 | Not started |
 | B6 | Matter numbers can be reissued | 4 | Numbers are worked out from existing matters, not a counter. If an opening is vetoed or the latest matter is deleted, its number is used again. | Use a per-tenant counter that never goes backwards. | Medium | 1 | Not started |
+| B11 | Person save allows self-granted roles | 28, P1 | Saving a person without employment data runs no permission check, and copies roles, permission overrides, app role and legacy permission fields straight from the request. Any signed-in user can create or edit contacts, or make themselves an administrator. | Reject role and override fields in the person save (they change only through the RBAC actions); require contact and employee permissions; add tests. | High | 0 | Not started |
+| B12 | Ethical walls fail open | 33 | `canAccessMatter` ignores `hasEthicalWall`. A walled matter whose allow-list is empty (for example, before a fee earner is set) is open to every user. | Treat `hasEthicalWall` as restricted in the core check; add two-tenant and tampered-ID tests. | High | 0 | Not started |
 | B8 | Reopen permission not enforced | 1 | The reopen check is used to show the button but not called when reopening on the server. | Call it in the reopen service. | Medium | 0 | Not started |
 
 ## Platform-wide gaps

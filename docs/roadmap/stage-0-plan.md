@@ -18,7 +18,7 @@ Stage 0 adds no new user-facing features, apart from the registers engine and th
 Stage 0 is done when every statement below is true and has been confirmed by re-running the status review.
 
 **Safe**
-- All High bugs (B1, B3, B4, B5, B7, B9, B10) and B8 are fixed, each with a regression test.
+- All High bugs (B1, B3, B4, B5, B7, B9, B10, B11, B12) and B8 are fixed, each with a regression test.
 - No secrets in the repository or the browser bundle. The Ideal Postcodes key has been rotated, and CI secret scanning blocks new secrets (P5).
 - Every server action and API route declares the permission it requires, and a guard test fails the build if one does not (P1).
 - Finance data reaches only people with a finance permission, and every firm-wide roll-up excludes restricted matters (P4).
@@ -40,7 +40,7 @@ Stage 0 is done when every statement below is true and has been confirmed by re-
 
 ## 3. Scope
 
-**In scope:** items 28 to 32; P1 to P12; bugs B1, B3, B4, B5, B7, B8, B9 and B10.
+**In scope:** items 28 to 32; P1 to P12; bugs B1, B3, B4, B5, B7, B8, B9, B10, B11 and B12.
 
 Stage 0 delivers everything listed under "What’s missing" for items 28 to 32, so that each meets the Completed bar. That includes the work-type behaviour (29), negotiated rates and CFA/DBA (30), and Teams delivery and digests (32). Section 5a maps every stage 0 backlog row to its slices.
 
@@ -89,13 +89,13 @@ Do these first, in this order (S0-27 sits between S0-02 and S0-03). S0-01 should
 | S0-01 | Rotate the Ideal Postcodes key; move it to Key Vault behind a server-side lookup route. Read the key only from the server-side setting `IDEAL_POSTCODES_API_KEY`: no `NEXT_PUBLIC_` variant and no fallback in code. Remove `apiKeyOverride` from the extraction route and clear any key saved in browsers; add the two Key Vault references to `main.bicep`; add secret scanning to CI; run CI on `s0-*` branches. | P5 | S | Manual: key rotation |
 | S0-02 | Permission helper, action-to-permission registry and guard test, with a baseline of current gaps. Decision record D2. | P1 | M | – |
 | S0-27 | Role journey smoke tests: Playwright tests that sign in as each built-in role (test-only sign-in) and walk its main journeys, run in CI. The safety net for S0-03 to S0-07. | P10 | M | S0-02 |
-| S0-03 | Lock down destructive and approval actions: clear and reset data (admin, MFA, non-live only, audited); approve and discuss sign-off (permission, matter access, assigned partner, no self-approval); enquiry anonymisation (permission, retention check always applied). | P1, B3 | M | S0-02, S0-27 |
+| S0-03 | Lock down destructive and approval actions: clear and reset data (admin, MFA, non-live only, audited); approve and discuss sign-off (permission, matter access, assigned partner, no self-approval); enquiry anonymisation (permission, retention check always applied). Person save (B11): reject `roles`, `permissionOverrides`, `appRole`, `employeePermissions` and `documentPermissions` in `savePersonRecord` (they change only through the RBAC actions, with self-escalation checks), require create or edit permission for contact changes and `employee:edit_core` whenever employee status, role, department or employment changes. Ethical walls (B12): `canAccessMatter` in the core treats `hasEthicalWall` as restricted even when the allow-list is empty (fail closed), with two-tenant and tampered-ID tests. | P1, B3, B11, B12 | L | S0-02, S0-27 |
 | S0-04 | Admin saves: teams, lists, custom fields, picklists, org structure, enquiry and task settings, matter costs config, party taxonomy, PMS links. All require admin permissions and MFA. | P1, E8 | M | S0-02 |
 | S0-05 | Record actions: task save and reassign; task comments (matter access); enquiry create, edit, assign, close and reopen permissions; merge and party relationships; leaver reassignment (permission, confirm leaver, respect restricted matters, re-permission SharePoint folders, audit each moved record). | P1, B8, B9, item 13 | L | S0-02 |
 | S0-06 | AI extraction route: require create permissions, never create employees, apply `aiProviderChoice` and `enableAiMatterExtraction`. Record which data goes to which AI provider for each tenant (standard section 10) in a help article and the configuration notes. | B10, P7 | M | S0-02 |
-| S0-07 | Conflict fixes: quote conversion runs the full conflict check and blocking rules; enquiry conversion checks `matter:create` before creating records and records a decision for new organisations; the search covers instructing and billing contacts and a person’s organisation links. | B5, B7, item 1a | M | S0-02 |
+| S0-07 | Conflict fixes: quote conversion runs the full conflict check and blocking rules; enquiry conversion checks `matter:create` before creating records and records a decision for new organisations; the search covers instructing and billing contacts and a person’s organisation links, in **both** conflict searches (`searchMatterConflicts` in `src/domain/matterConflicts.ts` and `runEnquiryConflictSearch` in `src/domain/enquiries.ts`), and records what was searched. | B5, B7, item 1a | M | S0-02 |
 | S0-08 | Risk assessment: keep the wizard answers on save and score risk on the server, with tests for new and edited matters. | B1, item 4 | M | – |
-| S0-09 | Merge: repoint every reference (matters and parties, enquiries, quotes, tasks, PMS links, links, notes) in one operation, with tests for each record type. | B4, item 28 | M | S0-05 |
+| S0-09 | Merge: repoint every reference in one operation, with tests for each record type: matters (client person and organisation, `additionalClientIds`, instructing, billing and referrer contacts, parties, conflict record party links), enquiries, quotes, tasks, PMS links, person–organisation links (de-duplicated), organisation `relationshipPartnerId`, generated documents and document links (including the tenant document repository), and notes. Refuse to merge employee records. Keep the merged-away record as a tombstone (`mergedIntoId`) so old links and audit entries still resolve. | B4, item 28 | L | S0-05 |
 | S0-10 | Finance gating: finance out of the snapshot (D4); gate on `finance:view` and `finance:view_matter`; remove the hard-coded `canViewFinance: true`; filter the four firm roll-ups for restricted matters. | P4 | M | S0-02 |
 | S0-11a | Remove demo content from product code (D5), one pull request per area: Home, matter profile, person and organisation profiles. Remove fake compliance statuses and the hard-coded firm name; add a CI check for demo literals. | P6 | L | – |
 | S0-11b | Demo tenant (ADR 0026): a seed command that loads demo data into a tenant, and a non-live demo deployment with demo mode and the email allow-list, so demos keep working. Becomes a tenant in the shared deployment after S0-17. | P6 | M | S0-11a |
@@ -127,8 +127,8 @@ S0-24 (the registers engine) can start once S0-17 and S0-19 are done, and can ru
 | S0-21 | Clients, contacts and parties: persona decision (D8), merge execution tests, two-tenant test, help. | 28, Q1 | M | S0-16 |
 | S0-22 | Departments and work types: tests and help. Work types drive (a) automatic task templates, chosen by work type when a matter opens; (b) the risk questionnaire, with questions varying by work type, building on S0-08’s server-side scoring; and (c) retention periods, setting the matter destruction date on closure. All three are tenant configuration with schema entries. Also advances items 4, 9 and 23. | 29 | L | S0-17, S0-08 |
 | S0-23 | Rates and charging: tests for rate lookup, the costs snapshot and quote maths; VAT rate as tenant configuration. | 30 | M | S0-17 |
-| S0-24 | Registers engine in the core (D7), with sign-offs migrated onto it as the first consumer; contract tests for its extension points. | 31 | L | S0-17, S0-19 |
-| S0-25 | Search: server-side search covering documents, quotes and key dates, respecting visibility; tests. | 32 | M | S0-17 |
+| S0-24 | Registers engine in the core (D7), with sign-offs migrated onto it as the first consumer; contract tests for its extension points; two-tenant isolation tests for register records, including tampered record IDs. | 31 | L | S0-17, S0-19 |
+| S0-25 | Search: server-side search covering documents, quotes and key dates, respecting visibility; tests, including two-tenant tests that search never returns another tenant’s records or restricted matters. | 32 | M | S0-17 |
 | S0-26 | Email and notifications (D9): the `EmailSender` interface and the dev catcher, Graph and placeholder ACS adapters; tenant configuration for provider, sender address, Key Vault references and recipient allow-list (schema change, backward compatible); notification email delivery with user preferences (channel and frequency per notification type); tests, including that a non-live tenant never sends outside its allow-list. Enquiry and quote sending (items 1 and 3) are wired to it in stage 1. | 32 | M | S0-19 |
 | S0-28 | Negotiated rates and CFA/DBA (D10): client- and matter-level rate overrides with effective dates and precedence; rate lookup uses them in quotes, matter costs and the costs snapshot; CFA and DBA fee bases with configurable, validated terms; tests for every precedence path and fee basis; two-tenant test; help. | 30 | L | S0-23 |
 | S0-29 | Teams delivery and digests (D11): digest job on the scheduler, per-user preferences, digest email through `EmailSender`; Teams activity-feed adapter behind a per-tenant setting (default off); tests, including that a non-live tenant never sends outside its allow-list; help. | 32 | M | S0-26, S0-19 |
@@ -153,7 +153,7 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 | P5 Secrets | S0-01 (plus the deferred key rotation) |
 | P6 Demo content | S0-11a, S0-11b |
 | P7 Ignored settings | S0-06, S0-12 |
-| P8 Two-tenant tests | S0-15 to S0-18, S0-21 |
+| P8 Two-tenant tests | S0-03, S0-15 to S0-18, S0-21, S0-24, S0-25, S0-28 |
 | P9 Scheduler | S0-19 |
 | P10 Test coverage | S0-27, and tests in every slice |
 | P11 Help articles | Every slice |
@@ -163,6 +163,7 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 | B4 | S0-09 |
 | B5, B7 | S0-07 |
 | B8, B9 | S0-05 |
+| B11, B12 | S0-03 |
 | B10 | S0-06 |
 
 ## 6. How to run each slice
@@ -215,3 +216,4 @@ These need a person with the right admin access. Claude Code should list them in
 | 6 Nov 2026 | D2 decided: ADR 0025 accepted, and ADR 0010 accepted with an amendment (the registry file is the authoritative permission list). |
 | 6 Nov 2026 | Ideal Postcodes key rotation deferred while in test; must happen before real client data, wider repository access or stage 0 exit. GitHub secret scanning and push protection are on. Anthropic key set locally. |
 | 6 Nov 2026 | Stage 0 delivers all of items 28 to 32: added S0-28 (negotiated rates, CFA/DBA) and S0-29 (Teams and digests), widened S0-22 and S0-26, added D10 and D11 and the coverage table (section 5a). |
+| 6 Nov 2026 | Antigravity review of the plan (findings AG1–AG12): added B11 (person save allows self-granted roles) and B12 (ethical walls fail open) to S0-03, which grows to L; widened S0-07 (both conflict searches) and S0-09 (all merge references, no employee merges; now L); two-tenant tests for S0-24 and S0-25; S0-01 and S0-02 slice plans and ADRs 0024 and 0025 corrected. AG12 rejected (the cited references are not in the documents). |
