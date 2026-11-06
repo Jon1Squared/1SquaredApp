@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   buildMatterRiskAssessmentSnapshot,
   MATTER_RISK_SECTIONS,
+  MAX_RISK_FOLLOW_UP_LENGTH,
   summarizeMatterRiskAssessment,
   validateMatterRiskAssessmentInput,
   type MatterRiskAssessmentSnapshot,
@@ -10,7 +11,11 @@ import {
   createSignedEntraSessionCookie,
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
-import { resetAllDemoData, saveMatterRecord } from '@/server/services';
+import {
+  prepareEnquiryConversion,
+  resetAllDemoData,
+  saveMatterRecord,
+} from '@/server/services';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import { getStore } from '@/server/store';
 
@@ -66,6 +71,7 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
         {
           ...matterTemplate,
           title: 'S0-08 New Matter With Medium Risk Answers',
+          leadFeeEarnerId: 'P-000002', // Dafydd Evans is lead fee earner while P-000001 (Rhian Morgan) submits
           // Client sends Low rating and forged Low snapshot, but answers include Medium risk options
           riskRatingId: 'risk_rating.low',
           fieldValues: {
@@ -111,6 +117,11 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
       expect(saveRes.matter!.riskRatingId).toBe('risk_rating.medium');
       expect(savedSnapshot.completedQuestions).toBe(4);
       expect(savedSnapshot.sections[0].id).toBe('about_instruction');
+      // R246: completedById/completedByName record the signed-in submitter (P-000001), separate from leadFeeEarnerId (P-000002)
+      expect(savedSnapshot.completedById).toBe('P-000001');
+      expect(savedSnapshot.completedByName).toBe('Rhian Morgan');
+      expect(savedSnapshot.leadFeeEarnerId).toBe('P-000002');
+      expect(savedSnapshot.leadFeeEarnerName).toBe('Dafydd Evans');
     });
   });
 
@@ -239,6 +250,24 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
       expect(badFollowUpQuestionId.error).toContain('bogusFollowUpKey');
     }
 
+    // R245: follow-up exceeding MAX_RISK_FOLLOW_UP_LENGTH (2,000 chars) is rejected; 2,000 chars is allowed
+    const maxLenFollowUp = validateMatterRiskAssessmentInput({
+      answers: { inScopeMlr: 'Yes, in scope', instructionMakesSense: 'Not sure' },
+      followUps: { instructionMakesSense: 'a'.repeat(MAX_RISK_FOLLOW_UP_LENGTH) },
+    });
+    expect(maxLenFollowUp.ok).toBe(true);
+
+    const overLenFollowUp = validateMatterRiskAssessmentInput({
+      answers: { inScopeMlr: 'Yes, in scope', instructionMakesSense: 'Not sure' },
+      followUps: {
+        instructionMakesSense: 'a'.repeat(MAX_RISK_FOLLOW_UP_LENGTH + 1),
+      },
+    });
+    expect(overLenFollowUp.ok).toBe(false);
+    if (!overLenFollowUp.ok) {
+      expect(overLenFollowUp.error).toMatch(/exceeds the maximum length of 2000 characters/);
+    }
+
     // Service-level enforcement in saveMatterRecord
     const store = getStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
@@ -283,6 +312,29 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
       expect(unknownValRes.matter).toBeNull();
       expect(unknownValRes.errors?.riskAssessment).toMatch(
         /Invalid answer "Maybe later" for risk assessment question "highRiskJurisdictionLink"/,
+      );
+
+      const overLenFollowUpRes = await saveMatterRecord(
+        {
+          ...matterTemplate,
+          title: 'S0-08 Over-Length Follow-Up Matter',
+          fieldValues: {
+            riskAssessment: {
+              answers: {
+                inScopeMlr: 'Yes, in scope',
+                instructionMakesSense: 'Not sure',
+              },
+              followUps: {
+                instructionMakesSense: 'x'.repeat(MAX_RISK_FOLLOW_UP_LENGTH + 1),
+              },
+            },
+          },
+        },
+        { byId: 'P-000001', saveMode: 'draft' },
+      );
+      expect(overLenFollowUpRes.matter).toBeNull();
+      expect(overLenFollowUpRes.errors?.riskAssessment).toMatch(
+        /exceeds the maximum length of 2000 characters/,
       );
     });
   });
@@ -383,5 +435,87 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
     expect(clientFullOutOfScope.completedQuestions).toBe(17);
     expect(serverFullOutOfScope.completedQuestions).toBe(17);
     expect(clientFullOutOfScope.isComplete).toBe(true);
+  });
+
+  it('5. R242: a new matter saved without answers and an enquiry conversion have no invented answers, no risk rating, and are not marked complete', async () => {
+    const store = getStore();
+    const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
+    const {
+      id: _omittedId,
+      fieldValues: _omittedFieldValues,
+      ...matterTemplate
+    } = baseMatter;
+    void _omittedId;
+    void _omittedFieldValues;
+    const actorSession = buildVerifiedActorSession('P-000001');
+
+    await runWithActiveActorSession(actorSession, async () => {
+      // (a) New matter saved without riskAssessment
+      const noAnswersRes = await saveMatterRecord(
+        {
+          ...matterTemplate,
+          title: 'S0-08 New Matter Without Questionnaire Answers',
+          riskRatingId: 'risk_rating.low', // client sends Low without answers; server must leave empty
+          fieldValues: {},
+        },
+        { byId: 'P-000001', saveMode: 'draft' },
+      );
+
+      expect(noAnswersRes.errors).toBeUndefined();
+      expect(noAnswersRes.matter).not.toBeNull();
+      expect(noAnswersRes.matter!.riskRatingId).toBe('');
+
+      const noAnswersSnapshot = noAnswersRes.matter!.fieldValues[
+        'riskAssessment'
+      ] as MatterRiskAssessmentSnapshot;
+      expect(noAnswersSnapshot.status).toBe('not_started');
+      expect(noAnswersSnapshot.answers).toEqual({});
+      expect(noAnswersSnapshot.followUps).toEqual({});
+      expect(noAnswersSnapshot.completedQuestions).toBe(0);
+      expect(noAnswersSnapshot.completedAt).toBeNull();
+      expect(noAnswersSnapshot.completedById).toBeNull();
+      expect(noAnswersSnapshot.completedByName).toBeNull();
+      expect(noAnswersSnapshot.overallRisk).toBeNull();
+
+      // (b) Enquiry conversion (prepareEnquiryConversion + saveMatterRecord with sourceEnquiryId and no answers)
+      const routableEnquiry = store.enquiries.find(
+        (e) => e.status !== 'Draft' && e.status !== 'Converted',
+      )!;
+      const prepRes = prepareEnquiryConversion(
+        routableEnquiry.id,
+        {},
+        'P-000001',
+      );
+      expect(prepRes.ok).toBe(true);
+
+      const convertedRes = await saveMatterRecord(
+        {
+          ...matterTemplate,
+          title: 'S0-08 Matter Converted From Enquiry Without Questionnaire',
+          clientId: prepRes.clientId!,
+          instructingContactId: prepRes.instructingContactId ?? null,
+          sourceEnquiryId: routableEnquiry.id,
+          riskRatingId: '',
+          fieldValues: {},
+        },
+        { byId: 'P-000001', saveMode: 'draft' },
+      );
+
+      expect(convertedRes.errors).toBeUndefined();
+      expect(convertedRes.matter).not.toBeNull();
+      expect(convertedRes.matter!.riskRatingId).toBe('');
+
+      const convertedSnapshot = convertedRes.matter!.fieldValues[
+        'riskAssessment'
+      ] as MatterRiskAssessmentSnapshot;
+      expect(convertedSnapshot.status).toBe('not_started');
+      expect(convertedSnapshot.answers).toEqual({});
+      expect(convertedSnapshot.followUps).toEqual({});
+      expect(convertedSnapshot.completedQuestions).toBe(0);
+      expect(convertedSnapshot.completedAt).toBeNull();
+      expect(convertedSnapshot.completedById).toBeNull();
+      expect(convertedSnapshot.completedByName).toBeNull();
+      expect(convertedSnapshot.overallRisk).toBeNull();
+    });
   });
 });

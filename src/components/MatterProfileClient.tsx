@@ -2047,7 +2047,11 @@ export function MatterProfileClient({
                           fontWeight: 600,
                         }}
                       >
-                        Matter risk assessment ({resolvedRiskAssessment.overallRisk} risk)
+                        Matter risk assessment (
+                        {resolvedRiskAssessment.overallRisk
+                          ? `${resolvedRiskAssessment.overallRisk} risk`
+                          : 'Not started'}
+                        )
                       </span>
                     </div>
                     <div className="worklist-right">
@@ -2907,7 +2911,11 @@ export function MatterProfileClient({
                     />
                     <h2 className="panel-title">Matter risk assessment</h2>
                     <StatusPill
-                      label={`${riskSnap.overallRisk} risk`}
+                      label={
+                        riskSnap.overallRisk
+                          ? `${riskSnap.overallRisk} risk`
+                          : 'Not assessed'
+                      }
                       tone={riskTonePill}
                     />
                     {riskRecordMinimised ? (
@@ -2916,7 +2924,10 @@ export function MatterProfileClient({
                         style={{ fontSize: 12.5, fontWeight: 500, marginLeft: 4 }}
                       >
                         {riskSnap.completedQuestions} of {riskSnap.totalQuestions}{' '}
-                        questions completed · Assessed by {riskSnap.completedByName}
+                        questions completed
+                        {riskSnap.completedByName
+                          ? ` · Assessed by ${riskSnap.completedByName}`
+                          : ' · Not yet assessed'}
                       </span>
                     ) : null}
                   </div>
@@ -2974,7 +2985,11 @@ export function MatterProfileClient({
                         <span className="kv-label">Overall risk rating</span>
                         <span className="kv-value">
                           <StatusPill
-                            label={`${riskSnap.overallRisk} risk`}
+                            label={
+                              riskSnap.overallRisk
+                                ? `${riskSnap.overallRisk} risk`
+                                : 'Not assessed'
+                            }
                             tone={riskTonePill}
                           />
                         </span>
@@ -2988,7 +3003,9 @@ export function MatterProfileClient({
                       <div className="kv-item">
                         <span className="kv-label">Assessed by &amp; when</span>
                         <span className="kv-value">
-                          {riskSnap.completedByName} · {formatDateTime(riskSnap.completedAt)}
+                          {riskSnap.completedByName && riskSnap.completedAt
+                            ? `${riskSnap.completedByName} · ${formatDateTime(riskSnap.completedAt)}`
+                            : 'Not yet assessed'}
                         </span>
                       </div>
                       <div className="kv-item">
@@ -3648,7 +3665,11 @@ export function MatterProfileClient({
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <StatusPill
-                        label={`Risk Assessment · ${riskSnap.overallRisk} risk`}
+                        label={
+                          riskSnap.overallRisk
+                            ? `Risk Assessment · ${riskSnap.overallRisk} risk`
+                            : 'Risk Assessment · Not started'
+                        }
                         tone={riskTonePill}
                       />
                       <strong style={{ fontSize: 14 }}>
@@ -3656,7 +3677,9 @@ export function MatterProfileClient({
                         {riskSnap.totalQuestions} questions answered)
                       </strong>
                       <span className="muted" style={{ fontSize: 12.5 }}>
-                        · Assessed {formatDateTime(riskSnap.completedAt)} by {riskSnap.completedByName}
+                        {riskSnap.completedByName && riskSnap.completedAt
+                          ? `· Assessed ${formatDateTime(riskSnap.completedAt)} by ${riskSnap.completedByName}`
+                          : '· Not yet assessed'}
                       </span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -3971,7 +3994,7 @@ export function MatterProfileClient({
                     <span className="kv-value">
                       Conflict: {openingSnapshot.conflictCheckRecord.status} (
                       {openingSnapshot.conflictCheckRecord.outcomeLabel}) · Risk:{' '}
-                      {openingSnapshot.riskAssessment.overallRisk} (
+                      {openingSnapshot.riskAssessment.overallRisk ?? 'Not assessed'} (
                       {openingSnapshot.riskAssessment.completedQuestions}/
                       {openingSnapshot.riskAssessment.totalQuestions} Qs)
                     </span>

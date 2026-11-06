@@ -3838,7 +3838,7 @@ export async function saveMatterRecord(
     clientTierId: input.clientTierId !== undefined ? input.clientTierId : existing?.clientTierId ?? null,
     clientSectorId: input.clientSectorId !== undefined ? input.clientSectorId : existing?.clientSectorId ?? null,
     billingBasisId: input.billingBasisId !== undefined ? input.billingBasisId : existing?.billingBasisId ?? '',
-    riskRatingId: existing?.riskRatingId ?? resolveRiskRatingIdForLevel(store.values, 'Low'),
+    riskRatingId: existing?.riskRatingId ?? '',
     matterSizeId: input.matterSizeId !== undefined ? input.matterSizeId : existing?.matterSizeId ?? null,
     jurisdictionGroupId:
       input.jurisdictionGroupId ?? existing?.jurisdictionGroupId ?? vid('jurisdiction', 'UK Jurisdictions'),
@@ -3935,12 +3935,16 @@ export async function saveMatterRecord(
       matter.conflictCheckRecord,
     );
   }
-  const completedByPersonId =
-    (input.leadFeeEarnerId !== undefined
-      ? input.leadFeeEarnerId
-      : existing?.leadFeeEarnerId) || opts.byId;
+  const completedByPersonId = opts.byId;
   const completedByPerson =
     allPeopleWithPending.find((p) => p.id === completedByPersonId) ?? actingUser;
+  const leadFeeEarnerPersonId =
+    (input.leadFeeEarnerId !== undefined
+      ? input.leadFeeEarnerId
+      : existing?.leadFeeEarnerId) || null;
+  const leadFeeEarnerPerson = leadFeeEarnerPersonId
+    ? allPeopleWithPending.find((p) => p.id === leadFeeEarnerPersonId) ?? null
+    : null;
   const fullRiskAssessment =
     validatedRiskAssessment.ok && validatedRiskAssessment.hasAnswers
       ? buildMatterRiskAssessmentSnapshot({
@@ -3949,8 +3953,11 @@ export async function saveMatterRecord(
           customKeyDates: validatedRiskAssessment.customKeyDates,
           completedById: completedByPersonId,
           completedByName: personDisplayName(completedByPerson),
+          leadFeeEarnerId: leadFeeEarnerPersonId,
+          leadFeeEarnerName: leadFeeEarnerPerson
+            ? personDisplayName(leadFeeEarnerPerson)
+            : leadFeeEarnerPersonId,
           completedAt: now,
-          fallbackOverallRisk: 'Low',
         })
       : resolveMatterRiskAssessment(
           matter,
@@ -3958,10 +3965,12 @@ export async function saveMatterRecord(
           store.values,
         );
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
-  matter.riskRatingId = resolveRiskRatingIdForLevel(
-    store.values,
-    fullRiskAssessment.overallRisk,
-  );
+  matter.riskRatingId = fullRiskAssessment.overallRisk
+    ? resolveRiskRatingIdForLevel(
+        store.values,
+        fullRiskAssessment.overallRisk,
+      )
+    : existing?.riskRatingId ?? '';
 
   // R108 & R131 & R173 & R178 & R179 & R181: Run active tenant extension hooks and unified matter opening gate
   const host = getPlatformExtensionHost();
@@ -4136,7 +4145,7 @@ export async function saveMatterRecord(
       action: 'create',
       field: 'Matter risk assessment',
       oldValue: null,
-      newValue: `Overall risk: ${fullRiskAssessment.overallRisk} (${fullRiskAssessment.completedQuestions}/${fullRiskAssessment.totalQuestions} questions completed)`,
+      newValue: `Overall risk: ${fullRiskAssessment.overallRisk ?? 'Not assessed'} (${fullRiskAssessment.completedQuestions}/${fullRiskAssessment.totalQuestions} questions completed)`,
       byId: opts.byId,
       at: now,
     });

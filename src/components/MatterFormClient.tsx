@@ -1646,13 +1646,14 @@ export function MatterFormClient({
         answers: riskAnswers,
         followUps: riskFollowUps,
         customKeyDates,
-        completedById: leadFeeEarnerId || currentUser.id,
-        completedByName:
-          people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))
-            ? personDisplayName(
-                people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))!,
-              )
-            : personDisplayName(currentUser),
+        completedById: currentUser.id,
+        completedByName: personDisplayName(currentUser),
+        leadFeeEarnerId: leadFeeEarnerId || null,
+        leadFeeEarnerName: leadFeeEarnerId
+          ? people.find((p) => p.id === leadFeeEarnerId)
+            ? personDisplayName(people.find((p) => p.id === leadFeeEarnerId)!)
+            : leadFeeEarnerId
+          : null,
       }),
     [riskAnswers, riskFollowUps, customKeyDates, leadFeeEarnerId, currentUser, people],
   );
