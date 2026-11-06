@@ -6,7 +6,7 @@ export const deploymentAndSecurityArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared isolates every firm’s data in a dedicated database, supports firm-specific customisations without forking the core, and runs identically in 1Squared UK Cloud or your firm’s own Azure subscription.',
-  updated: '2026-11-04',
+  updated: '2026-11-06',
   body: `
 Law firms evaluating practice management platforms traditionally face an uncomfortable compromise between **multi-tenant SaaS** (easy upgrades, but your client and matter records sit in a shared database alongside rival firms) and **bespoke on-premises forks** (isolated infrastructure, but every customisation makes upgrades slow, expensive, and fragile).
 
@@ -97,7 +97,7 @@ Every change to the 1Squared platform must pass automated **Two-Tenant Isolation
 1. **Cross-Tenant ID Tampering**: The test suite provisions two independent firms (*Tenant A* and *Tenant B*) and verifies that if an authenticated user in *Tenant A* attempts to read, modify, or delete a record belonging to *Tenant B* by guessing or tampering with its ID, the data layer returns \`null\` and blocks the request.
 2. **Forged Claim Rejection**: The test suite injects mismatched or forged \`tenantId\` parameters into request payloads and verifies that the platform ignores user-supplied tenant fields in favour of the verified OIDC token claim.
 3. **Extension Sandbox Enforcement**: Automated tests verify that extensions cannot import core internals, access ungranted permissions, or exceed execution timeouts.
-4. **Environment & Production Build Parity**: Test suites execute under \`PLATFORM_ENVIRONMENT=test\` (pinned in \`vitest.config.ts\`), fixture checks verify RFC 2606 and Ofcom drama data (\`scripts/verify-invented-fixtures.mjs\`), and production builds verify under \`PLATFORM_ENVIRONMENT=live\` so demo-only settings cannot leak into live builds.
+4. **Environment & Production Build Parity**: Test suites execute under \`PLATFORM_ENVIRONMENT=test\` (pinned in \`vitest.config.ts\`), fixture checks verify RFC 2606 and Ofcom drama data (\`scripts/verify-invented-fixtures.mjs\`), and production builds verify under \`PLATFORM_ENVIRONMENT=live\` so demo-only settings cannot leak into live builds. Application fonts are self-hosted in \`src/app/fonts/\` via \`next/font/local\`, so builds and client-hosted deployments require no internet access to external font services.
 
 ## 6. Prospective client slide deck blueprint (8 slides)
 
