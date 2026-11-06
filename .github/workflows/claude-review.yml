@@ -39,7 +39,7 @@ jobs:
       - name: Run Claude Senior Developer Review
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             You are the Senior Developer and Principal Architecture Reviewer for 1Squared.
             Read `CLAUDE.md`, `AGENTS.md`, `docs/architecture-standard.md`, and `docs/decisions/0001-shared-repo-and-transitional-store.md`.
