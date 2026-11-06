@@ -1,5 +1,16 @@
 # 1Squared — Release Notes
 
+## Unreleased — Stage 0 Roadmap and Decisions (`chore/stage-0-plan`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Documentation and Process Only (`docs/`, `CLAUDE.md`, `AGENTS.md`, `src/docs/`); no application code changes:**
+  - **Roadmap (`docs/roadmap/`):** Added the master backlog (`feature-list.md`), the read-only status review and functionality inventory it is based on, the Stage 0 plan (v3, checked against `a0a5534`, with a coverage table mapping every stage 0 backlog row to its slices), and detailed plans for slices S0-01 and S0-02 (`slices/`).
+  - **Architecture Decision Records:** Added [ADR 0024](./decisions/0024-azure-container-apps-hosting.md) (Azure Container Apps hosting), [ADR 0025](./decisions/0025-permission-enforcement-pattern.md) (permission enforcement pattern), [ADR 0026](./decisions/0026-separate-demo-tenant.md) (separate demo tenant) and [ADR 0027](./decisions/0027-email-sender-interface.md) (EmailSender interface), all Accepted. Accepted [ADR 0010](./decisions/0010-central-permission-registry-and-resolver.md) with an amendment making `core/src/domain/rbac/registry.ts` the authoritative permission list.
+  - **Agent Rules (`CLAUDE.md`, `AGENTS.md`):** Added a "Roadmap and stages" section: read the backlog and stage plan first; one slice per `s0-NN-short-name` branch and Pull Request; update `feature-list.md` in the same Pull Request using the strict Completed bar; never attempt the plan's manual setup tasks.
+  - Updated in-app Help & Documentation (`src/docs/articles/development-process.ts`: branch naming for roadmap slices).
+
+---
+
 ## Unreleased — Interactive Browser Audit Fixes (`fix/testing-fixes`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

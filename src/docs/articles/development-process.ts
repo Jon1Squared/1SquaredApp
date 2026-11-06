@@ -43,7 +43,7 @@ Before a single line of production code is written, every change is classified u
 | **Infrastructure** | Declarative Bicep (\`core/infra/\`) only, with cost and security review |
 
 ### Gate 2: Isolated feature branches & 100% synthetic test data
-- **Branch Isolation**: All development takes place on isolated \`feat/*\` branches. Direct pushes to \`develop\` or \`main\` are blocked.
+- **Branch Isolation**: All development takes place on isolated branches (\`feat/*\`, \`fix/*\` and \`chore/*\`), with roadmap slices on \`s0-NN-short-name\` branches as set out in \`docs/roadmap/stage-0-plan.md\`. Each slice is one Pull Request to \`develop\` and updates the backlog (\`docs/roadmap/feature-list.md\`) in the same Pull Request. Direct pushes to \`develop\` or \`main\` are blocked.
 - **11 Immutable Architecture Rules**: Enforced via \`AGENTS.md\` and \`CLAUDE.md\`—prohibiting client-specific code in the core, requiring all data access to use a token-derived \`TenantContext\`, banning secrets in code or config, and requiring every change to create or update the relevant pages in **Help & documentation** in the same Pull Request (Rule 11).
 - **Zero Real Client Data in Dev/Test**: Engineers never develop or test with real client PII. All development uses purpose-built synthetic law firm fixtures (*Not A Law Firm LLP* and *Pembroke Vaughan*).
 
