@@ -788,6 +788,7 @@ function getAppSnapshotInScope(
     ...baseRail,
     keyDates:
       Boolean(keyDatesConfig.enabled) &&
+      baseRail.keyDates &&
       currentUserKeyDatePermissions.includes('keydate:view'),
   };
 

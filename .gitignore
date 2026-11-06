@@ -12,6 +12,9 @@
 
 # testing
 /coverage
+/playwright-report/
+/test-results/
+/e2e/.auth/
 
 # next.js
 /.next/
@@ -46,5 +49,3 @@ next-env.d.ts
 /data/pembroke-vaughan.json
 /data/runtime-store.json
 /src/platform/generated/
-
-
