@@ -9,6 +9,20 @@ Reference documents (read before any architecture decision or review; not loaded
 - `docs/rbac-reference.md` (role keys, permissions and helpers)
 - `docs/decisions/` (architecture decision records)
 
+## Roadmap and stages
+
+Read these first in every session, before planning or writing code:
+- `docs/roadmap/feature-list.md`: the master backlog. IDs (1–45, F1–F18, P1–P12, B1–B10, E1–E9, Q1–Q2) are stable; never renumber them, and new items take the next free number in their series.
+- The current stage plan: `docs/roadmap/stage-0-plan.md` (detailed slice plans are in `docs/roadmap/slices/`). Work only on slices in that plan, and respect each slice's dependencies.
+
+Rules:
+- One slice per branch and pull request. Name the branch `s0-NN-short-name` (for example `s0-03-lock-down-approvals`) and target `develop`.
+- Update the affected `feature-list.md` rows (status, "What exists" and "What’s missing") in the same pull request, with the PR number where useful.
+- Use the strict bar. **Completed** means the item works end to end, with server-side permission checks, tests (including two-tenant tests where it touches data) and a help article. Anything less is **Partly built**.
+- Never attempt the manual setup tasks in section 8 of the stage plan (accounts, tenants, mailboxes, DNS, Azure subscriptions, key rotation). If a slice needs one, list it as a blocker in the slice plan and the PR description, and stop that part of the work.
+- If a slice needs a decision record from section 4 of the stage plan that is not yet Accepted, draft it first and ask for approval before building.
+- If the code contradicts the plan, or a slice's scope looks wrong, say so and propose a change to the plan. Never change the scope silently.
+
 ## Architecture rules
 
 1. Never put client-specific code, names or IDs in the core.
