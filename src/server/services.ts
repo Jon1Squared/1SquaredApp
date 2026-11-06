@@ -19,11 +19,16 @@ import {
   quoteClientDisplayName,
 } from '@/domain/quotes';
 import {
+  buildMatterRiskAssessmentSnapshot,
   conflictStatusPillFromLegacy,
   legacyConflictStatusFromRecord,
   resolveMatterConflictCheckRecord,
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
+  resolveRiskRatingIdForLevel,
+  validateMatterRiskAssessmentInput,
+  type CustomKeyDateEntry,
+  type MatterRiskAssessmentInput,
 } from '@/domain/matterOpeningRecord';
 import {
   buildEffectiveConflictParties,
@@ -2927,6 +2932,7 @@ export async function saveMatterRecord(
     practiceAreaId: string;
     workTypeSubcategoryId: string;
     conflictCheckRecord?: ConflictCheckRecordInput | ConflictCheckRecord;
+    riskAssessment?: MatterRiskAssessmentInput;
   },
   opts: {
     id?: string;
@@ -3040,6 +3046,24 @@ export async function saveMatterRecord(
     if (!input.clientId) errors.clientId = 'Client (instructing entity or individual) is required.';
     if (!input.practiceAreaId) errors.practiceAreaId = 'Practice area is required.';
     if (!input.workTypeSubcategoryId) errors.workTypeSubcategoryId = 'Work type subcategory is required.';
+  }
+
+  // Validate questionnaire answers against MATTER_RISK_SECTIONS; discard any client-supplied sections, overallRisk or scores (S0-08 / B1)
+  const rawRiskAssessmentInput =
+    input.riskAssessment !== undefined
+      ? input.riskAssessment
+      : input.fieldValues?.['riskAssessment'];
+  const incomingCustomKeyDates = Array.isArray(input.fieldValues?.['customKeyDates'])
+    ? (input.fieldValues['customKeyDates'] as CustomKeyDateEntry[])
+    : Array.isArray(existing?.fieldValues?.['customKeyDates'])
+      ? (existing.fieldValues['customKeyDates'] as CustomKeyDateEntry[])
+      : [];
+  const validatedRiskAssessment = validateMatterRiskAssessmentInput(
+    rawRiskAssessmentInput,
+    incomingCustomKeyDates,
+  );
+  if (!validatedRiskAssessment.ok) {
+    errors.riskAssessment = validatedRiskAssessment.error;
   }
 
   // Validate owningDepartmentId and owningTeamId against orgStructure and enforce matter:reassign_ownership on existing matters (R107, R134)
@@ -3814,7 +3838,7 @@ export async function saveMatterRecord(
     clientTierId: input.clientTierId !== undefined ? input.clientTierId : existing?.clientTierId ?? null,
     clientSectorId: input.clientSectorId !== undefined ? input.clientSectorId : existing?.clientSectorId ?? null,
     billingBasisId: input.billingBasisId !== undefined ? input.billingBasisId : existing?.billingBasisId ?? '',
-    riskRatingId: input.riskRatingId !== undefined ? input.riskRatingId : existing?.riskRatingId ?? '',
+    riskRatingId: existing?.riskRatingId ?? resolveRiskRatingIdForLevel(store.values, 'Low'),
     matterSizeId: input.matterSizeId !== undefined ? input.matterSizeId : existing?.matterSizeId ?? null,
     jurisdictionGroupId:
       input.jurisdictionGroupId ?? existing?.jurisdictionGroupId ?? vid('jurisdiction', 'UK Jurisdictions'),
@@ -3911,12 +3935,33 @@ export async function saveMatterRecord(
       matter.conflictCheckRecord,
     );
   }
-  const fullRiskAssessment = resolveMatterRiskAssessment(
-    matter,
-    allPeopleWithPending,
-    store.values,
-  );
+  const completedByPersonId =
+    (input.leadFeeEarnerId !== undefined
+      ? input.leadFeeEarnerId
+      : existing?.leadFeeEarnerId) || opts.byId;
+  const completedByPerson =
+    allPeopleWithPending.find((p) => p.id === completedByPersonId) ?? actingUser;
+  const fullRiskAssessment =
+    validatedRiskAssessment.ok && validatedRiskAssessment.hasAnswers
+      ? buildMatterRiskAssessmentSnapshot({
+          answers: validatedRiskAssessment.answers,
+          followUps: validatedRiskAssessment.followUps,
+          customKeyDates: validatedRiskAssessment.customKeyDates,
+          completedById: completedByPersonId,
+          completedByName: personDisplayName(completedByPerson),
+          completedAt: now,
+          fallbackOverallRisk: 'Low',
+        })
+      : resolveMatterRiskAssessment(
+          matter,
+          allPeopleWithPending,
+          store.values,
+        );
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
+  matter.riskRatingId = resolveRiskRatingIdForLevel(
+    store.values,
+    fullRiskAssessment.overallRisk,
+  );
 
   // R108 & R131 & R173 & R178 & R179 & R181: Run active tenant extension hooks and unified matter opening gate
   const host = getPlatformExtensionHost();

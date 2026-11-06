@@ -511,6 +511,241 @@ export function buildMatterRiskAssessmentSnapshot(params: {
   };
 }
 
+export interface MatterRiskAssessmentInput {
+  answers?: Record<string, string>;
+  followUps?: Record<string, string>;
+  customKeyDates?: CustomKeyDateEntry[];
+}
+
+const MATTER_RISK_QUESTION_BY_ID: ReadonlyMap<string, RiskQuestionDef> = new Map(
+  MATTER_RISK_SECTIONS.flatMap((sec) => sec.questions.map((q) => [q.id, q])),
+);
+
+export type ValidatedMatterRiskAssessmentInput =
+  | {
+      ok: true;
+      hasAnswers: false;
+    }
+  | {
+      ok: true;
+      hasAnswers: true;
+      answers: Record<string, string>;
+      followUps: Record<string, string>;
+      customKeyDates: CustomKeyDateEntry[];
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+/**
+ * Validates questionnaire answers from the client against `MATTER_RISK_SECTIONS`.
+ * Discards any client-supplied `sections`, `overallRisk`, or scores.
+ */
+export function validateMatterRiskAssessmentInput(
+  rawInput: unknown,
+  fallbackCustomKeyDates: CustomKeyDateEntry[] = [],
+): ValidatedMatterRiskAssessmentInput {
+  if (rawInput === undefined || rawInput === null) {
+    return { ok: true, hasAnswers: false };
+  }
+  if (typeof rawInput !== 'object' || Array.isArray(rawInput)) {
+    return { ok: false, error: 'Risk assessment input must be an object.' };
+  }
+
+  const candidate = rawInput as Record<string, unknown>;
+  const rawAnswers = candidate.answers;
+  const rawFollowUps = candidate.followUps;
+
+  if (rawAnswers === undefined && rawFollowUps === undefined) {
+    return { ok: true, hasAnswers: false };
+  }
+
+  const cleanedAnswers: Record<string, string> = {};
+  if (rawAnswers !== undefined) {
+    if (typeof rawAnswers !== 'object' || rawAnswers === null || Array.isArray(rawAnswers)) {
+      return { ok: false, error: 'Risk assessment answers must be a key-value map.' };
+    }
+    for (const [questionId, rawVal] of Object.entries(rawAnswers as Record<string, unknown>)) {
+      const qDef = MATTER_RISK_QUESTION_BY_ID.get(questionId);
+      if (!qDef) {
+        return {
+          ok: false,
+          error: `Unknown risk assessment question ID "${questionId}".`,
+        };
+      }
+      if (typeof rawVal !== 'string') {
+        return {
+          ok: false,
+          error: `Invalid answer value for risk assessment question "${questionId}".`,
+        };
+      }
+      if (rawVal !== '') {
+        const isAllowedOption = qDef.options.some((opt) => opt.label === rawVal);
+        if (!isAllowedOption) {
+          return {
+            ok: false,
+            error: `Invalid answer "${rawVal}" for risk assessment question "${questionId}".`,
+          };
+        }
+        cleanedAnswers[questionId] = rawVal;
+      }
+    }
+  }
+
+  const cleanedFollowUps: Record<string, string> = {};
+  if (rawFollowUps !== undefined) {
+    if (typeof rawFollowUps !== 'object' || rawFollowUps === null || Array.isArray(rawFollowUps)) {
+      return { ok: false, error: 'Risk assessment follow-ups must be a key-value map.' };
+    }
+    for (const [questionId, rawFollowUp] of Object.entries(
+      rawFollowUps as Record<string, unknown>,
+    )) {
+      const qDef = MATTER_RISK_QUESTION_BY_ID.get(questionId);
+      if (!qDef) {
+        return {
+          ok: false,
+          error: `Unknown risk assessment question ID "${questionId}" in follow-ups.`,
+        };
+      }
+      if (typeof rawFollowUp !== 'string') {
+        return {
+          ok: false,
+          error: `Invalid follow-up value for risk assessment question "${questionId}".`,
+        };
+      }
+      cleanedFollowUps[questionId] = rawFollowUp;
+    }
+  }
+
+  const rawKeyDates = Array.isArray(candidate.customKeyDates)
+    ? candidate.customKeyDates
+    : fallbackCustomKeyDates;
+  const cleanedKeyDates: CustomKeyDateEntry[] = Array.isArray(rawKeyDates)
+    ? rawKeyDates
+        .filter(
+          (d): d is CustomKeyDateEntry =>
+            Boolean(
+              d &&
+                typeof d === 'object' &&
+                typeof (d as CustomKeyDateEntry).date === 'string' &&
+                (d as CustomKeyDateEntry).date.trim().length > 0,
+            ),
+        )
+        .map((d, idx) => ({
+          id:
+            typeof d.id === 'string' && d.id.trim().length > 0
+              ? d.id.trim()
+              : `RISK-DATE-${idx + 1}`,
+          label:
+            typeof d.label === 'string' && d.label.trim().length > 0
+              ? d.label.trim()
+              : 'Imminent deadline / key date',
+          date: d.date.trim(),
+        }))
+    : [];
+
+  return {
+    ok: true,
+    hasAnswers: true,
+    answers: cleanedAnswers,
+    followUps: cleanedFollowUps,
+    customKeyDates: cleanedKeyDates,
+  };
+}
+
+/**
+ * Resolves the `risk_rating` ChoiceValue ID matching a calculated `RiskLevel`.
+ */
+export function resolveRiskRatingIdForLevel(
+  values: ChoiceValue[],
+  level: RiskLevel,
+): string {
+  const target = level.toLowerCase();
+  const match = values.find(
+    (v) =>
+      v.listKey === 'risk_rating' &&
+      v.active &&
+      v.label.toLowerCase().startsWith(target),
+  );
+  return match?.id ?? `risk_rating.${target}`;
+}
+
+export interface MatterRiskSectionSummaryItem extends RiskSectionDef {
+  visibleQuestions: RiskQuestionDef[];
+  totalCount: number;
+  completedCount: number;
+  remainingCount: number;
+  sectionRisk: RiskLevel | null;
+}
+
+export interface MatterRiskAssessmentSummary {
+  snapshot: MatterRiskAssessmentSnapshot;
+  visibleSections: MatterRiskSectionSummaryItem[];
+  totalQuestions: number;
+  completedQuestions: number;
+  remainingQuestions: number;
+  isComplete: boolean;
+  overallRisk: RiskLevel | null;
+}
+
+/**
+ * Shared summary builder used by both the Matter Opening form and server tests
+ * so client and server count completed questions (including the follow-up rule) identically.
+ */
+export function summarizeMatterRiskAssessment(params: {
+  answers: Record<string, string>;
+  followUps: Record<string, string>;
+  customKeyDates?: CustomKeyDateEntry[];
+  completedById?: string;
+  completedByName?: string;
+  completedAt?: string;
+}): MatterRiskAssessmentSummary {
+  const snapshot = buildMatterRiskAssessmentSnapshot({
+    answers: params.answers,
+    followUps: params.followUps,
+    customKeyDates: params.customKeyDates ?? [],
+    completedById: params.completedById ?? '',
+    completedByName: params.completedByName ?? '',
+    completedAt: params.completedAt,
+    fallbackOverallRisk: 'Low',
+  });
+
+  const visibleSections: MatterRiskSectionSummaryItem[] = snapshot.sections.map((secSnap) => {
+    const def = MATTER_RISK_SECTIONS.find((s) => s.id === secSnap.id)!;
+    const visibleQuestions = def.questions.filter(
+      (q) => !q.amlOnly || snapshot.isMlrInScope,
+    );
+    const remainingCount = secSnap.totalCount - secSnap.completedCount;
+    return {
+      ...def,
+      visibleQuestions,
+      totalCount: secSnap.totalCount,
+      completedCount: secSnap.completedCount,
+      remainingCount,
+      sectionRisk: secSnap.sectionRisk,
+    };
+  });
+
+  const totalQuestions = snapshot.totalQuestions;
+  const completedQuestions = snapshot.completedQuestions;
+  const remainingQuestions = totalQuestions - completedQuestions;
+  const hasAnyAnsweredQuestion = snapshot.sections.some((s) => s.sectionRisk !== null);
+  const overallRisk: RiskLevel | null = hasAnyAnsweredQuestion
+    ? snapshot.overallRisk
+    : null;
+
+  return {
+    snapshot,
+    visibleSections,
+    totalQuestions,
+    completedQuestions,
+    remainingQuestions,
+    isComplete: totalQuestions > 0 && remainingQuestions === 0,
+    overallRisk,
+  };
+}
+
 /**
  * Resolves the Matter Risk Assessment snapshot for a Matter.
  * Uses the immutable saved snapshot on `matter.fieldValues.riskAssessment` if present,

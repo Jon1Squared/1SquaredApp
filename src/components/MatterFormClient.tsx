@@ -86,7 +86,11 @@ import {
   specificFieldsForSubcategory,
 } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
-import { buildMatterRiskAssessmentSnapshot } from '@/domain/matterOpeningRecord';
+import {
+  MATTER_RISK_SECTIONS,
+  summarizeMatterRiskAssessment,
+  type CustomKeyDateEntry,
+} from '@/domain/matterOpeningRecord';
 import { formatGbp, quoteWorkTypeSummary } from '@/domain/quotes';
 import {
   allowedNameEdits,
@@ -185,309 +189,6 @@ type DemoPresetKey =
   | 'reopened_draft'
   | 'referred_submitted'
   | 'reviewer_view';
-
-type RiskLevel = 'Low' | 'Medium' | 'High';
-
-interface RiskQuestionOption {
-  label: string;
-  risk: RiskLevel;
-  triggersFollowUp?: boolean;
-}
-
-interface RiskQuestionDef {
-  id: string;
-  question: string;
-  amlOnly?: boolean;
-  options: RiskQuestionOption[];
-  followUpLabel?: string;
-  followUpType?: 'text' | 'key_dates';
-}
-
-interface RiskSectionDef {
-  id: string;
-  number: number;
-  title: string;
-  amlOnly?: boolean;
-  questions: RiskQuestionDef[];
-}
-
-interface CustomKeyDateEntry {
-  id: string;
-  label: string;
-  date: string;
-}
-
-const MATTER_RISK_SECTIONS: RiskSectionDef[] = [
-  {
-    id: 'about_instruction',
-    number: 1,
-    title: 'About this instruction',
-    questions: [
-      {
-        id: 'inScopeMlr',
-        question: 'Is this work in scope of the Money Laundering Regulations?',
-        options: [
-          { label: 'Yes, in scope', risk: 'Low' },
-          { label: 'No, out of scope', risk: 'Low' },
-        ],
-      },
-      {
-        id: 'instructionMakesSense',
-        question:
-          'Does the instruction make sense for this client? Consider whether it fits what you know of their business and history.',
-        options: [
-          { label: 'Yes', risk: 'Low' },
-          { label: 'Not sure', risk: 'Medium', triggersFollowUp: true },
-          { label: 'No', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'What doesn’t fit?',
-      },
-      {
-        id: 'moveMoneyWithoutTransaction',
-        question: 'Are we being asked to move money without an underlying legal transaction?',
-        amlOnly: true,
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Describe the request.',
-      },
-    ],
-  },
-  {
-    id: 'client_relationship',
-    number: 2,
-    title: 'Client and relationship',
-    questions: [
-      {
-        id: 'clientRelationshipStatus',
-        question: 'Is this a new or existing client?',
-        options: [
-          { label: 'New client', risk: 'Medium' },
-          { label: 'Existing, CDD current', risk: 'Low' },
-          { label: 'Existing, CDD needs refresh', risk: 'Medium' },
-        ],
-      },
-      {
-        id: 'clientDealingMethod',
-        question: 'How have you dealt with the client so far?',
-        options: [
-          { label: 'Met in person', risk: 'Low' },
-          { label: 'Video call with ID check', risk: 'Low' },
-          { label: 'Remote only or via introducer', risk: 'Medium' },
-        ],
-      },
-      {
-        id: 'complexOwnershipStructure',
-        question: 'Is the ownership structure complex or opaque?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes, with a clear reason', risk: 'Medium', triggersFollowUp: true },
-          { label: 'Yes, reason unclear', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Explain the structure and its purpose.',
-      },
-      {
-        id: 'thirdPartyInstructions',
-        question: 'Is anyone other than the client giving instructions?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Who, and how have you confirmed their authority?',
-      },
-    ],
-  },
-  {
-    id: 'geography',
-    number: 3,
-    title: 'Geography',
-    questions: [
-      {
-        id: 'highRiskJurisdictionLink',
-        question:
-          'Any link to a high-risk third country or sanctioned jurisdiction? Covers the client, other parties, assets or funds.',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Which country, and what is the link?',
-      },
-      {
-        id: 'crossBorderFundsOrAssets',
-        question: 'Will funds or assets move across borders?',
-        amlOnly: true,
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'From where to where?',
-      },
-    ],
-  },
-  {
-    id: 'funds_payments',
-    number: 4,
-    title: 'Funds and payments',
-    amlOnly: true,
-    questions: [
-      {
-        id: 'holdClientMoney',
-        question: 'Will we hold client money?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes, below firm threshold', risk: 'Low' },
-          { label: 'Yes, above firm threshold', risk: 'Medium' },
-        ],
-      },
-      {
-        id: 'matterFundingSource',
-        question: 'Who is funding the matter?',
-        options: [
-          { label: 'The client', risk: 'Low' },
-          { label: 'A third party', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Who, their relationship to the client, and why?',
-      },
-      {
-        id: 'sourceOfFundsUnderstood',
-        question:
-          'Is the source of funds understood and consistent with what you know of the client?',
-        options: [
-          { label: 'Yes', risk: 'Low' },
-          { label: 'Not yet', risk: 'Medium', triggersFollowUp: true },
-          { label: 'No', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'What is outstanding or inconsistent?',
-      },
-      {
-        id: 'unusualPaymentRequests',
-        question:
-          'Any unusual payment requests? For example cash, unexplained urgency, or payments to or from unconnected accounts.',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Describe the request.',
-      },
-    ],
-  },
-  {
-    id: 'delivery_resourcing',
-    number: 5,
-    title: 'Delivery and resourcing',
-    questions: [
-      {
-        id: 'regularTeamWork',
-        question: 'Is this work the team regularly does?',
-        options: [
-          { label: 'Yes', risk: 'Low' },
-          { label: 'Occasionally', risk: 'Medium', triggersFollowUp: true },
-          { label: 'No', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'How will you cover the gap?',
-      },
-      {
-        id: 'capacityAndSupervision',
-        question: 'Is there capacity and supervision in place?',
-        options: [
-          { label: 'Yes', risk: 'Low' },
-          { label: 'No', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'What is missing?',
-      },
-      {
-        id: 'imminentDeadlines',
-        question: 'Any imminent deadlines, limitation or court dates?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Add dates',
-        followUpType: 'key_dates',
-      },
-    ],
-  },
-  {
-    id: 'fees_liability',
-    number: 6,
-    title: 'Fees and liability',
-    questions: [
-      {
-        id: 'feeBasis',
-        question: 'Fee basis',
-        options: [
-          { label: 'Fixed fee', risk: 'Low' },
-          { label: 'Hourly', risk: 'Low' },
-          { label: 'CFA or DBA', risk: 'Medium' },
-          { label: 'Other', risk: 'Low' },
-        ],
-      },
-      {
-        id: 'moneyOnAccountRequested',
-        question: 'Has money on account been requested?',
-        options: [
-          { label: 'Yes', risk: 'Low' },
-          { label: 'No', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Why not?',
-      },
-      {
-        id: 'valueOrExposure',
-        question: 'Value or potential exposure at stake',
-        options: [
-          { label: 'Within normal range', risk: 'Low' },
-          { label: 'Unusually high', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Approximate value and why it is high.',
-      },
-      {
-        id: 'limitationOfLiabilityProposed',
-        question: 'Is a limitation of liability proposed?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Proposed cap and who agreed it.',
-      },
-    ],
-  },
-  {
-    id: 'reputation_regulation_data',
-    number: 7,
-    title: 'Reputation, regulation and data',
-    questions: [
-      {
-        id: 'reputationOrEthicalConcerns',
-        question: 'Could acting harm the firm’s reputation or raise ethical concerns?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'High', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Describe the concern.',
-      },
-      {
-        id: 'sensitiveSectorOrMedia',
-        question:
-          'Is the client or matter in a sensitive sector, or attracting media attention?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'Which sector or coverage?',
-      },
-      {
-        id: 'specialCategoryDataOrConfidentiality',
-        question: 'Special category data or unusual confidentiality requirements?',
-        options: [
-          { label: 'No', risk: 'Low' },
-          { label: 'Yes', risk: 'Medium', triggersFollowUp: true },
-        ],
-        followUpLabel: 'What data or requirements?',
-      },
-    ],
-  },
-];
 
 function rolePillTone(
   role: ConflictPartyRole,
@@ -1938,76 +1639,23 @@ export function MatterFormClient({
     });
   }, [clientIds, derivedClientRelationshipCdd.option]);
 
-  const isMlrInScope = riskAnswers.inScopeMlr !== 'No, out of scope';
-
-  // Compute active risk sections, per-section completion counts, per-section risk, and overall risk
-  const riskAssessmentSummary = useMemo(() => {
-    const visibleSections = MATTER_RISK_SECTIONS.filter(
-      (sec) => !sec.amlOnly || isMlrInScope,
-    ).map((sec) => {
-      const visibleQuestions = sec.questions.filter(
-        (q) => !q.amlOnly || isMlrInScope,
-      );
-      let completedCount = 0;
-      let sectionRisk: RiskLevel | null = null;
-
-      for (const q of visibleQuestions) {
-        const ans = riskAnswers[q.id];
-        const chosenOpt = q.options.find((o) => o.label === ans);
-        if (chosenOpt) {
-          completedCount++;
-          if (chosenOpt.risk === 'High') {
-            sectionRisk = 'High';
-          } else if (chosenOpt.risk === 'Medium' && sectionRisk !== 'High') {
-            sectionRisk = 'Medium';
-          } else if (chosenOpt.risk === 'Low' && !sectionRisk) {
-            sectionRisk = 'Low';
-          }
-        }
-      }
-
-      const totalCount = visibleQuestions.length;
-      const remainingCount = totalCount - completedCount;
-
-      return {
-        ...sec,
-        visibleQuestions,
-        totalCount,
-        completedCount,
-        remainingCount,
-        sectionRisk,
-      };
-    });
-
-    const totalQuestions = visibleSections.reduce((acc, s) => acc + s.totalCount, 0);
-    const completedQuestions = visibleSections.reduce(
-      (acc, s) => acc + s.completedCount,
-      0,
-    );
-    const remainingQuestions = totalQuestions - completedQuestions;
-
-    let overallRisk: RiskLevel | null = null;
-    for (const s of visibleSections) {
-      if (s.sectionRisk === 'High') {
-        overallRisk = 'High';
-        break;
-      }
-      if (s.sectionRisk === 'Medium') {
-        overallRisk = 'Medium';
-      } else if (s.sectionRisk === 'Low' && !overallRisk) {
-        overallRisk = 'Low';
-      }
-    }
-
-    return {
-      visibleSections,
-      totalQuestions,
-      completedQuestions,
-      remainingQuestions,
-      isComplete: totalQuestions > 0 && remainingQuestions === 0,
-      overallRisk,
-    };
-  }, [isMlrInScope, riskAnswers]);
+  // Compute active risk sections, per-section completion counts, per-section risk, and overall risk via shared builder
+  const riskAssessmentSummary = useMemo(
+    () =>
+      summarizeMatterRiskAssessment({
+        answers: riskAnswers,
+        followUps: riskFollowUps,
+        customKeyDates,
+        completedById: leadFeeEarnerId || currentUser.id,
+        completedByName:
+          people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))
+            ? personDisplayName(
+                people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))!,
+              )
+            : personDisplayName(currentUser),
+      }),
+    [riskAnswers, riskFollowUps, customKeyDates, leadFeeEarnerId, currentUser, people],
+  );
 
   // Sync calculated overall risk level to riskRatingId
   useEffect(() => {
@@ -4791,19 +4439,11 @@ export function MatterFormClient({
             instructingContactCapacityCodes,
             customKeyDates,
             matterCosts: buildMatterCostsSnapshotPayload(),
-            riskAssessment: buildMatterRiskAssessmentSnapshot({
+            riskAssessment: {
               answers: riskAnswers,
               followUps: riskFollowUps,
               customKeyDates,
-              completedById: leadFeeEarnerId || currentUser.id,
-              completedByName:
-                people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))
-                  ? personDisplayName(
-                      people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))!,
-                    )
-                  : personDisplayName(currentUser),
-              fallbackOverallRisk: riskAssessmentSummary.overallRisk ?? 'Low',
-            }),
+            },
           },
         },
         { id: savedDraftMatterId ?? existing?.id, saveMode: 'draft' },
@@ -4907,19 +4547,11 @@ export function MatterFormClient({
               instructingContactCapacityCodes,
               customKeyDates,
               matterCosts: buildMatterCostsSnapshotPayload(),
-              riskAssessment: buildMatterRiskAssessmentSnapshot({
+              riskAssessment: {
                 answers: riskAnswers,
                 followUps: riskFollowUps,
                 customKeyDates,
-                completedById: leadFeeEarnerId || currentUser.id,
-                completedByName:
-                  people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))
-                    ? personDisplayName(
-                        people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))!,
-                      )
-                    : personDisplayName(currentUser),
-                fallbackOverallRisk: riskAssessmentSummary.overallRisk ?? 'Low',
-              }),
+              },
             },
           },
           { id: targetMatterId ?? undefined, saveMode: 'draft' },
@@ -5088,19 +4720,11 @@ export function MatterFormClient({
       instructingContactCapacityCodes,
       customKeyDates: finalCustomKeyDates,
       matterCosts: buildMatterCostsSnapshotPayload(),
-      riskAssessment: buildMatterRiskAssessmentSnapshot({
+      riskAssessment: {
         answers: riskAnswers,
         followUps: riskFollowUps,
         customKeyDates: finalCustomKeyDates,
-        completedById: leadFeeEarnerId || currentUser.id,
-        completedByName:
-          people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))
-            ? personDisplayName(
-                people.find((p) => p.id === (leadFeeEarnerId || currentUser.id))!,
-              )
-            : personDisplayName(currentUser),
-        fallbackOverallRisk: riskAssessmentSummary.overallRisk ?? 'Low',
-      }),
+      },
     };
 
     return {

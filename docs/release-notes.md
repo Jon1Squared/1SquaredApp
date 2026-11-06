@@ -1,5 +1,16 @@
 # 1Squared — Release Notes
 
+## Unreleased — Matter Risk Assessment Answers Validated and Scored on the Server (`s0-08-risk-answers`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Host Domain & Server Validation (`src/domain/matterOpeningRecord.ts`, `src/server/services.ts`, `src/components/MatterFormClient.tsx`, `src/docs/`, `docs/`, `core/tests/isolation.test.ts`):**
+  - **Server-Side Questionnaire Validation & Scoring (`src/domain/matterOpeningRecord.ts`, `src/server/services.ts`, Bug B1, Item 4):** Added `validateMatterRiskAssessmentInput` to validate incoming questionnaire answers (`answers`, `followUps`, `customKeyDates`) against `MATTER_RISK_SECTIONS`, rejecting unknown question IDs or disallowed answer values with `errors.riskAssessment` and discarding any client-supplied `sections`, `overallRisk`, or scores. When valid answers are supplied on new matter creation or existing matter edit, `saveMatterRecord` rebuilds the snapshot on the server via `buildMatterRiskAssessmentSnapshot` and stores it in `matter.fieldValues.riskAssessment`; saving an existing matter without answers preserves its stored snapshot.
+  - **Server-Derived Risk Rating (`src/domain/matterOpeningRecord.ts`, `src/server/services.ts`):** Added `resolveRiskRatingIdForLevel` and updated `saveMatterRecord` to derive `matter.riskRatingId` from the server's calculated `overallRisk` (`Low` → `risk_rating.low`, `Medium` → `risk_rating.medium`, `High` → `risk_rating.high`), never trusting `input.riskRatingId` from the client.
+  - **Shared Client/Server Completion Counting (`src/domain/matterOpeningRecord.ts`, `src/components/MatterFormClient.tsx`):** Added `summarizeMatterRiskAssessment` backed by `buildMatterRiskAssessmentSnapshot`, removed the duplicate `MATTER_RISK_SECTIONS` definition in `MatterFormClient.tsx`, and updated `MatterFormClient.tsx` to use the shared builder for `riskAssessmentSummary` (including the `triggersFollowUp` rule and `key_dates` follow-up rule) and to send only `{ answers, followUps, customKeyDates }` on save.
+  - **Tests & Documentation (`src/domain/__tests__/matterRiskAssessment.test.ts`, `core/tests/isolation.test.ts`, `src/docs/articles/matter-opening-and-risk.ts`, `src/docs/registry.ts`, `docs/roadmap/feature-list.md`):** Updated R169 in `core/tests/isolation.test.ts`, added 4 unit/service tests in `src/domain/__tests__/matterRiskAssessment.test.ts`, added the `matter-opening-and-risk` help article, and updated `B1` (`Completed`), `Item 4`, and `P11` in `docs/roadmap/feature-list.md`.
+
+---
+
 ## Unreleased — Playwright Role Journey Smoke Tests (`s0-27-role-journeys`)
 
 ### Change Classification (Platform Architecture Standard Section 14)
