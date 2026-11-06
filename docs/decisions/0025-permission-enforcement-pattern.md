@@ -1,7 +1,7 @@
 # ADR 0025: One Permission Enforcement Pattern for Server Actions and Routes
 
 - **Date:** 2026-11-06
-- **Status:** Proposed
+- **Status:** Accepted (6 November 2026)
 - **Builds on:** [ADR 0010](./0010-central-permission-registry-and-resolver.md) (registry and resolver), [ADR 0013](./0013-viewing-as-role-presentation-only.md) (viewing-as is presentation only), [ADR 0014](./0014-staff-matter-access-by-permission.md) (restricted matters)
 - **Roadmap:** Stage 0 decision D2, slice S0-02 (`docs/roadmap/stage-0-plan.md`); backlog gap P1
 
@@ -70,4 +70,4 @@ The host application has 106 exported server actions, all in `src/app/actions.ts
 - Every action is listed against its permission, so a reviewer can see the whole surface in one file, and a new action cannot merge without a policy.
 - Slices S0-03 to S0-07 and S0-10 close the gaps. Each one switches entries to `enforcedBy: 'action'`, lowers `MAX_KNOWN_GAPS`, and updates the affected screens to handle `ActionDenied`.
 - Services may keep their own checks as defence in depth. Over time, `enforcedBy: 'service'` entries move to the wrapper.
-- ADR 0010 should be accepted alongside this decision, because this pattern depends on its registry and `requirePermission`.
+- ADR 0010 was accepted alongside this decision (with an amendment making `core/src/domain/rbac/registry.ts` the authoritative list of permissions), because this pattern depends on its registry and `requirePermission`.

@@ -59,7 +59,7 @@ Each of these gets a decision record in `docs/decisions/` before the slices that
 | No. | Decision | Recommendation or decision | Status | Needed before |
 |---|---|---|---|---|
 | D1 | Hosting platform. The standard confirms Azure Container Apps, but `main.bicep` provisions a Linux App Service. | **Container Apps**, as the standard says. Replace the App Service resources in Bicep. Use Container Apps jobs for scheduled work (D6) and a separate container app for the PDF converter. Shared platform resources and per-tenant resources become separate Bicep modules. [ADR 0024](../decisions/0024-azure-container-apps-hosting.md). | Decided | S0-13 |
-| D2 | Permission enforcement pattern | One helper (for example `authorize(actor, permission, resource?)`) used by every server action and route, plus a registry mapping each action to its permission. A guard test enumerates exports and fails on any undeclared action. Start the guard with a baseline list of known gaps that can only shrink. [ADR 0025](../decisions/0025-permission-enforcement-pattern.md), building on ADR 0010. | Proposed | S0-02 |
+| D2 | Permission enforcement pattern | One helper (for example `authorize(actor, permission, resource?)`) used by every server action and route, plus a registry mapping each action to its permission. A guard test enumerates exports and fails on any undeclared action. Start the guard with a baseline list of known gaps that can only shrink. [ADR 0025](../decisions/0025-permission-enforcement-pattern.md), building on ADR 0010. | Decided | S0-02 |
 | D3 | Persistence and migration | Postgres database per tenant (already confirmed). One repository per module behind the tenant-scoped data layer. Because there is no live client data yet, cut over module by module with a one-off import from the JSON store, rather than dual-writing. | Proposed | S0-14 |
 | D4 | Finance data delivery | Take finance out of the app snapshot. Load it on demand through gated endpoints, so it never reaches someone without permission. | Proposed | S0-10 |
 | D5 | Demo mode | **A separate demo tenant** loaded from seed data. Product components never check whether demo data is present. Unbuilt features show an honest empty state or are hidden. Until S0-17 the demo tenant is a separate non-live deployment. [ADR 0026](../decisions/0026-separate-demo-tenant.md). | Decided | S0-11a, S0-11b |
@@ -155,13 +155,13 @@ These need a person with the right admin access. Claude Code should list them in
 
 | Task | For | Notes |
 |---|---|---|
-| Rotate the Ideal Postcodes API key in the Ideal Postcodes account and store the new one in Key Vault. | S0-01 | Do this first; the old key is in the repository history. |
+| Rotate the Ideal Postcodes API key in the Ideal Postcodes account and store the new one in Key Vault. | S0-01, stage 0 exit | **Deferred** by the product owner on 6 November 2026: the existing key has credits and is used only in test. It is now in local `.env.local`. The old key is still in the repository history, so rotate it before any real client data goes in, before anyone else gets repository access, and before stage 0 exit. Until then P5 stays Partly built. |
 | Create a shared mailbox on 1Squared.co.uk (for example `notifications@1squared.co.uk`). | S0-26 | A shared mailbox is enough; it doesn’t need a user licence for this use. |
 | Register an Entra ID app for email, grant Mail.Send through Exchange Online RBAC for Applications scoped to that mailbox only, and do not grant the tenant-wide Graph Mail.Send permission. | S0-26 | Use a certificate or managed identity rather than a client secret if possible; store references in Key Vault. |
 | Add SPF, DKIM and DMARC records for 1Squared.co.uk if they aren’t already in place. | S0-26 | Helps demo emails reach inboxes rather than spam. |
 | Confirm Azure subscription access for creating the Container Apps environment and database. | S0-13 | |
-| Turn on GitHub secret scanning and push protection for the repository. | S0-01 | Repository settings; complements the CI scan. |
-| Put `ANTHROPIC_API_KEY` in Key Vault (and local `.env.local`) for environments that use AI extraction. | S0-01 | The browser key box is removed. |
+| Turn on GitHub secret scanning and push protection for the repository. | S0-01 | **Done** (confirmed 6 November 2026). Complements the CI scan. |
+| Put `ANTHROPIC_API_KEY` in Key Vault (and local `.env.local`) for environments that use AI extraction. | S0-01 | **Local `.env.local` done** (6 November 2026). Key Vault follows when an Azure environment exists (S0-13). The browser key box is removed. |
 | Create the demo deployment's Entra app registration and test users for each role. | S0-11b, S0-27 | Invented names only. |
 
 ## 9. Decisions log
@@ -173,3 +173,5 @@ These need a person with the right admin access. Claude Code should list them in
 | 6 Nov 2026 | D9: email through one interface with per-tenant adapters; Graph from a 1Squared.co.uk mailbox now, so demos send real email; Azure Communication Services for the hosted service later. |
 | 6 Nov 2026 | Item 2 (Conflict check) shown as Partly built until B7 is fixed. |
 | 6 Nov 2026 | Plan v3: checked against the code at `a0a5534`. ADRs 0024 (D1), 0026 (D5) and 0027 (D9) accepted; ADR 0025 (D2) proposed. Added S0-27, split S0-11 into S0-11a and S0-11b, recorded the pre-go-live items, added the AI data-flow record to S0-06, and set the rule that the Ideal Postcodes key is read only from server-side `IDEAL_POSTCODES_API_KEY`. |
+| 6 Nov 2026 | D2 decided: ADR 0025 accepted, and ADR 0010 accepted with an amendment (the registry file is the authoritative permission list). |
+| 6 Nov 2026 | Ideal Postcodes key rotation deferred while in test; must happen before real client data, wider repository access or stage 0 exit. GitHub secret scanning and push protection are on. Anthropic key set locally. |
