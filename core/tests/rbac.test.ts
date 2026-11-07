@@ -96,14 +96,36 @@ import {
   setActiveTenantConfigForTesting,
 } from '../../src/platform/tenantRuntime';
 import {
+  addChoiceValueAction,
   addHomeRoleAction,
   clearAllDataAction,
+  createMatterStageGroupAction,
+  createRecordFromPmsAction,
+  deleteMatterPartyCapacityAction,
+  deleteMatterPartyRelationshipAction,
+  linkPmsRecordAction,
+  reorderChoiceValueAction,
+  reorderCustomFieldAction,
+  reorderMatterPartyRelationshipAction,
+  rerunAutomaticPmsMatchingAction,
   resetDemoDataAction,
   resetHomePagesConfigAction,
+  saveCustomFieldAction,
+  saveEnquirySettingsAction,
   saveHomePagesConfigAction,
+  saveMatterCostsConfigAction,
   savePersonAction,
+  saveMatterPartyCapacityAction,
+  saveMatterPartyRelationshipAction,
+  saveOrgStructureAction,
+  saveTaskSettingsAction,
+  saveTeamAction,
   switchUserAction,
+  syncMatterCostsRatesFromPmsAction,
+  unlinkPmsRecordAction,
+  updateChoiceValueAction,
   updateTenantRbacConfigAction,
+  updateWorkTypeProfilesAction,
 } from '../../src/app/actions';
 import { isActionDenied } from '../../src/domain/actionResult';
 import { canActorAccessMatterRecord } from '../src/domain/document-generation/permissions';
@@ -2627,6 +2649,240 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           teams: store.teams,
         }),
       ).toBe(true);
+    });
+  });
+
+  describe('S0-04: Admin saves and PMS link actions require admin:access or finance:manage_links with MFA, plus PMS creation and team self-escalation guards', () => {
+    it('denies all 22 S0-04 actions without permission or without MFA, and allows them with MFA', async () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const orgStructure = store.orgStructure!;
+        const taskSettings = store.taskSettings;
+        const matterCostsConfig = store.matterCostsConfig!;
+        const firstValue = store.values.find((v) => v.listKey === 'enquiry_channel') ?? store.values[0]!;
+        const firstValueId = firstValue.id;
+        const firstWorkTypeSubId = (
+          store.values.find((v) => Boolean(v.parentId)) ?? store.values[0]!
+        ).id;
+
+        const invokeAll22 = async () => {
+          const results = [
+            await addChoiceValueAction({
+              listKey: firstValue.listKey,
+              label: 'S0-04 Test Source',
+            }),
+            await updateChoiceValueAction(firstValueId, {
+              description: 'S0-04 description',
+            }),
+            await reorderChoiceValueAction(firstValueId, 1),
+            await createMatterStageGroupAction({
+              label: 'S0-04 Stage Group',
+              mode: 'scratch',
+            }),
+            await saveCustomFieldAction({
+              recordType: 'person',
+              label: 'S0-04 Custom Field',
+              fieldType: 'text',
+              section: 'A',
+              required: false,
+            }),
+            await reorderCustomFieldAction(store.customFields[0]!.id, 1),
+            await saveTeamAction({
+              name: 'S0-04 Test Team',
+              memberIds: ['P-000001', 'P-000002'],
+              leadIds: ['P-000001'],
+              practiceAreaIds: [],
+            }),
+            await saveEnquirySettingsAction({ retentionMonths: 18 }),
+            await saveTaskSettingsAction(taskSettings),
+            await saveOrgStructureAction(orgStructure),
+            await saveMatterPartyRelationshipAction({
+              code: 'S004_REL',
+              label: 'S0-04 Relationship',
+              isNew: true,
+            }),
+            await reorderMatterPartyRelationshipAction('S004_REL', -1),
+            await deleteMatterPartyRelationshipAction('S004_REL'),
+            await saveMatterPartyCapacityAction({
+              code: 'S004_CAP',
+              label: 'S0-04 Capacity',
+              group: 'Ownership, control and authority',
+              allowedRelationships: ['CLIENT'],
+              profiles: ['ALL'],
+              isNew: true,
+            }),
+            await deleteMatterPartyCapacityAction('S004_CAP'),
+            await updateWorkTypeProfilesAction(firstWorkTypeSubId, ['CORP']),
+            await saveMatterCostsConfigAction(matterCostsConfig),
+            await syncMatterCostsRatesFromPmsAction(),
+            await linkPmsRecordAction('organisation', 'O-000001', 'CL-S004'),
+            await unlinkPmsRecordAction(
+              getStore().pmsLinks.find((l) => l.pmsCode === 'CL-S004')?.id ??
+                getStore().pmsLinks[0]!.id,
+            ),
+            await rerunAutomaticPmsMatchingAction(),
+            await createRecordFromPmsAction('organisation', 'CL001'),
+          ];
+          return results;
+        };
+
+        // 1. Fee earner (P-000002) with MFA is denied (FORBIDDEN) on all 22 actions
+        setTestEntraSessionOverride({
+          personId: 'P-000002',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000002',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000002',
+          email: 'dafydd.evans@notalawfirm.example',
+          displayName: 'Dafydd Evans',
+          entraRoles: ['fee_earner'],
+          mappedRoles: ['fee_earner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const deniedNoPerm = await invokeAll22();
+        for (const res of deniedNoPerm) {
+          expect(isActionDenied(res)).toBe(true);
+          if (isActionDenied(res)) {
+            expect(res.code).toBe('FORBIDDEN');
+          }
+        }
+
+        // 2. Admin (P-000004) without MFA is denied (MFA_REQUIRED) on all 22 actions
+        setTestEntraSessionOverride({
+          personId: 'P-000004',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000004',
+          email: 'huw.pritchard@notalawfirm.example',
+          displayName: 'Huw Pritchard',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: false,
+          amr: ['pwd'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const deniedNoMfa = await invokeAll22();
+        for (const res of deniedNoMfa) {
+          expect(isActionDenied(res)).toBe(true);
+          if (isActionDenied(res)) {
+            expect(res.code).toBe('MFA_REQUIRED');
+          }
+        }
+
+        // 3. Admin (P-000004) with MFA is allowed on all 22 actions
+        setTestEntraSessionOverride({
+          personId: 'P-000004',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000004',
+          email: 'huw.pritchard@notalawfirm.example',
+          displayName: 'Huw Pritchard',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const allowedWithMfa = await invokeAll22();
+        for (const res of allowedWithMfa) {
+          expect(isActionDenied(res)).toBe(false);
+        }
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('enforces employee:edit_core and matter:create on createRecordFromPmsAction and prevents self-escalation into team leadIds', async () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const adminPerson = store.people.find((p) => p.id === 'P-000004')!;
+
+        setTestEntraSessionOverride({
+          personId: adminPerson.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: adminPerson.id,
+          email: 'huw.pritchard@notalawfirm.example',
+          displayName: 'Huw Pritchard',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+
+        // Self-escalation check: admin (P-000004) cannot add themselves into leadIds
+        const selfLeadAttempt = await saveTeamAction({
+          name: 'Self Lead Escalation Team',
+          memberIds: [adminPerson.id, 'P-000001'],
+          leadIds: [adminPerson.id],
+          practiceAreaIds: [],
+        });
+        expect(isActionDenied(selfLeadAttempt)).toBe(true);
+        expect(selfLeadAttempt.error).toMatch(/SELF_MODIFICATION_FORBIDDEN/i);
+
+        const existingTeam = store.teams.find(
+          (t) => !t.leadIds.includes(adminPerson.id),
+        )!;
+        const selfLeadEditAttempt = await saveTeamAction({
+          id: existingTeam.id,
+          name: existingTeam.name,
+          description: existingTeam.description,
+          memberIds: [...existingTeam.memberIds, adminPerson.id],
+          leadIds: [...existingTeam.leadIds, adminPerson.id],
+          practiceAreaIds: existingTeam.practiceAreaIds,
+        });
+        expect(isActionDenied(selfLeadEditAttempt)).toBe(true);
+        expect(selfLeadEditAttempt.error).toMatch(/SELF_MODIFICATION_FORBIDDEN/i);
+
+        // Revoke employee:edit_core on adminPerson -> createRecordFromPmsAction('employee', ...) is denied and creates no employee
+        adminPerson.permissionOverrides = {
+          grant: [],
+          revoke: ['employee:edit_core'],
+        };
+        store.pmsLinks = store.pmsLinks.filter((l) => l.entityType !== 'employee');
+        const peopleCountBefore = store.people.length;
+        const empFromPmsDenied = await createRecordFromPmsAction('employee', 'FE01');
+        expect(isActionDenied(empFromPmsDenied)).toBe(true);
+        expect(empFromPmsDenied.ok).toBe(false);
+        expect(empFromPmsDenied.error).toMatch(/employee:edit_core/i);
+        expect(store.people.length).toBe(peopleCountBefore);
+
+        // Revoke matter:create on adminPerson -> createRecordFromPmsAction('matter', ...) is denied
+        adminPerson.permissionOverrides = {
+          grant: [],
+          revoke: ['matter:create'],
+        };
+        store.pmsLinks = store.pmsLinks.filter((l) => l.entityType !== 'matter');
+        const mattersCountBefore = store.matters.length;
+        const matterFromPmsDenied = await createRecordFromPmsAction(
+          'matter',
+          'MAT-PMS-001',
+        );
+        expect(isActionDenied(matterFromPmsDenied)).toBe(true);
+        expect(matterFromPmsDenied.ok).toBe(false);
+        expect(matterFromPmsDenied.error).toMatch(/matter:create/i);
+        expect(store.matters.length).toBe(mattersCountBefore);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
     });
   });
 });

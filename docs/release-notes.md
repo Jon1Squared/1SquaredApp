@@ -1,5 +1,16 @@
 # 1Squared — Release Notes
 
+## Unreleased — Admin Saves Require Admin Permission and MFA (`s0-04-admin-saves`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Host RBAC & MFA Enforcement (`src/server/actionPermissions.ts`, `src/server/services.ts`, `src/app/actions.ts`, `src/components/`, `src/docs/`, `docs/`):**
+  - **22 Admin & PMS Action Policies Closed (`src/server/actionPermissions.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`):** Enforced `admin:access` (`requiresMfa: true`, `enforcedBy: 'action'`) across all 19 administrative configuration actions (`addChoiceValueAction`, `updateChoiceValueAction`, `reorderChoiceValueAction`, `createMatterStageGroupAction`, `saveCustomFieldAction`, `reorderCustomFieldAction`, `saveTeamAction`, `saveEnquirySettingsAction`, `saveTaskSettingsAction`, `saveOrgStructureAction`, `saveMatterPartyRelationshipAction`, `reorderMatterPartyRelationshipAction`, `deleteMatterPartyRelationshipAction`, `saveMatterPartyCapacityAction`, `deleteMatterPartyCapacityAction`, `updateWorkTypeProfilesAction`, `saveMatterCostsConfigAction`, `syncMatterCostsRatesFromPmsAction`, and `createRecordFromPmsAction`), and enforced `finance:manage_links` (`requiresMfa: true`, `enforcedBy: 'action'`) on `linkPmsRecordAction`, `unlinkPmsRecordAction`, and `rerunAutomaticPmsMatchingAction`. Lowered `MAX_KNOWN_GAPS` from 48 to 26.
+  - **PMS Record Creation Checks (`src/server/services.ts`):** Updated `createRecordFromPms` to enforce `admin:access` (with MFA) plus entity-specific creation permissions (`employee:edit_core` for `employee`, `matter:create` for `matter`, and `contact:create` for `person` and `organisation`), preventing employee creation without `employee:edit_core`.
+  - **Team Lead Self-Escalation Guard & Tampered ID Validation (`src/server/services.ts`, `src/app/actions.ts`):** Updated `saveTeamRecord` to reject self-escalation into `leadIds` (`SELF_MODIFICATION_FORBIDDEN`) and reject unknown/tampered team IDs, and validated existing record IDs on choice list, custom field, and PMS link mutations.
+  - **Tests & Documentation (`core/tests/rbac.test.ts`, `core/tests/isolation.test.ts`, `src/docs/articles/authentication-rbac-and-mfa.ts`, `src/docs/articles/data-administration-and-retention.ts`, `docs/roadmap/feature-list.md`):** Added unit tests covering all 22 actions (no permission, permission without MFA, and permission with MFA, plus PMS employee/matter creation checks and team lead self-escalation) and two-tenant isolation tests for forged claims and tampered record IDs.
+
+---
+
 ## Unreleased — Lock Down Destructive and Approval Actions; B3, B11, B12 (`s0-03-lock-down-approvals`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

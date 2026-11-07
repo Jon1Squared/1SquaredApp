@@ -5465,10 +5465,15 @@ export function updateChoiceValue(
     meta?: Record<string, string>;
   },
   byId: string,
-): { value?: ChoiceValue; error?: string } {
+): { value?: ChoiceValue; error?: string } & Partial<ActionDenied> {
   const store = getStore();
   const val = store.values.find((v) => v.id === id);
-  if (!val) return { error: 'Value not found' };
+  if (!val) {
+    return {
+      ...buildActionDenied('FORBIDDEN', 'Value not found'),
+      error: 'Value not found',
+    };
+  }
 
   if (patch.active === false && val.active) {
     const check = canDeactivate(val);
@@ -5858,13 +5863,33 @@ export function saveTeamRecord(
     active?: boolean;
   },
   byId: string,
-): { team?: Team; error?: string } {
+): { team?: Team; error?: string } & Partial<ActionDenied> {
   const store = getStore();
   const now = new Date().toISOString();
   const name = input.name.trim();
   if (!name) return { error: 'Team name is required.' };
 
   const existing = input.id ? store.teams.find((t) => t.id === input.id) ?? null : null;
+  if (input.id && !existing) {
+    const msg = `Team "${input.id}" not found.`;
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      error: msg,
+    };
+  }
+
+  // S0-04: Prevent self-escalation into team leadIds (which grants team-lead permissions such as employee:edit_core).
+  const isAddingSelfAsLead =
+    input.leadIds.includes(byId) && !(existing?.leadIds.includes(byId) ?? false);
+  if (isAddingSelfAsLead) {
+    const msg =
+      'SELF_MODIFICATION_FORBIDDEN: Users cannot make themselves a team lead.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      error: msg,
+    };
+  }
+
   const memberIds = Array.from(new Set([...input.memberIds, ...input.leadIds]));
   const leadIds = input.leadIds.filter((id) => memberIds.includes(id));
 
@@ -8090,9 +8115,67 @@ export async function createRecordFromPms(
   entityType: PmsEntityType,
   pmsCode: string,
   byId: string,
-): Promise<{ ok: boolean; createdId?: string; error?: string }> {
+): Promise<{ ok: boolean; createdId?: string; error?: string } & Partial<Omit<ActionDenied, 'ok'>>> {
   const store = getStore();
   const pms = getPmsSource();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+
+  if (!actorPerms.permissions.has('admin:access')) {
+    const msg =
+      'FORBIDDEN: Permission "admin:access" is required to create records from PMS.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      ok: false,
+      error: msg,
+    };
+  }
+  if (
+    getActiveActorSession() &&
+    actorPerms.mfaPendingPermissions.has('admin:access')
+  ) {
+    const msg =
+      'MFA_REQUIRED: Multi-factor authentication (MFA) is required for administrative permission "admin:access".';
+    return {
+      ...buildActionDenied('MFA_REQUIRED', msg),
+      ok: false,
+      error: msg,
+    };
+  }
+
+  if (entityType === 'employee' && !actorPerms.permissions.has('employee:edit_core')) {
+    const msg =
+      'FORBIDDEN: Permission "employee:edit_core" is required to create an employee record from PMS.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      ok: false,
+      error: msg,
+    };
+  }
+  if (
+    (entityType === 'organisation' || entityType === 'person') &&
+    !actorPerms.permissions.has('contact:create')
+  ) {
+    const msg =
+      'FORBIDDEN: Permission "contact:create" is required to create a client or contact record from PMS.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      ok: false,
+      error: msg,
+    };
+  }
+  if (entityType === 'matter' && !actorPerms.permissions.has('matter:create')) {
+    const msg =
+      'FORBIDDEN: Permission "matter:create" is required to create a matter record from PMS.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      ok: false,
+      error: msg,
+    };
+  }
 
   const alreadyLinked = findOneSquaredIdForPmsCode(store.pmsLinks, entityType, pmsCode);
   if (alreadyLinked) {
@@ -8255,21 +8338,27 @@ export async function createRecordFromPms(
       clientId = createdClient.createdId;
     }
 
-    // Ensure partner & lead fee earner exist or fallback cleanly
+    // Ensure partner & lead fee earner exist or fallback cleanly (only creating employees if actor holds employee:edit_core)
     let partnerId = findOneSquaredIdForPmsCode(
       store.pmsLinks,
       'employee',
       pm.responsible_partner_id,
     );
-    if (!partnerId) {
+    if (!partnerId && actorPerms.permissions.has('employee:edit_core')) {
       const createdFe = await createRecordFromPms('employee', pm.responsible_partner_id, byId);
       partnerId = createdFe.createdId ?? byId;
     }
+    if (!partnerId) {
+      partnerId = byId;
+    }
 
     let leadId = findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', pm.fee_earner_id);
-    if (!leadId) {
+    if (!leadId && actorPerms.permissions.has('employee:edit_core')) {
       const createdLead = await createRecordFromPms('employee', pm.fee_earner_id, byId);
       leadId = createdLead.createdId ?? partnerId;
+    }
+    if (!leadId) {
+      leadId = partnerId;
     }
 
     const paId = mapPmsPracticeAreaId(store, pm.practice_area);

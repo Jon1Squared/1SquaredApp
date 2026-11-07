@@ -201,7 +201,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
     // Unauthenticated calls to gap and enforcedBy: 'service' throw UNAUTHENTICATED without calling fn
     setTestEntraSessionOverride(undefined);
     const gapFn = vi.fn(() => 'gap-result');
-    await expect(guardedAction('saveTaskAction', gapFn)).rejects.toThrow(
+    await expect(guardedAction('requestMatterBillAction', gapFn)).rejects.toThrow(
       /UNAUTHENTICATED/i,
     );
     expect(gapFn).not.toHaveBeenCalled();
@@ -214,7 +214,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
 
     // Authenticated calls pass return values and thrown errors through unchanged
     setTestEntraSessionOverride(makeSession());
-    const okRes = await guardedAction('saveTaskAction', () => ({
+    const okRes = await guardedAction('requestMatterBillAction', () => ({
       customShape: 42,
     }));
     expect(okRes).toEqual({ customShape: 42 });
@@ -240,7 +240,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
       }),
     );
 
-    const mfaTrueResult = await guardedAction('saveTeamAction', () => {
+    const mfaTrueResult = await guardedAction('saveMatterAction', () => {
       // Service resolves permissions without passing mfaVerified or context
       const perms = resolvePersonPermissionSet(adminPerson, {
         allPeople: store.people,
@@ -264,7 +264,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
       }),
     );
 
-    const mfaFalseResult = await guardedAction('saveTeamAction', () => {
+    const mfaFalseResult = await guardedAction('saveMatterAction', () => {
       const perms = resolvePersonPermissionSet(adminPerson, {
         allPeople: store.people,
         teams: store.teams,

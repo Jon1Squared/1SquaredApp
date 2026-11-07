@@ -95,8 +95,15 @@ import {
 import {
   approveSignOffAction,
   discussSignOffAction,
+  linkPmsRecordAction,
+  reorderChoiceValueAction,
+  reorderCustomFieldAction,
+  saveCustomFieldAction,
   saveMatterAction,
   savePersonAction,
+  saveTeamAction,
+  unlinkPmsRecordAction,
+  updateChoiceValueAction,
 } from '../../src/app/actions';
 import { isActionDenied } from '../../src/domain/actionResult';
 import { getStore } from '../../src/server/store';
@@ -6458,6 +6465,132 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await expect(
         savePersonAction({ firstName: 'Forged', surname: 'Tenant' }, {}),
       ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('S0-04: an admin of tenant B cannot change tenant A lists, custom fields, teams, or PMS links via forged tenant claims or tampered record IDs', async () => {
+    try {
+      resetAllDemoData('P-000001');
+      const store = getStore();
+      const firstValue = structuredClone(store.values[0]!);
+      const firstTeam = structuredClone(store.teams[0]!);
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+
+      // 1. Admin of Tenant B presenting a Tenant B claim against Tenant A's runtime is rejected at the action boundary
+      setTestEntraSessionOverride({
+        personId: 'P-000004',
+        tenantId: 'fictional-chambers-uk',
+        oid: '00000000-0000-4000-8000-000000000004',
+        tid: '22222222-2222-2222-2222-222222222222',
+        sub: 'P-000004',
+        email: 'admin@fictionalchambers.example',
+        displayName: 'Tenant B Admin',
+        entraRoles: ['admin'],
+        mappedRoles: ['admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+
+      await expect(
+        updateChoiceValueAction(firstValue.id, {
+          label: 'Tampered From Tenant B',
+        }),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+      expect(store.values.find((v) => v.id === firstValue.id)?.label).toBe(
+        firstValue.label,
+      );
+
+      await expect(
+        saveTeamAction({
+          id: firstTeam.id,
+          name: 'Tampered Team Name From Tenant B',
+          memberIds: firstTeam.memberIds,
+          leadIds: firstTeam.leadIds,
+          practiceAreaIds: firstTeam.practiceAreaIds,
+        }),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+      expect(store.teams.find((t) => t.id === firstTeam.id)?.name).toBe(
+        firstTeam.name,
+      );
+
+      // 2. Even within an authenticated admin session, tampered cross-tenant record IDs that do not belong to the tenant are rejected with FORBIDDEN and never create phantom records
+      setTestEntraSessionOverride({
+        personId: 'P-000004',
+        tenantId: 'not-a-law-firm',
+        oid: '00000000-0000-4000-8000-000000000004',
+        tid: '00000000-0000-4000-8000-000000000000',
+        sub: 'P-000004',
+        email: 'huw.pritchard@notalawfirm.example',
+        displayName: 'Huw Pritchard',
+        entraRoles: ['admin'],
+        mappedRoles: ['admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+
+      const teamsCountBefore = store.teams.length;
+      const cfCountBefore = store.customFields.length;
+      const pmsLinksCountBefore = store.pmsLinks.length;
+
+      const tamperedValUpdate = await updateChoiceValueAction(
+        'choice_value.tenant_b_nonexistent',
+        { label: 'Tampered' },
+      );
+      expect(isActionDenied(tamperedValUpdate)).toBe(true);
+
+      const tamperedValReorder = await reorderChoiceValueAction(
+        'choice_value.tenant_b_nonexistent',
+        1,
+      );
+      expect(isActionDenied(tamperedValReorder)).toBe(true);
+
+      const tamperedCfSave = await saveCustomFieldAction({
+        id: 'cf_tenant_b_nonexistent',
+        recordType: 'person',
+        label: 'Tampered CF',
+        fieldType: 'text',
+        section: 'A',
+        required: false,
+      });
+      expect(isActionDenied(tamperedCfSave)).toBe(true);
+      expect(store.customFields.length).toBe(cfCountBefore);
+
+      const tamperedCfReorder = await reorderCustomFieldAction(
+        'cf_tenant_b_nonexistent',
+        1,
+      );
+      expect(isActionDenied(tamperedCfReorder)).toBe(true);
+
+      const tamperedTeamSave = await saveTeamAction({
+        id: 'TM-TENANT-B-999',
+        name: 'Tampered Cross-Tenant Team',
+        memberIds: ['P-000001'],
+        leadIds: ['P-000001'],
+        practiceAreaIds: [],
+      });
+      expect(isActionDenied(tamperedTeamSave)).toBe(true);
+      expect(store.teams.length).toBe(teamsCountBefore);
+
+      const tamperedPmsLink = await linkPmsRecordAction(
+        'organisation',
+        'O-TENANT-B-999',
+        'CL-TAMPERED',
+      );
+      expect(isActionDenied(tamperedPmsLink)).toBe(true);
+      expect(store.pmsLinks.length).toBe(pmsLinksCountBefore);
+
+      const tamperedPmsUnlink = await unlinkPmsRecordAction('PMSL-TENANT-B-999');
+      expect(isActionDenied(tamperedPmsUnlink)).toBe(true);
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

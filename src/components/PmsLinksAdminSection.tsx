@@ -8,6 +8,7 @@ import {
   rerunAutomaticPmsMatchingAction,
   unlinkPmsRecordAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { formatDate } from '@/domain/dates';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import { formatPmsAsAtLabel } from '@/domain/pms';
@@ -94,14 +95,22 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
   const handleLink = (entityType: PmsEntityType, onesquaredId: string, pmsCode: string) => {
     if (!pmsCode) return;
     startTransition(async () => {
-      await linkPmsRecordAction(entityType, onesquaredId, pmsCode);
+      const res = await linkPmsRecordAction(entityType, onesquaredId, pmsCode);
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       showToast(`Linked ${pmsCode} in 1Squared`);
     });
   };
 
   const handleUnlink = (linkId: string, pmsCode: string) => {
     startTransition(async () => {
-      await unlinkPmsRecordAction(linkId);
+      const res = await unlinkPmsRecordAction(linkId);
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       showToast(`Unlinked ${pmsCode}`);
     });
   };
@@ -109,6 +118,10 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
   const handleRerunAuto = () => {
     startTransition(async () => {
       const res = await rerunAutomaticPmsMatchingAction();
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       showToast(`Re-ran automatic PMS matching (${res.totalLinks} links active)`);
     });
   };
@@ -116,6 +129,10 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
   const handleCreateFromPms = (entityType: PmsEntityType, pmsCode: string, label: string) => {
     startTransition(async () => {
       const res = await createRecordFromPmsAction(entityType, pmsCode);
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       if (!res.ok) {
         showToast(res.error ?? 'Could not create record from PMS');
         return;

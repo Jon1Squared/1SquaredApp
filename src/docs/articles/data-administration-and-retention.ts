@@ -26,5 +26,15 @@ Unconverted closed enquiries retain personal contact details only until the firm
 - **Retention period enforced on every path**: \`anonymiseExpiredEnquiries\` always evaluates \`isReadyForRetentionAnonymisation(enquiry, retentionMonths, now)\`, whether called in bulk or with a specific enquiry ID. An open enquiry, a converted enquiry, or a closed enquiry whose \`receivedAt\` date has not yet passed the retention cutoff is never anonymised early.
 - **Clear user feedback**: If a user triggers single-enquiry anonymisation before the retention period has elapsed, 1Squared leaves the record untouched and displays *"Not yet due for anonymisation (retention period ends …)"* rather than a success message.
 - **What is removed and retained**: When an eligible enquiry is anonymised, 1Squared scrubs the enquirer’s name, email, phone number, postal address, other named parties, and notes, while preserving the practice area, intake channel, dates, and closure outcome for management reporting, and records a \`Privacy retention anonymisation\` audit entry.
+
+## 3. Administrative saves for lists, custom fields, teams & PMS links (\`admin:access\` and \`finance:manage_links\`)
+
+All administrative configuration mutations in the \`/admin\` console require multi-factor authentication (\`mfaVerified === true\`) and are enforced at the server action boundary (\`enforcedBy: 'action'\`):
+
+- **Choice lists & matter stage groups (\`admin:access\` + MFA)**: Adding, editing, deactivating, or reordering picklist values (\`addChoiceValueAction\`, \`updateChoiceValueAction\`, \`reorderChoiceValueAction\`) and creating matter stage groups (\`createMatterStageGroupAction\`) require \`admin:access\` with MFA.
+- **Custom fields (\`admin:access\` + MFA)**: Creating, updating, or reordering custom field definitions (\`saveCustomFieldAction\`, \`reorderCustomFieldAction\`) across People, Organisations, Matters, and Enquiries requires \`admin:access\` with MFA.
+- **Teams & self-escalation guard (\`admin:access\` + MFA)**: Creating or updating operational teams (\`saveTeamAction\`) requires \`admin:access\` with MFA. Because team leadership (\`leadIds\`) grants relationship permissions (including \`employee:edit_core\`), \`saveTeamRecord\` also enforces the self-modification rule (\`SELF_MODIFICATION_FORBIDDEN\`): an administrator cannot add themselves as a team lead.
+- **Firm settings, organisation structure, party taxonomy & matter costs (\`admin:access\` + MFA)**: Saving enquiry settings, automatic task templates, the organisation structure catalogue, matter party relationships/capacities/work-type profiles, and matter costs rate cards (or syncing rates from the PMS) all require \`admin:access\` with MFA.
+- **PMS record linking & creation (\`finance:manage_links\` / \`admin:access\` + MFA)**: Linking, unlinking, and re-running automatic PMS matching require \`finance:manage_links\` with MFA; creating a 1Squared record from the PMS (\`createRecordFromPmsAction\`) requires \`admin:access\` with MFA plus \`employee:edit_core\` (for employees), \`matter:create\` (for matters), or \`contact:create\` (for people and organisations).
 `,
 };
