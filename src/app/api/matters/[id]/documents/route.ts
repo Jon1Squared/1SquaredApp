@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { normaliseDocumentStoreError } from '@platform/core';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import { guardedRoute } from '@/server/authorize';
 import {
   browseMatterDocumentStoreFolder,
   downloadMatterStoreDocument,
@@ -51,95 +52,103 @@ function resolveSafeCorrelationId(
   return `${fallbackPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export async function GET(
-  request: NextRequest,
-  context: { params: Promise<{ id: string }> },
-) {
-  const correlationId = resolveSafeCorrelationId(
-    request.headers.get('x-correlation-id'),
-    'corr-matter-docs-get',
-  );
-  let tenantId = 'unknown';
-  try {
-    tenantId = getActiveTenantConfiguration().tenantId;
-    const { id: matterId } = await context.params;
-    return await withAuthenticatedActor(async (actor) => {
-      tenantId = actor.tenantId || tenantId;
-      const userId = actor.personId;
-      const session = actor.session;
-      const { searchParams } = new URL(request.url);
-      const action = searchParams.get('action');
+export const GET = guardedRoute(
+  'GET /api/matters/[id]/documents',
+  async (
+    request: NextRequest,
+    context: { params: Promise<{ id: string }> },
+  ) => {
+    const correlationId = resolveSafeCorrelationId(
+      request.headers.get('x-correlation-id'),
+      'corr-matter-docs-get',
+    );
+    let tenantId = 'unknown';
+    try {
+      tenantId = getActiveTenantConfiguration().tenantId;
+      const { id: matterId } = await context.params;
+      return await withAuthenticatedActor(async (actor) => {
+        tenantId = actor.tenantId || tenantId;
+        const userId = actor.personId;
+        const session = actor.session;
+        const { searchParams } = new URL(request.url);
+        const action = searchParams.get('action');
 
-      if (action === 'download') {
-        const locationId = searchParams.get('locationId') ?? '';
-        const itemId = searchParams.get('itemId') ?? '';
-        const downloaded = await downloadMatterStoreDocument({
+        if (action === 'download') {
+          const locationId = searchParams.get('locationId') ?? '';
+          const itemId = searchParams.get('itemId') ?? '';
+          const downloaded = await downloadMatterStoreDocument({
+            matterId,
+            locationId,
+            itemId,
+            userId,
+            session,
+            correlationId,
+          });
+
+          return new NextResponse(Buffer.from(downloaded.bytes), {
+            status: 200,
+            headers: {
+              'Content-Type': downloaded.mimeType || 'application/octet-stream',
+              'Content-Disposition': `attachment; filename="${encodeURIComponent(downloaded.fileName)}"`,
+              'Cache-Control': 'no-store',
+            },
+          });
+        }
+
+        const locationId = searchParams.get('locationId') || undefined;
+        const folderItemId = searchParams.get('folderItemId') || undefined;
+        const cursor = searchParams.get('cursor') || undefined;
+
+        const browseResult = await browseMatterDocumentStoreFolder({
           matterId,
           locationId,
-          itemId,
+          folderItemId,
+          cursor,
           userId,
           session,
           correlationId,
         });
 
-        return new NextResponse(Buffer.from(downloaded.bytes), {
-          status: 200,
-          headers: {
-            'Content-Type': downloaded.mimeType || 'application/octet-stream',
-            'Content-Disposition': `attachment; filename="${encodeURIComponent(downloaded.fileName)}"`,
-            'Cache-Control': 'no-store',
-          },
-        });
-      }
-
-      const locationId = searchParams.get('locationId') || undefined;
-      const folderItemId = searchParams.get('folderItemId') || undefined;
-      const cursor = searchParams.get('cursor') || undefined;
-
-      const browseResult = await browseMatterDocumentStoreFolder({
-        matterId,
-        locationId,
-        folderItemId,
-        cursor,
-        userId,
-        session,
-        correlationId,
+        return NextResponse.json({ ok: true, ...browseResult });
       });
+    } catch (err) {
+      const normalised = normaliseDocumentStoreError(err);
+      const isUnauth =
+        (err instanceof Error &&
+          (err.message.startsWith('UNAUTHENTICATED:') ||
+            err.message.startsWith('[UNAUTHENTICATED]'))) ||
+        (err as { code?: string } | null)?.code === 'UNAUTHENTICATED';
+      const code = isUnauth ? 'reauthentication_required' : normalised.code;
+      logMatterDocumentsRouteError('GET', tenantId, correlationId, code);
+      return NextResponse.json(
+        {
+          ok: false,
+          code,
+          error: normalised.userMessage,
+          claimsChallenge: normalised.claimsChallenge,
+        },
+        {
+          status: isUnauth
+            ? 401
+            : normalised.code === 'access_denied'
+              ? 403
+              : 400,
+        },
+      );
+    }
+  },
+);
 
-      return NextResponse.json({ ok: true, ...browseResult });
-    });
-  } catch (err) {
-    const normalised = normaliseDocumentStoreError(err);
-    const isUnauth =
-      err instanceof Error && err.message.startsWith('UNAUTHENTICATED:');
-    const code = isUnauth ? 'reauthentication_required' : normalised.code;
-    logMatterDocumentsRouteError('GET', tenantId, correlationId, code);
-    return NextResponse.json(
-      {
-        ok: false,
-        code,
-        error: normalised.userMessage,
-        claimsChallenge: normalised.claimsChallenge,
-      },
-      {
-        status: isUnauth
-          ? 401
-          : normalised.code === 'access_denied'
-            ? 403
-            : 400,
-      },
+export const POST = guardedRoute(
+  'POST /api/matters/[id]/documents',
+  async (
+    request: NextRequest,
+    context: { params: Promise<{ id: string }> },
+  ) => {
+    const correlationId = resolveSafeCorrelationId(
+      request.headers.get('x-correlation-id'),
+      'corr-matter-docs-post',
     );
-  }
-}
-
-export async function POST(
-  request: NextRequest,
-  context: { params: Promise<{ id: string }> },
-) {
-  const correlationId = resolveSafeCorrelationId(
-    request.headers.get('x-correlation-id'),
-    'corr-matter-docs-post',
-  );
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
@@ -297,4 +306,4 @@ export async function POST(
       },
     );
   }
-}
+});

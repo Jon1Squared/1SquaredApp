@@ -1,5 +1,18 @@
 # 1Squared — Release Notes
 
+## Unreleased — Permission Enforcement Pattern, Registry and Guard (`s0-02-permission-guard`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Host Security Infrastructure (`src/server/`, `src/domain/`, `src/app/`, `docs/`, `src/docs/`):**
+  - **Central Action & Route Authorisation Wrappers (`src/server/authorize.ts`, `src/domain/actionResult.ts`, [ADR 0025](./decisions/0025-permission-enforcement-pattern.md)):** Added `guardedAction(name, fn)`, `guardedRoute(name, handler)`, and `authorizeResource(permissions, resource)`, plus the shared client-safe `ActionDenied` type and `isActionDenied()` helper (`{ ok: false, denied: true, code, message, error }`). Wrapped all 106 server actions in `src/app/actions.ts` and all 11 HTTP route handlers across the 8 route files under `src/app/api/`.
+  - **Complete Policy Registry & Gap Baseline (`src/server/actionPermissions.ts`):** Mapped all 106 server actions and 11 API route handlers to their policy (`permission`, `authenticated`, `public`, or `gap` tagged with the closing slice `S0-03` to `S0-07` / `S0-10`), locked `MAX_KNOWN_GAPS = 55`, and converted `updateTenantRbacConfigAction` (`rbac:manage_config`) as the `enforcedBy: 'action'` pilot.
+  - **Session MFA Propagation (`src/domain/rbac.ts`):** Updated `resolvePersonPermissionSet` to read `mfaVerified` from the active verified session when not explicitly passed, so services resolving permissions for the active actor see the session's real MFA state.
+  - **Guard & Runtime Tests (`src/server/__tests__/actionPermissionGuard.test.ts`, `src/server/__tests__/authorize.test.ts`):** Added static source-scanning guard tests verifying that every exported action and route handler has a valid policy and wrapper call, and runtime tests covering `UNAUTHENTICATED`, `FORBIDDEN`, `MFA_REQUIRED`, viewing-as non-escalation, forged tenant claims, MFA state propagation, route parameter forwarding, and PII-free denial logs.
+  - Updated `docs/rbac-reference.md`, `src/docs/articles/authentication-rbac-and-mfa.ts`, `AGENTS.md`, `CLAUDE.md`, and `docs/roadmap/feature-list.md` (`P1`).
+  - Review fixes R239, R241: rebased onto `s0-01-remove-secrets`, registered and wrapped `GET /api/address-lookup` (11 route handlers across 8 files), removed `policyOverride` from `guardedAction` and `guardedRoute` (narrowing `name` to `RegisteredActionName` / `RegisteredRouteName`), and enforced two-argument wrapper calls in `actionPermissionGuard.test.ts`.
+
+---
+
 ## Unreleased — Remove Secrets from Code and the Browser (`s0-01-remove-secrets`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

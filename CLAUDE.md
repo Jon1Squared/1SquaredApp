@@ -67,6 +67,7 @@ Rules:
 - Payroll and sensitive HR reads and writes must write audit entries (`view-payroll`, `view-sensitive`, `update-payroll`, `update-sensitive`).
 - Staff matters (`isStaffMatter`) are restricted to `restrictedAccessUserIds`. Any new query, report, search or export that returns matters must respect this.
 - Hiding a nav item is not access control. Every API endpoint enforces its own permission check.
+- Every server action and API route uses `guardedAction` / `guardedRoute` and has a policy in `src/server/actionPermissions.ts`.
 - New code compares stable keys (`HomeRoleKey`, `employee_role.*` IDs), never display labels. The label matching in `resolveUserAppRole` is known technical debt: flag it, don't copy it.
 - Roles are defined in the core; clients map their own roles through configuration.
 - Extensions get only the permissions in their manifest (`ExtensionPermission`).

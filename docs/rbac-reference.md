@@ -15,6 +15,7 @@ Related Architecture Decision Records:
 - [ADR-0019: Inheritance-Based Document Permission Model](./decisions/0019-inheritance-based-document-permission-model.md)
 - [ADR-0020: Document References and Zero-Content Storage](./decisions/0020-document-references-and-zero-content-storage.md)
 - [ADR-0021: Matter Folder Template Inheritance Model](./decisions/0021-matter-folder-template-inheritance-model.md)
+- [ADR-0025: One Permission Enforcement Pattern for Server Actions and Routes](./decisions/0025-permission-enforcement-pattern.md)
 
 ---
 
@@ -158,4 +159,23 @@ In addition to role-based grants, the RBAC engine evaluates relationship rules (
 |---|---|---|
 | `is_team_lead_of_any_team` | `employee:view_core`, `employee:edit_core`, `task:claim_any`, `keydate:view`, `keydate:edit`, `keydate:verify`, `keydate:resolve`, `keydate:waive` | Team leads and line managers can view and edit core employment records, claim unassigned tasks, and verify/manage key dates. Does **not** grant `matter:reassign_ownership` (which is restricted to `supervisor`, `partner`, `managing_partner`, and `admin`). |
 | `is_line_manager_of_target` | `employee:view_core`, `employee:edit_core` | Line managers and supervising partners can view and edit core employment records. |
+
+---
+
+## 9. Enforcing permissions in actions and routes (`src/server/authorize.ts` & `src/server/actionPermissions.ts`)
+
+Per [ADR-0025](./decisions/0025-permission-enforcement-pattern.md), every server action in `src/app/actions.ts` and every HTTP method exported from `src/app/api/**/route.ts` goes through the central wrappers in `src/server/authorize.ts` and has a declarative policy in `src/server/actionPermissions.ts`:
+
+- **Policy Registry (`src/server/actionPermissions.ts`):**
+  - `ACTION_PERMISSIONS`: maps each exported server action name to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'authenticated', reason }`, or `{ kind: 'gap', slice }`.
+  - `ROUTE_PERMISSIONS`: maps each `<METHOD> /api/...` route handler to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'public', reason }`, or `{ kind: 'gap', slice }`.
+  - `MAX_KNOWN_GAPS`: locks the maximum count of `gap` entries so new actions cannot ship without a permission policy and the baseline gap count can only decrease as Stage 0 slices S0-03 to S0-07 and S0-10 close them.
+- **Action & Route Wrappers (`src/server/authorize.ts`):**
+  - `guardedAction(name, fn)` authenticates the actor from the verified Entra ID session, resolves `TenantContext` via `resolveCurrentTenantContext`, resolves the actor's `ResolvedPermissionSet` with the session's real `mfaVerified` state and token roles, and runs `fn` inside `runWithActiveActorSession`.
+  - When a policy has `enforcedBy: 'action'`, `guardedAction` enforces the required permission via `@platform/core` `requirePermission` (including MFA gates where `requiresMfa: true`), logs any denial with `correlationId`, `tenantId`, `action`, and `code` (never personal data), and returns `ActionDenied` (`{ ok: false, denied: true, code, message, error }` in `src/domain/actionResult.ts`) without calling `fn`.
+  - `guardedRoute(name, handler)` wraps route handlers and passes Next.js route context (`params`) through to the handler.
+  - `authorizeResource(permissions, resource)` wraps `@platform/core` `canAccessMatter` for second-gate record-level access checks in services.
+- **Static Guard Test (`src/server/__tests__/actionPermissionGuard.test.ts`):**
+  - Scans `src/app/actions.ts` and `src/app/api/**/route.ts` on every test run and fails if any export is missing from `ACTION_PERMISSIONS` / `ROUTE_PERMISSIONS`, does not call `guardedAction` / `guardedRoute` with its own name, references an unregistered permission key, omits a reason on an `authenticated` or `public` entry, or exceeds `MAX_KNOWN_GAPS`.
+
 

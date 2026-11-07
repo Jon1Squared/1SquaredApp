@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardedRoute } from '@/server/authorize';
 import {
   ENTRA_PKCE_COOKIE,
   ENTRA_SESSION_COOKIE,
@@ -14,13 +15,16 @@ function buildLogoutResponse(request: NextRequest) {
   return response;
 }
 
-export async function GET() {
+export const GET = guardedRoute('GET /api/auth/logout', async () => {
   return NextResponse.json(
     { error: 'Method Not Allowed. Use POST /api/auth/logout to sign out.' },
     { status: 405, headers: { Allow: 'POST' } },
   );
-}
+});
 
-export async function POST(request: NextRequest) {
-  return buildLogoutResponse(request);
-}
+export const POST = guardedRoute(
+  'POST /api/auth/logout',
+  async (request: NextRequest) => {
+    return buildLogoutResponse(request);
+  },
+);

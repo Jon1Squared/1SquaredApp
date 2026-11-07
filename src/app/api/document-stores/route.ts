@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { normaliseDocumentStoreError } from '@platform/core';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import { guardedRoute } from '@/server/authorize';
 import {
   applyAdminTemplateAdditionsToOpenMatters,
   getDocumentStoresAdminDashboard,
@@ -51,76 +52,84 @@ function resolveSafeCorrelationId(
   return `${fallbackPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export async function GET(request: NextRequest) {
-  const correlationId = resolveSafeCorrelationId(
-    request.headers.get('x-correlation-id'),
-    'corr-doc-stores-get',
-  );
-  let tenantId = 'unknown';
-  try {
-    tenantId = getActiveTenantConfiguration().tenantId;
-    return await withAuthenticatedActor(async (actor) => {
-      tenantId = actor.tenantId || tenantId;
-      const userId = actor.personId;
-      const mfaVerified = actor.mfaVerified;
-      const { searchParams } = new URL(request.url);
-      const mode = searchParams.get('mode');
+export const GET = guardedRoute(
+  'GET /api/document-stores',
+  async (request: NextRequest) => {
+    const correlationId = resolveSafeCorrelationId(
+      request.headers.get('x-correlation-id'),
+      'corr-doc-stores-get',
+    );
+    let tenantId = 'unknown';
+    try {
+      tenantId = getActiveTenantConfiguration().tenantId;
+      return await withAuthenticatedActor(async (actor) => {
+        tenantId = actor.tenantId || tenantId;
+        const userId = actor.personId;
+        const mfaVerified = actor.mfaVerified;
+        const { searchParams } = new URL(request.url);
+        const mode = searchParams.get('mode');
 
-      if (mode === 'preview_template') {
-        const departmentId = searchParams.get('departmentId') || undefined;
-        const workTypeId = searchParams.get('workTypeId') || undefined;
-        const preview = previewAdminMatterFolderTemplate({
-          departmentId,
-          workTypeId,
-          userId,
+        if (mode === 'preview_template') {
+          const departmentId = searchParams.get('departmentId') || undefined;
+          const workTypeId = searchParams.get('workTypeId') || undefined;
+          const preview = previewAdminMatterFolderTemplate({
+            departmentId,
+            workTypeId,
+            userId,
+            session: actor.session,
+            mfaVerified,
+            correlationId,
+          });
+          return NextResponse.json({ ok: true, preview });
+        }
+
+        const dashboard = getDocumentStoresAdminDashboard(userId, {
           session: actor.session,
           mfaVerified,
           correlationId,
         });
-        return NextResponse.json({ ok: true, preview });
-      }
-
-      const dashboard = getDocumentStoresAdminDashboard(userId, {
-        session: actor.session,
-        mfaVerified,
-        correlationId,
+        return NextResponse.json({ ok: true, dashboard });
       });
-      return NextResponse.json({ ok: true, dashboard });
-    });
-  } catch (err) {
-    const normalised = normaliseDocumentStoreError(err);
-    const isUnauth =
-      err instanceof Error && err.message.startsWith('UNAUTHENTICATED:');
-    const code = isUnauth ? 'reauthentication_required' : normalised.code;
-    logDocumentStoreRouteError(
-      '/api/document-stores',
-      'GET',
-      tenantId,
-      correlationId,
-      code,
-    );
-    return NextResponse.json(
-      {
-        ok: false,
+    } catch (err) {
+      const normalised = normaliseDocumentStoreError(err);
+      const isUnauth =
+        (err instanceof Error &&
+          (err.message.startsWith('UNAUTHENTICATED:') ||
+            err.message.startsWith('[UNAUTHENTICATED]'))) ||
+        (err as { code?: string } | null)?.code === 'UNAUTHENTICATED';
+      const code = isUnauth ? 'reauthentication_required' : normalised.code;
+      logDocumentStoreRouteError(
+        '/api/document-stores',
+        'GET',
+        tenantId,
+        correlationId,
         code,
-        error: normalised.userMessage,
-      },
-      {
-        status: isUnauth
-          ? 401
-          : normalised.code === 'access_denied'
-            ? 403
-            : 400,
-      },
-    );
-  }
-}
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code,
+          error: normalised.userMessage,
+        },
+        {
+          status: isUnauth
+            ? 401
+            : normalised.code === 'access_denied'
+              ? 403
+              : 400,
+        },
+      );
+    }
+  },
+);
 
-export async function POST(request: NextRequest) {
-  const correlationId = resolveSafeCorrelationId(
-    request.headers.get('x-correlation-id'),
-    'corr-doc-stores-post',
-  );
+export const POST = guardedRoute(
+  'POST /api/document-stores',
+  async (request: NextRequest) => {
+    const correlationId = resolveSafeCorrelationId(
+      request.headers.get('x-correlation-id'),
+      'corr-doc-stores-post',
+    );
   let tenantId = 'unknown';
   try {
     tenantId = getActiveTenantConfiguration().tenantId;
@@ -283,4 +292,4 @@ export async function POST(request: NextRequest) {
       },
     );
   }
-}
+});

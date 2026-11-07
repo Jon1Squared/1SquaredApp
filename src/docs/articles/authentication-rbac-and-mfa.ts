@@ -6,9 +6,12 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How Microsoft Entra ID OIDC sign-in and sign-out work in 1Squared, how role-based access control (RBAC) and Entra identity mapping are configured, and which administrative actions require multi-factor authentication (MFA).',
-  updated: '2026-11-05',
+  updated: '2026-11-06',
   body: `
 1Squared authenticates every user through **Microsoft Entra ID (OpenID Connect with PKCE)** and evaluates access on every server action and API route through the central **Role-Based Access Control (RBAC)** engine in \`@platform/core\`.
+
+### How access is enforced
+Every server action in \`src/app/actions.ts\` and every API route handler under \`src/app/api/\` is registered in \`src/server/actionPermissions.ts\` and wrapped by \`guardedAction\` or \`guardedRoute\` (\`src/server/authorize.ts\`, ADR 0025). On each request, the wrapper verifies the signed Entra ID session, builds the tenant context from the verified token claims, and resolves the user’s effective permissions (including the session’s real \`mfaVerified\` status) before executing the action or service check (such as \`rbac:manage_config\`, \`admin:access\`, \`matter:create\`, \`matter:edit\`, and \`matter:restricted:access\`). Automated CI guard tests verify that no server action or route handler can be added without a registered permission policy.
 
 ## 1. Signing in and signing out with Microsoft Entra ID
 

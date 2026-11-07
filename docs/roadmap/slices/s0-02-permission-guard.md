@@ -18,7 +18,7 @@
   - About 52 actions call services that check a permission. Examples: matters (`services.ts:2992–3091`), key dates, document generation, RBAC and Home admin, and HR reveals.
   - `savePersonAction` checks permissions only when employment data is sent, and copies roles and permission overrides from the request (B11). It counts as a gap, closed in S0-03.
   - About 53 actions call services that check none. Examples: data reset and clear, sign-off approve and discuss, merge, Admin saves, tasks, enquiries, quotes, PMS links. Some of these are self-scoped, for example notifications.
-- **Routes:** 7 API route files with 10 exported handlers: `GET` on auth login, auth callback and document download; `GET` and `POST` on auth logout (its `GET` returns 405), document stores and matter documents; `POST` on matter extraction.
+- **Routes:** 8 API route files with 11 exported handlers: `GET` on address lookup, auth login, auth callback and document download; `GET` and `POST` on auth logout (its `GET` returns 405), document stores and matter documents; `POST` on matter extraction.
   - `api/matters/extract` checks only sign-in.
   - The document routes check permissions inside their services.
   - The auth routes are public by design.
@@ -54,7 +54,7 @@
   - **`public` with a reason:** the three auth routes.
   - **`MAX_KNOWN_GAPS`:** set to the exact gap count when building. It is expected to be about 52.
 - **`src/app/actions.ts`:** replace `withActorId(fn)` and `withAuthenticatedActor(fn)` with `guardedAction('<exportName>', fn)` in all 106 exports. This is mechanical, and every signature stays the same.
-- **`src/app/api/**/route.ts`** (7 files, 10 handlers): wrap each exported method in `guardedRoute('<METHOD> /api/…', …)`, including logout's `GET` (still 405).
+- **`src/app/api/**/route.ts`** (8 files, 11 handlers): wrap each exported method in `guardedRoute('<METHOD> /api/…', …)`, including logout's `GET` (still 405).
 - **Pilot conversion:** move `updateTenantRbacConfigAction` to `enforcedBy: 'action'`. Its service already calls `requirePermission('rbac:manage_config')` at `services.ts:8700`. Its service already returns `{ ok: false, code, error }` rather than throwing, and `ActionDenied` keeps the same `code` and `error`, so the Admin screen (`RbacAdminSection.tsx`) and test R53 keep working. This proves the path end to end without changing behaviour.
 - **Documentation:**
   - `docs/rbac-reference.md`: a new section, "Enforcing permissions in actions and routes".
@@ -90,7 +90,7 @@ A fixture-string case proves that the guard catches an unlisted action.
 
 ## Acceptance criteria
 
-1. All 106 actions and all 10 route handlers go through the wrappers and have a policy. The guard test fails for any new action without one.
+1. All 106 actions and all 11 route handlers go through the wrappers and have a policy. The guard test fails for any new action without one.
 2. The baseline lists exactly the known gaps, each tagged with the slice that closes it, and `MAX_KNOWN_GAPS` equals that count. It can only go down.
 3. Permissions are resolved with the session's real `mfaVerified` value.
 4. No user-visible behaviour changes. The pilot action returns `ActionDenied` with the same `code` and `error` as today.

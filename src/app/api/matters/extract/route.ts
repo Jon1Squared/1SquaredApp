@@ -16,6 +16,7 @@ import {
 import { AuthorisationError } from '@/domain/rbac';
 import { resolveConfiguredFirmPrimaryDomain } from '@/domain/employment';
 import { vid } from '@/seed/lists';
+import { guardedRoute } from '@/server/authorize';
 import {
   createOrUpdateLink,
   saveOrganisationRecord,
@@ -2438,27 +2439,28 @@ function ensureContactInCrm(
   }
 }
 
-export async function POST(req: Request) {
-  try {
-    return await withAuthenticatedActor(async (actor) => {
-      const byId = actor.personId;
+export const POST = guardedRoute(
+  'POST /api/matters/extract',
+  async (req: Request) => {
+    try {
+      return await withAuthenticatedActor(async (actor) => {
+        const byId = actor.personId;
 
-      const body = (await req.json()) as {
-        documents?: IntakeSourceDocument[];
-      };
+        const body = (await req.json()) as {
+          documents?: IntakeSourceDocument[];
+        };
 
-    const claudeKey = readServerSecret('ANTHROPIC_API_KEY');
-    if (!claudeKey) {
-      return NextResponse.json(
-        {
-          code: 'NOT_CONFIGURED',
-          error: "AI extraction isn't configured. Ask your administrator.",
-          message: "AI extraction isn't configured. Ask your administrator.",
-        },
-        { status: 503 },
-      );
-    }
-
+        const claudeKey = readServerSecret('ANTHROPIC_API_KEY');
+        if (!claudeKey) {
+          return NextResponse.json(
+            {
+              code: 'NOT_CONFIGURED',
+              error: "AI extraction isn't configured. Ask your administrator.",
+              message: "AI extraction isn't configured. Ask your administrator.",
+            },
+            { status: 503 },
+          );
+        }
     const documents = body.documents ?? [];
     if (!Array.isArray(documents) || documents.length === 0) {
       return NextResponse.json(
@@ -2660,4 +2662,4 @@ export async function POST(req: Request) {
       { status: 500 },
     );
   }
-}
+});

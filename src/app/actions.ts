@@ -109,7 +109,6 @@ import {
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
   updateWorkTypeProfiles,
-  withAuthenticatedActor,
   previewLimitationCalculationRecord,
   createOrProposeKeyDateRecord,
   proposeProvisionalKeyDateRecord,
@@ -135,6 +134,7 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
+import { guardedAction } from '@/server/authorize';
 import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
 import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
 
@@ -146,14 +146,10 @@ function revalidateAll() {
   }
 }
 
-function withActorId<R>(fn: (byId: string) => Promise<R> | R): Promise<R> {
-  return withAuthenticatedActor((actor) => fn(actor.personId));
-}
-
 export async function switchUserAction(
   userId: string,
 ): Promise<{ ok: true; personId: string } | { ok: false; error: string }> {
-  return withAuthenticatedActor(async () => {
+  return guardedAction('switchUserAction', async () => {
     const res = await switchUserInDemoMode(userId);
     revalidateAll();
     return { ok: true, personId: res.personId };
@@ -184,7 +180,7 @@ export async function savePersonAction(
     } | null;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('savePersonAction', ({ personId: byId }) => {
     const res = savePersonRecord(payload, { ...opts, byId });
     revalidateAll();
     return res;
@@ -196,7 +192,7 @@ export async function logEmployeeRestrictedAccessAction(
   section: 'payroll' | 'sensitive',
   fieldDetail?: string,
 ) {
-  return withActorId((byId) => {
+  return guardedAction('logEmployeeRestrictedAccessAction', ({ personId: byId }) => {
     const res = logEmployeeRestrictedAccess(personId, section, byId, fieldDetail);
     revalidateAll();
     return res;
@@ -204,7 +200,7 @@ export async function logEmployeeRestrictedAccessAction(
 }
 
 export async function revealEmployeeSensitiveRecordAction(personId: string) {
-  return withActorId((byId) => {
+  return guardedAction('revealEmployeeSensitiveRecordAction', ({ personId: byId }) => {
     const res = getEmployeeDetailsForUser(personId, byId, { logViewSensitive: true });
     revalidateAll();
     return {
@@ -219,7 +215,7 @@ export async function reassignLeaverOwnedRecordsAction(
   fromLeaverId: string,
   toEmployeeId: string,
 ) {
-  return withActorId((byId) => {
+  return guardedAction('reassignLeaverOwnedRecordsAction', ({ personId: byId }) => {
     const res = reassignLeaverOwnedRecords(fromLeaverId, toEmployeeId, byId);
     revalidateAll();
     return res;
@@ -235,7 +231,7 @@ export async function saveOrganisationAction(
     matchedDuplicateIds?: string[];
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('saveOrganisationAction', ({ personId: byId }) => {
     const res = saveOrganisationRecord(payload, { ...opts, byId });
     revalidateAll();
     return res;
@@ -258,7 +254,7 @@ export async function saveMatterAction(
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
   } = {},
 ) {
-  return withActorId(async (byId) => {
+  return guardedAction('saveMatterAction', async ({ personId: byId }) => {
     const res = await saveMatterRecord(payload, {
       id: opts.id,
       saveMode: opts.saveMode,
@@ -270,7 +266,7 @@ export async function saveMatterAction(
 }
 
 export async function signOffMatterCostsAction(matterId: string, note?: string) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('signOffMatterCostsAction', async (actor) => {
     const res = await signOffMatterCostsRecord(matterId, actor.personId, note);
     revalidateAll();
     return res;
@@ -278,7 +274,7 @@ export async function signOffMatterCostsAction(matterId: string, note?: string) 
 }
 
 export async function markEngagementLetterDraftedAction(matterId: string) {
-  return withActorId((byId) => {
+  return guardedAction('markEngagementLetterDraftedAction', ({ personId: byId }) => {
     const res = markEngagementLetterDrafted(matterId, byId);
     revalidateAll();
     return res;
@@ -290,7 +286,7 @@ export async function liftMatterRestrictionAction(
   restriction: 'staff_matter' | 'ethical_wall',
   reason: string,
 ) {
-  return withActorId((byId) => {
+  return guardedAction('liftMatterRestrictionAction', ({ personId: byId }) => {
     const res = liftMatterRestriction(matterId, restriction, reason, byId);
     revalidateAll();
     return res;
@@ -300,7 +296,7 @@ export async function liftMatterRestrictionAction(
 export async function runMatterConflictSearchAction(
   input: Parameters<typeof runMatterConflictSearchRecord>[0],
 ) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('runMatterConflictSearchAction', (actor) => {
     return runMatterConflictSearchRecord(input, actor.personId);
   });
 }
@@ -309,7 +305,7 @@ export async function updateMatterConflictRecordAction(
   matterId: string,
   record: ConflictCheckRecordInput,
 ) {
-  return withActorId((byId) => {
+  return guardedAction('updateMatterConflictRecordAction', ({ personId: byId }) => {
     const res = updateMatterConflictRecord(matterId, record, byId);
     revalidateAll();
     return res;
@@ -330,7 +326,7 @@ export async function saveLinkAction(input: {
   endDate: string | null;
   contactStatusId: string | null;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('saveLinkAction', ({ personId: byId }) => {
     const link = createOrUpdateLink(input, byId);
     revalidateAll();
     return link;
@@ -338,14 +334,14 @@ export async function saveLinkAction(input: {
 }
 
 export async function deleteLinkAction(linkId: string) {
-  return withActorId((byId) => {
+  return guardedAction('deleteLinkAction', ({ personId: byId }) => {
     deleteLink(linkId, byId);
     revalidateAll();
   });
 }
 
 export async function addNoteAction(recordType: RecordType | 'matter', recordId: string, text: string) {
-  return withActorId((byId) => {
+  return guardedAction('addNoteAction', ({ personId: byId }) => {
     const note = addNoteToRecord(recordType, recordId, text, byId);
     revalidateAll();
     return note;
@@ -353,14 +349,14 @@ export async function addNoteAction(recordType: RecordType | 'matter', recordId:
 }
 
 export async function dismissDuplicateAction(recordType: RecordType, recordId: string, otherId: string | null) {
-  return withActorId((byId) => {
+  return guardedAction('dismissDuplicateAction', ({ personId: byId }) => {
     dismissDuplicateMatch(recordType, recordId, otherId, byId);
     revalidateAll();
   });
 }
 
 export async function mergeRecordsAction(recordType: RecordType, survivorId: string, mergedId: string) {
-  return withActorId((byId) => {
+  return guardedAction('mergeRecordsAction', ({ personId: byId }) => {
     const hist = executeMerge(recordType, survivorId, mergedId, byId);
     revalidateAll();
     return hist;
@@ -375,7 +371,7 @@ export async function addChoiceValueAction(input: {
   parentId?: string | null;
   meta?: Record<string, string>;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('addChoiceValueAction', ({ personId: byId }) => {
     const val = addChoiceValue(input, byId);
     revalidateAll();
     return val;
@@ -392,7 +388,7 @@ export async function updateChoiceValueAction(
     meta?: Record<string, string>;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('updateChoiceValueAction', ({ personId: byId }) => {
     const res = updateChoiceValue(id, patch, byId);
     revalidateAll();
     return res;
@@ -400,7 +396,7 @@ export async function updateChoiceValueAction(
 }
 
 export async function reorderChoiceValueAction(id: string, direction: -1 | 1) {
-  return withActorId((byId) => {
+  return guardedAction('reorderChoiceValueAction', ({ personId: byId }) => {
     reorderChoiceValue(id, direction, byId);
     revalidateAll();
   });
@@ -412,7 +408,7 @@ export async function createMatterStageGroupAction(input: {
   mode: 'from_default' | 'scratch';
   selectedDefaultStageIds?: string[];
 }) {
-  return withActorId((byId) => {
+  return guardedAction('createMatterStageGroupAction', ({ personId: byId }) => {
     const res = createMatterStageGroup(input, byId);
     revalidateAll();
     return res;
@@ -429,7 +425,7 @@ export async function saveCustomFieldAction(input: {
   active?: boolean;
   options?: string[];
 }) {
-  return withActorId((byId) => {
+  return guardedAction('saveCustomFieldAction', ({ personId: byId }) => {
     const def = saveCustomFieldDefinition(input, byId);
     revalidateAll();
     return def;
@@ -437,35 +433,35 @@ export async function saveCustomFieldAction(input: {
 }
 
 export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
-  return withActorId((byId) => {
+  return guardedAction('reorderCustomFieldAction', ({ personId: byId }) => {
     reorderCustomField(id, direction, byId);
     revalidateAll();
   });
 }
 
 export async function resetDemoDataAction() {
-  return withActorId((byId) => {
+  return guardedAction('resetDemoDataAction', ({ personId: byId }) => {
     resetAllDemoData(byId);
     revalidateAll();
   });
 }
 
 export async function clearAllDataAction() {
-  return withActorId((byId) => {
+  return guardedAction('clearAllDataAction', ({ personId: byId }) => {
     clearAllDataToCleanDeployment(byId);
     revalidateAll();
   });
 }
 
 export async function markNotificationReadAction(id: string) {
-  return withActorId((userId) => {
+  return guardedAction('markNotificationReadAction', ({ personId: userId }) => {
     markNotificationRead(id, userId);
     revalidateAll();
   });
 }
 
 export async function markAllNotificationsReadAction() {
-  return withActorId((userId) => {
+  return guardedAction('markAllNotificationsReadAction', ({ personId: userId }) => {
     markAllNotificationsRead(userId);
     revalidateAll();
   });
@@ -480,7 +476,7 @@ export async function saveTeamAction(input: {
   practiceAreaIds: string[];
   active?: boolean;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('saveTeamAction', ({ personId: byId }) => {
     const res = saveTeamRecord(input, byId);
     revalidateAll();
     return res;
@@ -488,7 +484,7 @@ export async function saveTeamAction(input: {
 }
 
 export async function updateEmployeeRoleAction(personId: string, appRole: AppRole | null) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('updateEmployeeRoleAction', (actor) => {
     const res = updateEmployeeRoleSetting(personId, appRole, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
@@ -498,7 +494,7 @@ export async function updateEmployeeRoleAction(personId: string, appRole: AppRol
 }
 
 export async function saveEnquirySettingsAction(patch: Partial<EnquirySettings>) {
-  return withActorId((byId) => {
+  return guardedAction('saveEnquirySettingsAction', ({ personId: byId }) => {
     const res = saveEnquirySettingsRecord(patch, byId);
     revalidateAll();
     return res;
@@ -506,7 +502,7 @@ export async function saveEnquirySettingsAction(patch: Partial<EnquirySettings>)
 }
 
 export async function saveTaskSettingsAction(settings: TaskSettings) {
-  return withActorId((byId) => {
+  return guardedAction('saveTaskSettingsAction', ({ personId: byId }) => {
     const res = saveTaskSettingsRecord(settings, byId);
     revalidateAll();
     return res;
@@ -528,7 +524,7 @@ export async function saveTaskAction(input: {
   linkedRecords?: TaskLinkedRecord[];
   autoTrigger?: AutoTaskTrigger | null;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('saveTaskAction', ({ personId: byId }) => {
     const res = saveTaskRecord(input, byId);
     revalidateAll();
     return res;
@@ -536,7 +532,7 @@ export async function saveTaskAction(input: {
 }
 
 export async function takeTaskAction(taskId: string) {
-  return withActorId((byId) => {
+  return guardedAction('takeTaskAction', ({ personId: byId }) => {
     const res = takeTaskRecord(taskId, byId);
     revalidateAll();
     return res;
@@ -544,7 +540,7 @@ export async function takeTaskAction(taskId: string) {
 }
 
 export async function addTaskCommentAction(taskId: string, text: string) {
-  return withActorId((byId) => {
+  return guardedAction('addTaskCommentAction', ({ personId: byId }) => {
     const res = addTaskCommentRecord(taskId, text, byId);
     revalidateAll();
     return res;
@@ -564,7 +560,7 @@ export async function saveEnquiryAction(
   },
   opts: { id?: string; asDraft?: boolean } = {},
 ) {
-  return withActorId((byId) => {
+  return guardedAction('saveEnquiryAction', ({ personId: byId }) => {
     const res = saveEnquiryRecord(payload, {
       id: opts.id,
       asDraft: opts.asDraft,
@@ -580,7 +576,7 @@ export async function assignEnquiryAction(
   assignedToId: string | null,
   assignedTeamId?: string | null,
 ) {
-  return withActorId((byId) => {
+  return guardedAction('assignEnquiryAction', ({ personId: byId }) => {
     const res = assignEnquiryRecord(enquiryId, assignedToId, assignedTeamId, byId);
     revalidateAll();
     return res;
@@ -596,7 +592,7 @@ export async function logEnquiryContactAction(
     note: string;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('logEnquiryContactAction', ({ personId: byId }) => {
     const res = logEnquiryContactRecord(enquiryId, input, byId);
     revalidateAll();
     return res;
@@ -612,7 +608,7 @@ export async function sendEnquiryEmailAction(
     bodyText: string;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('sendEnquiryEmailAction', ({ personId: byId }) => {
     const res = sendEnquiryEmailRecord(enquiryId, input, byId);
     revalidateAll();
     return res;
@@ -629,7 +625,7 @@ export async function closeEnquiryAction(
     referredToName?: string;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('closeEnquiryAction', ({ personId: byId }) => {
     const res = closeEnquiryRecord(enquiryId, input, byId);
     revalidateAll();
     return res;
@@ -637,7 +633,7 @@ export async function closeEnquiryAction(
 }
 
 export async function reopenEnquiryAction(enquiryId: string) {
-  return withActorId((byId) => {
+  return guardedAction('reopenEnquiryAction', ({ personId: byId }) => {
     const res = reopenEnquiryRecord(enquiryId, byId);
     revalidateAll();
     return res;
@@ -652,7 +648,7 @@ export async function prepareEnquiryConversionAction(
     createForBusiness?: boolean;
   } = {},
 ) {
-  return withActorId((byId) => {
+  return guardedAction('prepareEnquiryConversionAction', ({ personId: byId }) => {
     const res = prepareEnquiryConversion(enquiryId, opts, byId);
     revalidateAll();
     return res;
@@ -660,7 +656,7 @@ export async function prepareEnquiryConversionAction(
 }
 
 export async function anonymiseExpiredEnquiriesAction(specificEnquiryId?: string) {
-  return withActorId((byId) => {
+  return guardedAction('anonymiseExpiredEnquiriesAction', ({ personId: byId }) => {
     const count = anonymiseExpiredEnquiries(byId, specificEnquiryId);
     revalidateAll();
     return { count };
@@ -672,7 +668,7 @@ export async function linkPmsRecordAction(
   onesquaredId: string,
   pmsCode: string,
 ) {
-  return withActorId((byId) => {
+  return guardedAction('linkPmsRecordAction', ({ personId: byId }) => {
     const res = linkPmsRecord(entityType, onesquaredId, pmsCode, byId);
     revalidateAll();
     return res;
@@ -680,14 +676,14 @@ export async function linkPmsRecordAction(
 }
 
 export async function unlinkPmsRecordAction(linkId: string) {
-  return withActorId((byId) => {
+  return guardedAction('unlinkPmsRecordAction', ({ personId: byId }) => {
     unlinkPmsRecord(linkId, byId);
     revalidateAll();
   });
 }
 
 export async function rerunAutomaticPmsMatchingAction() {
-  return withActorId((byId) => {
+  return guardedAction('rerunAutomaticPmsMatchingAction', ({ personId: byId }) => {
     const res = rerunAutomaticPmsMatching(byId);
     revalidateAll();
     return res;
@@ -695,7 +691,7 @@ export async function rerunAutomaticPmsMatchingAction() {
 }
 
 export async function createRecordFromPmsAction(entityType: PmsEntityType, pmsCode: string) {
-  return withActorId(async (byId) => {
+  return guardedAction('createRecordFromPmsAction', async ({ personId: byId }) => {
     const res = await createRecordFromPms(entityType, pmsCode, byId);
     revalidateAll();
     return res;
@@ -703,7 +699,7 @@ export async function createRecordFromPmsAction(entityType: PmsEntityType, pmsCo
 }
 
 export async function switchViewingRoleAction(roleKey: string) {
-  return withActorId((userId) => {
+  return guardedAction('switchViewingRoleAction', ({ personId: userId }) => {
     const res = switchViewingRole(userId, roleKey);
     revalidateAll();
     return res;
@@ -714,7 +710,7 @@ export async function saveHomePagesConfigAction(input: {
   roles?: RoleHomeConfig[];
   firmSettings?: Partial<HomeFirmSettings>;
 }) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('saveHomePagesConfigAction', (actor) => {
     const res = saveHomePagesConfig(input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
@@ -724,7 +720,7 @@ export async function saveHomePagesConfigAction(input: {
 }
 
 export async function resetHomePagesConfigAction() {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('resetHomePagesConfigAction', (actor) => {
     const res = resetHomePagesConfig(actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
@@ -740,7 +736,7 @@ export async function addHomeRoleAction(input: {
   purpose: string;
   copyFromRoleKey?: string;
 }) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('addHomeRoleAction', (actor) => {
     const res = addHomeRole(input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
@@ -756,7 +752,7 @@ export async function updateEmployeeRolesAndSupportsAction(
     supportsIds?: string[];
   },
 ) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('updateEmployeeRolesAndSupportsAction', (actor) => {
     const res = updateEmployeeRolesAndSupports(personId, input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
@@ -773,7 +769,7 @@ export async function previewRbacOverridesAction(
     rbacConfig?: RbacConfiguration;
   },
 ) {
-  return withAuthenticatedActor((actor) =>
+  return guardedAction('previewRbacOverridesAction', (actor) =>
     previewRbacOverrides(personId, draftOverrides, actor.personId, {
       mfaVerified: actor.session.mfaVerified === true,
     }),
@@ -789,7 +785,7 @@ export async function updatePersonPermissionOverridesAction(
     entraObjectId?: string | null;
   },
 ) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('updatePersonPermissionOverridesAction', (actor) => {
     const res = updatePersonPermissionOverrides(personId, input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
@@ -801,7 +797,7 @@ export async function updatePersonPermissionOverridesAction(
 export async function updateTenantRbacConfigAction(
   patch: Partial<RbacConfiguration>,
 ) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('updateTenantRbacConfigAction', (actor) => {
     const res = updateTenantRbacConfig(patch, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
@@ -811,7 +807,7 @@ export async function updateTenantRbacConfigAction(
 }
 
 export async function approveSignOffAction(signOffId: string) {
-  return withActorId((byId) => {
+  return guardedAction('approveSignOffAction', ({ personId: byId }) => {
     const res = approveSignOff(signOffId, byId);
     revalidateAll();
     return res;
@@ -819,7 +815,7 @@ export async function approveSignOffAction(signOffId: string) {
 }
 
 export async function discussSignOffAction(signOffId: string, note: string) {
-  return withActorId((byId) => {
+  return guardedAction('discussSignOffAction', ({ personId: byId }) => {
     const res = discussSignOff(signOffId, note, byId);
     revalidateAll();
     return res;
@@ -827,7 +823,7 @@ export async function discussSignOffAction(signOffId: string, note: string) {
 }
 
 export async function requestMatterBillAction(matterCode: string) {
-  return withActorId((byId) => {
+  return guardedAction('requestMatterBillAction', ({ personId: byId }) => {
     const res = requestMatterBill(matterCode, byId);
     revalidateAll();
     return res;
@@ -835,7 +831,7 @@ export async function requestMatterBillAction(matterCode: string) {
 }
 
 export async function flagMatterWriteOffAction(matterCode: string, amountGbp: number) {
-  return withActorId((byId) => {
+  return guardedAction('flagMatterWriteOffAction', ({ personId: byId }) => {
     const res = flagMatterWriteOff(matterCode, amountGbp, byId);
     revalidateAll();
     return res;
@@ -843,7 +839,7 @@ export async function flagMatterWriteOffAction(matterCode: string, amountGbp: nu
 }
 
 export async function remindTeamLeadOverdueComplianceAction(teamId: string) {
-  return withActorId((byId) => {
+  return guardedAction('remindTeamLeadOverdueComplianceAction', ({ personId: byId }) => {
     const res = remindTeamLeadOverdueCompliance(teamId, byId);
     revalidateAll();
     return res;
@@ -857,7 +853,7 @@ export async function recordInvoiceCreditControlActionAction(input: {
   actionType: 'log_call' | 'send_reminder' | 'escalate';
   note?: string;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('recordInvoiceCreditControlActionAction', ({ personId: byId }) => {
     const res = recordInvoiceCreditControlAction(input, byId);
     revalidateAll();
     return res;
@@ -865,7 +861,7 @@ export async function recordInvoiceCreditControlActionAction(input: {
 }
 
 export async function saveOrgStructureAction(nextCatalogue: OrgStructureCatalogue) {
-  return withActorId((byId) => {
+  return guardedAction('saveOrgStructureAction', ({ personId: byId }) => {
     const res = saveOrgStructure(nextCatalogue, byId);
     revalidateAll();
     return res;
@@ -879,7 +875,7 @@ export async function saveMatterPartyRelationshipAction(input: {
   active?: boolean;
   isNew?: boolean;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('saveMatterPartyRelationshipAction', ({ personId: byId }) => {
     const res = saveMatterPartyRelationship(input, byId);
     revalidateAll();
     return res;
@@ -887,7 +883,7 @@ export async function saveMatterPartyRelationshipAction(input: {
 }
 
 export async function reorderMatterPartyRelationshipAction(code: string, direction: -1 | 1) {
-  return withActorId((byId) => {
+  return guardedAction('reorderMatterPartyRelationshipAction', ({ personId: byId }) => {
     const res = reorderMatterPartyRelationship(code, direction, byId);
     revalidateAll();
     return res;
@@ -895,7 +891,7 @@ export async function reorderMatterPartyRelationshipAction(code: string, directi
 }
 
 export async function deleteMatterPartyRelationshipAction(code: string) {
-  return withActorId((byId) => {
+  return guardedAction('deleteMatterPartyRelationshipAction', ({ personId: byId }) => {
     const res = deleteMatterPartyRelationship(code, byId);
     revalidateAll();
     return res;
@@ -912,7 +908,7 @@ export async function saveMatterPartyCapacityAction(input: {
   active?: boolean;
   isNew?: boolean;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('saveMatterPartyCapacityAction', ({ personId: byId }) => {
     const res = saveMatterPartyCapacity(input, byId);
     revalidateAll();
     return res;
@@ -920,7 +916,7 @@ export async function saveMatterPartyCapacityAction(input: {
 }
 
 export async function deleteMatterPartyCapacityAction(code: string) {
-  return withActorId((byId) => {
+  return guardedAction('deleteMatterPartyCapacityAction', ({ personId: byId }) => {
     const res = deleteMatterPartyCapacity(code, byId);
     revalidateAll();
     return res;
@@ -931,7 +927,7 @@ export async function updateWorkTypeProfilesAction(
   workTypeSubcategoryId: string,
   profiles: WorkTypeProfileCode[],
 ) {
-  return withActorId((byId) => {
+  return guardedAction('updateWorkTypeProfilesAction', ({ personId: byId }) => {
     const res = updateWorkTypeProfiles(workTypeSubcategoryId, profiles, byId);
     revalidateAll();
     return res;
@@ -942,7 +938,7 @@ export async function saveQuoteAction(
   input: SaveQuoteInput,
   opts: { id?: string; markAsSent?: boolean } = {},
 ) {
-  return withActorId((byId) => {
+  return guardedAction('saveQuoteAction', ({ personId: byId }) => {
     const res = saveQuoteRecord(input, { ...opts, byId });
     revalidateAll();
     return res;
@@ -950,7 +946,7 @@ export async function saveQuoteAction(
 }
 
 export async function markQuoteSentAction(quoteId: string) {
-  return withActorId((byId) => {
+  return guardedAction('markQuoteSentAction', ({ personId: byId }) => {
     const res = markQuoteSentRecord(quoteId, byId);
     revalidateAll();
     return res;
@@ -965,7 +961,7 @@ export async function logQuoteFollowUpAction(
     nextFollowUpDate: string | null;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('logQuoteFollowUpAction', ({ personId: byId }) => {
     const res = logQuoteFollowUpRecord(quoteId, input, byId);
     revalidateAll();
     return res;
@@ -989,7 +985,7 @@ export async function reviseQuoteAction(
     markAsSent?: boolean;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('reviseQuoteAction', ({ personId: byId }) => {
     const res = reviseQuoteRecord(quoteId, input, byId);
     revalidateAll();
     return res;
@@ -1004,7 +1000,7 @@ export async function recordQuoteOutcomeAction(
     note?: string;
   },
 ) {
-  return withActorId((byId) => {
+  return guardedAction('recordQuoteOutcomeAction', ({ personId: byId }) => {
     const res = recordQuoteOutcomeRecord(quoteId, input, byId);
     revalidateAll();
     return res;
@@ -1012,7 +1008,7 @@ export async function recordQuoteOutcomeAction(
 }
 
 export async function prepareQuoteConversionAction(quoteId: string) {
-  return withActorId((byId) => {
+  return guardedAction('prepareQuoteConversionAction', ({ personId: byId }) => {
     const res = prepareQuoteConversionRecord(quoteId, byId);
     revalidateAll();
     return res;
@@ -1020,7 +1016,7 @@ export async function prepareQuoteConversionAction(quoteId: string) {
 }
 
 export async function saveMatterCostsConfigAction(config: MatterCostsConfig) {
-  return withActorId((byId) => {
+  return guardedAction('saveMatterCostsConfigAction', ({ personId: byId }) => {
     const res = saveMatterCostsConfig(config, byId);
     revalidateAll();
     return res;
@@ -1028,7 +1024,7 @@ export async function saveMatterCostsConfigAction(config: MatterCostsConfig) {
 }
 
 export async function syncMatterCostsRatesFromPmsAction() {
-  return withActorId((byId) => {
+  return guardedAction('syncMatterCostsRatesFromPmsAction', ({ personId: byId }) => {
     const res = syncMatterCostsRatesFromPms(byId);
     revalidateAll();
     return res;
@@ -1065,7 +1061,7 @@ import type {
 } from '@platform/core';
 
 export async function getDocumentGenerationSnapshotAction() {
-  return withAuthenticatedActor((actor) =>
+  return guardedAction('getDocumentGenerationSnapshotAction', (actor) =>
     getDocumentGenerationSnapshotForUser(actor.personId, actor.session),
   );
 }
@@ -1086,7 +1082,7 @@ export async function uploadTemplateDraftAction(input: {
   promptedFields?: PromptedFieldDefinition[];
   changeNote?: string;
 }) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('uploadTemplateDraftAction', async (actor) => {
     const res = await uploadTemplateDraftService(
       input,
       actor.personId,
@@ -1112,7 +1108,7 @@ export async function updateTemplateDraftAction(input: {
   };
   changeNote?: string;
 }) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('updateTemplateDraftAction', async (actor) => {
     const res = await updateTemplateDraftService(
       input,
       actor.personId,
@@ -1127,7 +1123,7 @@ export async function submitTemplateVersionAction(
   versionId: string,
   changeNote?: string,
 ) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('submitTemplateVersionAction', async (actor) => {
     const res = await submitTemplateVersionService(
       versionId,
       changeNote,
@@ -1140,7 +1136,7 @@ export async function submitTemplateVersionAction(
 }
 
 export async function approveTemplateVersionAction(versionId: string) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('approveTemplateVersionAction', async (actor) => {
     const res = await approveTemplateVersionService(
       versionId,
       actor.personId,
@@ -1155,7 +1151,7 @@ export async function rejectTemplateVersionAction(
   versionId: string,
   rejectionReason: string,
 ) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('rejectTemplateVersionAction', async (actor) => {
     const res = await rejectTemplateVersionService(
       versionId,
       rejectionReason,
@@ -1168,7 +1164,7 @@ export async function rejectTemplateVersionAction(
 }
 
 export async function retireTemplateAction(templateId: string) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('retireTemplateAction', async (actor) => {
     const res = await retireTemplateService(
       templateId,
       actor.personId,
@@ -1183,7 +1179,7 @@ export async function rollbackTemplateVersionAction(
   templateId: string,
   targetVersionId: string,
 ) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('rollbackTemplateVersionAction', async (actor) => {
     const res = await rollbackTemplateVersionService(
       templateId,
       targetVersionId,
@@ -1199,7 +1195,7 @@ export async function exportTemplatePackageAction(
   templateId: string,
   versionId?: string,
 ) {
-  return withAuthenticatedActor((actor) =>
+  return guardedAction('exportTemplatePackageAction', (actor) =>
     exportTemplatePackageService(
       templateId,
       versionId,
@@ -1210,7 +1206,7 @@ export async function exportTemplatePackageAction(
 }
 
 export async function importTemplatePackageAction(pkg: TemplatePackageManifest) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('importTemplatePackageAction', async (actor) => {
     const res = await importTemplatePackageService(
       pkg,
       actor.personId,
@@ -1230,7 +1226,7 @@ export async function previewTemplateAction(input: {
   promptedValues?: Record<string, unknown>;
   outputFormat?: DocumentOutputFormat;
 }) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('previewTemplateAction', async (actor) => {
     const res = await previewTemplateService(
       input,
       actor.personId,
@@ -1252,7 +1248,7 @@ export async function generateDocumentAction(input: {
   promptedValues?: Record<string, unknown>;
   outputFormat?: DocumentOutputFormat;
 }) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('generateDocumentAction', async (actor) => {
     const res = await generateDocumentService(
       input,
       actor.personId,
@@ -1264,13 +1260,13 @@ export async function generateDocumentAction(input: {
 }
 
 export async function downloadGeneratedDocumentAction(documentId: string) {
-  return withAuthenticatedActor((actor) =>
+  return guardedAction('downloadGeneratedDocumentAction', (actor) =>
     downloadGeneratedDocumentService(documentId, actor.personId, actor.session),
   );
 }
 
 export async function deleteGeneratedDocumentAction(documentId: string) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('deleteGeneratedDocumentAction', async (actor) => {
     const res = await deleteGeneratedDocumentService(
       documentId,
       actor.personId,
@@ -1284,13 +1280,13 @@ export async function deleteGeneratedDocumentAction(documentId: string) {
 export async function getTemplateUsageReportAction(
   filter: TemplateUsageReportFilter = {},
 ) {
-  return withAuthenticatedActor((actor) =>
+  return guardedAction('getTemplateUsageReportAction', (actor) =>
     getTemplateUsageReportService(filter, actor.personId, actor.session),
   );
 }
 
 export async function updateDocumentGenerationConfigAction(patch: Partial<DocumentGenerationConfig>) {
-  return withAuthenticatedActor(async (actor) => {
+  return guardedAction('updateDocumentGenerationConfigAction', async (actor) => {
     const res = await updateDocumentGenerationConfigService(
       patch,
       actor.personId,
@@ -1312,7 +1308,7 @@ export async function previewLimitationCalculationAction(input: {
   standstillPeriods?: StandstillPeriod[];
   calendarCodeOverride?: string;
 }) {
-  return withActorId((byId) =>
+  return guardedAction('previewLimitationCalculationAction', ({ personId: byId }) =>
     previewLimitationCalculationRecord(input, byId),
   );
 }
@@ -1333,7 +1329,7 @@ export async function createOrProposeKeyDateAction(input: {
   sourceDocumentId?: string;
   intent?: 'provisional' | 'propose';
 }) {
-  return withActorId(async (byId) => {
+  return guardedAction('createOrProposeKeyDateAction', async ({ personId: byId }) => {
     const res = await createOrProposeKeyDateRecord(input, byId);
     revalidateAll();
     return res;
@@ -1341,7 +1337,7 @@ export async function createOrProposeKeyDateAction(input: {
 }
 
 export async function proposeProvisionalKeyDateAction(keyDateId: string) {
-  return withActorId(async (byId) => {
+  return guardedAction('proposeProvisionalKeyDateAction', async ({ personId: byId }) => {
     const res = await proposeProvisionalKeyDateRecord(keyDateId, byId);
     revalidateAll();
     return res;
@@ -1349,7 +1345,7 @@ export async function proposeProvisionalKeyDateAction(keyDateId: string) {
 }
 
 export async function verifyProposedKeyDateAction(keyDateId: string) {
-  return withActorId(async (byId) => {
+  return guardedAction('verifyProposedKeyDateAction', async ({ personId: byId }) => {
     const res = await verifyProposedKeyDateRecord(keyDateId, byId);
     revalidateAll();
     return res;
@@ -1360,7 +1356,7 @@ export async function rejectProposedKeyDateAction(
   keyDateId: string,
   reason: string,
 ) {
-  return withActorId(async (byId) => {
+  return guardedAction('rejectProposedKeyDateAction', async ({ personId: byId }) => {
     const res = await rejectProposedKeyDateRecord(keyDateId, reason, byId);
     revalidateAll();
     return res;
@@ -1382,7 +1378,7 @@ export async function supersedeConfirmedKeyDateAction(
   },
   reason: string,
 ) {
-  return withActorId(async (byId) => {
+  return guardedAction('supersedeConfirmedKeyDateAction', async ({ personId: byId }) => {
     const res = await supersedeConfirmedKeyDateRecord(
       keyDateId,
       updates,
@@ -1402,7 +1398,7 @@ export async function resolveKeyDateOutcomeAction(
     evidenceDocumentId?: string;
   },
 ) {
-  return withActorId(async (byId) => {
+  return guardedAction('resolveKeyDateOutcomeAction', async ({ personId: byId }) => {
     const res = await resolveKeyDateOutcomeRecord(keyDateId, input, byId);
     revalidateAll();
     return res;
@@ -1417,7 +1413,7 @@ export async function reassignKeyDateTeamAction(
     reason?: string;
   },
 ) {
-  return withActorId(async (byId) => {
+  return guardedAction('reassignKeyDateTeamAction', async ({ personId: byId }) => {
     const res = await reassignKeyDateTeamRecord(keyDateId, input, byId);
     revalidateAll();
     return res;
@@ -1429,7 +1425,7 @@ export async function recordKeyDateNotApplicableAction(input: {
   keyDateTypeId: string;
   reason: string;
 }) {
-  return withActorId((byId) => {
+  return guardedAction('recordKeyDateNotApplicableAction', ({ personId: byId }) => {
     const res = recordKeyDateNotApplicableRecord(input, byId);
     revalidateAll();
     return res;
@@ -1437,7 +1433,7 @@ export async function recordKeyDateNotApplicableAction(input: {
 }
 
 export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
-  return withActorId((byId) => {
+  return guardedAction('acknowledgeKeyDateReminderAction', ({ personId: byId }) => {
     const res = acknowledgeKeyDateReminderRecord(keyDateId, byId);
     revalidateAll();
     return res;
@@ -1445,7 +1441,7 @@ export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
 }
 
 export async function runKeyDateReminderSchedulerAction() {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('runKeyDateReminderSchedulerAction', (actor) => {
     const tenantCtx = resolveCurrentTenantContext(
       createVerifiedSessionActorFromEntraSession(actor.session),
     );
@@ -1464,7 +1460,7 @@ export async function queryKeyDatesTeamDiaryAction(
   query: TeamDiaryQuery,
   todayIso?: string,
 ) {
-  return withActorId((byId) =>
+  return guardedAction('queryKeyDatesTeamDiaryAction', ({ personId: byId }) =>
     queryKeyDatesTeamDiaryRecord(query, byId, todayIso),
   );
 }
@@ -1473,7 +1469,7 @@ export async function getKeyDateExceptionsReportAction(
   filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
   todayIso?: string,
 ) {
-  return withActorId((byId) =>
+  return guardedAction('getKeyDateExceptionsReportAction', ({ personId: byId }) =>
     getKeyDateExceptionsReportRecord(filter, byId, todayIso),
   );
 }
@@ -1486,7 +1482,7 @@ export async function exportKeyDateExceptionsReportAction(
   } = {},
   todayIso?: string,
 ) {
-  return withActorId((byId) => {
+  return guardedAction('exportKeyDateExceptionsReportAction', ({ personId: byId }) => {
     const res = exportKeyDateExceptionsReportRecord(filter, byId, todayIso);
     revalidateAll();
     return res;
@@ -1497,7 +1493,7 @@ export async function saveKeyDatesConfigAction(
   newConfig: KeyDatesConfig,
   reason: string,
 ) {
-  return withAuthenticatedActor((actor) => {
+  return guardedAction('saveKeyDatesConfigAction', (actor) => {
     const res = saveKeyDatesConfigRecord(newConfig, reason, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
