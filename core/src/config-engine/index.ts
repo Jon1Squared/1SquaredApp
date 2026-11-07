@@ -495,35 +495,47 @@ const PmsIntegrationSyncConfigSchema = z
       .boolean()
       .default(true)
       .describe(
-        'Whether PMS / Finance DB synchronisation is enabled for this tenant',
+        '[x-reserved:S0-18] Whether PMS / Finance DB synchronisation is enabled for this tenant (reserved for live tenant-scoped PMS synchronisation in S0-18)',
       ),
     providerKey: z
       .string()
       .min(1)
       .default('generic_sql')
-      .describe('Identifier of the connected PMS / Finance adapter'),
+      .describe(
+        '[x-reserved:S0-18] Identifier of the connected PMS / Finance adapter (reserved for S0-18)',
+      ),
     syncMode: z
       .enum(['read_only', 'two_way'])
       .default('two_way')
-      .describe('Whether integration is read-only inbound or two-way'),
+      .describe(
+        '[x-reserved:S0-18] Whether integration is read-only inbound or two-way (reserved for S0-18)',
+      ),
     matterCodeAllocation: z
       .enum(['onesquared', 'pms_on_open'])
       .default('onesquared')
-      .describe('System responsible for allocating canonical matter numbers'),
+      .describe(
+        '[x-reserved:S0-18] System responsible for allocating canonical matter numbers (reserved for S0-18)',
+      ),
     clientCodeAllocation: z
       .enum(['onesquared', 'pms_on_open'])
       .default('onesquared')
-      .describe('System responsible for allocating canonical client codes'),
+      .describe(
+        '[x-reserved:S0-18] System responsible for allocating canonical client codes (reserved for S0-18)',
+      ),
     pollIntervalMinutes: z
       .number()
       .int()
       .positive()
       .default(15)
-      .describe('Inbound delta sync polling interval in minutes'),
+      .describe(
+        '[x-reserved:S0-18] Inbound delta sync polling interval in minutes (reserved for S0-18)',
+      ),
     fieldMappings: z
       .array(PmsFieldMappingEntrySchema)
       .default([])
-      .describe('Field-level mappings and System-of-Record ownership rules'),
+      .describe(
+        '[x-reserved:S0-18] Field-level mappings and System-of-Record ownership rules (reserved for S0-18)',
+      ),
   })
   .strict();
 
@@ -558,11 +570,15 @@ export const TenantConfigurationSchema = z
           .string()
           .regex(/^#[0-9a-fA-F]{6}$/)
           .default('#1f6feb')
-          .describe('Primary brand accent hex colour'),
+          .describe(
+            '[x-reserved:S0-11b] Primary brand accent hex colour (reserved for tenant branding theme rendering in S0-11b)',
+          ),
         logoAssetKey: z
           .string()
           .default('default-logo.svg')
-          .describe('Tenant-scoped asset key for the firm logo'),
+          .describe(
+            '[x-reserved:S0-11b] Tenant-scoped asset key for the firm logo (reserved for tenant firm logo rendering in S0-11b)',
+          ),
         contactEmail: z
           .string()
           .default('')
@@ -674,34 +690,50 @@ export const TenantConfigurationSchema = z
         rateSourceMode: z
           .enum(['application_table', 'pms_when_linked'])
           .default('pms_when_linked')
-          .describe('Source of default fee-earner hourly rates'),
+          .describe(
+            '[x-reserved:S0-23] Source of default fee-earner hourly rates (reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23)',
+          ),
         allowMatterRateOverrides: z
           .boolean()
           .default(true)
           .describe(
-            'Whether fee earners can override standard rates on a matter',
+            '[x-reserved:S0-23] Whether fee earners can override standard rates on a matter (reserved for S0-23)',
           ),
         partnerSignOffThresholdGbp: z
           .number()
           .nonnegative()
           .default(25000)
           .describe(
-            'Fee estimate or cap threshold in GBP requiring Partner cost sign-off',
+            '[x-reserved:S0-23] Fee estimate or cap threshold in GBP requiring Partner cost sign-off (reserved for S0-23)',
           ),
-        rateCards: z.array(RateCardEntrySchema).default([]),
-        disbursementPresets: z.array(DisbursementPresetSchema).default([]),
+        rateCards: z
+          .array(RateCardEntrySchema)
+          .default([])
+          .describe(
+            '[x-reserved:S0-23] Tenant-level rate cards (reserved for S0-23)',
+          ),
+        disbursementPresets: z
+          .array(DisbursementPresetSchema)
+          .default([])
+          .describe(
+            '[x-reserved:S0-23] Tenant-level disbursement presets (reserved for S0-23)',
+          ),
       })
       .strict(),
     integrations: z
       .object({
-        pmsConnectionSecretVaultRef: KeyVaultRefSchema,
-        companiesHouseApiKeyVaultRef: KeyVaultRefSchema,
+        pmsConnectionSecretVaultRef: KeyVaultRefSchema.describe(
+          '[x-reserved:S0-18] Key Vault reference for live PMS database connection secret resolution (reserved for S0-18)',
+        ),
+        companiesHouseApiKeyVaultRef: KeyVaultRefSchema.describe(
+          '[x-reserved:S0-18] Key Vault reference for live Companies House API integration (reserved for S0-18)',
+        ),
         aiProviderChoice: z
           .enum(['azure_openai_uk', 'anthropic', 'disabled'])
           .default('disabled')
           .describe('Configured AI model provider for this tenant'),
         pmsSync: PmsIntegrationSyncConfigSchema.optional().describe(
-          'Two-way Finance/PMS synchronisation settings and field mappings',
+          '[x-reserved:S0-18] Two-way Finance/PMS synchronisation settings and field mappings (reserved for S0-18)',
         ),
       })
       .strict(),
@@ -1108,7 +1140,7 @@ export const TenantConfigurationSchema = z
           .default(false)
           .optional()
           .describe(
-            'Whether scheduled permission reconciliation automatically remediates detected drift (default: false)',
+            '[x-reserved:S0-25] Whether scheduled permission reconciliation automatically remediates detected drift (default: false; reserved for S0-25)',
           ),
         defaultPolicy: z
           .object({
@@ -2061,6 +2093,167 @@ export function collectConfigDeprecationWarnings(
   return warnings;
 }
 
+export interface ConfigReservedSettingNotice {
+  path: string;
+  forSlice: string;
+  reason: string;
+  message: string;
+}
+
+export const RESERVED_TENANT_CONFIG_SETTINGS: readonly {
+  path: string;
+  forSlice: string;
+  reason: string;
+}[] = [
+  {
+    path: 'branding.accentColorHex',
+    forSlice: 'S0-11b',
+    reason: 'Reserved for tenant branding theme rendering in S0-11b.',
+  },
+  {
+    path: 'branding.logoAssetKey',
+    forSlice: 'S0-11b',
+    reason: 'Reserved for tenant firm logo rendering in S0-11b.',
+  },
+  {
+    path: 'matterCosts.rateSourceMode',
+    forSlice: 'S0-23',
+    reason:
+      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
+  },
+  {
+    path: 'matterCosts.allowMatterRateOverrides',
+    forSlice: 'S0-23',
+    reason:
+      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
+  },
+  {
+    path: 'matterCosts.partnerSignOffThresholdGbp',
+    forSlice: 'S0-23',
+    reason:
+      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
+  },
+  {
+    path: 'matterCosts.rateCards',
+    forSlice: 'S0-23',
+    reason:
+      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
+  },
+  {
+    path: 'matterCosts.disbursementPresets',
+    forSlice: 'S0-23',
+    reason:
+      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
+  },
+  {
+    path: 'integrations.pmsConnectionSecretVaultRef',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS database connection secret resolution in S0-18.',
+  },
+  {
+    path: 'integrations.companiesHouseApiKeyVaultRef',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live Companies House API integration in S0-18.',
+  },
+  {
+    path: 'integrations.pmsSync.enabled',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS synchronisation in S0-18.',
+  },
+  {
+    path: 'integrations.pmsSync.providerKey',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS adapter selection in S0-18.',
+  },
+  {
+    path: 'integrations.pmsSync.syncMode',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS sync direction control in S0-18.',
+  },
+  {
+    path: 'integrations.pmsSync.matterCodeAllocation',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS matter number allocation in S0-18.',
+  },
+  {
+    path: 'integrations.pmsSync.clientCodeAllocation',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS client code allocation in S0-18.',
+  },
+  {
+    path: 'integrations.pmsSync.pollIntervalMinutes',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS delta polling interval in S0-18.',
+  },
+  {
+    path: 'integrations.pmsSync.fieldMappings',
+    forSlice: 'S0-18',
+    reason:
+      'Reserved for live tenant-scoped PMS field-level synchronisation in S0-18.',
+  },
+  {
+    path: 'documentAccess.autoRemediateDrift',
+    forSlice: 'S0-25',
+    reason:
+      'Reserved for scheduled automatic SharePoint permission drift remediation in S0-25.',
+  },
+];
+
+function hasNestedConfigValue(
+  obj: Record<string, unknown> | undefined,
+  dottedPath: string,
+): boolean {
+  if (!obj || typeof obj !== 'object') return false;
+  const parts = dottedPath.split('.');
+  let cur: unknown = obj;
+  for (const part of parts) {
+    if (!cur || typeof cur !== 'object' || !(part in (cur as Record<string, unknown>))) {
+      return false;
+    }
+    cur = (cur as Record<string, unknown>)[part];
+  }
+  return cur !== undefined;
+}
+
+export function collectStructuredConfigReservedSettings(
+  baseConfig: Record<string, unknown>,
+  environmentOverlay: Record<string, unknown> = {},
+): ConfigReservedSettingNotice[] {
+  const notices: ConfigReservedSettingNotice[] = [];
+  for (const entry of RESERVED_TENANT_CONFIG_SETTINGS) {
+    if (
+      hasNestedConfigValue(baseConfig, entry.path) ||
+      hasNestedConfigValue(environmentOverlay, entry.path)
+    ) {
+      notices.push({
+        path: entry.path,
+        forSlice: entry.forSlice,
+        reason: entry.reason,
+        message: `[RESERVED_CONFIG_KEY] ${entry.path} is reserved for ${entry.forSlice}: ${entry.reason}`,
+      });
+    }
+  }
+  return notices;
+}
+
+export function collectConfigReservedSettings(
+  baseConfig: Record<string, unknown>,
+  environmentOverlay: Record<string, unknown> = {},
+): string[] {
+  return collectStructuredConfigReservedSettings(
+    baseConfig,
+    environmentOverlay,
+  ).map((n) => n.message);
+}
+
 export function validateTenantConfigWithWarnings(
   baseConfig: Record<string, unknown>,
   environmentOverlay: Record<string, unknown> = {},
@@ -2070,6 +2263,8 @@ export function validateTenantConfigWithWarnings(
   config: TenantConfiguration;
   deprecationWarnings: string[];
   structuredDeprecationWarnings: ConfigDeprecationWarning[];
+  reservedSettings: string[];
+  structuredReservedSettings: ConfigReservedSettingNotice[];
 } {
   const deprecationWarnings = collectConfigDeprecationWarnings(
     baseConfig,
@@ -2077,13 +2272,25 @@ export function validateTenantConfigWithWarnings(
   );
   const structuredDeprecationWarnings =
     collectStructuredConfigDeprecationWarnings(baseConfig, environmentOverlay);
+  const reservedSettings = collectConfigReservedSettings(
+    baseConfig,
+    environmentOverlay,
+  );
+  const structuredReservedSettings =
+    collectStructuredConfigReservedSettings(baseConfig, environmentOverlay);
   const config = loadAndValidateTenantConfig(
     baseConfig,
     environmentOverlay,
     environmentOverride,
     hostingModeOverride,
   );
-  return { config, deprecationWarnings, structuredDeprecationWarnings };
+  return {
+    config,
+    deprecationWarnings,
+    structuredDeprecationWarnings,
+    reservedSettings,
+    structuredReservedSettings,
+  };
 }
 
 export function loadAndValidateTenantConfig(

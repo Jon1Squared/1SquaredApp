@@ -179,6 +179,7 @@ interface MatterFormClientProps {
   };
   enableAiMatterExtraction?: boolean;
   aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
+  enableMatterCostsGovernance?: boolean;
   tenantId: string;
 }
 
@@ -286,6 +287,7 @@ export function MatterFormClient({
   suggestedMatterGovernanceAssignees,
   enableAiMatterExtraction = false,
   aiProviderChoice = 'disabled',
+  enableMatterCostsGovernance = false,
   tenantId,
 }: MatterFormClientProps) {
   const router = useRouter();
@@ -8290,8 +8292,9 @@ export function MatterFormClient({
                   ) : null}
                 </div>
 
-                {partnerCostSignOff ||
-                (canSignOffCosts && (savedDraftMatterId || existing?.id)) ? (
+                {enableMatterCostsGovernance &&
+                (partnerCostSignOff ||
+                  (canSignOffCosts && (savedDraftMatterId || existing?.id))) ? (
                   <div
                     style={{
                       display: 'flex',

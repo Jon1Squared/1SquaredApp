@@ -75,6 +75,7 @@ export default async function NewMatterPage({
         suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
         enableAiMatterExtraction={snap.enableAiMatterExtraction}
         aiProviderChoice={snap.aiProviderChoice}
+        enableMatterCostsGovernance={snap.enableMatterCostsGovernance}
         tenantId={snap.tenantId}
       />
     );

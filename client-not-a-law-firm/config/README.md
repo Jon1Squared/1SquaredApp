@@ -6,6 +6,30 @@ This directory holds the schema-validated tenant configuration for the invented 
 - `environments/dev.json`: development environment overlay.
 - `environments/test.json`: automated test environment overlay.
 
+## Feature Flags & Active Tenant Settings (S0-06, S0-12)
+
+| Setting | `base.json` value | Schema default | Runtime behaviour |
+|---|---|---|---|
+| `featureFlags.enableMatterCostsGovernance` | `true` | `true` | Gates the Administration **Rates & matter costs** tab, the matter form partner cost sign-off UI, `saveMatterCostsConfigAction`, `signOffMatterCostsAction`, and the `beforeMatterCostsCalculate` / `beforeMatterOpen` governance hooks |
+| `featureFlags.enablePmsLiveRateSync` | `true` | `true` | Gates the **Pull / Sync Rates from PMS** button and `syncMatterCostsRatesFromPmsAction` |
+| `featureFlags.enableAiMatterExtraction` | `true` | `false` | Gates `POST /api/matters/extract` and the AI extraction panel (requires `integrations.aiProviderChoice === "anthropic"`) |
+| `featureFlags.enableDemoMode` | `false` (`true` in `dev.json` / `test.json`) | `false` | Enables Demo Mode persona switching in non-live environments |
+| `integrations.aiProviderChoice` | `"anthropic"` | `"disabled"` | Selects the AI model provider (`"anthropic"`, `"azure_openai_uk"`, or `"disabled"`) |
+
+## Reserved Tenant Settings (`x-reserved`)
+
+Settings that are validated by `core/schemas/tenant-config.schema.json` for backward compatibility (Rule 7) and reserved for upcoming Stage 0 slices are marked with `"x-reserved": { "for": "S0-...", "reason": "..." }` in the JSON schema and logged once at startup as a structured `info` notice (`event: "tenant_config.reserved_settings"`):
+
+| Setting | Target slice | Reason |
+|---|---|---|
+| `branding.accentColorHex` | `S0-11b` | Reserved for tenant branding theme rendering |
+| `branding.logoAssetKey` | `S0-11b` | Reserved for tenant firm logo rendering |
+| `matterCosts.*` (`rateSourceMode`, `allowMatterRateOverrides`, `partnerSignOffThresholdGbp`, `rateCards`, `disbursementPresets`) | `S0-23` | Reserved for unifying tenant-level and runtime-store matter costs configuration |
+| `integrations.pmsConnectionSecretVaultRef` | `S0-18` | Reserved for live tenant-scoped PMS database connection secret resolution |
+| `integrations.companiesHouseApiKeyVaultRef` | `S0-18` | Reserved for live Companies House API integration |
+| `integrations.pmsSync.*` (`enabled`, `providerKey`, `syncMode`, `matterCodeAllocation`, `clientCodeAllocation`, `pollIntervalMinutes`, `fieldMappings`) | `S0-18` | Reserved for live tenant-scoped PMS synchronisation and code allocation |
+| `documentAccess.autoRemediateDrift` | `S0-25` | Reserved for scheduled automatic SharePoint permission drift remediation |
+
 ## AI Matter Extraction Configuration & Data Flow Record (Standard Section 10, ADR 0031)
 
 AI matter extraction (`POST /api/matters/extract`) is governed by two tenant settings:

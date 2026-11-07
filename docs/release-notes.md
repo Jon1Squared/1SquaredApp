@@ -1,5 +1,15 @@
 # 1Squared — Release Notes
 
+## Unreleased — Tenant Settings Enforcement, Reserved Markers, and Usage Guard (`s0-12-tenant-settings`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Core Config Schema, Tenant Runtime & Host Feature Gates (`core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `src/platform/tenantRuntime.ts`, `src/server/services.ts`, `src/components/`, `src/app/`, `src/docs/`, `docs/`, `client-not-a-law-firm/config/`):**
+  - **Matter Costs Governance & PMS Live Rate Sync Gates (P7, `src/server/services.ts`, `src/components/AdminClient.tsx`, `src/components/MatterCostsAdminSection.tsx`, `src/components/MatterFormClient.tsx`, `src/app/admin/[[...slug]]/page.tsx`, `src/app/matters/`):** Gated the Administration **Rates & matter costs** tab, the `MatterFormClient` partner cost sign-off block, `saveMatterCostsConfig`, `signOffMatterCostsRecord`, and the `beforeMatterCostsCalculate` / `beforeMatterOpen` extension hooks on `featureFlags.enableMatterCostsGovernance`, and gated `syncMatterCostsRatesFromPms` and the **Pull / Sync Rates from PMS** button on `featureFlags.enablePmsLiveRateSync`.
+  - **Reserved Tenant Settings & Startup Info Logging (`core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `src/platform/tenantRuntime.ts`):** Added `"x-reserved": { "for": "S0-...", "reason": "..." }` metadata in `core/schemas/tenant-config.schema.json` and matching `[x-reserved:S0-...]` descriptions in `TenantConfigurationSchema` for `branding.accentColorHex` and `branding.logoAssetKey` (`S0-11b`), `matterCosts.*` (`S0-23`), `integrations.pmsConnectionSecretVaultRef`, `integrations.companiesHouseApiKeyVaultRef`, and `integrations.pmsSync.*` (`S0-18`), and `documentAccess.autoRemediateDrift` (`S0-25`); added `collectStructuredConfigReservedSettings` and `collectConfigReservedSettings`; and logged reserved settings once at startup as a structured `info` event (`event: 'tenant_config.reserved_settings'`) with `tenantId` and `correlationId`.
+  - **Schema Usage Guard Test & Documentation (`core/tests/tenant-config-usage.test.ts`, `src/docs/articles/tenant-settings.ts`, `src/docs/registry.ts`, `client-not-a-law-firm/config/README.md`, `docs/roadmap/feature-list.md`):** Added `core/tests/tenant-config-usage.test.ts` walking `tenantConfigJsonSchema.properties` recursively to verify every leaf key is either referenced in runtime code or marked `x-reserved`, verifying Rule 7 backward compatibility across `base.json` and environment overlays, and testing the feature flag gates; added the `tenant-settings` help article; and updated P7 to Completed.
+
+---
+
 ## Unreleased — Record Merge Reference Repointing and Employee Refusal (`s0-09-merge-references`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

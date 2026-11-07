@@ -1638,6 +1638,7 @@ export async function updateDocumentGenerationConfigService(
 
   const isSecuritySensitivePatch =
     patch.permissions !== undefined ||
+    patch.approval?.requireApproval !== undefined ||
     patch.approval?.allowSelfApproval !== undefined;
   const canUpdateConfig = isSecuritySensitivePatch
     ? hasPersonPermission(user, 'rbac:manage_config', { config }) ||

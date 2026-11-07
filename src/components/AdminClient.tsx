@@ -173,6 +173,8 @@ interface Props {
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterPartyMigrationReport?: MatterPartyMigrationReport;
   matterCostsConfig?: MatterCostsConfig;
+  enableMatterCostsGovernance?: boolean;
+  enablePmsLiveRateSync?: boolean;
   currentUserId?: string;
   currentUserPermissions?: PermissionKey[];
   appRoleByPersonId?: Record<string, AppRole>;
@@ -209,6 +211,8 @@ export function AdminClient({
   matterPartyTaxonomy,
   matterPartyMigrationReport,
   matterCostsConfig,
+  enableMatterCostsGovernance = true,
+  enablePmsLiveRateSync = true,
   currentUserId,
   currentUserPermissions,
   appRoleByPersonId = {},
@@ -1243,15 +1247,17 @@ export function AdminClient({
         >
           Organisation structure &amp; teams ({orgCatalogue.departments.length} depts · {teams.length} teams)
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'rates-and-costs'}
-          className={`tab-btn ${tab === 'rates-and-costs' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('rates-and-costs')}
-        >
-          Rates &amp; matter costs ({matterCostsConfig?.rateCards.length ?? 6} rate cards)
-        </button>
+        {enableMatterCostsGovernance ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'rates-and-costs'}
+            className={`tab-btn ${tab === 'rates-and-costs' ? 'tab-btn--active' : ''}`}
+            onClick={() => setTab('rates-and-costs')}
+          >
+            Rates &amp; matter costs ({matterCostsConfig?.rateCards.length ?? 6} rate cards)
+          </button>
+        ) : null}
         <button
           type="button"
           role="tab"
@@ -3985,10 +3991,11 @@ export function AdminClient({
       {tab === 'document-stores' && <DocumentStoresAdminPanel />}
 
       {/* TAB: RATES & MATTER COSTS */}
-      {tab === 'rates-and-costs' && matterCostsConfig && (
+      {tab === 'rates-and-costs' && enableMatterCostsGovernance && matterCostsConfig && (
         <MatterCostsAdminSection
           initialConfig={matterCostsConfig}
           values={values}
+          enablePmsLiveRateSync={enablePmsLiveRateSync}
         />
       )}
 

@@ -8,6 +8,7 @@ import 'server-only';
  */
 
 import {
+  collectStructuredConfigReservedSettings,
   CORE_API_VERSION,
   CORE_VERSION,
   ExtensionHost,
@@ -41,6 +42,7 @@ let cachedValidatedTenantConfig: {
   value: TenantConfiguration;
 } | null = null;
 let tenantConfigValidationCount = 0;
+const loggedReservedSettingKeys = new Set<string>();
 
 function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) {
@@ -76,6 +78,7 @@ export function setActiveTenantConfigForTesting(
   testBaseConfigOverride = baseConfig;
   testDevOverlayOverride = devOverlay;
   cachedValidatedTenantConfig = null;
+  loggedReservedSettingKeys.clear();
   cachedHost = null;
   cachedHostKey = null;
   cachedHostLoadErrors = [];
@@ -195,6 +198,7 @@ export function getActiveTenantRawBaseConfig(): Record<string, unknown> {
 export interface PlatformArchitectureSnapshot {
   coreVersion: string;
   coreApiVersion: string;
+  schemaVersion: string;
   tenantId: string;
   hostingMode: 'single_tenant' | 'multi_tenant';
   environment: 'dev' | 'test' | 'training' | 'live';
@@ -560,6 +564,30 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
     ),
   );
   tenantConfigValidationCount += 1;
+  const reservedLogKey = `${validated.tenantId}::${env}::${hostingMode}`;
+  if (!loggedReservedSettingKeys.has(reservedLogKey)) {
+    loggedReservedSettingKeys.add(reservedLogKey);
+    const reservedNotices = collectStructuredConfigReservedSettings(
+      baseCfg,
+      overlayCfg,
+    );
+    if (reservedNotices.length > 0) {
+      console.info(
+        JSON.stringify({
+          level: 'info',
+          event: 'tenant_config.reserved_settings',
+          tenantId: validated.tenantId,
+          correlationId: `cfg-startup-${validated.tenantId}-${env}`,
+          environment: env,
+          reservedSettings: reservedNotices.map((n) => ({
+            path: n.path,
+            for: n.forSlice,
+            reason: n.reason,
+          })),
+        }),
+      );
+    }
+  }
   cachedValidatedTenantConfig = {
     packageDir,
     env,
@@ -639,6 +667,7 @@ export function getPlatformArchitectureSnapshot(
   return {
     coreVersion: CORE_VERSION,
     coreApiVersion: CORE_API_VERSION,
+    schemaVersion: tenantConfig.schemaVersion,
     tenantId: tenantCtx.tenantId,
     hostingMode: tenantCtx.hostingMode,
     environment: tenantCtx.environment,

@@ -2998,16 +2998,17 @@ async function runMatterOpeningGate(params: {
     }
   }
 
-  // 3. beforeMatterOpen extension hook.
+  // 3. beforeMatterOpen extension hook (when Matter Costs Governance is enabled for the tenant).
   const host = getPlatformExtensionHost();
-  const openGovernance = gateLoadFailure
-    ? null
-    : await host.executeMatterCostsHook(
-        'beforeMatterOpen',
-        extensionCtx,
-        tenantCfg,
-        costsHookInput,
-      );
+  const openGovernance =
+    gateLoadFailure || !tenantCfg.featureFlags?.enableMatterCostsGovernance
+      ? null
+      : await host.executeMatterCostsHook(
+          'beforeMatterOpen',
+          extensionCtx,
+          tenantCfg,
+          costsHookInput,
+        );
 
   if (openGovernance && !openGovernance.allowProceed) {
     const rawWarning = openGovernance.governanceWarnings[0] ?? '';
@@ -4377,12 +4378,19 @@ export async function saveMatterRecord(
     disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
     partnerSignOffCompleted,
   };
-  const calcGovernance = await host.executeMatterCostsHook(
-    'beforeMatterCostsCalculate',
-    extensionCtx,
-    tenantCfg,
-    costsHookInput,
-  );
+  const calcGovernance = tenantCfg.featureFlags?.enableMatterCostsGovernance
+    ? await host.executeMatterCostsHook(
+        'beforeMatterCostsCalculate',
+        extensionCtx,
+        tenantCfg,
+        costsHookInput,
+      )
+    : {
+        allowProceed: true,
+        requiresPartnerSignOff: false,
+        governanceWarnings: [],
+        appliedTransformations: [],
+      };
   const gateResult =
     !isDraftSave && !existingHasOpened && !isPmsImport
       ? await runMatterOpeningGate({
@@ -5329,6 +5337,16 @@ export async function signOffMatterCostsRecord(
   errors?: Record<string, string>;
   warnings?: string[];
 }> {
+  const tenantCfg = getActiveTenantConfiguration();
+  if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
+    return {
+      matter: null,
+      errors: {
+        featureDisabled:
+          'Forbidden: Matter costs governance is disabled for this tenant (featureFlags.enableMatterCostsGovernance is false).',
+      },
+    };
+  }
   const store = getStore();
   const matter = store.matters.find((m) => m.id === matterId) ?? null;
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
@@ -5369,7 +5387,6 @@ export async function signOffMatterCostsRecord(
       },
     };
   }
-  const tenantCfg = getActiveTenantConfiguration();
   let extensionCtx: TenantContext;
   try {
     extensionCtx = resolveCurrentTenantContext(
@@ -12173,6 +12190,17 @@ export function saveMatterCostsConfig(
   config: MatterCostsConfig,
   byId: string,
 ): MatterCostsConfig {
+  const tenantCfg = getActiveTenantConfiguration();
+  if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message:
+        'Forbidden: Matter costs governance is disabled for this tenant (featureFlags.enableMatterCostsGovernance is false).',
+      tenantId: tenantCfg.tenantId,
+      correlationId: `corr-costs-cfg-${randomUUID()}`,
+      actorUserId: byId,
+    });
+  }
   const store = getStore();
   const now = new Date().toISOString();
   const next: MatterCostsConfig = {
@@ -12198,10 +12226,20 @@ export function saveMatterCostsConfig(
 export function syncMatterCostsRatesFromPms(
   byId: string,
 ): MatterCostsConfig {
+  const tenantCfg = getActiveTenantConfiguration();
+  if (!tenantCfg.featureFlags?.enablePmsLiveRateSync) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message:
+        'Forbidden: PMS live rate sync is disabled for this tenant (featureFlags.enablePmsLiveRateSync is false).',
+      tenantId: tenantCfg.tenantId,
+      correlationId: `corr-pms-rates-${randomUUID()}`,
+      actorUserId: byId,
+    });
+  }
   const store = getStore();
   const pms = getPmsSource();
   const feeEarners = pms.listFeeEarners();
-  const tenantCfg = getActiveTenantConfiguration();
   const base =
     store.matterCostsConfig ??
     createDefaultMatterCostsConfig(store.values, {
