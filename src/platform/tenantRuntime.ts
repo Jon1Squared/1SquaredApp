@@ -30,13 +30,39 @@ let testDevOverlayOverride: Record<string, unknown> | null | undefined =
 const fileJsonCache = new Map<string, Record<string, unknown>>();
 const envOverlayPathCache = new Map<string, string>();
 const EMPTY_JSON_CONFIG: Record<string, unknown> = Object.freeze({});
+/**
+ * Cached validated `TenantConfiguration` shared across requests for the lifetime
+ * of the process. Deep-frozen so callers treat it as strictly read-only.
+ */
 let cachedValidatedTenantConfig: {
-  baseCfg: Record<string, unknown>;
-  overlayCfg: Record<string, unknown>;
+  packageDir: string;
   env: string;
   hostingMode: string;
   value: TenantConfiguration;
 } | null = null;
+let tenantConfigValidationCount = 0;
+
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) {
+    return value;
+  }
+  Object.freeze(value);
+  for (const propValue of Object.values(value as Record<string, unknown>)) {
+    if (propValue && typeof propValue === 'object') {
+      deepFreeze(propValue);
+    }
+  }
+  return value;
+}
+
+export function getTenantConfigValidationCountForTesting(): number {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: getTenantConfigValidationCountForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  return tenantConfigValidationCount;
+}
 
 export function setActiveTenantConfigForTesting(
   baseConfig: Record<string, unknown> | null,
@@ -499,12 +525,21 @@ export function getPlatformPostgresCluster(): PostgresTenantCluster {
 }
 
 export function getActiveTenantConfiguration(): TenantConfiguration {
+  const packageDir = resolveTenantPackageDir();
   const env =
     (process.env.PLATFORM_ENVIRONMENT as 'dev' | 'test' | 'training' | 'live' | undefined) ??
     'dev';
   const hostingMode =
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
+  if (
+    cachedValidatedTenantConfig &&
+    cachedValidatedTenantConfig.packageDir === packageDir &&
+    cachedValidatedTenantConfig.env === env &&
+    cachedValidatedTenantConfig.hostingMode === hostingMode
+  ) {
+    return cachedValidatedTenantConfig.value;
+  }
   const baseCfg = getActiveTenantRawBaseConfig();
   const isTestEnv = process.env.NODE_ENV === 'test';
   const overlayCfg =
@@ -516,24 +551,17 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
             getActiveTenantEnvironmentOverlayPath(env),
             true,
           );
-  if (
-    cachedValidatedTenantConfig &&
-    cachedValidatedTenantConfig.baseCfg === baseCfg &&
-    cachedValidatedTenantConfig.overlayCfg === overlayCfg &&
-    cachedValidatedTenantConfig.env === env &&
-    cachedValidatedTenantConfig.hostingMode === hostingMode
-  ) {
-    return cachedValidatedTenantConfig.value;
-  }
-  const validated = loadAndValidateTenantConfig(
-    baseCfg,
-    overlayCfg,
-    env,
-    hostingMode,
+  const validated = deepFreeze(
+    loadAndValidateTenantConfig(
+      baseCfg,
+      overlayCfg,
+      env,
+      hostingMode,
+    ),
   );
+  tenantConfigValidationCount += 1;
   cachedValidatedTenantConfig = {
-    baseCfg,
-    overlayCfg,
+    packageDir,
     env,
     hostingMode,
     value: validated,

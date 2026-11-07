@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  buildMatterOpeningPdfLines,
   buildMatterRiskAssessmentSnapshot,
+  formatRiskQuestionPill,
+  formatRiskSectionPill,
   MATTER_RISK_SECTIONS,
   MAX_RISK_FOLLOW_UP_LENGTH,
+  resolveMatterOpeningSnapshot,
+  resolveMatterRiskAssessment,
   summarizeMatterRiskAssessment,
   validateMatterRiskAssessmentInput,
   type MatterRiskAssessmentSnapshot,
@@ -517,5 +522,82 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
       expect(convertedSnapshot.completedByName).toBeNull();
       expect(convertedSnapshot.overallRisk).toBeNull();
     });
+  });
+
+  it('6. R248: an empty (not_started) risk assessment shows Not assessed / Unanswered with neutral pills and never shows Low for any section or question', () => {
+    const store = getStore();
+    const unassessedMatter = {
+      ...store.matters.find((m) => m.id === 'M-000001')!,
+      fieldValues: {},
+      riskRatingId: '',
+    };
+
+    const resolved = resolveMatterRiskAssessment(
+      unassessedMatter,
+      store.people,
+      store.values,
+    );
+    expect(resolved.status).toBe('not_started');
+    expect(resolved.overallRisk).toBeNull();
+    expect(resolved.sections.length).toBeGreaterThan(0);
+
+    for (const sec of resolved.sections) {
+      expect(sec.sectionRisk).toBeNull();
+      const secPill = formatRiskSectionPill(sec.sectionRisk);
+      expect(secPill).toEqual({ label: 'Not assessed', tone: 'neutral' });
+      expect(secPill.label).not.toContain('Low');
+
+      for (const q of sec.questions) {
+        expect(q.risk).toBeNull();
+        const qPill = formatRiskQuestionPill(q.risk);
+        expect(qPill).toEqual({ label: 'Unanswered', tone: 'neutral' });
+        expect(qPill.label).not.toContain('Low');
+      }
+    }
+
+    expect(formatRiskSectionPill('Low')).toEqual({
+      label: 'Low risk',
+      tone: 'positive',
+    });
+    expect(formatRiskSectionPill('Medium')).toEqual({
+      label: 'Medium risk',
+      tone: 'warning',
+    });
+    expect(formatRiskSectionPill('High')).toEqual({
+      label: 'High risk',
+      tone: 'alert',
+    });
+
+    expect(formatRiskQuestionPill('Low')).toEqual({
+      label: 'Low',
+      tone: 'positive',
+    });
+    expect(formatRiskQuestionPill('Medium')).toEqual({
+      label: 'Medium',
+      tone: 'warning',
+    });
+    expect(formatRiskQuestionPill('High')).toEqual({
+      label: 'High',
+      tone: 'alert',
+    });
+
+    const openingSnap = resolveMatterOpeningSnapshot(
+      unassessedMatter,
+      store.people,
+      store.organisations,
+      store.values,
+      store.enquiries,
+      store.quotes,
+    );
+    const pdfLines = buildMatterOpeningPdfLines(openingSnap).map((l) => l.text);
+    const riskSectionLines = pdfLines.filter(
+      (line) =>
+        line.startsWith('2. MATTER RISK ASSESSMENT') ||
+        line.startsWith('Section ') ||
+        line.startsWith('• '),
+    );
+    for (const line of riskSectionLines) {
+      expect(line).not.toContain('Low');
+    }
   });
 });

@@ -785,6 +785,26 @@ export function summarizeMatterRiskAssessment(params: {
   };
 }
 
+export type RiskAssessmentPillTone = 'alert' | 'warning' | 'positive' | 'neutral';
+
+export function formatRiskSectionPill(
+  sectionRisk: RiskLevel | null | undefined,
+): { label: string; tone: RiskAssessmentPillTone } {
+  if (sectionRisk === 'High') return { label: 'High risk', tone: 'alert' };
+  if (sectionRisk === 'Medium') return { label: 'Medium risk', tone: 'warning' };
+  if (sectionRisk === 'Low') return { label: 'Low risk', tone: 'positive' };
+  return { label: 'Not assessed', tone: 'neutral' };
+}
+
+export function formatRiskQuestionPill(
+  questionRisk: RiskLevel | null | undefined,
+): { label: string; tone: RiskAssessmentPillTone } {
+  if (questionRisk === 'High') return { label: 'High', tone: 'alert' };
+  if (questionRisk === 'Medium') return { label: 'Medium', tone: 'warning' };
+  if (questionRisk === 'Low') return { label: 'Low', tone: 'positive' };
+  return { label: 'Unanswered', tone: 'neutral' };
+}
+
 /**
  * Resolves the Matter Risk Assessment snapshot for a Matter.
  * Uses the immutable saved snapshot on `matter.fieldValues.riskAssessment` if present,

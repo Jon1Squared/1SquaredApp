@@ -49,6 +49,8 @@ import {
   downloadConflictCheckPdf,
   downloadMatterOpeningPdf,
   downloadRiskAssessmentPdf,
+  formatRiskQuestionPill,
+  formatRiskSectionPill,
   resolveMatterConflictCheckRecord,
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
@@ -3083,12 +3085,7 @@ export function MatterProfileClient({
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                       {riskSnap.sections.map((sec) => {
-                        const secTone: 'alert' | 'warning' | 'positive' =
-                          sec.sectionRisk === 'High'
-                            ? 'alert'
-                            : sec.sectionRisk === 'Medium'
-                              ? 'warning'
-                              : 'positive';
+                        const secPill = formatRiskSectionPill(sec.sectionRisk);
                         return (
                           <div
                             key={sec.number}
@@ -3118,18 +3115,13 @@ export function MatterProfileClient({
                                 </div>
                               </div>
                               <StatusPill
-                                label={`${sec.sectionRisk || 'Low'} risk`}
-                                tone={secTone}
+                                label={secPill.label}
+                                tone={secPill.tone}
                               />
                             </div>
                             <ul className="worklist" style={{ padding: '0 14px' }}>
                               {sec.questions.map((q) => {
-                                const qTone: 'alert' | 'warning' | 'positive' =
-                                  q.risk === 'High'
-                                    ? 'alert'
-                                    : q.risk === 'Medium'
-                                      ? 'warning'
-                                      : 'positive';
+                                const qPill = formatRiskQuestionPill(q.risk);
                                 return (
                                   <li key={q.id} className="worklist-row">
                                     <div className="worklist-main">
@@ -3144,7 +3136,7 @@ export function MatterProfileClient({
                                       </div>
                                     </div>
                                     <div className="worklist-right">
-                                      <StatusPill label={q.risk || 'Low'} tone={qTone} />
+                                      <StatusPill label={qPill.label} tone={qPill.tone} />
                                     </div>
                                   </li>
                                 );
