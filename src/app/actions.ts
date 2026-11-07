@@ -372,8 +372,9 @@ export async function saveLinkAction(input: {
 
 export async function deleteLinkAction(linkId: string) {
   return guardedAction('deleteLinkAction', ({ personId: byId }) => {
-    deleteLink(linkId, byId);
+    const res = deleteLink(linkId, byId);
     revalidateAll();
+    return res;
   });
 }
 
@@ -387,8 +388,9 @@ export async function addNoteAction(recordType: RecordType | 'matter', recordId:
 
 export async function dismissDuplicateAction(recordType: RecordType, recordId: string, otherId: string | null) {
   return guardedAction('dismissDuplicateAction', ({ personId: byId }) => {
-    dismissDuplicateMatch(recordType, recordId, otherId, byId);
+    const res = dismissDuplicateMatch(recordType, recordId, otherId, byId);
     revalidateAll();
+    return res;
   });
 }
 

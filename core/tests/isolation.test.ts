@@ -93,15 +93,36 @@ import {
   updateMatterConflictRecord,
 } from '../../src/server/services';
 import {
+  addNoteAction,
+  addTaskCommentAction,
   approveSignOffAction,
+  assignEnquiryAction,
+  closeEnquiryAction,
+  deleteLinkAction,
   discussSignOffAction,
+  dismissDuplicateAction,
   linkPmsRecordAction,
+  logEnquiryContactAction,
+  logQuoteFollowUpAction,
+  markQuoteSentAction,
+  mergeRecordsAction,
+  reassignLeaverOwnedRecordsAction,
+  recordQuoteOutcomeAction,
   reorderChoiceValueAction,
   reorderCustomFieldAction,
+  reopenEnquiryAction,
+  reviseQuoteAction,
   saveCustomFieldAction,
+  saveEnquiryAction,
+  saveLinkAction,
   saveMatterAction,
+  saveOrganisationAction,
   savePersonAction,
+  saveQuoteAction,
+  saveTaskAction,
   saveTeamAction,
+  sendEnquiryEmailAction,
+  takeTaskAction,
   unlinkPmsRecordAction,
   updateChoiceValueAction,
 } from '../../src/app/actions';
@@ -6591,6 +6612,242 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const tamperedPmsUnlink = await unlinkPmsRecordAction('PMSL-TENANT-B-999');
       expect(isActionDenied(tamperedPmsUnlink)).toBe(true);
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('S0-05: rejects tampered cross-tenant record IDs and forged tenant claims across all 20 S0-05 record actions', async () => {
+    try {
+      resetAllDemoData('P-000001');
+      const store = getStore();
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+
+      // 1. Forged tenant claim is rejected at the action boundary
+      setTestEntraSessionOverride({
+        personId: 'P-000001',
+        tenantId: 'fictional-chambers-uk',
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '22222222-2222-2222-2222-222222222222',
+        sub: 'P-000001',
+        email: 'partner@fictionalchambers.example',
+        displayName: 'Tenant B Partner',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+
+      await expect(
+        saveTaskAction({
+          title: 'Cross-tenant task',
+          dueAt: '2026-12-01',
+          assignedPersonId: 'P-000001',
+        }),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+
+      await expect(
+        saveEnquiryAction({ firstName: 'Cross', lastName: 'Tenant' }, { asDraft: true }),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+
+      await expect(
+        saveQuoteAction({
+          clientType: 'prospect',
+          prospectName: 'Cross Tenant',
+          practiceAreaId: store.quotes[0]!.practiceAreaId,
+          scope: 'Scope',
+          feeBasis: 'Fixed fee',
+          feeAmountExVat: 1000,
+        }),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+
+      // 2. Within an authenticated Tenant A session, tampered record IDs belonging to Tenant B are rejected with FORBIDDEN
+      setTestEntraSessionOverride({
+        personId: 'P-000001',
+        tenantId: 'not-a-law-firm',
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '00000000-0000-4000-8000-000000000000',
+        sub: 'P-000001',
+        email: 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+
+      const tasksBefore = store.tasks.length;
+      const enquiriesBefore = store.enquiries.length;
+      const quotesBefore = store.quotes.length;
+      const orgsBefore = store.organisations.length;
+      const linksBefore = store.links.length;
+      const notesBefore = store.notes.length;
+
+      expect(
+        isActionDenied(
+          await saveTaskAction({
+            id: 'TSK-TENANT-B-999',
+            title: 'Tampered task',
+            dueAt: '2026-12-01',
+            assignedPersonId: 'P-000001',
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await saveTaskAction({
+            title: 'Task linked to Tenant B matter',
+            dueAt: '2026-12-01',
+            assignedPersonId: 'P-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: 'M-TENANT-B-999' }],
+          }),
+        ),
+      ).toBe(true);
+      expect(isActionDenied(await takeTaskAction('TSK-TENANT-B-999'))).toBe(true);
+      expect(
+        isActionDenied(await addTaskCommentAction('TSK-TENANT-B-999', 'Tampered comment')),
+      ).toBe(true);
+
+      expect(
+        isActionDenied(
+          await saveEnquiryAction(
+            { firstName: 'Tampered', lastName: 'Enquiry' },
+            { id: 'ENQ-TENANT-B-999', asDraft: true },
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(await assignEnquiryAction('ENQ-TENANT-B-999', 'P-000001')),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await logEnquiryContactAction('ENQ-TENANT-B-999', {
+            method: 'Phone',
+            outcome: 'Spoke',
+            note: 'Tampered',
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await sendEnquiryEmailAction('ENQ-TENANT-B-999', {
+            to: 'test@notalawfirm.example',
+            subject: 'Tampered',
+            bodyHtml: '<p>Test</p>',
+            bodyText: 'Test',
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await closeEnquiryAction('ENQ-TENANT-B-999', {
+            targetStatus: 'Declined',
+            closeReasonId: 'enquiry_close_reason.conflict',
+          }),
+        ),
+      ).toBe(true);
+      expect(isActionDenied(await reopenEnquiryAction('ENQ-TENANT-B-999'))).toBe(true);
+
+      expect(
+        isActionDenied(
+          await saveQuoteAction(
+            {
+              clientType: 'prospect',
+              prospectName: 'Tampered',
+              practiceAreaId: store.quotes[0]!.practiceAreaId,
+              scope: 'Scope',
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 1000,
+            },
+            { id: 'Q-TENANT-B-999' },
+          ),
+        ),
+      ).toBe(true);
+      expect(isActionDenied(await markQuoteSentAction('Q-TENANT-B-999'))).toBe(true);
+      expect(
+        isActionDenied(
+          await logQuoteFollowUpAction('Q-TENANT-B-999', {
+            method: 'Phone',
+            note: 'Tampered',
+            nextFollowUpDate: '2026-12-01',
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await reviseQuoteAction('Q-TENANT-B-999', {
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 1200,
+            scope: 'Tampered',
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await recordQuoteOutcomeAction('Q-TENANT-B-999', { outcome: 'Accepted' }),
+        ),
+      ).toBe(true);
+
+      expect(
+        isActionDenied(
+          await saveOrganisationAction(
+            { legalName: 'Tampered Org' },
+            { id: 'O-TENANT-B-999' },
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await saveLinkAction({
+            id: 'L-TENANT-B-999',
+            personId: 'P-000001',
+            organisationId: store.organisations[0]!.id,
+            jobTitle: 'Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: null,
+            endDate: null,
+            contactStatusId: null,
+          }),
+        ),
+      ).toBe(true);
+      expect(isActionDenied(await deleteLinkAction('L-TENANT-B-999'))).toBe(true);
+      expect(
+        isActionDenied(await addNoteAction('matter', 'M-TENANT-B-999', 'Tampered note')),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await dismissDuplicateAction('person', 'P-TENANT-B-999', 'P-000001'),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await mergeRecordsAction('person', 'P-000001', 'P-TENANT-B-999'),
+        ),
+      ).toBe(true);
+      expect(
+        isActionDenied(
+          await reassignLeaverOwnedRecordsAction('P-TENANT-B-999', 'P-000001'),
+        ),
+      ).toBe(true);
+
+      expect(store.tasks.length).toBe(tasksBefore);
+      expect(store.enquiries.length).toBe(enquiriesBefore);
+      expect(store.quotes.length).toBe(quotesBefore);
+      expect(store.organisations.length).toBe(orgsBefore);
+      expect(store.links.length).toBe(linksBefore);
+      expect(store.notes.length).toBe(notesBefore);
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

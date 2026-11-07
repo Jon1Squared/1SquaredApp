@@ -481,84 +481,104 @@ export const ACTION_PERMISSIONS = {
 
   // S0-05: Record mutations — tasks, enquiries, organisations, links, notes, duplicates/merge, leavers & quotes (20)
   reassignLeaverOwnedRecordsAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'matter:reassign_ownership',
+    enforcedBy: 'action',
   },
   saveOrganisationAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: { anyOf: ['contact:create', 'contact:edit'] },
+    enforcedBy: 'action',
   },
   saveLinkAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: { anyOf: ['contact:create', 'contact:edit'] },
+    enforcedBy: 'action',
   },
   deleteLinkAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'contact:edit',
+    enforcedBy: 'action',
   },
   addNoteAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: { anyOf: ['contact:edit', 'matter:edit', 'employee:edit_core'] },
+    enforcedBy: 'service',
   },
   dismissDuplicateAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'record:merge',
+    enforcedBy: 'action',
   },
   mergeRecordsAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'record:merge',
+    enforcedBy: 'action',
   },
   saveTaskAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'task:edit',
+    enforcedBy: 'action',
   },
   addTaskCommentAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'task:comment',
+    enforcedBy: 'action',
   },
   saveEnquiryAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: { anyOf: ['enquiry:create', 'enquiry:edit'] },
+    enforcedBy: 'action',
   },
   assignEnquiryAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'enquiry:assign',
+    enforcedBy: 'action',
   },
   logEnquiryContactAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'enquiry:edit',
+    enforcedBy: 'action',
   },
   sendEnquiryEmailAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'enquiry:edit',
+    enforcedBy: 'action',
   },
   closeEnquiryAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'enquiry:close',
+    enforcedBy: 'action',
   },
   reopenEnquiryAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'enquiry:reopen',
+    enforcedBy: 'action',
   },
   saveQuoteAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'quote:edit',
+    enforcedBy: 'action',
   },
   markQuoteSentAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'quote:edit',
+    enforcedBy: 'action',
   },
   logQuoteFollowUpAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'quote:edit',
+    enforcedBy: 'action',
   },
   reviseQuoteAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'quote:edit',
+    enforcedBy: 'action',
   },
   recordQuoteOutcomeAction: {
-    kind: 'gap',
-    slice: 'S0-05',
+    kind: 'permission',
+    key: 'quote:edit',
+    enforcedBy: 'action',
   },
 
   // S0-07: Enquiry and quote conversion (2)
@@ -669,4 +689,4 @@ export type RegisteredRouteName = keyof typeof ROUTE_PERMISSIONS;
  * `ROUTE_PERMISSIONS`. Equals the exact S0-02 baseline (54 actions + 1 route = 55)
  * and may only decrease as slices S0-03 to S0-07 and S0-10 close gaps.
  */
-export const MAX_KNOWN_GAPS = 26;
+export const MAX_KNOWN_GAPS = 6;

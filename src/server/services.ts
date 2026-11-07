@@ -84,6 +84,7 @@ import {
   emptyDiversityAnswers,
   findOpenMattersWherePersonIsParty,
   findRecordsOwnedByLeavers,
+  isLeaverPerson,
   isSelectableInEmployeeDropdown,
   isWorkingAtFirm,
   maskBankDetails,
@@ -735,19 +736,10 @@ function getAppSnapshotInScope(
       .map((e) => e.id),
   );
 
-  // Filter quotes: hide quotes linked to or converted into a hidden matter or hidden enquiry.
-  const visibleQuotes: Quote[] = (store.quotes ?? []).filter((q) => {
-    if (q.convertedMatterId && hiddenMatterIds.has(q.convertedMatterId)) {
-      return false;
-    }
-    if (q.linkedEnquiryId && hiddenEnquiryIds.has(q.linkedEnquiryId)) {
-      return false;
-    }
-    if (hiddenMatterSourceQuoteIds.has(q.id)) {
-      return false;
-    }
-    return true;
-  });
+  // Filter quotes: require quote:view and hide quotes linked to or converted into a hidden matter or hidden enquiry.
+  const visibleQuotes: Quote[] = currentUserPermissions.includes('quote:view')
+    ? (store.quotes ?? []).filter(visibility.canViewQuote)
+    : [];
   const visibleQuoteIdSet = new Set(visibleQuotes.map((q) => q.id));
   const hiddenQuoteIds = new Set(
     (store.quotes ?? [])
@@ -756,18 +748,7 @@ function getAppSnapshotInScope(
   );
 
   // Filter tasks: hide any task linked to a hidden matter, hidden enquiry, hidden quote, or hidden key date.
-  const visibleTasks: Task[] = store.tasks.filter((t) => {
-    if (t.linkedKeyDateId && hiddenMatterKeyDateIds.has(t.linkedKeyDateId)) {
-      return false;
-    }
-    const linksToHidden = t.linkedRecords.some(
-      (lr) =>
-        (lr.recordType === 'matter' && hiddenMatterIds.has(lr.recordId)) ||
-        (lr.recordType === 'enquiry' && hiddenEnquiryIds.has(lr.recordId)) ||
-        (lr.recordType === 'quote' && hiddenQuoteIds.has(lr.recordId)),
-    );
-    return !linksToHidden;
-  });
+  const visibleTasks: Task[] = store.tasks.filter(visibility.canViewTask);
   const visibleTaskIdSet = new Set(visibleTasks.map((t) => t.id));
   const hiddenTaskIds = new Set(
     store.tasks.filter((t) => !visibleTaskIdSet.has(t.id)).map((t) => t.id),
@@ -1070,13 +1051,15 @@ function getAppSnapshotInScope(
 
   const canReopenByEnquiryId: Record<string, boolean> = {};
   for (const eq of visibleEnquiries) {
-    canReopenByEnquiryId[eq.id] = canUserReopenEnquiry(
-      user.id,
-      eq,
-      store.teams,
-      store.people,
-      store.values,
-    );
+    canReopenByEnquiryId[eq.id] =
+      currentUserPermissions.includes('enquiry:reopen') &&
+      canUserReopenEnquiry(
+        user.id,
+        eq,
+        store.teams,
+        store.people,
+        store.values,
+      );
   }
 
   const appRoleByPersonId: Record<string, AppRole> = {};
@@ -1324,79 +1307,234 @@ export function reassignLeaverOwnedRecords(
   fromLeaverId: string,
   toEmployeeId: string,
   byId: string,
-): { reassignedCount: number; errors?: Record<string, string> } {
+): { reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied> {
   const store = getStore();
   const now = new Date().toISOString();
-  const targetEmp = store.people.find((p) => p.id === toEmployeeId);
-  if (!targetEmp || !isSelectableInEmployeeDropdown(targetEmp)) {
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const actorPerms = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  if (
+    !actorPerms.permissions.has('employee:edit_core') ||
+    !actorPerms.permissions.has('matter:reassign_ownership')
+  ) {
+    const msg =
+      'You must hold both employee:edit_core and matter:reassign_ownership to reassign records owned by a leaver.';
     return {
+      ...buildActionDenied('FORBIDDEN', msg),
       reassignedCount: 0,
-      errors: { toEmployeeId: 'Replacement owner must be an active employee.' },
+      errors: { permission: msg },
     };
   }
 
+  const fromLeaver = store.people.find((p) => p.id === fromLeaverId);
+  if (!fromLeaver || !isLeaverPerson(fromLeaver)) {
+    const msg = 'Source person must be an existing leaver.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      reassignedCount: 0,
+      errors: { fromLeaverId: msg },
+    };
+  }
+
+  const targetEmp = store.people.find((p) => p.id === toEmployeeId);
+  if (!targetEmp || !isSelectableInEmployeeDropdown(targetEmp)) {
+    const msg = 'Replacement owner must be an active employee.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      reassignedCount: 0,
+      errors: { toEmployeeId: msg },
+    };
+  }
+
+  const fromName = personDisplayName(fromLeaver);
+  const toName = personDisplayName(targetEmp);
   let count = 0;
+
   for (const p of store.people) {
     if (p.mergedIntoId) continue;
+    const movedRoles: string[] = [];
     if (p.relationshipOwnerId === fromLeaverId) {
       p.relationshipOwnerId = toEmployeeId;
       count++;
+      movedRoles.push('Relationship owner');
     }
     if (p.recordOwnerId === fromLeaverId) {
       p.recordOwnerId = toEmployeeId;
       count++;
+      movedRoles.push('Record owner');
     }
     if (p.verificationReviewerId === fromLeaverId) {
       p.verificationReviewerId = toEmployeeId;
       count++;
+      movedRoles.push('Verification reviewer');
+    }
+    if (movedRoles.length > 0) {
+      p.updatedAt = now;
+      p.updatedById = byId;
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: p.id,
+        action: 'assign',
+        field: `Leaver reassignment (${movedRoles.join(', ')})`,
+        oldValue: `${fromName} (${fromLeaverId})`,
+        newValue: `${toName} (${toEmployeeId})`,
+        byId,
+        at: now,
+      });
     }
   }
+
   for (const o of store.organisations) {
     if (o.mergedIntoId) continue;
+    const movedRoles: string[] = [];
     if (o.relationshipPartnerId === fromLeaverId) {
       o.relationshipPartnerId = toEmployeeId;
       count++;
+      movedRoles.push('Relationship partner');
     }
     if (o.recordOwnerId === fromLeaverId) {
       o.recordOwnerId = toEmployeeId;
       count++;
+      movedRoles.push('Record owner');
     }
     if (o.reviewerId === fromLeaverId) {
       o.reviewerId = toEmployeeId;
       count++;
+      movedRoles.push('Reviewer');
+    }
+    if (movedRoles.length > 0) {
+      o.updatedAt = now;
+      o.updatedById = byId;
+      writeAudit(store, {
+        recordType: 'organisation',
+        recordId: o.id,
+        action: 'assign',
+        field: `Leaver reassignment (${movedRoles.join(', ')})`,
+        oldValue: `${fromName} (${fromLeaverId})`,
+        newValue: `${toName} (${toEmployeeId})`,
+        byId,
+        at: now,
+      });
     }
   }
+
   for (const m of store.matters) {
-    let changed = false;
+    const movedRoles: string[] = [];
+    const prevMatter =
+      m.responsiblePartnerId === fromLeaverId ||
+      m.supervisingPartnerId === fromLeaverId ||
+      m.leadFeeEarnerId === fromLeaverId
+        ? structuredClone(m)
+        : null;
+
     if (m.responsiblePartnerId === fromLeaverId) {
       m.responsiblePartnerId = toEmployeeId;
       count++;
-      changed = true;
+      movedRoles.push('Responsible partner');
     }
     if (m.supervisingPartnerId === fromLeaverId) {
       m.supervisingPartnerId = toEmployeeId;
       count++;
-      changed = true;
+      movedRoles.push('Supervising partner');
     }
     if (m.leadFeeEarnerId === fromLeaverId) {
       m.leadFeeEarnerId = toEmployeeId;
       count++;
-      changed = true;
+      movedRoles.push('Lead fee earner');
     }
-    if (changed) {
+    if (movedRoles.length > 0) {
+      const isRestricted =
+        m.isStaffMatter ||
+        m.hasEthicalWall ||
+        (m.restrictedAccessUserIds?.length ?? 0) > 0;
+      if (isRestricted) {
+        const nextRestricted = new Set(m.restrictedAccessUserIds ?? []);
+        nextRestricted.delete(fromLeaverId);
+        nextRestricted.add(toEmployeeId);
+        m.restrictedAccessUserIds = Array.from(nextRestricted);
+      }
       touchMatter(m, byId);
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: m.id,
+        action: 'assign',
+        field: `Leaver reassignment (${movedRoles.join(', ')})`,
+        oldValue: `${fromName} (${fromLeaverId})`,
+        newValue: `${toName} (${toEmployeeId})`,
+        byId,
+        at: now,
+      });
+      if (isRestricted && prevMatter) {
+        const syncCorrelationId = `corr-leaver-reassign-${m.id}-${Date.now()}`;
+        try {
+          void syncMatterLifecycleOnSaveSync({
+            matter: m,
+            previousMatter: prevMatter,
+            userId: byId,
+            correlationId: syncCorrelationId,
+            store,
+          }).catch((err) => {
+            logDocumentLifecycleSyncError(err, syncCorrelationId);
+          });
+        } catch (err) {
+          logDocumentLifecycleSyncError(err, syncCorrelationId);
+        }
+      }
     }
   }
+
   for (const t of store.tasks) {
-    if (t.status !== 'Done' && t.status !== 'Cancelled' && t.assignedPersonId === fromLeaverId) {
+    if (t.status === 'Done' || t.status === 'Cancelled') continue;
+    let taskChanged = false;
+    if (t.assignedPersonId === fromLeaverId) {
       t.assignedPersonId = toEmployeeId;
       count++;
+      taskChanged = true;
+    }
+    if (Array.isArray(t.assignedPersonIds) && t.assignedPersonIds.includes(fromLeaverId)) {
+      t.assignedPersonIds = Array.from(
+        new Set(t.assignedPersonIds.map((id) => (id === fromLeaverId ? toEmployeeId : id))),
+      );
+      if (!taskChanged) {
+        count++;
+        taskChanged = true;
+      }
+    }
+    if (taskChanged) {
+      t.updatedAt = now;
+      t.updatedById = byId;
+      writeAudit(store, {
+        recordType: 'task',
+        recordId: t.id,
+        action: 'assign',
+        field: 'Leaver reassignment (Assigned to)',
+        oldValue: `${fromName} (${fromLeaverId})`,
+        newValue: `${toName} (${toEmployeeId})`,
+        byId,
+        at: now,
+      });
     }
   }
+
   for (const e of store.enquiries) {
+    if (!isEnquiryOpen(e)) continue;
     if (e.assignedToId === fromLeaverId) {
       e.assignedToId = toEmployeeId;
+      e.updatedAt = now;
+      e.updatedById = byId;
       count++;
+      writeAudit(store, {
+        recordType: 'enquiry',
+        recordId: e.id,
+        action: 'assign',
+        field: 'Leaver reassignment (Assigned to)',
+        oldValue: `${fromName} (${fromLeaverId})`,
+        newValue: `${toName} (${toEmployeeId})`,
+        byId,
+        at: now,
+      });
     }
   }
 
@@ -1406,7 +1544,7 @@ export function reassignLeaverOwnedRecords(
     action: 'assign',
     field: 'Leaver record reassignment',
     oldValue: fromLeaverId,
-    newValue: `Reassigned ${count} record role(s) to ${personDisplayName(targetEmp)} (${toEmployeeId})`,
+    newValue: `Reassigned ${count} record role(s) to ${toName} (${toEmployeeId})`,
     byId,
     at: now,
   });
@@ -2221,6 +2359,7 @@ export function savePersonRecord(
         contactStatusId: vid('contact_status', 'Active'),
       },
       opts.byId,
+      { internalSystemStep: true },
     );
   }
 
@@ -2281,12 +2420,39 @@ export function saveOrganisationRecord(
     customFieldsSubmitted?: Record<string, unknown>;
     flagPossibleDuplicate?: boolean;
     matchedDuplicateIds?: string[];
+    internalSystemStep?: 'enquiry_conversion' | 'quote_conversion';
   },
-): { organisation: Organisation; errors?: Record<string, string> } {
+): { organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied> {
   const store = getStore();
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const existing = opts.id ? store.organisations.find((o) => o.id === opts.id) ?? null : null;
+  if (opts.id && !existing) {
+    const msg = 'Organisation not found.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      organisation: null as unknown as Organisation,
+      errors: { notFound: msg },
+    };
+  }
+
+  if (!opts.internalSystemStep) {
+    const actor = store.people.find((p) => p.id === opts.byId) ?? null;
+    const requiredPerm = existing ? 'contact:edit' : 'contact:create';
+    if (
+      !hasPersonPermission(actor, requiredPerm, {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      const msg = `You do not have permission (${requiredPerm}) to ${existing ? 'edit' : 'create'} an organisation record.`;
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        organisation: existing as Organisation,
+        errors: { permission: msg },
+      };
+    }
+  }
 
   if (!input.legalName?.trim()) {
     return { organisation: existing as Organisation, errors: { legalName: 'Legal name is required.' } };
@@ -2468,12 +2634,40 @@ export function createOrUpdateLink(
     id?: string;
   },
   byId: string,
-): PersonOrganisationLink {
+  opts?: { internalSystemStep?: boolean },
+): PersonOrganisationLink & Partial<ActionDenied> {
   const store = getStore();
   const now = new Date().toISOString();
   const existing = input.id ? store.links.find((l) => l.id === input.id) ?? null : null;
+  if (input.id && !existing) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      `Organisation link "${input.id}" not found.`,
+    ) as unknown as PersonOrganisationLink & Partial<ActionDenied>;
+  }
   const person = store.people.find((p) => p.id === input.personId);
   const org = store.organisations.find((o) => o.id === input.organisationId);
+  if (!person || !org) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Linked person or organisation not found.',
+    ) as unknown as PersonOrganisationLink & Partial<ActionDenied>;
+  }
+  if (!opts?.internalSystemStep) {
+    const actor = store.people.find((p) => p.id === byId) ?? null;
+    const requiredPerm = existing ? 'contact:edit' : 'contact:create';
+    if (
+      !hasPersonPermission(actor, requiredPerm, {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        `You do not have permission (${requiredPerm}) to ${existing ? 'update' : 'create'} a person-organisation link.`,
+      ) as unknown as PersonOrganisationLink & Partial<ActionDenied>;
+    }
+  }
   const label = `${person ? personDisplayName(person) : input.personId} ↔ ${org ? org.legalName : input.organisationId}`;
 
   const link: PersonOrganisationLink = {
@@ -2535,10 +2729,24 @@ export function createOrUpdateLink(
   return link;
 }
 
-export function deleteLink(linkId: string, byId: string): void {
+export function deleteLink(linkId: string, byId: string): { ok: true } | ActionDenied {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'contact:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission (contact:edit) to delete a person-organisation link.',
+    );
+  }
   const existing = store.links.find((l) => l.id === linkId);
-  if (!existing) return;
+  if (!existing) {
+    return buildActionDenied('FORBIDDEN', `Organisation link "${linkId}" not found.`);
+  }
   const person = store.people.find((p) => p.id === existing.personId);
   const org = store.organisations.find((o) => o.id === existing.organisationId);
   const label = `${person ? personDisplayName(person) : existing.personId} ↔ ${org ? org.legalName : existing.organisationId}`;
@@ -2558,10 +2766,76 @@ export function deleteLink(linkId: string, byId: string): void {
     });
   }
   saveStore(store);
+  return { ok: true };
 }
 
-export function addNoteToRecord(recordType: RecordType | 'matter', recordId: string, text: string, byId: string): Note {
+export function addNoteToRecord(
+  recordType: RecordType | 'matter',
+  recordId: string,
+  text: string,
+  byId: string,
+): Note & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const visibility = buildRecordVisibility(store, actor);
+
+  const target: (AnyRecord | Matter) | undefined =
+    recordType === 'person'
+      ? store.people.find((p) => p.id === recordId)
+      : recordType === 'matter'
+        ? store.matters.find((m) => m.id === recordId)
+        : store.organisations.find((o) => o.id === recordId);
+
+  if (!target) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      `Target ${recordType} "${recordId}" not found.`,
+    ) as unknown as Note & Partial<ActionDenied>;
+  }
+
+  if (recordType === 'matter') {
+    if (
+      !hasPersonPermission(actor, 'matter:edit', {
+        allPeople: store.people,
+        teams: store.teams,
+      }) ||
+      !visibility.canViewMatter(target as Matter)
+    ) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        'You do not have permission (matter:edit) or access to add a note to this matter.',
+      ) as unknown as Note & Partial<ActionDenied>;
+    }
+  } else if (recordType === 'organisation') {
+    if (
+      !hasPersonPermission(actor, 'contact:edit', {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        'You do not have permission (contact:edit) to add a note to this organisation.',
+      ) as unknown as Note & Partial<ActionDenied>;
+    }
+  } else {
+    const targetPerson = target as Person;
+    const isEmpOrLeaver = Boolean(targetPerson.isEmployee || isLeaverPerson(targetPerson));
+    const requiredPerm = isEmpOrLeaver ? 'employee:edit_core' : 'contact:edit';
+    if (
+      !hasPersonPermission(actor, requiredPerm, {
+        allPeople: store.people,
+        teams: store.teams,
+        targetPersonId: targetPerson.id,
+      })
+    ) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        `You do not have permission (${requiredPerm}) to add a note to this person record.`,
+      ) as unknown as Note & Partial<ActionDenied>;
+    }
+  }
+
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const note: Note = {
@@ -2574,33 +2848,24 @@ export function addNoteToRecord(recordType: RecordType | 'matter', recordId: str
   };
   store.notes.unshift(note);
 
-  const target: (AnyRecord | Matter) | undefined =
-    recordType === 'person'
-      ? store.people.find((p) => p.id === recordId)
-      : recordType === 'matter'
-        ? store.matters.find((m) => m.id === recordId)
-        : store.organisations.find((o) => o.id === recordId);
-
-  if (target) {
-    const oldInteraction = target.lastInteractionAt;
-    target.lastInteractionAt = today;
-    if (recordType === 'matter') {
-      touchMatter(target as Matter, byId);
-    } else {
-      target.updatedAt = now;
-      target.updatedById = byId;
-    }
-    writeAudit(store, {
-      recordType,
-      recordId,
-      action: 'note',
-      field: 'Note added',
-      oldValue: oldInteraction,
-      newValue: note.text.slice(0, 120),
-      byId,
-      at: now,
-    });
+  const oldInteraction = target.lastInteractionAt;
+  target.lastInteractionAt = today;
+  if (recordType === 'matter') {
+    touchMatter(target as Matter, byId);
+  } else {
+    target.updatedAt = now;
+    target.updatedById = byId;
   }
+  writeAudit(store, {
+    recordType,
+    recordId,
+    action: 'note',
+    field: 'Note added',
+    oldValue: oldInteraction,
+    newValue: note.text.slice(0, 120),
+    byId,
+    at: now,
+  });
   saveStore(store);
   return note;
 }
@@ -5202,12 +5467,34 @@ export async function signOffMatterCostsRecord(
   return { matter, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
-export function dismissDuplicateMatch(recordType: RecordType, recordId: string, otherId: string | null, byId: string): void {
+export function dismissDuplicateMatch(
+  recordType: RecordType,
+  recordId: string,
+  otherId: string | null,
+  byId: string,
+): { ok: true } | ActionDenied {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'record:merge', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission (record:merge) to dismiss duplicate matches.',
+    );
+  }
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
   const list: AnyRecord[] = recordType === 'person' ? store.people : store.organisations;
   const rec = list.find((r) => r.id === recordId);
-  if (!rec) return;
+  if (!rec) {
+    return buildActionDenied('FORBIDDEN', `Target ${recordType} "${recordId}" not found.`);
+  }
+  if (otherId && !list.some((r) => r.id === otherId)) {
+    return buildActionDenied('FORBIDDEN', `Compared ${recordType} "${otherId}" not found.`);
+  }
 
   const targets = otherId ? [otherId] : [...rec.possibleMatchIds];
   for (const tid of targets) {
@@ -5232,6 +5519,7 @@ export function dismissDuplicateMatch(recordType: RecordType, recordId: string, 
     byId,
   });
   saveStore(store);
+  return { ok: true };
 }
 
 export function executeMerge(
@@ -5239,13 +5527,30 @@ export function executeMerge(
   survivorId: string,
   mergedId: string,
   byId: string,
-): MergeHistory {
+): MergeHistory & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'record:merge', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission (record:merge) to merge duplicate records.',
+    ) as unknown as MergeHistory & Partial<ActionDenied>;
+  }
   const now = new Date().toISOString();
   const list: AnyRecord[] = recordType === 'person' ? store.people : store.organisations;
   const survivor = list.find((r) => r.id === survivorId);
   const merged = list.find((r) => r.id === mergedId);
-  if (!survivor || !merged) throw new Error('Record not found for merge');
+  if (!survivor || !merged) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Record not found for merge.',
+    ) as unknown as MergeHistory & Partial<ActionDenied>;
+  }
 
   const plan = planMerge(survivor, merged);
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
@@ -6079,9 +6384,68 @@ export function saveTaskRecord(
     autoTrigger?: AutoTaskTrigger | null;
   },
   byId: string,
-): { task?: Task; tasks?: Task[]; error?: string } {
+  opts?: { viaTakeTask?: boolean; internalSystemStep?: boolean },
+): { task?: Task; tasks?: Task[]; error?: string } & Partial<ActionDenied> {
   const store = getStore();
   const now = new Date().toISOString();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const visibility = buildRecordVisibility(store, actor);
+
+  if (!opts?.viaTakeTask && !opts?.internalSystemStep) {
+    if (
+      !hasPersonPermission(actor, 'task:edit', {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      const msg = 'You do not have permission (task:edit) to create or edit tasks.';
+      return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+    }
+  }
+
+  const existing = input.id ? store.tasks.find((t) => t.id === input.id) ?? null : null;
+  if (input.id && !existing) {
+    const msg = 'Task not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  if (existing && !visibility.canViewTask(existing)) {
+    const msg = 'You do not have access to this task.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+
+  const candidateLinks = input.linkedRecords ?? existing?.linkedRecords ?? [];
+  for (const lr of candidateLinks) {
+    if (lr.recordType === 'matter') {
+      const m = store.matters.find((x) => x.id === lr.recordId);
+      if (!m || !visibility.canViewMatter(m)) {
+        const msg = 'Linked matter not found or access denied.';
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    } else if (lr.recordType === 'enquiry') {
+      const e = store.enquiries.find((x) => x.id === lr.recordId);
+      if (!e || !visibility.canViewEnquiry(e)) {
+        const msg = 'Linked enquiry not found or access denied.';
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    } else if (lr.recordType === 'quote') {
+      const q = store.quotes.find((x) => x.id === lr.recordId);
+      if (!q || !visibility.canViewQuote(q)) {
+        const msg = 'Linked quote not found or access denied.';
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    } else if (lr.recordType === 'person') {
+      if (!store.people.some((x) => x.id === lr.recordId)) {
+        const msg = 'Linked person not found.';
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    } else if (lr.recordType === 'organisation') {
+      if (!store.organisations.some((x) => x.id === lr.recordId)) {
+        const msg = 'Linked organisation not found.';
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    }
+  }
+
   const title = input.title?.trim();
   if (!title) return { error: 'Task title is required.' };
   if (!input.dueAt) return { error: 'Due date is required.' };
@@ -6101,7 +6465,48 @@ export function saveTaskRecord(
     return { error: 'Task must be assigned to a team, a person, or both.' };
   }
 
-  const existing = input.id ? store.tasks.find((t) => t.id === input.id) ?? null : null;
+  if (existing && !opts?.viaTakeTask && !opts?.internalSystemStep) {
+    const nextTeamId =
+      input.assignedTeamId !== undefined ? input.assignedTeamId : existing.assignedTeamId;
+    const nextPersonId =
+      cleanPersonIds[0] ??
+      (input.assignedPersonId !== undefined ? input.assignedPersonId : existing.assignedPersonId);
+    const nextPersonIds =
+      cleanPersonIds.length > 0
+        ? cleanPersonIds
+        : input.assignedPersonIds !== undefined
+          ? input.assignedPersonIds
+          : input.assignedPersonId !== undefined
+            ? input.assignedPersonId
+              ? [input.assignedPersonId]
+              : []
+            : existing.assignedPersonIds ?? (existing.assignedPersonId ? [existing.assignedPersonId] : []);
+    const existingPersonIds =
+      existing.assignedPersonIds ?? (existing.assignedPersonId ? [existing.assignedPersonId] : []);
+    const personIdsChanged =
+      nextPersonIds.length !== existingPersonIds.length ||
+      nextPersonIds.some((id, i) => id !== existingPersonIds[i]);
+    const assignmentChanged =
+      nextTeamId !== existing.assignedTeamId ||
+      nextPersonId !== existing.assignedPersonId ||
+      personIdsChanged;
+
+    if (assignmentChanged) {
+      const isSelfClaim =
+        !existing.assignedPersonId &&
+        nextTeamId === existing.assignedTeamId &&
+        nextPersonIds.length === 1 &&
+        nextPersonIds[0] === byId &&
+        canUserTakeTask(byId, existing, store.teams, store.people, store.values);
+      if (
+        !isSelfClaim &&
+        !canUserReassignTask(byId, existing, store.teams, store.people, store.values)
+      ) {
+        const msg = 'You do not have permission to reassign this task.';
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    }
+  }
 
   // Separate task per assignee when creating a new task with multiAssigneeMode === 'separate'
   if (!existing && input.multiAssigneeMode === 'separate' && cleanPersonIds.length > 1) {
@@ -6313,11 +6718,17 @@ export function saveTaskRecord(
   }
 
   // If this task is linked to a New enquiry and now has an assignedPersonId, sync the enquiry!
-  if (task.assignedPersonId) {
+  if (
+    task.assignedPersonId &&
+    hasPersonPermission(actor, 'enquiry:assign', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
     for (const lr of task.linkedRecords) {
       if (lr.recordType === 'enquiry') {
         const enq = store.enquiries.find((e) => e.id === lr.recordId);
-        if (enq && (enq.status === 'New' || !enq.assignedToId)) {
+        if (enq && visibility.canViewEnquiry(enq) && (enq.status === 'New' || !enq.assignedToId)) {
           const prevStatus = enq.status;
           const prevAssignee = enq.assignedToId;
           enq.assignedToId = task.assignedPersonId;
@@ -6346,12 +6757,21 @@ export function saveTaskRecord(
   return { task };
 }
 
-export function takeTaskRecord(taskId: string, byId: string): { task?: Task; error?: string } {
+export function takeTaskRecord(
+  taskId: string,
+  byId: string,
+): { task?: Task; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const visibility = buildRecordVisibility(store, actor);
   const existing = store.tasks.find((t) => t.id === taskId);
-  if (!existing) return { error: 'Task not found.' };
+  if (!existing || !visibility.canViewTask(existing)) {
+    const msg = 'Task not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
   if (!canUserTakeTask(byId, existing, store.teams, store.people, store.values)) {
-    return { error: 'You do not have permission to claim this task.' };
+    const msg = 'You do not have permission to claim this task.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   return saveTaskRecord(
     {
@@ -6367,6 +6787,7 @@ export function takeTaskRecord(taskId: string, byId: string): { task?: Task; err
       linkedRecords: existing.linkedRecords,
     },
     byId,
+    { viaTakeTask: true },
   );
 }
 
@@ -6374,10 +6795,24 @@ export function addTaskCommentRecord(
   taskId: string,
   text: string,
   byId: string,
-): { task?: Task; error?: string } {
+): { task?: Task; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'task:comment', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (task:comment) to comment on tasks.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const task = store.tasks.find((t) => t.id === taskId);
-  if (!task) return { error: 'Task not found.' };
+  if (!task || !visibility.canViewTask(task)) {
+    const msg = 'Task not found or access denied.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
   const trimmed = text.trim();
   if (!trimmed) return { error: 'Comment text is required.' };
 
@@ -6578,10 +7013,68 @@ export function saveEnquiryRecord(
   routedToIntakeFallback?: boolean;
   errors?: Record<string, string>;
   missingFields?: string[];
-} {
+} & Partial<ActionDenied> {
   const store = getStore();
   const now = opts.now ?? new Date().toISOString();
+  const actor = store.people.find((p) => p.id === opts.byId) ?? null;
+  const visibility = buildRecordVisibility(store, actor);
   const existing = opts.id ? store.enquiries.find((e) => e.id === opts.id) ?? null : null;
+  if (opts.id && !existing) {
+    const msg = 'Enquiry not found.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      errors: { notFound: msg },
+    };
+  }
+  if (!existing) {
+    if (
+      !hasPersonPermission(actor, 'enquiry:create', {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      const msg = 'You do not have permission (enquiry:create) to create an enquiry.';
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        errors: { permission: msg },
+      };
+    }
+  } else {
+    if (
+      !hasPersonPermission(actor, 'enquiry:edit', {
+        allPeople: store.people,
+        teams: store.teams,
+      }) ||
+      !visibility.canViewEnquiry(existing)
+    ) {
+      const msg =
+        'You do not have permission (enquiry:edit) or access to edit this enquiry.';
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        errors: { permission: msg },
+      };
+    }
+  }
+  if (
+    input.linkedOrganisationId &&
+    !store.organisations.some((o) => o.id === input.linkedOrganisationId)
+  ) {
+    const msg = 'Linked organisation not found.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      errors: { linkedOrganisationId: msg },
+    };
+  }
+  if (
+    input.linkedPersonId &&
+    !store.people.some((p) => p.id === input.linkedPersonId)
+  ) {
+    const msg = 'Linked person not found.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      errors: { linkedPersonId: msg },
+    };
+  }
   const asDraft = Boolean(opts.asDraft || input.status === 'Draft');
 
   const mergedInput = {
@@ -6672,7 +7165,7 @@ export function saveEnquiryRecord(
     }
   }
 
-  // Server-side Quick Conflict Check snapshot
+  // Server-side Quick Conflict Check snapshot (filtered to records visible to the actor)
   const conflictSnapshot = computeEnquiryConflictSnapshot(
     {
       firstName: mergedInput.firstName,
@@ -6689,12 +7182,12 @@ export function saveEnquiryRecord(
     },
     store.people,
     store.organisations,
-    store.matters,
+    store.matters.filter((m) => visibility.canViewMatter(m)),
     store.values,
     {
       recordedAt: now,
       recordedById: opts.byId,
-      enquiries: store.enquiries,
+      enquiries: store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
       excludeEnquiryId: existing?.id ?? null,
     },
   );
@@ -7014,12 +7507,34 @@ export function assignEnquiryRecord(
   assignedToId: string | null,
   assignedTeamId: string | null | undefined,
   byId: string,
-): { enquiry?: Enquiry; error?: string } {
+): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'enquiry:assign', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (enquiry:assign) to assign enquiries.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const enq = store.enquiries.find((e) => e.id === enquiryId);
-  if (!enq) return { error: 'Enquiry not found.' };
+  if (
+    !enq ||
+    (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) ||
+    visibility.hiddenMatterSourceEnquiryIds.has(enq.id)
+  ) {
+    const msg = 'Enquiry not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
   if (!isEnquiryRouted(enq)) {
     return { error: 'Cannot assign a draft or closed enquiry before it has been routed.' };
+  }
+  if (!visibility.canViewEnquiry(enq)) {
+    const msg = 'Enquiry not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
 
   const now = new Date().toISOString();
@@ -7101,10 +7616,24 @@ export function logEnquiryContactRecord(
     note: string;
   },
   byId: string,
-): { enquiry?: Enquiry; suggestNoResponse?: boolean; error?: string } {
+): { enquiry?: Enquiry; suggestNoResponse?: boolean; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'enquiry:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (enquiry:edit) to log contact on enquiries.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const enq = store.enquiries.find((e) => e.id === enquiryId);
-  if (!enq) return { error: 'Enquiry not found.' };
+  if (!enq || !visibility.canViewEnquiry(enq)) {
+    const msg = 'Enquiry not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
 
   const now = new Date().toISOString();
   const entry: ContactLogEntry = {
@@ -7171,10 +7700,24 @@ export function sendEnquiryEmailRecord(
     bodyText: string;
   },
   byId: string,
-): { enquiry?: Enquiry; error?: string } {
+): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'enquiry:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (enquiry:edit) to send enquiry emails.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const enq = store.enquiries.find((e) => e.id === enquiryId);
-  if (!enq) return { error: 'Enquiry not found.' };
+  if (!enq || !visibility.canViewEnquiry(enq)) {
+    const msg = 'Enquiry not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
 
   const to = input.to.trim();
   const subject = input.subject.trim();
@@ -7224,10 +7767,24 @@ export function closeEnquiryRecord(
     referredToName?: string;
   },
   byId: string,
-): { enquiry?: Enquiry; error?: string } {
+): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'enquiry:close', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (enquiry:close) to close enquiries.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const enq = store.enquiries.find((e) => e.id === enquiryId);
-  if (!enq) return { error: 'Enquiry not found.' };
+  if (!enq || !visibility.canViewEnquiry(enq)) {
+    const msg = 'Enquiry not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
 
   if (input.targetStatus === 'Declined' && !input.closeReasonId) {
     return { error: 'A close reason is required when declining an enquiry.' };
@@ -7322,15 +7879,40 @@ export function closeEnquiryRecord(
 export function reopenEnquiryRecord(
   enquiryId: string,
   byId: string,
-): { enquiry?: Enquiry; error?: string } {
+): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'enquiry:reopen', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (enquiry:reopen) to reopen enquiries.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const enq = store.enquiries.find((e) => e.id === enquiryId);
-  if (!enq) return { error: 'Enquiry not found.' };
+  if (!enq || !visibility.canViewEnquiry(enq)) {
+    const msg = 'Enquiry not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  if (enq.status === 'Converted' || isEnquiryOpen(enq)) {
+    const msg =
+      enq.status === 'Converted'
+        ? 'Converted enquiries cannot be reopened.'
+        : 'Only closed enquiries (Declined, Referred out, or No response) can be reopened.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  if (!canUserReopenEnquiry(byId, enq, store.teams, store.people, store.values)) {
+    const msg =
+      'Only the assignee, the team lead for the enquiry team, Intake, or an administrator may reopen this enquiry.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
 
   const now = new Date().toISOString();
   const prevStatus = enq.status;
-  enq.status = 'Assigned';
-  if (!enq.assignedToId) enq.assignedToId = byId;
+  enq.status = enq.assignedToId ? 'Assigned' : 'New';
   enq.updatedAt = now;
   enq.updatedById = byId;
 
@@ -7340,7 +7922,7 @@ export function reopenEnquiryRecord(
     action: 'status-change',
     field: 'Enquiry reopened',
     oldValue: prevStatus,
-    newValue: 'Assigned',
+    newValue: enq.status,
     byId,
     at: now,
   });
@@ -7477,7 +8059,7 @@ export function prepareEnquiryConversion(
           originId: enq.sourceId,
           conflictStatusId: vid('conflict_status', 'Cleared'),
         },
-        { byId },
+        { byId, internalSystemStep: 'enquiry_conversion' },
       );
       orgId = createdOrg.organisation.id;
     }
@@ -7504,6 +8086,7 @@ export function prepareEnquiryConversion(
             contactStatusId: vid('contact_status', 'Active'),
           },
           byId,
+          { internalSystemStep: true },
         );
       }
     }
@@ -9228,6 +9811,7 @@ export function discussSignOff(
       linkedRecords,
     },
     byId,
+    { internalSystemStep: true },
   );
 
   saveStore(store);
@@ -9286,6 +9870,7 @@ export function requestMatterBill(
       linkedRecords,
     },
     byId,
+    { internalSystemStep: true },
   );
 
   return { ok: true, taskId: res.task?.id };
@@ -9488,6 +10073,7 @@ export function recordInvoiceCreditControlAction(
         linkedRecords,
       },
       byId,
+      { internalSystemStep: true },
     );
     return { ok: true, taskId: res.task?.id };
   }
@@ -9846,19 +10432,46 @@ export interface SaveQuoteInput {
 export function saveQuoteRecord(
   input: SaveQuoteInput,
   opts: { id?: string; byId: string; markAsSent?: boolean },
-): { quote?: Quote; error?: string } {
+): { quote?: Quote; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === opts.byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'quote:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (quote:edit) to create or edit quotes.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const now = new Date();
   const nowIso = now.toISOString();
 
   const existing = opts.id ? store.quotes.find((q) => q.id === opts.id) : undefined;
-  if (opts.id && !existing) {
-    return { error: 'Quote not found.' };
+  if (opts.id && (!existing || !visibility.canViewQuote(existing))) {
+    const msg = 'Quote not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
 
   const clientType = input.clientType || 'prospect';
   const linkedOrganisationId = input.linkedOrganisationId || null;
   const linkedPersonId = input.linkedPersonId || null;
+  if (linkedOrganisationId && !store.organisations.some((o) => o.id === linkedOrganisationId)) {
+    const msg = 'Linked organisation not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  if (linkedPersonId && !store.people.some((p) => p.id === linkedPersonId)) {
+    const msg = 'Linked person not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  if (input.linkedEnquiryId) {
+    const linkedEnq = store.enquiries.find((e) => e.id === input.linkedEnquiryId);
+    if (!linkedEnq || !visibility.canViewEnquiry(linkedEnq)) {
+      const msg = 'Linked enquiry not found or access denied.';
+      return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+    }
+  }
   const prospectName = (input.prospectName ?? '').trim();
   const prospectOrganisationName = (input.prospectOrganisationName ?? '').trim();
   const prospectEmail = (input.prospectEmail ?? '').trim();
@@ -10062,10 +10675,24 @@ export function saveQuoteRecord(
 export function markQuoteSentRecord(
   quoteId: string,
   byId: string,
-): { quote?: Quote; error?: string } {
+): { quote?: Quote; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'quote:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (quote:edit) to mark a quote as sent.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const quote = store.quotes.find((q) => q.id === quoteId);
-  if (!quote) return { error: 'Quote not found.' };
+  if (!quote || !visibility.canViewQuote(quote)) {
+    const msg = 'Quote not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
 
   const now = new Date();
   const nowIso = now.toISOString();
@@ -10110,10 +10737,24 @@ export function logQuoteFollowUpRecord(
     nextFollowUpDate: string | null;
   },
   byId: string,
-): { quote?: Quote; error?: string } {
+): { quote?: Quote; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'quote:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (quote:edit) to log quote follow-ups.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const quote = store.quotes.find((q) => q.id === quoteId);
-  if (!quote) return { error: 'Quote not found.' };
+  if (!quote || !visibility.canViewQuote(quote)) {
+    const msg = 'Quote not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
   if (!input.note?.trim()) {
     return { error: 'Please enter a follow-up note.' };
   }
@@ -10181,10 +10822,24 @@ export function reviseQuoteRecord(
     markAsSent?: boolean;
   },
   byId: string,
-): { quote?: Quote; error?: string } {
+): { quote?: Quote; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'quote:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (quote:edit) to revise quotes.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const quote = store.quotes.find((q) => q.id === quoteId);
-  if (!quote) return { error: 'Quote not found.' };
+  if (!quote || !visibility.canViewQuote(quote)) {
+    const msg = 'Quote not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
 
   const now = new Date();
   const nowIso = now.toISOString();
@@ -10310,10 +10965,24 @@ export function recordQuoteOutcomeRecord(
     note?: string;
   },
   byId: string,
-): { quote?: Quote; error?: string } {
+): { quote?: Quote; error?: string } & Partial<ActionDenied> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'quote:edit', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (quote:edit) to record a quote outcome.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const quote = store.quotes.find((q) => q.id === quoteId);
-  if (!quote) return { error: 'Quote not found.' };
+  if (!quote || !visibility.canViewQuote(quote)) {
+    const msg = 'Quote not found.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
 
   if (input.outcome === 'Declined') {
     if (!input.declineReason) {
@@ -10465,7 +11134,7 @@ export function prepareQuoteConversionRecord(
         relationshipStatusId: vid('relationship_status', 'Prospective'),
         conflictStatusId: vid('conflict_status', 'Cleared'),
       },
-      { byId },
+      { byId, internalSystemStep: 'quote_conversion' },
     );
     orgId = createdOrg.organisation.id;
 
@@ -10489,6 +11158,7 @@ export function prepareQuoteConversionRecord(
             contactStatusId: vid('contact_status', 'Active'),
           },
           byId,
+          { internalSystemStep: true },
         );
       }
     }

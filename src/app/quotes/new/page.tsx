@@ -1,3 +1,4 @@
+import { notFound } from 'next/navigation';
 import { QuoteFormClient } from '@/components/QuoteFormClient';
 import { getAppSnapshot, withPageActor } from '@/server/services';
 
@@ -11,6 +12,12 @@ export default async function NewQuotePage({
   const sp = await searchParams;
   return withPageActor(async (actor) => {
     const snap = getAppSnapshot(actor.personId);
+    if (
+      !snap.currentUserPermissions.includes('quote:view') ||
+      !snap.currentUserPermissions.includes('quote:edit')
+    ) {
+      notFound();
+    }
 
     const initialEnquiry = sp.enquiryId
       ? snap.enquiries.find((e) => e.id === sp.enquiryId) ?? null

@@ -1206,7 +1206,7 @@ export function canUserReopenEnquiry(
   values: ChoiceValue[],
   rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
-  if (isEnquiryOpen(enquiry)) return false;
+  if (isEnquiryOpen(enquiry) || enquiry.status === 'Converted') return false;
   if (enquiry.assignedToId === userId) return true;
   if (isUserTeamLeadFor(userId, enquiry.assignedTeamId, teams)) return true;
   const user = people.find((p) => p.id === userId) ?? null;
