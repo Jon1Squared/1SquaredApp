@@ -109,6 +109,8 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
 // - entra-client-secret: Microsoft Entra ID confidential client secret (or certificate thumbprint)
 // - auth-secret: 32+ byte HMAC-SHA256 session cookie signing key
 // - blob-signing-key: 32+ byte HMAC-SHA256 scoped blob download token signing key
+// - ideal-postcodes-api-key: Ideal Postcodes server-side UK address lookup API key
+// - anthropic-api-key: Anthropic Claude API key for server-side matter extraction
 // Network design (R68): publicNetworkAccess is Enabled with networkAcls defaultAction: 'Deny',
 // bypass: 'AzureServices', and virtualNetworkRules bound to the App Service regional VNet integration
 // subnet (snet-appservice) so Azure App Service can resolve @Microsoft.KeyVault(...) secret references.
@@ -159,6 +161,8 @@ var keyVaultSecretAppSettings = {
   ENTRA_CLIENT_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/entra-client-secret/)'
   AUTH_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/auth-secret/)'
   PLATFORM_BLOB_SIGNING_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/blob-signing-key/)'
+  IDEAL_POSTCODES_API_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/ideal-postcodes-api-key/)'
+  ANTHROPIC_API_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/anthropic-api-key/)'
   PLATFORM_HOSTING_MODE: hostingMode
   PLATFORM_ENVIRONMENT: environment
   PLATFORM_TENANT_PACKAGE_DIR: tenantPackageDir
@@ -204,6 +208,14 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
         {
           name: 'PLATFORM_BLOB_SIGNING_KEY'
           value: keyVaultSecretAppSettings.PLATFORM_BLOB_SIGNING_KEY
+        }
+        {
+          name: 'IDEAL_POSTCODES_API_KEY'
+          value: keyVaultSecretAppSettings.IDEAL_POSTCODES_API_KEY
+        }
+        {
+          name: 'ANTHROPIC_API_KEY'
+          value: keyVaultSecretAppSettings.ANTHROPIC_API_KEY
         }
         {
           name: 'PLATFORM_HOSTING_MODE'

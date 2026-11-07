@@ -1,5 +1,18 @@
 # 1Squared — Release Notes
 
+## Unreleased — Remove Secrets from Code and the Browser (`s0-01-remove-secrets`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Infrastructure & Host Security Fix (`src/server/`, `src/app/api/`, `src/domain/`, `src/components/`, `core/infra/`, `.github/workflows/`, `scripts/`, `src/docs/`):**
+  - **Server-Side UK Address Lookup (`src/server/addressLookupService.ts`, `src/app/api/address-lookup/route.ts`, `src/domain/addressLookup.ts`):** Removed the hard-coded Ideal Postcodes fallback key and `NEXT_PUBLIC_IDEAL_POSTCODES_API_KEY` read from client-bundled code. Added a server-only address lookup service and authenticated route (`GET /api/address-lookup?q=` and `GET /api/address-lookup?id=`) reading `process.env.IDEAL_POSTCODES_API_KEY` only, treating unset values and unresolved `@Microsoft.KeyVault(` references as not configured (`503 "Address lookup isn't configured"`), validating query length (3–100 characters) and ID format, and never logging address queries or addresses.
+  - **Server-Only AI Matter Extraction Key (`src/app/api/matters/extract/route.ts`, `src/components/MatterFormClient.tsx`):** Removed `apiKeyOverride` from `/api/matters/extract` so the server uses `process.env.ANTHROPIC_API_KEY` only (returning `503 "AI extraction isn't configured. Ask your administrator."` when unset or an unresolved Key Vault reference). Removed the Claude API key UI from `MatterFormClient.tsx` and cleared any previously saved `onesquared_claude_api_key` entry from browser `localStorage` on mount.
+  - **Key Vault References & Environment Template (`core/infra/main.bicep`, `.env.example`):** Added `IDEAL_POSTCODES_API_KEY` (`ideal-postcodes-api-key`) and `ANTHROPIC_API_KEY` (`anthropic-api-key`) Key Vault secret references to `main.bicep` and documented both server-side variables in `.env.example`.
+  - **Secret Scanning & `s0-*` CI Trigger (`.gitleaks.toml`, `.github/workflows/ci.yml`, `scripts/verify-ci.mjs`, `AGENTS.md`, `CLAUDE.md`):** Added `.gitleaks.toml` (with a custom `ideal-postcodes-api-key` rule), a pinned `gitleaks` v8 secret-scan step in `.github/workflows/ci.yml` and `scripts/verify-ci.mjs` (`npm run ci`), and `'s0-*'` branch push triggers.
+  - **Tests & Documentation (`src/server/__tests__/addressLookupRoute.test.ts`, `src/server/__tests__/noClientSecrets.test.ts`, `core/tests/entra-auth.test.ts`, `src/docs/articles/deployment-and-security.ts`, `docs/roadmap/feature-list.md`):** Added route, client-secret scan, and extraction key-override rejection tests; updated Help & Documentation and backlog rows `P5`, `34`, `E7`, and `F6`.
+  - Review fixes R229–R235 and R237–R238: verified gitleaks download, pinned gitleaks version locally and in CI, bounded client-supplied `x-correlation-id` validation (`^[A-Za-z0-9._:-]{8,128}$`) with tenant and correlation IDs on the address lookup warning, shared server secret helper, narrower scan allow-list, and identical automated bundle checks in CI and `scripts/verify-ci.mjs`.
+
+---
+
 ## Unreleased — Self-Hosted Local Fonts Build Fix (`fix/build-local-fonts`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

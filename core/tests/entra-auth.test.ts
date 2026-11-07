@@ -543,6 +543,81 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     const logoutRes = await logoutGet();
     expect(logoutRes.status).toBe(405);
 
+    // S0-01: POST /api/matters/extract with apiKeyOverride and no server ANTHROPIC_API_KEY returns 503 and never calls api.anthropic.com
+    const prevAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    const prevFetch = globalThis.fetch;
+    const anthropicCalls: string[] = [];
+    try {
+      delete process.env.ANTHROPIC_API_KEY;
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('api.anthropic.com')) {
+          anthropicCalls.push(urlStr);
+        }
+        throw new Error(`Unexpected outbound fetch: ${urlStr}`);
+      }) as unknown as typeof fetch;
+
+      const overrideReq = new NextRequest(
+        'http://localhost:3000/api/matters/extract',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            apiKeyOverride: 'test-anthropic-key-placeholder',
+            documents: [
+              {
+                id: 'doc-1',
+                name: 'instruction.txt',
+                kind: 'email',
+                content: 'Please open a new matter.',
+              },
+            ],
+          }),
+        },
+      );
+      const overrideRes = await extractMatterPost(overrideReq);
+      expect(overrideRes.status).toBe(503);
+      const overrideBody = (await overrideRes.json()) as {
+        error?: string;
+        message?: string;
+      };
+      expect(overrideBody.error).toBe(
+        "AI extraction isn't configured. Ask your administrator.",
+      );
+      expect(anthropicCalls).toEqual([]);
+
+      process.env.ANTHROPIC_API_KEY =
+        '@Microsoft.KeyVault(SecretUri=https://kv-test.vault.azure.net/secrets/anthropic-api-key/)';
+      const kvExtractReq = new NextRequest(
+        'http://localhost:3000/api/matters/extract',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            apiKeyOverride: 'test-anthropic-key-placeholder',
+            documents: [
+              {
+                id: 'doc-1',
+                name: 'instruction.txt',
+                kind: 'email',
+                content: 'Please open a new matter.',
+              },
+            ],
+          }),
+        },
+      );
+      const kvExtractRes = await extractMatterPost(kvExtractReq);
+      expect(kvExtractRes.status).toBe(503);
+      expect(anthropicCalls).toEqual([]);
+    } finally {
+      globalThis.fetch = prevFetch;
+      if (prevAnthropicKey === undefined) {
+        delete process.env.ANTHROPIC_API_KEY;
+      } else {
+        process.env.ANTHROPIC_API_KEY = prevAnthropicKey;
+      }
+    }
+
     resetAllDemoData('P-000001');
   });
 });

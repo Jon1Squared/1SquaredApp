@@ -6,6 +6,8 @@ const isWin = process.platform === 'win32';
 const npmCmd = isWin ? 'npm.cmd' : 'npm';
 const npxCmd = isWin ? 'npx.cmd' : 'npx';
 
+const GITLEAKS_VERSION = '8.30.1';
+
 const testEnv = {
   ...process.env,
   PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
@@ -17,6 +19,87 @@ const liveBuildEnv = {
   PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
   PLATFORM_ENVIRONMENT: 'live',
 };
+
+function resolveGitleaksBinary() {
+  const direct = spawnSync(isWin ? 'gitleaks.exe' : 'gitleaks', ['version'], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  if (direct.status === 0) {
+    return isWin ? 'gitleaks.exe' : 'gitleaks';
+  }
+
+  if (isWin && process.env.LOCALAPPDATA) {
+    const wingetLinks = path.join(
+      process.env.LOCALAPPDATA,
+      'Microsoft',
+      'WinGet',
+      'Links',
+      'gitleaks.exe',
+    );
+    if (fs.existsSync(wingetLinks)) {
+      return wingetLinks;
+    }
+
+    const wingetPackagesDir = path.join(
+      process.env.LOCALAPPDATA,
+      'Microsoft',
+      'WinGet',
+      'Packages',
+    );
+    if (fs.existsSync(wingetPackagesDir)) {
+      const entries = fs.readdirSync(wingetPackagesDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name.startsWith('Gitleaks.Gitleaks')) {
+          const candidate = path.join(
+            wingetPackagesDir,
+            entry.name,
+            'gitleaks.exe',
+          );
+          if (fs.existsSync(candidate)) {
+            return candidate;
+          }
+        }
+      }
+    }
+  }
+
+  console.error(
+    `[CI Verify] FAILED: gitleaks is not installed or not on PATH. Install it locally first (for example \`winget install gitleaks --version ${GITLEAKS_VERSION}\` on Windows or \`brew install gitleaks\` on macOS).`,
+  );
+  process.exit(1);
+}
+
+function checkGitleaksVersion(gitleaksBin) {
+  const versionRes = spawnSync(gitleaksBin, ['version'], {
+    encoding: 'utf8',
+    shell: false,
+  });
+  const rawVersion = (versionRes.stdout ?? '').trim().replace(/^v/i, '');
+  if (rawVersion === GITLEAKS_VERSION) {
+    console.log(
+      `=== [CI Verify] Gitleaks ${rawVersion} (matches Platform CI ${GITLEAKS_VERSION}) ===`,
+    );
+  } else {
+    console.warn(
+      `[CI Verify] WARNING: Local gitleaks version is "${rawVersion || 'unknown'}", but Platform CI pins "${GITLEAKS_VERSION}". Install the pinned version with \`winget install gitleaks --version ${GITLEAKS_VERSION}\` for exact CI parity.`,
+    );
+  }
+}
+
+function collectFilesRecursively(dir) {
+  const results = [];
+  if (!fs.existsSync(dir)) return results;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...collectFilesRecursively(fullPath));
+    } else if (entry.isFile()) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
 
 function runStep(label, command, args, env = testEnv) {
   console.log(`\n=== [CI Verify] ${label} ===`);
@@ -47,17 +130,26 @@ if (nodeMajor !== 24) {
 }
 console.log(`=== [CI Verify] Node.js ${process.versions.node} (matches Platform CI major 24) ===`);
 
-runStep('1/7 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
-runStep('2/7 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
-runStep('3/7 ESLint check', npmCmd, ['run', 'lint'], testEnv);
+const gitleaksBin = resolveGitleaksBinary();
+checkGitleaksVersion(gitleaksBin);
+
 runStep(
-  '4/7 Verify invented-only fixture data in data/ and src/seed/',
+  '1/9 Secret scan (gitleaks)',
+  gitleaksBin,
+  ['dir', '.', '--config', '.gitleaks.toml', '--redact'],
+  testEnv,
+);
+runStep('2/9 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
+runStep('3/9 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
+runStep('4/9 ESLint check', npmCmd, ['run', 'lint'], testEnv);
+runStep(
+  '5/9 Verify invented-only fixture data in data/ and src/seed/',
   process.execPath,
   ['scripts/verify-invented-fixtures.mjs'],
   testEnv,
 );
 
-console.log('\n=== [CI Verify] 5/7 Verify generated extension registry contains bundled extension ===');
+console.log('\n=== [CI Verify] 6/9 Verify generated extension registry contains bundled extension ===');
 const registryPath = path.resolve(
   process.cwd(),
   'src/platform/generated/extensionRegistry.ts',
@@ -73,16 +165,34 @@ if (!registryContent.includes('extModule_0')) {
 }
 
 runStep(
-  '6/7 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
+  '7/9 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
   npmCmd,
   ['test'],
   testEnv,
 );
 runStep(
-  '7/7 Verify production build (PLATFORM_ENVIRONMENT=live)',
+  '8/9 Verify production build (PLATFORM_ENVIRONMENT=live)',
   npmCmd,
   ['run', 'build'],
   liveBuildEnv,
 );
+
+console.log('\n=== [CI Verify] 9/9 Verify client bundle (.next/static) contains no API keys ===');
+const staticDir = path.resolve(process.cwd(), '.next/static');
+const staticFiles = collectFilesRecursively(staticDir);
+if (staticFiles.length === 0) {
+  console.error('[CI Verify] FAILED: .next/static contains no files after production build.');
+  process.exit(1);
+}
+const BUNDLE_SECRET_REGEX_SOURCE = '\\bak_[A-Za-z0-9]{20,}\\b|sk-ant-';
+const bundleSecretPattern = new RegExp(BUNDLE_SECRET_REGEX_SOURCE);
+for (const filePath of staticFiles) {
+  const content = fs.readFileSync(filePath, 'utf8');
+  if (bundleSecretPattern.test(content)) {
+    const rel = path.relative(process.cwd(), filePath).replace(/\\/g, '/');
+    console.error(`[CI Verify] FAILED: Client bundle file ${rel} contains a forbidden API key pattern.`);
+    process.exit(1);
+  }
+}
 
 console.log('\n=== [CI Verify] All Platform CI checks passed ===\n');

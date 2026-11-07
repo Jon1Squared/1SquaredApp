@@ -13,14 +13,17 @@ export interface ResolvedUkAddress {
   country: string;
 }
 
-const DEFAULT_API_KEY =
-  process.env.NEXT_PUBLIC_IDEAL_POSTCODES_API_KEY ||
-  'ak_h88HXIcAS6B1MmRPE0kwrVO05Vuhg';
+const NOT_CONFIGURED_ERROR = "Address lookup isn't configured";
 
 const suggestionCache = new Map<string, AddressSuggestion[]>();
 const resolvedCache = new Map<string, ResolvedUkAddress>();
 
 const SESSION_CACHE_PREFIX = 'ideal_pc_resolved_v1:';
+
+export function clearAddressLookupCaches(): void {
+  suggestionCache.clear();
+  resolvedCache.clear();
+}
 
 function readSessionCache(id: string): ResolvedUkAddress | null {
   if (typeof window === 'undefined') return null;
@@ -47,7 +50,7 @@ function writeSessionCache(id: string, value: ResolvedUkAddress): void {
 
 /**
  * Step 1 (Free / 0 credits):
- * Queries Ideal Postcodes Address Autocomplete API with a partial address or postcode.
+ * Queries the server-side `/api/address-lookup` endpoint with a partial address or postcode.
  */
 export async function searchAddressSuggestions(
   query: string,
@@ -64,9 +67,7 @@ export async function searchAddressSuggestions(
     return { suggestions: cached };
   }
 
-  const url = `https://api.ideal-postcodes.co.uk/v1/autocomplete/addresses?api_key=${encodeURIComponent(
-    DEFAULT_API_KEY,
-  )}&query=${encodeURIComponent(trimmed)}`;
+  const url = `/api/address-lookup?q=${encodeURIComponent(trimmed)}`;
 
   try {
     const res = await fetch(url, {
@@ -77,14 +78,17 @@ export async function searchAddressSuggestions(
 
     const data = await res.json().catch(() => null);
     if (!res.ok || !data) {
+      if (res.status === 503 || data?.code === 'NOT_CONFIGURED') {
+        return { suggestions: [], error: NOT_CONFIGURED_ERROR };
+      }
       const msg =
         (data && typeof data.message === 'string' && data.message) ||
         `Address lookup failed (${res.status})`;
       return { suggestions: [], error: msg };
     }
 
-    const hits = Array.isArray(data?.result?.hits) ? data.result.hits : [];
-    const suggestions: AddressSuggestion[] = hits
+    const rawHits = Array.isArray(data?.suggestions) ? data.suggestions : [];
+    const suggestions: AddressSuggestion[] = rawHits
       .filter(
         (h: unknown): h is { id: string; suggestion: string; udprn?: number } =>
           Boolean(
@@ -108,14 +112,15 @@ export async function searchAddressSuggestions(
     }
     return {
       suggestions: [],
-      error: 'Could not reach Ideal Postcodes service.',
+      error: 'Could not reach address lookup service.',
     };
   }
 }
 
 /**
  * Step 2 (1 credit per unique resolved address, cached in memory & sessionStorage):
- * Resolves a selected autocomplete suggestion ID into structured UK address fields.
+ * Resolves a selected autocomplete suggestion ID into structured UK address fields
+ * via the server-side `/api/address-lookup` endpoint.
  */
 export async function resolveAddressSuggestion(
   id: string,
@@ -136,9 +141,7 @@ export async function resolveAddressSuggestion(
     return { address: sessionCached };
   }
 
-  const url = `https://api.ideal-postcodes.co.uk/v1/autocomplete/addresses/${encodeURIComponent(
-    trimmedId,
-  )}/gbr?api_key=${encodeURIComponent(DEFAULT_API_KEY)}`;
+  const url = `/api/address-lookup?id=${encodeURIComponent(trimmedId)}`;
 
   try {
     const res = await fetch(url, {
@@ -147,38 +150,27 @@ export async function resolveAddressSuggestion(
     });
 
     const data = await res.json().catch(() => null);
-    if (!res.ok || !data || !data.result) {
+    if (!res.ok || !data || !data.address) {
+      if (res.status === 503 || data?.code === 'NOT_CONFIGURED') {
+        return { address: null, error: NOT_CONFIGURED_ERROR };
+      }
       const msg =
         (data && typeof data.message === 'string' && data.message) ||
         `Could not resolve address (${res.status})`;
       return { address: null, error: msg };
     }
 
-    const r = data.result as Record<string, unknown>;
-    const line1 = typeof r.line_1 === 'string' ? r.line_1.trim() : '';
-    const line2Parts = [r.line_2, r.line_3]
-      .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
-      .map((p) => p.trim());
-    const line2 = line2Parts.join(', ');
-    const town = typeof r.post_town === 'string' ? r.post_town.trim() : '';
-    const county =
-      (typeof r.county === 'string' && r.county.trim()) ||
-      (typeof r.traditional_county === 'string' && r.traditional_county.trim()) ||
-      (typeof r.administrative_county === 'string' && r.administrative_county.trim()) ||
-      '';
-    const postcode = typeof r.postcode === 'string' ? r.postcode.trim() : '';
-    const country =
-      typeof r.country === 'string' && r.country.trim()
-        ? r.country.trim()
-        : 'United Kingdom';
-
+    const a = data.address as Record<string, unknown>;
     const resolved: ResolvedUkAddress = {
-      line1,
-      line2,
-      town,
-      county,
-      postcode,
-      country,
+      line1: typeof a.line1 === 'string' ? a.line1 : '',
+      line2: typeof a.line2 === 'string' ? a.line2 : '',
+      town: typeof a.town === 'string' ? a.town : '',
+      county: typeof a.county === 'string' ? a.county : '',
+      postcode: typeof a.postcode === 'string' ? a.postcode : '',
+      country:
+        typeof a.country === 'string' && a.country.trim()
+          ? a.country.trim()
+          : 'United Kingdom',
     };
 
     resolvedCache.set(trimmedId, resolved);
@@ -187,7 +179,7 @@ export async function resolveAddressSuggestion(
   } catch {
     return {
       address: null,
-      error: 'Could not resolve address from Ideal Postcodes.',
+      error: 'Could not resolve address from address lookup service.',
     };
   }
 }

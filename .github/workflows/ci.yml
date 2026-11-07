@@ -8,6 +8,7 @@ on:
       - 'feat/**'
       - 'chore/**'
       - 'fix/**'
+      - 's0-*'
   pull_request:
     branches:
       - main
@@ -27,6 +28,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Secret scan
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+        run: |
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          sha256sum --check --ignore-missing "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          sudo tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -C /usr/local/bin gitleaks
+          rm -f "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          gitleaks dir . --config .gitleaks.toml --redact
 
       - name: Setup Node.js 24
         uses: actions/setup-node@v4
@@ -60,3 +72,6 @@ jobs:
           PLATFORM_TENANT_PACKAGE_DIR: client-not-a-law-firm
           PLATFORM_ENVIRONMENT: live
         run: npm run build
+
+      - name: Verify client bundle contains no API keys
+        run: '! grep -rEq "\bak_[A-Za-z0-9]{20,}\b|sk-ant-" .next/static'

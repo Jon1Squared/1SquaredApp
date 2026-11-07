@@ -2124,13 +2124,6 @@ export function MatterFormClient({
   const [pastedDocName, setPastedDocName] = useState<string>('');
   const [pastedDocContent, setPastedDocContent] = useState<string>('');
   const [previewDocId, setPreviewDocId] = useState<string | null>(null);
-  const [showClaudeKeyConfig, setShowClaudeKeyConfig] = useState<boolean>(false);
-  const [claudeApiKeyOverride, setClaudeApiKeyOverride] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return window.localStorage.getItem('onesquared_claude_api_key') ?? '';
-    }
-    return '';
-  });
   const [extractingAi, setExtractingAi] = useState<boolean>(false);
   const [aiExtractionResult, setAiExtractionResult] =
     useState<MatterAiExtractionResult | null>(null);
@@ -2143,16 +2136,13 @@ export function MatterFormClient({
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
   const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
 
-  function handleClaudeKeyChange(val: string) {
-    setClaudeApiKeyOverride(val);
-    if (typeof window !== 'undefined') {
-      if (val.trim()) {
-        window.localStorage.setItem('onesquared_claude_api_key', val.trim());
-      } else {
-        window.localStorage.removeItem('onesquared_claude_api_key');
-      }
+  useEffect(() => {
+    try {
+      window.localStorage.removeItem('onesquared_claude_api_key');
+    } catch {
+      // Ignore storage errors
     }
-  }
+  }, []);
 
   const SUPPORTED_INTAKE_EXTENSIONS = [
     '.eml',
@@ -2601,7 +2591,6 @@ export function MatterFormClient({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           documents: docs,
-          apiKeyOverride: claudeApiKeyOverride.trim() || undefined,
         }),
       });
       const data = (await response.json()) as {
@@ -2627,9 +2616,6 @@ export function MatterFormClient({
       const msg =
         err instanceof Error ? err.message : 'Failed to extract from documents';
       setAiErrorMsg(msg);
-      if (msg.toLowerCase().includes('api key')) {
-        setShowClaudeKeyConfig(true);
-      }
       showToast(msg);
     } finally {
       setExtractingAi(false);
@@ -5943,58 +5929,8 @@ export function MatterFormClient({
                           <Plus size={13} />
                           <span>Paste email / attendance note</span>
                         </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          onClick={() => setShowClaudeKeyConfig((s) => !s)}
-                        >
-                          <span>
-                            {claudeApiKeyOverride.trim()
-                              ? 'Claude API Key: Saved ✓'
-                              : 'Claude API Key'}
-                          </span>
-                        </button>
                       </div>
                     </div>
-
-                    {/* Claude API key input (persisted in localStorage or configured via .env.local) */}
-                    {showClaudeKeyConfig ? (
-                      <div
-                        style={{
-                          padding: '10px 12px',
-                          borderRadius: 8,
-                          background: 'var(--bg-surface)',
-                          border: '1px solid var(--border-default)',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 6,
-                        }}
-                      >
-                        <div style={{ fontSize: 12.5, fontWeight: 600 }}>
-                          Anthropic Claude API Key (saved in your browser, or set{' '}
-                          <code>ANTHROPIC_API_KEY</code> in <code>.env.local</code>)
-                        </div>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                          <input
-                            type="password"
-                            className="field-input"
-                            placeholder="sk-ant-api03-..."
-                            value={claudeApiKeyOverride}
-                            onChange={(e) => handleClaudeKeyChange(e.target.value)}
-                            style={{ flex: 1 }}
-                          />
-                          {claudeApiKeyOverride ? (
-                            <button
-                              type="button"
-                              className="btn btn--ghost btn--sm"
-                              onClick={() => handleClaudeKeyChange('')}
-                            >
-                              Clear
-                            </button>
-                          ) : null}
-                        </div>
-                      </div>
-                    ) : null}
 
                     {/* Paste email / note input box */}
                     {showPasteInput ? (
