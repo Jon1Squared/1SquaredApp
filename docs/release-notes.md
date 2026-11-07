@@ -1,5 +1,16 @@
 # 1Squared — Release Notes
 
+## Unreleased — Playwright Role Journey Smoke Tests (`s0-27-role-journeys`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **End-to-End Test Infrastructure (`playwright.config.ts`, `e2e/`, `client-not-a-law-firm/config/environments/test.json`, `src/server/services.ts`, `.github/workflows/ci.yml`, `scripts/verify-ci.mjs`, `src/docs/`, `docs/`):**
+  - **Playwright Role Journey Suite (`playwright.config.ts`, `e2e/global-setup.ts`, `e2e/start-server.mjs`, `e2e/role-journeys.spec.ts`):** Added 9 automated Chromium browser smoke tests (`npm run e2e`) covering all 8 seeded roles (`P-000002` fee earner, `P-000001` partner, `P-000010` legal secretary, `P-000042` enquiries coordinator, `P-000009` finance, `P-000003` risk and compliance, `P-000038` managing partner, and `P-000004` admin with both `mfaVerified: true` and `mfaVerified: false`). Each journey signs in via a real HMAC-SHA256 signed `onesquared_entra_session` cookie minted in `e2e/global-setup.ts` using `signEntraSessionCookie` (zero test-only authentication bypass in `src/`), asserts that Home loads without console/page errors and with the role's configured Home panels, checks that the left-rail navigation links match `getLeftRailVisibility(homeRole, userRoles)` (`src/domain/homeConfig.ts`), exercises a core role workflow end to end, and confirms that `/admin` is refused when the role lacks `admin` or `mfaVerified: true`.
+  - **Left-Rail Key Dates Alignment (`src/server/services.ts`):** Updated `getAppSnapshot` so `leftRailVisibility.keyDates` honours `baseRail.keyDates` from `getLeftRailVisibility` before checking `keydate:view`, ensuring roles whose `baseRail.keyDates` is `false` (such as `finance`) do not show the Key Dates left-rail link when the employee happens to lead an operational team.
+  - **CI Integration (`.github/workflows/ci.yml`, `scripts/verify-ci.mjs`, `package.json`, `AGENTS.md`, `CLAUDE.md`, `src/docs/articles/development-process.ts`, `docs/roadmap/feature-list.md`):** Added `"e2e": "playwright test"` to `package.json`, added an `e2e` job to `.github/workflows/ci.yml`, added step 10 (`playwright test`) to `scripts/verify-ci.mjs`, and updated `P10` in `docs/roadmap/feature-list.md`.
+  - Review fixes R239, R240, R243, R244, R247, R251: rebased onto `s0-02-permission-guard`, added failure artefact uploads (`playwright-report/` and `test-results/`) to the GitHub Actions `e2e` job, updated `e2e/start-server.mjs` to always run a fresh `PLATFORM_ENVIRONMENT=test` build unless `E2E_SKIP_BUILD=1` is set, added a unit test in `src/domain/home.test.ts` verifying that `getAppSnapshot` keeps `leftRailVisibility.keyDates` `false` when the active Home role hides Key Dates, set `expect: { timeout: 10_000 }` and `workers: 2` in `playwright.config.ts`, and documented that the draft enquiry created by the enquiries coordinator journey must not be relied on by other journeys.
+
+---
+
 ## Unreleased — Permission Enforcement Pattern, Registry and Guard (`s0-02-permission-guard`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

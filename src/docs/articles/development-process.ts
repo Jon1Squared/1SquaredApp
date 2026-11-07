@@ -6,7 +6,7 @@ export const developmentProcessArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared designs, tests, audits (including independent Claude Code verification on develop), and releases software safely across isolated branches and deployment rings.',
-  updated: '2026-11-03',
+  updated: '2026-11-06',
   body: `
 For a law firm, a software update cannot be a leap of faith. 1Squared is engineered around a **Zero-Trust, Architecture-First Software Development Lifecycle (SDLC)** where every change passes through **six independent quality and security gates** before reaching live production.
 
@@ -53,6 +53,28 @@ Every push and Pull Request triggers the automated **Platform CI** workflow (\`.
 2. **Unit & Contract Suite**: Verifies domain rules, RBAC permissions, conflict checks, and JSON Schema contracts.
 3. **Adversarial Two-Tenant Isolation Suite**: Automatically provisions two separate firms (*Tenant A* and *Tenant B*) and attempts cross-tenant record reads, updates, deletes, and forged \`tenantId\` claim injection. Any boundary failure immediately blocks the Pull Request.
 4. **Clean Production Build (\`npm run build\`)**: Verifies the immutable production build succeeds.
+5. **Browser Role Journey Smoke Tests (\`npm run e2e\`)**: Runs Playwright browser tests against a production \`next start\` server across the eight seeded roles.
+
+### End-to-end tests
+Browser-level role journey smoke tests live in \`e2e/\` and are configured in \`playwright.config.ts\` (\`npm run e2e\`). Before each run, \`e2e/global-setup.ts\` restores \`data/seed-not-a-law-firm.json\` into the runtime store and mints HMAC-SHA256 signed \`onesquared_entra_session\` cookies in test code only (never via a sign-in bypass in product code).
+
+The suite covers the eight roles with seeded holders in *Not A Law Firm LLP*:
+- **Fee earner** (\`P-000002\` — Dafydd Evans)
+- **Partner** (\`P-000001\` — Rhian Morgan)
+- **Legal secretary** (\`P-000010\` — Nia Edwards)
+- **Enquiries coordinator** (\`P-000042\` — Lowri Ellis)
+- **Finance** (\`P-000009\` — Gethin Powell)
+- **Risk and compliance** (\`P-000003\` — Bethan Rees)
+- **Managing partner** (\`P-000038\` — Gethin Lloyd)
+- **Admin** (\`P-000004\` — Huw Pritchard, tested both with \`mfaVerified: true\` and \`mfaVerified: false\`)
+
+*(Note: \`supervisor\` and \`intake\` have no dedicated seeded holder in \`data/seed-not-a-law-firm.json\` and are covered by the unit RBAC suite.)*
+
+Each role journey verifies four things:
+1. Home loads without runtime errors and displays the expected active Home role.
+2. The left navigation rail matches \`getLeftRailVisibility\` for that role.
+3. One primary end-to-end journey for that role succeeds (such as opening a matter workspace, saving a draft enquiry, or opening the Finance, Risk, or Admin workspaces).
+4. An unauthorised page or navigation item is hidden or refused (including \`/admin\` redirecting away when \`admin:access\` or \`mfaVerified\` is missing).
 
 ### Gate 4 & Gate 5: Staging on \`develop\` & independent Claude Code audit
 To eliminate single-perspective blind spots, 1Squared enforces an adversarial **Builder vs. Auditor** model combining distinct AI systems with human principal oversight:
