@@ -165,7 +165,7 @@ When presenting to a firm's Risk Partner, COLP, or InfoSec team, highlight these
    - High-sensitivity permissions (`admin:access`, `rbac:manage_config`, `rbac:manage_user_overrides`, `document_template:approve`, `document_store:configure`, `finance:manage_links`) verify that the user's Entra token carries a hardware or MFA authentication claim (`amr: ["mfa"]`) before executing.
    - Anti-escalation guards prevent any administrator from modifying their own permissions or granting a permission they do not hold themselves.
 6. **Configurable AI Governance:**
-   - AI features (`aiProviderChoice`) are configurable per tenant (`azure_openai_uk` or `disabled`), kept within UK Azure regions, and contractually and technically prevented from using any client content for model training.
+   - AI features (`featureFlags.enableAiMatterExtraction` and `integrations.aiProviderChoice`) are configurable per tenant (`disabled` by default, `anthropic`, or reserved `azure_openai_uk`). Extraction runs only when both the feature flag and provider are explicitly enabled for the tenant, and commercial API terms prohibit using client content for model training ([ADR 0031](decisions/0031-ai-provider-choice-anthropic.md)). Tenants requiring UK-only AI residency keep `aiProviderChoice` set to `disabled` until `azure_openai_uk` is enabled.
 7. **Four Isolated Environments Per Client (`dev`, `test`, `training`, `live`):**
    - Each environment has its own database, storage, and secrets. Live data is never copied to lower environments without anonymisation.
 8. **Clean Offboarding Guarantee:**
