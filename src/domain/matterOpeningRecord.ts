@@ -1072,6 +1072,14 @@ export function resolveMatterConflictCheckRecord(
 /**
  * Resolves or constructs the immutable MatterOpeningSnapshot for a Matter.
  */
+export interface MatterOpeningSnapshotPrecomputed {
+  riskAssessment?: MatterRiskAssessmentSnapshot;
+  conflictCheckRecord?: ConflictCheckRecord;
+  nameMap?: ReadonlyMap<string, string>;
+  sourceEnquiry?: Enquiry | null;
+  sourceQuote?: Quote | null;
+}
+
 export function resolveMatterOpeningSnapshot(
   matter: Matter,
   people: Person[],
@@ -1079,6 +1087,7 @@ export function resolveMatterOpeningSnapshot(
   values: ChoiceValue[],
   enquiries: Enquiry[] = [],
   quotes: Quote[] = [],
+  precomputed?: MatterOpeningSnapshotPrecomputed,
 ): MatterOpeningSnapshot {
   const existingSnap = matter.fieldValues?.['matterOpeningSnapshot'] as
     | MatterOpeningSnapshot
@@ -1094,9 +1103,15 @@ export function resolveMatterOpeningSnapshot(
     };
   }
 
-  const nameMap = new Map<string, string>();
-  for (const o of organisations) nameMap.set(o.id, o.legalName);
-  for (const p of people) nameMap.set(p.id, personDisplayName(p));
+  let nameMap: ReadonlyMap<string, string>;
+  if (precomputed?.nameMap) {
+    nameMap = precomputed.nameMap;
+  } else {
+    const builtMap = new Map<string, string>();
+    for (const o of organisations) builtMap.set(o.id, o.legalName);
+    for (const p of people) builtMap.set(p.id, personDisplayName(p));
+    nameMap = builtMap;
+  }
 
   const allClientIds = Array.from(
     new Set([matter.clientId, ...(matter.additionalClientIds ?? [])].filter(Boolean)),
@@ -1124,22 +1139,32 @@ export function resolveMatterOpeningSnapshot(
     };
   });
 
-  const sourceEnq = matter.sourceEnquiryId
-    ? enquiries.find((e) => e.id === matter.sourceEnquiryId)
-    : enquiries.find((e) => e.convertedMatterId === matter.id);
-  const sourceQte = matter.sourceQuoteId
-    ? quotes.find((q) => q.id === matter.sourceQuoteId)
-    : quotes.find((q) => q.convertedMatterId === matter.id);
+  const sourceEnq =
+    precomputed?.sourceEnquiry !== undefined
+      ? precomputed.sourceEnquiry
+      : matter.sourceEnquiryId
+        ? enquiries.find((e) => e.id === matter.sourceEnquiryId)
+        : enquiries.find((e) => e.convertedMatterId === matter.id);
+  const sourceQte =
+    precomputed?.sourceQuote !== undefined
+      ? precomputed.sourceQuote
+      : matter.sourceQuoteId
+        ? quotes.find((q) => q.id === matter.sourceQuoteId)
+        : quotes.find((q) => q.convertedMatterId === matter.id);
 
   const customRoles =
     (matter.fieldValues?.['teamMemberRoles'] as Record<string, string> | undefined) ?? {};
 
-  const riskAssessment = resolveMatterRiskAssessment(matter, people, values);
-  const conflictCheckRecord = resolveMatterConflictCheckRecord(
-    matter,
-    people,
-    organisations,
-  );
+  const riskAssessment =
+    precomputed?.riskAssessment ??
+    resolveMatterRiskAssessment(matter, people, values);
+  const conflictCheckRecord =
+    precomputed?.conflictCheckRecord ??
+    resolveMatterConflictCheckRecord(
+      matter,
+      people,
+      organisations,
+    );
 
   const reservedKeys = new Set([
     'riskAssessment',

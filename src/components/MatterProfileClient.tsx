@@ -271,17 +271,42 @@ export function MatterProfileClient({
     [matter, people, values],
   );
 
-  const openingSnapshot = useMemo(
-    () => resolveMatterOpeningSnapshot(matter, people, organisations, values, enquiries, quotes),
-    [matter, people, organisations, values, enquiries, quotes],
-  );
-
   const sourceEnquiry = useMemo(
     () =>
       matter.sourceEnquiryId
         ? enquiries.find((e) => e.id === matter.sourceEnquiryId) ?? null
         : enquiries.find((e) => e.convertedMatterId === matter.id) ?? null,
     [matter.sourceEnquiryId, matter.id, enquiries],
+  );
+
+  const openingSnapshot = useMemo(
+    () =>
+      resolveMatterOpeningSnapshot(
+        matter,
+        people,
+        organisations,
+        values,
+        enquiries,
+        quotes,
+        {
+          riskAssessment: resolvedRiskAssessment,
+          conflictCheckRecord: resolvedConflictRecord,
+          nameMap,
+          sourceEnquiry,
+        },
+      ),
+    [
+      matter,
+      people,
+      organisations,
+      values,
+      enquiries,
+      quotes,
+      resolvedRiskAssessment,
+      resolvedConflictRecord,
+      nameMap,
+      sourceEnquiry,
+    ],
   );
 
   const activityItemsCount = notes.length + (sourceEnquiry ? 1 : 0) + 3; // +3 for Conflict check record, Matter risk assessment, and Matter opening snapshot PDF
@@ -3733,7 +3758,11 @@ export function MatterProfileClient({
                   >
                     <div className="kv-item">
                       <span className="kv-label">Overall risk rating</span>
-                      <span className="kv-value">{riskSnap.overallRisk} risk</span>
+                      <span className="kv-value">
+                        {riskSnap.overallRisk
+                          ? `${riskSnap.overallRisk} risk`
+                          : 'Not assessed'}
+                      </span>
                     </div>
                     <div className="kv-item">
                       <span className="kv-label">MLR 2017 regulated scope</span>
@@ -3747,14 +3776,16 @@ export function MatterProfileClient({
                       <span className="kv-label">Section summary</span>
                       <span className="kv-value">
                         {riskSnap.sections
-                          .map((s) => `${s.number}. ${s.title}: ${s.sectionRisk || 'Low'}`)
+                          .map((s) => `${s.number}. ${s.title}: ${s.sectionRisk || 'Not assessed'}`)
                           .join(' · ')}
                       </span>
                     </div>
                     <div className="kv-item">
                       <span className="kv-label">Assessed by</span>
                       <span className="kv-value">
-                        {riskSnap.completedByName} ({formatDateTime(riskSnap.completedAt)})
+                        {riskSnap.completedByName && riskSnap.completedAt
+                          ? `${riskSnap.completedByName} (${formatDateTime(riskSnap.completedAt)})`
+                          : riskSnap.completedByName || 'Not yet assessed'}
                       </span>
                     </div>
                   </div>
@@ -3782,11 +3813,13 @@ export function MatterProfileClient({
                               marginBottom: 4,
                             }}
                           >
-                            {sec.number}. {sec.title} ({sec.sectionRisk || 'Low'} risk)
+                            {sec.number}. {sec.title} (
+                            {sec.sectionRisk ? `${sec.sectionRisk} risk` : 'Not assessed'})
                           </div>
                           {sec.questions.map((q) => (
                             <div key={q.id} style={{ fontSize: 12.5, padding: '3px 0' }}>
-                              • {q.question}: <strong>{q.answer}</strong> ({q.risk || 'Low'} risk)
+                              • {q.question}: <strong>{q.answer}</strong> (
+                              {q.risk ? `${q.risk} risk` : 'Unanswered'})
                               {q.followUp ? ` — Note: ${q.followUp}` : ''}
                             </div>
                           ))}

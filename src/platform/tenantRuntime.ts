@@ -28,6 +28,15 @@ let testDevOverlayOverride: Record<string, unknown> | null | undefined =
   undefined;
 
 const fileJsonCache = new Map<string, Record<string, unknown>>();
+const envOverlayPathCache = new Map<string, string>();
+const EMPTY_JSON_CONFIG: Record<string, unknown> = Object.freeze({});
+let cachedValidatedTenantConfig: {
+  baseCfg: Record<string, unknown>;
+  overlayCfg: Record<string, unknown>;
+  env: string;
+  hostingMode: string;
+  value: TenantConfiguration;
+} | null = null;
 
 export function setActiveTenantConfigForTesting(
   baseConfig: Record<string, unknown> | null,
@@ -40,6 +49,7 @@ export function setActiveTenantConfigForTesting(
   }
   testBaseConfigOverride = baseConfig;
   testDevOverlayOverride = devOverlay;
+  cachedValidatedTenantConfig = null;
   cachedHost = null;
   cachedHostKey = null;
   cachedHostLoadErrors = [];
@@ -94,15 +104,22 @@ export function getActiveTenantEnvironmentOverlayPath(
   if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
     return `${folder}/config/environments/${env}.json`;
   }
+  const cacheKey = `${folder}::${env}`;
+  const cachedPath = envOverlayPathCache.get(cacheKey);
+  if (cachedPath) {
+    return cachedPath;
+  }
   const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
   const path = process.getBuiltinModule('node:path') as typeof import('node:path');
   const packageRoot = path.resolve(process.cwd(), folder);
   const envDirCandidate = path.join(packageRoot, 'config', 'environments', `${env}.json`);
   const directCandidate = path.join(packageRoot, 'config', `${env}.json`);
-  if (!fs.existsSync(envDirCandidate) && fs.existsSync(directCandidate)) {
-    return directCandidate;
-  }
-  return envDirCandidate;
+  const resolvedPath =
+    !fs.existsSync(envDirCandidate) && fs.existsSync(directCandidate)
+      ? directCandidate
+      : envDirCandidate;
+  envOverlayPathCache.set(cacheKey, resolvedPath);
+  return resolvedPath;
 }
 
 function readJsonConfigFile(
@@ -121,7 +138,8 @@ function readJsonConfigFile(
   const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
   if (!fs.existsSync(filePath)) {
     if (optional) {
-      return {};
+      fileJsonCache.set(filePath, EMPTY_JSON_CONFIG);
+      return EMPTY_JSON_CONFIG;
     }
     throw new Error(
       `TENANT_CONFIG_ERROR: Tenant configuration file not found at "${filePath}".`,
@@ -491,19 +509,36 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
   const isTestEnv = process.env.NODE_ENV === 'test';
   const overlayCfg =
     isTestEnv && testDevOverlayOverride !== undefined
-      ? (testDevOverlayOverride ?? {})
+      ? (testDevOverlayOverride ?? EMPTY_JSON_CONFIG)
       : isTestEnv && testBaseConfigOverride
-        ? {}
+        ? EMPTY_JSON_CONFIG
         : readJsonConfigFile(
             getActiveTenantEnvironmentOverlayPath(env),
             true,
           );
-  return loadAndValidateTenantConfig(
+  if (
+    cachedValidatedTenantConfig &&
+    cachedValidatedTenantConfig.baseCfg === baseCfg &&
+    cachedValidatedTenantConfig.overlayCfg === overlayCfg &&
+    cachedValidatedTenantConfig.env === env &&
+    cachedValidatedTenantConfig.hostingMode === hostingMode
+  ) {
+    return cachedValidatedTenantConfig.value;
+  }
+  const validated = loadAndValidateTenantConfig(
     baseCfg,
     overlayCfg,
     env,
     hostingMode,
   );
+  cachedValidatedTenantConfig = {
+    baseCfg,
+    overlayCfg,
+    env,
+    hostingMode,
+    value: validated,
+  };
+  return validated;
 }
 
 export function resolveCurrentTenantContext(

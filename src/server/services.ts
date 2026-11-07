@@ -1199,6 +1199,9 @@ function getAppSnapshotInScope(
 export function recordRecentlyViewed(userId: string, recordId: string): void {
   const store = getStore();
   const current = store.recentlyViewed[userId] ?? [];
+  if (current[0] === recordId) {
+    return;
+  }
   const next = [recordId, ...current.filter((id) => id !== recordId)].slice(0, 8);
   store.recentlyViewed[userId] = next;
   saveStore(store);
@@ -4083,6 +4086,7 @@ export async function saveMatterRecord(
       store.values,
       store.enquiries,
       store.quotes,
+      { riskAssessment: fullRiskAssessment },
     );
     openingSnapshot.saveMode = isDraftSave
       ? 'draft'
