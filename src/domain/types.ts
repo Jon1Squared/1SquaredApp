@@ -288,7 +288,12 @@ export type PermissionKey =
   | 'task:claim_any'
   | 'task:reassign_any'
   | 'enquiry:intake_view'
+  | 'enquiry:anonymise'
+  | 'signoff:approve'
+  | 'contact:create'
+  | 'contact:edit'
   | 'admin:access'
+  | 'admin:data_reset'
   | 'rbac:manage_config'
   | 'rbac:manage_user_overrides';
 
@@ -1388,7 +1393,9 @@ export type AuditAction =
   | 'keydate-config-change'
   | 'keydate-export'
   | 'matter-restriction-lift'
-  | 'matter-imported-open';
+  | 'matter-imported-open'
+  | 'data-reset'
+  | 'data-cleared';
 
 export interface AuditEntry {
   id: string;

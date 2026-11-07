@@ -61,6 +61,7 @@ export interface MatterAccessSubject {
   readonly id: string;
   readonly clientId?: string | null;
   readonly isStaffMatter?: boolean;
+  readonly hasEthicalWall?: boolean;
   readonly restrictedAccessUserIds?: readonly string[];
   readonly responsiblePartnerId?: string | null;
   readonly responsibleSolicitorId?: string | null;
@@ -254,6 +255,7 @@ export function canActorAccessMatterRecord(
     id: matter.id,
     clientId: matter.clientId,
     isStaffMatter: matter.isStaffMatter,
+    hasEthicalWall: matter.hasEthicalWall,
     restrictedAccessUserIds: matter.restrictedAccessUserIds,
     responsiblePartnerId: matter.responsiblePartnerId,
     responsibleSolicitorId: matter.responsibleSolicitorId,

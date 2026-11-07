@@ -33,6 +33,7 @@ export interface MatterAccessRecord {
   readonly id: string;
   readonly clientId?: string | null;
   readonly isStaffMatter?: boolean;
+  readonly hasEthicalWall?: boolean;
   readonly restrictedAccessUserIds?: readonly string[];
   readonly responsiblePartnerId?: string | null;
   readonly responsibleSolicitorId?: string | null;
@@ -626,7 +627,10 @@ export function canAccessMatter(
   const hasExplicitAllowList =
     Array.isArray(matter.restrictedAccessUserIds) &&
     matter.restrictedAccessUserIds.length > 0;
-  const isRestricted = Boolean(matter.isStaffMatter) || hasExplicitAllowList;
+  const isRestricted =
+    Boolean(matter.isStaffMatter) ||
+    Boolean(matter.hasEthicalWall) ||
+    hasExplicitAllowList;
 
   if (!isRestricted) {
     return true;

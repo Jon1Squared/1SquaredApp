@@ -1406,7 +1406,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       }),
     ).rejects.toThrow(/DOCUMENT_RECORD_ACCESS_DENIED/);
 
-    // R11: toMatterAccessSubject maps hasEthicalWall: true to isStaffMatter: true
+    // R11 / B12: toMatterAccessSubject maps hasEthicalWall: true to hasEthicalWall: true (leaving isStaffMatter: false)
     const ethicalWallSubject = toMatterAccessSubject({
       id: 'M-WALL-1',
       isStaffMatter: false,
@@ -1414,7 +1414,8 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       restrictedAccessUserIds: ['P-PARTNER-NAMED'],
       leadFeeEarnerId: 'P-PARTNER-NAMED',
     } as never);
-    expect(ethicalWallSubject?.isStaffMatter).toBe(true);
+    expect(ethicalWallSubject?.isStaffMatter).toBe(false);
+    expect(ethicalWallSubject?.hasEthicalWall).toBe(true);
 
     // R11: getDocumentGenerationSnapshotForUser omits a document linked to a matter with hasEthicalWall: true (even when isStaffMatter: false) for an excluded employee
     const store = getStore();

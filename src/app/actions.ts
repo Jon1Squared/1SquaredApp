@@ -53,6 +53,7 @@ import {
   executeMerge,
   flagMatterWriteOff,
   getEmployeeDetailsForUser,
+  isDataResetAllowedEnvironment,
   liftMatterRestriction,
   linkPmsRecord,
   logEmployeeRestrictedAccess,
@@ -133,6 +134,7 @@ import type {
   StandstillPeriod,
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
+import { buildActionDenied } from '@/domain/actionResult';
 import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
 import { guardedAction } from '@/server/authorize';
 import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
@@ -181,6 +183,27 @@ export async function savePersonAction(
   },
 ) {
   return guardedAction('savePersonAction', ({ personId: byId }) => {
+    const PERSON_SECURITY_FIELDS = [
+      'roles',
+      'permissionOverrides',
+      'appRole',
+      'employeePermissions',
+      'documentPermissions',
+      'supportsIds',
+      'showsWorkOfId',
+      'demo',
+    ] as const;
+    const forbiddenField = PERSON_SECURITY_FIELDS.find(
+      (key) => payload[key] !== undefined,
+    );
+    if (forbiddenField) {
+      const msg = `Security field "${forbiddenField}" cannot be set or modified through person save. Use the dedicated RBAC administration actions.`;
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        person: null as unknown as Person,
+        errors: { permission: msg },
+      };
+    }
     const res = savePersonRecord(payload, { ...opts, byId });
     revalidateAll();
     return res;
@@ -441,15 +464,29 @@ export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
 
 export async function resetDemoDataAction() {
   return guardedAction('resetDemoDataAction', ({ personId: byId }) => {
+    if (!isDataResetAllowedEnvironment()) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        'Demo data reset is disabled in the live environment.',
+      );
+    }
     resetAllDemoData(byId);
     revalidateAll();
+    return { ok: true as const };
   });
 }
 
 export async function clearAllDataAction() {
   return guardedAction('clearAllDataAction', ({ personId: byId }) => {
+    if (!isDataResetAllowedEnvironment()) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        'Clearing all data is disabled in the live environment.',
+      );
+    }
     clearAllDataToCleanDeployment(byId);
     revalidateAll();
+    return { ok: true as const };
   });
 }
 

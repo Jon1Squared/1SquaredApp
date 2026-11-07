@@ -64,13 +64,18 @@ import { buildDemoData } from '../../src/seed/demo';
 import { NextRequest } from 'next/server';
 import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
 import {
+  anonymiseExpiredEnquiries,
+  approveSignOff,
+  discussSignOff,
   getAppSnapshot,
   getEmployeeDetailsForUser,
   logEmployeeRestrictedAccess,
   previewRbacOverrides,
+  remindTeamLeadOverdueCompliance,
   requireAuthenticatedActor,
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
+  savePersonRecord,
   updateEmployeeRolesAndSupports,
   updateEmployeeRoleSetting,
   updatePersonPermissionOverrides,
@@ -92,11 +97,15 @@ import {
 } from '../../src/platform/tenantRuntime';
 import {
   addHomeRoleAction,
+  clearAllDataAction,
+  resetDemoDataAction,
   resetHomePagesConfigAction,
   saveHomePagesConfigAction,
   switchUserAction,
   updateTenantRbacConfigAction,
 } from '../../src/app/actions';
+import { isActionDenied } from '../../src/domain/actionResult';
+import { canActorAccessMatterRecord } from '../src/domain/document-generation/permissions';
 import type { ChoiceValue, Matter, Person, Task, Team } from '../../src/domain/types';
 
 function makeBaseTenantConfig(tenantId = 'tenant-alpha'): TenantConfiguration {
@@ -177,8 +186,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 45 canonical permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(45);
+    it('defines all 50 canonical permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(50);
       for (const key of ALL_PERMISSION_KEYS) {
         const entry = PERMISSION_REGISTRY[key];
         expect(entry).toBeDefined();
@@ -198,6 +207,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(PERMISSION_REGISTRY['rbac:manage_config'].requiresMfa).toBe(true);
       expect(PERMISSION_REGISTRY['rbac:manage_user_overrides'].requiresMfa).toBe(true);
       expect(PERMISSION_REGISTRY['matter:restriction:lift'].requiresMfa).toBe(true);
+      expect(PERMISSION_REGISTRY['admin:data_reset'].requiresMfa).toBe(true);
     });
 
     it('enforces CI contract: every Field Catalogue entry references a registered PermissionKey', () => {
@@ -2153,6 +2163,419 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setActiveTenantConfigForTesting(null);
         setRuntimeRbacConfigOverride(undefined);
       }
+    });
+  });
+
+  describe('12. Slice S0-03: Destructive Actions, Sign-Off Approvals, Enquiry Anonymisation (B3), Person Save (B11) & Ethical Walls (B12)', () => {
+    beforeEach(() => {
+      resetAllDemoData('P-000001');
+      setTestEntraSessionOverride(undefined);
+      setActiveTenantConfigForTesting(null);
+    });
+
+    it('1a. resetDemoDataAction and clearAllDataAction enforce admin:data_reset (admin only + MFA + non-live) and write data-reset / data-cleared audit entries', async () => {
+      try {
+        // Managing partner (P-000038) has admin:access, but NOT admin:data_reset
+        setTestEntraSessionOverride({
+          personId: 'P-000038',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000038',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000038',
+          email: 'gethin.lloyd@notalawfirm.example',
+          displayName: 'Gethin Lloyd',
+          entraRoles: ['managing_partner'],
+          mappedRoles: ['managing_partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const mpReset = await resetDemoDataAction();
+        expect(isActionDenied(mpReset)).toBe(true);
+        if (isActionDenied(mpReset)) {
+          expect(mpReset.code).toBe('FORBIDDEN');
+        }
+
+        // Admin (P-000004) without MFA is denied with MFA_REQUIRED
+        setTestEntraSessionOverride({
+          personId: 'P-000004',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000004',
+          email: 'huw.pritchard@notalawfirm.example',
+          displayName: 'Huw Pritchard',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: false,
+          amr: ['pwd'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const noMfaClear = await clearAllDataAction();
+        expect(isActionDenied(noMfaClear)).toBe(true);
+        if (isActionDenied(noMfaClear)) {
+          expect(noMfaClear.code).toBe('MFA_REQUIRED');
+        }
+
+        // Admin with MFA in live environment is denied with FORBIDDEN
+        setTestEntraSessionOverride({
+          personId: 'P-000004',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000004',
+          email: 'huw.pritchard@notalawfirm.example',
+          displayName: 'Huw Pritchard',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const prevEnv = process.env.PLATFORM_ENVIRONMENT;
+        try {
+          process.env.PLATFORM_ENVIRONMENT = 'live';
+          setActiveTenantConfigForTesting({
+            ...getActiveTenantRawBaseConfig(),
+            environment: 'live',
+            featureFlags: {
+              ...(getActiveTenantRawBaseConfig().featureFlags as Record<string, unknown>),
+              enableDemoMode: false,
+            },
+          });
+          const liveReset = await resetDemoDataAction();
+          expect(isActionDenied(liveReset)).toBe(true);
+          if (isActionDenied(liveReset)) {
+            expect(liveReset.code).toBe('FORBIDDEN');
+          }
+          const liveClear = await clearAllDataAction();
+          expect(isActionDenied(liveClear)).toBe(true);
+          if (isActionDenied(liveClear)) {
+            expect(liveClear.code).toBe('FORBIDDEN');
+          }
+        } finally {
+          process.env.PLATFORM_ENVIRONMENT = prevEnv;
+          setActiveTenantConfigForTesting(null);
+        }
+
+        // Admin with MFA in test environment succeeds and writes data-reset / data-cleared audit entries with actor name & ID
+        const okReset = await resetDemoDataAction();
+        expect(isActionDenied(okReset)).toBe(false);
+        const storeAfterReset = getStore();
+        const resetAudit = storeAfterReset.audit.find(
+          (a) => a.action === 'data-reset',
+        );
+        expect(resetAudit).toBeDefined();
+        expect(resetAudit?.byId).toBe('P-000004');
+        expect(resetAudit?.newValue).toContain('Huw Pritchard');
+
+        const okClear = await clearAllDataAction();
+        expect(isActionDenied(okClear)).toBe(false);
+        const storeAfterClear = getStore();
+        expect(storeAfterClear.people).toHaveLength(0);
+        const clearAudit = storeAfterClear.audit.find(
+          (a) => a.action === 'data-cleared',
+        );
+        expect(clearAudit).toBeDefined();
+        expect(clearAudit?.byId).toBe('P-000004');
+        expect(clearAudit?.newValue).toContain('Huw Pritchard');
+      } finally {
+        resetAllDemoData('P-000001');
+        setTestEntraSessionOverride(undefined);
+        setActiveTenantConfigForTesting(null);
+      }
+    });
+
+    it('1b. approveSignOff and discussSignOff enforce signoff:approve, matter access, assignedPartnerId, no self-approval, status checks, and audit discussSignOff', async () => {
+      const store = getStore();
+      // SO-000001: requestedById P-000002, assignedPartnerId P-000001, matterId M-000002, status Pending
+      // 1. Fee earner (P-000002) lacks signoff:approve
+      const feApprove = approveSignOff('SO-000001', 'P-000002');
+      expect(isActionDenied(feApprove)).toBe(true);
+
+      // 2. Partner who is NOT assignedPartnerId (P-000005 is another partner) is denied when assignedPartnerId is set
+      const otherPartnerApprove = approveSignOff('SO-000001', 'P-000005');
+      expect(isActionDenied(otherPartnerApprove)).toBe(true);
+      if (isActionDenied(otherPartnerApprove)) {
+        expect(otherPartnerApprove.message).toMatch(/assigned partner/i);
+      }
+
+      // 3. No self-approval even when actor holds signoff:approve and assignedPartnerId matches or is null
+      const item1 = store.signOffs.find((s) => s.id === 'SO-000001')!;
+      item1.requestedById = 'P-000001';
+      const selfApprove = approveSignOff('SO-000001', 'P-000001');
+      expect(isActionDenied(selfApprove)).toBe(true);
+      if (isActionDenied(selfApprove)) {
+        expect(selfApprove.message).toMatch(/self-approval/i);
+      }
+      const selfDiscuss = discussSignOff('SO-000001', 'Self note', 'P-000001');
+      expect(isActionDenied(selfDiscuss)).toBe(true);
+      item1.requestedById = 'P-000002';
+
+      // 4. Restricted linked matter that the assigned partner cannot access is denied
+      const linkedMatter = store.matters.find((m) => m.id === item1.matterId)!;
+      linkedMatter.hasEthicalWall = true;
+      linkedMatter.restrictedAccessUserIds = ['P-000005'];
+      linkedMatter.responsiblePartnerId = 'P-000005';
+      linkedMatter.supervisingPartnerId = 'P-000005';
+      linkedMatter.leadFeeEarnerId = 'P-000005';
+      linkedMatter.teamMemberIds = ['P-000005'];
+      const wallDenied = approveSignOff('SO-000001', 'P-000001');
+      expect(isActionDenied(wallDenied)).toBe(true);
+      if (isActionDenied(wallDenied)) {
+        expect(wallDenied.message).toMatch(/matter/i);
+      }
+      linkedMatter.hasEthicalWall = false;
+      linkedMatter.restrictedAccessUserIds = [];
+      linkedMatter.responsiblePartnerId = 'P-000001';
+      linkedMatter.supervisingPartnerId = 'P-000001';
+
+      // 5. discussSignOff writes an audit entry and transitions status to Discussing
+      const discRes = discussSignOff('SO-000001', 'Need client confirmation first', 'P-000001');
+      expect(isActionDenied(discRes)).toBe(false);
+      expect(item1.status).toBe('Discussing');
+      const discAudit = store.audit.find(
+        (a) =>
+          a.field === 'Partner sign-off' &&
+          a.newValue?.includes('Discussing: Write-off'),
+      );
+      expect(discAudit).toBeDefined();
+
+      // 6. When assignedPartnerId is null, any holder of signoff:approve (who is not requestedById and can access the matter) may approve
+      item1.assignedPartnerId = null;
+      const unassignedApprove = approveSignOff('SO-000001', 'P-000038');
+      expect(isActionDenied(unassignedApprove)).toBe(false);
+      expect(item1.status).toBe('Approved');
+
+      // 7. Re-approving or discussing an already Approved sign-off is denied
+      const reApprove = approveSignOff('SO-000001', 'P-000038');
+      expect(isActionDenied(reApprove)).toBe(true);
+      const reDiscuss = discussSignOff('SO-000001', 'Too late', 'P-000038');
+      expect(isActionDenied(reDiscuss)).toBe(true);
+    });
+
+    it('1c (B3). anonymiseExpiredEnquiries requires enquiry:anonymise and enforces isReadyForRetentionAnonymisation for single enquiries as well as bulk', async () => {
+      const store = getStore();
+      // Fee earner (P-000002) is denied enquiry:anonymise
+      expect(() => anonymiseExpiredEnquiries('P-000002')).toThrow(AuthorisationError);
+
+      // Find a closed unconverted enquiry that is RECENT (not past retentionMonths)
+      const closedEnq = store.enquiries.find(
+        (e) => e.status === 'Declined' && !e.anonymisedAt,
+      )!;
+      closedEnq.receivedAt = new Date().toISOString();
+      const origFirstName = closedEnq.firstName;
+
+      // Single-enquiry call with Risk & Compliance (P-000003) must NOT anonymise a recent closed enquiry (B3 regression)
+      const prematureCount = anonymiseExpiredEnquiries('P-000003', closedEnq.id);
+      expect(prematureCount).toBe(0);
+      expect(closedEnq.firstName).toBe(origFirstName);
+      expect(closedEnq.anonymisedAt).toBeNull();
+
+      // Move receivedAt past retention period (24 months ago) -> now single-enquiry call anonymises it
+      const twoYearsAgo = new Date();
+      twoYearsAgo.setMonth(twoYearsAgo.getMonth() - 24);
+      closedEnq.receivedAt = twoYearsAgo.toISOString();
+      const expiredCount = anonymiseExpiredEnquiries('P-000003', closedEnq.id);
+      expect(expiredCount).toBe(1);
+      expect(closedEnq.firstName).toBe('Anonymised');
+      expect(closedEnq.anonymisedAt).toBeTruthy();
+    });
+
+    it('1d. remindTeamLeadOverdueCompliance requires risk:view', () => {
+      // Fee earner (P-000002) lacks risk:view
+      const denied = remindTeamLeadOverdueCompliance('TM-000001', 'P-000002');
+      expect(isActionDenied(denied)).toBe(true);
+
+      // Risk & compliance (P-000003) has risk:view
+      const allowed = remindTeamLeadOverdueCompliance('TM-000001', 'P-000003');
+      expect(isActionDenied(allowed)).toBe(false);
+      expect(allowed.ok).toBe(true);
+    });
+
+    it('1e (B11). savePersonRecord rejects security field mutations, enforces employee:edit_core on legacy/leaver paths, enforces contact:create/edit, and preserves entraObjectId', async () => {
+      const store = getStore();
+      const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+
+      // 1. A fee earner cannot add admin to their own roles by saving their person record
+      const selfEscalateRes = savePersonRecord(
+        {
+          firstName: feeEarner.firstName,
+          surname: feeEarner.surname,
+          roles: ['fee_earner', 'admin'],
+        },
+        { id: feeEarner.id, byId: feeEarner.id },
+      );
+      expect(isActionDenied(selfEscalateRes)).toBe(true);
+      expect(
+        store.people.find((p) => p.id === feeEarner.id)?.roles,
+      ).not.toContain('admin');
+
+      // Also rejected when spreading existing person and mutating roles or permissionOverrides
+      const spreadEscalateRes = savePersonRecord(
+        {
+          ...feeEarner,
+          permissionOverrides: { grant: ['admin:access'], revoke: [] },
+        },
+        { id: feeEarner.id, byId: feeEarner.id },
+      );
+      expect(isActionDenied(spreadEscalateRes)).toBe(true);
+
+      // 2. worksAtFirm: false without employee:edit_core is denied
+      const leaverWithoutPermRes = savePersonRecord(
+        {
+          firstName: feeEarner.firstName,
+          surname: feeEarner.surname,
+        },
+        { id: feeEarner.id, byId: feeEarner.id, worksAtFirm: false },
+      );
+      expect(isActionDenied(leaverWithoutPermRes)).toBe(true);
+      expect(leaverWithoutPermRes.errors?.permission).toMatch(/employee:edit_core/);
+
+      // Legacy isEmployee: true without rawEmpInput and without employee:edit_core is also denied
+      const legacyEmpCreateDenied = savePersonRecord(
+        {
+          firstName: 'Unauthorised',
+          surname: 'Hire',
+          isEmployee: true,
+          employeeRoleId: 'employee_role.fee_earner',
+        },
+        { byId: feeEarner.id },
+      );
+      expect(isActionDenied(legacyEmpCreateDenied)).toBe(true);
+
+      // 3. Contact create without contact:create (Finance P-000009 lacks contact:create and contact:edit) is denied
+      const finCreateContact = savePersonRecord(
+        {
+          firstName: 'Invented',
+          surname: 'Prospect',
+        },
+        { byId: 'P-000009' },
+      );
+      expect(isActionDenied(finCreateContact)).toBe(true);
+      expect(finCreateContact.errors?.permission).toMatch(/contact:create/);
+
+      // Contact edit without contact:edit is denied
+      const existingContact = store.people.find((p) => !p.isEmployee && !p.employment)!;
+      const finEditContact = savePersonRecord(
+        {
+          firstName: existingContact.firstName,
+          surname: 'ChangedByFinance',
+        },
+        { id: existingContact.id, byId: 'P-000009' },
+      );
+      expect(isActionDenied(finEditContact)).toBe(true);
+      expect(finEditContact.errors?.permission).toMatch(/contact:edit/);
+
+      // 4. entraObjectId survives a save
+      feeEarner.entraObjectId = '00000000-0000-4000-8000-000000000002';
+      const partnerUpdateRes = savePersonRecord(
+        {
+          firstName: feeEarner.firstName,
+          surname: feeEarner.surname,
+          preferredName: 'Daf',
+        },
+        { id: feeEarner.id, byId: 'P-000001' },
+      );
+      expect(isActionDenied(partnerUpdateRes)).toBe(false);
+      expect(partnerUpdateRes.errors).toBeUndefined();
+      expect(partnerUpdateRes.person.entraObjectId).toBe(
+        '00000000-0000-4000-8000-000000000002',
+      );
+    });
+
+    it('1f (B12). ethical walls fail closed in canAccessMatter and all wrappers even when restrictedAccessUserIds is empty', () => {
+      const store = getStore();
+      const emptyWallMatter: Matter = {
+        ...store.matters.find((m) => m.id === 'M-000001')!,
+        id: 'M-EMPTY-WALL',
+        isStaffMatter: false,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: [],
+        responsiblePartnerId: 'P-000005',
+        supervisingPartnerId: 'P-000005',
+        leadFeeEarnerId: 'P-000005',
+        teamMemberIds: [],
+      };
+
+      // Unnamed partner (P-000001) lacks matter:restricted:access -> denied
+      const partner = store.people.find((p) => p.id === 'P-000001')!;
+      expect(
+        canPersonAccessMatter(emptyWallMatter, partner.id, partner, {
+          allPeople: store.people,
+          teams: store.teams,
+        }),
+      ).toBe(false);
+
+      // Unnamed fee earner (P-000002) -> denied
+      const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+      expect(
+        canPersonAccessMatter(emptyWallMatter, feeEarner.id, feeEarner, {
+          allPeople: store.people,
+          teams: store.teams,
+        }),
+      ).toBe(false);
+
+      // Admin with matter:restricted:access explicitly revoked -> denied
+      const adminWithoutOversight: Person = {
+        ...store.people.find((p) => p.id === 'P-000004')!,
+        permissionOverrides: {
+          grant: [],
+          revoke: ['matter:restricted:access'],
+        },
+      };
+      expect(
+        canPersonAccessMatter(
+          emptyWallMatter,
+          adminWithoutOversight.id,
+          adminWithoutOversight,
+          {
+            allPeople: store.people,
+            teams: store.teams,
+          },
+        ),
+      ).toBe(false);
+
+      // Document generation wrapper also fails closed on empty-allowlist ethical wall
+      expect(
+        canActorAccessMatterRecord(
+          {
+            id: partner.id,
+            tenantId: 'not-a-law-firm',
+            roles: ['partner'],
+          },
+          {
+            id: emptyWallMatter.id,
+            isStaffMatter: false,
+            hasEthicalWall: true,
+            restrictedAccessUserIds: [],
+            responsiblePartnerId: 'P-000005',
+          },
+          getActiveTenantConfiguration(),
+        ),
+      ).toBe(false);
+
+      // Named participant (P-000005) and Risk & Compliance (P-000003, has matter:restricted:access) are allowed
+      const namedPartner = store.people.find((p) => p.id === 'P-000005')!;
+      const riskOfficer = store.people.find((p) => p.id === 'P-000003')!;
+      expect(
+        canPersonAccessMatter(emptyWallMatter, namedPartner.id, namedPartner, {
+          allPeople: store.people,
+          teams: store.teams,
+        }),
+      ).toBe(true);
+      expect(
+        canPersonAccessMatter(emptyWallMatter, riskOfficer.id, riskOfficer, {
+          allPeople: store.people,
+          teams: store.teams,
+        }),
+      ).toBe(true);
     });
   });
 });

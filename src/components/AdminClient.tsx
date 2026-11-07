@@ -20,6 +20,7 @@ import {
   updateEmployeeRoleAction,
   updateEmployeeRolesAndSupportsAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import {
   CUSTOM_FIELD_SCREEN_OPTIONS,
   formatSectionLocationLabel,
@@ -2625,6 +2626,10 @@ export function AdminClient({
               onClick={() =>
                 startTransition(async () => {
                   const res = await anonymiseExpiredEnquiriesAction();
+                  if (isActionDenied(res)) {
+                    showToast(res.message);
+                    return;
+                  }
                   showToast(`Anonymised ${res.count} expired unconverted enquiries`);
                 })
               }
@@ -4034,8 +4039,13 @@ export function AdminClient({
               disabled={pending}
               onClick={() =>
                 startTransition(async () => {
-                  await clearAllDataAction();
-                  showToast('Cleared all records — system is now a clean client deployment');
+                  const res = await clearAllDataAction();
+                  if (isActionDenied(res)) {
+                    showToast(res.message);
+                    return;
+                  }
+                  showToast('Cleared all records — signing out to refresh session');
+                  window.location.assign('/api/auth/logout');
                 })
               }
             >
@@ -4058,8 +4068,13 @@ export function AdminClient({
               disabled={pending}
               onClick={() =>
                 startTransition(async () => {
-                  await resetDemoDataAction();
+                  const res = await resetDemoDataAction();
+                  if (isActionDenied(res)) {
+                    showToast(res.message);
+                    return;
+                  }
                   showToast('Demo data restored');
+                  window.location.reload();
                 })
               }
             >

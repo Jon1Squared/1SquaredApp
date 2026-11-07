@@ -71,7 +71,12 @@ export type PermissionKey =
   | 'task:claim_any'
   | 'task:reassign_any'
   | 'enquiry:intake_view'
+  | 'enquiry:anonymise'
+  | 'signoff:approve'
+  | 'contact:create'
+  | 'contact:edit'
   | 'admin:access'
+  | 'admin:data_reset'
   | 'rbac:manage_config'
   | 'rbac:manage_user_overrides';
 
@@ -85,6 +90,8 @@ export type PermissionDomain =
   | 'matter'
   | 'task'
   | 'enquiry'
+  | 'signoff'
+  | 'contact'
   | 'admin'
   | 'rbac';
 

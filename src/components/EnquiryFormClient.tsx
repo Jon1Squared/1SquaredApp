@@ -14,6 +14,7 @@ import {
   saveTaskAction,
   sendEnquiryEmailAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { enquiryStatusTone, urgencyTone } from '@/domain/badges';
 import {
   activeDefinitions,
@@ -21,6 +22,7 @@ import {
   validateCustomFields,
 } from '@/domain/customFields';
 import {
+  addMonths,
   formatDate,
   formatDateTime,
   formatKeyDateCountdown,
@@ -106,6 +108,7 @@ interface Props {
   enquirySettings?: EnquirySettings;
   currentUserId: string;
   canReopen?: boolean;
+  canAnonymise?: boolean;
   firmName?: string;
 }
 
@@ -152,6 +155,7 @@ export function EnquiryFormClient({
   enquirySettings,
   currentUserId,
   canReopen: canReopenProp = false,
+  canAnonymise = false,
   firmName = 'the firm',
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
@@ -3338,7 +3342,7 @@ export function EnquiryFormClient({
                     >
                       + New task
                     </button>
-                  ) : !open && enquiry.status !== 'Converted' && !enquiry.anonymisedAt ? (
+                  ) : !open && enquiry.status !== 'Converted' && !enquiry.anonymisedAt && canAnonymise ? (
                     <button
                       type="button"
                       className="btn btn--ghost btn--sm"
@@ -3346,7 +3350,23 @@ export function EnquiryFormClient({
                       disabled={pending}
                       onClick={() =>
                         startTransition(async () => {
-                          await anonymiseExpiredEnquiriesAction(enquiry.id);
+                          const res = await anonymiseExpiredEnquiriesAction(enquiry.id);
+                          if (isActionDenied(res)) {
+                            showToast(res.message);
+                            return;
+                          }
+                          if (res.count === 0) {
+                            const retentionEnd = formatDate(
+                              addMonths(
+                                new Date(enquiry.receivedAt),
+                                Math.max(1, enquirySettings?.retentionMonths || 12),
+                              ),
+                            );
+                            showToast(
+                              `Not yet due for anonymisation (retention period ends ${retentionEnd})`,
+                            );
+                            return;
+                          }
                           showToast('Personal details anonymised for retention compliance');
                           router.refresh();
                         })

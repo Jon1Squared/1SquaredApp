@@ -498,6 +498,7 @@ export function canPersonAccessMatter(
     | 'id'
     | 'clientId'
     | 'isStaffMatter'
+    | 'hasEthicalWall'
     | 'restrictedAccessUserIds'
     | 'responsiblePartnerId'
     | 'supervisingPartnerId'
@@ -569,6 +570,7 @@ export function canPersonAccessMatter(
     id: matter.id,
     clientId: matter.clientId,
     isStaffMatter: matter.isStaffMatter,
+    hasEthicalWall: matter.hasEthicalWall,
     restrictedAccessUserIds: matter.restrictedAccessUserIds,
     responsiblePartnerId: matter.responsiblePartnerId,
     supervisingPartnerId: matter.supervisingPartnerId,

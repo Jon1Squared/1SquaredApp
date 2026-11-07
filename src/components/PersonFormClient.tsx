@@ -10,6 +10,7 @@ import {
   revealEmployeeSensitiveRecordAction,
   savePersonAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { findPersonDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
 import {
   buildSensitiveSubmissionPayload,
@@ -1541,6 +1542,11 @@ export function PersonFormClient({
               : null,
         },
       );
+
+      if (isActionDenied(res)) {
+        setErrorMsg(res.message);
+        return;
+      }
 
       if (res.errors && Object.keys(res.errors).length > 0) {
         setErrorMsg(Object.values(res.errors).join(' '));

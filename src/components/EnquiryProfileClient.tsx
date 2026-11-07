@@ -12,7 +12,9 @@ import {
   reopenEnquiryAction,
   saveEnquiryAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import {
+  addMonths,
   formatDate,
   formatDateTime,
   formatKeyDateCountdown,
@@ -63,6 +65,7 @@ interface Props {
   audit: AuditEntry[];
   currentUserId: string;
   canReopen?: boolean;
+  canAnonymise?: boolean;
   canTakeByTaskId?: Record<string, boolean>;
 }
 
@@ -78,6 +81,7 @@ export function EnquiryProfileClient({
   audit,
   currentUserId,
   canReopen = false,
+  canAnonymise = false,
   canTakeByTaskId,
 }: Props) {
   const router = useRouter();
@@ -1079,14 +1083,30 @@ export function EnquiryProfileClient({
       <section className="profile-section">
         <div className="profile-section__header">
           <h2>Audit trail ({audit.length})</h2>
-          {!open && enquiry.status !== 'Converted' && !enquiry.anonymisedAt ? (
+          {!open && enquiry.status !== 'Converted' && !enquiry.anonymisedAt && canAnonymise ? (
             <button
               type="button"
               className="btn btn--ghost btn--sm"
               disabled={pending}
               onClick={() =>
                 startTransition(async () => {
-                  await anonymiseExpiredEnquiriesAction(enquiry.id);
+                  const res = await anonymiseExpiredEnquiriesAction(enquiry.id);
+                  if (isActionDenied(res)) {
+                    showToast(res.message);
+                    return;
+                  }
+                  if (res.count === 0) {
+                    const retentionEnd = formatDate(
+                      addMonths(
+                        new Date(enquiry.receivedAt),
+                        Math.max(1, enquirySettings.retentionMonths || 12),
+                      ),
+                    );
+                    showToast(
+                      `Not yet due for anonymisation (retention period ends ${retentionEnd})`,
+                    );
+                    return;
+                  }
                   showToast('Personal details anonymised for retention compliance');
                 })
               }
