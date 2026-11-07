@@ -3127,7 +3127,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               },
               matterOpeningSnapshot: { forged: true },
               matterCostsGovernance: { allowProceed: true },
-              riskAssessment: { forged: true },
+              riskAssessment: {
+                forged: true,
+                overallRisk: 'Low',
+                sections: [{ id: 'forged_section', title: 'Forged' }],
+                answers: {
+                  inScopeMlr: 'Yes, in scope',
+                  highRiskJurisdictionLink: 'Yes',
+                },
+                followUps: {
+                  highRiskJurisdictionLink:
+                    'Linked counterparty in high-risk jurisdiction',
+                },
+              },
               customClientNote: 'preserved',
             },
           },
@@ -3153,6 +3165,21 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             }
           )?.forged,
         ).toBeUndefined();
+        const savedRisk = draftRes.matter!.fieldValues['riskAssessment'] as {
+          forged?: boolean;
+          overallRisk?: string;
+          answers?: Record<string, string>;
+          followUps?: Record<string, string>;
+          sections?: Array<{ id: string }>;
+        };
+        expect(savedRisk?.forged).toBeUndefined();
+        expect(savedRisk?.overallRisk).toBe('High');
+        expect(savedRisk?.sections?.[0]?.id).toBe('about_instruction');
+        expect(savedRisk?.answers?.highRiskJurisdictionLink).toBe('Yes');
+        expect(savedRisk?.followUps?.highRiskJurisdictionLink).toBe(
+          'Linked counterparty in high-risk jurisdiction',
+        );
+        expect(draftRes.matter!.riskRatingId).toBe('risk_rating.high');
 
         // 2. Attempting to open with forged partnerCostSignOffCompleted: true in fieldValues is blocked by beforeMatterOpen
         const forgedOpenRes = await saveMatterRecord(

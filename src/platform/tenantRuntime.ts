@@ -28,6 +28,41 @@ let testDevOverlayOverride: Record<string, unknown> | null | undefined =
   undefined;
 
 const fileJsonCache = new Map<string, Record<string, unknown>>();
+const envOverlayPathCache = new Map<string, string>();
+const EMPTY_JSON_CONFIG: Record<string, unknown> = Object.freeze({});
+/**
+ * Cached validated `TenantConfiguration` shared across requests for the lifetime
+ * of the process. Deep-frozen so callers treat it as strictly read-only.
+ */
+let cachedValidatedTenantConfig: {
+  packageDir: string;
+  env: string;
+  hostingMode: string;
+  value: TenantConfiguration;
+} | null = null;
+let tenantConfigValidationCount = 0;
+
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) {
+    return value;
+  }
+  Object.freeze(value);
+  for (const propValue of Object.values(value as Record<string, unknown>)) {
+    if (propValue && typeof propValue === 'object') {
+      deepFreeze(propValue);
+    }
+  }
+  return value;
+}
+
+export function getTenantConfigValidationCountForTesting(): number {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: getTenantConfigValidationCountForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  return tenantConfigValidationCount;
+}
 
 export function setActiveTenantConfigForTesting(
   baseConfig: Record<string, unknown> | null,
@@ -40,6 +75,7 @@ export function setActiveTenantConfigForTesting(
   }
   testBaseConfigOverride = baseConfig;
   testDevOverlayOverride = devOverlay;
+  cachedValidatedTenantConfig = null;
   cachedHost = null;
   cachedHostKey = null;
   cachedHostLoadErrors = [];
@@ -94,15 +130,22 @@ export function getActiveTenantEnvironmentOverlayPath(
   if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
     return `${folder}/config/environments/${env}.json`;
   }
+  const cacheKey = `${folder}::${env}`;
+  const cachedPath = envOverlayPathCache.get(cacheKey);
+  if (cachedPath) {
+    return cachedPath;
+  }
   const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
   const path = process.getBuiltinModule('node:path') as typeof import('node:path');
   const packageRoot = path.resolve(process.cwd(), folder);
   const envDirCandidate = path.join(packageRoot, 'config', 'environments', `${env}.json`);
   const directCandidate = path.join(packageRoot, 'config', `${env}.json`);
-  if (!fs.existsSync(envDirCandidate) && fs.existsSync(directCandidate)) {
-    return directCandidate;
-  }
-  return envDirCandidate;
+  const resolvedPath =
+    !fs.existsSync(envDirCandidate) && fs.existsSync(directCandidate)
+      ? directCandidate
+      : envDirCandidate;
+  envOverlayPathCache.set(cacheKey, resolvedPath);
+  return resolvedPath;
 }
 
 function readJsonConfigFile(
@@ -121,7 +164,8 @@ function readJsonConfigFile(
   const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
   if (!fs.existsSync(filePath)) {
     if (optional) {
-      return {};
+      fileJsonCache.set(filePath, EMPTY_JSON_CONFIG);
+      return EMPTY_JSON_CONFIG;
     }
     throw new Error(
       `TENANT_CONFIG_ERROR: Tenant configuration file not found at "${filePath}".`,
@@ -481,29 +525,48 @@ export function getPlatformPostgresCluster(): PostgresTenantCluster {
 }
 
 export function getActiveTenantConfiguration(): TenantConfiguration {
+  const packageDir = resolveTenantPackageDir();
   const env =
     (process.env.PLATFORM_ENVIRONMENT as 'dev' | 'test' | 'training' | 'live' | undefined) ??
     'dev';
   const hostingMode =
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
+  if (
+    cachedValidatedTenantConfig &&
+    cachedValidatedTenantConfig.packageDir === packageDir &&
+    cachedValidatedTenantConfig.env === env &&
+    cachedValidatedTenantConfig.hostingMode === hostingMode
+  ) {
+    return cachedValidatedTenantConfig.value;
+  }
   const baseCfg = getActiveTenantRawBaseConfig();
   const isTestEnv = process.env.NODE_ENV === 'test';
   const overlayCfg =
     isTestEnv && testDevOverlayOverride !== undefined
-      ? (testDevOverlayOverride ?? {})
+      ? (testDevOverlayOverride ?? EMPTY_JSON_CONFIG)
       : isTestEnv && testBaseConfigOverride
-        ? {}
+        ? EMPTY_JSON_CONFIG
         : readJsonConfigFile(
             getActiveTenantEnvironmentOverlayPath(env),
             true,
           );
-  return loadAndValidateTenantConfig(
-    baseCfg,
-    overlayCfg,
+  const validated = deepFreeze(
+    loadAndValidateTenantConfig(
+      baseCfg,
+      overlayCfg,
+      env,
+      hostingMode,
+    ),
+  );
+  tenantConfigValidationCount += 1;
+  cachedValidatedTenantConfig = {
+    packageDir,
     env,
     hostingMode,
-  );
+    value: validated,
+  };
+  return validated;
 }
 
 export function resolveCurrentTenantContext(

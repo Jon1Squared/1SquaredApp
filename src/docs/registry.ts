@@ -24,6 +24,7 @@ import { keyDatesOverviewArticle } from './articles/key-dates-overview';
 import { keyDatesRemindersArticle } from './articles/key-dates-reminders';
 import { keyDatesTeamDiaryArticle } from './articles/key-dates-team-diary';
 import { keyDatesVerificationArticle } from './articles/key-dates-verification';
+import { matterOpeningAndRiskArticle } from './articles/matter-opening-and-risk';
 import { mattersEnquiriesTasksNavigationArticle } from './articles/matters-enquiries-tasks-and-navigation';
 import { quickConflictCheck } from './articles/quick-conflict-check';
 import { sharepointDocumentStoreArticle } from './articles/sharepoint-document-store';
@@ -56,6 +57,7 @@ export type DocSectionKey = (typeof DOC_SECTIONS)[number]['key'];
 
 export const ARTICLES: DocArticle[] = [
   aboutDocs,
+  matterOpeningAndRiskArticle,
   mattersEnquiriesTasksNavigationArticle,
   deploymentAndSecurityArticle,
   authenticationRbacAndMfaArticle,

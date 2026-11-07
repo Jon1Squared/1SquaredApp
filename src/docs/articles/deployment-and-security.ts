@@ -6,7 +6,7 @@ export const deploymentAndSecurityArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared isolates every firm’s data in a dedicated database, supports firm-specific customisations without forking the core, and runs identically in 1Squared UK Cloud or your firm’s own Azure subscription.',
-  updated: '2026-11-06',
+  updated: '2026-11-07',
   body: `
 Law firms evaluating practice management platforms traditionally face an uncomfortable compromise between **multi-tenant SaaS** (easy upgrades, but your client and matter records sit in a shared database alongside rival firms) and **bespoke on-premises forks** (isolated infrastructure, but every customisation makes upgrades slow, expensive, and fragile).
 
@@ -38,7 +38,7 @@ Whether you choose 1Squared Hosted Cloud or Self-Hosted Azure, **no two law firm
 
 | Isolation Layer | How 1Squared Protects Your Firm |
 | --- | --- |
-| **Cryptographic Identity & Tenant Resolution** | The active tenant configuration is loaded via \`getActiveTenantConfiguration()\` (from the configured \`PLATFORM_TENANT_PACKAGE_DIR\`), and the request \`TenantContext\` is resolved by \`resolveCurrentTenantContext()\` from the user’s cryptographically verified Microsoft Entra ID (OIDC) session claims. In the transitional Next.js host, \`resolveCurrentTenantContext()\` binds the session to the active tenant configuration’s \`tenantId\` and rejects any mismatched actor or request \`tenantId\` (\`TENANCY_FORGERY_DETECTED\`); in \`@platform/core\`’s \`resolveTenantFromVerifiedToken()\`, \`single_tenant\` mode cross-checks \`configuredSingleTenantId\` against \`verifiedToken.tenantId\` and \`multi_tenant\` mode binds the context to \`verifiedToken.tenantId\`, never trusting a URL parameter, HTTP header, or form field. |
+| **Cryptographic Identity & Tenant Resolution** | The active tenant configuration is loaded via \`getActiveTenantConfiguration()\` (from the configured \`PLATFORM_TENANT_PACKAGE_DIR\`), and the request \`TenantContext\` is resolved by \`resolveCurrentTenantContext()\` from the user’s cryptographically verified Microsoft Entra ID (OIDC) session claims. The tenant configuration is loaded and validated once per process as a read-only cached configuration; a process restart is required to pick up configuration file changes. In the transitional Next.js host, \`resolveCurrentTenantContext()\` binds the session to the active tenant configuration’s \`tenantId\` and rejects any mismatched actor or request \`tenantId\` (\`TENANCY_FORGERY_DETECTED\`); in \`@platform/core\`’s \`resolveTenantFromVerifiedToken()\`, \`single_tenant\` mode cross-checks \`configuredSingleTenantId\` against \`verifiedToken.tenantId\` and \`multi_tenant\` mode binds the context to \`verifiedToken.tenantId\`, never trusting a URL parameter, HTTP header, or form field. |
 | **Dedicated Database per Firm** | Each firm has its own dedicated PostgreSQL database (database-per-tenant isolation) with a strict \`TenantContext\` required on every repository call. |
 | **Database Row-Level Security (RLS)** | Every table also carries a \`tenant_id\` column protected by PostgreSQL \`FORCE ROW LEVEL SECURITY\` bound to \`current_setting('app.current_tenant_id')\`. Even if an application query omitted a filter, the database kernel refuses to return rows without a matching session tenant. |
 | **Dedicated File Storage** | Exports and attachments stored by 1Squared reside in a dedicated Azure Blob Storage container per firm, accessed only through short-lived, tenant-scoped SAS tokens. |

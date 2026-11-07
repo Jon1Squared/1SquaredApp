@@ -334,11 +334,16 @@ export interface MatterRiskSectionSnapshotItem {
   questions: MatterRiskQuestionSnapshotItem[];
 }
 
+export type MatterRiskAssessmentStatus = 'not_started' | 'in_progress' | 'complete';
+
 export interface MatterRiskAssessmentSnapshot {
-  completedAt: string;
-  completedById: string;
-  completedByName: string;
-  overallRisk: RiskLevel;
+  status?: MatterRiskAssessmentStatus;
+  completedAt: string | null;
+  completedById: string | null;
+  completedByName: string | null;
+  leadFeeEarnerId?: string | null;
+  leadFeeEarnerName?: string | null;
+  overallRisk: RiskLevel | null;
   completedQuestions: number;
   totalQuestions: number;
   isMlrInScope: boolean;
@@ -417,19 +422,23 @@ export function buildMatterRiskAssessmentSnapshot(params: {
   answers: Record<string, string>;
   followUps: Record<string, string>;
   customKeyDates?: CustomKeyDateEntry[];
-  completedById: string;
-  completedByName: string;
-  completedAt?: string;
-  fallbackOverallRisk?: RiskLevel;
+  completedById?: string | null;
+  completedByName?: string | null;
+  leadFeeEarnerId?: string | null;
+  leadFeeEarnerName?: string | null;
+  completedAt?: string | null;
+  fallbackOverallRisk?: RiskLevel | null;
 }): MatterRiskAssessmentSnapshot {
   const {
     answers,
     followUps,
     customKeyDates = [],
-    completedById,
-    completedByName,
-    completedAt = new Date().toISOString(),
-    fallbackOverallRisk = 'Low',
+    completedById = null,
+    completedByName = null,
+    leadFeeEarnerId = null,
+    leadFeeEarnerName = null,
+    completedAt,
+    fallbackOverallRisk = null,
   } = params;
 
   const isMlrInScope = answers.inScopeMlr !== 'No, out of scope';
@@ -496,10 +505,24 @@ export function buildMatterRiskAssessmentSnapshot(params: {
     };
   });
 
+  const hasAnsweredAny = highestRisk !== null;
+  const status: MatterRiskAssessmentStatus = !hasAnsweredAny
+    ? 'not_started'
+    : completedQuestions >= totalQuestions && totalQuestions > 0
+      ? 'complete'
+      : 'in_progress';
+
   return {
-    completedAt,
-    completedById,
-    completedByName,
+    status,
+    completedAt: hasAnsweredAny
+      ? completedAt !== undefined
+        ? completedAt
+        : new Date().toISOString()
+      : null,
+    completedById: hasAnsweredAny ? completedById : null,
+    completedByName: hasAnsweredAny ? completedByName : null,
+    leadFeeEarnerId,
+    leadFeeEarnerName,
     overallRisk: highestRisk ?? fallbackOverallRisk,
     completedQuestions,
     totalQuestions,
@@ -511,18 +534,289 @@ export function buildMatterRiskAssessmentSnapshot(params: {
   };
 }
 
+export interface MatterRiskAssessmentInput {
+  answers?: Record<string, string>;
+  followUps?: Record<string, string>;
+  customKeyDates?: CustomKeyDateEntry[];
+}
+
+const MATTER_RISK_QUESTION_BY_ID: ReadonlyMap<string, RiskQuestionDef> = new Map(
+  MATTER_RISK_SECTIONS.flatMap((sec) => sec.questions.map((q) => [q.id, q])),
+);
+
+export type ValidatedMatterRiskAssessmentInput =
+  | {
+      ok: true;
+      hasAnswers: false;
+    }
+  | {
+      ok: true;
+      hasAnswers: true;
+      answers: Record<string, string>;
+      followUps: Record<string, string>;
+      customKeyDates: CustomKeyDateEntry[];
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+export const MAX_RISK_FOLLOW_UP_LENGTH = 2000;
+
+/**
+ * Validates questionnaire answers from the client against `MATTER_RISK_SECTIONS`.
+ * Discards any client-supplied `sections`, `overallRisk`, or scores.
+ */
+export function validateMatterRiskAssessmentInput(
+  rawInput: unknown,
+  fallbackCustomKeyDates: CustomKeyDateEntry[] = [],
+): ValidatedMatterRiskAssessmentInput {
+  if (rawInput === undefined || rawInput === null) {
+    return { ok: true, hasAnswers: false };
+  }
+  if (typeof rawInput !== 'object' || Array.isArray(rawInput)) {
+    return { ok: false, error: 'Risk assessment input must be an object.' };
+  }
+
+  const candidate = rawInput as Record<string, unknown>;
+  const rawAnswers = candidate.answers;
+  const rawFollowUps = candidate.followUps;
+
+  if (rawAnswers === undefined && rawFollowUps === undefined) {
+    return { ok: true, hasAnswers: false };
+  }
+
+  const cleanedAnswers: Record<string, string> = {};
+  if (rawAnswers !== undefined) {
+    if (typeof rawAnswers !== 'object' || rawAnswers === null || Array.isArray(rawAnswers)) {
+      return { ok: false, error: 'Risk assessment answers must be a key-value map.' };
+    }
+    for (const [questionId, rawVal] of Object.entries(rawAnswers as Record<string, unknown>)) {
+      const qDef = MATTER_RISK_QUESTION_BY_ID.get(questionId);
+      if (!qDef) {
+        return {
+          ok: false,
+          error: `Unknown risk assessment question ID "${questionId}".`,
+        };
+      }
+      if (typeof rawVal !== 'string') {
+        return {
+          ok: false,
+          error: `Invalid answer value for risk assessment question "${questionId}".`,
+        };
+      }
+      if (rawVal !== '') {
+        const isAllowedOption = qDef.options.some((opt) => opt.label === rawVal);
+        if (!isAllowedOption) {
+          return {
+            ok: false,
+            error: `Invalid answer "${rawVal}" for risk assessment question "${questionId}".`,
+          };
+        }
+        cleanedAnswers[questionId] = rawVal;
+      }
+    }
+  }
+
+  const cleanedFollowUps: Record<string, string> = {};
+  if (rawFollowUps !== undefined) {
+    if (typeof rawFollowUps !== 'object' || rawFollowUps === null || Array.isArray(rawFollowUps)) {
+      return { ok: false, error: 'Risk assessment follow-ups must be a key-value map.' };
+    }
+    for (const [questionId, rawFollowUp] of Object.entries(
+      rawFollowUps as Record<string, unknown>,
+    )) {
+      const qDef = MATTER_RISK_QUESTION_BY_ID.get(questionId);
+      if (!qDef) {
+        return {
+          ok: false,
+          error: `Unknown risk assessment question ID "${questionId}" in follow-ups.`,
+        };
+      }
+      if (typeof rawFollowUp !== 'string') {
+        return {
+          ok: false,
+          error: `Invalid follow-up value for risk assessment question "${questionId}".`,
+        };
+      }
+      if (rawFollowUp.length > MAX_RISK_FOLLOW_UP_LENGTH) {
+        return {
+          ok: false,
+          error: `Follow-up answer for risk assessment question "${questionId}" exceeds the maximum length of ${MAX_RISK_FOLLOW_UP_LENGTH} characters.`,
+        };
+      }
+      cleanedFollowUps[questionId] = rawFollowUp;
+    }
+  }
+
+  if (Object.keys(cleanedAnswers).length === 0) {
+    return { ok: true, hasAnswers: false };
+  }
+
+  const rawKeyDates = Array.isArray(candidate.customKeyDates)
+    ? candidate.customKeyDates
+    : fallbackCustomKeyDates;
+  const cleanedKeyDates: CustomKeyDateEntry[] = Array.isArray(rawKeyDates)
+    ? rawKeyDates
+        .filter(
+          (d): d is CustomKeyDateEntry =>
+            Boolean(
+              d &&
+                typeof d === 'object' &&
+                typeof (d as CustomKeyDateEntry).date === 'string' &&
+                (d as CustomKeyDateEntry).date.trim().length > 0,
+            ),
+        )
+        .map((d, idx) => ({
+          id:
+            typeof d.id === 'string' && d.id.trim().length > 0
+              ? d.id.trim()
+              : `RISK-DATE-${idx + 1}`,
+          label:
+            typeof d.label === 'string' && d.label.trim().length > 0
+              ? d.label.trim()
+              : 'Imminent deadline / key date',
+          date: d.date.trim(),
+        }))
+    : [];
+
+  return {
+    ok: true,
+    hasAnswers: true,
+    answers: cleanedAnswers,
+    followUps: cleanedFollowUps,
+    customKeyDates: cleanedKeyDates,
+  };
+}
+
+/**
+ * Resolves the `risk_rating` ChoiceValue ID matching a calculated `RiskLevel`.
+ */
+export function resolveRiskRatingIdForLevel(
+  values: ChoiceValue[],
+  level: RiskLevel,
+): string {
+  const target = level.toLowerCase();
+  const match = values.find(
+    (v) =>
+      v.listKey === 'risk_rating' &&
+      v.active &&
+      v.label.toLowerCase().startsWith(target),
+  );
+  return match?.id ?? `risk_rating.${target}`;
+}
+
+export interface MatterRiskSectionSummaryItem extends RiskSectionDef {
+  visibleQuestions: RiskQuestionDef[];
+  totalCount: number;
+  completedCount: number;
+  remainingCount: number;
+  sectionRisk: RiskLevel | null;
+}
+
+export interface MatterRiskAssessmentSummary {
+  snapshot: MatterRiskAssessmentSnapshot;
+  visibleSections: MatterRiskSectionSummaryItem[];
+  totalQuestions: number;
+  completedQuestions: number;
+  remainingQuestions: number;
+  isComplete: boolean;
+  overallRisk: RiskLevel | null;
+}
+
+/**
+ * Shared summary builder used by both the Matter Opening form and server tests
+ * so client and server count completed questions (including the follow-up rule) identically.
+ */
+export function summarizeMatterRiskAssessment(params: {
+  answers: Record<string, string>;
+  followUps: Record<string, string>;
+  customKeyDates?: CustomKeyDateEntry[];
+  completedById?: string | null;
+  completedByName?: string | null;
+  leadFeeEarnerId?: string | null;
+  leadFeeEarnerName?: string | null;
+  completedAt?: string | null;
+}): MatterRiskAssessmentSummary {
+  const snapshot = buildMatterRiskAssessmentSnapshot({
+    answers: params.answers,
+    followUps: params.followUps,
+    customKeyDates: params.customKeyDates ?? [],
+    completedById: params.completedById ?? null,
+    completedByName: params.completedByName ?? null,
+    leadFeeEarnerId: params.leadFeeEarnerId ?? null,
+    leadFeeEarnerName: params.leadFeeEarnerName ?? null,
+    completedAt: params.completedAt,
+    fallbackOverallRisk: null,
+  });
+
+  const visibleSections: MatterRiskSectionSummaryItem[] = snapshot.sections.map((secSnap) => {
+    const def = MATTER_RISK_SECTIONS.find((s) => s.id === secSnap.id)!;
+    const visibleQuestions = def.questions.filter(
+      (q) => !q.amlOnly || snapshot.isMlrInScope,
+    );
+    const remainingCount = secSnap.totalCount - secSnap.completedCount;
+    return {
+      ...def,
+      visibleQuestions,
+      totalCount: secSnap.totalCount,
+      completedCount: secSnap.completedCount,
+      remainingCount,
+      sectionRisk: secSnap.sectionRisk,
+    };
+  });
+
+  const totalQuestions = snapshot.totalQuestions;
+  const completedQuestions = snapshot.completedQuestions;
+  const remainingQuestions = totalQuestions - completedQuestions;
+  const hasAnyAnsweredQuestion = snapshot.sections.some((s) => s.sectionRisk !== null);
+  const overallRisk: RiskLevel | null = hasAnyAnsweredQuestion
+    ? snapshot.overallRisk
+    : null;
+
+  return {
+    snapshot,
+    visibleSections,
+    totalQuestions,
+    completedQuestions,
+    remainingQuestions,
+    isComplete: totalQuestions > 0 && remainingQuestions === 0,
+    overallRisk,
+  };
+}
+
+export type RiskAssessmentPillTone = 'alert' | 'warning' | 'positive' | 'neutral';
+
+export function formatRiskSectionPill(
+  sectionRisk: RiskLevel | null | undefined,
+): { label: string; tone: RiskAssessmentPillTone } {
+  if (sectionRisk === 'High') return { label: 'High risk', tone: 'alert' };
+  if (sectionRisk === 'Medium') return { label: 'Medium risk', tone: 'warning' };
+  if (sectionRisk === 'Low') return { label: 'Low risk', tone: 'positive' };
+  return { label: 'Not assessed', tone: 'neutral' };
+}
+
+export function formatRiskQuestionPill(
+  questionRisk: RiskLevel | null | undefined,
+): { label: string; tone: RiskAssessmentPillTone } {
+  if (questionRisk === 'High') return { label: 'High', tone: 'alert' };
+  if (questionRisk === 'Medium') return { label: 'Medium', tone: 'warning' };
+  if (questionRisk === 'Low') return { label: 'Low', tone: 'positive' };
+  return { label: 'Unanswered', tone: 'neutral' };
+}
+
 /**
  * Resolves the Matter Risk Assessment snapshot for a Matter.
  * Uses the immutable saved snapshot on `matter.fieldValues.riskAssessment` if present,
- * or constructs a complete fallback snapshot for seeded/existing matters.
+ * or constructs an empty (`not_started`) snapshot when no answers have been recorded.
  */
 export function resolveMatterRiskAssessment(
   matter: Matter,
   people: Person[],
-  values: ChoiceValue[],
+  _values: ChoiceValue[],
 ): MatterRiskAssessmentSnapshot {
   const nameOf = (id: string | null | undefined) => {
-    if (!id) return 'Fee earner';
+    if (!id) return null;
     const p = people.find((x) => x.id === id);
     return p ? personDisplayName(p) : id;
   };
@@ -539,23 +833,45 @@ export function resolveMatterRiskAssessment(
     ? (matter.fieldValues['customKeyDates'] as CustomKeyDateEntry[])
     : [];
 
-  const riskLabel = resolveLabel(values, matter.riskRatingId);
-  const fallbackRisk: RiskLevel = riskLabel.toLowerCase().includes('high')
-    ? 'High'
-    : riskLabel.toLowerCase().includes('low')
-      ? 'Low'
-      : 'Medium';
+  const leadFeeEarnerId =
+    saved?.leadFeeEarnerId !== undefined
+      ? saved.leadFeeEarnerId
+      : matter.leadFeeEarnerId || null;
+  const leadFeeEarnerName =
+    saved?.leadFeeEarnerName !== undefined
+      ? saved.leadFeeEarnerName
+      : nameOf(leadFeeEarnerId);
+
+  const hasSavedAnswers = Boolean(
+    saved?.answers && Object.keys(saved.answers).length > 0,
+  );
 
   if (saved && Array.isArray(saved.sections) && saved.sections.length > 0) {
+    const completedQuestions = saved.completedQuestions ?? 0;
+    const totalQuestions = saved.totalQuestions ?? 0;
+    const hasAssessmentActivity = hasSavedAnswers || completedQuestions > 0;
+    const status: MatterRiskAssessmentStatus = !hasAssessmentActivity
+      ? 'not_started'
+      : completedQuestions >= totalQuestions && totalQuestions > 0
+        ? 'complete'
+        : 'in_progress';
+
     return {
-      completedAt: saved.completedAt || matter.openedAt || matter.createdAt,
-      completedById: saved.completedById || matter.leadFeeEarnerId || matter.createdById,
-      completedByName:
-        saved.completedByName ||
-        nameOf(matter.leadFeeEarnerId || matter.createdById),
-      overallRisk: saved.overallRisk || fallbackRisk,
-      completedQuestions: saved.completedQuestions ?? 0,
-      totalQuestions: saved.totalQuestions ?? 0,
+      status,
+      completedAt: hasAssessmentActivity
+        ? saved.completedAt || matter.openedAt || matter.createdAt || null
+        : null,
+      completedById: hasAssessmentActivity
+        ? saved.completedById || matter.createdById || null
+        : null,
+      completedByName: hasAssessmentActivity
+        ? saved.completedByName || nameOf(saved.completedById || matter.createdById)
+        : null,
+      leadFeeEarnerId,
+      leadFeeEarnerName,
+      overallRisk: hasAssessmentActivity ? (saved.overallRisk ?? null) : null,
+      completedQuestions,
+      totalQuestions,
       isMlrInScope: saved.isMlrInScope ?? true,
       answers: saved.answers ?? {},
       followUps: saved.followUps ?? {},
@@ -564,69 +880,22 @@ export function resolveMatterRiskAssessment(
     };
   }
 
-  const hasSavedAnswers =
-    saved?.answers && Object.keys(saved.answers).length > 0;
-
-  const defaultSeedAnswers: Record<string, string> = {
-    inScopeMlr: 'Yes, in scope',
-    instructionMakesSense: 'Yes',
-    moveMoneyWithoutTransaction: 'No',
-    clientRelationshipStatus: 'Existing, CDD current',
-    clientDealingMethod: 'Met in person',
-    complexOwnershipStructure: 'No',
-    thirdPartyInstructions: 'No',
-    highRiskJurisdictionLink: 'No',
-    crossBorderFundsOrAssets: 'No',
-    holdClientMoney: 'Yes, below firm threshold',
-    matterFundingSource: 'The client',
-    sourceOfFundsUnderstood: 'Yes',
-    unusualPaymentRequests: 'No',
-    regularTeamWork: 'Yes',
-    capacityAndSupervision: 'Yes',
-    imminentDeadlines: matter.targetCompletionAt ? 'Yes' : 'No',
-    feeBasis: resolveLabel(values, matter.billingBasisId).toLowerCase().includes('fixed')
-      ? 'Fixed fee'
-      : 'Hourly',
-    moneyOnAccountRequested: 'Yes',
-    valueOrExposure: fallbackRisk === 'High' ? 'Unusually high' : 'Within normal range',
-    limitationOfLiabilityProposed: 'No',
-    reputationOrEthicalConcerns: 'No',
-    sensitiveSectorOrMedia: 'No',
-    specialCategoryDataOrConfidentiality: 'No',
-  };
-
-  const defaultSeedFollowUps: Record<string, string> =
-    fallbackRisk === 'High'
-      ? {
-          valueOrExposure:
-            'High-value commercial instruction reviewed and approved by supervising partner.',
-        }
-      : {};
-
-  const effectiveKeyDates =
-    savedKeyDates.length > 0
-      ? savedKeyDates
-      : matter.targetCompletionAt
-        ? [
-            {
-              id: 'kd-target',
-              label: 'Target completion / key date',
-              date: matter.targetCompletionAt,
-            },
-          ]
-        : [];
-
   return buildMatterRiskAssessmentSnapshot({
-    answers: hasSavedAnswers ? saved!.answers! : defaultSeedAnswers,
-    followUps: saved?.followUps ?? defaultSeedFollowUps,
-    customKeyDates: effectiveKeyDates,
-    completedById:
-      saved?.completedById || matter.leadFeeEarnerId || matter.createdById,
-    completedByName:
-      saved?.completedByName ||
-      nameOf(matter.leadFeeEarnerId || matter.createdById),
-    completedAt: saved?.completedAt || matter.openedAt || matter.createdAt,
-    fallbackOverallRisk: saved?.overallRisk || fallbackRisk,
+    answers: hasSavedAnswers ? saved!.answers! : {},
+    followUps: hasSavedAnswers ? (saved?.followUps ?? {}) : {},
+    customKeyDates: saved?.customKeyDates ?? savedKeyDates,
+    completedById: hasSavedAnswers
+      ? saved?.completedById || matter.createdById || null
+      : null,
+    completedByName: hasSavedAnswers
+      ? saved?.completedByName || nameOf(saved?.completedById || matter.createdById)
+      : null,
+    leadFeeEarnerId,
+    leadFeeEarnerName,
+    completedAt: hasSavedAnswers
+      ? saved?.completedAt || matter.openedAt || matter.createdAt || null
+      : null,
+    fallbackOverallRisk: hasSavedAnswers ? (saved?.overallRisk ?? null) : null,
   });
 }
 
@@ -823,6 +1092,14 @@ export function resolveMatterConflictCheckRecord(
 /**
  * Resolves or constructs the immutable MatterOpeningSnapshot for a Matter.
  */
+export interface MatterOpeningSnapshotPrecomputed {
+  riskAssessment?: MatterRiskAssessmentSnapshot;
+  conflictCheckRecord?: ConflictCheckRecord;
+  nameMap?: ReadonlyMap<string, string>;
+  sourceEnquiry?: Enquiry | null;
+  sourceQuote?: Quote | null;
+}
+
 export function resolveMatterOpeningSnapshot(
   matter: Matter,
   people: Person[],
@@ -830,6 +1107,7 @@ export function resolveMatterOpeningSnapshot(
   values: ChoiceValue[],
   enquiries: Enquiry[] = [],
   quotes: Quote[] = [],
+  precomputed?: MatterOpeningSnapshotPrecomputed,
 ): MatterOpeningSnapshot {
   const existingSnap = matter.fieldValues?.['matterOpeningSnapshot'] as
     | MatterOpeningSnapshot
@@ -845,9 +1123,15 @@ export function resolveMatterOpeningSnapshot(
     };
   }
 
-  const nameMap = new Map<string, string>();
-  for (const o of organisations) nameMap.set(o.id, o.legalName);
-  for (const p of people) nameMap.set(p.id, personDisplayName(p));
+  let nameMap: ReadonlyMap<string, string>;
+  if (precomputed?.nameMap) {
+    nameMap = precomputed.nameMap;
+  } else {
+    const builtMap = new Map<string, string>();
+    for (const o of organisations) builtMap.set(o.id, o.legalName);
+    for (const p of people) builtMap.set(p.id, personDisplayName(p));
+    nameMap = builtMap;
+  }
 
   const allClientIds = Array.from(
     new Set([matter.clientId, ...(matter.additionalClientIds ?? [])].filter(Boolean)),
@@ -875,22 +1159,32 @@ export function resolveMatterOpeningSnapshot(
     };
   });
 
-  const sourceEnq = matter.sourceEnquiryId
-    ? enquiries.find((e) => e.id === matter.sourceEnquiryId)
-    : enquiries.find((e) => e.convertedMatterId === matter.id);
-  const sourceQte = matter.sourceQuoteId
-    ? quotes.find((q) => q.id === matter.sourceQuoteId)
-    : quotes.find((q) => q.convertedMatterId === matter.id);
+  const sourceEnq =
+    precomputed?.sourceEnquiry !== undefined
+      ? precomputed.sourceEnquiry
+      : matter.sourceEnquiryId
+        ? enquiries.find((e) => e.id === matter.sourceEnquiryId)
+        : enquiries.find((e) => e.convertedMatterId === matter.id);
+  const sourceQte =
+    precomputed?.sourceQuote !== undefined
+      ? precomputed.sourceQuote
+      : matter.sourceQuoteId
+        ? quotes.find((q) => q.id === matter.sourceQuoteId)
+        : quotes.find((q) => q.convertedMatterId === matter.id);
 
   const customRoles =
     (matter.fieldValues?.['teamMemberRoles'] as Record<string, string> | undefined) ?? {};
 
-  const riskAssessment = resolveMatterRiskAssessment(matter, people, values);
-  const conflictCheckRecord = resolveMatterConflictCheckRecord(
-    matter,
-    people,
-    organisations,
-  );
+  const riskAssessment =
+    precomputed?.riskAssessment ??
+    resolveMatterRiskAssessment(matter, people, values);
+  const conflictCheckRecord =
+    precomputed?.conflictCheckRecord ??
+    resolveMatterConflictCheckRecord(
+      matter,
+      people,
+      organisations,
+    );
 
   const reservedKeys = new Set([
     'riskAssessment',
@@ -1261,7 +1555,7 @@ export function buildMatterOpeningPdfLines(snap: MatterOpeningSnapshot): PdfLine
 
   // Section 2: Matter Risk Assessment
   lines.push({
-    text: `2. MATTER RISK ASSESSMENT (Overall Risk: ${snap.riskAssessment.overallRisk} | ${snap.riskAssessment.completedQuestions}/${snap.riskAssessment.totalQuestions} Completed)`,
+    text: `2. MATTER RISK ASSESSMENT (Overall Risk: ${snap.riskAssessment.overallRisk ?? 'Not assessed'} | ${snap.riskAssessment.completedQuestions}/${snap.riskAssessment.totalQuestions} Completed)`,
     bold: true,
     size: 10.5,
     spacingBefore: 8,
@@ -1269,14 +1563,14 @@ export function buildMatterOpeningPdfLines(snap: MatterOpeningSnapshot): PdfLine
     ruleBelow: true,
   });
   lines.push({
-    text: `Assessed by: ${snap.riskAssessment.completedByName}   |   MLR In Scope: ${snap.riskAssessment.isMlrInScope ? 'Yes, in scope' : 'No, out of scope'}`,
+    text: `Assessed by: ${snap.riskAssessment.completedByName ?? 'Not yet assessed'}${snap.riskAssessment.leadFeeEarnerName ? `   |   Lead Fee Earner: ${snap.riskAssessment.leadFeeEarnerName}` : ''}   |   MLR In Scope: ${snap.riskAssessment.isMlrInScope ? 'Yes, in scope' : 'No, out of scope'}`,
     size: 9,
     spacingAfter: 2,
   });
 
   for (const sec of snap.riskAssessment.sections) {
     lines.push({
-      text: `Section ${sec.number}: ${sec.title} [Section Risk: ${sec.sectionRisk || 'Low'}]`,
+      text: `Section ${sec.number}: ${sec.title} [Section Risk: ${sec.sectionRisk || 'Not assessed'}]`,
       bold: true,
       size: 9.5,
       spacingBefore: 4,
@@ -1551,14 +1845,14 @@ export function downloadRiskAssessmentPdf(
       spacingAfter: 2,
     },
     {
-      text: `Overall Risk: ${ra.overallRisk}   |   Completed: ${ra.completedQuestions}/${ra.totalQuestions} questions   |   Assessed by: ${ra.completedByName}`,
+      text: `Overall Risk: ${ra.overallRisk ?? 'Not assessed'}   |   Completed: ${ra.completedQuestions}/${ra.totalQuestions} questions   |   Assessed by: ${ra.completedByName ?? 'Not yet assessed'}${ra.leadFeeEarnerName ? `   |   Lead Fee Earner: ${ra.leadFeeEarnerName}` : ''}`,
       size: 9,
       spacingAfter: 4,
       ruleBelow: true,
     },
     ...ra.sections.flatMap((sec) => [
       {
-        text: `Section ${sec.number}: ${sec.title} [Section Risk: ${sec.sectionRisk || 'Low'}]`,
+        text: `Section ${sec.number}: ${sec.title} [Section Risk: ${sec.sectionRisk || 'Not assessed'}]`,
         bold: true,
         size: 10,
         spacingBefore: 5,
