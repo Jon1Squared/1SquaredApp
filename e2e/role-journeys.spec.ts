@@ -312,6 +312,7 @@ test.describe('S0-27: Role journey smoke tests (8 seeded roles)', () => {
   });
 
   test.describe('4. Enquiries coordinator (P-000042 — Lowri Ellis)', () => {
+    test.describe.configure({ mode: 'serial' });
     const actor = findActor('enquiries_coordinator');
     test.use({ storageState: storageStatePathFor(actor.stateKey) });
 
