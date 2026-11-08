@@ -277,8 +277,8 @@ export function MatterFormClient({
   canSignOffCosts = false,
   initialSignOffEstimateGbp = null,
   suggestedMatterGovernanceAssignees,
-  enableAiMatterExtraction = true,
-  aiProviderChoice = 'anthropic',
+  enableAiMatterExtraction = false,
+  aiProviderChoice = 'disabled',
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();

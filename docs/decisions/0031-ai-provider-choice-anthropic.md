@@ -25,7 +25,7 @@ Under the Platform Architecture Standard (sections 3, 10, and 12), tenant config
    ```
 
    - The default remains `'disabled'` (backward compatible under architecture rule 7).
-   - `'azure_openai_uk'` remains reserved in the schema for a UK-resident Azure OpenAI adapter (`x-reserved` until wired).
+   - `'azure_openai_uk'` remains in the schema enum for a future UK-resident Azure OpenAI adapter (rejected at runtime by `POST /api/matters/extract` with `403 AI_EXTRACTION_DISABLED` until that adapter is wired).
 
 2. **Runtime enforcement on `/api/matters/extract` and UI.**
    - AI matter extraction runs **only** when `featureFlags.enableAiMatterExtraction === true` **and** `integrations.aiProviderChoice === 'anthropic'`.

@@ -305,6 +305,139 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     expect(noContactCreateData.extraction.instructingContact?.matchedPersonId).toBeUndefined();
     expect(getStore().organisations.length).toBe(orgCountBeforeNoContactCreate);
     expect(getStore().people.length).toBe(peopleCountBeforeNoContactCreate);
+
+    // R263 (3): When both the organisation and the contact already exist in the CRM, lacking contact:create prevents linking them
+    clearMatterExtractionCacheForTesting();
+    const existingOrg = getStore().organisations[0]!;
+    const unlinkedPerson = {
+      ...structuredClone(getStore().people.find((p) => !p.isEmployee)!),
+      id: 'P-UNLINKED-EXT-01',
+      firstName: 'Nerys',
+      surname: 'UnlinkedContact',
+      isEmployee: false,
+      emails: [
+        {
+          id: 'em-unlinked-1',
+          address: 'nerys.unlinked@notalawfirm.example',
+          typeId: 'email_type.work',
+          isPrimary: true,
+        },
+      ],
+    };
+    getStore().people.push(unlinkedPerson);
+    const linksBeforeExistingMatch = getStore().links.length;
+
+    globalThis.fetch = mockAnthropicSuccessResponse({
+      client: {
+        type: 'Company',
+        name: { value: existingOrg.legalName, source: ['instruction.eml'] },
+        company_number: { value: existingOrg.companyNumber || '', source: ['instruction.eml'] },
+        instructing_contact: {
+          name: 'Nerys UnlinkedContact',
+          jobTitle: 'General Counsel',
+          email: 'nerys.unlinked@notalawfirm.example',
+          source: ['instruction.eml'],
+        },
+      },
+    }) as unknown as typeof fetch;
+
+    const existingWithoutCreateRes = await matterExtractPost(
+      buildExtractRequest('Third instruction matching existing org and unlinked contact without contact:create.'),
+    );
+    expect(existingWithoutCreateRes.status).toBe(200);
+    const existingWithoutCreateData = (await existingWithoutCreateRes.json()) as {
+      extraction: {
+        client?: { matchedRecordId?: string; createdNewRecord?: boolean };
+        instructingContact?: { matchedPersonId?: string; createdNewRecord?: boolean };
+      };
+      links: Array<{ id: string; personId: string; organisationId: string }>;
+    };
+    expect(existingWithoutCreateData.extraction.client?.matchedRecordId).toBe(existingOrg.id);
+    expect(existingWithoutCreateData.extraction.instructingContact?.matchedPersonId).toBe(
+      unlinkedPerson.id,
+    );
+    expect(existingWithoutCreateData.links).toEqual([]);
+    expect(getStore().links.length).toBe(linksBeforeExistingMatch);
+    expect(
+      getStore().links.some(
+        (l) => l.personId === unlinkedPerson.id && l.organisationId === existingOrg.id,
+      ),
+    ).toBe(false);
+  });
+
+  it('excludes a person created from a hidden enquiry from CRM matching and the response (R263)', async () => {
+    const store = getStore();
+    // Create a private Draft enquiry owned by P-000001 (hidden from P-000002) and a person created from it
+    const hiddenEnq = {
+      ...structuredClone(store.enquiries[0]!),
+      id: 'ENQ-HIDDEN-S006',
+      reference: 'ENQ-HIDDEN-S006',
+      status: 'Draft' as const,
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      assignedToId: null,
+      assignedTeamId: null,
+      firstName: 'Idris',
+      lastName: 'HiddenEnquirer',
+    };
+    const hiddenEnqPerson = {
+      ...structuredClone(store.people.find((p) => !p.isEmployee)!),
+      id: 'P-HIDDEN-ENQ-S006',
+      firstName: 'Idris',
+      surname: 'HiddenEnquirer',
+      isEmployee: false,
+      createdFromEnquiryId: hiddenEnq.id,
+      emails: [
+        {
+          id: 'em-hidden-s006',
+          address: 'idris.hidden@notalawfirm.example',
+          typeId: 'email_type.personal',
+          isPrimary: true,
+        },
+      ],
+    };
+    store.enquiries.push(hiddenEnq);
+    store.people.push(hiddenEnqPerson);
+
+    globalThis.fetch = mockAnthropicSuccessResponse({
+      matters: [
+        {
+          matter_ref: 'Matter A',
+          title: { value: 'ET Claim Defence', source: ['instruction.eml'] },
+          work_type: 'Employment & HR',
+          sub_type: 'Employment Tribunal',
+          description: { value: 'Employment tribunal defence', source: ['instruction.eml'] },
+          other_parties_for_conflict_check: [
+            {
+              name: 'Idris HiddenEnquirer',
+              entity_type: 'person',
+              role: 'Claimant',
+              relationship_code: 'OP',
+              source: ['instruction.eml'],
+            },
+          ],
+        },
+      ],
+    }) as unknown as typeof fetch;
+
+    const res = await matterExtractPost(
+      buildExtractRequest('Instruction naming Idris HiddenEnquirer from a hidden enquiry.'),
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      extraction: {
+        otherParties?: Array<{ name: string; matchedRecordId?: string }>;
+        matters?: Array<{ otherParties?: Array<{ name: string; matchedRecordId?: string }> }>;
+      };
+      people: Array<{ id: string }>;
+    };
+
+    expect(data.people.some((p) => p.id === hiddenEnqPerson.id)).toBe(false);
+    const allParties = [
+      ...(data.extraction.otherParties ?? []),
+      ...(data.extraction.matters ?? []).flatMap((m) => m.otherParties ?? []),
+    ];
+    expect(allParties.some((pt) => pt.matchedRecordId === hiddenEnqPerson.id)).toBe(false);
   });
 
   it('labels local fallback provenance as local-fallback and hides internal error messages on 500', async () => {
@@ -393,12 +526,33 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
 
     const sharedDocText = 'Identical uploaded document text across two tenants.';
 
-    // 1. Tenant A ('not-a-law-firm') runs extraction
+    // 1. Tenant A ('not-a-law-firm'), User 1 ('P-000002') runs extraction -> cache miss (call 1), repeat call -> cache hit
     const resA = await matterExtractPost(buildExtractRequest(sharedDocText));
     expect(resA.status).toBe(200);
     const dataA = (await resA.json()) as { extraction: { summary: string } };
     expect(dataA.extraction.summary).toBe('Tenant A Matter Title');
     expect(anthropicCalls).toBe(1);
+
+    const resARepeat = await matterExtractPost(buildExtractRequest(sharedDocText));
+    expect(resARepeat.status).toBe(200);
+    expect(anthropicCalls).toBe(1);
+
+    // 1b. R263 (1): Same tenant ('not-a-law-firm'), different user ('P-000001') -> cache miss
+    setTestEntraSessionOverride({
+      ...FEE_EARNER_SESSION,
+      personId: 'P-000001',
+      oid: '00000000-0000-4000-8000-000000000001',
+      sub: 'P-000001',
+      email: 'carys.hughes@notalawfirm.example',
+      displayName: 'Carys Hughes',
+      entraRoles: ['partner'],
+      mappedRoles: ['partner'],
+    });
+    const resDifferentUserSameTenant = await matterExtractPost(
+      buildExtractRequest(sharedDocText),
+    );
+    expect(resDifferentUserSameTenant.status).toBe(200);
+    expect(anthropicCalls).toBe(2);
 
     // 2. Forged tenant claim ('pembroke-vaughan' while active tenant is 'not-a-law-firm') is rejected
     setTestEntraSessionOverride({
@@ -408,7 +562,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     await expect(
       matterExtractPost(buildExtractRequest(sharedDocText)),
     ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
-    expect(anthropicCalls).toBe(1);
+    expect(anthropicCalls).toBe(2);
 
     // 3. Switch active tenant to Tenant B ('pembroke-vaughan') and sign in as Tenant B -> cache miss (never returns Tenant A's result)
     setActiveTenantConfigForTesting(null, {
@@ -423,6 +577,6 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     expect(resB.status).toBe(200);
     const dataB = (await resB.json()) as { extraction: { summary: string } };
     expect(dataB.extraction.summary).toBe('Tenant B Matter Title');
-    expect(anthropicCalls).toBe(2);
+    expect(anthropicCalls).toBe(3);
   });
 });
