@@ -3955,6 +3955,7 @@ export async function saveMatterRecord(
       people: allPeopleWithPending,
       organisations: allOrganisationsWithPending,
       links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
     },
@@ -4979,6 +4980,7 @@ export function runMatterConflictSearchRecord(
       people: store.people,
       organisations: store.organisations,
       links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
     },
@@ -5158,6 +5160,7 @@ export function updateMatterConflictRecord(
       people: store.people,
       organisations: store.organisations,
       links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
     },
@@ -7233,6 +7236,7 @@ export function saveEnquiryRecord(
       excludeEnquiryId: existing?.id ?? null,
       links: store.links,
       canViewMatter: visibility.canViewMatter,
+      tenantId: getActiveTenantConfiguration().tenantId,
     },
   );
 
@@ -7337,7 +7341,7 @@ export function saveEnquiryRecord(
     writeAudit(store, {
       recordType: 'enquiry',
       recordId: draftEnquiry.id,
-      action: 'duplicate',
+      action: 'conflict-decision',
       field: 'Quick conflict check recorded',
       oldValue: null,
       newValue: conflictAuditSummary,
@@ -7480,7 +7484,7 @@ export function saveEnquiryRecord(
   writeAudit(store, {
     recordType: 'enquiry',
     recordId: enquiry.id,
-    action: 'duplicate',
+    action: 'conflict-decision',
     field: 'Quick conflict check recorded',
     oldValue: null,
     newValue: conflictAuditSummary,
@@ -8061,6 +8065,7 @@ export function prepareEnquiryConversion(
     enq.id,
     store.links,
     visibility.canViewMatter,
+    getActiveTenantConfiguration().tenantId,
   );
 
   const redactRestrictedMatterReasons = (rawReasons: string[]): string[] => {
@@ -11190,6 +11195,7 @@ export function prepareQuoteConversionRecord(
   ok: boolean;
   conflictBlocked?: boolean;
   conflictReasons?: string[];
+  conflictWarnings?: string[];
   clientId?: string;
   instructingContactId?: string | null;
   quoteId?: string;
@@ -11317,6 +11323,7 @@ export function prepareQuoteConversionRecord(
       people: store.people,
       organisations: store.organisations,
       links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
     },
@@ -11359,12 +11366,24 @@ export function prepareQuoteConversionRecord(
     quote.linkedEnquiryId ?? null,
     store.links,
     visibility.canViewMatter,
+    getActiveTenantConfiguration().tenantId,
   );
 
   const hasRestrictedMatch = hasUnapprovedRestrictedMatches(reconciledMatches, []);
+  const clientOrgNameLower = clientOrgName.trim().toLowerCase();
+  const matchedOrgByName =
+    !existingOrg && clientOrgNameLower
+      ? store.organisations.find(
+          (o) =>
+            !o.mergedIntoId &&
+            (o.legalName.trim().toLowerCase() === clientOrgNameLower ||
+              o.otherNames.some((n) => n.name.trim().toLowerCase() === clientOrgNameLower)),
+        )
+      : undefined;
+  const orgForConflictStatusCheck = existingOrg ?? matchedOrgByName;
   const existingOrgDeclined = Boolean(
-    existingOrg &&
-      existingOrg.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
+    orgForConflictStatusCheck &&
+      orgForConflictStatusCheck.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
   );
   const isConflictBlocked =
     existingOrgDeclined ||
@@ -11583,6 +11602,9 @@ export function prepareQuoteConversionRecord(
 
   const clientId = orgId || personId || '';
   const instructingContactId = orgId ? personId : personId;
+  const conflictWarnings = prelimConflicts.allConflicts
+    .filter((h) => !h.blocking && h.severity !== 'high')
+    .map((h) => h.reason);
 
   return {
     ok: true,
@@ -11590,6 +11612,7 @@ export function prepareQuoteConversionRecord(
     instructingContactId,
     quoteId: quote.id,
     enquiryId: quote.linkedEnquiryId,
+    ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
   };
 }
 

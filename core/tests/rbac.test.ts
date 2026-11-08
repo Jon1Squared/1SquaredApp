@@ -159,10 +159,12 @@ import {
   updateTenantRbacConfigAction,
   updateWorkTypeProfilesAction,
 } from '../../src/app/actions';
+import crypto from 'node:crypto';
 import { isActionDenied } from '../../src/domain/actionResult';
 import {
   buildEffectiveConflictParties,
   CONFLICT_SEARCHED_SOURCES,
+  redactRecordId,
   searchMatterConflicts,
 } from '../../src/domain/matterConflicts';
 import {
@@ -4003,6 +4005,37 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const amberConv = prepareQuoteConversionRecord(amberQuote.id, 'P-000001');
         expect(amberConv.ok).toBe(true);
         expect(amberConv.conflictBlocked).toBeFalsy();
+        expect(amberConv.conflictWarnings?.length).toBeGreaterThan(0);
+        expect(amberConv.conflictWarnings?.[0]).toContain('linked to');
+        const amberAudit = store.audit.find(
+          (a) =>
+            a.recordType === 'quote' &&
+            a.recordId === amberQuote.id &&
+            a.action === 'conflict-decision',
+        );
+        expect(amberAudit).toBeDefined();
+        expect(amberAudit?.newValue).toContain('Potential conflict');
+
+        // 2e. R293: A quote matching a declined organisation by name (without linkedOrganisationId) is also blocked
+        const declinedByNameQuote = saveQuoteRecord(
+          {
+            clientType: 'prospect',
+            prospectName: 'Dafydd NameMatch',
+            prospectOrganisationName: 'Declined Existing Org Ltd',
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            scope: 'Quote matching declined org by name',
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 1900,
+          },
+          { byId: 'P-000001' },
+        ).quote!;
+        const declinedByNameConv = prepareQuoteConversionRecord(
+          declinedByNameQuote.id,
+          'P-000001',
+        );
+        expect(declinedByNameConv.ok).toBe(false);
+        expect(declinedByNameConv.conflictBlocked).toBe(true);
+        expect((declinedByNameConv.conflictReasons ?? []).join(' ')).toMatch(/declined/i);
 
         // 3. Enquiry conversion for a new business also records conflictDecision and audit entry
         const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
@@ -4296,13 +4329,82 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000002', asDraft: false },
         );
         const blockedEnq = blockedEnqRes.enquiry!;
-        // R256 & R257: saveEnquiryRecord stores a redacted restricted hit in conflictSnapshot with an opaque hash recordId
+        // R280 (R258 follow-up): Quick conflict check recorded audit entry uses action 'conflict-decision' in both main and draft paths
+        const mainQuickAudit = store.audit.find(
+          (a) =>
+            a.recordType === 'enquiry' &&
+            a.recordId === blockedEnq.id &&
+            a.field === 'Quick conflict check recorded',
+        );
+        expect(mainQuickAudit).toBeDefined();
+        expect(mainQuickAudit?.action).toBe('conflict-decision');
+
+        const draftCheckEnq = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Draft',
+            lastName: 'AuditCaller',
+            practiceAreaId: baseMatter.practiceAreaId,
+            summary: 'Draft enquiry conflict audit test',
+            urgencyId: templateEnq.urgencyId,
+          },
+          { byId: 'P-000002', asDraft: true },
+        ).enquiry!;
+        const draftQuickAudit = store.audit.find(
+          (a) =>
+            a.recordType === 'enquiry' &&
+            a.recordId === draftCheckEnq.id &&
+            a.field === 'Quick conflict check recorded',
+        );
+        expect(draftQuickAudit).toBeDefined();
+        expect(draftQuickAudit?.action).toBe('conflict-decision');
+
+        // R256, R257 & R290: saveEnquiryRecord stores a redacted restricted hit in conflictSnapshot with a tenant-salted SHA-256 recordId
         expect(blockedEnq.conflictSnapshot).toBeDefined();
         const redactedSnapshotHit = blockedEnq.conflictSnapshot!.conflicts.find(
           (h) => h.name === 'Restricted matter',
         );
         expect(redactedSnapshotHit).toBeDefined();
-        expect(redactedSnapshotHit!.recordId).toMatch(/^restricted-[0-9a-f]{8}$/);
+        expect(redactedSnapshotHit!.recordId).toMatch(/^restricted-[0-9a-f]{16}$/);
+        const expectedSha256Prefix = crypto
+          .createHash('sha256')
+          .update(`not-a-law-firm:${restrictedMatter.id}`)
+          .digest('hex')
+          .slice(0, 16);
+        expect(redactRecordId('not-a-law-firm', restrictedMatter.id)).toBe(expectedSha256Prefix);
+        expect(redactedSnapshotHit!.recordId).toBe(`restricted-${expectedSha256Prefix}`);
+        expect(redactRecordId('not-a-law-firm', restrictedMatter.id)).not.toBe(
+          redactRecordId('pembroke-vaughan', restrictedMatter.id),
+        );
+        const searchTenantA = runEnquiryConflictSearch(
+          { callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd' },
+          store.people,
+          store.organisations,
+          store.matters,
+          store.values,
+          [],
+          null,
+          store.links,
+          () => false,
+          'not-a-law-firm',
+        );
+        const searchTenantB = runEnquiryConflictSearch(
+          { callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd' },
+          store.people,
+          store.organisations,
+          store.matters,
+          store.values,
+          [],
+          null,
+          store.links,
+          () => false,
+          'pembroke-vaughan',
+        );
+        expect(searchTenantA.allConflicts[0]?.recordId).toMatch(/^restricted-[0-9a-f]{16}$/);
+        expect(searchTenantB.allConflicts[0]?.recordId).toMatch(/^restricted-[0-9a-f]{16}$/);
+        expect(searchTenantA.allConflicts[0]?.recordId).not.toBe(
+          searchTenantB.allConflicts[0]?.recordId,
+        );
         expect(redactedSnapshotHit!.recordId).not.toContain(restrictedMatter.id);
         expect(JSON.stringify(blockedEnq.conflictSnapshot)).not.toContain(restrictedMatter.id);
         expect(JSON.stringify(blockedEnq.conflictSnapshot)).not.toContain(

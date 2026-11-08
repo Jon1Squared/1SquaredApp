@@ -13,7 +13,7 @@ import {
   type DuplicateReason,
 } from './duplicates';
 import { resolveLabel } from './lists';
-import { CONFLICT_SEARCHED_SOURCES } from './matterConflicts';
+import { CONFLICT_SEARCHED_SOURCES, redactRecordId } from './matterConflicts';
 import { personDisplayName } from './names';
 import {
   extractEmailDomain,
@@ -464,6 +464,7 @@ export function runEnquiryConflictSearch(
   excludeEnquiryId?: string | null,
   links: PersonOrganisationLink[] = [],
   canViewMatter?: (matter: Matter) => boolean,
+  tenantId = 'default-tenant',
 ): {
   otherPartyClientMatches: ConflictHit[];
   clientAgainstPartyMatches: ConflictHit[];
@@ -801,15 +802,6 @@ export function runEnquiryConflictSearch(
     }
   }
 
-function redactEnquiryMatterIdHash(input: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
-}
-
   // 3. Check if caller, callingOnBehalfOf, or otherPartiesNamed is an adverse/counterparty or instructing/billing contact on a matter
   const isRestrictedMatter = (m: Matter): boolean =>
     canViewMatter ? !canViewMatter(m) : Boolean(m.isStaffMatter || m.hasEthicalWall);
@@ -836,7 +828,7 @@ function redactEnquiryMatterIdHash(input: string): string {
       ? 'Restricted matter'
       : `${m.matterNumber} — ${m.title}`;
     const matterHref = restricted ? '' : `/matters/${m.id}`;
-    const matterHitId = restricted ? `restricted-${redactEnquiryMatterIdHash(m.id)}` : m.id;
+    const matterHitId = restricted ? `restricted-${redactRecordId(tenantId, m.id)}` : m.id;
 
     for (const party of m.parties) {
       const roleLower = party.role.toLowerCase();
@@ -1597,6 +1589,7 @@ export function computeEnquiryConflictSnapshot(
     excludeEnquiryId?: string | null;
     links?: PersonOrganisationLink[];
     canViewMatter?: (matter: Matter) => boolean;
+    tenantId?: string;
   },
 ): EnquiryConflictSnapshot {
   const searchedInput = {
@@ -1638,6 +1631,7 @@ export function computeEnquiryConflictSnapshot(
     opts.excludeEnquiryId ?? null,
     opts.links ?? [],
     opts.canViewMatter,
+    opts.tenantId ?? 'default-tenant',
   );
 
   const entityMatches = findEnquiryEntityMatches(
