@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation';
 import { TaskDetailClient } from '@/components/TaskDetailClient';
-import { canUserReassignTask, canUserTakeTask } from '@/domain/tasks';
+import { canUserReassignTask, canUserTakeTask } from '@/server/rbacRuntime';
 import { getAppSnapshot, withPageActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';

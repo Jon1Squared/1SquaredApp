@@ -2852,6 +2852,10 @@ export function PersonFormClient({
                                   existing.id,
                                   reassignTargetEmployeeId,
                                 );
+                                if (isActionDenied(res)) {
+                                  showToast(res.message);
+                                  return;
+                                }
                                 if (!res.errors) {
                                   showToast(
                                     `Reassigned ${res.reassignedCount} record(s) from ${personDisplayName(existing)}.`,

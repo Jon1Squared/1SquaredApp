@@ -5,15 +5,24 @@ export const mattersEnquiriesTasksNavigationArticle: DocArticle = {
   title: 'Matters, enquiries, tasks & navigation: how key dates integrate across the workspace',
   section: 'getting-started',
   summary:
-    'How the Key Dates & Limitation module connects with Enquiries, Matter opening and closure gates, the single-task reminder model, and left-rail navigation.',
-  updated: '2026-11-04',
+    'How the Key Dates & Limitation module connects with Enquiries, Quotes, Tasks, Matter opening and closure gates, the single-task reminder model, and left-rail navigation.',
+  updated: '2026-11-07',
   body: `
-This guide explains how **Matters**, **Enquiries**, **Tasks**, and **Navigation** work together across 1Squared, including how the [Key Dates & Limitation](/docs/key-dates-overview) module and conflict review routing integrate into each screen.
+This guide explains how **Matters**, **Enquiries**, **Quotes**, **Tasks**, and **Navigation** work together across 1Squared, including how the [Key Dates & Limitation](/docs/key-dates-overview) module, conflict review routing, and record-action permissions integrate into each screen.
 
-## Enquiries and conversion to a matter
+## Enquiries, quotes, and conversion to a matter
 
 - On the **Enquiry detail** screen (\`/enquiries/[id]\`), fee earners and call handlers can capture early key dates (such as a provisional limitation date or ACAS early conciliation deadline) in the **Key dates & limitation** panel.
 - When an enquiry is converted into a matter, every non-superseded key date on the enquiry is automatically carried across onto the new matter with \`source: 'carried_from_enquiry'\`, preserving its calculation audit trail and verification state.
+- **Enquiry permissions (S0-05)**:
+  - \`enquiry:create\`: Required to log a new enquiry (\`saveEnquiryAction\` when creating).
+  - \`enquiry:edit\`: Required to edit an existing enquiry, log a contact attempt (\`logEnquiryContactAction\`), or send an enquiry email (\`sendEnquiryEmailAction\`).
+  - \`enquiry:assign\`: Required to assign or reassign an enquiry (\`assignEnquiryAction\`). Granted to \`enquiries_coordinator\`, \`intake\`, \`legal_secretary\`, \`fee_earner\`, \`supervisor\`, \`partner\`, \`managing_partner\`, \`admin\`, and via the \`is_team_lead_of_any_team\` relationship grant.
+  - \`enquiry:close\`: Required to close an enquiry as Declined, Referred out, or No response (\`closeEnquiryAction\`).
+  - \`enquiry:reopen\`: Required to reopen a closed enquiry (\`reopenEnquiryAction\`). Reopening is restricted to closed enquiries (\`Declined\`, \`Referred out\`, or \`No response\`)—open and \`Converted\` enquiries cannot be reopened (\`canUserReopenEnquiry\` returns \`false\`). Only the current assignee, the team lead for the enquiry's team, an Intake user, a partner, or an administrator may reopen the enquiry. When an unassigned closed enquiry (\`assignedToId === null\`) is reopened, its status returns to \`'New'\` and \`assignedToId\` remains \`null\` rather than silently assigning the enquiry to the person who reopened it (B8).
+- **Quote permissions and visibility (S0-05)**:
+  - \`quote:view\`: Required to view quotes in \`getAppSnapshot\`, \`/quotes\`, and \`/quotes/[id]\`. Granted to \`enquiries_coordinator\`, \`intake\`, \`legal_secretary\`, \`fee_earner\`, \`supervisor\`, \`risk_compliance\`, \`partner\`, \`managing_partner\`, and \`admin\` (not granted to \`finance\`). Quotes linked to a hidden enquiry or a restricted matter that the actor cannot view are filtered out via \`visibility.canViewQuote\`.
+  - \`quote:edit\`: Required to access \`/quotes/new\` and to create, update, mark sent, log follow-ups, revise, or record outcomes on quotes (\`saveQuoteAction\`, \`markQuoteSentAction\`, \`logQuoteFollowUpAction\`, \`reviseQuoteAction\`, \`recordQuoteOutcomeAction\`).
 
 ## Matters: opening gate, Tasks & Dates tab, and closure gate
 
@@ -36,8 +45,12 @@ This guide explains how **Matters**, **Enquiries**, **Tasks**, and **Navigation*
 - When \`conflictReview.assigneeTeamKey\` is not configured or no permitted assignee matches, the task is left unassigned in the team queue (\`assignedPersonIds: []\`) and a structured \`conflict_review_task_unassigned\` warning is logged. On restricted or staff matters with no permitted reviewer, the task uses a generic title (\`[Ref] Conflict review required (restricted matter)\`) that omits client and matter names.
 - Recording an \`Approved\` or \`Declined\` conflict decision via \`updateMatterConflictRecord\` requires the \`risk:view\` permission in addition to \`matter:edit\`, and records \`conflictClearedById\` / \`approvedById\` from the authenticated server caller.
 
-## Tasks: one reminder task per confirmed key date
+## Tasks: permissions, visibility, and one reminder task per confirmed key date
 
+- **Task permissions & visibility (S0-05)**:
+  - \`task:edit\`: Required to create or update tasks (\`saveTaskAction\`). Every linked record (\`matter\`, \`enquiry\`, \`quote\`, \`person\`, \`organisation\`) is verified to exist in the tenant and to be visible to the actor (\`visibility.canViewTask\`). Reassigning an existing task's assignee or team enforces \`canUserReassignTask\` from \`src/server/rbacRuntime.ts\` (and silent enquiry assignment on task save only runs when the actor holds \`enquiry:assign\` and can view the enquiry).
+  - \`task:comment\`: Required to post comments on a task (\`addTaskCommentAction\`), and \`addTaskCommentRecord\` verifies \`visibility.canViewTask(task)\` so an actor cannot comment on a task linked to a restricted matter or hidden enquiry/quote (B9).
+  - Claiming an unassigned team task (\`takeTaskAction\`) checks \`visibility.canViewTask\` and \`canUserTakeTask\`.
 - Confirming a key date creates or updates **one** linked \`Task\` in the Tasks workspace (\`/tasks\`) with the deterministic idempotency key \`keydate-reminder:{tenantId}:{keyDateId}\`.
 - \`assignedTeamId\` is set to the key date's \`teamId\` (the team diary backup owner) and \`assignedPersonIds\` is set to its \`responsiblePersonIds\`.
 - As the key date crosses countdown stages (e.g. 90 days to 60 days), the daily tenant job updates that **same task** in place rather than stacking duplicate tasks. Standard task rules (\`canUserTakeTask\`, \`canUserReassignTask\`) apply.

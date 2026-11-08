@@ -269,7 +269,13 @@ export async function saveOrganisationAction(
   },
 ) {
   return guardedAction('saveOrganisationAction', ({ personId: byId }) => {
-    const res = saveOrganisationRecord(payload, { ...opts, byId });
+    const res = saveOrganisationRecord(payload, {
+      id: opts?.id,
+      byId,
+      customFieldsSubmitted: opts?.customFieldsSubmitted,
+      flagPossibleDuplicate: opts?.flagPossibleDuplicate,
+      matchedDuplicateIds: opts?.matchedDuplicateIds,
+    });
     revalidateAll();
     return res;
   });
@@ -372,8 +378,9 @@ export async function saveLinkAction(input: {
 
 export async function deleteLinkAction(linkId: string) {
   return guardedAction('deleteLinkAction', ({ personId: byId }) => {
-    deleteLink(linkId, byId);
+    const res = deleteLink(linkId, byId);
     revalidateAll();
+    return res;
   });
 }
 
@@ -387,8 +394,9 @@ export async function addNoteAction(recordType: RecordType | 'matter', recordId:
 
 export async function dismissDuplicateAction(recordType: RecordType, recordId: string, otherId: string | null) {
   return guardedAction('dismissDuplicateAction', ({ personId: byId }) => {
-    dismissDuplicateMatch(recordType, recordId, otherId, byId);
+    const res = dismissDuplicateMatch(recordType, recordId, otherId, byId);
     revalidateAll();
+    return res;
   });
 }
 
@@ -712,7 +720,15 @@ export async function prepareEnquiryConversionAction(
   } = {},
 ) {
   return guardedAction('prepareEnquiryConversionAction', ({ personId: byId }) => {
-    const res = prepareEnquiryConversion(enquiryId, opts, byId);
+    const res = prepareEnquiryConversion(
+      enquiryId,
+      {
+        usePersonId: opts?.usePersonId,
+        useOrganisationId: opts?.useOrganisationId,
+        createForBusiness: opts?.createForBusiness,
+      },
+      byId,
+    );
     revalidateAll();
     return res;
   });
@@ -1021,7 +1037,11 @@ export async function saveQuoteAction(
   opts: { id?: string; markAsSent?: boolean } = {},
 ) {
   return guardedAction('saveQuoteAction', ({ personId: byId }) => {
-    const res = saveQuoteRecord(input, { ...opts, byId });
+    const res = saveQuoteRecord(input, {
+      id: opts?.id,
+      markAsSent: opts?.markAsSent,
+      byId,
+    });
     revalidateAll();
     return res;
   });

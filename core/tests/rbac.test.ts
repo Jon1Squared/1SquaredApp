@@ -32,6 +32,8 @@ import {
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import {
   computeStaffMatterStatus,
+  createDefaultEmploymentRecord,
+  findRecordsOwnedByLeavers,
   resolveEmployeePermissions as domainResolveEmployeePermissions,
 } from '../../src/domain/employment';
 import {
@@ -64,24 +66,48 @@ import { buildDemoData } from '../../src/seed/demo';
 import { NextRequest } from 'next/server';
 import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
 import {
+  addNoteToRecord,
+  addTaskCommentRecord,
   anonymiseExpiredEnquiries,
   approveSignOff,
+  assignEnquiryRecord,
+  closeEnquiryRecord,
+  createOrUpdateLink,
+  deleteLink,
   discussSignOff,
+  dismissDuplicateMatch,
+  executeMerge,
   getAppSnapshot,
   getEmployeeDetailsForUser,
   logEmployeeRestrictedAccess,
+  logEnquiryContactRecord,
+  logQuoteFollowUpRecord,
+  markQuoteSentRecord,
   previewRbacOverrides,
+  reassignLeaverOwnedRecords,
+  recordQuoteOutcomeRecord,
   remindTeamLeadOverdueCompliance,
+  reopenEnquiryRecord,
   requireAuthenticatedActor,
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
+  reviseQuoteRecord,
+  saveEnquiryRecord,
+  saveOrganisationRecord,
   savePersonRecord,
+  saveQuoteRecord,
+  saveTaskRecord,
+  sendEnquiryEmailRecord,
   updateEmployeeRolesAndSupports,
   updateEmployeeRoleSetting,
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
   withPageActor,
 } from '../../src/server/services';
+import {
+  flushDocumentLifecycleSyncForTesting,
+  retryMatterDocumentProvisioning,
+} from '../../src/server/documentStoreServices';
 import { getStore } from '../../src/server/store';
 import {
   buildEntraSessionPayload,
@@ -114,6 +140,7 @@ import {
   saveEnquirySettingsAction,
   saveHomePagesConfigAction,
   saveMatterCostsConfigAction,
+  saveOrganisationAction,
   savePersonAction,
   saveMatterPartyCapacityAction,
   saveMatterPartyRelationshipAction,
@@ -209,8 +236,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 50 canonical permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(50);
+    it('defines all 60 canonical permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(60);
       for (const key of ALL_PERMISSION_KEYS) {
         const entry = PERMISSION_REGISTRY[key];
         expect(entry).toBeDefined();
@@ -2881,6 +2908,837 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(store.matters.length).toBe(mattersCountBefore);
       } finally {
         setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+  });
+
+  describe('20. S0-05 Record Actions: Tasks, Enquiries, Quotes, Notes, and Leaver Reassignment (B8, B9, Item 13)', () => {
+    it('denies task comment, task save, and task reassign on restricted matters or when not a team lead (B9)', () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        // Create an ethical wall matter visible only to P-000001
+        const wallMatter = store.matters.find((m) => m.id === 'M-000001')!;
+        wallMatter.hasEthicalWall = true;
+        wallMatter.restrictedAccessUserIds = ['P-000001'];
+        wallMatter.responsiblePartnerId = 'P-000001';
+        wallMatter.supervisingPartnerId = 'P-000001';
+        wallMatter.leadFeeEarnerId = 'P-000001';
+        wallMatter.teamMemberIds = [];
+
+        // Create a task linked to that restricted matter
+        const createRes = saveTaskRecord(
+          {
+            title: 'Confidential wall task',
+            dueAt: '2026-12-01',
+            assignedPersonId: 'P-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(createRes.task).toBeDefined();
+        const wallTask = createRes.task!;
+
+        // Fee earner P-000002 (not on allowlist) cannot see the task in getAppSnapshot
+        const snapFeeEarner = getAppSnapshot('P-000002');
+        expect(snapFeeEarner.tasks.some((t) => t.id === wallTask.id)).toBe(false);
+
+        // B9: P-000002 cannot comment on a task linked to a restricted matter
+        const commentDenied = addTaskCommentRecord(
+          wallTask.id,
+          'Attempted comment on restricted matter task',
+          'P-000002',
+        );
+        expect(isActionDenied(commentDenied)).toBe(true);
+
+        // P-000002 cannot link a new task to the restricted matter
+        const linkRestrictedDenied = saveTaskRecord(
+          {
+            title: 'Probe restricted matter',
+            dueAt: '2026-12-01',
+            assignedPersonId: 'P-000002',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000002',
+        );
+        expect(isActionDenied(linkRestrictedDenied)).toBe(true);
+
+        // Non-lead fee earner (P-000002) cannot reassign a task created by and assigned to P-000001
+        const teamWithoutP2Lead = store.teams.find((t) => !t.leadIds.includes('P-000002'))!;
+        const normalTaskRes = saveTaskRecord(
+          {
+            title: 'Normal team task',
+            dueAt: '2026-12-01',
+            assignedPersonId: 'P-000001',
+            assignedTeamId: teamWithoutP2Lead.id,
+          },
+          'P-000001',
+        );
+        const normalTask = normalTaskRes.task!;
+        const reassignDenied = saveTaskRecord(
+          {
+            id: normalTask.id,
+            title: normalTask.title,
+            dueAt: normalTask.dueAt,
+            assignedPersonId: 'P-000002',
+            assignedTeamId: normalTask.assignedTeamId,
+          },
+          'P-000002',
+        );
+        expect(isActionDenied(reassignDenied)).toBe(true);
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('enforces reopenEnquiryRecord rules and preserves unassigned status as New when unassigned (B8)', () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
+
+        // 1. Reopening an already-open enquiry is denied
+        const reopenOpenDenied = reopenEnquiryRecord(openEnq.id, 'P-000001');
+        expect(isActionDenied(reopenOpenDenied)).toBe(true);
+
+        // 2. Reopening a Converted enquiry is denied
+        const convertedEnq = store.enquiries.find((e) => e.status === 'Converted') ?? openEnq;
+        convertedEnq.status = 'Converted';
+        const reopenConvertedDenied = reopenEnquiryRecord(convertedEnq.id, 'P-000001');
+        expect(isActionDenied(reopenConvertedDenied)).toBe(true);
+
+        // 3. Prepare a closed (Declined) enquiry with assignedToId = null on team 0
+        const team = store.teams.find((t) => t.leadIds.length > 0)!;
+        const teamLeadId = team.leadIds[0]!;
+        const closedEnq = store.enquiries[0]!;
+        closedEnq.status = 'Declined';
+        closedEnq.assignedToId = null;
+        closedEnq.assignedTeamId = team.id;
+        closedEnq.convertedMatterId = null;
+
+        // Non-lead, non-assignee fee earner (who is not in Intake) cannot reopen
+        const nonLeadFeeEarner = store.people.find(
+          (p) =>
+            p.isEmployee &&
+            p.id !== teamLeadId &&
+            p.roles?.includes('fee_earner') &&
+            !store.teams.some((t) => t.leadIds.includes(p.id)) &&
+            !store.teams.some(
+              (t) => t.name.toLowerCase().includes('intake') && t.memberIds.includes(p.id),
+            ),
+        )!;
+        // Grant enquiry:reopen override to test the service-level canUserReopenEnquiry check specifically
+        nonLeadFeeEarner.permissionOverrides = {
+          grant: ['enquiry:reopen'],
+          revoke: [],
+        };
+        const reopenByNonLead = reopenEnquiryRecord(closedEnq.id, nonLeadFeeEarner.id);
+        expect(isActionDenied(reopenByNonLead)).toBe(true);
+
+        // Team lead with enquiry:reopen revoked is refused (R267)
+        const teamLeadPerson = store.people.find((p) => p.id === teamLeadId)!;
+        teamLeadPerson.permissionOverrides = {
+          grant: [],
+          revoke: ['enquiry:reopen'],
+        };
+        const reopenNoPerm = reopenEnquiryRecord(closedEnq.id, teamLeadId);
+        expect(isActionDenied(reopenNoPerm)).toBe(true);
+        teamLeadPerson.permissionOverrides = undefined;
+
+        // Team lead reopens unassigned closed enquiry -> status becomes 'New' and assignedToId stays null (B8)
+        const reopenedRes = reopenEnquiryRecord(closedEnq.id, teamLeadId);
+        expect(isActionDenied(reopenedRes)).toBe(false);
+        expect(reopenedRes.enquiry?.status).toBe('New');
+        expect(reopenedRes.enquiry?.assignedToId).toBeNull();
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('denies quote viewing and editing for the finance role, and hides quotes linked to hidden enquiries or restricted matters (quote:view, quote:edit, R267)', () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const financeUser = store.people.find(
+          (p) => p.isEmployee && p.roles?.includes('finance') && !p.roles?.includes('partner'),
+        )!;
+        expect(financeUser).toBeDefined();
+
+        // Finance user does not hold quote:view -> getAppSnapshot returns empty quotes
+        const snap = getAppSnapshot(financeUser.id);
+        expect(snap.currentUserPermissions).not.toContain('quote:view');
+        expect(snap.currentUserPermissions).not.toContain('quote:edit');
+        expect(snap.quotes).toEqual([]);
+
+        // R267: Fee earner P-000002 holds quote:view, but quotes linked to a restricted matter or hidden enquiry are hidden
+        const wallMatter = store.matters[0]!;
+        wallMatter.hasEthicalWall = true;
+        wallMatter.restrictedAccessUserIds = ['P-000001'];
+        wallMatter.responsiblePartnerId = 'P-000001';
+        wallMatter.supervisingPartnerId = 'P-000001';
+        wallMatter.leadFeeEarnerId = 'P-000001';
+        wallMatter.teamMemberIds = [];
+
+        const hiddenEnq = store.enquiries[0]!;
+        hiddenEnq.status = 'Draft';
+        hiddenEnq.createdById = 'P-000001';
+        hiddenEnq.takenById = 'P-000001';
+
+        const quoteOnRestrictedMatter = store.quotes[0]!;
+        quoteOnRestrictedMatter.convertedMatterId = wallMatter.id;
+        quoteOnRestrictedMatter.linkedEnquiryId = null;
+
+        const quoteOnHiddenEnquiry = store.quotes[1]!;
+        quoteOnHiddenEnquiry.linkedEnquiryId = hiddenEnq.id;
+        quoteOnHiddenEnquiry.convertedMatterId = null;
+
+        const feeEarnerSnap = getAppSnapshot('P-000002');
+        expect(feeEarnerSnap.currentUserPermissions).toContain('quote:view');
+        expect(
+          feeEarnerSnap.quotes.some((q) => q.id === quoteOnRestrictedMatter.id),
+        ).toBe(false);
+        expect(
+          feeEarnerSnap.quotes.some((q) => q.id === quoteOnHiddenEnquiry.id),
+        ).toBe(false);
+
+        const existingQuote = store.quotes[0]!;
+        expect(
+          isActionDenied(
+            saveQuoteRecord(
+              {
+                clientType: 'prospect',
+                prospectName: 'Test Prospect',
+                practiceAreaId: existingQuote.practiceAreaId,
+                scope: 'Test scope',
+                feeBasis: 'Fixed fee',
+                feeAmountExVat: 1500,
+              },
+              { byId: financeUser.id },
+            ),
+          ),
+        ).toBe(true);
+        expect(isActionDenied(markQuoteSentRecord(existingQuote.id, financeUser.id))).toBe(true);
+        expect(
+          isActionDenied(
+            logQuoteFollowUpRecord(
+              existingQuote.id,
+              { method: 'Phone', note: 'Follow up', nextFollowUpDate: '2026-12-01' },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            reviseQuoteRecord(
+              existingQuote.id,
+              {
+                feeBasis: 'Fixed fee',
+                feeAmountExVat: 2000,
+                scope: 'Revised scope',
+              },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            recordQuoteOutcomeRecord(
+              existingQuote.id,
+              { outcome: 'Accepted' },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('enforces dual permissions, leaver check, restricted matter allowlist update, SharePoint lifecycle sync, assignedPersonIds, open-only enquiries, and per-record audit on reassignLeaverOwnedRecords (Item 13, R266, R270)', async () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const actor = store.people.find((p) => p.id === 'P-000001')!;
+        const activeEmp = store.people.find((p) => p.id === 'P-000002')!;
+        const replacementEmp = store.people.find((p) => p.id === 'P-000003')!;
+
+        const actorSession = {
+          personId: actor.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: actor.id,
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        };
+        const verifiedActorSession = verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie(actorSession),
+        )!;
+        setTestEntraSessionOverride(verifiedActorSession);
+
+        // 1. Rejects when source person is still an active employee (not a leaver)
+        const notLeaverRes = reassignLeaverOwnedRecords(
+          activeEmp.id,
+          replacementEmp.id,
+          actor.id,
+        );
+        expect(isActionDenied(notLeaverRes)).toBe(true);
+
+        // Mark P-000002 as a Leaver
+        activeEmp.employment = {
+          ...(activeEmp.employment ??
+            createDefaultEmploymentRecord({
+              person: activeEmp,
+              allPeople: store.people,
+              byId: 'P-000001',
+              status: 'Leaver',
+            })),
+          status: 'Leaver',
+        };
+
+        // 2. Rejects when actor lacks matter:reassign_ownership or employee:edit_core
+        actor.permissionOverrides = {
+          grant: [],
+          revoke: ['matter:reassign_ownership'],
+        };
+        expect(
+          isActionDenied(
+            reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+          ),
+        ).toBe(true);
+
+        actor.permissionOverrides = {
+          grant: [],
+          revoke: ['employee:edit_core'],
+        };
+        expect(
+          isActionDenied(
+            reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+          ),
+        ).toBe(true);
+
+        actor.permissionOverrides = undefined;
+
+        // 3. Set up restricted matter, multi-assignee open task, and closed enquiry owned by leaver
+        const restrictedMatter = store.matters[0]!;
+        restrictedMatter.hasEthicalWall = true;
+        restrictedMatter.leadFeeEarnerId = activeEmp.id;
+        restrictedMatter.restrictedAccessUserIds = ['P-000001', activeEmp.id];
+
+        // Provision a document store folder on restrictedMatter so syncMatterLifecycleOnSaveSync is exercised (R266)
+        await retryMatterDocumentProvisioning(restrictedMatter.id, actor.id, {
+          session: verifiedActorSession,
+        });
+
+        const sharedTask = store.tasks[0]!;
+        sharedTask.status = 'To do';
+        sharedTask.assignedPersonId = 'P-000001';
+        sharedTask.assignedPersonIds = ['P-000001', activeEmp.id];
+
+        // R270 & R293: findRecordsOwnedByLeavers finds multi-assignee tasks where leaver is in assignedPersonIds and labels roleField with assignedPersonIds
+        const ownedBefore = findRecordsOwnedByLeavers(
+          store.people,
+          store.organisations,
+          store.matters,
+          store.tasks,
+          store.enquiries,
+          activeEmp.id,
+        );
+        const coOwnedTaskItem = ownedBefore.find(
+          (item) => item.recordType === 'task' && item.recordId === sharedTask.id,
+        );
+        expect(coOwnedTaskItem).toBeDefined();
+        expect(coOwnedTaskItem?.roleField).toBe('assignedPersonIds');
+        expect(coOwnedTaskItem?.roleLabel).toBe('Co-assignee');
+
+        const closedEnq = store.enquiries[0]!;
+        closedEnq.status = 'Declined';
+        closedEnq.assignedToId = activeEmp.id;
+
+        const openEnq = store.enquiries[1]!;
+        openEnq.status = 'Assigned';
+        openEnq.assignedToId = activeEmp.id;
+
+        const auditCountBefore = store.audit.length;
+        const okRes = runWithActiveActorSession(
+          {
+            personId: actor.id,
+            tenantId: 'not-a-law-firm',
+            tokenRoles: ['partner'],
+            expiresAtMs: Date.now() + 3_600_000,
+            verifiedSession: verifiedActorSession,
+          },
+          () => reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+        );
+        await flushDocumentLifecycleSyncForTesting();
+        expect(isActionDenied(okRes)).toBe(false);
+        expect(okRes.reassignedCount).toBeGreaterThan(0);
+
+        // Restricted matter updated: replacement added, leaver removed, no extra users added
+        expect(restrictedMatter.leadFeeEarnerId).toBe(replacementEmp.id);
+        expect(restrictedMatter.restrictedAccessUserIds).toContain(replacementEmp.id);
+        expect(restrictedMatter.restrictedAccessUserIds).not.toContain(activeEmp.id);
+        expect(restrictedMatter.restrictedAccessUserIds).toContain('P-000001');
+
+        // R266: SharePoint lifecycle re-permission sync job ran for the restricted matter
+        const leaverSyncJob = (store.documentLifecycleJobs ?? []).find(
+          (j) =>
+            j.matterId === restrictedMatter.id &&
+            j.jobType === 'recalculate_permissions' &&
+            j.correlationId.startsWith('corr-leaver-reassign-'),
+        );
+        expect(leaverSyncJob).toBeDefined();
+        expect(leaverSyncJob?.status).toBe('succeeded');
+
+        // Task assignedPersonIds updated
+        expect(sharedTask.assignedPersonIds).toContain(replacementEmp.id);
+        expect(sharedTask.assignedPersonIds).not.toContain(activeEmp.id);
+
+        // Closed enquiry untouched; open enquiry reassigned
+        expect(closedEnq.assignedToId).toBe(activeEmp.id);
+        expect(openEnq.assignedToId).toBe(replacementEmp.id);
+
+        // Per-record audit entries written for moved matter, task, and open enquiry
+        const newAuditEntries = store.audit.slice(0, store.audit.length - auditCountBefore);
+        expect(
+          newAuditEntries.some(
+            (a) => a.recordType === 'matter' && a.recordId === restrictedMatter.id,
+          ),
+        ).toBe(true);
+        expect(
+          newAuditEntries.some(
+            (a) => a.recordType === 'task' && a.recordId === sharedTask.id,
+          ),
+        ).toBe(true);
+        expect(
+          newAuditEntries.some(
+            (a) => a.recordType === 'enquiry' && a.recordId === openEnq.id,
+          ),
+        ).toBe(true);
+      } finally {
+        setTestEntraSessionOverride(null);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('enforces contact:create, contact:edit, internalSystemStep stripping on saveOrganisationAction (R252), record:merge on duplicates, enquiry permissions, R264 status/assignment lock, and R268 automatic enquiry assignment in saveTaskRecord (R267)', async () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const financeUser = store.people.find((p) => p.id === 'P-000009')!;
+        const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+        const riskOfficer = store.people.find((p) => p.id === 'P-000003')!;
+        const existingOrg = store.organisations[0]!;
+        const existingContact = store.people.find((p) => !p.isEmployee)!;
+
+        // 1. saveOrganisationRecord, createOrUpdateLink, and deleteLink enforce contact:create / contact:edit
+        expect(
+          isActionDenied(
+            saveOrganisationRecord(
+              { legalName: 'Denied Org' },
+              { byId: financeUser.id },
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            saveOrganisationRecord(
+              { legalName: 'Denied Org Edit' },
+              { id: existingOrg.id, byId: financeUser.id },
+            ),
+          ),
+        ).toBe(true);
+
+        const createdOrgRes = saveOrganisationRecord(
+          { legalName: 'Allowed Org Ltd' },
+          { byId: feeEarner.id },
+        );
+        expect(isActionDenied(createdOrgRes)).toBe(false);
+
+        const linkDeniedCreate = createOrUpdateLink(
+          {
+            personId: existingContact.id,
+            organisationId: existingOrg.id,
+            jobTitle: 'Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: '2026-01-01',
+            endDate: null,
+            contactStatusId: null,
+          },
+          financeUser.id,
+        );
+        expect(isActionDenied(linkDeniedCreate)).toBe(true);
+
+        const linkCreated = createOrUpdateLink(
+          {
+            personId: existingContact.id,
+            organisationId: createdOrgRes.organisation.id,
+            jobTitle: 'Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: '2026-01-01',
+            endDate: null,
+            contactStatusId: null,
+          },
+          feeEarner.id,
+        );
+        expect(isActionDenied(linkCreated)).toBe(false);
+        if (!isActionDenied(linkCreated)) {
+          expect(
+            isActionDenied(
+              createOrUpdateLink(
+                {
+                  id: linkCreated.id,
+                  personId: existingContact.id,
+                  organisationId: createdOrgRes.organisation.id,
+                  jobTitle: 'Updated Director',
+                  department: '',
+                  roleWithinOrganisation: 'Director',
+                  contactRoleIds: [],
+                  isPrimaryContact: false,
+                  isCurrent: true,
+                  startDate: '2026-01-01',
+                  endDate: null,
+                  contactStatusId: null,
+                },
+                financeUser.id,
+              ),
+            ),
+          ).toBe(true);
+          expect(isActionDenied(deleteLink(linkCreated.id, financeUser.id))).toBe(true);
+          expect(isActionDenied(deleteLink(linkCreated.id, feeEarner.id))).toBe(false);
+        }
+
+        // 2 (R252). saveOrganisationAction strips internalSystemStep so a user with contact:edit only cannot create an org
+        riskOfficer.permissionOverrides = {
+          grant: ['contact:edit'],
+          revoke: ['contact:create'],
+        };
+        setTestEntraSessionOverride({
+          personId: riskOfficer.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000003',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: riskOfficer.id,
+          email: 'bethan.rees@notalawfirm.example',
+          displayName: 'Bethan Rees',
+          entraRoles: ['risk_compliance'],
+          mappedRoles: ['risk_compliance'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const spoofedOrgCreate = await saveOrganisationAction(
+          { legalName: 'Spoofed Conversion Org' },
+          {
+            internalSystemStep: 'enquiry_conversion',
+          } as unknown as Parameters<typeof saveOrganisationAction>[1],
+        );
+        expect(isActionDenied(spoofedOrgCreate)).toBe(true);
+        expect(spoofedOrgCreate.errors?.permission).toMatch(/contact:create/);
+        riskOfficer.permissionOverrides = undefined;
+
+        // 3. record:merge on dismissDuplicateMatch and executeMerge
+        const secondOrgRes = saveOrganisationRecord(
+          { legalName: 'Duplicate Org Ltd' },
+          { byId: feeEarner.id },
+        );
+        expect(
+          isActionDenied(
+            dismissDuplicateMatch(
+              'organisation',
+              createdOrgRes.organisation.id,
+              secondOrgRes.organisation.id,
+              feeEarner.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            executeMerge(
+              'organisation',
+              createdOrgRes.organisation.id,
+              secondOrgRes.organisation.id,
+              feeEarner.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            dismissDuplicateMatch(
+              'organisation',
+              createdOrgRes.organisation.id,
+              secondOrgRes.organisation.id,
+              riskOfficer.id,
+            ),
+          ),
+        ).toBe(false);
+
+        // 4. Refusals by permission key on assignEnquiryRecord, closeEnquiryRecord, logEnquiryContactRecord, sendEnquiryEmailRecord
+        const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
+        financeUser.permissionOverrides = {
+          grant: [],
+          revoke: ['enquiry:assign'],
+        };
+        expect(
+          isActionDenied(assignEnquiryRecord(openEnq.id, feeEarner.id, null, financeUser.id)),
+        ).toBe(true);
+        financeUser.permissionOverrides = undefined;
+        expect(
+          isActionDenied(
+            closeEnquiryRecord(
+              openEnq.id,
+              { targetStatus: 'Declined', closeNotes: 'Denied close' },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            logEnquiryContactRecord(
+              openEnq.id,
+              { method: 'Phone', outcome: 'Spoke', note: 'Denied log' },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            sendEnquiryEmailRecord(
+              openEnq.id,
+              {
+                to: 'prospect@notalawfirm.example',
+                subject: 'Test',
+                bodyHtml: '<p>Test</p>',
+                bodyText: 'Test',
+              },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+
+        // 5 (R264, R292). saveEnquiryRecord refuses status or assignment changes on an existing non-draft enquiry
+        // even when the actor holds enquiry:edit and only the specific action permission is revoked
+        const closedEnq = store.enquiries.find((e) => e.id !== openEnq.id)!;
+        closedEnq.status = 'Declined';
+        closedEnq.assignedToId = feeEarner.id;
+
+        // 5a. Actor with enquiry:edit but enquiry:reopen revoked cannot reopen a closed enquiry via saveEnquiryRecord
+        feeEarner.permissionOverrides = {
+          grant: ['enquiry:edit', 'enquiry:close', 'enquiry:assign'],
+          revoke: ['enquiry:reopen'],
+        };
+        const bypassReopenRes = saveEnquiryRecord(
+          { status: 'Assigned', summary: closedEnq.summary },
+          { id: closedEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassReopenRes)).toBe(true);
+        if (isActionDenied(bypassReopenRes)) {
+          expect(bypassReopenRes.code).toBe('FORBIDDEN');
+          expect(bypassReopenRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+
+        // 5b. Actor with enquiry:edit but enquiry:close revoked cannot close an open enquiry via saveEnquiryRecord
+        feeEarner.permissionOverrides = {
+          grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:assign'],
+          revoke: ['enquiry:close'],
+        };
+        const bypassCloseRes = saveEnquiryRecord(
+          { status: 'Declined', summary: openEnq.summary },
+          { id: openEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassCloseRes)).toBe(true);
+        if (isActionDenied(bypassCloseRes)) {
+          expect(bypassCloseRes.code).toBe('FORBIDDEN');
+          expect(bypassCloseRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+
+        // 5c. Actor with enquiry:edit but enquiry:assign revoked cannot change assignedToId or assignedTeamId via saveEnquiryRecord
+        feeEarner.permissionOverrides = {
+          grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:close'],
+          revoke: ['enquiry:assign'],
+        };
+        const bypassAssignUserRes = saveEnquiryRecord(
+          { assignedToId: 'P-000001', summary: openEnq.summary },
+          { id: openEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassAssignUserRes)).toBe(true);
+        if (isActionDenied(bypassAssignUserRes)) {
+          expect(bypassAssignUserRes.code).toBe('FORBIDDEN');
+          expect(bypassAssignUserRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+        const bypassAssignTeamRes = saveEnquiryRecord(
+          { assignedTeamId: 'TM-999999', summary: openEnq.summary },
+          { id: openEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassAssignTeamRes)).toBe(true);
+        if (isActionDenied(bypassAssignTeamRes)) {
+          expect(bypassAssignTeamRes.code).toBe('FORBIDDEN');
+          expect(bypassAssignTeamRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+        feeEarner.permissionOverrides = undefined;
+
+        // 5d (R292 positive control). A Draft enquiry can still be routed through saveEnquiryRecord with asDraft: false, status, assignedToId, and assignedTeamId
+        const draftToRouteCreateRes = saveEnquiryRecord(
+          {
+            firstName: 'Route',
+            lastName: 'FromDraft',
+            email: 'route.fromdraft@notalawfirm.example',
+            phone: '029 2000 1234',
+            channelId: openEnq.channelId,
+            practiceAreaId: openEnq.practiceAreaId,
+            summary: 'Draft enquiry ready for routing',
+            notes: 'Initial notes for routing from draft',
+            urgencyId: openEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { asDraft: true, byId: feeEarner.id },
+        );
+        expect(isActionDenied(draftToRouteCreateRes)).toBe(false);
+        expect(draftToRouteCreateRes.enquiry?.status).toBe('Draft');
+        const targetTeamId = store.teams[0]!.id;
+        const routedFromDraftRes = saveEnquiryRecord(
+          {
+            status: 'Assigned',
+            assignedToId: feeEarner.id,
+            assignedTeamId: targetTeamId,
+          },
+          { id: draftToRouteCreateRes.enquiry!.id, asDraft: false, byId: feeEarner.id },
+        );
+        expect(isActionDenied(routedFromDraftRes)).toBe(false);
+        expect(routedFromDraftRes.enquiry?.status).toBe('Assigned');
+        expect(routedFromDraftRes.enquiry?.assignedToId).toBe(feeEarner.id);
+        expect(routedFromDraftRes.enquiry?.assignedTeamId).toBe(targetTeamId);
+
+        // 6 (R267, R268, R293, R299). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft and closed enquiries
+        const draftEnqRes = saveEnquiryRecord(
+          { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
+          { asDraft: true, byId: feeEarner.id },
+        );
+        const draftEnq = draftEnqRes.enquiry!;
+        const draftTaskRes = saveTaskRecord(
+          {
+            title: 'Task on draft enquiry',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: draftEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(isActionDenied(draftTaskRes)).toBe(false);
+        expect(draftTaskRes.task?.id).toBeTruthy();
+        expect(draftTaskRes.task?.linkedRecords).toEqual([
+          { recordType: 'enquiry', recordId: draftEnq.id },
+        ]);
+        expect(draftEnq.status).toBe('Draft');
+        expect(draftEnq.assignedToId).toBeNull();
+
+        // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293, R299)
+        closedEnq.status = 'Declined';
+        closedEnq.assignedToId = null;
+        const closedTaskRes = saveTaskRecord(
+          {
+            title: 'Task on declined enquiry',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: closedEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(isActionDenied(closedTaskRes)).toBe(false);
+        expect(closedTaskRes.task?.id).toBeTruthy();
+        expect(closedTaskRes.task?.linkedRecords).toEqual([
+          { recordType: 'enquiry', recordId: closedEnq.id },
+        ]);
+        expect(closedEnq.status).toBe('Declined');
+        expect(closedEnq.assignedToId).toBeNull();
+
+        const routedNewEnq = store.enquiries.find((e) => e.id === openEnq.id)!;
+        routedNewEnq.status = 'New';
+        routedNewEnq.assignedToId = null;
+
+        // Actor without enquiry:assign does not auto-assign the enquiry
+        feeEarner.permissionOverrides = {
+          grant: [],
+          revoke: ['enquiry:assign'],
+        };
+        saveTaskRecord(
+          {
+            title: 'Task without enquiry:assign',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(routedNewEnq.assignedToId).toBeNull();
+        expect(routedNewEnq.status).toBe('New');
+
+        // Actor with enquiry:assign auto-assigns the routed New enquiry
+        feeEarner.permissionOverrides = undefined;
+        saveTaskRecord(
+          {
+            title: 'Task with enquiry:assign',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(routedNewEnq.assignedToId).toBe(feeEarner.id);
+        expect(routedNewEnq.status).toBe('Assigned');
+      } finally {
+        setTestEntraSessionOverride(null);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('enforces target-specific permissions on addNoteToRecord (restricted matter and employee record)', () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const wallMatter = store.matters[0]!;
+        wallMatter.hasEthicalWall = true;
+        wallMatter.restrictedAccessUserIds = ['P-000001'];
+        wallMatter.responsiblePartnerId = 'P-000001';
+        wallMatter.supervisingPartnerId = 'P-000001';
+        wallMatter.leadFeeEarnerId = 'P-000001';
+        wallMatter.teamMemberIds = [];
+
+        // Fee earner P-000002 holds matter:edit and contact:edit, but cannot view wallMatter or edit employees
+        const noteOnRestrictedMatter = addNoteToRecord(
+          'matter',
+          wallMatter.id,
+          'Should fail on walled matter',
+          'P-000002',
+        );
+        expect(isActionDenied(noteOnRestrictedMatter)).toBe(true);
+
+        const noteOnEmployeeWithoutHrPerm = addNoteToRecord(
+          'person',
+          'P-000001',
+          'Should fail on employee record without employee:edit_core',
+          'P-000002',
+        );
+        expect(isActionDenied(noteOnEmployeeWithoutHrPerm)).toBe(true);
+      } finally {
         resetAllDemoData('P-000001');
       }
     });

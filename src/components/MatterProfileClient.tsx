@@ -33,6 +33,7 @@ import {
   saveTaskAction,
   updateMatterConflictRecordAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime } from '@/domain/dates';
 import { resolveLabel, resolveLabels } from '@/domain/lists';
 import {
@@ -1024,10 +1025,15 @@ export function MatterProfileClient({
     e.preventDefault();
     if (!noteText.trim()) return;
     setSavingNote(true);
-    await addNoteAction('matter', matter.id, noteText.trim());
+    const res = await addNoteAction('matter', matter.id, noteText.trim());
+    setSavingNote(false);
+    if (isActionDenied(res)) {
+      showToast(res.message);
+      return;
+    }
     setNoteText('');
     setNoteOpen(false);
-    setSavingNote(false);
+    showToast('Note added');
     router.refresh();
   }
 

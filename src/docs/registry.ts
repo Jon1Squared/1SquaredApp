@@ -25,6 +25,7 @@ import { keyDatesOverviewArticle } from './articles/key-dates-overview';
 import { keyDatesRemindersArticle } from './articles/key-dates-reminders';
 import { keyDatesTeamDiaryArticle } from './articles/key-dates-team-diary';
 import { keyDatesVerificationArticle } from './articles/key-dates-verification';
+import { leaversAndReassignmentArticle } from './articles/leavers-and-reassignment';
 import { matterOpeningAndRiskArticle } from './articles/matter-opening-and-risk';
 import { mattersEnquiriesTasksNavigationArticle } from './articles/matters-enquiries-tasks-and-navigation';
 import { quickConflictCheck } from './articles/quick-conflict-check';
@@ -80,6 +81,7 @@ export const ARTICLES: DocArticle[] = [
   sharepointSitesSelectedSetupArticle,
   quickConflictCheck,
   duplicateChecks,
+  leaversAndReassignmentArticle,
 ];
 
 export function getDocArticle(slug: string): DocArticle | undefined {
