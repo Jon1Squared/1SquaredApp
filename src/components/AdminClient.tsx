@@ -4045,7 +4045,11 @@ export function AdminClient({
                     return;
                   }
                   showToast('Cleared all records — signing out to refresh session');
-                  window.location.assign('/api/auth/logout');
+                  const logoutForm = document.createElement('form');
+                  logoutForm.method = 'POST';
+                  logoutForm.action = '/api/auth/logout';
+                  document.body.appendChild(logoutForm);
+                  logoutForm.submit();
                 })
               }
             >

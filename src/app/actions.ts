@@ -204,7 +204,20 @@ export async function savePersonAction(
         errors: { permission: msg },
       };
     }
-    const res = savePersonRecord(payload, { ...opts, byId });
+    const res = savePersonRecord(payload, {
+      id: opts?.id,
+      byId,
+      customFieldsSubmitted: opts?.customFieldsSubmitted,
+      flagPossibleDuplicate: opts?.flagPossibleDuplicate,
+      matchedDuplicateIds: opts?.matchedDuplicateIds,
+      worksAtFirm: opts?.worksAtFirm,
+      employmentSubmitted: opts?.employmentSubmitted,
+      sensitiveSubmitted: opts?.sensitiveSubmitted,
+      sensitiveSectionOpened: opts?.sensitiveSectionOpened,
+      sensitiveSectionEdited: opts?.sensitiveSectionEdited,
+      keepAsContactOnLeave: opts?.keepAsContactOnLeave,
+      initialLink: opts?.initialLink,
+    });
     revalidateAll();
     return res;
   });

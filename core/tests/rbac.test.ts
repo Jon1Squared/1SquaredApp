@@ -101,6 +101,7 @@ import {
   resetDemoDataAction,
   resetHomePagesConfigAction,
   saveHomePagesConfigAction,
+  savePersonAction,
   switchUserAction,
   updateTenantRbacConfigAction,
 } from '../../src/app/actions';
@@ -2488,6 +2489,56 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(partnerUpdateRes.person.entraObjectId).toBe(
         '00000000-0000-4000-8000-000000000002',
       );
+
+      // 5 (R252). savePersonAction strips caller-supplied internalSystemStep so a user without contact:create/edit cannot bypass the check
+      const riskOfficer = store.people.find((p) => p.id === 'P-000003')!;
+      const savedOverrides = riskOfficer.permissionOverrides;
+      riskOfficer.permissionOverrides = {
+        grant: ['employee:edit_core'],
+        revoke: ['contact:create', 'contact:edit'],
+      };
+      setTestEntraSessionOverride({
+        personId: riskOfficer.id,
+        tenantId: 'not-a-law-firm',
+        oid: '00000000-0000-4000-8000-000000000003',
+        tid: '00000000-0000-4000-8000-000000000099',
+        sub: riskOfficer.id,
+        email: 'bethan.rees@notalawfirm.example',
+        displayName: 'Bethan Rees',
+        entraRoles: [],
+        mappedRoles: ['risk_compliance'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      try {
+        const spoofedCreate = await savePersonAction(
+          { firstName: 'Spoofed', surname: 'InternalStep' },
+          {
+            internalSystemStep: 'enquiry_conversion',
+          } as unknown as Parameters<typeof savePersonAction>[1],
+        );
+        expect(isActionDenied(spoofedCreate)).toBe(true);
+        expect(spoofedCreate.errors?.permission).toMatch(/contact:create/);
+
+        const spoofedEdit = await savePersonAction(
+          {
+            firstName: existingContact.firstName,
+            surname: 'SpoofedEdit',
+          },
+          {
+            id: existingContact.id,
+            internalSystemStep: 'enquiry_conversion',
+          } as unknown as Parameters<typeof savePersonAction>[1],
+        );
+        expect(isActionDenied(spoofedEdit)).toBe(true);
+        expect(spoofedEdit.errors?.permission).toMatch(/contact:edit/);
+      } finally {
+        riskOfficer.permissionOverrides = savedOverrides;
+        setTestEntraSessionOverride(null);
+      }
     });
 
     it('1f (B12). ethical walls fail closed in canAccessMatter and all wrappers even when restrictedAccessUserIds is empty', () => {
