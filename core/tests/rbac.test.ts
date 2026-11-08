@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import {
   ALL_BUILTIN_ROLE_KEYS,
   ALL_PERMISSION_KEYS,
@@ -79,6 +79,7 @@ import {
   executeMerge,
   getAppSnapshot,
   getEmployeeDetailsForUser,
+  linkPmsRecord,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
   logQuoteFollowUpRecord,
@@ -112,7 +113,7 @@ import {
   flushDocumentLifecycleSyncForTesting,
   retryMatterDocumentProvisioning,
 } from '../../src/server/documentStoreServices';
-import { getStore } from '../../src/server/store';
+import { clearStoreMemoryCache, getStore } from '../../src/server/store';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -170,6 +171,11 @@ import {
   redactRecordId,
   searchMatterConflicts,
 } from '../../src/domain/matterConflicts';
+import { getDocumentRepository } from '../../src/server/documentGenerationServices';
+import PersonProfilePage from '../../src/app/people/[id]/page';
+import EditPersonPage from '../../src/app/people/[id]/edit/page';
+import OrganisationProfilePage from '../../src/app/organisations/[id]/page';
+import EditOrganisationPage from '../../src/app/organisations/[id]/edit/page';
 import {
   computeEnquiryConflictSnapshot,
   detectPreliminaryConflicts,
@@ -4682,6 +4688,1190 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(combinedReasons).not.toContain(restrictedMatter.matterNumber);
         expect(combinedReasons).not.toContain('Ultra Secret Restricted Acquisition');
       } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+  });
+
+  describe('S0-09: Merge repoints every reference, link de-duplication, PMS collision, document repository read-back, employee/leaver refusal, and tombstone redirects', () => {
+    function setVerifiedAdminMergeSession() {
+      const adminPerson = getStore().people.find((p) => p.id === 'P-000004')!;
+      const cfg = getActiveTenantConfiguration();
+      const sessionPayload = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: adminPerson.id,
+          tenantId: cfg.tenantId,
+          oid: adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: adminPerson.id,
+          email: adminPerson.emails[0]?.address ?? 'admin@notalawfirm.example',
+          displayName: 'Admin',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(sessionPayload);
+    }
+
+    it('denies merge without record:merge, refuses active employees, firm staff, or leavers, and fails closed without a verified session (R271)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        const s1 = savePersonRecord(
+          { firstName: 'Gareth', surname: 'Survivor', isEmployee: false },
+          { byId: 'P-000001' },
+        ).person!;
+        const m1 = savePersonRecord(
+          { firstName: 'Gareth', surname: 'Duplicate', isEmployee: false },
+          { byId: 'P-000001' },
+        ).person!;
+
+        // 1. Denied without record:merge (fee earner P-000002 lacks record:merge)
+        const deniedNoPerm = executeMerge('person', s1.id, m1.id, 'P-000002');
+        expect(isActionDenied(deniedNoPerm)).toBe(true);
+        if (isActionDenied(deniedNoPerm)) {
+          expect(deniedNoPerm.code).toBe('FORBIDDEN');
+        }
+
+        // 2. Denied when either record is an active employee (P-000002)
+        const deniedActiveEmpAsMerged = executeMerge('person', s1.id, 'P-000002', 'P-000004');
+        expect(isActionDenied(deniedActiveEmpAsMerged)).toBe(true);
+        const deniedActiveEmpAsSurvivor = executeMerge('person', 'P-000002', m1.id, 'P-000004');
+        expect(isActionDenied(deniedActiveEmpAsSurvivor)).toBe(true);
+
+        // 3. Denied when a record has worksAtFirm or employment data (including a leaver)
+        const store = getStore();
+        const leaverContact = store.people.find((p) => p.id === m1.id)!;
+        leaverContact.isEmployee = false;
+        leaverContact.employment = createDefaultEmploymentRecord({
+          person: leaverContact,
+          allPeople: store.people,
+          byId: 'P-000004',
+          status: 'Leaver',
+          primaryDomain: 'notalawfirm.example',
+        });
+        const deniedLeaver = executeMerge('person', s1.id, m1.id, 'P-000004');
+        expect(isActionDenied(deniedLeaver)).toBe(true);
+        if (isActionDenied(deniedLeaver)) {
+          expect(deniedLeaver.code).toBe('FORBIDDEN');
+        }
+
+        // 4. R271: Without a verified Entra session for the actor, executeMerge fails closed with UNAUTHENTICATED
+        leaverContact.employment = undefined;
+        setTestEntraSessionOverride(null);
+        expect(() => executeMerge('person', s1.id, m1.id, 'P-000004')).toThrow(
+          /UNAUTHENTICATED/,
+        );
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('1. Matter: repoints clientId, additionalClientIds (de-duplicated), instructingContactId, billingContactId, referrerContactId, parties[].linkedRecordId, and conflictCheckRecord parties/matches (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'MatterSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'MatterDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Matter Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Matter Duplicate Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        const store = getStore();
+        const matter = store.matters[0]!;
+        matter.clientId = mergedOrg.id;
+        matter.additionalClientIds = [survivorPerson.id, mergedPerson.id];
+        matter.instructingContactId = mergedPerson.id;
+        matter.billingContactId = mergedPerson.id;
+        matter.referrerContactId = mergedPerson.id;
+        matter.parties = [
+          {
+            id: 'MP-MERGE-1',
+            name: 'Alun MatterDuplicate',
+            role: 'Opponent',
+            entityType: 'person',
+            linkedRecordId: mergedPerson.id,
+          },
+          {
+            id: 'MP-MERGE-2',
+            name: 'Bryn Matter Duplicate Ltd',
+            role: 'Other party',
+            entityType: 'organisation',
+            linkedRecordId: mergedOrg.id,
+          },
+        ];
+        matter.conflictCheckRecord = {
+          status: 'Cleared',
+          outcomeLabel: 'Cleared by fee earner',
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '2026-11-07',
+          lastRunById: 'P-000001',
+          lastRunByName: 'Carys',
+          parties: [
+            {
+              id: 'CP-1',
+              name: 'Alun',
+              entityType: 'person',
+              role: 'Client contact',
+              linkedRecordId: mergedPerson.id,
+            },
+            {
+              id: 'CP-2',
+              name: 'Bryn Dup',
+              entityType: 'organisation',
+              role: 'Client',
+              linkedRecordId: mergedOrg.id,
+            },
+          ],
+          matches: [
+            {
+              id: 'CM-1',
+              partyId: 'CP-1',
+              partyName: 'Alun',
+              matchedRecordId: mergedPerson.id,
+              matchedRecordName: 'Alun',
+              matchedRecordType: 'person',
+              strength: 'Exact',
+              whereFound: 'Directory',
+              responsiblePartnerId: null,
+              responsiblePartnerName: '',
+              dateLabel: '2026-11-07',
+              disposition: 'same_no_conflict',
+              note: 'Same contact',
+            },
+            {
+              id: 'CM-2',
+              partyId: 'CP-2',
+              partyName: 'Bryn Dup',
+              matchedRecordId: mergedOrg.id,
+              matchedRecordName: 'Bryn Dup',
+              matchedRecordType: 'organisation',
+              strength: 'Exact',
+              whereFound: 'Directory',
+              responsiblePartnerId: null,
+              responsiblePartnerName: '',
+              dateLabel: '2026-11-07',
+              disposition: 'same_no_conflict',
+              note: 'Same org',
+            },
+          ],
+          runs: [],
+          comments: [],
+        };
+
+        expect(
+          isActionDenied(executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004')),
+        ).toBe(false);
+        expect(
+          isActionDenied(executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004')),
+        ).toBe(false);
+
+        const updatedMatter = getStore().matters.find((m) => m.id === matter.id)!;
+        expect(updatedMatter.clientId).toBe(survivorOrg.id);
+        expect(updatedMatter.additionalClientIds).toEqual([survivorPerson.id]);
+        expect(updatedMatter.instructingContactId).toBe(survivorPerson.id);
+        expect(updatedMatter.billingContactId).toBe(survivorPerson.id);
+        expect(updatedMatter.referrerContactId).toBe(survivorPerson.id);
+        expect(updatedMatter.parties.find((p) => p.id === 'MP-MERGE-1')?.linkedRecordId).toBe(
+          survivorPerson.id,
+        );
+        expect(updatedMatter.parties.find((p) => p.id === 'MP-MERGE-2')?.linkedRecordId).toBe(
+          survivorOrg.id,
+        );
+        expect(
+          updatedMatter.conflictCheckRecord?.parties.find((p) => p.id === 'CP-1')?.linkedRecordId,
+        ).toBe(survivorPerson.id);
+        expect(
+          updatedMatter.conflictCheckRecord?.parties.find((p) => p.id === 'CP-2')?.linkedRecordId,
+        ).toBe(survivorOrg.id);
+        expect(
+          updatedMatter.conflictCheckRecord?.matches.find((m) => m.id === 'CM-1')?.matchedRecordId,
+        ).toBe(survivorPerson.id);
+        expect(
+          updatedMatter.conflictCheckRecord?.matches.find((m) => m.id === 'CM-2')?.matchedRecordId,
+        ).toBe(survivorOrg.id);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('2. Enquiry: repoints linkedOrganisationId, referrerPersonId, linkedPersonId, referredToOrganisationId, and conflictSnapshot conflicts/knownPeople/knownOrganisations (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'EnqSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'EnqDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Enq Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Enq Duplicate Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        const store = getStore();
+        const enq = store.enquiries[0]!;
+        enq.linkedOrganisationId = mergedOrg.id;
+        enq.referredToOrganisationId = mergedOrg.id;
+        enq.referrerPersonId = mergedPerson.id;
+        enq.linkedPersonId = mergedPerson.id;
+        enq.conflictSnapshot = {
+          recordedAt: new Date().toISOString(),
+          recordedById: 'P-000001',
+          searchedInput: {
+            firstName: 'Alun',
+            lastName: 'Bryn',
+            callingOnBehalfOf: 'Bryn Holdings',
+            otherPartiesNamed: '',
+            email: '',
+            phone: '',
+            postcode: '',
+            addressLine1: '',
+            addressLine2: '',
+          },
+          matchCount: 2,
+          highestSeverity: 'medium',
+          conflictStatus: 'Check',
+          conflicts: [
+            {
+              recordId: mergedPerson.id,
+              recordType: 'person',
+              name: 'Alun',
+              recordLabel: 'Person',
+              queryTerm: 'Alun',
+              href: `/people/${mergedPerson.id}`,
+              reason: 'Name match',
+              matchedFields: ['Name'],
+              severity: 'medium',
+              strength: 80,
+              blocking: false,
+            },
+            {
+              recordId: mergedOrg.id,
+              recordType: 'organisation',
+              name: 'Bryn Holdings',
+              recordLabel: 'Organisation',
+              queryTerm: 'Bryn',
+              href: `/organisations/${mergedOrg.id}`,
+              reason: 'Name match',
+              matchedFields: ['Name'],
+              severity: 'medium',
+              strength: 80,
+              blocking: false,
+            },
+          ],
+          knownPeople: [
+            { id: survivorPerson.id, formattedReasons: 'Existing' },
+            { id: mergedPerson.id, formattedReasons: 'Duplicate' },
+          ],
+          knownOrganisations: [{ id: mergedOrg.id, formattedReasons: 'Duplicate Org' }],
+        };
+
+        executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+        executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
+
+        const updatedEnq = getStore().enquiries.find((e) => e.id === enq.id)!;
+        expect(updatedEnq.linkedOrganisationId).toBe(survivorOrg.id);
+        expect(updatedEnq.referredToOrganisationId).toBe(survivorOrg.id);
+        expect(updatedEnq.referrerPersonId).toBe(survivorPerson.id);
+        expect(updatedEnq.linkedPersonId).toBe(survivorPerson.id);
+        expect(updatedEnq.conflictSnapshot?.conflicts[0]?.recordId).toBe(survivorPerson.id);
+        expect(updatedEnq.conflictSnapshot?.conflicts[0]?.href).toBe(
+          `/people/${survivorPerson.id}`,
+        );
+        expect(updatedEnq.conflictSnapshot?.conflicts[1]?.recordId).toBe(survivorOrg.id);
+        expect(updatedEnq.conflictSnapshot?.conflicts[1]?.href).toBe(
+          `/organisations/${survivorOrg.id}`,
+        );
+        expect(updatedEnq.conflictSnapshot?.knownPeople.map((kp) => kp.id)).toEqual([
+          survivorPerson.id,
+        ]);
+        expect(updatedEnq.conflictSnapshot?.knownOrganisations.map((ko) => ko.id)).toEqual([
+          survivorOrg.id,
+        ]);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('3. Quote: repoints linkedOrganisationId and linkedPersonId (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'QuoteSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'QuoteDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Quote Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Quote Duplicate Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        const quote = getStore().quotes[0]!;
+        quote.linkedOrganisationId = mergedOrg.id;
+        quote.linkedPersonId = mergedPerson.id;
+
+        executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+        executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
+
+        const updatedQuote = getStore().quotes.find((q) => q.id === quote.id)!;
+        expect(updatedQuote.linkedOrganisationId).toBe(survivorOrg.id);
+        expect(updatedQuote.linkedPersonId).toBe(survivorPerson.id);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('4. Task: repoints and de-duplicates linkedRecords[].recordId (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'TaskSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'TaskDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Task Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Task Duplicate Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        const task = getStore().tasks[0]!;
+        task.linkedRecords = [
+          { recordType: 'person', recordId: survivorPerson.id },
+          { recordType: 'person', recordId: mergedPerson.id },
+          { recordType: 'organisation', recordId: mergedOrg.id },
+        ];
+
+        executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+        executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
+
+        const updatedTask = getStore().tasks.find((t) => t.id === task.id)!;
+        expect(updatedTask.linkedRecords).toEqual([
+          { recordType: 'person', recordId: survivorPerson.id },
+          { recordType: 'organisation', recordId: survivorOrg.id },
+        ]);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('5. Person–organisation links (store.links): repoints non-colliding links and on collision keeps survivor link while carrying over isCurrent, primary-contact status, and dates (R273, R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'LinkSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'LinkDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Link Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const secondOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Second Counterpart Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        // Survivor has a PAST non-primary link to survivorOrg; merged record has a CURRENT primary link with earlier startDate
+        createOrUpdateLink(
+          {
+            personId: survivorPerson.id,
+            organisationId: survivorOrg.id,
+            jobTitle: 'Former Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: false,
+            startDate: '2023-01-01',
+            endDate: '2024-06-30',
+            contactStatusId: null,
+          },
+          'P-000004',
+        );
+        createOrUpdateLink(
+          {
+            personId: mergedPerson.id,
+            organisationId: survivorOrg.id,
+            jobTitle: 'Current Managing Director',
+            department: 'Board',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: true,
+            isCurrent: true,
+            startDate: '2021-03-15',
+            endDate: null,
+            contactStatusId: null,
+          },
+          'P-000004',
+        );
+        createOrUpdateLink(
+          {
+            personId: mergedPerson.id,
+            organisationId: secondOrg.id,
+            jobTitle: 'Advisor',
+            department: '',
+            roleWithinOrganisation: 'Advisor',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: '2025-01-01',
+            endDate: null,
+            contactStatusId: null,
+          },
+          'P-000004',
+        );
+
+        executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+
+        const updatedLinks = getStore().links;
+        expect(updatedLinks.some((l) => l.personId === mergedPerson.id)).toBe(false);
+        const collidingLinks = updatedLinks.filter(
+          (l) => l.personId === survivorPerson.id && l.organisationId === survivorOrg.id,
+        );
+        expect(collidingLinks).toHaveLength(1);
+        expect(collidingLinks[0]?.isCurrent).toBe(true);
+        expect(collidingLinks[0]?.isPrimaryContact).toBe(true);
+        expect(collidingLinks[0]?.startDate).toBe('2021-03-15');
+        expect(collidingLinks[0]?.endDate).toBeNull();
+        expect(
+          updatedLinks.some(
+            (l) => l.personId === survivorPerson.id && l.organisationId === secondOrg.id,
+          ),
+        ).toBe(true);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('6. Organisation: repoints parentOrganisationId on subsidiaries while leaving relationshipPartnerId unchanged (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorOrg = saveOrganisationRecord(
+          {
+            legalName: 'Bryn Parent Survivor Ltd',
+            relationshipPartnerId: 'P-000001',
+          },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          {
+            legalName: 'Bryn Parent Duplicate Ltd',
+            relationshipPartnerId: 'P-000003',
+          },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const childOrg = saveOrganisationRecord(
+          {
+            legalName: 'Bryn Subsidiary Ltd',
+            parentOrganisationId: mergedOrg.id,
+          },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
+
+        const updatedStore = getStore();
+        const updatedChildOrg = updatedStore.organisations.find((o) => o.id === childOrg.id)!;
+        expect(updatedChildOrg.parentOrganisationId).toBe(survivorOrg.id);
+        const updatedSurvivorOrg = updatedStore.organisations.find((o) => o.id === survivorOrg.id)!;
+        expect(updatedSurvivorOrg.relationshipPartnerId).toBe('P-000001');
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('7. PMS links (store.pmsLinks): repoints non-colliding links and on collision keeps survivor link, records pmsLinkConflicts, and writes audit entry (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'PmsSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'PmsDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Pms Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Pms Duplicate Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        linkPmsRecord('person', mergedPerson.id, 'PMS-PER-MERGED', 'P-000004');
+        linkPmsRecord('organisation', survivorOrg.id, 'PMS-ORG-SURV', 'P-000004');
+        linkPmsRecord('organisation', mergedOrg.id, 'PMS-ORG-MERG', 'P-000004');
+
+        executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+        const orgMergeHistory = executeMerge(
+          'organisation',
+          survivorOrg.id,
+          mergedOrg.id,
+          'P-000004',
+        );
+
+        const updatedStore = getStore();
+        const personPmsLinks = updatedStore.pmsLinks.filter(
+          (l) =>
+            l.entityType === 'person' &&
+            (l.onesquaredId === survivorPerson.id || l.onesquaredId === mergedPerson.id),
+        );
+        expect(personPmsLinks).toHaveLength(1);
+        expect(personPmsLinks[0]?.onesquaredId).toBe(survivorPerson.id);
+        expect(personPmsLinks[0]?.pmsCode).toBe('PMS-PER-MERGED');
+
+        const orgPmsLinks = updatedStore.pmsLinks.filter(
+          (l) =>
+            l.entityType === 'organisation' &&
+            (l.onesquaredId === survivorOrg.id || l.onesquaredId === mergedOrg.id),
+        );
+        expect(orgPmsLinks).toHaveLength(1);
+        expect(orgPmsLinks[0]?.onesquaredId).toBe(survivorOrg.id);
+        expect(orgPmsLinks[0]?.pmsCode).toBe('PMS-ORG-SURV');
+        expect(orgMergeHistory.pmsLinkConflicts).toEqual([
+          { keptPmsCode: 'PMS-ORG-SURV', discardedPmsCode: 'PMS-ORG-MERG' },
+        ]);
+        expect(
+          updatedStore.audit.some(
+            (a) =>
+              a.recordId === survivorOrg.id &&
+              a.action === 'merge' &&
+              a.field === 'PMS link conflict' &&
+              a.oldValue === 'PMS-ORG-MERG' &&
+              a.newValue === 'PMS-ORG-SURV',
+          ),
+        ).toBe(true);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('8. Generated documents and documentLinks: repoints primaryClientId, recipientPartyId, and documentLinks in both store and TenantDocumentRepository (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'DocSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'DocDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Doc Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Doc Duplicate Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        const store = getStore();
+        const matter = store.matters[0]!;
+        const tenantCfg = getActiveTenantConfiguration();
+        const repo = getDocumentRepository();
+        const adminActor = store.people.find((p) => p.id === 'P-000004')!;
+        const ctx = resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: adminActor.id,
+            tenantId: tenantCfg.tenantId,
+            email: adminActor.emails[0]?.address ?? 'admin@notalawfirm.example',
+            name: 'Admin User',
+            roles: ['admin'],
+            entraObjectId: adminActor.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+            mfaVerified: true,
+          },
+          hostingMode: tenantCfg.hostingMode,
+          environment: tenantCfg.environment,
+          correlationId: 'test-s0-09-doc-repo',
+        });
+
+        const docRecord = {
+          id: 'DOC-S009-1',
+          tenantId: ctx.tenantId,
+          title: 'Client Care Letter',
+          fileName: 'ccl.docx',
+          documentType: 'letter',
+          outputFormat: 'docx' as const,
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          fileSizeBytes: 1024,
+          fileSha256: 'abc123',
+          templateId: 'TPL-1',
+          templateName: 'CCL',
+          templateVersionId: 'TPLV-1',
+          templateVersionNumber: 1,
+          storageProvider: 'local-fs' as const,
+          storageKey: 'blob-s009-1',
+          generatedByUserId: 'P-000004',
+          generatedAt: new Date().toISOString(),
+          primaryMatterId: matter.id,
+          primaryClientId: mergedOrg.id,
+          recipientPartyId: mergedPerson.id,
+          isDeleted: false,
+        };
+        const docLinkPerson = {
+          id: 'DL-S009-PER',
+          tenantId: ctx.tenantId,
+          documentId: docRecord.id,
+          entityType: 'person' as const,
+          entityId: mergedPerson.id,
+          linkRole: 'recipient_party' as const,
+          createdAt: new Date().toISOString(),
+        };
+        const docLinkOrg = {
+          id: 'DL-S009-ORG',
+          tenantId: ctx.tenantId,
+          documentId: docRecord.id,
+          entityType: 'organisation' as const,
+          entityId: mergedOrg.id,
+          linkRole: 'primary_client' as const,
+          createdAt: new Date().toISOString(),
+        };
+        store.documents = [...(store.documents ?? []), { ...docRecord }];
+        store.documentLinks = [
+          ...(store.documentLinks ?? []),
+          { ...docLinkPerson },
+          { ...docLinkOrg },
+        ];
+        repo.putDocument(ctx, docRecord);
+        repo.putDocumentLink(ctx, docLinkPerson);
+        repo.putDocumentLink(ctx, docLinkOrg);
+
+        executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+        executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
+
+        const updatedStore = getStore();
+        const storeDoc = (updatedStore.documents ?? []).find((d) => d.id === docRecord.id)!;
+        expect(storeDoc.primaryClientId).toBe(survivorOrg.id);
+        expect(storeDoc.recipientPartyId).toBe(survivorPerson.id);
+        expect(
+          updatedStore.documentLinks?.some(
+            (l) => l.entityId === mergedPerson.id || l.entityId === mergedOrg.id,
+          ),
+        ).toBe(false);
+
+        const docsForSurvivorPerson = repo.listDocumentsForEntity(
+          ctx,
+          'person',
+          survivorPerson.id,
+        );
+        expect(docsForSurvivorPerson.map((d) => d.id)).toContain(docRecord.id);
+        expect(repo.listDocumentsForEntity(ctx, 'person', mergedPerson.id)).toHaveLength(0);
+
+        const docsForSurvivorOrg = repo.listDocumentsForEntity(
+          ctx,
+          'organisation',
+          survivorOrg.id,
+        );
+        expect(docsForSurvivorOrg.map((d) => d.id)).toContain(docRecord.id);
+        expect(repo.listDocumentsForEntity(ctx, 'organisation', mergedOrg.id)).toHaveLength(0);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('9. Notes, Person.createdFromEnquiryId, recentlyViewed, notifications, and untouched pre-existing audit recordIds (R275)', () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'MiscSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'MiscDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const survivorOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Misc Survivor Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          { legalName: 'Bryn Misc Duplicate Ltd' },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        const store = getStore();
+        const storeMergedPerson = store.people.find((p) => p.id === mergedPerson.id)!;
+        storeMergedPerson.createdFromEnquiryId = 'ENQ-ORIGIN-99';
+
+        addNoteToRecord('person', mergedPerson.id, 'Merged person note', 'P-000004');
+        store.recentlyViewed['P-000001'] = [mergedPerson.id, survivorPerson.id, mergedOrg.id];
+        store.notifications.push({
+          id: 'NTF-MERGE-1',
+          recipientId: 'P-000001',
+          kind: 'enquiry_assigned',
+          title: 'Follow up with Alun',
+          detail: 'Call client',
+          href: `/people/${mergedPerson.id}`,
+          recordId: mergedPerson.id,
+          createdAt: new Date().toISOString(),
+          read: false,
+          byId: 'P-000004',
+        });
+
+        const preMergeAuditIdsForMergedPerson = store.audit
+          .filter((a) => a.recordId === mergedPerson.id)
+          .map((a) => a.id);
+        expect(preMergeAuditIdsForMergedPerson.length).toBeGreaterThan(0);
+
+        executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+        executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
+
+        const updatedStore = getStore();
+        expect(
+          updatedStore.notes.some(
+            (n) =>
+              n.recordId === survivorPerson.id &&
+              n.mergedFromId === mergedPerson.id &&
+              n.text === 'Merged person note',
+          ),
+        ).toBe(true);
+        const updatedSurvivorPerson = updatedStore.people.find(
+          (p) => p.id === survivorPerson.id,
+        )!;
+        const updatedMergedPerson = updatedStore.people.find((p) => p.id === mergedPerson.id)!;
+        expect(updatedSurvivorPerson.createdFromEnquiryId).toBe('ENQ-ORIGIN-99');
+        expect(updatedMergedPerson.createdFromEnquiryId).toBeNull();
+        expect(updatedMergedPerson.mergedIntoId).toBe(survivorPerson.id);
+
+        expect(updatedStore.recentlyViewed['P-000001']).toEqual([
+          survivorPerson.id,
+          survivorOrg.id,
+        ]);
+        const updatedNotif = updatedStore.notifications.find((n) => n.id === 'NTF-MERGE-1')!;
+        expect(updatedNotif.recordId).toBe(survivorPerson.id);
+        expect(updatedNotif.href).toBe(`/people/${survivorPerson.id}`);
+
+        for (const auditId of preMergeAuditIdsForMergedPerson) {
+          const entry = updatedStore.audit.find((a) => a.id === auditId)!;
+          expect(entry.recordId).toBe(mergedPerson.id);
+        }
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('10. Atomic rollback (R272, R282, R296): rolls back both TenantDocumentRepository and store when putDocument fails part-way through the repository loop, and rolls back in-memory and persisted store (test-mode __oneSquaredLastSavedStoreJson copy) when prepareMergedEntityDocumentsInStore throws after repointing and before saveStore', () => {
+      resetAllDemoData('P-000001');
+      const repo = getDocumentRepository();
+      const origPutDoc = repo.putDocument.bind(repo);
+      const origListDocs = repo.listDocuments.bind(repo);
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackMerged', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+
+        const store = getStore();
+        const matter = store.matters[0]!;
+        matter.instructingContactId = mergedPerson.id;
+        const enq = store.enquiries[0]!;
+        enq.linkedPersonId = mergedPerson.id;
+
+        const tenantCfg = getActiveTenantConfiguration();
+        const adminActor = store.people.find((p) => p.id === 'P-000004')!;
+        const ctx = resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: adminActor.id,
+            tenantId: tenantCfg.tenantId,
+            email: adminActor.emails[0]?.address ?? 'admin@notalawfirm.example',
+            name: 'Admin User',
+            roles: ['admin'],
+            entraObjectId: adminActor.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+            mfaVerified: true,
+          },
+          hostingMode: tenantCfg.hostingMode,
+          environment: tenantCfg.environment,
+          correlationId: 'test-s0-09-r282',
+        });
+
+        const doc1 = {
+          id: 'DOC-R282-1',
+          tenantId: ctx.tenantId,
+          title: 'First Document',
+          fileName: 'doc1.docx',
+          documentType: 'letter',
+          outputFormat: 'docx' as const,
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          fileSizeBytes: 512,
+          fileSha256: 'sha-r282-1',
+          templateId: 'TPL-1',
+          templateName: 'CCL',
+          templateVersionId: 'TPLV-1',
+          templateVersionNumber: 1,
+          storageProvider: 'local-fs' as const,
+          storageKey: 'blob-r282-1',
+          generatedByUserId: 'P-000004',
+          generatedAt: new Date().toISOString(),
+          primaryMatterId: matter.id,
+          primaryClientId: mergedPerson.id,
+          recipientPartyId: mergedPerson.id,
+          isDeleted: false,
+        };
+        const doc2 = {
+          ...doc1,
+          id: 'DOC-R282-2',
+          title: 'Second Document',
+          fileName: 'doc2.docx',
+          storageKey: 'blob-r282-2',
+        };
+        const link1 = {
+          id: 'DL-R282-1',
+          tenantId: ctx.tenantId,
+          documentId: doc1.id,
+          entityType: 'person' as const,
+          entityId: mergedPerson.id,
+          linkRole: 'recipient_party' as const,
+          createdAt: new Date().toISOString(),
+        };
+        store.documents = [...(store.documents ?? []), { ...doc1 }, { ...doc2 }];
+        store.documentLinks = [...(store.documentLinks ?? []), { ...link1 }];
+        origPutDoc(ctx, doc1);
+        origPutDoc(ctx, doc2);
+        repo.putDocumentLink(ctx, link1);
+        saveStore(store);
+
+        // R296: restoreTenantDocumentsAndLinks checks that every snapshot record belongs to ctx.tenantId BEFORE deleting anything
+        expect(() =>
+          repo.restoreTenantDocumentsAndLinks(ctx, {
+            documents: [{ ...doc1, tenantId: 'other-tenant-id' }],
+            links: [],
+          }),
+        ).toThrow(/TENANCY_ISOLATION_ERROR/);
+        expect(repo.getDocumentById(ctx, doc1.id)?.id).toBe(doc1.id);
+        expect(repo.getDocumentById(ctx, doc2.id)?.id).toBe(doc2.id);
+
+        // R296: clearStoreMemoryCache throws outside test environments
+        const prevVitest = process.env.VITEST;
+        const prevNodeEnv = process.env.NODE_ENV;
+        try {
+          delete process.env.VITEST;
+          (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+          expect(() => clearStoreMemoryCache()).toThrow(
+            /clearStoreMemoryCache is only permitted in test environments/,
+          );
+        } finally {
+          if (prevVitest !== undefined) process.env.VITEST = prevVitest;
+          (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+        }
+
+        // Case 1 (R282, R296): Force failure part-way through the repository putDocument loop (succeeds on 1st doc, throws on 2nd doc after repointMergedEntity already ran)
+        let putCalls = 0;
+        repo.putDocument = (callCtx, d) => {
+          putCalls += 1;
+          if (putCalls === 2) {
+            throw new Error('SIMULATED_PUT_DOC_LOOP_FAILURE');
+          }
+          return origPutDoc(callCtx, d);
+        };
+
+        expect(() =>
+          executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
+        ).toThrow(/SIMULATED_PUT_DOC_LOOP_FAILURE/);
+        expect(putCalls).toBe(2);
+        repo.putDocument = origPutDoc;
+
+        // Repository documents and links are rolled back to their pre-merge state
+        expect(repo.getDocumentById(ctx, doc1.id)?.primaryClientId).toBe(mergedPerson.id);
+        expect(repo.getDocumentById(ctx, doc1.id)?.recipientPartyId).toBe(mergedPerson.id);
+        expect(repo.getDocumentById(ctx, doc2.id)?.primaryClientId).toBe(mergedPerson.id);
+        expect(repo.listDocumentsForEntity(ctx, 'person', mergedPerson.id).map((d) => d.id)).toEqual(
+          expect.arrayContaining([doc1.id, doc2.id]),
+        );
+        const survivorRepoDocIds = repo
+          .listDocumentsForEntity(ctx, 'person', survivorPerson.id)
+          .map((d) => d.id);
+        expect(survivorRepoDocIds).not.toContain(doc1.id);
+        expect(survivorRepoDocIds).not.toContain(doc2.id);
+
+        // Note (R296): In tests, "persisted store" means the test-mode global.__oneSquaredLastSavedStoreJson copy reloaded by clearStoreMemoryCache() + getStore().
+        expect(
+          getStore().matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
+        clearStoreMemoryCache();
+        const reloadedAfterLoopFail = getStore();
+        expect(
+          reloadedAfterLoopFail.matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
+        expect(reloadedAfterLoopFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId).toBe(
+          mergedPerson.id,
+        );
+        expect(
+          reloadedAfterLoopFail.people.find((p) => p.id === mergedPerson.id)?.mergedIntoId,
+        ).toBeNull();
+        expect(
+          reloadedAfterLoopFail.documents?.find((d) => d.id === doc1.id)?.primaryClientId,
+        ).toBe(mergedPerson.id);
+        expect(reloadedAfterLoopFail.mergeHistory).toHaveLength(0);
+      } finally {
+        repo.putDocument = origPutDoc;
+        repo.listDocuments = origListDocs;
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('10b. Atomic rollback Case 2 (R272, R282, R296): rolls back in-memory and persisted store (test-mode __oneSquaredLastSavedStoreJson copy) when prepareMergedEntityDocumentsInStore throws after repointing and before saveStore', () => {
+      resetAllDemoData('P-000001');
+      const repo = getDocumentRepository();
+      const origListDocs = repo.listDocuments.bind(repo);
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackSurvivorCase2', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackMergedCase2', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+
+        const store = getStore();
+        const matter = store.matters[0]!;
+        matter.instructingContactId = mergedPerson.id;
+        const enq = store.enquiries[0]!;
+        enq.linkedPersonId = mergedPerson.id;
+        saveStore(store);
+
+        // Case 2 (R282, R296): Force prepareMergedEntityDocumentsInStore (which runs AFTER in-memory repointing of matters, enquiries, and mergedIntoId, and BEFORE saveStore) to throw
+        repo.listDocuments = () => {
+          throw new Error('SIMULATED_PRE_SAVE_DOC_STEP_FAILURE');
+        };
+        expect(() =>
+          executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
+        ).toThrow(/SIMULATED_PRE_SAVE_DOC_STEP_FAILURE/);
+        repo.listDocuments = origListDocs;
+
+        // Assert both the in-memory store and the persisted store (test-mode __oneSquaredLastSavedStoreJson copy via clearStoreMemoryCache() + getStore()) are unchanged
+        const inMemoryAfterPreSaveFail = getStore();
+        expect(
+          inMemoryAfterPreSaveFail.matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
+        expect(
+          inMemoryAfterPreSaveFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId,
+        ).toBe(mergedPerson.id);
+        expect(
+          inMemoryAfterPreSaveFail.people.find((p) => p.id === mergedPerson.id)?.mergedIntoId,
+        ).toBeNull();
+        expect(inMemoryAfterPreSaveFail.mergeHistory).toHaveLength(0);
+
+        clearStoreMemoryCache();
+        const reloadedAfterPreSaveFail = getStore();
+        expect(
+          reloadedAfterPreSaveFail.matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
+        expect(
+          reloadedAfterPreSaveFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId,
+        ).toBe(mergedPerson.id);
+        expect(
+          reloadedAfterPreSaveFail.people.find((p) => p.id === mergedPerson.id)?.mergedIntoId,
+        ).toBeNull();
+        expect(reloadedAfterPreSaveFail.mergeHistory).toHaveLength(0);
+      } finally {
+        repo.listDocuments = origListDocs;
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('10c. Atomic rollback Case 3 (R309): when both the first saveStore and the rollback saveStore throw, logs rollback failure with correlationId and tenantId only and rethrows the original error', () => {
+      resetAllDemoData('P-000001');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackSurvivorCase3', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackMergedCase3', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+
+        const priorSavedJson = global.__oneSquaredLastSavedStoreJson;
+        let saveAttempts = 0;
+        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
+          configurable: true,
+          get() {
+            return priorSavedJson;
+          },
+          set() {
+            saveAttempts += 1;
+            if (saveAttempts === 1) {
+              throw new Error('SIMULATED_FIRST_SAVE_STORE_FAILURE');
+            }
+            throw new Error('SIMULATED_ROLLBACK_SAVE_STORE_FAILURE');
+          },
+        });
+
+        expect(() =>
+          executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
+        ).toThrow('SIMULATED_FIRST_SAVE_STORE_FAILURE');
+        expect(saveAttempts).toBe(2);
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        const loggedArg = String(errorSpy.mock.calls[0]?.[0] ?? '');
+        const parsedLog = JSON.parse(loggedArg) as {
+          level?: string;
+          event?: string;
+          correlationId?: string;
+          tenantId?: string;
+        };
+        expect(parsedLog.level).toBe('error');
+        expect(parsedLog.event).toBe('merge.rollback_save_failed');
+        expect(parsedLog.correlationId).toBeTruthy();
+        expect(parsedLog.tenantId).toBe('not-a-law-firm');
+        expect(loggedArg).not.toContain('RollbackSurvivorCase3');
+        expect(loggedArg).not.toContain('RollbackMergedCase3');
+        expect(loggedArg).not.toContain('SIMULATED_');
+      } finally {
+        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
+          configurable: true,
+          writable: true,
+          value: savedJsonValue,
+        });
+        errorSpy.mockRestore();
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('redirects merged person and organisation tombstone pages and edit pages to the survivor', async () => {
+      resetAllDemoData('P-000001');
+      try {
+        setVerifiedAdminMergeSession();
+        const sPerson = savePersonRecord(
+          { firstName: 'Nia', surname: 'Survivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mPerson = savePersonRecord(
+          { firstName: 'Nia', surname: 'Merged', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        executeMerge('person', sPerson.id, mPerson.id, 'P-000004');
+
+        const sOrg = saveOrganisationRecord(
+          { legalName: 'Nia Survivor Co' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mOrg = saveOrganisationRecord(
+          { legalName: 'Nia Merged Co' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        executeMerge('organisation', sOrg.id, mOrg.id, 'P-000004');
+
+        const captureRedirect = async (fn: () => Promise<unknown>): Promise<string> => {
+          try {
+            await fn();
+            return '';
+          } catch (err) {
+            const digest = (err as { digest?: string })?.digest ?? '';
+            return digest || (err instanceof Error ? err.message : String(err));
+          }
+        };
+
+        const personViewRedirect = await captureRedirect(() =>
+          PersonProfilePage({
+            params: Promise.resolve({ id: mPerson.id }),
+            searchParams: Promise.resolve({}),
+          }),
+        );
+        expect(personViewRedirect).toContain(
+          `/people/${sPerson.id}?mergedFrom=${mPerson.id}`,
+        );
+
+        const personEditRedirect = await captureRedirect(() =>
+          EditPersonPage({
+            params: Promise.resolve({ id: mPerson.id }),
+          }),
+        );
+        expect(personEditRedirect).toContain(`/people/${sPerson.id}/edit`);
+
+        const orgViewRedirect = await captureRedirect(() =>
+          OrganisationProfilePage({
+            params: Promise.resolve({ id: mOrg.id }),
+            searchParams: Promise.resolve({}),
+          }),
+        );
+        expect(orgViewRedirect).toContain(
+          `/organisations/${sOrg.id}?mergedFrom=${mOrg.id}`,
+        );
+
+        const orgEditRedirect = await captureRedirect(() =>
+          EditOrganisationPage({
+            params: Promise.resolve({ id: mOrg.id }),
+          }),
+        );
+        expect(orgEditRedirect).toContain(`/organisations/${sOrg.id}/edit`);
+      } finally {
+        setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');
       }
     });

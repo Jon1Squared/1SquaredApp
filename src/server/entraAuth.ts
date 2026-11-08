@@ -117,6 +117,37 @@ export function setTestEntraSessionOverride(
   testEntraSessionOverride = verified;
 }
 
+export function getTestEntraSessionOverride():
+  | VerifiedEntraSessionPayload
+  | null
+  | undefined {
+  if (process.env.NODE_ENV !== 'test') {
+    return undefined;
+  }
+  return testEntraSessionOverride;
+}
+
+export async function persistEntraSessionCookie(
+  session: EntraSessionPayload,
+): Promise<void> {
+  const signedSession = createSignedEntraSessionCookie(session);
+  if (process.env.NODE_ENV === 'test') {
+    setTestEntraSessionOverride(session);
+  }
+  try {
+    const jar = await cookies();
+    jar.set(ENTRA_SESSION_COOKIE, signedSession, {
+      httpOnly: true,
+      secure: shouldUseSecureCookies(),
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 8 * 60 * 60,
+    });
+  } catch {
+    // Ignore when called outside Next.js request context in unit tests
+  }
+}
+
 export function shouldUseSecureCookies(): boolean {
   return process.env.NODE_ENV === 'production';
 }

@@ -1462,6 +1462,10 @@ export interface MergeHistory {
   byId: string;
   at: string;
   fieldsTaken: string[];
+  pmsLinkConflicts?: {
+    keptPmsCode: string;
+    discardedPmsCode: string;
+  }[];
 }
 
 /** Everything needed to resolve list values and custom fields. */

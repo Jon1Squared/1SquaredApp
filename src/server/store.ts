@@ -208,6 +208,19 @@ export function repairOrphanTaxonomyIds(
 declare global {
   var __oneSquaredStore: FirmStore | undefined;
   var __oneSquaredStoreMtimeMs: number | undefined;
+  var __oneSquaredLastSavedStoreJson: string | undefined;
+}
+
+/**
+ * Test-only helper that clears `global.__oneSquaredStore` so the next `getStore()` call reloads
+ * from the persisted store (which in tests is the test-mode `global.__oneSquaredLastSavedStoreJson`
+ * copy rather than disk). Throws if called outside test environments (`VITEST` or `NODE_ENV === 'test'`).
+ */
+export function clearStoreMemoryCache(): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('clearStoreMemoryCache is only permitted in test environments.');
+  }
+  global.__oneSquaredStore = undefined;
 }
 
 function buildInitialPmsLinks(
@@ -1193,6 +1206,16 @@ export function getStore(): FirmStore {
       // recreate if corrupted
     }
   }
+  if (isTestEnv && global.__oneSquaredLastSavedStoreJson) {
+    try {
+      const parsed = JSON.parse(global.__oneSquaredLastSavedStoreJson) as FirmStore;
+      setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
+      global.__oneSquaredStore = parsed;
+      return global.__oneSquaredStore;
+    } catch {
+      // fall through to fresh seed store
+    }
+  }
   const fresh = createSeedStore(new Date());
   saveStore(fresh);
   return fresh;
@@ -1202,6 +1225,7 @@ export function saveStore(store: FirmStore): void {
   global.__oneSquaredStore = store;
   setRuntimeRbacConfigOverride(store.rbacConfigOverride);
   if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+    global.__oneSquaredLastSavedStoreJson = JSON.stringify(store);
     return;
   }
   try {

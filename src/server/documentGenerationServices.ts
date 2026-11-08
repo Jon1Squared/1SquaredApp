@@ -82,6 +82,7 @@ import {
 } from '@/platform/tenantRuntime';
 import {
   createVerifiedSessionActorFromEntraSession,
+  getTestEntraSessionOverride,
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
 import {
@@ -238,7 +239,9 @@ export function resolveTenantContextForStoreUser(
     session ??
     (getActiveActorSession()?.verifiedSession as
       | VerifiedEntraSessionPayload
-      | undefined);
+      | undefined) ??
+    getTestEntraSessionOverride() ??
+    undefined;
   if (!verifiedSession) {
     throw new Error(
       `UNAUTHENTICATED: Verified Entra ID session is required for user "${user.id}".`,
@@ -323,6 +326,159 @@ function syncStoreToRepository(
           bytes: buildSeedGeneralCorrespondenceDocxBytes(),
         });
       });
+  }
+}
+
+export function getDocumentRepository(): TenantDocumentRepository {
+  if (!global.__oneSquaredDocRepo) {
+    global.__oneSquaredDocRepo = new TenantDocumentRepository();
+  }
+  return global.__oneSquaredDocRepo;
+}
+
+export function prepareMergedEntityDocumentsInStore(
+  store: FirmStore,
+  ctx: TenantContext,
+  entityType: 'organisation' | 'person',
+  mergedId: string,
+  survivorId: string,
+): number {
+  const repo = getDocumentRepository();
+  let updatedCount = 0;
+
+  // Include any documents/links present in the repository for this tenant before repointing store arrays
+  const repoDocs = repo.listDocuments(ctx, { includeDeleted: true });
+  if (repoDocs.length > 0) {
+    const storeDocById = new Map(
+      (store.documents ?? []).map((d) => [d.id, d]),
+    );
+    for (const d of repoDocs) {
+      if (!storeDocById.has(d.id)) {
+        storeDocById.set(d.id, { ...d });
+      }
+    }
+    store.documents = Array.from(storeDocById.values());
+
+    const storeLinkById = new Map(
+      (store.documentLinks ?? []).map((l) => [l.id, l]),
+    );
+    for (const d of repoDocs) {
+      for (const l of repo.listLinksForDocument(ctx, d.id)) {
+        if (!storeLinkById.has(l.id)) {
+          storeLinkById.set(l.id, { ...l });
+        }
+      }
+    }
+    store.documentLinks = Array.from(storeLinkById.values());
+  }
+
+  if (Array.isArray(store.documents)) {
+    for (const doc of store.documents) {
+      if (doc.tenantId && doc.tenantId !== ctx.tenantId) continue;
+      let changed = false;
+      if (doc.primaryClientId === mergedId) {
+        doc.primaryClientId = survivorId;
+        changed = true;
+      }
+      if (doc.recipientPartyId === mergedId) {
+        doc.recipientPartyId = survivorId;
+        changed = true;
+      }
+      if (changed) {
+        updatedCount++;
+      }
+    }
+  }
+
+  if (Array.isArray(store.documentLinks)) {
+    const nextLinks: DocumentLinkRecord[] = [];
+    for (const link of store.documentLinks) {
+      if (
+        (!link.tenantId || link.tenantId === ctx.tenantId) &&
+        link.entityType === entityType &&
+        link.entityId === mergedId
+      ) {
+        const duplicateExists =
+          store.documentLinks.some(
+            (other) =>
+              other !== link &&
+              (!other.tenantId || other.tenantId === ctx.tenantId) &&
+              other.documentId === link.documentId &&
+              other.entityType === entityType &&
+              other.entityId === survivorId &&
+              other.linkRole === link.linkRole,
+          ) ||
+          nextLinks.some(
+            (other) =>
+              (!other.tenantId || other.tenantId === ctx.tenantId) &&
+              other.documentId === link.documentId &&
+              other.entityType === entityType &&
+              other.entityId === survivorId &&
+              other.linkRole === link.linkRole,
+          );
+        if (!duplicateExists) {
+          link.entityId = survivorId;
+          nextLinks.push(link);
+          updatedCount++;
+        }
+      } else {
+        nextLinks.push(link);
+      }
+    }
+    store.documentLinks = nextLinks;
+  }
+
+  return updatedCount;
+}
+
+export function repointMergedEntityInDocRepository(
+  store: FirmStore,
+  actor: Person | null,
+  entityType: 'organisation' | 'person',
+  mergedId: string,
+  survivorId: string,
+): number {
+  const repo = getDocumentRepository();
+  if (!actor) {
+    throw new Error(
+      'UNAUTHENTICATED: Verified Entra ID session is required for document merge repointing.',
+    );
+  }
+  const activeVerified = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  const { ctx } = resolveTenantContextForStoreUser(
+    store,
+    actor.id,
+    activeVerified,
+  );
+
+  // R282: Do not call prepareMergedEntityDocumentsInStore a second time after saveStore.
+  // Snapshot affected tenant repository documents and links before writing, and restore on failure.
+  const repoSnapshot = repo.snapshotTenantDocumentsAndLinks(ctx);
+  try {
+    const repoUpdated = repo.repointMergedEntity(
+      ctx,
+      entityType,
+      mergedId,
+      survivorId,
+    );
+
+    for (const d of store.documents ?? []) {
+      if (d.tenantId === ctx.tenantId) {
+        repo.putDocument(ctx, d);
+      }
+    }
+    for (const l of store.documentLinks ?? []) {
+      if (l.tenantId === ctx.tenantId) {
+        repo.putDocumentLink(ctx, l);
+      }
+    }
+
+    return repoUpdated;
+  } catch (err) {
+    repo.restoreTenantDocumentsAndLinks(ctx, repoSnapshot);
+    throw err;
   }
 }
 

@@ -282,13 +282,131 @@ export class TenantDocumentRepository {
         }
         if (
           (entityType === 'organisation' || entityType === 'person') &&
-          d.primaryClientId === entityId
+          (d.primaryClientId === entityId || d.recipientPartyId === entityId)
         ) {
           return true;
         }
         return false;
       })
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+  }
+
+  public repointMergedEntity(
+    ctx: TenantContext,
+    entityType: 'organisation' | 'person',
+    mergedId: string,
+    survivorId: string,
+  ): number {
+    const db = this.getDb(ctx);
+    let updatedCount = 0;
+
+    for (const [docId, doc] of db.documents.entries()) {
+      if (doc.tenantId !== ctx.tenantId) continue;
+      let changed = false;
+      const copy: GeneratedDocumentRecord = { ...doc };
+      if (copy.primaryClientId === mergedId) {
+        copy.primaryClientId = survivorId;
+        changed = true;
+      }
+      if (copy.recipientPartyId === mergedId) {
+        copy.recipientPartyId = survivorId;
+        changed = true;
+      }
+      if (changed) {
+        db.documents.set(docId, copy);
+        updatedCount++;
+      }
+    }
+
+    const toDelete: string[] = [];
+    for (const [linkId, link] of db.links.entries()) {
+      if (
+        link.tenantId !== ctx.tenantId ||
+        link.entityType !== entityType ||
+        link.entityId !== mergedId
+      ) {
+        continue;
+      }
+      const duplicateExists = Array.from(db.links.values()).some(
+        (other) =>
+          other.id !== linkId &&
+          other.tenantId === ctx.tenantId &&
+          other.documentId === link.documentId &&
+          other.entityType === entityType &&
+          other.entityId === survivorId &&
+          other.linkRole === link.linkRole,
+      );
+      if (duplicateExists) {
+        toDelete.push(linkId);
+      } else {
+        db.links.set(linkId, {
+          ...link,
+          entityId: survivorId,
+        });
+        updatedCount++;
+      }
+    }
+    for (const linkId of toDelete) {
+      db.links.delete(linkId);
+    }
+
+    return updatedCount;
+  }
+
+  public snapshotTenantDocumentsAndLinks(ctx: TenantContext): {
+    documents: GeneratedDocumentRecord[];
+    links: DocumentLinkRecord[];
+  } {
+    const db = this.getDb(ctx);
+    return {
+      documents: Array.from(db.documents.values())
+        .filter((d) => d.tenantId === ctx.tenantId)
+        .map((d) => ({ ...d })),
+      links: Array.from(db.links.values())
+        .filter((l) => l.tenantId === ctx.tenantId)
+        .map((l) => ({ ...l })),
+    };
+  }
+
+  /**
+   * Restores the caller's tenant partition of documents and links from a snapshot captured by
+   * `snapshotTenantDocumentsAndLinks`.
+   *
+   * Note (R304): `restoreTenantDocumentsAndLinks` replaces the whole tenant partition in memory,
+   * so a concurrent write in the same process would be lost. This is acceptable in the single-process
+   * transitional store prior to S0-17 database transactions.
+   */
+  public restoreTenantDocumentsAndLinks(
+    ctx: TenantContext,
+    snapshot: {
+      documents: GeneratedDocumentRecord[];
+      links: DocumentLinkRecord[];
+    },
+  ): void {
+    const db = this.getDb(ctx);
+    // R296: Verify that every snapshot record belongs to ctx.tenantId BEFORE deleting anything.
+    for (const doc of snapshot.documents) {
+      this.assertRecordTenant(ctx, doc.tenantId, 'GeneratedDocumentRecord');
+    }
+    for (const link of snapshot.links) {
+      this.assertRecordTenant(ctx, link.tenantId, 'DocumentLinkRecord');
+    }
+    for (const [docId, doc] of db.documents.entries()) {
+      if (doc.tenantId === ctx.tenantId) {
+        db.documents.delete(docId);
+      }
+    }
+    for (const [linkId, link] of db.links.entries()) {
+      if (link.tenantId === ctx.tenantId) {
+        db.links.delete(linkId);
+      }
+    }
+    for (const doc of snapshot.documents) {
+      db.documents.set(doc.id, { ...doc });
+    }
+    for (const link of snapshot.links) {
+      db.links.set(link.id, { ...link });
+    }
   }
 
   // ============================================================================

@@ -2,11 +2,17 @@
 import { fieldsFor } from './fieldRegistry';
 import { normaliseEmail, normaliseOrgName, normalisePhone, normalisePostcode, normaliseText } from './normalise';
 import { personDisplayName } from './names';
-import type { Address, AnyRecord, Email, OtherName, Phone } from './types';
+import type { Address, AnyRecord, Email, OtherName, Person, Phone } from './types';
 
 export interface MergePlan<T extends AnyRecord> {
   survivor: T;
   fieldsTaken: string[];
+}
+
+export function isEmployeeOrLeaverRecord(record: AnyRecord): boolean {
+  if (record.recordType !== 'person') return false;
+  const person = record as Person & { worksAtFirm?: boolean };
+  return Boolean(person.isEmployee || person.worksAtFirm || person.employment);
 }
 
 /** Fields never copied across in a merge. */
@@ -16,6 +22,7 @@ const SKIP = new Set([
   'isEmployee',
   'employeeRoleId',
   'departmentId',
+  'relationshipPartnerId',
   'lastInteractionAt',
 ]);
 
@@ -128,6 +135,15 @@ export function planMerge<T extends AnyRecord>(survivor: T, merged: T): MergePla
   if (cfTaken) {
     out.customFields = cf;
     taken.push('Custom fields');
+  }
+
+  if (
+    survivor.recordType === 'person' &&
+    isEmpty(out.createdFromEnquiryId) &&
+    !isEmpty(src.createdFromEnquiryId)
+  ) {
+    out.createdFromEnquiryId = src.createdFromEnquiryId;
+    taken.push('Created from enquiry');
   }
 
   // Track history: survivor remembers the merged id so it is no longer flagged as a duplicate.
