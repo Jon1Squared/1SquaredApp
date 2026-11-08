@@ -6985,6 +6985,26 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ),
       ).toBe(true);
 
+      const validEnqUpdate = await saveEnquiryAction(
+        {
+          firstName: 'TenantA',
+          lastName: 'PositiveControl',
+          email: 'tenanta.control@notalawfirm.example',
+          phone: '029 2000 5555',
+          channelId: templateEnq.channelId,
+          practiceAreaId: templateEnq.practiceAreaId,
+          summary: 'Tenant A positive control enquiry updated by ID',
+          notes: 'Updated notes for Tenant A positive control enquiry',
+          urgencyId: templateEnq.urgencyId,
+          privacyNoticeGiven: true,
+        },
+        { id: validEnqId },
+      );
+      expect(isActionDenied(validEnqUpdate)).toBe(false);
+      expect(store.enquiries.find((e) => e.id === validEnqId)?.summary).toBe(
+        'Tenant A positive control enquiry updated by ID',
+      );
+
       const validEnqAssign = await assignEnquiryAction(validEnqId, 'P-000001');
       expect(isActionDenied(validEnqAssign)).toBe(false);
       expect(store.enquiries.find((e) => e.id === validEnqId)?.assignedToId).toBe(
@@ -7053,6 +7073,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           (q) => q.id === validQuoteId && q.scope === 'Tenant A valid quote scope',
         ),
       ).toBe(true);
+
+      const validQuoteUpdate = await saveQuoteAction(
+        {
+          clientType: 'prospect',
+          prospectName: 'Tenant A Prospect',
+          practiceAreaId: store.quotes[0]!.practiceAreaId,
+          scope: 'Tenant A valid quote scope updated by ID',
+          feeBasis: 'Fixed fee',
+          feeAmountExVat: 1250,
+        },
+        { id: validQuoteId },
+      );
+      expect(isActionDenied(validQuoteUpdate)).toBe(false);
+      expect(store.quotes.find((q) => q.id === validQuoteId)?.scope).toBe(
+        'Tenant A valid quote scope updated by ID',
+      );
 
       const validQuoteSent = await markQuoteSentAction(validQuoteId);
       expect(isActionDenied(validQuoteSent)).toBe(false);
@@ -7190,6 +7226,49 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         store.organisations.find((o) => o.id === mergeOrgTarget.organisation.id)
           ?.mergedIntoId,
       ).toBe(mergeOrgSurvivor.organisation.id);
+
+      const dupPersonA = await savePersonAction(
+        { firstName: 'TenantADup', surname: 'PersonAlpha' },
+        {},
+      );
+      const dupPersonB = await savePersonAction(
+        { firstName: 'TenantADup', surname: 'PersonBeta' },
+        {},
+      );
+      expect(isActionDenied(dupPersonA)).toBe(false);
+      expect(isActionDenied(dupPersonB)).toBe(false);
+      const validDismissPersonDup = await dismissDuplicateAction(
+        'person',
+        dupPersonA.person.id,
+        dupPersonB.person.id,
+      );
+      expect(isActionDenied(validDismissPersonDup)).toBe(false);
+      expect(
+        store.people
+          .find((p) => p.id === dupPersonA.person.id)
+          ?.notDuplicateOf.includes(dupPersonB.person.id),
+      ).toBe(true);
+
+      const mergePersonSurvivor = await savePersonAction(
+        { firstName: 'TenantAMerge', surname: 'SurvivorPerson' },
+        {},
+      );
+      const mergePersonTarget = await savePersonAction(
+        { firstName: 'TenantAMerge', surname: 'TargetPerson' },
+        {},
+      );
+      expect(isActionDenied(mergePersonSurvivor)).toBe(false);
+      expect(isActionDenied(mergePersonTarget)).toBe(false);
+      const validPersonMerge = await mergeRecordsAction(
+        'person',
+        mergePersonSurvivor.person.id,
+        mergePersonTarget.person.id,
+      );
+      expect(isActionDenied(validPersonMerge)).toBe(false);
+      expect(
+        store.people.find((p) => p.id === mergePersonTarget.person.id)
+          ?.mergedIntoId,
+      ).toBe(mergePersonSurvivor.person.id);
 
       const leaverCandidate = store.people.find(
         (p) => p.isEmployee && p.id !== 'P-000001' && p.id !== 'P-000002',
