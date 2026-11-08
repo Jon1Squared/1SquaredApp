@@ -6618,99 +6618,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('S0-05: rejects tampered cross-tenant record IDs and forged tenant claims across all 20 S0-05 record actions', async () => {
+  it('S0-05: rejects forged tenant claims and tampered record IDs across all 20 S0-05 record actions (with positive Tenant A controls and data-layer cluster checks)', async () => {
     try {
       resetAllDemoData('P-000001');
       const store = getStore();
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
 
-      // Build an isolated Tenant B store and persist real Tenant B records in PostgresTenantCluster under ctxB
-      const cluster = new PostgresTenantCluster();
-      const ctxA = resolveTenantFromVerifiedToken({
-        verifiedToken: tenantAToken,
-        hostingMode: 'multi_tenant',
-        environment: 'dev',
-        correlationId: 'corr-s005-a',
-      });
-      const ctxB = resolveTenantFromVerifiedToken({
-        verifiedToken: tenantBToken,
-        hostingMode: 'multi_tenant',
-        environment: 'dev',
-        correlationId: 'corr-s005-b',
-      });
-      const tenantBStore = createSeedStore();
-      tenantBStore.firmId = ctxB.tenantId;
-
-      const tenantBTask = {
-        ...structuredClone(tenantBStore.tasks[0]!),
-        id: 'TSK-TB-000501',
-        title: 'Tenant B Confidential Task',
+      const tamperedIds = {
+        task: 'TSK-TB-000501',
+        matter: 'M-TB-000501',
+        enquiry: 'ENQ-TB-000501',
+        quote: 'Q-TB-000501',
+        org: 'O-TB-000501',
+        person: 'P-TB-000501',
+        link: 'L-TB-000501',
       };
-      const tenantBMatter = {
-        ...structuredClone(tenantBStore.matters[0]!),
-        id: 'M-TB-000501',
-        matterNumber: 'PV-000501',
-        title: 'Tenant B Confidential Matter',
-      };
-      const tenantBEnquiry = {
-        ...structuredClone(tenantBStore.enquiries[0]!),
-        id: 'ENQ-TB-000501',
-        reference: 'ENQ-TB-000501',
-        firstName: 'Owain',
-        lastName: 'Pembroke',
-      };
-      const tenantBQuote = {
-        ...structuredClone(tenantBStore.quotes[0]!),
-        id: 'Q-TB-000501',
-        reference: 'QUO-TB-000501',
-        prospectName: 'Pembroke Vaughan Prospect',
-      };
-      const tenantBOrg = {
-        ...structuredClone(tenantBStore.organisations[0]!),
-        id: 'O-TB-000501',
-        legalName: 'Pembroke Vaughan Holdings Ltd',
-      };
-      const tenantBPerson = {
-        ...structuredClone(tenantBStore.people[0]!),
-        id: 'P-TB-000501',
-        firstName: 'Gareth',
-        surname: 'PembrokeLeaver',
-        isEmployee: true,
-        employment: {
-          ...structuredClone(tenantBStore.people[0]!.employment!),
-          status: 'Leaver' as const,
-          endDate: '2026-10-01',
-        },
-      };
-      const tenantBLink = {
-        ...structuredClone(tenantBStore.links[0]!),
-        id: 'L-TB-000501',
-        personId: tenantBPerson.id,
-        organisationId: tenantBOrg.id,
-      };
-
-      tenantBStore.tasks.unshift(tenantBTask);
-      tenantBStore.matters.unshift(tenantBMatter);
-      tenantBStore.enquiries.unshift(tenantBEnquiry);
-      tenantBStore.quotes.unshift(tenantBQuote);
-      tenantBStore.organisations.unshift(tenantBOrg);
-      tenantBStore.people.unshift(tenantBPerson);
-      tenantBStore.links.unshift(tenantBLink);
-
-      for (const rec of [
-        tenantBTask,
-        tenantBMatter,
-        tenantBEnquiry,
-        tenantBQuote,
-        tenantBOrg,
-        tenantBPerson,
-        tenantBLink,
-      ]) {
-        cluster.putRecord(ctxB, { ...rec, tenantId: ctxB.tenantId });
-        expect(cluster.getRecordById(ctxB, rec.id)?.id).toBe(rec.id);
-        expect(cluster.getRecordById(ctxA, rec.id)).toBeNull();
-      }
 
       // 1. Forged tenant claim is rejected at the action boundary across all 20 S0-05 actions (and takeTaskAction)
       setTestEntraSessionOverride({
@@ -6737,30 +6660,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             dueAt: '2026-12-01',
             assignedPersonId: 'P-000001',
           }),
-        () => takeTaskAction(tenantBTask.id),
-        () => addTaskCommentAction(tenantBTask.id, 'Cross-tenant comment'),
+        () => takeTaskAction(tamperedIds.task),
+        () => addTaskCommentAction(tamperedIds.task, 'Cross-tenant comment'),
         () =>
           saveEnquiryAction({ firstName: 'Cross', lastName: 'Tenant' }, { asDraft: true }),
-        () => assignEnquiryAction(tenantBEnquiry.id, 'P-000001'),
+        () => assignEnquiryAction(tamperedIds.enquiry, 'P-000001'),
         () =>
-          logEnquiryContactAction(tenantBEnquiry.id, {
+          logEnquiryContactAction(tamperedIds.enquiry, {
             method: 'Phone',
             outcome: 'Spoke',
             note: 'Cross-tenant',
           }),
         () =>
-          sendEnquiryEmailAction(tenantBEnquiry.id, {
+          sendEnquiryEmailAction(tamperedIds.enquiry, {
             to: 'test@notalawfirm.example',
             subject: 'Cross-tenant',
             bodyHtml: '<p>Test</p>',
             bodyText: 'Test',
           }),
         () =>
-          closeEnquiryAction(tenantBEnquiry.id, {
+          closeEnquiryAction(tamperedIds.enquiry, {
             targetStatus: 'Declined',
             closeReasonId: 'enquiry_close_reason.conflict',
           }),
-        () => reopenEnquiryAction(tenantBEnquiry.id),
+        () => reopenEnquiryAction(tamperedIds.enquiry),
         () =>
           saveQuoteAction({
             clientType: 'prospect',
@@ -6770,24 +6693,24 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             feeBasis: 'Fixed fee',
             feeAmountExVat: 1000,
           }),
-        () => markQuoteSentAction(tenantBQuote.id),
+        () => markQuoteSentAction(tamperedIds.quote),
         () =>
-          logQuoteFollowUpAction(tenantBQuote.id, {
+          logQuoteFollowUpAction(tamperedIds.quote, {
             method: 'Phone',
             note: 'Cross-tenant',
             nextFollowUpDate: '2026-12-01',
           }),
         () =>
-          reviseQuoteAction(tenantBQuote.id, {
+          reviseQuoteAction(tamperedIds.quote, {
             feeBasis: 'Fixed fee',
             feeAmountExVat: 1200,
             scope: 'Cross-tenant',
           }),
-        () => recordQuoteOutcomeAction(tenantBQuote.id, { outcome: 'Accepted' }),
-        () => saveOrganisationAction({ legalName: 'Cross-Tenant Org' }, { id: tenantBOrg.id }),
+        () => recordQuoteOutcomeAction(tamperedIds.quote, { outcome: 'Accepted' }),
+        () => saveOrganisationAction({ legalName: 'Cross-Tenant Org' }, { id: tamperedIds.org }),
         () =>
           saveLinkAction({
-            id: tenantBLink.id,
+            id: tamperedIds.link,
             personId: 'P-000001',
             organisationId: store.organisations[0]!.id,
             jobTitle: 'Director',
@@ -6800,18 +6723,18 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             endDate: null,
             contactStatusId: null,
           }),
-        () => deleteLinkAction(tenantBLink.id),
-        () => addNoteAction('matter', tenantBMatter.id, 'Cross-tenant note'),
-        () => dismissDuplicateAction('person', tenantBPerson.id, 'P-000001'),
-        () => mergeRecordsAction('person', 'P-000001', tenantBPerson.id),
-        () => reassignLeaverOwnedRecordsAction(tenantBPerson.id, 'P-000001'),
+        () => deleteLinkAction(tamperedIds.link),
+        () => addNoteAction('matter', tamperedIds.matter, 'Cross-tenant note'),
+        () => dismissDuplicateAction('person', tamperedIds.person, 'P-000001'),
+        () => mergeRecordsAction('person', 'P-000001', tamperedIds.person),
+        () => reassignLeaverOwnedRecordsAction(tamperedIds.person, 'P-000001'),
       ];
       expect(forgedCalls.length).toBe(21);
       for (const invokeForged of forgedCalls) {
         await expect(invokeForged()).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
       }
 
-      // 2. Within an authenticated Tenant A session, tampered record IDs belonging to Tenant B are rejected with FORBIDDEN
+      // 2. Within an authenticated Tenant A session, tampered/foreign record IDs are rejected with code === 'FORBIDDEN' and a specific not-found/access-denied message
       setTestEntraSessionOverride({
         personId: 'P-000001',
         tenantId: 'not-a-law-firm',
@@ -6836,156 +6759,128 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const linksBefore = store.links.length;
       const notesBefore = store.notes.length;
 
-      expect(
-        isActionDenied(
-          await saveTaskAction({
-            id: tenantBTask.id,
-            title: 'Tampered task',
-            dueAt: '2026-12-01',
-            assignedPersonId: 'P-000001',
-          }),
-        ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await saveTaskAction({
-            title: 'Task linked to Tenant B matter',
-            dueAt: '2026-12-01',
-            assignedPersonId: 'P-000001',
-            linkedRecords: [{ recordType: 'matter', recordId: tenantBMatter.id }],
-          }),
-        ),
-      ).toBe(true);
-      expect(isActionDenied(await takeTaskAction(tenantBTask.id))).toBe(true);
-      expect(
-        isActionDenied(await addTaskCommentAction(tenantBTask.id, 'Tampered comment')),
-      ).toBe(true);
+      const expectTamperedForbidden = (res: unknown) => {
+        expect(isActionDenied(res)).toBe(true);
+        if (isActionDenied(res)) {
+          expect(res.code).toBe('FORBIDDEN');
+          expect(res.message).toMatch(/not found|access denied|existing leaver/i);
+        }
+      };
 
-      expect(
-        isActionDenied(
-          await saveEnquiryAction(
-            { firstName: 'Tampered', lastName: 'Enquiry' },
-            { id: tenantBEnquiry.id, asDraft: true },
-          ),
-        ),
-      ).toBe(true);
-      expect(
-        isActionDenied(await assignEnquiryAction(tenantBEnquiry.id, 'P-000001')),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await logEnquiryContactAction(tenantBEnquiry.id, {
-            method: 'Phone',
-            outcome: 'Spoke',
-            note: 'Tampered',
-          }),
-        ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await sendEnquiryEmailAction(tenantBEnquiry.id, {
-            to: 'test@notalawfirm.example',
-            subject: 'Tampered',
-            bodyHtml: '<p>Test</p>',
-            bodyText: 'Test',
-          }),
-        ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await closeEnquiryAction(tenantBEnquiry.id, {
-            targetStatus: 'Declined',
-            closeReasonId: 'enquiry_close_reason.conflict',
-          }),
-        ),
-      ).toBe(true);
-      expect(isActionDenied(await reopenEnquiryAction(tenantBEnquiry.id))).toBe(true);
+      expectTamperedForbidden(
+        await saveTaskAction({
+          id: tamperedIds.task,
+          title: 'Tampered task',
+          dueAt: '2026-12-01',
+          assignedPersonId: 'P-000001',
+        }),
+      );
+      expectTamperedForbidden(
+        await saveTaskAction({
+          title: 'Task linked to tampered matter',
+          dueAt: '2026-12-01',
+          assignedPersonId: 'P-000001',
+          linkedRecords: [{ recordType: 'matter', recordId: tamperedIds.matter }],
+        }),
+      );
+      expectTamperedForbidden(await takeTaskAction(tamperedIds.task));
+      expectTamperedForbidden(await addTaskCommentAction(tamperedIds.task, 'Tampered comment'));
 
-      expect(
-        isActionDenied(
-          await saveQuoteAction(
-            {
-              clientType: 'prospect',
-              prospectName: 'Tampered',
-              practiceAreaId: store.quotes[0]!.practiceAreaId,
-              scope: 'Scope',
-              feeBasis: 'Fixed fee',
-              feeAmountExVat: 1000,
-            },
-            { id: tenantBQuote.id },
-          ),
+      expectTamperedForbidden(
+        await saveEnquiryAction(
+          { firstName: 'Tampered', lastName: 'Enquiry' },
+          { id: tamperedIds.enquiry, asDraft: true },
         ),
-      ).toBe(true);
-      expect(isActionDenied(await markQuoteSentAction(tenantBQuote.id))).toBe(true);
-      expect(
-        isActionDenied(
-          await logQuoteFollowUpAction(tenantBQuote.id, {
-            method: 'Phone',
-            note: 'Tampered',
-            nextFollowUpDate: '2026-12-01',
-          }),
-        ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await reviseQuoteAction(tenantBQuote.id, {
+      );
+      expectTamperedForbidden(await assignEnquiryAction(tamperedIds.enquiry, 'P-000001'));
+      expectTamperedForbidden(
+        await logEnquiryContactAction(tamperedIds.enquiry, {
+          method: 'Phone',
+          outcome: 'Spoke',
+          note: 'Tampered',
+        }),
+      );
+      expectTamperedForbidden(
+        await sendEnquiryEmailAction(tamperedIds.enquiry, {
+          to: 'test@notalawfirm.example',
+          subject: 'Tampered',
+          bodyHtml: '<p>Test</p>',
+          bodyText: 'Test',
+        }),
+      );
+      expectTamperedForbidden(
+        await closeEnquiryAction(tamperedIds.enquiry, {
+          targetStatus: 'Declined',
+          closeReasonId: 'enquiry_close_reason.conflict',
+        }),
+      );
+      expectTamperedForbidden(await reopenEnquiryAction(tamperedIds.enquiry));
+
+      expectTamperedForbidden(
+        await saveQuoteAction(
+          {
+            clientType: 'prospect',
+            prospectName: 'Tampered',
+            practiceAreaId: store.quotes[0]!.practiceAreaId,
+            scope: 'Scope',
             feeBasis: 'Fixed fee',
-            feeAmountExVat: 1200,
-            scope: 'Tampered',
-          }),
+            feeAmountExVat: 1000,
+          },
+          { id: tamperedIds.quote },
         ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await recordQuoteOutcomeAction(tenantBQuote.id, { outcome: 'Accepted' }),
-        ),
-      ).toBe(true);
+      );
+      expectTamperedForbidden(await markQuoteSentAction(tamperedIds.quote));
+      expectTamperedForbidden(
+        await logQuoteFollowUpAction(tamperedIds.quote, {
+          method: 'Phone',
+          note: 'Tampered',
+          nextFollowUpDate: '2026-12-01',
+        }),
+      );
+      expectTamperedForbidden(
+        await reviseQuoteAction(tamperedIds.quote, {
+          feeBasis: 'Fixed fee',
+          feeAmountExVat: 1200,
+          scope: 'Tampered',
+        }),
+      );
+      expectTamperedForbidden(
+        await recordQuoteOutcomeAction(tamperedIds.quote, { outcome: 'Accepted' }),
+      );
 
-      expect(
-        isActionDenied(
-          await saveOrganisationAction(
-            { legalName: 'Tampered Org' },
-            { id: tenantBOrg.id },
-          ),
+      expectTamperedForbidden(
+        await saveOrganisationAction(
+          { legalName: 'Tampered Org' },
+          { id: tamperedIds.org },
         ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await saveLinkAction({
-            id: tenantBLink.id,
-            personId: 'P-000001',
-            organisationId: store.organisations[0]!.id,
-            jobTitle: 'Director',
-            department: '',
-            roleWithinOrganisation: 'Director',
-            contactRoleIds: [],
-            isPrimaryContact: false,
-            isCurrent: true,
-            startDate: null,
-            endDate: null,
-            contactStatusId: null,
-          }),
-        ),
-      ).toBe(true);
-      expect(isActionDenied(await deleteLinkAction(tenantBLink.id))).toBe(true);
-      expect(
-        isActionDenied(await addNoteAction('matter', tenantBMatter.id, 'Tampered note')),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await dismissDuplicateAction('person', tenantBPerson.id, 'P-000001'),
-        ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await mergeRecordsAction('person', 'P-000001', tenantBPerson.id),
-        ),
-      ).toBe(true);
-      expect(
-        isActionDenied(
-          await reassignLeaverOwnedRecordsAction(tenantBPerson.id, 'P-000001'),
-        ),
-      ).toBe(true);
+      );
+      expectTamperedForbidden(
+        await saveLinkAction({
+          id: tamperedIds.link,
+          personId: 'P-000001',
+          organisationId: store.organisations[0]!.id,
+          jobTitle: 'Director',
+          department: '',
+          roleWithinOrganisation: 'Director',
+          contactRoleIds: [],
+          isPrimaryContact: false,
+          isCurrent: true,
+          startDate: null,
+          endDate: null,
+          contactStatusId: null,
+        }),
+      );
+      expectTamperedForbidden(await deleteLinkAction(tamperedIds.link));
+      expectTamperedForbidden(await addNoteAction('matter', tamperedIds.matter, 'Tampered note'));
+      expectTamperedForbidden(
+        await dismissDuplicateAction('person', tamperedIds.person, 'P-000001'),
+      );
+      expectTamperedForbidden(
+        await mergeRecordsAction('person', 'P-000001', tamperedIds.person),
+      );
+      expectTamperedForbidden(
+        await reassignLeaverOwnedRecordsAction(tamperedIds.person, 'P-000001'),
+      );
 
       expect(store.tasks.length).toBe(tasksBefore);
       expect(store.enquiries.length).toBe(enquiriesBefore);
@@ -6994,19 +6889,79 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(store.links.length).toBe(linksBefore);
       expect(store.notes.length).toBe(notesBefore);
 
-      // Tenant B records remain intact in Tenant B's store and database cluster
+      // 3. Positive controls (R281): the same actions succeed with Tenant A's valid session and valid Tenant A record IDs
+      const validTask = store.tasks[0]!;
+      const validTaskSave = await saveTaskAction({
+        id: validTask.id,
+        title: validTask.title,
+        dueAt: validTask.dueAt,
+        assignedPersonId: validTask.assignedPersonId,
+      });
+      expect(isActionDenied(validTaskSave)).toBe(false);
+      const validTaskComment = await addTaskCommentAction(validTask.id, 'Tenant A valid comment');
+      expect(isActionDenied(validTaskComment)).toBe(false);
+
+      const validEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
+      const validEnqAssign = await assignEnquiryAction(validEnq.id, 'P-000001');
+      expect(isActionDenied(validEnqAssign)).toBe(false);
+      const validQuote = store.quotes[0]!;
+      const validQuoteFollowUp = await logQuoteFollowUpAction(validQuote.id, {
+        method: 'Phone',
+        note: 'Tenant A valid quote follow-up',
+        nextFollowUpDate: '2026-12-01',
+      });
+      expect(isActionDenied(validQuoteFollowUp)).toBe(false);
+      const validOrg = store.organisations[0]!;
+      const validOrgSave = await saveOrganisationAction(
+        { legalName: validOrg.legalName },
+        { id: validOrg.id },
+      );
+      expect(isActionDenied(validOrgSave)).toBe(false);
+      const validMatterNote = await addNoteAction(
+        'matter',
+        store.matters[0]!.id,
+        'Tenant A valid matter note',
+      );
+      expect(isActionDenied(validMatterNote)).toBe(false);
+
+      // 4. Data-layer isolation check (PostgresTenantCluster, separate from the single-tenant ADR 0001 host store)
+      const cluster = new PostgresTenantCluster();
+      const ctxA = resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-s005-a',
+      });
+      const ctxB = resolveTenantFromVerifiedToken({
+        verifiedToken: tenantBToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-s005-b',
+      });
+      cluster.putRecord(ctxB, {
+        id: tamperedIds.task,
+        tenantId: ctxB.tenantId,
+        title: 'Tenant B Confidential Task',
+      });
+      cluster.putRecord(ctxB, {
+        id: tamperedIds.org,
+        tenantId: ctxB.tenantId,
+        legalName: 'Pembroke Vaughan Holdings Ltd',
+      });
       expect(
         cluster.getRecordById<{ id: string; tenantId: string; title: string }>(
           ctxB,
-          tenantBTask.id,
+          tamperedIds.task,
         )?.title,
       ).toBe('Tenant B Confidential Task');
+      expect(cluster.getRecordById(ctxA, tamperedIds.task)).toBeNull();
       expect(
         cluster.getRecordById<{ id: string; tenantId: string; legalName: string }>(
           ctxB,
-          tenantBOrg.id,
+          tamperedIds.org,
         )?.legalName,
       ).toBe('Pembroke Vaughan Holdings Ltd');
+      expect(cluster.getRecordById(ctxA, tamperedIds.org)).toBeNull();
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

@@ -7072,7 +7072,7 @@ export function saveEnquiryRecord(
         (input.assignedTeamId ?? null) !== (existing.assignedTeamId ?? null);
       if (attemptedStatusChange || attemptedAssigneeChange || attemptedTeamChange) {
         const msg =
-          'Status and assignment on a non-draft enquiry cannot be changed through saveEnquiryRecord; use assignEnquiryAction, closeEnquiryAction, or reopenEnquiryAction.';
+          'Status and assignment on a non-draft enquiry cannot be changed through saveEnquiryRecord. Use the assign, close, or reopen actions (assignEnquiryAction, closeEnquiryAction, or reopenEnquiryAction).';
         return {
           ...buildActionDenied('FORBIDDEN', msg),
           errors: { permission: msg },

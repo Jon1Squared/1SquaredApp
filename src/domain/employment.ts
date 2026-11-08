@@ -434,13 +434,14 @@ export function findRecordsOwnedByLeavers(
       if (pid) taskOwnerIds.add(pid);
     }
     for (const ownerId of taskOwnerIds) {
+      const isPrimaryAssignee = t.assignedPersonId === ownerId;
       pushIfLeaver(
         ownerId,
         'task',
         t.id,
         `${t.reference} — ${t.title}`,
-        'assignedPersonId',
-        'Assigned person',
+        isPrimaryAssignee ? 'assignedPersonId' : 'assignedPersonIds',
+        isPrimaryAssignee ? 'Assigned person' : 'Assigned person (assignedPersonIds)',
       );
     }
   }

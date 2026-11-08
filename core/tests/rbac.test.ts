@@ -3243,7 +3243,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         sharedTask.assignedPersonId = 'P-000001';
         sharedTask.assignedPersonIds = ['P-000001', activeEmp.id];
 
-        // R270: findRecordsOwnedByLeavers finds multi-assignee tasks where leaver is in assignedPersonIds
+        // R270 & R293: findRecordsOwnedByLeavers finds multi-assignee tasks where leaver is in assignedPersonIds and labels roleField with assignedPersonIds
         const ownedBefore = findRecordsOwnedByLeavers(
           store.people,
           store.organisations,
@@ -3252,9 +3252,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           store.enquiries,
           activeEmp.id,
         );
-        expect(
-          ownedBefore.some((item) => item.recordType === 'task' && item.recordId === sharedTask.id),
-        ).toBe(true);
+        const coOwnedTaskItem = ownedBefore.find(
+          (item) => item.recordType === 'task' && item.recordId === sharedTask.id,
+        );
+        expect(coOwnedTaskItem).toBeDefined();
+        expect(coOwnedTaskItem?.roleField).toBe('assignedPersonIds');
 
         const closedEnq = store.enquiries[0]!;
         closedEnq.status = 'Declined';
@@ -3531,44 +3533,100 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ),
         ).toBe(true);
 
-        // 5 (R264). saveEnquiryRecord refuses status or assignment changes on an existing non-draft enquiry
+        // 5 (R264, R292). saveEnquiryRecord refuses status or assignment changes on an existing non-draft enquiry
+        // even when the actor holds enquiry:edit and only the specific action permission is revoked
         const closedEnq = store.enquiries.find((e) => e.id !== openEnq.id)!;
         closedEnq.status = 'Declined';
         closedEnq.assignedToId = feeEarner.id;
-        expect(
-          isActionDenied(
-            saveEnquiryRecord(
-              { status: 'Assigned', summary: closedEnq.summary },
-              { id: closedEnq.id, byId: feeEarner.id },
-            ),
-          ),
-        ).toBe(true);
-        expect(
-          isActionDenied(
-            saveEnquiryRecord(
-              { status: 'Declined', summary: openEnq.summary },
-              { id: openEnq.id, byId: feeEarner.id },
-            ),
-          ),
-        ).toBe(true);
-        expect(
-          isActionDenied(
-            saveEnquiryRecord(
-              { assignedToId: 'P-000001', summary: openEnq.summary },
-              { id: openEnq.id, byId: feeEarner.id },
-            ),
-          ),
-        ).toBe(true);
-        expect(
-          isActionDenied(
-            saveEnquiryRecord(
-              { assignedTeamId: 'TM-999999', summary: openEnq.summary },
-              { id: openEnq.id, byId: feeEarner.id },
-            ),
-          ),
-        ).toBe(true);
 
-        // 6 (R267, R268). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft enquiries
+        // 5a. Actor with enquiry:edit but enquiry:reopen revoked cannot reopen a closed enquiry via saveEnquiryRecord
+        feeEarner.permissionOverrides = {
+          grant: ['enquiry:edit', 'enquiry:close', 'enquiry:assign'],
+          revoke: ['enquiry:reopen'],
+        };
+        const bypassReopenRes = saveEnquiryRecord(
+          { status: 'Assigned', summary: closedEnq.summary },
+          { id: closedEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassReopenRes)).toBe(true);
+        if (isActionDenied(bypassReopenRes)) {
+          expect(bypassReopenRes.code).toBe('FORBIDDEN');
+          expect(bypassReopenRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+
+        // 5b. Actor with enquiry:edit but enquiry:close revoked cannot close an open enquiry via saveEnquiryRecord
+        feeEarner.permissionOverrides = {
+          grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:assign'],
+          revoke: ['enquiry:close'],
+        };
+        const bypassCloseRes = saveEnquiryRecord(
+          { status: 'Declined', summary: openEnq.summary },
+          { id: openEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassCloseRes)).toBe(true);
+        if (isActionDenied(bypassCloseRes)) {
+          expect(bypassCloseRes.code).toBe('FORBIDDEN');
+          expect(bypassCloseRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+
+        // 5c. Actor with enquiry:edit but enquiry:assign revoked cannot change assignedToId or assignedTeamId via saveEnquiryRecord
+        feeEarner.permissionOverrides = {
+          grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:close'],
+          revoke: ['enquiry:assign'],
+        };
+        const bypassAssignUserRes = saveEnquiryRecord(
+          { assignedToId: 'P-000001', summary: openEnq.summary },
+          { id: openEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassAssignUserRes)).toBe(true);
+        if (isActionDenied(bypassAssignUserRes)) {
+          expect(bypassAssignUserRes.code).toBe('FORBIDDEN');
+          expect(bypassAssignUserRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+        const bypassAssignTeamRes = saveEnquiryRecord(
+          { assignedTeamId: 'TM-999999', summary: openEnq.summary },
+          { id: openEnq.id, byId: feeEarner.id },
+        );
+        expect(isActionDenied(bypassAssignTeamRes)).toBe(true);
+        if (isActionDenied(bypassAssignTeamRes)) {
+          expect(bypassAssignTeamRes.code).toBe('FORBIDDEN');
+          expect(bypassAssignTeamRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+        }
+        feeEarner.permissionOverrides = undefined;
+
+        // 5d (R292 positive control). A Draft enquiry can still be routed through saveEnquiryRecord with asDraft: false, status, assignedToId, and assignedTeamId
+        const draftToRouteCreateRes = saveEnquiryRecord(
+          {
+            firstName: 'Route',
+            lastName: 'FromDraft',
+            email: 'route.fromdraft@notalawfirm.example',
+            phone: '029 2000 1234',
+            channelId: openEnq.channelId,
+            practiceAreaId: openEnq.practiceAreaId,
+            summary: 'Draft enquiry ready for routing',
+            notes: 'Initial notes for routing from draft',
+            urgencyId: openEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { asDraft: true, byId: feeEarner.id },
+        );
+        expect(isActionDenied(draftToRouteCreateRes)).toBe(false);
+        expect(draftToRouteCreateRes.enquiry?.status).toBe('Draft');
+        const targetTeamId = store.teams[0]!.id;
+        const routedFromDraftRes = saveEnquiryRecord(
+          {
+            status: 'Assigned',
+            assignedToId: feeEarner.id,
+            assignedTeamId: targetTeamId,
+          },
+          { id: draftToRouteCreateRes.enquiry!.id, asDraft: false, byId: feeEarner.id },
+        );
+        expect(isActionDenied(routedFromDraftRes)).toBe(false);
+        expect(routedFromDraftRes.enquiry?.status).toBe('Assigned');
+        expect(routedFromDraftRes.enquiry?.assignedToId).toBe(feeEarner.id);
+        expect(routedFromDraftRes.enquiry?.assignedTeamId).toBe(targetTeamId);
+
+        // 6 (R267, R268, R293). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft and closed enquiries
         const draftEnqRes = saveEnquiryRecord(
           { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
           { asDraft: true, byId: feeEarner.id },
@@ -3585,6 +3643,21 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(draftEnq.status).toBe('Draft');
         expect(draftEnq.assignedToId).toBeNull();
+
+        // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293)
+        closedEnq.status = 'Declined';
+        closedEnq.assignedToId = null;
+        saveTaskRecord(
+          {
+            title: 'Task on declined enquiry',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: closedEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(closedEnq.status).toBe('Declined');
+        expect(closedEnq.assignedToId).toBeNull();
 
         const routedNewEnq = store.enquiries.find((e) => e.id === openEnq.id)!;
         routedNewEnq.status = 'New';
