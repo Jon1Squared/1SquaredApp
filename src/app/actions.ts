@@ -138,6 +138,7 @@ import { buildActionDenied } from '@/domain/actionResult';
 import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
 import { guardedAction } from '@/server/authorize';
 import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
+import { getStore } from '@/server/store';
 import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
 
 function revalidateAll() {
@@ -433,8 +434,13 @@ export async function updateChoiceValueAction(
 
 export async function reorderChoiceValueAction(id: string, direction: -1 | 1) {
   return guardedAction('reorderChoiceValueAction', ({ personId: byId }) => {
+    const store = getStore();
+    if (!store.values.some((v) => v.id === id)) {
+      return buildActionDenied('FORBIDDEN', `Choice value "${id}" not found.`);
+    }
     reorderChoiceValue(id, direction, byId);
     revalidateAll();
+    return { ok: true as const };
   });
 }
 
@@ -462,6 +468,9 @@ export async function saveCustomFieldAction(input: {
   options?: string[];
 }) {
   return guardedAction('saveCustomFieldAction', ({ personId: byId }) => {
+    if (input.id && !getStore().customFields.some((d) => d.id === input.id)) {
+      return buildActionDenied('FORBIDDEN', `Custom field "${input.id}" not found.`);
+    }
     const def = saveCustomFieldDefinition(input, byId);
     revalidateAll();
     return def;
@@ -470,8 +479,12 @@ export async function saveCustomFieldAction(input: {
 
 export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
   return guardedAction('reorderCustomFieldAction', ({ personId: byId }) => {
+    if (!getStore().customFields.some((d) => d.id === id)) {
+      return buildActionDenied('FORBIDDEN', `Custom field "${id}" not found.`);
+    }
     reorderCustomField(id, direction, byId);
     revalidateAll();
+    return { ok: true as const };
   });
 }
 
@@ -719,6 +732,21 @@ export async function linkPmsRecordAction(
   pmsCode: string,
 ) {
   return guardedAction('linkPmsRecordAction', ({ personId: byId }) => {
+    const store = getStore();
+    const recordExists =
+      entityType === 'employee'
+        ? store.people.some((p) => p.id === onesquaredId && p.isEmployee)
+        : entityType === 'person'
+          ? store.people.some((p) => p.id === onesquaredId)
+          : entityType === 'organisation'
+            ? store.organisations.some((o) => o.id === onesquaredId)
+            : store.matters.some((m) => m.id === onesquaredId);
+    if (!recordExists) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        `Target ${entityType} "${onesquaredId}" not found.`,
+      );
+    }
     const res = linkPmsRecord(entityType, onesquaredId, pmsCode, byId);
     revalidateAll();
     return res;
@@ -727,8 +755,12 @@ export async function linkPmsRecordAction(
 
 export async function unlinkPmsRecordAction(linkId: string) {
   return guardedAction('unlinkPmsRecordAction', ({ personId: byId }) => {
+    if (!getStore().pmsLinks.some((l) => l.id === linkId)) {
+      return buildActionDenied('FORBIDDEN', `PMS link "${linkId}" not found.`);
+    }
     unlinkPmsRecord(linkId, byId);
     revalidateAll();
+    return { ok: true as const };
   });
 }
 

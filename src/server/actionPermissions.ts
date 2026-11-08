@@ -369,92 +369,114 @@ export const ACTION_PERMISSIONS = {
 
   // S0-04: Admin saves — lists, custom fields, teams, settings, org structure, party taxonomy, costs config & PMS links (22)
   addChoiceValueAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   updateChoiceValueAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   reorderChoiceValueAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   createMatterStageGroupAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveCustomFieldAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   reorderCustomFieldAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveTeamAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveEnquirySettingsAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveTaskSettingsAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveOrgStructureAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveMatterPartyRelationshipAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   reorderMatterPartyRelationshipAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   deleteMatterPartyRelationshipAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveMatterPartyCapacityAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   deleteMatterPartyCapacityAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   updateWorkTypeProfilesAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   saveMatterCostsConfigAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   syncMatterCostsRatesFromPmsAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
   linkPmsRecordAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'finance:manage_links',
+    enforcedBy: 'action',
   },
   unlinkPmsRecordAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'finance:manage_links',
+    enforcedBy: 'action',
   },
   rerunAutomaticPmsMatchingAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'finance:manage_links',
+    enforcedBy: 'action',
   },
   createRecordFromPmsAction: {
-    kind: 'gap',
-    slice: 'S0-04',
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
   },
 
   // S0-05: Record mutations — tasks, enquiries, organisations, links, notes, duplicates/merge, leavers & quotes (20)
@@ -647,4 +669,4 @@ export type RegisteredRouteName = keyof typeof ROUTE_PERMISSIONS;
  * `ROUTE_PERMISSIONS`. Equals the exact S0-02 baseline (54 actions + 1 route = 55)
  * and may only decrease as slices S0-03 to S0-07 and S0-10 close gaps.
  */
-export const MAX_KNOWN_GAPS = 48;
+export const MAX_KNOWN_GAPS = 26;

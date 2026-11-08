@@ -6,6 +6,7 @@ import {
   saveMatterCostsConfigAction,
   syncMatterCostsRatesFromPmsAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import type {
   ChoiceValue,
   CustomGradeRateRow,
@@ -152,6 +153,7 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
   function handleSaveConfig() {
     startTransition(async () => {
       const saved = await saveMatterCostsConfigAction(config);
+      if (isActionDenied(saved)) { showToast(saved.message); return; }
       setConfig(saved);
       showToast('Matter Costs & Client Rate Cards saved');
     });
@@ -160,6 +162,7 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
   function handleSyncFromPms() {
     startTransition(async () => {
       const synced = await syncMatterCostsRatesFromPmsAction();
+      if (isActionDenied(synced)) { showToast(synced.message); return; }
       setConfig(synced);
       showToast(
         'Pulled Partner, Associate & Trainee hourly rates from PMS into rate table',
