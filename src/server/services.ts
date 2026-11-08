@@ -1115,6 +1115,10 @@ function getAppSnapshotInScope(
   return {
     firm: store.firm,
     firmPrimaryDomain,
+    enableAiMatterExtraction: Boolean(activeTenantCfg.featureFlags?.enableAiMatterExtraction),
+    aiProviderChoice: activeTenantCfg.integrations?.aiProviderChoice ?? 'disabled',
+    enableMatterCostsGovernance: Boolean(activeTenantCfg.featureFlags?.enableMatterCostsGovernance),
+    enablePmsLiveRateSync: Boolean(activeTenantCfg.featureFlags?.enablePmsLiveRateSync),
     currentUser: user,
     currentUserId: user.id,
     currentUserRole,

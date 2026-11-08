@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { NextResponse } from 'next/server';
 import {
@@ -14,17 +15,18 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import { AuthorisationError } from '@/domain/rbac';
-import { resolveConfiguredFirmPrimaryDomain } from '@/domain/employment';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { vid } from '@/seed/lists';
 import { guardedRoute } from '@/server/authorize';
+import { hasPersonPermission } from '@/server/rbacRuntime';
 import {
   createOrUpdateLink,
   saveOrganisationRecord,
   savePersonRecord,
-  withAuthenticatedActor,
 } from '@/server/services';
 import { readServerSecret } from '@/server/serverSecrets';
 import { getStore } from '@/server/store';
+import { buildRecordVisibility } from '@/server/visibility';
 
 export const dynamic = 'force-dynamic';
 
@@ -331,8 +333,11 @@ function parseEmlText(raw: string): string {
 
 const cachedModelsByKeyPrefix = new Map<string, { models: string[]; cachedAt: number }>();
 
-async function resolveAvailableClaudeModels(apiKey: string): Promise<string[]> {
-  const keyPrefix = apiKey.slice(0, 18);
+async function resolveAvailableClaudeModels(
+  apiKey: string,
+  tenantId: string,
+): Promise<string[]> {
+  const keyPrefix = `${tenantId}:${apiKey.slice(0, 18)}`;
   const cached = cachedModelsByKeyPrefix.get(keyPrefix);
   if (cached && Date.now() - cached.cachedAt < 10 * 60 * 1000) {
     return cached.models;
@@ -1642,7 +1647,7 @@ function normaliseClaudeJsonToExtractionResult(
 
   return {
     engine: 'claude',
-    modelName: `Claude (${modelId})`,
+    modelName: modelId === 'local-fallback' ? 'local-fallback' : `Claude (${modelId})`,
     summary: generatedSummary,
     extractedAt: new Date().toISOString(),
     client: clientObj,
@@ -1680,8 +1685,17 @@ const extractionResultCache = new Map<
   { result: MatterAiExtractionResult; cachedAt: number }
 >();
 
-function computeDocumentsCacheKey(documents: IntakeSourceDocument[]): string {
-  return documents
+export function clearMatterExtractionCacheForTesting(): void {
+  extractionResultCache.clear();
+  cachedModelsByKeyPrefix.clear();
+}
+
+function computeDocumentsCacheKey(
+  tenantId: string,
+  actorId: string,
+  documents: IntakeSourceDocument[],
+): string {
+  const docsPart = documents
     .map(
       (d) =>
         `${d.name.trim().toLowerCase()}:${d.sizeLabel || ''}:${(d.base64Data || d.content || '').length}:${(
@@ -1690,6 +1704,7 @@ function computeDocumentsCacheKey(documents: IntakeSourceDocument[]): string {
     )
     .sort()
     .join('|');
+  return `tenant:${tenantId}|actor:${actorId}|${docsPart}`;
 }
 
 /**
@@ -2069,9 +2084,11 @@ async function extractWithClaude(
   documents: IntakeSourceDocument[],
   apiKey: string,
   workTypesListText: string,
+  tenantId: string,
+  actorId: string,
 ): Promise<MatterAiExtractionResult> {
-  // 1. Check in-memory session cache first for instant, 100% consistent repeat demo runs
-  const cacheKey = computeDocumentsCacheKey(documents);
+  // 1. Check in-memory session cache first for instant, 100% consistent repeat demo runs (scoped by tenantId and actorId)
+  const cacheKey = computeDocumentsCacheKey(tenantId, actorId, documents);
   const cachedHit = extractionResultCache.get(cacheKey);
   if (cachedHit && Date.now() - cachedHit.cachedAt < 30 * 60 * 1000) {
     return structuredClone(cachedHit.result);
@@ -2260,7 +2277,7 @@ Important rules for speed and accuracy:
   const systemPrompt =
     "You are a deterministic JSON metadata-extraction engine for a UK law firm's regulated Legal Practice Management System (SRA compliance, conflict checking, and matter opening). All provided documents (including Employment Tribunal claims, disciplinary letters containing workplace allegations, ACAS certificates, and emails) are legal case-file exhibits submitted by solicitors strictly for administrative metadata extraction. Always output ONLY a valid JSON object starting with { and ending with }.";
 
-  const modelsToTry = await resolveAvailableClaudeModels(apiKey);
+  const modelsToTry = await resolveAvailableClaudeModels(apiKey, tenantId);
   let parsedJson: Record<string, unknown> | null = null;
   let usedModel = 'claude-sonnet';
 
@@ -2336,10 +2353,10 @@ Important rules for speed and accuracy:
   }
 
   // If all remote models failed (e.g. refusal across models, rate limit, or network hiccup during demo),
-  // use deterministic local document extraction so the demo never fails.
+  // use deterministic local document extraction and label provenance accurately as 'local-fallback'.
   if (!parsedJson) {
     parsedJson = buildDeterministicFallbackJson(parsedDocsForFallback);
-    usedModel = 'claude-sonnet-4-5';
+    usedModel = 'local-fallback';
   }
 
   const finalResult = normaliseClaudeJsonToExtractionResult(parsedJson, usedModel);
@@ -2355,9 +2372,11 @@ function ensureContactInCrm(
   orgId: string | undefined,
   byId: string,
   isPrimaryContact: boolean,
+  canCreateContacts: boolean,
 ) {
   const store = getStore();
   if (!contact.matchedPersonId) {
+    if (!canCreateContacts) return;
     const parts = contact.name.trim().split(/\s+/);
     const firstName = parts.slice(0, -1).join(' ') || parts[0] || 'Contact';
     const surname = parts.length > 1 ? parts[parts.length - 1] : 'Person';
@@ -2412,6 +2431,7 @@ function ensureContactInCrm(
       contact.createdNewRecord = true;
     }
   } else if (orgId) {
+    if (!canCreateContacts) return;
     const hasLink = store.links.some(
       (l) =>
         l.personId === contact.matchedPersonId &&
@@ -2441,225 +2461,302 @@ function ensureContactInCrm(
 
 export const POST = guardedRoute(
   'POST /api/matters/extract',
-  async (req: Request) => {
+  async (req: Request, _ctx, guardedActor) => {
+    const correlationId =
+      guardedActor?.tenantContext.correlationId ?? `corr-ext-${crypto.randomUUID()}`;
+    const tenantConfig = getActiveTenantConfiguration();
+    const tenantId =
+      guardedActor?.tenantContext.tenantId ?? tenantConfig.tenantId;
+
     try {
-      return await withAuthenticatedActor(async (actor) => {
-        const byId = actor.personId;
-
-        const body = (await req.json()) as {
-          documents?: IntakeSourceDocument[];
-        };
-
-        const claudeKey = readServerSecret('ANTHROPIC_API_KEY');
-        if (!claudeKey) {
-          return NextResponse.json(
-            {
-              code: 'NOT_CONFIGURED',
-              error: "AI extraction isn't configured. Ask your administrator.",
-              message: "AI extraction isn't configured. Ask your administrator.",
-            },
-            { status: 503 },
-          );
-        }
-    const documents = body.documents ?? [];
-    if (!Array.isArray(documents) || documents.length === 0) {
-      return NextResponse.json(
-        { error: 'Please upload or paste at least one email or document first.' },
-        { status: 400 },
-      );
-    }
-
-    const store = getStore();
-    const employees = store.people.filter((p) => p.isEmployee);
-
-    const practiceAreas = store.values.filter(
-      (v) => v.listKey === 'work_type' && !v.parentId && v.active,
-    );
-    const workTypesListText = practiceAreas
-      .map((pa) => {
-        const subs = store.values
-          .filter((v) => v.listKey === 'work_type' && v.parentId === pa.id && v.active)
-          .map((s) => s.label)
-          .join(', ');
-        return `- ${pa.label}: ${subs}`;
-      })
-      .join('\n');
-
-    const rawExtraction = await extractWithClaude(
-      documents,
-      claudeKey,
-      workTypesListText,
-    );
-
-    const enriched = enrichExtractionWithCrmMatches(rawExtraction, {
-      organisations: store.organisations,
-      people: store.people,
-      employees,
-      values: store.values,
-    });
-
-    // 1. If the extracted client does not exist in the CRM store yet, create it so it can be selected on the form
-    if (enriched.client && !enriched.client.matchedRecordId) {
-      if (enriched.client.entityType === 'organisation') {
-        const createdOrg = saveOrganisationRecord(
+      if (tenantId !== tenantConfig.tenantId) {
+        return NextResponse.json(
           {
-            legalName: enriched.client.name.trim(),
-            companyNumber: enriched.client.companyNumber?.trim() || '',
-            generalEmail: enriched.client.email?.trim() || '',
-            mainPhone: enriched.client.phone?.trim() || '',
-            registeredAddress:
-              enriched.client.addressLine1 ||
-              enriched.client.town ||
-              enriched.client.postcode
-                ? {
-                    id: `addr-${Date.now()}`,
-                    typeId: vid('address_type', 'Registered office'),
-                    line1: enriched.client.addressLine1 || '',
-                    line2: '',
-                    town: enriched.client.town || '',
-                    county: '',
-                    postcode: enriched.client.postcode || '',
-                    countryId: vid('country', 'United Kingdom'),
-                  }
-                : null,
-            relationshipTypeIds: [vid('organisation_relationship_type', 'Client')],
+            ok: false,
+            denied: true,
+            code: 'TENANT_MISMATCH',
+            error: 'Tenant claim does not match active tenant.',
+            message: 'Tenant claim does not match active tenant.',
+            correlationId,
           },
-          { byId },
+          { status: 403 },
         );
-        if (createdOrg.organisation?.id) {
-          enriched.client.matchedRecordId = createdOrg.organisation.id;
-          enriched.client.matchedRecordName = createdOrg.organisation.legalName;
-          enriched.client.createdNewRecord = true;
-        }
-      } else {
-        const parts = enriched.client.name.trim().split(/\s+/);
-        const firstName = parts.slice(0, -1).join(' ') || parts[0] || 'Client';
-        const surname = parts.length > 1 ? parts[parts.length - 1] : 'Record';
-        const createdPer = savePersonRecord(
-          {
-            firstName,
-            surname,
-            emails: enriched.client.email
-              ? [
-                  {
-                    id: `em-${Date.now()}`,
-                    address: enriched.client.email.trim(),
-                    typeId: vid('email_type', 'Personal'),
-                    isPrimary: true,
-                  },
-                ]
-              : [],
-            phones: enriched.client.phone
-              ? [
-                  {
-                    id: `ph-${Date.now()}`,
-                    number: enriched.client.phone.trim(),
-                    typeId: vid('phone_type', 'Mobile'),
-                  },
-                ]
-              : [],
-            relationshipRoleIds: [vid('person_role', 'Private client')],
-          },
-          { byId },
-        );
-        if (createdPer.person?.id) {
-          enriched.client.matchedRecordId = createdPer.person.id;
-          enriched.client.matchedRecordName = `${createdPer.person.firstName} ${createdPer.person.surname}`.trim();
-          enriched.client.createdNewRecord = true;
-        }
       }
-    }
 
-    const clientOrgId =
-      enriched.client?.entityType === 'organisation'
-        ? enriched.client.matchedRecordId || undefined
-        : undefined;
+      if (
+        !tenantConfig.featureFlags?.enableAiMatterExtraction ||
+        tenantConfig.integrations?.aiProviderChoice !== 'anthropic'
+      ) {
+        return NextResponse.json(
+          {
+            ok: false,
+            denied: true,
+            code: 'AI_EXTRACTION_DISABLED',
+            error: 'AI matter extraction is disabled for this tenant.',
+            message: 'AI matter extraction is disabled for this tenant.',
+            correlationId,
+          },
+          { status: 403 },
+        );
+      }
 
-    // 2. Ensure Instructing Contact exists and is linked to Client Organisation
-    if (enriched.instructingContact) {
-      ensureContactInCrm(enriched.instructingContact, clientOrgId, byId, true);
-    }
+      const byId = guardedActor!.personId;
+      const body = (await req.json()) as {
+        documents?: IntakeSourceDocument[];
+      };
 
-    // 3. Ensure Billing Contact exists and is linked to Client Organisation
-    if (enriched.billingContact) {
-      ensureContactInCrm(enriched.billingContact, clientOrgId, byId, false);
-    }
+      const claudeKey = readServerSecret('ANTHROPIC_API_KEY');
+      if (!claudeKey) {
+        return NextResponse.json(
+          {
+            code: 'NOT_CONFIGURED',
+            error: "AI extraction isn't configured. Ask your administrator.",
+            message: "AI extraction isn't configured. Ask your administrator.",
+          },
+          { status: 503 },
+        );
+      }
 
-    // 4. If a Fee Earner / Partner (e.g. "Sarah Pennock") is named in the documents and not yet in CRM employees, create them as an Employee so Responsible Partner & Fee Earner dropdowns pre-fill accurately
-    const feName =
-      enriched.leadFeeEarner?.name || enriched.responsiblePartner?.name || '';
-    if (
-      feName &&
-      !enriched.leadFeeEarner?.matchedPersonId &&
-      !enriched.responsiblePartner?.matchedPersonId
-    ) {
-      const cleanName = feName.replace(/\([^)]*\)/g, '').trim();
-      const parts = cleanName.split(/\s+/);
-      const firstName = parts.slice(0, -1).join(' ') || parts[0] || 'Partner';
-      const surname = parts.length > 1 ? parts[parts.length - 1] : 'FeeEarner';
-      const createdEmp = savePersonRecord(
-        {
-          firstName,
-          surname,
-          isEmployee: true,
-          jobTitle: 'Partner',
-          emails: [
-            {
-              id: `em-${Date.now()}-fe`,
-              address: `${firstName.toLowerCase()}.${surname.toLowerCase()}@${resolveConfiguredFirmPrimaryDomain()}`,
-              typeId: vid('email_type', 'Work'),
-              isPrimary: true,
-            },
-          ],
-        },
-        { byId },
+      const documents = body.documents ?? [];
+      if (!Array.isArray(documents) || documents.length === 0) {
+        return NextResponse.json(
+          { error: 'Please upload or paste at least one email or document first.' },
+          { status: 400 },
+        );
+      }
+
+      const store = getStore();
+      const actorPerson = store.people.find((p) => p.id === byId) ?? null;
+      const visibility = buildRecordVisibility(store, actorPerson);
+      const visiblePeople = store.people.filter(
+        (p) =>
+          !p.mergedIntoId &&
+          !(p.createdFromEnquiryId && visibility.hiddenEnquiryIds.has(p.createdFromEnquiryId)),
       );
-      if (createdEmp.person?.id) {
-        const empId = createdEmp.person.id;
-        const empDisplay = `${createdEmp.person.firstName} ${createdEmp.person.surname}`.trim();
-        if (enriched.responsiblePartner) {
-          enriched.responsiblePartner.matchedPersonId = empId;
-          enriched.responsiblePartner.name = empDisplay;
-        }
-        if (enriched.leadFeeEarner) {
-          enriched.leadFeeEarner.matchedPersonId = empId;
-          enriched.leadFeeEarner.name = empDisplay;
-        }
-        if (Array.isArray(enriched.matters)) {
-          for (const m of enriched.matters) {
-            if (m.responsiblePartner && !m.responsiblePartner.matchedPersonId) {
-              m.responsiblePartner.matchedPersonId = empId;
-              m.responsiblePartner.name = empDisplay;
-            }
-            if (m.leadFeeEarner && !m.leadFeeEarner.matchedPersonId) {
-              m.leadFeeEarner.matchedPersonId = empId;
-              m.leadFeeEarner.name = empDisplay;
-            }
+      const visibleOrganisations = store.organisations.filter((o) => !o.mergedIntoId);
+      const employees = store.people.filter((p) => p.isEmployee && !p.mergedIntoId);
+
+      const practiceAreas = store.values.filter(
+        (v) => v.listKey === 'work_type' && !v.parentId && v.active,
+      );
+      const workTypesListText = practiceAreas
+        .map((pa) => {
+          const subs = store.values
+            .filter((v) => v.listKey === 'work_type' && v.parentId === pa.id && v.active)
+            .map((s) => s.label)
+            .join(', ');
+          return `- ${pa.label}: ${subs}`;
+        })
+        .join('\n');
+
+      const rawExtraction = await extractWithClaude(
+        documents,
+        claudeKey,
+        workTypesListText,
+        tenantId,
+        byId,
+      );
+
+      const enriched = enrichExtractionWithCrmMatches(rawExtraction, {
+        organisations: visibleOrganisations,
+        people: visiblePeople,
+        employees,
+        values: store.values,
+      });
+
+      const canCreateContacts =
+        Boolean(guardedActor?.permissions.has('contact:create')) &&
+        hasPersonPermission(actorPerson, 'contact:create', {
+          allPeople: store.people,
+          teams: store.teams,
+        });
+
+      // 1. If the extracted client does not exist in the CRM store yet, create it only when actor holds contact:create
+      if (enriched.client && !enriched.client.matchedRecordId && canCreateContacts) {
+        if (enriched.client.entityType === 'organisation') {
+          const createdOrg = saveOrganisationRecord(
+            {
+              legalName: enriched.client.name.trim(),
+              companyNumber: enriched.client.companyNumber?.trim() || '',
+              generalEmail: enriched.client.email?.trim() || '',
+              mainPhone: enriched.client.phone?.trim() || '',
+              registeredAddress:
+                enriched.client.addressLine1 ||
+                enriched.client.town ||
+                enriched.client.postcode
+                  ? {
+                      id: `addr-${Date.now()}`,
+                      typeId: vid('address_type', 'Registered office'),
+                      line1: enriched.client.addressLine1 || '',
+                      line2: '',
+                      town: enriched.client.town || '',
+                      county: '',
+                      postcode: enriched.client.postcode || '',
+                      countryId: vid('country', 'United Kingdom'),
+                    }
+                  : null,
+              relationshipTypeIds: [vid('organisation_relationship_type', 'Client')],
+            },
+            { byId },
+          );
+          if (createdOrg.organisation?.id) {
+            enriched.client.matchedRecordId = createdOrg.organisation.id;
+            enriched.client.matchedRecordName = createdOrg.organisation.legalName;
+            enriched.client.createdNewRecord = true;
+          }
+        } else {
+          const parts = enriched.client.name.trim().split(/\s+/);
+          const firstName = parts.slice(0, -1).join(' ') || parts[0] || 'Client';
+          const surname = parts.length > 1 ? parts[parts.length - 1] : 'Record';
+          const createdPer = savePersonRecord(
+            {
+              firstName,
+              surname,
+              emails: enriched.client.email
+                ? [
+                    {
+                      id: `em-${Date.now()}`,
+                      address: enriched.client.email.trim(),
+                      typeId: vid('email_type', 'Personal'),
+                      isPrimary: true,
+                    },
+                  ]
+                : [],
+              phones: enriched.client.phone
+                ? [
+                    {
+                      id: `ph-${Date.now()}`,
+                      number: enriched.client.phone.trim(),
+                      typeId: vid('phone_type', 'Mobile'),
+                    },
+                  ]
+                : [],
+              relationshipRoleIds: [vid('person_role', 'Private client')],
+            },
+            { byId },
+          );
+          if (createdPer.person?.id) {
+            enriched.client.matchedRecordId = createdPer.person.id;
+            enriched.client.matchedRecordName = `${createdPer.person.firstName} ${createdPer.person.surname}`.trim();
+            enriched.client.createdNewRecord = true;
           }
         }
       }
-    }
+
+      const clientOrgId =
+        enriched.client?.entityType === 'organisation'
+          ? enriched.client.matchedRecordId || undefined
+          : undefined;
+
+      // 2. Ensure Instructing Contact exists and is linked to Client Organisation (requires contact:create)
+      if (enriched.instructingContact) {
+        ensureContactInCrm(
+          enriched.instructingContact,
+          clientOrgId,
+          byId,
+          true,
+          canCreateContacts,
+        );
+      }
+
+      // 3. Ensure Billing Contact exists and is linked to Client Organisation (requires contact:create)
+      if (enriched.billingContact) {
+        ensureContactInCrm(
+          enriched.billingContact,
+          clientOrgId,
+          byId,
+          false,
+          canCreateContacts,
+        );
+      }
+
+      // B10: Never create employees from extracted documents. Unmatched firm people remain unmatched suggestions.
+
+      const matchedOrgIds = new Set<string>();
+      const matchedPersonIds = new Set<string>();
+      if (enriched.client?.matchedRecordId) {
+        if (enriched.client.entityType === 'organisation') {
+          matchedOrgIds.add(enriched.client.matchedRecordId);
+        } else {
+          matchedPersonIds.add(enriched.client.matchedRecordId);
+        }
+      }
+      if (enriched.instructingContact?.matchedPersonId) {
+        matchedPersonIds.add(enriched.instructingContact.matchedPersonId);
+      }
+      if (enriched.billingContact?.matchedPersonId) {
+        matchedPersonIds.add(enriched.billingContact.matchedPersonId);
+      }
+      const allExtractedParties = [
+        ...(enriched.otherParties ?? []),
+        ...(enriched.matters ?? []).flatMap((m) => m.otherParties ?? []),
+      ];
+      for (const pt of allExtractedParties) {
+        if (!pt?.matchedRecordId) continue;
+        if (pt.entityType === 'organisation') {
+          matchedOrgIds.add(pt.matchedRecordId);
+        } else {
+          matchedPersonIds.add(pt.matchedRecordId);
+        }
+      }
 
       const latestStore = getStore();
+      const latestVisibility = buildRecordVisibility(latestStore, actorPerson);
+      const returnedOrganisations = latestStore.organisations.filter(
+        (o) => matchedOrgIds.has(o.id) && !o.mergedIntoId,
+      );
+      const returnedPeople = latestStore.people
+        .filter(
+          (p) =>
+            matchedPersonIds.has(p.id) &&
+            !p.mergedIntoId &&
+            !p.isEmployee &&
+            !(
+              p.createdFromEnquiryId &&
+              latestVisibility.hiddenEnquiryIds.has(p.createdFromEnquiryId)
+            ),
+        )
+        .map((p) => ({ ...p, employment: undefined }));
+      const returnedLinks = latestStore.links.filter(
+        (l) =>
+          l.isCurrent &&
+          matchedPersonIds.has(l.personId) &&
+          matchedOrgIds.has(l.organisationId),
+      );
+
       return NextResponse.json({
         extraction: enriched,
-        organisations: latestStore.organisations,
-        people: latestStore.people,
-        links: latestStore.links,
+        organisations: returnedOrganisations,
+        people: returnedPeople,
+        links: returnedLinks,
       });
-    });
-  } catch (err) {
-    if (err instanceof AuthorisationError && err.code === 'UNAUTHENTICATED') {
+    } catch (err) {
+      if (err instanceof AuthorisationError && err.code === 'UNAUTHENTICATED') {
+        return NextResponse.json(
+          { error: 'Authentication is required.' },
+          { status: 401 },
+        );
+      }
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'matter_ai_extraction.failed',
+          correlationId,
+          tenantId,
+          errorCode: 'EXTRACTION_FAILED',
+          errorType: err instanceof Error ? err.name : 'UnknownError',
+        }),
+      );
       return NextResponse.json(
-        { error: 'Authentication is required.' },
-        { status: 401 },
+        {
+          ok: false,
+          code: 'EXTRACTION_FAILED',
+          error: 'Failed to extract matter data from the provided documents.',
+          message: 'Failed to extract matter data from the provided documents.',
+          correlationId,
+        },
+        { status: 500 },
       );
     }
-    return NextResponse.json(
-      {
-        error: err instanceof Error ? err.message : 'Failed to extract from documents.',
-      },
-      { status: 500 },
-    );
-  }
-});
+  },
+);

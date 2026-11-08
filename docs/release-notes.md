@@ -1,5 +1,17 @@
 # 1Squared — Release Notes
 
+## Unreleased — AI Matter Extraction Route Hardening and Tenant Settings (`s0-06-ai-extraction`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Core Config Schema, AI Extraction Route & Host UI (`core/`, `src/app/api/matters/extract/route.ts`, `src/components/MatterFormClient.tsx`, `src/docs/`, `docs/`, `client-not-a-law-firm/config/`):**
+  - **ADR 0031 & Additive Schema Option (`docs/decisions/0031-ai-provider-choice-anthropic.md`, `core/src/config-engine/index.ts`, `core/schemas/tenant-config.schema.json`, `core/src/api/index.ts`, `client-not-a-law-firm/config/`):** Added `'anthropic'` to `integrations.aiProviderChoice` (default remains `'disabled'`; `'azure_openai_uk'` stays reserved) and updated `client-not-a-law-firm/config/base.json`, `environments/dev.json`, and `environments/test.json` to `"anthropic"`.
+  - **Route Permissions & Employee Creation Removal (Bug B10, `src/server/actionPermissions.ts`, `src/app/api/matters/extract/route.ts`):** Closed the `'POST /api/matters/extract'` gap policy (`matter:create`, `enforcedBy: 'action'`), lowering `MAX_KNOWN_GAPS` from 6 to 5; required `contact:create` before creating any client organisation, person, or person–organisation link; and removed automatic employee record creation so unmatched firm people remain unmatched suggestions.
+  - **Tenant Settings Gate, Scoped Response, Cache Isolation, Provenance & Error Handling (P7, `src/app/api/matters/extract/route.ts`, `src/components/MatterFormClient.tsx`):** Returned `403 AI_EXTRACTION_DISABLED` and hid the AI panel unless `featureFlags.enableAiMatterExtraction === true` and `integrations.aiProviderChoice === 'anthropic'`; scoped extraction cache keys by `tenantId` and `actor.personId`; returned only the matched/created records for the extraction (filtered by actor visibility and excluding employees); labelled local deterministic fallback results `'local-fallback'`; and returned stable error codes on `500` with structured logging (`correlationId` and `tenantId`, no document content).
+  - **Tests & Documentation (`src/server/__tests__/matterExtractRoute.test.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`, `src/docs/articles/ai-matter-extraction.ts`, `client-not-a-law-firm/config/README.md`, `docs/roadmap/feature-list.md`):** Added unit and two-tenant isolation tests in `src/server/__tests__/matterExtractRoute.test.ts`, the `ai-matter-extraction` help article (including the Standard section 10 data flow record), and `client-not-a-law-firm/config/README.md`.
+  - Review fixes R261–R263, R291, R300: defaulted `enableAiMatterExtraction` (`false`) and `aiProviderChoice` (`'disabled'`) to off in `MatterFormClient.tsx` and passed both snapshot props from `src/app/matters/[id]/page.tsx` (R261); aligned `docs/release-notes.md`, `docs/decisions/0031-ai-provider-choice-anthropic.md`, and row `P10` of `docs/roadmap/feature-list.md` with the code (R262); and added tests in `src/server/__tests__/matterExtractRoute.test.ts` for same-tenant different-user cache misses, excluding a person created from a hidden enquiry (`canViewEnquiry === false`) while matching a same-named person created from a visible enquiry (`canViewEnquiry === true`), and not linking an existing contact to an existing organisation when the actor lacks `contact:create` (R263, R291, R300).
+
+---
+
 ## Unreleased — Record Actions, Permissions, and Leaver Reassignment (`s0-05-record-actions`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

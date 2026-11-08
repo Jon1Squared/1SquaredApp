@@ -172,6 +172,8 @@ interface MatterFormClientProps {
     riskReviewerId: string | null;
     practiceManagerId: string | null;
   };
+  enableAiMatterExtraction?: boolean;
+  aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
 }
 
 type OptionalTabKey =
@@ -275,6 +277,8 @@ export function MatterFormClient({
   canSignOffCosts = false,
   initialSignOffEstimateGbp = null,
   suggestedMatterGovernanceAssignees,
+  enableAiMatterExtraction = false,
+  aiProviderChoice = 'disabled',
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -2252,9 +2256,27 @@ export function MatterFormClient({
       if (!response.ok || !data.extraction) {
         throw new Error(data.error || 'Could not extract matter data');
       }
-      if (data.organisations) setOrganisations(data.organisations);
-      if (data.people) setPeople(data.people);
-      if (data.links) setLinks(data.links);
+      if (data.organisations?.length) {
+        setOrganisations((prev) => {
+          const byId = new Map(prev.map((o) => [o.id, o]));
+          for (const o of data.organisations!) byId.set(o.id, o);
+          return Array.from(byId.values());
+        });
+      }
+      if (data.people?.length) {
+        setPeople((prev) => {
+          const byId = new Map(prev.map((p) => [p.id, p]));
+          for (const p of data.people!) byId.set(p.id, p);
+          return Array.from(byId.values());
+        });
+      }
+      if (data.links?.length) {
+        setLinks((prev) => {
+          const byId = new Map(prev.map((l) => [l.id, l]));
+          for (const l of data.links!) byId.set(l.id, l);
+          return Array.from(byId.values());
+        });
+      }
       setAiExtractionResult(data.extraction);
       applyAiExtractionToForm(data.extraction, 0);
       const mattersCount = data.extraction.matters?.length || 1;
@@ -5383,7 +5405,9 @@ export function MatterFormClient({
           {/* ================================================================
               AI DOCUMENT & EMAIL EXTRACTION PANEL
               ================================================================ */}
-          {!isReadOnlyFeeEarner ? (
+          {!isReadOnlyFeeEarner &&
+          enableAiMatterExtraction &&
+          aiProviderChoice === 'anthropic' ? (
             <section
               className="new-enquiry-card"
               aria-labelledby="ai-intake-heading"
@@ -5411,8 +5435,16 @@ export function MatterFormClient({
                   </h2>
                   {aiExtractionResult ? (
                     <StatusPill
-                      label="✓ Pre-filled (Claude AI)"
-                      tone="positive"
+                      label={
+                        aiExtractionResult.modelName === 'local-fallback'
+                          ? '✓ Pre-filled (local fallback)'
+                          : '✓ Pre-filled (Claude AI)'
+                      }
+                      tone={
+                        aiExtractionResult.modelName === 'local-fallback'
+                          ? 'warning'
+                          : 'positive'
+                      }
                     />
                   ) : stagedDocs.length > 0 ? (
                     <StatusPill
@@ -5834,7 +5866,10 @@ export function MatterFormClient({
                             Extraction Applied to Form
                           </span>
                           <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                            · {aiExtractionResult.modelName}
+                            ·{' '}
+                            {aiExtractionResult.modelName === 'local-fallback'
+                              ? 'Local fallback (offline / deterministic)'
+                              : aiExtractionResult.modelName}
                           </span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

@@ -160,8 +160,9 @@
         "companiesHouseApiKeyVaultRef": { "type": "string" },
         "aiProviderChoice": {
           "type": "string",
-          "enum": ["azure_openai_uk", "disabled"],
-          "default": "disabled"
+          "enum": ["azure_openai_uk", "anthropic", "disabled"],
+          "default": "disabled",
+          "description": "AI provider for tenant AI features ('anthropic' or 'disabled' active today; 'azure_openai_uk' reserved in the enum for a future UK Azure OpenAI adapter)"
         },
         "pmsSync": {
           "type": "object",

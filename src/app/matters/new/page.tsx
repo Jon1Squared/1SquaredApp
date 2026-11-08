@@ -68,6 +68,8 @@ export default async function NewMatterPage({
             : null
         }
         suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
+        enableAiMatterExtraction={snap.enableAiMatterExtraction}
+        aiProviderChoice={snap.aiProviderChoice}
       />
     );
   });

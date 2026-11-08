@@ -10,6 +10,7 @@
  * > notes, | tables |, **bold**, *italic*, `code` and [links](/docs/other-article).
  */
 import { aboutDocs } from './articles/about-documentation';
+import { aiMatterExtractionArticle } from './articles/ai-matter-extraction';
 import { authenticationRbacAndMfaArticle } from './articles/authentication-rbac-and-mfa';
 import { dataAdministrationAndRetentionArticle } from './articles/data-administration-and-retention';
 import { deploymentAndSecurityArticle } from './articles/deployment-and-security';
@@ -61,6 +62,7 @@ export type DocSectionKey = (typeof DOC_SECTIONS)[number]['key'];
 export const ARTICLES: DocArticle[] = [
   aboutDocs,
   matterOpeningAndRiskArticle,
+  aiMatterExtractionArticle,
   mattersEnquiriesTasksNavigationArticle,
   signOffQueueArticle,
   deploymentAndSecurityArticle,

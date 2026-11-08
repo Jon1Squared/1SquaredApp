@@ -37,6 +37,8 @@ export default async function EditMatterPage({
         canSignOffCosts={snap.canSignOffCostsByMatterId[matter.id] ?? false}
         initialSignOffEstimateGbp={snap.signOffEstimateGbpByMatterId[matter.id] ?? null}
         suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
+        enableAiMatterExtraction={snap.enableAiMatterExtraction}
+        aiProviderChoice={snap.aiProviderChoice}
       />
     );
   });
