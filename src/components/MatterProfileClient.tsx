@@ -139,7 +139,7 @@ function initialsOfName(name: string): string {
     .replace(/^(Mr|Mrs|Ms|Miss|Mx|Dr|Prof|Rev|Sir|Dame)\s+/i, '')
     .trim();
   const parts = cleaned.split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return 'PV';
+  if (parts.length === 0) return '—';
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
@@ -165,11 +165,102 @@ function formatDayMonthYear(dateStr: string | null | undefined): string {
 function parseMonthAndDay(dateStr: string): { month: string; day: string } {
   const d = new Date(dateStr.length === 10 ? `${dateStr}T00:00:00` : dateStr);
   if (Number.isNaN(d.getTime())) {
-    return { month: 'OCT', day: '21' };
+    return { month: '—', day: '—' };
   }
   return {
     month: d.toLocaleDateString('en-GB', { month: 'short' }).toUpperCase(),
     day: String(d.getDate()),
+  };
+}
+
+export interface MatterIntakeComplianceRows {
+  conflictCheck: {
+    cleared: boolean;
+    label: string;
+    detail: string;
+  };
+  clientDueDiligence: {
+    verified: boolean;
+    label: string;
+    detail: string;
+  };
+  engagementLetter: {
+    signed: boolean;
+    label: string;
+    detail: string;
+  };
+  riskAssessment: {
+    completed: boolean;
+    label: string;
+    detail: string;
+  };
+}
+
+export function resolveMatterIntakeComplianceRows(
+  matter: Pick<
+    Matter,
+    | 'conflictDecision'
+    | 'conflictCheckDate'
+    | 'amlCompletedAt'
+    | 'amlStatus'
+    | 'engagementLetterSignedAt'
+    | 'engagementLetterStatus'
+  >,
+  resolvedRiskAssessment: {
+    overallRisk: string | null;
+    completedQuestions: number;
+    totalQuestions: number;
+  },
+): MatterIntakeComplianceRows {
+  const conflictCleared = matter.conflictDecision?.outcome === 'Cleared';
+  const conflictLabel = conflictCleared
+    ? 'Conflict check cleared'
+    : matter.conflictDecision?.outcome
+      ? `Conflict check: ${matter.conflictDecision.outcome}`
+      : 'Conflict check not recorded';
+  const conflictDetail = formatShortDayMonth(
+    matter.conflictDecision?.decidedAt ?? matter.conflictCheckDate,
+  );
+
+  const cddVerified = Boolean(matter.amlCompletedAt);
+  const cddDetail = matter.amlCompletedAt
+    ? `Verified ${formatShortDayMonth(matter.amlCompletedAt)}`
+    : matter.amlStatus || 'Not recorded';
+
+  const engagementSigned =
+    Boolean(matter.engagementLetterSignedAt) || matter.engagementLetterStatus === 'Signed';
+  const engagementLabel = engagementSigned ? 'Engagement letter signed' : 'Engagement letter';
+  const engagementDetail = matter.engagementLetterSignedAt
+    ? formatShortDayMonth(matter.engagementLetterSignedAt)
+    : matter.engagementLetterStatus || 'Not recorded';
+
+  const riskCompleted = Boolean(resolvedRiskAssessment.overallRisk);
+  const riskLabel = `Matter risk assessment (${
+    resolvedRiskAssessment.overallRisk ? `${resolvedRiskAssessment.overallRisk} risk` : 'Not started'
+  })`;
+  const riskDetail = `${resolvedRiskAssessment.completedQuestions}/${resolvedRiskAssessment.totalQuestions} answered`;
+
+  return {
+    conflictCheck: {
+      cleared: conflictCleared,
+      label: conflictLabel,
+      detail: conflictDetail,
+    },
+    clientDueDiligence: {
+      verified: cddVerified,
+      label: 'Client due diligence',
+      detail: cddDetail,
+    },
+    engagementLetter: {
+      signed: engagementSigned,
+      label: engagementLabel,
+      detail: engagementDetail,
+    },
+    riskAssessment: {
+      completed: riskCompleted,
+      label: riskLabel,
+      detail: riskDetail,
+    },
   };
 }
 
@@ -240,10 +331,6 @@ export function MatterProfileClient({
   const [liftReason, setLiftReason] = useState('');
   const [liftingRestriction, setLiftingRestriction] = useState(false);
   const [liftError, setLiftError] = useState<string | null>(null);
-  const [completedDemoTaskIds, setCompletedDemoTaskIds] = useState<Set<string>>(() => new Set());
-
-  const isBrightwaterTribunal = matter.matterNumber === 'BRI001-0003';
-  const isSeededDemoMatter = /^M-0000(0[1-9]|1[0-8])$/.test(matter.id);
   const [conflictRecordMinimised, setConflictRecordMinimised] = useState(false);
   const [riskRecordMinimised, setRiskRecordMinimised] = useState(false);
   const [activityConflictExpanded, setActivityConflictExpanded] = useState(false);
@@ -272,6 +359,11 @@ export function MatterProfileClient({
   const resolvedRiskAssessment = useMemo(
     () => resolveMatterRiskAssessment(matter, people, values),
     [matter, people, values],
+  );
+
+  const intakeComplianceRows = useMemo(
+    () => resolveMatterIntakeComplianceRows(matter, resolvedRiskAssessment),
+    [matter, resolvedRiskAssessment],
   );
 
   const sourceEnquiry = useMemo(
@@ -355,12 +447,10 @@ export function MatterProfileClient({
   const originLabel = resolveLabel(values, matter.referrerTypeId);
 
   const responsiblePartnerName = matter.responsiblePartnerId
-    ? nameMap.get(matter.responsiblePartnerId) ?? 'Siân Llewellyn'
-    : 'Siân Llewellyn';
+    ? nameMap.get(matter.responsiblePartnerId) ?? 'Unassigned'
+    : 'Unassigned';
 
-  const openedDisplay = isBrightwaterTribunal
-    ? '12 Aug 2026'
-    : formatDayMonthYear(matter.openedAt);
+  const openedDisplay = formatDayMonthYear(matter.openedAt);
 
   // Determine 6-stage progress track
   const initialStageIdx = useMemo(() => {
@@ -381,16 +471,6 @@ export function MatterProfileClient({
     setStageIdxState({ baseIdx: initialStageIdx, value: next });
 
   const stageSteps = useMemo<StageStepItem[]>(() => {
-    if (isBrightwaterTribunal || subcatLabel.toLowerCase().includes('tribunal')) {
-      return [
-        { name: 'Intake', completedDetail: 'Done 14 Aug' },
-        { name: 'ET3 response', completedDetail: 'Filed 2 Sep' },
-        { name: 'Case management', completedDetail: 'Done 30 Sep' },
-        { name: 'Drafting & negotiation' },
-        { name: 'Final hearing', upcomingDetail: 'Listed Mar 2027' },
-        { name: 'Close', upcomingDetail: '—' },
-      ];
-    }
     return [
       {
         name: 'Intake',
@@ -410,7 +490,7 @@ export function MatterProfileClient({
       },
       { name: 'Close', upcomingDetail: '—' },
     ];
-  }, [isBrightwaterTribunal, subcatLabel, matter.openedAt, matter.targetCompletionAt]);
+  }, [matter.openedAt, matter.targetCompletionAt]);
 
   async function persistStageIdx(nextIdx: number) {
     const prevIdx = currentStageIdx;
@@ -475,25 +555,8 @@ export function MatterProfileClient({
         footerText: '',
       };
     }
-    if (isBrightwaterTribunal) {
-      return {
-        budget: 25000,
-        billedPaid: 9013,
-        billedUnpaid: 3137,
-        overdueSub: 'PV-2026-014 overdue',
-        unbilledWip: 6250,
-        remainingBudget: 6600,
-        budgetUsedPct: 74,
-        matterProgressPct:
-          Math.round(((currentStageIdx + 0.5) / stageSteps.length) * 100) === 58
-            ? 58
-            : Math.min(100, Math.round(((currentStageIdx + 0.48) / stageSteps.length) * 100)),
-        footerText:
-          'Hourly, capped estimate · Billed monthly · Billing party: client · Client account £0',
-      };
-    }
 
-    if (!pmsFin && !isSeededDemoMatter) {
+    if (!pmsFin) {
       const budget = matter.agreedFeeCapGbp ?? matter.feeEstimateGbp ?? 0;
       const clientAcct = matter.retainerMoniesOnAccountGbp ?? 0;
       const matterProgressPct = Math.min(
@@ -514,14 +577,14 @@ export function MatterProfileClient({
     }
 
     const budget =
-      (pmsFin?.fee_estimate && pmsFin.fee_estimate > 0 ? pmsFin.fee_estimate : null) ??
+      (pmsFin.fee_estimate && pmsFin.fee_estimate > 0 ? pmsFin.fee_estimate : null) ??
       matter.agreedFeeCapGbp ??
       matter.feeEstimateGbp ??
-      25000;
-    const totalBilled = pmsFin ? pmsFin.fees_billed : Math.round(budget * 0.48);
-    const billedUnpaid = pmsFin ? pmsFin.outstanding_debt : Math.round(budget * 0.12);
+      0;
+    const totalBilled = pmsFin.fees_billed;
+    const billedUnpaid = pmsFin.outstanding_debt;
     const billedPaid = Math.max(0, totalBilled - billedUnpaid);
-    const unbilledWip = pmsFin ? pmsFin.unbilled_wip : Math.round(budget * 0.25);
+    const unbilledWip = pmsFin.unbilled_wip;
     const usedTotal = billedPaid + billedUnpaid + unbilledWip;
     const remainingBudget = Math.max(0, budget - usedTotal);
     const budgetUsedPct = budget > 0 ? Math.min(100, Math.round((usedTotal / budget) * 100)) : 0;
@@ -536,7 +599,7 @@ export function MatterProfileClient({
       billedPaid,
       billedUnpaid,
       overdueSub:
-        billedUnpaid > 0 && pmsFin && (pmsFin.max_invoice_days_past_due ?? 0) > 0
+        billedUnpaid > 0 && (pmsFin.max_invoice_days_past_due ?? 0) > 0
           ? 'Invoice overdue'
           : '',
       unbilledWip,
@@ -547,8 +610,6 @@ export function MatterProfileClient({
     };
   }, [
     canViewFinance,
-    isBrightwaterTribunal,
-    isSeededDemoMatter,
     pmsFin,
     matter.agreedFeeCapGbp,
     matter.feeEstimateGbp,
@@ -598,13 +659,15 @@ export function MatterProfileClient({
     [tasks, matter.id],
   );
 
+  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
   const widgetTasks = useMemo(() => {
-    const mapped = realMatterTasks.map((t) => {
+    return realMatterTasks.map((t) => {
       const typeLabel = resolveLabel(values, t.taskTypeId) || 'Review';
       const assigneeName = t.assignedPersonId
-        ? nameMap.get(t.assignedPersonId) ?? 'Siân Llewellyn'
-        : 'Siân Llewellyn';
-      const isOverdue = new Date(t.dueAt).getTime() < new Date('2026-10-22T23:59:59').getTime();
+        ? nameMap.get(t.assignedPersonId) ?? 'Unassigned'
+        : 'Unassigned';
+      const isOverdue = Boolean(t.dueAt && t.dueAt.slice(0, 10) < todayIso);
       return {
         id: t.id,
         realTask: t,
@@ -615,42 +678,7 @@ export function MatterProfileClient({
         overdue: isOverdue,
       };
     });
-
-    if (isBrightwaterTribunal && mapped.length === 0) {
-      const demoItems = [
-        {
-          id: 'BRI-DEMO-TSK-1',
-          realTask: null as Task | null,
-          title: 'Prepare Respondent agenda for Bristol ET preliminary hearing',
-          typeLabel: 'Review',
-          assigneeName: 'Siân Llewellyn',
-          dueLabel: 'Due 21 Oct',
-          overdue: true,
-        },
-        {
-          id: 'BRI-DEMO-TSK-2',
-          realTask: null as Task | null,
-          title: 'Brief Tom Griffiths ahead of the preliminary hearing',
-          typeLabel: 'Meeting',
-          assigneeName: 'Ffion Hughes',
-          dueLabel: 'Due 31 Oct',
-          overdue: false,
-        },
-        {
-          id: 'BRI-DEMO-TSK-3',
-          realTask: null as Task | null,
-          title: 'Take witness statement from Tom Griffiths',
-          typeLabel: 'Drafting',
-          assigneeName: 'Ffion Hughes',
-          dueLabel: 'Due 13 Nov',
-          overdue: false,
-        },
-      ];
-      return demoItems.filter((d) => !completedDemoTaskIds.has(d.id));
-    }
-
-    return mapped.filter((d) => !completedDemoTaskIds.has(d.id));
-  }, [realMatterTasks, values, nameMap, isBrightwaterTribunal, completedDemoTaskIds]);
+  }, [realMatterTasks, values, nameMap, todayIso]);
 
   const overdueWidgetTasks = useMemo(
     () => widgetTasks.filter((t) => t.overdue),
@@ -678,61 +706,12 @@ export function MatterProfileClient({
       });
       showToast(`Completed ${t.reference} — ${t.title}`);
       router.refresh();
-    } else {
-      setCompletedDemoTaskIds((prev) => new Set(prev).add(item.id));
-      showToast(`Completed task — ${item.title}`);
     }
   }
 
   // Parties list for Overview and Parties tab
   const overviewParties = useMemo(() => {
     const partiesEdited = Boolean(matter.fieldValues['partiesEdited']);
-    if (isBrightwaterTribunal && !partiesEdited && matter.parties.length === 0) {
-      return [
-        {
-          id: 'pt-client',
-          name: clientLabel,
-          href: hrefForId(matter.clientId),
-          sub: 'Our client · Respondent',
-          badge: 'Client',
-          tone: 'positive' as const,
-        },
-        {
-          id: 'pt-instructing',
-          name: matter.instructingContactId
-            ? nameMap.get(matter.instructingContactId) ?? 'Tom Griffiths'
-            : 'Tom Griffiths',
-          href: matter.instructingContactId ? hrefForId(matter.instructingContactId) : undefined,
-          sub: 'Instructing contact · Operations Director · Witness',
-          badge: 'Client contact',
-          tone: 'neutral' as const,
-        },
-        {
-          id: 'pt-claimant',
-          name: '[Claimant name]',
-          href: undefined,
-          sub: 'Claimant · Former employee',
-          badge: 'Opponent',
-          tone: 'warning' as const,
-        },
-        {
-          id: 'pt-claimant-sol',
-          name: "[Claimant's solicitors]",
-          href: undefined,
-          sub: "Claimant's representative",
-          badge: 'Opponent',
-          tone: 'warning' as const,
-        },
-        {
-          id: 'pt-tribunal',
-          name: 'Employment Tribunal — Bristol',
-          href: undefined,
-          sub: 'Tribunal · Case no. [Case number]',
-          badge: 'Court / tribunal',
-          tone: 'neutral' as const,
-        },
-      ];
-    }
 
     const list: {
       id: string;
@@ -803,8 +782,7 @@ export function MatterProfileClient({
       matter.forumCourt &&
       !matter.parties.some((p) =>
         p.name.toLowerCase().includes(matter.forumCourt.toLowerCase()),
-      ) &&
-      !isBrightwaterTribunal
+      )
     ) {
       list.push({
         id: 'forum-court',
@@ -819,7 +797,7 @@ export function MatterProfileClient({
     }
 
     return list;
-  }, [isBrightwaterTribunal, clientLabel, matter, nameMap, people]);
+  }, [clientLabel, matter, nameMap, people]);
 
   const rule = useMemo(() => findSubcategoryRule(subcatLabel), [subcatLabel]);
   const activeGroups = useMemo(() => fieldGroupsForSubcategory(subcatLabel), [subcatLabel]);
@@ -831,44 +809,9 @@ export function MatterProfileClient({
 
   // Key dates for right sidebar
   const keyDatesList = useMemo(() => {
-    if (isBrightwaterTribunal) {
-      return [
-        {
-          id: 'kd-1',
-          month: 'OCT',
-          day: '21',
-          title: 'Agenda for preliminary hearing',
-          sub: 'Court deadline · TSK-000014',
-          pill: 'Overdue by 1 day',
-          pillTone: 'warning' as const,
-          overdue: true,
-        },
-        {
-          id: 'kd-2',
-          month: 'NOV',
-          day: '4',
-          title: 'Preliminary hearing — Bristol ET',
-          sub: '10:00 · By video · In 13 days',
-          pill: '',
-          pillTone: 'neutral' as const,
-          overdue: false,
-        },
-        {
-          id: 'kd-3',
-          month: 'DEC',
-          day: '9',
-          title: 'Disclosure of documents',
-          sub: 'Expected — confirm after hearing',
-          pill: 'Provisional',
-          pillTone: 'neutral' as const,
-          overdue: false,
-        },
-      ];
-    }
-
     const items = criticalDates.slice(0, 4).map((cd) => {
       const { month, day } = parseMonthAndDay(cd.date);
-      const isOverdue = new Date(cd.date).getTime() < new Date('2026-10-22T00:00:00').getTime();
+      const isOverdue = Boolean(cd.date && cd.date.slice(0, 10) < todayIso);
       return {
         id: cd.fieldId,
         month,
@@ -896,7 +839,7 @@ export function MatterProfileClient({
     }
 
     return items;
-  }, [isBrightwaterTribunal, criticalDates, matter.targetCompletionAt]);
+  }, [criticalDates, matter.targetCompletionAt, todayIso]);
 
   // Team members for right sidebar
   const teamMembersList = useMemo(() => {
@@ -914,7 +857,15 @@ export function MatterProfileClient({
     }[] = [];
     const seen = new Set<string>();
 
-    const hasHours = canViewFinance && (Boolean(pmsFin) || isSeededDemoMatter);
+    const hoursForMember = (memberName: string): string => {
+      if (!canViewFinance || !pmsView?.matterBundle?.timeEntries) return '';
+      const target = memberName.trim().toLowerCase();
+      if (!target) return '';
+      const total = pmsView.matterBundle.timeEntries
+        .filter((te) => (te.fee_earner_name ?? '').trim().toLowerCase() === target)
+        .reduce((sum, te) => sum + te.hours, 0);
+      return total > 0 ? `${total.toFixed(1)} h` : '';
+    };
 
     if (matter.responsiblePartnerId) {
       const nm = nameMap.get(matter.responsiblePartnerId) ?? matter.responsiblePartnerId;
@@ -925,7 +876,7 @@ export function MatterProfileClient({
         initials: initialsOfName(nm),
         name: nm,
         role: isAlsoFeeEarner ? 'Responsible partner & Fee earner' : 'Responsible partner',
-        hours: hasHours ? (isBrightwaterTribunal ? '22.5 h' : '18.0 h') : '',
+        hours: hoursForMember(nm),
         avatarBg: 'var(--pill-positive-bg)',
         avatarColor: 'var(--pill-positive-fg)',
       });
@@ -935,18 +886,15 @@ export function MatterProfileClient({
       const nm = nameMap.get(matter.leadFeeEarnerId) ?? matter.leadFeeEarnerId;
       seen.add(matter.leadFeeEarnerId);
       const emp = people.find((p) => p.id === matter.leadFeeEarnerId);
-      const roleLabel =
-        isBrightwaterTribunal && matter.leadFeeEarnerId === 'P-000006'
-          ? 'Fee earner · Associate'
-          : emp?.jobTitle
-            ? `Fee earner · ${emp.jobTitle.split(',')[0]}`
-            : 'Lead fee earner';
+      const roleLabel = emp?.jobTitle
+        ? `Fee earner · ${emp.jobTitle.split(',')[0]}`
+        : 'Lead fee earner';
       list.push({
         id: matter.leadFeeEarnerId,
         initials: initialsOfName(nm),
         name: nm,
         role: roleLabel,
-        hours: hasHours ? (isBrightwaterTribunal ? '41.0 h' : '34.5 h') : '',
+        hours: hoursForMember(nm),
         avatarBg: 'var(--blue-bg)',
         avatarColor: 'var(--blue-text)',
       });
@@ -960,7 +908,7 @@ export function MatterProfileClient({
         initials: initialsOfName(nm),
         name: nm,
         role: customRoles[matter.supervisingPartnerId] || 'Supervising partner',
-        hours: hasHours ? '6.0 h' : '',
+        hours: hoursForMember(nm),
         avatarBg: 'var(--pill-positive-bg)',
         avatarColor: 'var(--pill-positive-fg)',
       });
@@ -974,7 +922,7 @@ export function MatterProfileClient({
         initials: initialsOfName(nm),
         name: nm,
         role: customRoles[matter.relationshipPartnerId] || 'Relationship partner',
-        hours: hasHours ? '4.5 h' : '',
+        hours: hoursForMember(nm),
         avatarBg: 'var(--pill-positive-bg)',
         avatarColor: 'var(--pill-positive-fg)',
       });
@@ -985,22 +933,20 @@ export function MatterProfileClient({
       seen.add(tid);
       const nm = nameMap.get(tid) ?? tid;
       const emp = people.find((p) => p.id === tid);
-      const roleLabel =
-        customRoles[tid] ||
-        (tid === 'P-000010' ? 'Trainee' : emp?.jobTitle || 'Team member');
+      const roleLabel = customRoles[tid] || emp?.jobTitle || 'Team member';
       list.push({
         id: tid,
         initials: initialsOfName(nm),
         name: nm,
         role: roleLabel,
-        hours: hasHours ? '9.5 h' : '',
+        hours: hoursForMember(nm),
         avatarBg: 'var(--purple-bg)',
         avatarColor: 'var(--purple-text)',
       });
     }
 
     return list;
-  }, [canViewFinance, isBrightwaterTribunal, isSeededDemoMatter, pmsFin, matter, nameMap, people]);
+  }, [canViewFinance, pmsView, matter, nameMap, people]);
 
   function formatFieldValue(field: MatterModelField, val: unknown): React.ReactNode {
     if (val === undefined || val === null || val === '') {
@@ -1459,7 +1405,7 @@ export function MatterProfileClient({
                 <div className="panel-header">
                   <div className="panel-title-group">
                     <h2 className="panel-title">Financials</h2>
-                    {!pmsFin && !isSeededDemoMatter ? (
+                    {!pmsFin ? (
                       <StatusPill label="Not linked to PMS" tone="neutral" />
                     ) : null}
                   </div>
@@ -1999,57 +1945,26 @@ export function MatterProfileClient({
                       className="worklist-main"
                       style={{ display: 'flex', alignItems: 'center', gap: 8 }}
                     >
-                      <Check size={16} color="var(--pill-positive-fg)" strokeWidth={2.5} />
-                      <span
-                        style={{
-                          fontSize: 14.5,
-                          color: 'var(--teal)',
-                          fontWeight: 600,
-                        }}
-                      >
-                        Conflict check cleared
-                      </span>
-                    </div>
-                    <div className="worklist-right">
-                      <span className="worklist-meta">
-                        {isBrightwaterTribunal
-                          ? '12 Aug'
-                          : matter.conflictCheckRecord?.submittedAtDisplay
-                            ? '22 Oct'
-                            : formatShortDayMonth(matter.conflictCheckDate) === '—'
-                              ? '22 Oct'
-                              : formatShortDayMonth(matter.conflictCheckDate)}{' '}
-                        →
-                      </span>
-                    </div>
-                  </li>
-
-                  <li className="worklist-row">
-                    <div
-                      className="worklist-main"
-                      style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                    >
-                      {isSeededDemoMatter || matter.amlCompletedAt ? (
+                      {intakeComplianceRows.conflictCheck.cleared ? (
                         <Check size={16} color="var(--pill-positive-fg)" strokeWidth={2.5} />
                       ) : (
                         <AlertCircle size={16} color="var(--pill-warning-fg)" />
                       )}
-                      <span style={{ fontSize: 14.5 }}>Client due diligence</span>
+                      <span
+                        style={{
+                          fontSize: 14.5,
+                          color: intakeComplianceRows.conflictCheck.cleared
+                            ? 'var(--teal)'
+                            : undefined,
+                          fontWeight: intakeComplianceRows.conflictCheck.cleared ? 600 : 400,
+                        }}
+                      >
+                        {intakeComplianceRows.conflictCheck.label}
+                      </span>
                     </div>
                     <div className="worklist-right">
-                      <span
-                        className="worklist-meta"
-                        style={
-                          !isSeededDemoMatter && !matter.amlCompletedAt
-                            ? { color: 'var(--pill-warning-fg)', fontWeight: 700 }
-                            : undefined
-                        }
-                      >
-                        {isBrightwaterTribunal
-                          ? 'Verified 19 Jul'
-                          : matter.amlCompletedAt
-                            ? `Verified ${formatShortDayMonth(matter.amlCompletedAt)}`
-                            : matter.amlStatus || 'CMI incomplete'}
+                      <span className="worklist-meta">
+                        {intakeComplianceRows.conflictCheck.detail} →
                       </span>
                     </div>
                   </li>
@@ -2059,24 +1974,46 @@ export function MatterProfileClient({
                       className="worklist-main"
                       style={{ display: 'flex', alignItems: 'center', gap: 8 }}
                     >
-                      {isSeededDemoMatter || matter.engagementLetterSignedAt ? (
+                      {intakeComplianceRows.clientDueDiligence.verified ? (
                         <Check size={16} color="var(--pill-positive-fg)" strokeWidth={2.5} />
                       ) : (
                         <AlertCircle size={16} color="var(--pill-warning-fg)" />
                       )}
                       <span style={{ fontSize: 14.5 }}>
-                        {isSeededDemoMatter || matter.engagementLetterSignedAt
-                          ? 'Engagement letter signed'
-                          : 'Engagement letter'}
+                        {intakeComplianceRows.clientDueDiligence.label}
+                      </span>
+                    </div>
+                    <div className="worklist-right">
+                      <span
+                        className="worklist-meta"
+                        style={
+                          !intakeComplianceRows.clientDueDiligence.verified
+                            ? { color: 'var(--pill-warning-fg)', fontWeight: 700 }
+                            : undefined
+                        }
+                      >
+                        {intakeComplianceRows.clientDueDiligence.detail}
+                      </span>
+                    </div>
+                  </li>
+
+                  <li className="worklist-row">
+                    <div
+                      className="worklist-main"
+                      style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                    >
+                      {intakeComplianceRows.engagementLetter.signed ? (
+                        <Check size={16} color="var(--pill-positive-fg)" strokeWidth={2.5} />
+                      ) : (
+                        <AlertCircle size={16} color="var(--pill-warning-fg)" />
+                      )}
+                      <span style={{ fontSize: 14.5 }}>
+                        {intakeComplianceRows.engagementLetter.label}
                       </span>
                     </div>
                     <div className="worklist-right">
                       <span className="worklist-meta">
-                        {isBrightwaterTribunal
-                          ? '15 Aug'
-                          : matter.engagementLetterSignedAt
-                            ? formatShortDayMonth(matter.engagementLetterSignedAt)
-                            : matter.engagementLetterStatus || 'Pending'}
+                        {intakeComplianceRows.engagementLetter.detail}
                       </span>
                     </div>
                   </li>
@@ -2090,25 +2027,26 @@ export function MatterProfileClient({
                       className="worklist-main"
                       style={{ display: 'flex', alignItems: 'center', gap: 8 }}
                     >
-                      <Check size={16} color="var(--pill-positive-fg)" strokeWidth={2.5} />
+                      {intakeComplianceRows.riskAssessment.completed ? (
+                        <Check size={16} color="var(--pill-positive-fg)" strokeWidth={2.5} />
+                      ) : (
+                        <AlertCircle size={16} color="var(--pill-warning-fg)" />
+                      )}
                       <span
                         style={{
                           fontSize: 14.5,
-                          color: 'var(--teal)',
-                          fontWeight: 600,
+                          color: intakeComplianceRows.riskAssessment.completed
+                            ? 'var(--teal)'
+                            : undefined,
+                          fontWeight: intakeComplianceRows.riskAssessment.completed ? 600 : 400,
                         }}
                       >
-                        Matter risk assessment (
-                        {resolvedRiskAssessment.overallRisk
-                          ? `${resolvedRiskAssessment.overallRisk} risk`
-                          : 'Not started'}
-                        )
+                        {intakeComplianceRows.riskAssessment.label}
                       </span>
                     </div>
                     <div className="worklist-right">
                       <span className="worklist-meta">
-                        {resolvedRiskAssessment.completedQuestions}/
-                        {resolvedRiskAssessment.totalQuestions} answered →
+                        {intakeComplianceRows.riskAssessment.detail} →
                       </span>
                     </div>
                   </li>
@@ -2199,11 +2137,7 @@ export function MatterProfileClient({
                             (matter.fieldValues['claimValue'] as string) || ''
                           ).trim();
                           if (rawClaimValue) return rawClaimValue;
-                          if (
-                            !isBrightwaterTribunal &&
-                            sizeLabel &&
-                            sizeLabel.toLowerCase() !== 'unknown value'
-                          ) {
+                          if (sizeLabel && sizeLabel.toLowerCase() !== 'unknown value') {
                             return sizeLabel;
                           }
                           return <span className="muted">Not recorded</span>;
@@ -2216,10 +2150,17 @@ export function MatterProfileClient({
                     <div className="worklist-main">
                       <div className="worklist-meta">Office · Department</div>
                       <div className="worklist-title" style={{ marginTop: 2, marginBottom: 0 }}>
-                        {`${
-                          ((matter.fieldValues['responsibleOffice'] as string) || '').trim() ||
-                          (isBrightwaterTribunal ? 'Bristol' : 'Cardiff')
-                        } · ${practiceLabel || (isBrightwaterTribunal ? 'Employment & HR' : 'Legal')}`}
+                        {(() => {
+                          const office = (
+                            (matter.fieldValues['responsibleOffice'] as string) || ''
+                          ).trim();
+                          const dept = (practiceLabel || '').trim();
+                          const parts = [office, dept].filter(Boolean);
+                          if (parts.length === 0) {
+                            return <span className="muted">Not recorded</span>;
+                          }
+                          return parts.join(' · ');
+                        })()}
                       </div>
                     </div>
                   </li>
@@ -2229,9 +2170,7 @@ export function MatterProfileClient({
                       <div className="worklist-meta">Source of work</div>
                       <div className="worklist-title" style={{ marginTop: 2, marginBottom: 0 }}>
                         {((matter.fieldValues['sourceOfWork'] as string) || '').trim() ||
-                          (isBrightwaterTribunal
-                            ? 'Existing client — cross-referral from Corporate'
-                            : originLabel || 'Existing client')}
+                          originLabel || <span className="muted">Not recorded</span>}
                       </div>
                     </div>
                   </li>
@@ -2298,7 +2237,7 @@ export function MatterProfileClient({
               </div>
               <div className="panel-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <StatusPill
-                  label={isSeededDemoMatter ? 'SharePoint / DMS linked' : 'Matter opening record archived'}
+                  label="Matter opening record archived"
                   tone="neutral"
                 />
               </div>
@@ -2345,49 +2284,6 @@ export function MatterProfileClient({
                   </button>
                 </div>
               </li>
-              {isSeededDemoMatter ? (
-                <>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">Engagement Letter &amp; Terms of Business</div>
-                      <div className="worklist-meta">
-                        Client Care &amp; Engagement · Signed {openedDisplay}
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <StatusPill label="Executed" tone="positive" />
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        {isBrightwaterTribunal
-                          ? 'ET3 Grounds of Resistance — Draft v2.docx'
-                          : `${matter.matterNumber} — Principal Draft Documentation`}
-                      </div>
-                      <div className="worklist-meta">
-                        Pleadings &amp; Statements of Case · Author: {responsiblePartnerName}
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <StatusPill label="Working draft" tone="neutral" />
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        {isBrightwaterTribunal
-                          ? 'Bristol ET Preliminary Hearing Case Management Agenda.pdf'
-                          : 'Case Management & Correspondence Bundle'}
-                      </div>
-                      <div className="worklist-meta">Court &amp; Tribunal Bundle · Current stage</div>
-                    </div>
-                    <div className="worklist-right">
-                      <StatusPill label="In review" tone="warning" />
-                    </div>
-                  </li>
-                </>
-              ) : null}
             </ul>
           </div>
           </section>
@@ -2584,11 +2480,14 @@ export function MatterProfileClient({
                       className="btn btn--secondary btn--sm"
                       style={{ borderRadius: 999 }}
                       onClick={async () => {
+                        const actorName = currentUser
+                          ? personDisplayName(currentUser)
+                          : (nameMap.get(currentUserId) ?? currentUserId);
                         const newRun = {
                           id: `run-${Date.now()}`,
-                          runAtDisplay: '22 Oct 2026, 17:52',
+                          runAtDisplay: formatDateTime(new Date().toISOString()),
                           runById: currentUserId,
-                          runByName: 'Bethan R.',
+                          runByName: actorName,
                           searchTerms: rec.parties.map((p) => p.name),
                           partiesCount: rec.parties.length,
                           matchesCount: rec.matches.length,
@@ -2661,15 +2560,15 @@ export function MatterProfileClient({
                       <div className="kv-item">
                         <span className="kv-label">Submitted by &amp; when</span>
                         <span className="kv-value">
-                          {rec.submittedByName || 'Bethan Rees'} ·{' '}
-                          {rec.submittedAtDisplay || '22 Oct 2026, 17:46'}
+                          {rec.submittedByName || 'Not recorded'} ·{' '}
+                          {rec.submittedAtDisplay || '—'}
                         </span>
                       </div>
                       <div className="kv-item">
                         <span className="kv-label">Approved / cleared by &amp; when</span>
                         <span className="kv-value">
-                          {rec.approvedByName || 'Bethan Rees (Cleared by fee earner)'} ·{' '}
-                          {rec.approvedAtDisplay || '22 Oct 2026, 17:46'}
+                          {rec.approvedByName || 'Not recorded'} ·{' '}
+                          {rec.approvedAtDisplay || '—'}
                         </span>
                       </div>
                       <div className="kv-item">
@@ -2852,7 +2751,7 @@ export function MatterProfileClient({
                                       fontWeight: 600,
                                     }}
                                   >
-                                    Risk / Compliance decision ({m.reviewedByName || 'Bethan Rees'}
+                                    Risk / Compliance decision ({m.reviewedByName || 'Reviewer'}
                                     ):{' '}
                                   </span>
                                   <strong>
