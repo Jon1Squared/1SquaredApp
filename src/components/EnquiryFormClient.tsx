@@ -1217,6 +1217,10 @@ export function EnquiryFormClient({
         useOrganisationId: convertForBusiness ? convertUseOrgId || null : null,
         createForBusiness: convertForBusiness,
       });
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       if (!res.ok) {
         showToast(res.conflictReasons?.[0] ?? 'Cannot convert enquiry due to conflict');
         return;

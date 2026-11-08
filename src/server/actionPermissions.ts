@@ -583,12 +583,14 @@ export const ACTION_PERMISSIONS = {
 
   // S0-07: Enquiry and quote conversion (2)
   prepareEnquiryConversionAction: {
-    kind: 'gap',
-    slice: 'S0-07',
+    kind: 'permission',
+    key: 'matter:create',
+    enforcedBy: 'action',
   },
   prepareQuoteConversionAction: {
-    kind: 'gap',
-    slice: 'S0-07',
+    kind: 'permission',
+    key: 'matter:create',
+    enforcedBy: 'action',
   },
 
   // S0-10: Finance billing, write-off and credit-control actions (3)
@@ -689,4 +691,4 @@ export type RegisteredRouteName = keyof typeof ROUTE_PERMISSIONS;
  * `ROUTE_PERMISSIONS`. Equals the exact S0-02 baseline (54 actions + 1 route = 55)
  * and may only decrease as slices S0-03 to S0-07 and S0-10 close gaps.
  */
-export const MAX_KNOWN_GAPS = 5;
+export const MAX_KNOWN_GAPS = 3;

@@ -6,7 +6,7 @@ export const quickConflictCheck: DocArticle = {
   section: 'enquiries',
   summary:
     'What the live check on the New enquiry screen compares, when it runs, how results are graded, and its limits.',
-  updated: '2026-10-18',
+  updated: '2026-11-07',
   body: `
 The quick conflict check runs on the **New enquiry** screen while you take the caller's details. It compares what you type with existing People, Organisations and matters so you can spot a likely conflict, or an existing contact, before the enquiry is saved.
 
@@ -46,6 +46,17 @@ Until one of these is met, the card shows **Waiting**.
 | Address | Opposite party People and Organisations | Check (amber) |
 | Address or postcode | Other People and Organisations | Already known to us |
 | Caller or organisation | Opposing, counterparty, claimant, defendant or adjoining parties on matters | Possible conflict |
+| Caller, organisation or other party | Matter instructing contacts and billing contacts | Possible conflict (when adverse) or Already known to us |
+| Caller, organisation or other party | Person–organisation links (linked people and linked organisations) | Possible conflict (when linked to an opposite party) or Already known to us |
+| Caller, organisation or other party | Primary and additional clients on matters | Possible conflict (when named as an other party) or Already known to us |
+
+## What the conflict snapshot stores
+
+When an enquiry is saved or converted, the server records an immutable **Enquiry conflict snapshot** (\`conflictSnapshot\`) containing:
+
+- **Timestamp and actor** (\`recordedAt\`, \`recordedById\`): when the check ran and who triggered it.
+- **Searched inputs and sources** (\`searchedInput\`): the exact caller name, organisation, other parties named, email, phone, postcode, address lines, and the \`searchedSources\` list (\`matter clients\`, \`additional clients\`, \`parties\`, \`instructing contacts\`, \`billing contacts\`, \`person–organisation links\`, \`enquiries\`, \`directory\`).
+- **Matched records and redaction**: the conflict hits, known people, and known organisations visible to the actor. Any match against a restricted or ethical-wall matter the actor is not permitted to view is redacted as **a restricted matter** so matter numbers and titles are never leaked.
 
 ## How results are shown
 

@@ -426,6 +426,10 @@ export function HomeClient({
       useOrganisationId: enq.linkedOrganisationId,
       createForBusiness: Boolean(enq.callingOnBehalfOf),
     });
+    if (isActionDenied(res)) {
+      showToast(res.message);
+      return;
+    }
     if (!res.ok) {
       showToast(res.conflictReasons?.[0] ?? 'Cannot convert enquiry until conflict check is cleared.');
       return;

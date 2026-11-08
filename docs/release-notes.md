@@ -1,5 +1,15 @@
 # 1Squared — Release Notes
 
+## Unreleased — Conflict Search Coverage and Conversion Conflict Checks (`s0-07-conflict-fixes`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Host Domain & Server Services (`src/domain/matterConflicts.ts`, `src/domain/enquiries.ts`, `src/domain/types.ts`, `src/server/services.ts`, `src/server/actionPermissions.ts`, `src/components/`, `src/docs/`, `docs/`):**
+  - **Enquiry & Quote Conversion Gates (Bug B5, Item 1a, `src/server/actionPermissions.ts`, `src/server/services.ts`, `src/components/`):** Closed `prepareEnquiryConversionAction` and `prepareQuoteConversionAction` (`matter:create`, `enforcedBy: 'action'`), lowering `MAX_KNOWN_GAPS` from 5 to 3; enforced `matter:create` in `prepareEnquiryConversion` and `prepareQuoteConversionRecord` before running any conflict check or creating any Person, Organisation, or link record; ran the full `searchMatterConflicts` check on quote conversion with the same blocking rules as matter save; redacted restricted matters (`'a restricted matter'`) in blocked reasons; derived the prospective organisation's conflict status from the search outcome rather than hard-coded `Cleared`; and recorded `conflictDecision` and a `conflict-decision` audit entry on the organisation.
+  - **Expanded Conflict Search Coverage & Searched Sources Audit (Bug B7, Item 2, `src/domain/matterConflicts.ts`, `src/domain/enquiries.ts`, `src/domain/types.ts`, `src/server/services.ts`):** Added `billingContactId` to `buildEffectiveConflictParties`, updated `searchMatterConflicts`, `detectPreliminaryConflicts`, `runEnquiryConflictSearch`, and `computeEnquiryConflictSnapshot` to search matter `instructingContactId`, `billingContactId`, `additionalClientIds`, and `store.links` (person–organisation links, including checking linked organisations and people against adverse parties), and recorded `searchedSources` on `ConflictCheckRunAudit` and `EnquiryConflictSnapshot.searchedInput`.
+  - **Tests & Documentation (`core/tests/rbac.test.ts`, `core/tests/isolation.test.ts`, `src/docs/articles/quick-conflict-check.ts`, `src/docs/articles/matter-opening-and-risk.ts`, `docs/roadmap/feature-list.md`):** Added unit and two-tenant isolation tests and updated `quick-conflict-check` and `matter-opening-and-risk`.
+
+---
+
 ## Unreleased — AI Matter Extraction Route Hardening and Tenant Settings (`s0-06-ai-extraction`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

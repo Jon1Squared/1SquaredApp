@@ -9,6 +9,7 @@ import {
   prepareQuoteConversionAction,
   recordQuoteOutcomeAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { quoteStatusTone } from '@/domain/badges';
 import { addDays, formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
@@ -182,8 +183,12 @@ export function QuoteDetailClient({
   const handleConvertToMatter = () => {
     startTransition(async () => {
       const res = await prepareQuoteConversionAction(quote.id);
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       if (!res.ok) {
-        showToast(res.error ?? 'Could not prepare quote conversion');
+        showToast(res.error ?? res.conflictReasons?.[0] ?? 'Could not prepare quote conversion');
         return;
       }
       const params = new URLSearchParams();

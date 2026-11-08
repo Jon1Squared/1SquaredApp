@@ -590,6 +590,17 @@ export interface Person extends RecordBase {
   createdFromEnquiryId?: string | null;
 }
 
+export interface OrganisationConflictDecision {
+  outcome: 'Cleared' | 'Potential conflict';
+  decidedById: string;
+  decidedByName: string;
+  decidedAt: string;
+  sourceRecordId: string;
+  matchesCount: number;
+  searchedSources: string[];
+  summary: string;
+}
+
 export interface Organisation extends RecordBase {
   recordType: 'organisation';
   // A. Identity
@@ -624,6 +635,7 @@ export interface Organisation extends RecordBase {
   onboardingStatusId: string | null;
   conflictStatusId: string | null;
   conflictReference: string;
+  conflictDecision?: OrganisationConflictDecision | null;
   riskRatingId: string | null;
   riskAssessmentStatusId: string | null;
   verificationStatusId: string | null;
@@ -830,6 +842,7 @@ export interface ConflictCheckRunAudit {
   partiesCount: number;
   matchesCount: number;
   potentialConflictsCount: number;
+  searchedSources?: string[];
 }
 
 export interface ConflictReviewerComment {
@@ -1075,6 +1088,7 @@ export interface EnquiryConflictSnapshot {
     postcode: string;
     addressLine1: string;
     addressLine2: string;
+    searchedSources?: string[];
   };
   matchCount: number;
   highestSeverity: 'high' | 'medium' | 'low' | 'none';

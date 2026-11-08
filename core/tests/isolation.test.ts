@@ -44,7 +44,11 @@ import {
   migrateEmployeesToEmploymentRecords,
 } from '../../src/domain/employment';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
-import { reconcileServerConflictMatches } from '../../src/domain/matterConflicts';
+import {
+  reconcileServerConflictMatches,
+  searchMatterConflicts,
+} from '../../src/domain/matterConflicts';
+import { runEnquiryConflictSearch } from '../../src/domain/enquiries';
 import {
   conflictStatusPillFromLegacy,
   legacyConflictStatusFromRecord,
@@ -106,6 +110,8 @@ import {
   logQuoteFollowUpAction,
   markQuoteSentAction,
   mergeRecordsAction,
+  prepareEnquiryConversionAction,
+  prepareQuoteConversionAction,
   reassignLeaverOwnedRecordsAction,
   recordQuoteOutcomeAction,
   reorderChoiceValueAction,
@@ -7329,6 +7335,175 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         )?.legalName,
       ).toBe('Pembroke Vaughan Holdings Ltd');
       expect(cluster.getRecordById(ctxA, tamperedIds.org)).toBeNull();
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('S0-07: searchMatterConflicts and runEnquiryConflictSearch never return another tenant records, and conversion actions reject forged tenant claims and tampered IDs', async () => {
+    try {
+      resetAllDemoData('P-000001');
+      const store = getStore();
+      const ctxA = resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-s007-a',
+      });
+      const ctxB = resolveTenantFromVerifiedToken({
+        verifiedToken: tenantBToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-s007-b',
+      });
+      expect(ctxA.tenantId).toBe('not-a-law-firm');
+      expect(ctxB.tenantId).toBe('fictional-chambers-uk');
+
+      // Construct an isolated Tenant B data set with instructing/billing contacts, additionalClientIds, and links
+      const tenantBPerson = {
+        ...store.people[0]!,
+        id: 'P-TENANT-B-501',
+        firstName: 'Owain',
+        surname: 'PembrokeSecretContact',
+        isEmployee: false,
+      };
+      const tenantBOrg = {
+        ...store.organisations[0]!,
+        id: 'O-TENANT-B-501',
+        legalName: 'Pembroke Vaughan Secret Client Holdings Ltd',
+      };
+      const tenantBMatter = {
+        ...store.matters[0]!,
+        id: 'M-TENANT-B-501',
+        matterNumber: 'PV-999999',
+        title: 'Pembroke Secret Matter',
+        clientId: tenantBOrg.id,
+        additionalClientIds: [tenantBPerson.id],
+        instructingContactId: tenantBPerson.id,
+        billingContactId: tenantBPerson.id,
+        parties: [
+          {
+            id: 'MP-TB-1',
+            name: tenantBOrg.legalName,
+            entityType: 'organisation' as const,
+            role: 'Opponent',
+            linkedRecordId: tenantBOrg.id,
+          },
+        ],
+      };
+
+      // Running both searches against Tenant A's scoped data never returns Tenant B's records
+      const matterSearchA = searchMatterConflicts(
+        {
+          currentMatterId: null,
+          parties: [
+            {
+              id: 'cp-tb-1',
+              name: tenantBOrg.legalName,
+              entityType: 'organisation',
+              role: 'Opponent',
+              linkedRecordId: tenantBOrg.id,
+            },
+            {
+              id: 'cp-tb-2',
+              name: `${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+              entityType: 'person',
+              role: 'Opponent',
+              linkedRecordId: tenantBPerson.id,
+            },
+          ],
+          canReviewConditions: true,
+        },
+        {
+          matters: store.matters,
+          enquiries: store.enquiries,
+          people: store.people,
+          organisations: store.organisations,
+          links: store.links,
+          canView: () => true,
+          canViewEnquiry: () => true,
+        },
+      );
+      expect(matterSearchA).toEqual([]);
+      expect(JSON.stringify(matterSearchA)).not.toContain(tenantBMatter.matterNumber);
+
+      const enqSearchA = runEnquiryConflictSearch(
+        {
+          firstName: tenantBPerson.firstName,
+          lastName: tenantBPerson.surname,
+          callingOnBehalfOf: tenantBOrg.legalName,
+          otherPartiesNamed: `${tenantBOrg.legalName}, ${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+        },
+        store.people,
+        store.organisations,
+        store.matters,
+        store.values,
+        store.enquiries,
+        null,
+        store.links,
+        () => true,
+      );
+      expect(enqSearchA.allConflicts).toEqual([]);
+      expect(enqSearchA.otherPartyClientMatches).toEqual([]);
+      expect(enqSearchA.clientAgainstPartyMatches).toEqual([]);
+      expect(enqSearchA.hasBlockingConflict).toBe(false);
+
+      // Forged tenant B session cookie is rejected by conversion actions
+      const forgedTenantBSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'pembroke-vaughan',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '99999999-8888-7777-6666-555555555555',
+          sub: 'P-000001',
+          email: 'rhian.morgan@pembroke.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(forgedTenantBSession);
+      await expect(
+        prepareEnquiryConversionAction(store.enquiries[0]!.id, {}),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+      await expect(
+        prepareQuoteConversionAction(store.quotes[0]!.id),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+
+      // Valid Tenant A session with tampered Tenant B record IDs fails closed and creates nothing
+      const validTenantASession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000001',
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(validTenantASession);
+      const peopleBefore = store.people.length;
+      const orgsBefore = store.organisations.length;
+      const tamperedEnqConv = await prepareEnquiryConversionAction('ENQ-TENANT-B-999', {});
+      expect(tamperedEnqConv.ok).toBe(false);
+      const tamperedQuoteConv = await prepareQuoteConversionAction('Q-TENANT-B-999');
+      expect(tamperedQuoteConv.ok).toBe(false);
+      expect(store.people.length).toBe(peopleBefore);
+      expect(store.organisations.length).toBe(orgsBefore);
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
