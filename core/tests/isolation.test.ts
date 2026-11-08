@@ -7690,7 +7690,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('enforces two-tenant isolation on S0-09 record merge (tampered Tenant B survivor and merged IDs, forged tenant claims, and TenantDocumentRepository isolation)', async () => {
+  it('S0-09: rejects forged tenant claims and tampered IDs on mergeRecordsAction (with positive Tenant A controls and TenantDocumentRepository / cluster data-layer checks)', async () => {
     resetAllDemoData('P-000001');
     try {
       const sA = savePersonRecord(
@@ -7715,19 +7715,126 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         correlationId: 's0-09-iso-b',
       });
 
+      // 1. Forged tenant claim: session whose tenant claim ('pembroke-vaughan') differs from the active tenant ('not-a-law-firm')
+      const forgedTenantBSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000004',
+          tenantId: 'pembroke-vaughan',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '99999999-8888-7777-6666-555555555555',
+          sub: 'P-000004',
+          email: 'admin@pembroke.example',
+          displayName: 'Admin',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(forgedTenantBSession);
+      await expect(
+        mergeRecordsAction('person', sA.id, mA.id),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+      await expect(
+        mergeRecordsAction('organisation', 'O-000001', 'O-000002'),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+
+      // 2. Tampered IDs under a valid Tenant A session fail closed with FORBIDDEN and "Record not found for merge."
+      const validTenantASession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000004',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000004',
+          email: 'admin@notalawfirm.example',
+          displayName: 'Admin',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(validTenantASession);
+
+      const sOrgARes = await saveOrganisationAction(
+        {
+          legalName: 'Tenant A Survivor Org Ltd',
+        },
+        {},
+      );
+      expect(isActionDenied(sOrgARes)).toBe(false);
+      const sOrgA = (sOrgARes as { organisation: { id: string } }).organisation;
+      const mOrgARes = await saveOrganisationAction(
+        {
+          legalName: 'Tenant A Merged Org Ltd',
+        },
+        {},
+      );
+      expect(isActionDenied(mOrgARes)).toBe(false);
+      const mOrgA = (mOrgARes as { organisation: { id: string } }).organisation;
+
+      const tenantBPersonSurvId = 'P-TENANT-B-SURV';
+      const tenantBPersonMergId = 'P-TENANT-B-MERG';
+
+      const tamperedSurv = await mergeRecordsAction('person', tenantBPersonSurvId, sA.id);
+      expect(isActionDenied(tamperedSurv)).toBe(true);
+      if (isActionDenied(tamperedSurv)) {
+        expect(tamperedSurv.code).toBe('FORBIDDEN');
+        expect(tamperedSurv.message).toBe('Record not found for merge.');
+      }
+
+      const tamperedMerg = await mergeRecordsAction('person', sA.id, tenantBPersonMergId);
+      expect(isActionDenied(tamperedMerg)).toBe(true);
+      if (isActionDenied(tamperedMerg)) {
+        expect(tamperedMerg.code).toBe('FORBIDDEN');
+        expect(tamperedMerg.message).toBe('Record not found for merge.');
+      }
+
+      const tamperedBoth = await mergeRecordsAction(
+        'person',
+        tenantBPersonSurvId,
+        tenantBPersonMergId,
+      );
+      expect(isActionDenied(tamperedBoth)).toBe(true);
+      if (isActionDenied(tamperedBoth)) {
+        expect(tamperedBoth.code).toBe('FORBIDDEN');
+        expect(tamperedBoth.message).toBe('Record not found for merge.');
+      }
+
+      const tamperedOrg = await mergeRecordsAction(
+        'organisation',
+        'O-TENANT-B-SURV',
+        'O-TENANT-B-MERG',
+      );
+      expect(isActionDenied(tamperedOrg)).toBe(true);
+      if (isActionDenied(tamperedOrg)) {
+        expect(tamperedOrg.code).toBe('FORBIDDEN');
+        expect(tamperedOrg.message).toBe('Record not found for merge.');
+      }
+      expect(getStore().people.find((p) => p.id === sA.id)?.mergedIntoId).toBeNull();
+      expect(getStore().people.find((p) => p.id === mA.id)?.mergedIntoId).toBeNull();
+
+      // 3. Data-layer isolation checks (TenantDocumentRepository and PostgresTenantCluster) + positive Tenant A merge controls
       const repo = getDocumentRepository();
       const tenantBStore = createSeedStore();
       const cluster = new PostgresTenantCluster();
       const tenantBPersonSurv = {
         ...tenantBStore.people[0]!,
-        id: 'P-TENANT-B-SURV',
+        id: tenantBPersonSurvId,
         firstName: 'Owain',
         surname: 'PembrokeSurvivor',
         isEmployee: false,
       };
       const tenantBPersonMerg = {
         ...tenantBStore.people[1]!,
-        id: 'P-TENANT-B-MERG',
+        id: tenantBPersonMergId,
         firstName: 'Owain',
         surname: 'PembrokeDuplicate',
         isEmployee: false,
@@ -7742,15 +7849,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         id: 'O-TENANT-B-MERG',
         legalName: 'Pembroke Duplicate Holdings Ltd',
       };
-      tenantBStore.people.push(tenantBPersonSurv, tenantBPersonMerg);
-      tenantBStore.organisations.push(tenantBOrgSurv, tenantBOrgMerg);
       cluster.putRecord(ctxB, { ...tenantBPersonSurv, tenantId: ctxB.tenantId });
       cluster.putRecord(ctxB, { ...tenantBPersonMerg, tenantId: ctxB.tenantId });
       cluster.putRecord(ctxB, { ...tenantBOrgSurv, tenantId: ctxB.tenantId });
       cluster.putRecord(ctxB, { ...tenantBOrgMerg, tenantId: ctxB.tenantId });
-
-      const tenantBPersonSurvId = tenantBPersonSurv.id;
-      const tenantBPersonMergId = tenantBPersonMerg.id;
 
       const docB = {
         id: 'DOC-TENANT-B-09',
@@ -7786,31 +7888,20 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       repo.putDocument(ctxB, docB);
       repo.putDocumentLink(ctxB, linkB);
 
-      // 1. Valid merge in Tenant A never alters Tenant B's documents or links even when IDs collide
-      const validTenantASession = verifySignedEntraSessionCookie(
-        createSignedEntraSessionCookie({
-          personId: 'P-000004',
-          tenantId: 'not-a-law-firm',
-          oid: '00000000-0000-4000-8000-000000000004',
-          tid: '11111111-2222-3333-4444-000000000000',
-          sub: 'P-000004',
-          email: 'admin@notalawfirm.example',
-          displayName: 'Admin',
-          entraRoles: ['admin'],
-          mappedRoles: ['admin'],
-          entraGroups: [],
-          mfaVerified: true,
-          amr: ['pwd', 'mfa'],
-          authenticatedAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-        }),
-      )!;
-      setTestEntraSessionOverride(validTenantASession);
-
+      // Positive controls: merging valid Tenant A person and organisation records succeeds
       const mergeARes = await mergeRecordsAction('person', sA.id, mA.id);
       expect(isActionDenied(mergeARes)).toBe(false);
+      expect((mergeARes as { survivorId: string }).survivorId).toBe(sA.id);
+      expect(getStore().people.find((p) => p.id === mA.id)?.mergedIntoId).toBe(sA.id);
 
-      // Tenant B's document and link remain untouched
+      const mergeOrgARes = await mergeRecordsAction('organisation', sOrgA.id, mOrgA.id);
+      expect(isActionDenied(mergeOrgARes)).toBe(false);
+      expect((mergeOrgARes as { survivorId: string }).survivorId).toBe(sOrgA.id);
+      expect(getStore().organisations.find((o) => o.id === mOrgA.id)?.mergedIntoId).toBe(
+        sOrgA.id,
+      );
+
+      // Tenant B's document and link in TenantDocumentRepository and records in PostgresTenantCluster remain untouched
       const fetchedDocB = repo.getDocumentById(ctxB, docB.id)!;
       expect(fetchedDocB.primaryClientId).toBe(tenantBPersonMergId);
       expect(fetchedDocB.recipientPartyId).toBe(mA.id);
@@ -7818,25 +7909,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         docB.id,
       ]);
       expect(repo.listDocumentsForEntity(ctxA, 'person', mA.id)).toHaveLength(0);
-
-      // 2. Tampered survivor and merged IDs pointing at real stored Tenant B records are denied in Tenant A
-      const tamperedSurv = await mergeRecordsAction('person', tenantBPersonSurvId, sA.id);
-      expect(isActionDenied(tamperedSurv)).toBe(true);
-      const tamperedMerg = await mergeRecordsAction('person', sA.id, tenantBPersonMergId);
-      expect(isActionDenied(tamperedMerg)).toBe(true);
-      const tamperedBoth = await mergeRecordsAction(
-        'person',
-        tenantBPersonSurvId,
-        tenantBPersonMergId,
-      );
-      expect(isActionDenied(tamperedBoth)).toBe(true);
-      const tamperedOrg = await mergeRecordsAction(
-        'organisation',
-        tenantBOrgSurv.id,
-        tenantBOrgMerg.id,
-      );
-      expect(isActionDenied(tamperedOrg)).toBe(true);
-      expect(getStore().people.find((p) => p.id === sA.id)?.mergedIntoId).toBeNull();
+      expect(cluster.getRecordById(ctxA, tenantBPersonMerg.id)).toBeNull();
+      expect(cluster.getRecordById(ctxA, tenantBOrgMerg.id)).toBeNull();
       expect(
         cluster.getRecordById<{ id: string; tenantId: string; mergedIntoId?: string | null }>(
           ctxB,
@@ -7849,30 +7923,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           tenantBOrgMerg.id,
         )?.mergedIntoId,
       ).toBeFalsy();
-
-      // 3. Forged Tenant B session claim is rejected
-      const forgedTenantBSession = verifySignedEntraSessionCookie(
-        createSignedEntraSessionCookie({
-          personId: 'P-000004',
-          tenantId: 'pembroke-vaughan',
-          oid: '00000000-0000-4000-8000-000000000004',
-          tid: '99999999-8888-7777-6666-555555555555',
-          sub: 'P-000004',
-          email: 'admin@pembroke.example',
-          displayName: 'Admin',
-          entraRoles: ['admin'],
-          mappedRoles: ['admin'],
-          entraGroups: [],
-          mfaVerified: true,
-          amr: ['pwd', 'mfa'],
-          authenticatedAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-        }),
-      )!;
-      setTestEntraSessionOverride(forgedTenantBSession);
-      await expect(
-        mergeRecordsAction('person', sA.id, mA.id),
-      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

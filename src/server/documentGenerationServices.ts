@@ -453,34 +453,33 @@ export function repointMergedEntityInDocRepository(
     activeVerified,
   );
 
-  let updatedCount = prepareMergedEntityDocumentsInStore(
-    store,
-    ctx,
-    entityType,
-    mergedId,
-    survivorId,
-  );
+  // R282: Do not call prepareMergedEntityDocumentsInStore a second time after saveStore.
+  // Snapshot affected tenant repository documents and links before writing, and restore on failure.
+  const repoSnapshot = repo.snapshotTenantDocumentsAndLinks(ctx);
+  try {
+    const repoUpdated = repo.repointMergedEntity(
+      ctx,
+      entityType,
+      mergedId,
+      survivorId,
+    );
 
-  const repoUpdated = repo.repointMergedEntity(
-    ctx,
-    entityType,
-    mergedId,
-    survivorId,
-  );
-  updatedCount += repoUpdated;
-
-  for (const d of store.documents ?? []) {
-    if (d.tenantId === ctx.tenantId) {
-      repo.putDocument(ctx, d);
+    for (const d of store.documents ?? []) {
+      if (d.tenantId === ctx.tenantId) {
+        repo.putDocument(ctx, d);
+      }
     }
-  }
-  for (const l of store.documentLinks ?? []) {
-    if (l.tenantId === ctx.tenantId) {
-      repo.putDocumentLink(ctx, l);
+    for (const l of store.documentLinks ?? []) {
+      if (l.tenantId === ctx.tenantId) {
+        repo.putDocumentLink(ctx, l);
+      }
     }
-  }
 
-  return updatedCount;
+    return repoUpdated;
+  } catch (err) {
+    repo.restoreTenantDocumentsAndLinks(ctx, repoSnapshot);
+    throw err;
+  }
 }
 
 function persistRepositoryToStore(

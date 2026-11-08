@@ -208,6 +208,11 @@ export function repairOrphanTaxonomyIds(
 declare global {
   var __oneSquaredStore: FirmStore | undefined;
   var __oneSquaredStoreMtimeMs: number | undefined;
+  var __oneSquaredLastSavedStoreJson: string | undefined;
+}
+
+export function clearStoreMemoryCache(): void {
+  global.__oneSquaredStore = undefined;
 }
 
 function buildInitialPmsLinks(
@@ -1193,6 +1198,16 @@ export function getStore(): FirmStore {
       // recreate if corrupted
     }
   }
+  if (isTestEnv && global.__oneSquaredLastSavedStoreJson) {
+    try {
+      const parsed = JSON.parse(global.__oneSquaredLastSavedStoreJson) as FirmStore;
+      setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
+      global.__oneSquaredStore = parsed;
+      return global.__oneSquaredStore;
+    } catch {
+      // fall through to fresh seed store
+    }
+  }
   const fresh = createSeedStore(new Date());
   saveStore(fresh);
   return fresh;
@@ -1202,6 +1217,7 @@ export function saveStore(store: FirmStore): void {
   global.__oneSquaredStore = store;
   setRuntimeRbacConfigOverride(store.rbacConfigOverride);
   if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+    global.__oneSquaredLastSavedStoreJson = JSON.stringify(store);
     return;
   }
   try {

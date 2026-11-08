@@ -353,6 +353,49 @@ export class TenantDocumentRepository {
     return updatedCount;
   }
 
+  public snapshotTenantDocumentsAndLinks(ctx: TenantContext): {
+    documents: GeneratedDocumentRecord[];
+    links: DocumentLinkRecord[];
+  } {
+    const db = this.getDb(ctx);
+    return {
+      documents: Array.from(db.documents.values())
+        .filter((d) => d.tenantId === ctx.tenantId)
+        .map((d) => ({ ...d })),
+      links: Array.from(db.links.values())
+        .filter((l) => l.tenantId === ctx.tenantId)
+        .map((l) => ({ ...l })),
+    };
+  }
+
+  public restoreTenantDocumentsAndLinks(
+    ctx: TenantContext,
+    snapshot: {
+      documents: GeneratedDocumentRecord[];
+      links: DocumentLinkRecord[];
+    },
+  ): void {
+    const db = this.getDb(ctx);
+    for (const [docId, doc] of db.documents.entries()) {
+      if (doc.tenantId === ctx.tenantId) {
+        db.documents.delete(docId);
+      }
+    }
+    for (const [linkId, link] of db.links.entries()) {
+      if (link.tenantId === ctx.tenantId) {
+        db.links.delete(linkId);
+      }
+    }
+    for (const doc of snapshot.documents) {
+      this.assertRecordTenant(ctx, doc.tenantId, 'GeneratedDocumentRecord');
+      db.documents.set(doc.id, { ...doc });
+    }
+    for (const link of snapshot.links) {
+      this.assertRecordTenant(ctx, link.tenantId, 'DocumentLinkRecord');
+      db.links.set(link.id, { ...link });
+    }
+  }
+
   // ============================================================================
   // Template Usage Events & Daily Summaries
   // ============================================================================

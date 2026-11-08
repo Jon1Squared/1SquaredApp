@@ -113,7 +113,7 @@ import {
   flushDocumentLifecycleSyncForTesting,
   retryMatterDocumentProvisioning,
 } from '../../src/server/documentStoreServices';
-import { getStore } from '../../src/server/store';
+import { clearStoreMemoryCache, getStore } from '../../src/server/store';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -5512,10 +5512,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('10. Atomic rollback (R272): when the document repository step throws, the store is unchanged with no references repointed and no mergedIntoId set', () => {
+    it('10. Atomic rollback (R272, R282): rolls back both TenantDocumentRepository and store when putDocument fails part-way through the repository loop, and leaves persisted store unchanged when prepareMergedEntityDocumentsInStore throws before saveStore', () => {
       resetAllDemoData('P-000001');
       const repo = getDocumentRepository();
-      const origRepoint = repo.repointMergedEntity.bind(repo);
+      const origPutDoc = repo.putDocument.bind(repo);
+      const origListDocs = repo.listDocuments.bind(repo);
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5533,27 +5534,141 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const enq = store.enquiries[0]!;
         enq.linkedPersonId = mergedPerson.id;
 
-        repo.repointMergedEntity = () => {
-          throw new Error('SIMULATED_DOC_REPO_FAILURE');
+        const tenantCfg = getActiveTenantConfiguration();
+        const adminActor = store.people.find((p) => p.id === 'P-000004')!;
+        const ctx = resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: adminActor.id,
+            tenantId: tenantCfg.tenantId,
+            email: adminActor.emails[0]?.address ?? 'admin@notalawfirm.example',
+            name: 'Admin User',
+            roles: ['admin'],
+            entraObjectId: adminActor.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+            mfaVerified: true,
+          },
+          hostingMode: tenantCfg.hostingMode,
+          environment: tenantCfg.environment,
+          correlationId: 'test-s0-09-r282',
+        });
+
+        const doc1 = {
+          id: 'DOC-R282-1',
+          tenantId: ctx.tenantId,
+          title: 'First Document',
+          fileName: 'doc1.docx',
+          documentType: 'letter',
+          outputFormat: 'docx' as const,
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          fileSizeBytes: 512,
+          fileSha256: 'sha-r282-1',
+          templateId: 'TPL-1',
+          templateName: 'CCL',
+          templateVersionId: 'TPLV-1',
+          templateVersionNumber: 1,
+          storageProvider: 'local-fs' as const,
+          storageKey: 'blob-r282-1',
+          generatedByUserId: 'P-000004',
+          generatedAt: new Date().toISOString(),
+          primaryMatterId: matter.id,
+          primaryClientId: mergedPerson.id,
+          recipientPartyId: mergedPerson.id,
+          isDeleted: false,
+        };
+        const doc2 = {
+          ...doc1,
+          id: 'DOC-R282-2',
+          title: 'Second Document',
+          fileName: 'doc2.docx',
+          storageKey: 'blob-r282-2',
+        };
+        const link1 = {
+          id: 'DL-R282-1',
+          tenantId: ctx.tenantId,
+          documentId: doc1.id,
+          entityType: 'person' as const,
+          entityId: mergedPerson.id,
+          linkRole: 'recipient_party' as const,
+          createdAt: new Date().toISOString(),
+        };
+        store.documents = [...(store.documents ?? []), { ...doc1 }, { ...doc2 }];
+        store.documentLinks = [...(store.documentLinks ?? []), { ...link1 }];
+        origPutDoc(ctx, doc1);
+        origPutDoc(ctx, doc2);
+        repo.putDocumentLink(ctx, link1);
+        saveStore(store);
+
+        // Case 1 (R282): Force failure part-way through the repository putDocument loop (succeeds on 1st doc, throws on 2nd doc after repointMergedEntity already ran)
+        let putCalls = 0;
+        repo.putDocument = (callCtx, d) => {
+          putCalls += 1;
+          if (putCalls === 2) {
+            throw new Error('SIMULATED_PUT_DOC_LOOP_FAILURE');
+          }
+          return origPutDoc(callCtx, d);
         };
 
         expect(() =>
           executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
-        ).toThrow(/SIMULATED_DOC_REPO_FAILURE/);
+        ).toThrow(/SIMULATED_PUT_DOC_LOOP_FAILURE/);
+        expect(putCalls).toBe(2);
+        repo.putDocument = origPutDoc;
 
-        const afterStore = getStore();
-        expect(afterStore.matters.find((m) => m.id === matter.id)?.instructingContactId).toBe(
-          mergedPerson.id,
+        // Repository documents and links are rolled back to their pre-merge state
+        expect(repo.getDocumentById(ctx, doc1.id)?.primaryClientId).toBe(mergedPerson.id);
+        expect(repo.getDocumentById(ctx, doc1.id)?.recipientPartyId).toBe(mergedPerson.id);
+        expect(repo.getDocumentById(ctx, doc2.id)?.primaryClientId).toBe(mergedPerson.id);
+        expect(repo.listDocumentsForEntity(ctx, 'person', mergedPerson.id).map((d) => d.id)).toEqual(
+          expect.arrayContaining([doc1.id, doc2.id]),
         );
-        expect(afterStore.enquiries.find((e) => e.id === enq.id)?.linkedPersonId).toBe(
+        const survivorRepoDocIds = repo
+          .listDocumentsForEntity(ctx, 'person', survivorPerson.id)
+          .map((d) => d.id);
+        expect(survivorRepoDocIds).not.toContain(doc1.id);
+        expect(survivorRepoDocIds).not.toContain(doc2.id);
+
+        // Store (both in-memory and reloaded after clearing cache) is unchanged
+        clearStoreMemoryCache();
+        const reloadedAfterLoopFail = getStore();
+        expect(
+          reloadedAfterLoopFail.matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
+        expect(reloadedAfterLoopFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId).toBe(
           mergedPerson.id,
         );
         expect(
-          afterStore.people.find((p) => p.id === mergedPerson.id)?.mergedIntoId,
+          reloadedAfterLoopFail.people.find((p) => p.id === mergedPerson.id)?.mergedIntoId,
         ).toBeNull();
-        expect(afterStore.mergeHistory).toHaveLength(0);
+        expect(
+          reloadedAfterLoopFail.documents?.find((d) => d.id === doc1.id)?.primaryClientId,
+        ).toBe(mergedPerson.id);
+        expect(reloadedAfterLoopFail.mergeHistory).toHaveLength(0);
+
+        // Case 2 (R282): Force the document step before saveStore (~5919, prepareMergedEntityDocumentsInStore) to throw
+        repo.listDocuments = () => {
+          throw new Error('SIMULATED_PRE_SAVE_DOC_STEP_FAILURE');
+        };
+        expect(() =>
+          executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
+        ).toThrow(/SIMULATED_PRE_SAVE_DOC_STEP_FAILURE/);
+        repo.listDocuments = origListDocs;
+
+        // Reload persisted store with getStore() after clearing the cache and assert it is unchanged
+        clearStoreMemoryCache();
+        const reloadedAfterPreSaveFail = getStore();
+        expect(
+          reloadedAfterPreSaveFail.matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
+        expect(
+          reloadedAfterPreSaveFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId,
+        ).toBe(mergedPerson.id);
+        expect(
+          reloadedAfterPreSaveFail.people.find((p) => p.id === mergedPerson.id)?.mergedIntoId,
+        ).toBeNull();
+        expect(reloadedAfterPreSaveFail.mergeHistory).toHaveLength(0);
       } finally {
-        repo.repointMergedEntity = origRepoint;
+        repo.putDocument = origPutDoc;
+        repo.listDocuments = origListDocs;
         setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');
       }
