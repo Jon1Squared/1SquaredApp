@@ -801,9 +801,31 @@ export function runEnquiryConflictSearch(
     }
   }
 
+function redactEnquiryMatterIdHash(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
   // 3. Check if caller, callingOnBehalfOf, or otherPartiesNamed is an adverse/counterparty or instructing/billing contact on a matter
   const isRestrictedMatter = (m: Matter): boolean =>
     canViewMatter ? !canViewMatter(m) : Boolean(m.isStaffMatter || m.hasEthicalWall);
+
+  const personById = new Map<string, Person>();
+  for (const p of combinedPeople) {
+    if (!p.mergedIntoId) {
+      personById.set(p.id, p);
+    }
+  }
+  const orgById = new Map<string, Organisation>();
+  for (const o of organisations) {
+    if (!o.mergedIntoId) {
+      orgById.set(o.id, o);
+    }
+  }
 
   const looseForParty = (partyName: string): LooseNameMatch | null =>
     (canMatchCallerFullName ? personNameLooseMatch(callerFullRaw, partyName) : null) ??
@@ -814,7 +836,7 @@ export function runEnquiryConflictSearch(
       ? 'Restricted matter'
       : `${m.matterNumber} — ${m.title}`;
     const matterHref = restricted ? '' : `/matters/${m.id}`;
-    const matterHitId = restricted ? `restricted-${m.id}` : m.id;
+    const matterHitId = restricted ? `restricted-${redactEnquiryMatterIdHash(m.id)}` : m.id;
 
     for (const party of m.parties) {
       const roleLower = party.role.toLowerCase();
@@ -914,16 +936,14 @@ export function runEnquiryConflictSearch(
       Boolean(input.linkedOrganisationId && allMatterClientIds.includes(input.linkedOrganisationId)) ||
       (hasMinThreeCharToken(behalfRaw) &&
         allMatterClientIds.some((cid) => {
-          const cOrg = organisations.find((o) => o.id === cid);
+          const cOrg = orgById.get(cid);
           return Boolean(cOrg && namesLikelyMatch(behalfRaw, cOrg.legalName, 'organisation'));
         }));
 
     for (const slot of matterContactSlots) {
       if (!slot.id) continue;
-      const contactPerson = combinedPeople.find((p) => p.id === slot.id && !p.mergedIntoId);
-      const contactOrg = !contactPerson
-        ? organisations.find((o) => o.id === slot.id && !o.mergedIntoId)
-        : undefined;
+      const contactPerson = personById.get(slot.id);
+      const contactOrg = !contactPerson ? orgById.get(slot.id) : undefined;
       const contactName = contactPerson
         ? personDisplayName(contactPerson)
         : contactOrg
@@ -1011,92 +1031,77 @@ export function runEnquiryConflictSearch(
     }
   }
 
-  // 3c. Check person–organisation links (B7)
+  // 3c. Check person–organisation links (B7, R259: pre-indexed maps, name match tested first, status computed lazily only after a hit)
+  const isAdverseMatterRole = (role: string) => {
+    const r = role.toLowerCase();
+    return (
+      r.includes('oppos') ||
+      r.includes('opponent') ||
+      r.includes('counterparty') ||
+      r.includes('other side') ||
+      r.includes('adverse') ||
+      r.includes('defendant') ||
+      r.includes('claimant') ||
+      r.includes('adjoining')
+    );
+  };
+  const orgLinkStatusCache = new Map<string, { isClient: boolean; isOpposite: boolean }>();
+  const getOrgLinkStatus = (org: Organisation, oName: string) => {
+    let cached = orgLinkStatusCache.get(org.id);
+    if (!cached) {
+      const onMatterAdverse = matters.some((m) =>
+        m.parties.some(
+          (mp) =>
+            isAdverseMatterRole(mp.role) &&
+            ((mp.linkedRecordId && mp.linkedRecordId === org.id) ||
+              namesLikelyMatch(mp.name, oName, 'organisation')),
+        ),
+      );
+      cached = {
+        isClient: isClientOrg(org, matters, values),
+        isOpposite: isOppositePartyOrg(org, values) || onMatterAdverse,
+      };
+      orgLinkStatusCache.set(org.id, cached);
+    }
+    return cached;
+  };
+  const personLinkStatusCache = new Map<string, { isClient: boolean; isOpposite: boolean }>();
+  const getPersonLinkStatus = (person: Person, pName: string) => {
+    let cached = personLinkStatusCache.get(person.id);
+    if (!cached) {
+      const onMatterAdverse = matters.some((m) =>
+        m.parties.some(
+          (mp) =>
+            isAdverseMatterRole(mp.role) &&
+            ((mp.linkedRecordId && mp.linkedRecordId === person.id) ||
+              namesLikelyMatch(mp.name, pName, 'person')),
+        ),
+      );
+      cached = {
+        isClient: isClientPerson(person, matters, values),
+        isOpposite: isOppositePartyPerson(person, values) || onMatterAdverse,
+      };
+      personLinkStatusCache.set(person.id, cached);
+    }
+    return cached;
+  };
+
   for (const link of links) {
     if (link.isCurrent === false) continue;
-    const linkPerson = combinedPeople.find(
-      (p) => p.id === link.personId && !p.mergedIntoId && !p.isEmployee,
-    );
-    const linkOrg = organisations.find(
-      (o) => o.id === link.organisationId && !o.mergedIntoId,
-    );
-    if (!linkPerson || !linkOrg) continue;
+    const linkPerson = personById.get(link.personId);
+    if (!linkPerson || linkPerson.isEmployee) continue;
+    const linkOrg = orgById.get(link.organisationId);
+    if (!linkOrg) continue;
 
     const pName = personDisplayName(linkPerson);
     const oName = linkOrg.legalName;
-    const isAdverseMatterRole = (role: string) => {
-      const r = role.toLowerCase();
-      return (
-        r.includes('oppos') ||
-        r.includes('opponent') ||
-        r.includes('counterparty') ||
-        r.includes('other side') ||
-        r.includes('adverse') ||
-        r.includes('defendant') ||
-        r.includes('claimant') ||
-        r.includes('adjoining')
-      );
-    };
-    const orgOnMatterAdverse = matters.some((m) =>
-      m.parties.some(
-        (mp) =>
-          isAdverseMatterRole(mp.role) &&
-          ((mp.linkedRecordId && mp.linkedRecordId === linkOrg.id) ||
-            namesLikelyMatch(mp.name, oName, 'organisation')),
-      ),
-    );
-    const personOnMatterAdverse = matters.some((m) =>
-      m.parties.some(
-        (mp) =>
-          isAdverseMatterRole(mp.role) &&
-          ((mp.linkedRecordId && mp.linkedRecordId === linkPerson.id) ||
-            namesLikelyMatch(mp.name, pName, 'person')),
-      ),
-    );
-    const orgIsClient = isClientOrg(linkOrg, matters, values);
-    const orgIsOpposite = isOppositePartyOrg(linkOrg, values) || orgOnMatterAdverse;
-    const personIsClient = isClientPerson(linkPerson, matters, values);
-    const personIsOpposite = isOppositePartyPerson(linkPerson, values) || personOnMatterAdverse;
 
-    for (const otherName of rawOther) {
-      if (namesLikelyMatch(otherName, pName, 'person')) {
-        const isHigh = orgIsClient || orgIsOpposite;
-        const hitData = {
-          recordId: linkOrg.id,
-          recordType: 'organisation' as const,
-          name: oName,
-          recordLabel: `${oName} (${linkOrg.id})`,
-          queryTerm: otherName,
-          href: `/organisations/${linkOrg.id}`,
-          reason: `Other party "${otherName}" is linked to ${orgIsClient ? 'existing client' : orgIsOpposite ? 'opposite party' : 'organisation'} ${oName} (${linkOrg.id})`,
-          matchedField: 'person–organisation link',
-          severity: isHigh ? ('high' as const) : ('medium' as const),
-          strength: isHigh ? 5 : 3,
-          blocking: isHigh,
-        };
-        upsertConflictHit(otherPartyMap, hitData);
-        upsertConflictHit(combinedMap, hitData);
-      }
-      if (namesLikelyMatch(otherName, oName, 'organisation')) {
-        const isHigh = personIsClient || personIsOpposite;
-        const hitData = {
-          recordId: linkPerson.id,
-          recordType: 'person' as const,
-          name: pName,
-          recordLabel: `${pName} (${linkPerson.id})`,
-          queryTerm: otherName,
-          href: `/people/${linkPerson.id}`,
-          reason: `Other party "${otherName}" is linked to ${personIsClient ? 'existing client' : personIsOpposite ? 'opposite party' : 'person'} ${pName} (${linkPerson.id})`,
-          matchedField: 'person–organisation link',
-          severity: isHigh ? ('high' as const) : ('medium' as const),
-          strength: isHigh ? 5 : 3,
-          blocking: isHigh,
-        };
-        upsertConflictHit(otherPartyMap, hitData);
-        upsertConflictHit(combinedMap, hitData);
-      }
-    }
-
+    const matchedOtherForPerson = rawOther.filter((otherName) =>
+      namesLikelyMatch(otherName, pName, 'person'),
+    );
+    const matchedOtherForOrg = rawOther.filter((otherName) =>
+      namesLikelyMatch(otherName, oName, 'organisation'),
+    );
     const callerMatchesLinkPerson =
       Boolean(input.linkedPersonId && input.linkedPersonId === linkPerson.id) ||
       (canMatchCallerFullName && namesLikelyMatch(callerFullRaw, pName, 'person'));
@@ -1104,7 +1109,56 @@ export function runEnquiryConflictSearch(
       Boolean(input.linkedOrganisationId && input.linkedOrganisationId === linkOrg.id) ||
       (hasMinThreeCharToken(behalfRaw) && namesLikelyMatch(behalfRaw, oName, 'organisation'));
 
+    const needsOrgStatus =
+      matchedOtherForPerson.length > 0 || (callerMatchesLinkPerson && !callerMatchesLinkOrg);
+    const needsPersonStatus =
+      matchedOtherForOrg.length > 0 || (callerMatchesLinkOrg && !callerMatchesLinkPerson);
+    if (!needsOrgStatus && !needsPersonStatus) continue;
+
+    for (const otherName of matchedOtherForPerson) {
+      const { isClient: orgIsClient, isOpposite: orgIsOpposite } = getOrgLinkStatus(linkOrg, oName);
+      const isHigh = orgIsClient || orgIsOpposite;
+      const hitData = {
+        recordId: linkOrg.id,
+        recordType: 'organisation' as const,
+        name: oName,
+        recordLabel: `${oName} (${linkOrg.id})`,
+        queryTerm: otherName,
+        href: `/organisations/${linkOrg.id}`,
+        reason: `Other party "${otherName}" is linked to ${orgIsClient ? 'existing client' : orgIsOpposite ? 'opposite party' : 'organisation'} ${oName} (${linkOrg.id})`,
+        matchedField: 'person–organisation link',
+        severity: isHigh ? ('high' as const) : ('medium' as const),
+        strength: isHigh ? 5 : 3,
+        blocking: isHigh,
+      };
+      upsertConflictHit(otherPartyMap, hitData);
+      upsertConflictHit(combinedMap, hitData);
+    }
+    for (const otherName of matchedOtherForOrg) {
+      const { isClient: personIsClient, isOpposite: personIsOpposite } = getPersonLinkStatus(
+        linkPerson,
+        pName,
+      );
+      const isHigh = personIsClient || personIsOpposite;
+      const hitData = {
+        recordId: linkPerson.id,
+        recordType: 'person' as const,
+        name: pName,
+        recordLabel: `${pName} (${linkPerson.id})`,
+        queryTerm: otherName,
+        href: `/people/${linkPerson.id}`,
+        reason: `Other party "${otherName}" is linked to ${personIsClient ? 'existing client' : personIsOpposite ? 'opposite party' : 'person'} ${pName} (${linkPerson.id})`,
+        matchedField: 'person–organisation link',
+        severity: isHigh ? ('high' as const) : ('medium' as const),
+        strength: isHigh ? 5 : 3,
+        blocking: isHigh,
+      };
+      upsertConflictHit(otherPartyMap, hitData);
+      upsertConflictHit(combinedMap, hitData);
+    }
+
     if (callerMatchesLinkPerson && !callerMatchesLinkOrg) {
+      const { isClient: orgIsClient, isOpposite: orgIsOpposite } = getOrgLinkStatus(linkOrg, oName);
       const isHigh = orgIsOpposite;
       const hitData = {
         recordId: linkOrg.id,
@@ -1124,6 +1178,10 @@ export function runEnquiryConflictSearch(
     }
 
     if (callerMatchesLinkOrg && !callerMatchesLinkPerson) {
+      const { isClient: personIsClient, isOpposite: personIsOpposite } = getPersonLinkStatus(
+        linkPerson,
+        pName,
+      );
       const isHigh = personIsOpposite;
       const hitData = {
         recordId: linkPerson.id,

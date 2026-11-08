@@ -7207,7 +7207,7 @@ export function saveEnquiryRecord(
     }
   }
 
-  // Server-side Quick Conflict Check snapshot (with restricted matters redacted via canViewMatter)
+  // Server-side Quick Conflict Check snapshot (passes all matters and redacts restricted hits via canViewMatter, R257)
   const conflictSnapshot = computeEnquiryConflictSnapshot(
     {
       firstName: mergedInput.firstName,
@@ -7224,7 +7224,7 @@ export function saveEnquiryRecord(
     },
     store.people,
     store.organisations,
-    store.matters.filter((m) => visibility.canViewMatter(m)),
+    store.matters,
     store.values,
     {
       recordedAt: now,
@@ -8187,7 +8187,7 @@ export function prepareEnquiryConversion(
         writeAudit(store, {
           recordType: 'organisation',
           recordId: orgId,
-          action: 'duplicate',
+          action: 'conflict-decision',
           field: 'Conflict check decision recorded on enquiry conversion',
           oldValue: null,
           newValue: conflictReference,
@@ -11362,16 +11362,13 @@ export function prepareQuoteConversionRecord(
   );
 
   const hasRestrictedMatch = hasUnapprovedRestrictedMatches(reconciledMatches, []);
-  const blockingMatterMatches = reconciledMatches.filter(
-    (m) =>
-      m.restricted ||
-      m.disposition === 'potential_conflict' ||
-      (m.matterId !== null && m.strength === 'Exact') ||
-      (m.whereFound.toLowerCase().includes('enquiry') && m.strength === 'Exact'),
+  const existingOrgDeclined = Boolean(
+    existingOrg &&
+      existingOrg.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
   );
   const isConflictBlocked =
+    existingOrgDeclined ||
     hasRestrictedMatch ||
-    blockingMatterMatches.length > 0 ||
     prelimConflicts.hasBlockingConflict;
 
   const totalMatchesCount = Math.max(
@@ -11381,14 +11378,15 @@ export function prepareQuoteConversionRecord(
 
   if (isConflictBlocked) {
     const reasons: string[] = [];
+    if (existingOrgDeclined) {
+      reasons.push(
+        'Client organisation has conflict status "Conflict – declined".',
+      );
+    }
     if (hasRestrictedMatch) {
       reasons.push(
         'This matter must be referred to Risk because a match was found on a restricted record.',
       );
-    }
-    for (const bm of blockingMatterMatches) {
-      if (bm.restricted) continue;
-      reasons.push(`${bm.partyName}: ${bm.whereFound}`);
     }
     for (const hit of prelimConflicts.allConflicts.filter((h) => h.blocking || h.severity === 'high')) {
       if (!reasons.includes(hit.reason)) {
@@ -11411,29 +11409,12 @@ export function prepareQuoteConversionRecord(
       summary: decisionSummary,
     };
 
-    if (existingOrg) {
-      existingOrg.conflictStatusId = vid('conflict_status', 'Potential conflict');
-      existingOrg.conflictReference = `${quote.reference} · ${decisionSummary}`;
-      existingOrg.reviewDate = today;
-      existingOrg.reviewerId = byId;
-      existingOrg.conflictDecision = decisionSnapshot;
-      writeAudit(store, {
-        recordType: 'organisation',
-        recordId: existingOrg.id,
-        action: 'duplicate',
-        field: 'Conflict check decision recorded on quote conversion',
-        oldValue: null,
-        newValue: existingOrg.conflictReference,
-        byId,
-        at: nowIso,
-        snapshot: decisionSnapshot,
-      });
-    }
-
+    // R254: Never overwrite an existing organisation's conflict status or conflictDecision.
+    // Record the blocked decision on the quote audit trail (`conflict-decision`, R258).
     writeAudit(store, {
       recordType: 'quote',
       recordId: quote.id,
-      action: 'duplicate',
+      action: 'conflict-decision',
       field: 'Quote conversion blocked by conflict check',
       oldValue: null,
       newValue: `${decisionSummary} · ${reasons.join(' · ')}`,
@@ -11512,6 +11493,7 @@ export function prepareQuoteConversionRecord(
     personId = createdPerson.person.id;
   }
 
+  let createdNewClientOrg = false;
   if (!orgId && hasOrgName) {
     const createdOrg = saveOrganisationRecord(
       {
@@ -11529,6 +11511,7 @@ export function prepareQuoteConversionRecord(
       { byId, internalSystemStep: 'quote_conversion' },
     );
     orgId = createdOrg.organisation.id;
+    createdNewClientOrg = true;
 
     if (personId && orgId) {
       const linkExists = store.links.some(
@@ -11556,7 +11539,8 @@ export function prepareQuoteConversionRecord(
     }
   }
 
-  if (orgId) {
+  // R254: Set conflict status and conflictDecision only on organisations created by this conversion.
+  if (createdNewClientOrg && orgId) {
     const orgRecord = store.organisations.find((o) => o.id === orgId);
     if (orgRecord) {
       orgRecord.conflictStatusId = vid('conflict_status', outcomeLabel);
@@ -11567,7 +11551,7 @@ export function prepareQuoteConversionRecord(
       writeAudit(store, {
         recordType: 'organisation',
         recordId: orgId,
-        action: 'duplicate',
+        action: 'conflict-decision',
         field: 'Conflict check decision recorded on quote conversion',
         oldValue: null,
         newValue: conflictReference,
@@ -11581,7 +11565,7 @@ export function prepareQuoteConversionRecord(
   writeAudit(store, {
     recordType: 'quote',
     recordId: quote.id,
-    action: 'duplicate',
+    action: 'conflict-decision',
     field: 'Conflict check completed on quote conversion',
     oldValue: null,
     newValue: conflictReference,

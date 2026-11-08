@@ -7360,21 +7360,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(ctxA.tenantId).toBe('not-a-law-firm');
       expect(ctxB.tenantId).toBe('fictional-chambers-uk');
 
-      // Construct an isolated Tenant B data set with instructing/billing contacts, additionalClientIds, and links
+      // Construct and persist an isolated Tenant B data set in Tenant B's store and database cluster
+      const tenantBStore = createSeedStore();
+      const cluster = new PostgresTenantCluster();
       const tenantBPerson = {
-        ...store.people[0]!,
+        ...tenantBStore.people[0]!,
         id: 'P-TENANT-B-501',
         firstName: 'Owain',
         surname: 'PembrokeSecretContact',
         isEmployee: false,
       };
       const tenantBOrg = {
-        ...store.organisations[0]!,
+        ...tenantBStore.organisations[0]!,
         id: 'O-TENANT-B-501',
         legalName: 'Pembroke Vaughan Secret Client Holdings Ltd',
       };
+      const tenantBLink = {
+        ...tenantBStore.links[0]!,
+        id: 'L-TENANT-B-501',
+        personId: tenantBPerson.id,
+        organisationId: tenantBOrg.id,
+        isCurrent: true,
+      };
       const tenantBMatter = {
-        ...store.matters[0]!,
+        ...tenantBStore.matters[0]!,
         id: 'M-TENANT-B-501',
         matterNumber: 'PV-999999',
         title: 'Pembroke Secret Matter',
@@ -7392,8 +7401,87 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           },
         ],
       };
+      const tenantBEnquiry = {
+        ...tenantBStore.enquiries[0]!,
+        id: 'ENQ-TENANT-B-501',
+        firstName: tenantBPerson.firstName,
+        lastName: tenantBPerson.surname,
+        callingOnBehalfOf: tenantBOrg.legalName,
+      };
+      const tenantBQuote = {
+        ...tenantBStore.quotes[0]!,
+        id: 'Q-TENANT-B-501',
+        prospectName: `${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+        prospectOrganisationName: tenantBOrg.legalName,
+      };
 
-      // Running both searches against Tenant A's scoped data never returns Tenant B's records
+      tenantBStore.people.push(tenantBPerson);
+      tenantBStore.organisations.push(tenantBOrg);
+      tenantBStore.links.push(tenantBLink);
+      tenantBStore.matters.push(tenantBMatter);
+      tenantBStore.enquiries.push(tenantBEnquiry);
+      tenantBStore.quotes.push(tenantBQuote);
+
+      cluster.putRecord(ctxB, { ...tenantBPerson, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBOrg, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBLink, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBMatter, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBEnquiry, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBQuote, tenantId: ctxB.tenantId });
+
+      // Running both searches against Tenant B's own store finds the stored Tenant B hits
+      const matterSearchB = searchMatterConflicts(
+        {
+          currentMatterId: null,
+          parties: [
+            {
+              id: 'cp-tb-1',
+              name: tenantBOrg.legalName,
+              entityType: 'organisation',
+              role: 'Opponent',
+              linkedRecordId: tenantBOrg.id,
+            },
+            {
+              id: 'cp-tb-2',
+              name: `${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+              entityType: 'person',
+              role: 'Opponent',
+              linkedRecordId: tenantBPerson.id,
+            },
+          ],
+          canReviewConditions: true,
+        },
+        {
+          matters: tenantBStore.matters,
+          enquiries: tenantBStore.enquiries,
+          people: tenantBStore.people,
+          organisations: tenantBStore.organisations,
+          links: tenantBStore.links,
+          canView: () => true,
+          canViewEnquiry: () => true,
+        },
+      );
+      expect(matterSearchB.some((m) => m.matterId === tenantBMatter.id)).toBe(true);
+
+      const enqSearchB = runEnquiryConflictSearch(
+        {
+          firstName: tenantBPerson.firstName,
+          lastName: tenantBPerson.surname,
+          callingOnBehalfOf: tenantBOrg.legalName,
+          otherPartiesNamed: `${tenantBOrg.legalName}, ${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+        },
+        tenantBStore.people,
+        tenantBStore.organisations,
+        tenantBStore.matters,
+        tenantBStore.values,
+        tenantBStore.enquiries,
+        tenantBEnquiry.id,
+        tenantBStore.links,
+        () => true,
+      );
+      expect(enqSearchB.allConflicts.length).toBeGreaterThan(0);
+
+      // Running both searches against Tenant A's scoped data never returns Tenant B's stored records
       const matterSearchA = searchMatterConflicts(
         {
           currentMatterId: null,
@@ -7498,12 +7586,18 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       setTestEntraSessionOverride(validTenantASession);
       const peopleBefore = store.people.length;
       const orgsBefore = store.organisations.length;
-      const tamperedEnqConv = await prepareEnquiryConversionAction('ENQ-TENANT-B-999', {});
+      const tamperedEnqConv = await prepareEnquiryConversionAction(tenantBEnquiry.id, {});
       expect(tamperedEnqConv.ok).toBe(false);
-      const tamperedQuoteConv = await prepareQuoteConversionAction('Q-TENANT-B-999');
+      const tamperedQuoteConv = await prepareQuoteConversionAction(tenantBQuote.id);
       expect(tamperedQuoteConv.ok).toBe(false);
       expect(store.people.length).toBe(peopleBefore);
       expect(store.organisations.length).toBe(orgsBefore);
+      expect(
+        cluster.getRecordById<{ id: string; tenantId: string }>(ctxB, tenantBEnquiry.id)?.id,
+      ).toBe(tenantBEnquiry.id);
+      expect(
+        cluster.getRecordById<{ id: string; tenantId: string }>(ctxB, tenantBQuote.id)?.id,
+      ).toBe(tenantBQuote.id);
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

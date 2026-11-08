@@ -229,12 +229,21 @@ export function searchMatterConflicts(
     generated.push(applyPreviousDecision(match, prev));
   };
 
+  const personById = new Map<string, Person>();
+  for (const p of deps.people) {
+    personById.set(p.id, p);
+  }
+  const orgById = new Map<string, Organisation>();
+  for (const o of deps.organisations) {
+    orgById.set(o.id, o);
+  }
+
   const resolveRecord = (
     id: string,
   ): { id: string; name: string; type: 'person' | 'organisation' } | null => {
-    const org = deps.organisations.find((o) => o.id === id);
+    const org = orgById.get(id);
     if (org) return { id: org.id, name: org.legalName, type: 'organisation' };
-    const person = deps.people.find((p) => p.id === id);
+    const person = personById.get(id);
     if (person) return { id: person.id, name: personDisplayName(person), type: 'person' };
     return null;
   };
@@ -258,8 +267,8 @@ export function searchMatterConflicts(
       } | null = null;
 
       for (const cid of allMatterClientIds) {
-        const cOrg = deps.organisations.find((o) => o.id === cid);
-        const cPerson = deps.people.find((p) => p.id === cid);
+        const cOrg = orgById.get(cid);
+        const cPerson = personById.get(cid);
         const cName = cOrg?.legalName || (cPerson ? personDisplayName(cPerson) : '');
         const cLower = cName.toLowerCase();
         const linkedMatch = Boolean(party.linkedRecordId && party.linkedRecordId === cid);
@@ -362,7 +371,9 @@ export function searchMatterConflicts(
         continue;
       }
 
-      const respPartner = deps.people.find((p) => p.id === m.responsiblePartnerId);
+      const respPartner = m.responsiblePartnerId
+        ? personById.get(m.responsiblePartnerId)
+        : undefined;
       const respPartnerName = respPartner ? personDisplayName(respPartner) : '';
       const dateLabel = formatDate(m.openedAt || m.createdAt) || '';
 
@@ -485,16 +496,13 @@ export function searchMatterConflicts(
       }
     }
 
-    // 1b. Check person–organisation links (B7)
+    // 1b. Check person–organisation links (B7, R259: pre-indexed maps)
     for (const link of deps.links ?? []) {
       if (link.isCurrent === false) continue;
-      const linkPerson = deps.people.find(
-        (p) => p.id === link.personId && !p.mergedIntoId && !p.demo,
-      );
-      const linkOrg = deps.organisations.find(
-        (o) => o.id === link.organisationId && !o.mergedIntoId,
-      );
-      if (!linkPerson || !linkOrg) continue;
+      const linkPerson = personById.get(link.personId);
+      if (!linkPerson || linkPerson.mergedIntoId || linkPerson.demo) continue;
+      const linkOrg = orgById.get(link.organisationId);
+      if (!linkOrg || linkOrg.mergedIntoId) continue;
 
       const pName = personDisplayName(linkPerson);
       const pLower = pName.toLowerCase();
@@ -516,6 +524,7 @@ export function searchMatterConflicts(
 
       const counterpartId = personMatched ? linkOrg.id : linkPerson.id;
       const counterpartName = personMatched ? oName : pName;
+      const counterpartLower = counterpartName.toLowerCase();
       const counterpartType: 'person' | 'organisation' = personMatched
         ? 'organisation'
         : 'person';
@@ -535,7 +544,7 @@ export function searchMatterConflicts(
           m.parties.some(
             (mp) =>
               mp.linkedRecordId === counterpartId ||
-              namesMatch(mp.name.trim().toLowerCase(), counterpartName.toLowerCase()),
+              namesMatch(mp.name.trim().toLowerCase(), counterpartLower),
           );
         if (!counterpartOnMatter) continue;
 
@@ -579,12 +588,14 @@ export function searchMatterConflicts(
           );
         if (sameClientOnMatter) continue;
 
-        const respPartner = deps.people.find((p) => p.id === m.responsiblePartnerId);
+        const respPartner = m.responsiblePartnerId
+          ? personById.get(m.responsiblePartnerId)
+          : undefined;
         const respPartnerName = respPartner ? personDisplayName(respPartner) : '';
         const dateLabel = formatDate(m.openedAt || m.createdAt) || '';
         const matchId = `match-${party.id}-link-${link.id}-${m.id}`;
         const whereFound = `Linked ${counterpartType} (${counterpartName}) on ${m.matterNumber} (${m.title})`;
-        const fallbackKey = `${lower}__${counterpartName.toLowerCase()}__${whereFound.toLowerCase()}`;
+        const fallbackKey = `${lower}__${counterpartLower}__${whereFound.toLowerCase()}`;
         pushMatch(
           {
             id: matchId,
@@ -609,13 +620,10 @@ export function searchMatterConflicts(
       }
 
       if (!bothFixedInInput) {
-        const ownerPerson = deps.people.find(
-          (p) =>
-            p.id ===
-            (personMatched
-              ? linkOrg.relationshipPartnerId || linkOrg.recordOwnerId
-              : linkPerson.relationshipOwnerId || linkPerson.recordOwnerId),
-        );
+        const ownerCandidateId = personMatched
+          ? linkOrg.relationshipPartnerId || linkOrg.recordOwnerId
+          : linkPerson.relationshipOwnerId || linkPerson.recordOwnerId;
+        const ownerPerson = ownerCandidateId ? personById.get(ownerCandidateId) : undefined;
         const ownerName = ownerPerson ? personDisplayName(ownerPerson) : '';
         const ownerId =
           ownerPerson?.id ??
@@ -628,7 +636,7 @@ export function searchMatterConflicts(
         const whereFound = personMatched
           ? `Linked to ${oName} (${link.roleWithinOrganisation || 'Contact link'})`
           : `Linked person ${pName} at ${oName}`;
-        const fallbackKey = `${lower}__${counterpartName.toLowerCase()}__${whereFound.toLowerCase()}`;
+        const fallbackKey = `${lower}__${counterpartLower}__${whereFound.toLowerCase()}`;
         pushMatch(
           {
             id: matchId,

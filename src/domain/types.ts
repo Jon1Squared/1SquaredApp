@@ -1419,7 +1419,8 @@ export type AuditAction =
   | 'matter-restriction-lift'
   | 'matter-imported-open'
   | 'data-reset'
-  | 'data-cleared';
+  | 'data-cleared'
+  | 'conflict-decision';
 
 export interface AuditEntry {
   id: string;
