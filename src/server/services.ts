@@ -33,6 +33,7 @@ import {
 } from '@/domain/matterOpeningRecord';
 import {
   buildEffectiveConflictParties,
+  CONFLICT_SEARCHED_SOURCES,
   hasUnapprovedRestrictedMatches,
   reconcileServerConflictMatches,
   searchMatterConflicts,
@@ -1114,6 +1115,7 @@ function getAppSnapshotInScope(
 
   return {
     firm: store.firm,
+    tenantId: activeTenantCfg.tenantId,
     firmPrimaryDomain,
     enableAiMatterExtraction: Boolean(activeTenantCfg.featureFlags?.enableAiMatterExtraction),
     aiProviderChoice: activeTenantCfg.integrations?.aiProviderChoice ?? 'disabled',
@@ -3231,6 +3233,7 @@ function buildServerConflictCheckRecord(params: {
     potentialConflictsCount: matches.filter(
       (m) => m.disposition === 'potential_conflict' || m.restricted,
     ).length,
+    searchedSources: [...CONFLICT_SEARCHED_SOURCES],
   };
   const runs = shouldAppendRun ? [...storedRuns, serverRun] : [...storedRuns];
 
@@ -3896,6 +3899,11 @@ export async function saveMatterRecord(
       ? input.instructingContactId
       : existing?.instructingContactId ?? null,
   );
+  const resolvedBillingContactId = promoteEnquiryPersonId(
+    input.billingContactId !== undefined
+      ? input.billingContactId
+      : existing?.billingContactId ?? null,
+  );
 
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
     allPeople: allPeopleWithPending,
@@ -3916,6 +3924,7 @@ export async function saveMatterRecord(
     clientId: effectiveClientId,
     additionalClientIds: resolvedAdditionalClientIds,
     instructingContactId: resolvedInstructingContactId,
+    billingContactId: resolvedBillingContactId,
     matterParties: resolvedParties,
     people: allPeopleWithPending,
     organisations: allOrganisationsWithPending,
@@ -3946,6 +3955,8 @@ export async function saveMatterRecord(
       enquiries: store.enquiries,
       people: allPeopleWithPending,
       organisations: allOrganisationsWithPending,
+      links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
     },
@@ -4286,6 +4297,9 @@ export async function saveMatterRecord(
       ...stripServerOwnedFieldValues(input.fieldValues),
     },
     conflictCheckRecord: resolvedConflictCheckRecord,
+    ...(existing?.conflictDecision
+      ? { conflictDecision: existing.conflictDecision }
+      : {}),
     owningDepartmentId: nextOwningDepartmentId,
     owningTeamId: nextOwningTeamId,
     isStaffMatter: effectiveIsStaffMatter,
@@ -4969,6 +4983,8 @@ export function runMatterConflictSearchRecord(
       enquiries: store.enquiries,
       people: store.people,
       organisations: store.organisations,
+      links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
     },
@@ -4985,6 +5001,7 @@ export function runMatterConflictSearchRecord(
     potentialConflictsCount: matches.filter(
       (m) => m.disposition === 'potential_conflict' || m.restricted,
     ).length,
+    searchedSources: [...CONFLICT_SEARCHED_SOURCES],
   };
   const savedMatter = input.currentMatterId
     ? store.matters.find((m) => m.id === input.currentMatterId) ?? null
@@ -5124,6 +5141,7 @@ export function updateMatterConflictRecord(
     clientId: matter.clientId,
     additionalClientIds: matter.additionalClientIds,
     instructingContactId: matter.instructingContactId,
+    billingContactId: matter.billingContactId,
     matterParties: matter.parties,
     people: store.people,
     organisations: store.organisations,
@@ -5145,6 +5163,8 @@ export function updateMatterConflictRecord(
       enquiries: store.enquiries,
       people: store.people,
       organisations: store.organisations,
+      links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
     },
@@ -7194,7 +7214,7 @@ export function saveEnquiryRecord(
     }
   }
 
-  // Server-side Quick Conflict Check snapshot (filtered to records visible to the actor)
+  // Server-side Quick Conflict Check snapshot (passes all matters and redacts restricted hits via canViewMatter, R257)
   const conflictSnapshot = computeEnquiryConflictSnapshot(
     {
       firstName: mergedInput.firstName,
@@ -7211,13 +7231,16 @@ export function saveEnquiryRecord(
     },
     store.people,
     store.organisations,
-    store.matters.filter((m) => visibility.canViewMatter(m)),
+    store.matters,
     store.values,
     {
       recordedAt: now,
       recordedById: opts.byId,
       enquiries: store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
       excludeEnquiryId: existing?.id ?? null,
+      links: store.links,
+      canViewMatter: visibility.canViewMatter,
+      tenantId: getActiveTenantConfiguration().tenantId,
     },
   );
 
@@ -7322,7 +7345,7 @@ export function saveEnquiryRecord(
     writeAudit(store, {
       recordType: 'enquiry',
       recordId: draftEnquiry.id,
-      action: 'duplicate',
+      action: 'conflict-decision',
       field: 'Quick conflict check recorded',
       oldValue: null,
       newValue: conflictAuditSummary,
@@ -7465,7 +7488,7 @@ export function saveEnquiryRecord(
   writeAudit(store, {
     recordType: 'enquiry',
     recordId: enquiry.id,
-    action: 'duplicate',
+    action: 'conflict-decision',
     field: 'Quick conflict check recorded',
     oldValue: null,
     newValue: conflictAuditSummary,
@@ -7966,6 +7989,46 @@ export function reopenEnquiryRecord(
   return { enquiry: enq };
 }
 
+const DECLINED_ORG_BLOCKED_REASON =
+  'Client organisation has conflict status "Conflict – declined".';
+const DECLINED_ORG_NAME_WARNING =
+  "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.";
+
+function assessDeclinedOrganisation(
+  store: FirmStore,
+  existingOrg: Organisation | undefined,
+  clientOrgName: string,
+): {
+  existingOrgDeclined: boolean;
+  hasDeclinedOrgNameMatch: boolean;
+  blockedReason: string | null;
+  nameMatchWarning: string | null;
+} {
+  const declinedStatusId = vid('conflict_status', 'Conflict – declined');
+  const existingOrgDeclined = Boolean(
+    existingOrg && existingOrg.conflictStatusId === declinedStatusId,
+  );
+  const clientOrgNameLower = clientOrgName.trim().toLowerCase();
+  const matchingOrgsByName =
+    !existingOrg && clientOrgNameLower
+      ? store.organisations.filter(
+          (o) =>
+            !o.mergedIntoId &&
+            (o.legalName.trim().toLowerCase() === clientOrgNameLower ||
+              o.otherNames.some((n) => n.name.trim().toLowerCase() === clientOrgNameLower)),
+        )
+      : [];
+  const hasDeclinedOrgNameMatch = matchingOrgsByName.some(
+    (o) => o.conflictStatusId === declinedStatusId,
+  );
+  return {
+    existingOrgDeclined,
+    hasDeclinedOrgNameMatch,
+    blockedReason: existingOrgDeclined ? DECLINED_ORG_BLOCKED_REASON : null,
+    nameMatchWarning: hasDeclinedOrgNameMatch ? DECLINED_ORG_NAME_WARNING : null,
+  };
+}
+
 /**
  * Step 1 & 2 of Converting an enquiry to a matter:
  * - Runs the conflict check against the client and other parties named.
@@ -7984,19 +8047,48 @@ export function prepareEnquiryConversion(
   ok: boolean;
   conflictBlocked?: boolean;
   conflictReasons?: string[];
+  conflictWarnings?: string[];
   clientId?: string;
   instructingContactId?: string | null;
   enquiryId?: string;
-} {
+  error?: string;
+} & Partial<Omit<ActionDenied, 'ok'>> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'matter:create', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (matter:create) to convert an enquiry to a matter.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      ok: false,
+      error: msg,
+      conflictReasons: [msg],
+    };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq) return { ok: false, conflictReasons: ['Enquiry not found.'] };
+  if (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) {
+    return { ok: false, conflictReasons: ['Enquiry not found.'] };
+  }
   if (!isEnquiryRouted(enq)) {
     return {
       ok: false,
       conflictReasons: ['Cannot convert a draft enquiry before it has been routed.'],
     };
   }
+  if (!visibility.canViewEnquiry(enq)) {
+    return { ok: false, conflictReasons: ['Enquiry not found.'] };
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const today = toIsoDate(now);
+  const actorName = actor ? personDisplayName(actor) : byId;
 
   const conflicts = runEnquiryConflictSearch(
     {
@@ -8014,19 +8106,88 @@ export function prepareEnquiryConversion(
     store.organisations,
     store.matters,
     store.values,
-    store.enquiries,
+    store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
     enq.id,
+    store.links,
+    visibility.canViewMatter,
+    getActiveTenantConfiguration().tenantId,
   );
 
-  if (conflicts.hasBlockingConflict) {
-    const reasons = [
+  const redactRestrictedMatterReasons = (rawReasons: string[]): string[] => {
+    const hiddenMatters = store.matters.filter((m) => !visibility.canViewMatter(m));
+    return rawReasons.map((reason) => {
+      let safe = reason;
+      for (const hm of hiddenMatters) {
+        if (hm.matterNumber && safe.includes(hm.matterNumber)) {
+          safe = safe.split(hm.matterNumber).join('a restricted matter');
+        }
+        if (hm.title && safe.includes(hm.title)) {
+          safe = safe.split(hm.title).join('a restricted matter');
+        }
+        for (const pt of hm.parties) {
+          if (pt.name && safe.includes(`"${pt.name}"`)) {
+            safe = safe.split(`"${pt.name}"`).join('a party');
+          }
+        }
+      }
+      return safe;
+    });
+  };
+
+  const linkedOrgId = opts.useOrganisationId ?? enq.linkedOrganisationId ?? null;
+  const existingOrg = linkedOrgId
+    ? store.organisations.find((o) => o.id === linkedOrgId)
+    : undefined;
+  const clientOrgName = existingOrg?.legalName || enq.callingOnBehalfOf.trim();
+  const declinedOrgAssessment = assessDeclinedOrganisation(
+    store,
+    existingOrg,
+    clientOrgName,
+  );
+
+  if (declinedOrgAssessment.existingOrgDeclined || conflicts.hasBlockingConflict) {
+    const rawReasons: string[] = [];
+    if (declinedOrgAssessment.blockedReason) {
+      rawReasons.push(declinedOrgAssessment.blockedReason);
+    }
+    rawReasons.push(
       ...conflicts.otherPartyClientMatches.filter((h) => h.blocking).map((h) => h.reason),
       ...conflicts.clientAgainstPartyMatches.filter((h) => h.blocking).map((h) => h.reason),
-    ];
+    );
+    const reasons = redactRestrictedMatterReasons(rawReasons);
+    const blockedMatchesCount = conflicts.allConflicts.length;
+    const blockedOutcome: 'Conflict – declined' | 'Potential conflict' =
+      declinedOrgAssessment.existingOrgDeclined
+        ? 'Conflict – declined'
+        : 'Potential conflict';
+    const blockedDecisionSummary = `${blockedOutcome} identified by ${actorName} on ${today} (${blockedMatchesCount} ${blockedMatchesCount === 1 ? 'match' : 'matches'})`;
+    const blockedDecisionSnapshot = {
+      outcome: blockedOutcome,
+      decidedById: byId,
+      decidedByName: actorName,
+      decidedAt: nowIso,
+      sourceRecordId: enq.id,
+      matchesCount: blockedMatchesCount,
+      searchedSources: [...CONFLICT_SEARCHED_SOURCES],
+      summary: blockedDecisionSummary,
+    };
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'conflict-decision',
+      field: 'Enquiry conversion blocked by conflict check',
+      oldValue: null,
+      newValue: `${blockedDecisionSummary} · ${reasons.join(' · ')}`,
+      byId,
+      at: nowIso,
+      snapshot: blockedDecisionSnapshot,
+    });
+    saveStore(store);
     return {
       ok: false,
       conflictBlocked: true,
       conflictReasons: reasons,
+      error: reasons[0],
     };
   }
 
@@ -8074,12 +8235,44 @@ export function prepareEnquiryConversion(
 
   enq.linkedPersonId = personId;
 
+  const conflictWarnings = redactRestrictedMatterReasons(
+    conflicts.allConflicts
+      .filter((h) => !h.blocking && h.severity !== 'high')
+      .map((h) => h.reason),
+  );
+  if (
+    declinedOrgAssessment.nameMatchWarning &&
+    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
+  ) {
+    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
+  }
+
+  const outcomeLabel: 'Cleared' | 'Potential conflict' =
+    conflicts.allConflicts.length > 0 || declinedOrgAssessment.hasDeclinedOrgNameMatch
+      ? 'Potential conflict'
+      : 'Cleared';
+  const decisionSummary = `${outcomeLabel} by ${actorName} on ${today} (${conflicts.allConflicts.length} ${conflicts.allConflicts.length === 1 ? 'match' : 'matches'})`;
+  const conflictReference = `${enq.reference} · ${decisionSummary}`;
+  const decisionSnapshot = {
+    outcome: outcomeLabel,
+    decidedById: byId,
+    decidedByName: actorName,
+    decidedAt: nowIso,
+    sourceRecordId: enq.id,
+    matchesCount: conflicts.allConflicts.length,
+    searchedSources: [...CONFLICT_SEARCHED_SOURCES],
+    summary: decisionSummary,
+    ...(conflictWarnings.length > 0 ? { warnings: [...conflictWarnings] } : {}),
+  };
+  enq.conflictDecision = decisionSnapshot;
+
   // If enquiry was made on behalf of a business, link or create the Organisation and link caller as contact
   let clientId = personId;
   const instructingContactId: string | null = personId;
 
   if (opts.createForBusiness || enq.callingOnBehalfOf.trim() || opts.useOrganisationId || enq.linkedOrganisationId) {
     let orgId = opts.useOrganisationId || enq.linkedOrganisationId;
+
     if (!orgId && enq.callingOnBehalfOf.trim()) {
       const createdOrg = saveOrganisationRecord(
         {
@@ -8092,11 +8285,29 @@ export function prepareEnquiryConversion(
           relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
           relationshipStatusId: vid('relationship_status', 'Prospective'),
           originId: enq.sourceId,
-          conflictStatusId: vid('conflict_status', 'Cleared'),
+          conflictStatusId: vid('conflict_status', outcomeLabel),
+          conflictReference,
+          reviewDate: today,
+          reviewerId: byId,
         },
         { byId, internalSystemStep: 'enquiry_conversion' },
       );
       orgId = createdOrg.organisation.id;
+      const orgRecord = store.organisations.find((o) => o.id === orgId);
+      if (orgRecord) {
+        orgRecord.conflictDecision = decisionSnapshot;
+        writeAudit(store, {
+          recordType: 'organisation',
+          recordId: orgId,
+          action: 'conflict-decision',
+          field: 'Conflict check decision recorded on enquiry conversion',
+          oldValue: null,
+          newValue: conflictReference,
+          byId,
+          at: nowIso,
+          snapshot: orgRecord.conflictDecision,
+        });
+      }
     }
 
     if (orgId) {
@@ -8116,7 +8327,7 @@ export function prepareEnquiryConversion(
             contactRoleIds: [vid('contact_role', 'Key relationship contact')],
             isPrimaryContact: true,
             isCurrent: true,
-            startDate: toIsoDate(new Date()),
+            startDate: today,
             endDate: null,
             contactStatusId: vid('contact_status', 'Active'),
           },
@@ -8133,6 +8344,7 @@ export function prepareEnquiryConversion(
     clientId,
     instructingContactId,
     enquiryId: enq.id,
+    ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
   };
 }
 
@@ -8160,6 +8372,9 @@ function finalizeEnquiryConversionToMatter(
   if (!enq.assignedToId) enq.assignedToId = matter.leadFeeEarnerId || byId;
   enq.updatedAt = now;
   enq.updatedById = byId;
+  if (enq.conflictDecision && !matter.conflictDecision) {
+    matter.conflictDecision = enq.conflictDecision;
+  }
 
   if (!alreadyConvertedToThisMatter) {
     writeAudit(store, {
@@ -11089,34 +11304,286 @@ export function prepareQuoteConversionRecord(
   byId: string,
 ): {
   ok: boolean;
+  conflictBlocked?: boolean;
+  conflictReasons?: string[];
+  conflictWarnings?: string[];
   clientId?: string;
   instructingContactId?: string | null;
   quoteId?: string;
   enquiryId?: string | null;
   error?: string;
-} {
+} & Partial<Omit<ActionDenied, 'ok'>> {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'matter:create', {
+      allPeople: store.people,
+      teams: store.teams,
+    })
+  ) {
+    const msg = 'You do not have permission (matter:create) to convert a quote to a matter.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      ok: false,
+      error: msg,
+      conflictReasons: [msg],
+    };
+  }
+  const visibility = buildRecordVisibility(store, actor);
   const quote = store.quotes.find((q) => q.id === quoteId);
-  if (!quote) return { ok: false, error: 'Quote not found.' };
+  if (!quote || !visibility.canViewQuote(quote)) {
+    return { ok: false, error: 'Quote not found.' };
+  }
 
   const now = new Date();
   const nowIso = now.toISOString();
   const today = toIsoDate(now);
+  const actorName = actor ? personDisplayName(actor) : byId;
+  const actorHasRiskView = hasPersonPermission(actor, 'risk:view', {
+    allPeople: store.people,
+    teams: store.teams,
+  });
 
   let personId = quote.linkedPersonId;
   let orgId = quote.linkedOrganisationId;
 
   // If linked to an enquiry that already has linkedPersonId / linkedOrganisationId, inherit if missing
-  if (quote.linkedEnquiryId) {
-    const enq = store.enquiries.find((e) => e.id === quote.linkedEnquiryId);
-    if (enq) {
-      if (!personId && enq.linkedPersonId) personId = enq.linkedPersonId;
-      if (!orgId && enq.linkedOrganisationId) orgId = enq.linkedOrganisationId;
-    }
+  const linkedEnq = quote.linkedEnquiryId
+    ? store.enquiries.find((e) => e.id === quote.linkedEnquiryId)
+    : undefined;
+  if (linkedEnq) {
+    if (!personId && linkedEnq.linkedPersonId) personId = linkedEnq.linkedPersonId;
+    if (!orgId && linkedEnq.linkedOrganisationId) orgId = linkedEnq.linkedOrganisationId;
   }
 
   const hasOrgName = Boolean(quote.prospectOrganisationName.trim());
   const hasPersonName = Boolean(quote.prospectName.trim());
+  const existingOrg = orgId ? store.organisations.find((o) => o.id === orgId) : undefined;
+  const existingPerson = personId ? store.people.find((p) => p.id === personId) : undefined;
+  const clientOrgName = existingOrg?.legalName || quote.prospectOrganisationName.trim();
+  const clientPersonName = existingPerson
+    ? personDisplayName(existingPerson)
+    : quote.prospectName.trim();
+
+  const submittedParties: ConflictCheckParty[] = [];
+  if (clientOrgName) {
+    submittedParties.push({
+      id: 'cp-client-1',
+      name: clientOrgName,
+      entityType: 'organisation',
+      role: 'Client',
+      linkedRecordId: orgId ?? null,
+      isClientFixed: true,
+    });
+    if (clientPersonName) {
+      submittedParties.push({
+        id: 'cp-instructing-1',
+        name: clientPersonName,
+        entityType: 'person',
+        role: 'Client contact',
+        linkedRecordId: personId ?? null,
+        isClientFixed: true,
+      });
+    }
+  } else if (clientPersonName) {
+    submittedParties.push({
+      id: 'cp-client-1',
+      name: clientPersonName,
+      entityType: 'person',
+      role: 'Client',
+      linkedRecordId: personId ?? null,
+      isClientFixed: true,
+    });
+  }
+
+  const enqOtherPartyNames = (linkedEnq?.otherPartiesNamed ?? '')
+    .split(/[,;/\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  enqOtherPartyNames.forEach((opName, idx) => {
+    submittedParties.push({
+      id: `cp-party-${idx + 1}`,
+      name: opName,
+      entityType: 'organisation',
+      role: 'Opponent',
+      linkedRecordId: null,
+    });
+  });
+
+  const effectiveParties = buildEffectiveConflictParties({
+    submittedParties,
+    clientId: orgId || personId || null,
+    instructingContactId: orgId ? personId : null,
+    people: store.people,
+    organisations: store.organisations,
+  });
+
+  const rawMatterMatches = searchMatterConflicts(
+    {
+      currentMatterId: null,
+      sourceEnquiryId: quote.linkedEnquiryId ?? null,
+      parties: effectiveParties,
+      canReviewConditions: actorHasRiskView,
+      reviewerUserId: actorHasRiskView ? byId : null,
+      reviewerDisplayName: actorHasRiskView ? actorName : null,
+      reviewedAtIso: nowIso,
+    },
+    {
+      matters: store.matters,
+      enquiries: store.enquiries,
+      people: store.people,
+      organisations: store.organisations,
+      links: store.links,
+      tenantId: getActiveTenantConfiguration().tenantId,
+      canView: visibility.canViewMatter,
+      canViewEnquiry: visibility.canViewEnquiry,
+    },
+  );
+  const reconciledMatches = reconcileServerConflictMatches({
+    serverMatches: rawMatterMatches,
+    canReviewConditions: actorHasRiskView,
+    reviewerUserId: actorHasRiskView ? byId : null,
+    reviewerDisplayName: actorHasRiskView ? actorName : null,
+    reviewedAtIso: nowIso,
+  });
+
+  const nameParts = clientPersonName.split(/\s+/).filter(Boolean);
+  const firstNameForSearch = existingPerson?.firstName ?? (nameParts[0] || '');
+  const lastNameForSearch = existingPerson?.surname ?? nameParts.slice(1).join(' ');
+  const prelimConflicts = runEnquiryConflictSearch(
+    {
+      firstName: firstNameForSearch,
+      lastName: lastNameForSearch,
+      callingOnBehalfOf: clientOrgName,
+      otherPartiesNamed: linkedEnq?.otherPartiesNamed ?? '',
+      email:
+        quote.prospectEmail ||
+        existingPerson?.emails[0]?.address ||
+        existingOrg?.generalEmail ||
+        '',
+      phone:
+        quote.prospectPhone ||
+        existingPerson?.phones[0]?.number ||
+        existingOrg?.mainPhone ||
+        '',
+      linkedPersonId: personId ?? null,
+      linkedOrganisationId: orgId ?? null,
+    },
+    store.people,
+    store.organisations,
+    store.matters,
+    store.values,
+    store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
+    quote.linkedEnquiryId ?? null,
+    store.links,
+    visibility.canViewMatter,
+    getActiveTenantConfiguration().tenantId,
+  );
+
+  const hasRestrictedMatch = hasUnapprovedRestrictedMatches(reconciledMatches, []);
+  const declinedOrgAssessment = assessDeclinedOrganisation(
+    store,
+    existingOrg,
+    clientOrgName,
+  );
+  const { existingOrgDeclined, hasDeclinedOrgNameMatch } = declinedOrgAssessment;
+  const isConflictBlocked =
+    existingOrgDeclined ||
+    hasRestrictedMatch ||
+    prelimConflicts.hasBlockingConflict;
+
+  const totalMatchesCount = Math.max(
+    reconciledMatches.length,
+    prelimConflicts.allConflicts.length,
+  );
+
+  if (isConflictBlocked) {
+    const reasons: string[] = [];
+    if (declinedOrgAssessment.blockedReason) {
+      reasons.push(declinedOrgAssessment.blockedReason);
+    }
+    if (hasRestrictedMatch) {
+      reasons.push(
+        'This matter must be referred to Risk because a match was found on a restricted record.',
+      );
+    }
+    for (const hit of prelimConflicts.allConflicts.filter((h) => h.blocking || h.severity === 'high')) {
+      if (!reasons.includes(hit.reason)) {
+        reasons.push(hit.reason);
+      }
+    }
+    if (reasons.length === 0) {
+      reasons.push('This quote cannot convert until its conflict check is cleared or approved by Risk.');
+    }
+
+    const decisionSummary = `Potential conflict identified by ${actorName} on ${today} (${totalMatchesCount} ${totalMatchesCount === 1 ? 'match' : 'matches'})`;
+    const decisionSnapshot = {
+      outcome: 'Potential conflict' as const,
+      decidedById: byId,
+      decidedByName: actorName,
+      decidedAt: nowIso,
+      sourceRecordId: quote.id,
+      matchesCount: totalMatchesCount,
+      searchedSources: [...CONFLICT_SEARCHED_SOURCES],
+      summary: decisionSummary,
+    };
+
+    // R254: Never overwrite an existing organisation's conflict status or conflictDecision.
+    // Record the blocked decision on the quote audit trail (`conflict-decision`, R258).
+    writeAudit(store, {
+      recordType: 'quote',
+      recordId: quote.id,
+      action: 'conflict-decision',
+      field: 'Quote conversion blocked by conflict check',
+      oldValue: null,
+      newValue: `${decisionSummary} · ${reasons.join(' · ')}`,
+      byId,
+      at: nowIso,
+      snapshot: decisionSnapshot,
+    });
+    saveStore(store);
+
+    return {
+      ok: false,
+      conflictBlocked: true,
+      conflictReasons: reasons,
+      error: reasons[0],
+    };
+  }
+
+  const conflictWarnings = prelimConflicts.allConflicts
+    .filter((h) => !h.blocking && h.severity !== 'high')
+    .map((h) => h.reason);
+  if (
+    declinedOrgAssessment.nameMatchWarning &&
+    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
+  ) {
+    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
+  }
+
+  // Conflict check passed: determine outcome status from search result, not a hard-coded Cleared
+  const hasNonSelfMatches =
+    hasDeclinedOrgNameMatch ||
+    reconciledMatches.some(
+      (m) => m.matchedRecordId !== orgId && m.matchedRecordId !== personId,
+    ) ||
+    prelimConflicts.allConflicts.length > 0;
+  const outcomeLabel: 'Cleared' | 'Potential conflict' = hasNonSelfMatches
+    ? 'Potential conflict'
+    : 'Cleared';
+  const decisionSummary = `${outcomeLabel} by ${actorName} on ${today} (${totalMatchesCount} ${totalMatchesCount === 1 ? 'match' : 'matches'})`;
+  const conflictReference = `${quote.reference} · ${decisionSummary}`;
+  const decisionSnapshot = {
+    outcome: outcomeLabel,
+    decidedById: byId,
+    decidedByName: actorName,
+    decidedAt: nowIso,
+    sourceRecordId: quote.id,
+    matchesCount: totalMatchesCount,
+    searchedSources: [...CONFLICT_SEARCHED_SOURCES],
+    summary: decisionSummary,
+    ...(conflictWarnings.length > 0 ? { warnings: [...conflictWarnings] } : {}),
+  };
 
   if (!personId && hasPersonName) {
     const parts = quote.prospectName.trim().split(/\s+/);
@@ -11158,6 +11625,7 @@ export function prepareQuoteConversionRecord(
     personId = createdPerson.person.id;
   }
 
+  let createdNewClientOrg = false;
   if (!orgId && hasOrgName) {
     const createdOrg = saveOrganisationRecord(
       {
@@ -11167,11 +11635,15 @@ export function prepareQuoteConversionRecord(
         relationshipPartnerId: quote.feeEarnerId || byId,
         relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
         relationshipStatusId: vid('relationship_status', 'Prospective'),
-        conflictStatusId: vid('conflict_status', 'Cleared'),
+        conflictStatusId: vid('conflict_status', outcomeLabel),
+        conflictReference,
+        reviewDate: today,
+        reviewerId: byId,
       },
       { byId, internalSystemStep: 'quote_conversion' },
     );
     orgId = createdOrg.organisation.id;
+    createdNewClientOrg = true;
 
     if (personId && orgId) {
       const linkExists = store.links.some(
@@ -11199,6 +11671,42 @@ export function prepareQuoteConversionRecord(
     }
   }
 
+  // R254: Set conflict status and conflictDecision only on organisations created by this conversion.
+  if (createdNewClientOrg && orgId) {
+    const orgRecord = store.organisations.find((o) => o.id === orgId);
+    if (orgRecord) {
+      orgRecord.conflictStatusId = vid('conflict_status', outcomeLabel);
+      orgRecord.conflictReference = conflictReference;
+      orgRecord.reviewDate = today;
+      orgRecord.reviewerId = byId;
+      orgRecord.conflictDecision = decisionSnapshot;
+      writeAudit(store, {
+        recordType: 'organisation',
+        recordId: orgId,
+        action: 'conflict-decision',
+        field: 'Conflict check decision recorded on quote conversion',
+        oldValue: null,
+        newValue: conflictReference,
+        byId,
+        at: nowIso,
+        snapshot: decisionSnapshot,
+      });
+    }
+  }
+
+  writeAudit(store, {
+    recordType: 'quote',
+    recordId: quote.id,
+    action: 'conflict-decision',
+    field: 'Conflict check completed on quote conversion',
+    oldValue: null,
+    newValue: conflictReference,
+    byId,
+    at: nowIso,
+    snapshot: decisionSnapshot,
+  });
+
+  quote.conflictDecision = decisionSnapshot;
   quote.linkedPersonId = personId;
   quote.linkedOrganisationId = orgId;
   quote.updatedAt = nowIso;
@@ -11215,6 +11723,7 @@ export function prepareQuoteConversionRecord(
     instructingContactId,
     quoteId: quote.id,
     enquiryId: quote.linkedEnquiryId,
+    ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
   };
 }
 
@@ -11235,6 +11744,9 @@ function finalizeQuoteConversionToMatter(
   quote.nextFollowUpDate = null;
   quote.updatedAt = now;
   quote.updatedById = byId;
+  if (quote.conflictDecision) {
+    matter.conflictDecision = quote.conflictDecision;
+  }
 
   if (!alreadyConverted) {
     quote.timeline.push({

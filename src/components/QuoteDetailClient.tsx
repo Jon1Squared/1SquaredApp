@@ -9,10 +9,12 @@ import {
   prepareQuoteConversionAction,
   recordQuoteOutcomeAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { quoteStatusTone } from '@/domain/badges';
 import { addDays, formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { resolveLabel } from '@/domain/lists';
+import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import { personDisplayName } from '@/domain/names';
 import {
   calculateQuoteTotals,
@@ -49,6 +51,7 @@ interface Props {
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
   currentUserId: string;
+  tenantId: string;
   initialAction?: string | null;
 }
 
@@ -61,6 +64,7 @@ export function QuoteDetailClient({
   links = [],
   values,
   currentUserId,
+  tenantId,
   initialAction = null,
 }: Props) {
   const router = useRouter();
@@ -182,9 +186,19 @@ export function QuoteDetailClient({
   const handleConvertToMatter = () => {
     startTransition(async () => {
       const res = await prepareQuoteConversionAction(quote.id);
-      if (!res.ok) {
-        showToast(res.error ?? 'Could not prepare quote conversion');
+      if (isActionDenied(res)) {
+        showToast(res.message);
         return;
+      }
+      if (!res.ok) {
+        showToast(res.error ?? res.conflictReasons?.[0] ?? 'Could not prepare quote conversion');
+        return;
+      }
+      const warningNotice = formatConversionConflictWarningsNotice(
+        res.conflictWarnings,
+      );
+      if (warningNotice) {
+        showToast(warningNotice);
       }
       const params = new URLSearchParams();
       params.set('quoteId', quote.id);
@@ -214,6 +228,7 @@ export function QuoteDetailClient({
         links={links}
         values={values}
         currentUserId={currentUserId}
+        tenantId={tenantId}
         onCancelOverride={() => setViewMode('detail')}
         onSuccessOverride={() => {
           setViewMode('detail');

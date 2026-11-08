@@ -33,6 +33,7 @@ import {
 } from '@/domain/enquiries';
 import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, valuesForList } from '@/domain/lists';
+import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import { personDisplayName } from '@/domain/names';
 import type {
   Address,
@@ -67,6 +68,7 @@ interface Props {
   canReopen?: boolean;
   canAnonymise?: boolean;
   canTakeByTaskId?: Record<string, boolean>;
+  tenantId: string;
 }
 
 export function EnquiryProfileClient({
@@ -83,6 +85,7 @@ export function EnquiryProfileClient({
   canReopen = false,
   canAnonymise = false,
   canTakeByTaskId,
+  tenantId,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -218,8 +221,13 @@ export function EnquiryProfileClient({
         organisations,
         matters,
         values,
+        undefined,
+        enquiry.id,
+        undefined,
+        undefined,
+        tenantId,
       ),
-    [enquiry, convertUsePersonId, convertUseOrgId, people, organisations, matters, values],
+    [enquiry, convertUsePersonId, convertUseOrgId, people, organisations, matters, values, tenantId],
   );
 
   const nameOfPerson = (id: string | null | undefined) => {
@@ -346,11 +354,21 @@ export function EnquiryProfileClient({
         useOrganisationId: convertForBusiness ? convertUseOrgId || null : null,
         createForBusiness: convertForBusiness,
       });
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       if (!res.ok) {
         showToast(res.conflictReasons?.[0] ?? 'Cannot convert enquiry due to conflict');
         return;
       }
       setConvertModalOpen(false);
+      const warningNotice = formatConversionConflictWarningsNotice(
+        res.conflictWarnings,
+      );
+      if (warningNotice) {
+        showToast(warningNotice);
+      }
       router.push(
         `/matters/new?enquiryId=${enquiry.id}&clientId=${res.clientId ?? ''}&instructingContactId=${res.instructingContactId ?? ''}`,
       );

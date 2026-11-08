@@ -84,6 +84,8 @@ import {
   logQuoteFollowUpRecord,
   markQuoteSentRecord,
   previewRbacOverrides,
+  prepareEnquiryConversion,
+  prepareQuoteConversionRecord,
   reassignLeaverOwnedRecords,
   recordQuoteOutcomeRecord,
   remindTeamLeadOverdueCompliance,
@@ -92,7 +94,9 @@ import {
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
   reviseQuoteRecord,
+  runMatterConflictSearchRecord,
   saveEnquiryRecord,
+  saveMatterRecord,
   saveOrganisationRecord,
   savePersonRecord,
   saveQuoteRecord,
@@ -130,6 +134,8 @@ import {
   deleteMatterPartyCapacityAction,
   deleteMatterPartyRelationshipAction,
   linkPmsRecordAction,
+  prepareEnquiryConversionAction,
+  prepareQuoteConversionAction,
   reorderChoiceValueAction,
   reorderCustomFieldAction,
   reorderMatterPartyRelationshipAction,
@@ -154,7 +160,21 @@ import {
   updateTenantRbacConfigAction,
   updateWorkTypeProfilesAction,
 } from '../../src/app/actions';
+import crypto from 'node:crypto';
 import { isActionDenied } from '../../src/domain/actionResult';
+import {
+  buildEffectiveConflictParties,
+  CONFLICT_SEARCHED_SOURCES,
+  formatConversionConflictWarningsNotice,
+  normaliseConversionConflictWarnings,
+  redactRecordId,
+  searchMatterConflicts,
+} from '../../src/domain/matterConflicts';
+import {
+  computeEnquiryConflictSnapshot,
+  detectPreliminaryConflicts,
+  runEnquiryConflictSearch,
+} from '../../src/domain/enquiries';
 import { canActorAccessMatterRecord } from '../src/domain/document-generation/permissions';
 import type { ChoiceValue, Matter, Person, Task, Team } from '../../src/domain/types';
 
@@ -3738,6 +3758,929 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           'P-000002',
         );
         expect(isActionDenied(noteOnEmployeeWithoutHrPerm)).toBe(true);
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+  });
+
+  describe('21. S0-07 Conflict Fixes: Quote Conversion (B5), Enquiry Conversion, and Extended Conflict Search (B7, Item 1a)', () => {
+    it('denies enquiry conversion and quote conversion without matter:create and creates nothing', async () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const peopleBefore = store.people.length;
+        const orgsBefore = store.organisations.length;
+        const linksBefore = store.links.length;
+
+        // Finance user (P-000009) lacks matter:create
+        setTestEntraSessionOverride({
+          personId: 'P-000009',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000009',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000009',
+          email: 'gethin.powell@notalawfirm.example',
+          displayName: 'Gethin Powell',
+          entraRoles: ['finance'],
+          mappedRoles: ['finance'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+
+        const enqId = store.enquiries.find((e) => e.status !== 'Draft')!.id;
+        const enqActionRes = await prepareEnquiryConversionAction(enqId, {
+          createForBusiness: true,
+        });
+        expect(isActionDenied(enqActionRes)).toBe(true);
+        if (isActionDenied(enqActionRes)) {
+          expect(enqActionRes.code).toBe('FORBIDDEN');
+        }
+        const enqSvcRes = prepareEnquiryConversion(
+          enqId,
+          { createForBusiness: true },
+          'P-000009',
+        );
+        expect(isActionDenied(enqSvcRes)).toBe(true);
+
+        const quoteId = store.quotes[0]!.id;
+        const quoteActionRes = await prepareQuoteConversionAction(quoteId);
+        expect(isActionDenied(quoteActionRes)).toBe(true);
+        const quoteSvcRes = prepareQuoteConversionRecord(quoteId, 'P-000009');
+        expect(isActionDenied(quoteSvcRes)).toBe(true);
+
+        expect(store.people.length).toBe(peopleBefore);
+        expect(store.organisations.length).toBe(orgsBefore);
+        expect(store.links.length).toBe(linksBefore);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('blocks quote conversion on a high-severity conflict hit (creating nothing), and when clear creates records with outcome-derived conflict status, conflictDecision, and audit entry (B5)', async () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        // Find an opposing party on an existing matter to trigger a high-severity hit
+        const matterWithOpponent = store.matters.find(
+          (m) =>
+            !m.isStaffMatter &&
+            !m.hasEthicalWall &&
+            m.parties.some((p) => p.role === 'Opponent' || p.role === 'Counterparty'),
+        )!;
+        const opponentParty = matterWithOpponent.parties.find(
+          (p) => p.role === 'Opponent' || p.role === 'Counterparty',
+        )!;
+
+        // 1. Create a prospect quote for that opposing party
+        const blockedQuoteRes = saveQuoteRecord(
+          {
+            clientType: 'prospect',
+            prospectName: 'Gareth OpponentContact',
+            prospectOrganisationName: opponentParty.name,
+            prospectEmail: 'gareth@opponent.example',
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            scope: 'Blocked quote scope',
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 2500,
+          },
+          { byId: 'P-000001' },
+        );
+        expect(blockedQuoteRes.quote).toBeDefined();
+        const blockedQuote = blockedQuoteRes.quote!;
+
+        const peopleBeforeBlock = store.people.length;
+        const orgsBeforeBlock = store.organisations.length;
+        const linksBeforeBlock = store.links.length;
+
+        const blockedConv = prepareQuoteConversionRecord(blockedQuote.id, 'P-000001');
+        expect(blockedConv.ok).toBe(false);
+        expect(blockedConv.conflictBlocked).toBe(true);
+        expect(blockedConv.conflictReasons?.length).toBeGreaterThan(0);
+        // Nothing created when blocked
+        expect(store.people.length).toBe(peopleBeforeBlock);
+        expect(store.organisations.length).toBe(orgsBeforeBlock);
+        expect(store.links.length).toBe(linksBeforeBlock);
+
+        // 2. Create a clean prospect quote -> creates person, organisation (Cleared), conflictDecision, and audit entry
+        const cleanQuoteRes = saveQuoteRecord(
+          {
+            clientType: 'prospect',
+            prospectName: 'Seren CleanProspect',
+            prospectOrganisationName: 'Solaris Clean Ventures Ltd',
+            prospectEmail: 'seren@solaris-clean.example',
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            scope: 'Clean quote scope',
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 3000,
+          },
+          { byId: 'P-000001' },
+        );
+        const cleanQuote = cleanQuoteRes.quote!;
+        const cleanConv = prepareQuoteConversionRecord(cleanQuote.id, 'P-000001');
+        expect(cleanConv.ok).toBe(true);
+        expect(cleanConv.clientId).toBeDefined();
+        expect(cleanConv.instructingContactId).toBeDefined();
+
+        const createdOrg = store.organisations.find((o) => o.id === cleanConv.clientId)!;
+        expect(createdOrg).toBeDefined();
+        expect(createdOrg.conflictDecision).toBeDefined();
+        expect(createdOrg.conflictDecision?.outcome).toBe('Cleared');
+        expect(createdOrg.conflictDecision?.decidedById).toBe('P-000001');
+        expect(createdOrg.conflictDecision?.searchedSources).toEqual([
+          ...CONFLICT_SEARCHED_SOURCES,
+        ]);
+        expect(
+          store.audit.some(
+            (a) =>
+              a.recordType === 'organisation' &&
+              a.recordId === createdOrg.id &&
+              a.action === 'conflict-decision' &&
+              a.field?.includes('Conflict check decision recorded on quote conversion'),
+          ),
+        ).toBe(true);
+
+        // 2b. R254: An existing organisation set to "Conflict – declined" stays declined and blocks quote conversion
+        const declinedStatusId = 'conflict_status.conflict_declined';
+        const clearedWithConsentStatusId = 'conflict_status.cleared_with_consent';
+
+        const declinedOrg = saveOrganisationRecord(
+          {
+            legalName: 'Declined Existing Org Ltd',
+            conflictStatusId: declinedStatusId,
+            conflictReference: 'CR-KEEP-DECLINED',
+          },
+          { byId: 'P-000001' },
+        ).organisation!;
+        expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
+
+        const declinedOrgQuote = saveQuoteRecord(
+          {
+            clientType: 'existing',
+            linkedOrganisationId: declinedOrg.id,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            scope: 'Quote for declined existing org',
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 1800,
+          },
+          { byId: 'P-000001' },
+        ).quote!;
+        const declinedOrgConv = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
+        expect(declinedOrgConv.ok).toBe(false);
+        expect(declinedOrgConv.conflictBlocked).toBe(true);
+        expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
+        expect(declinedOrg.conflictReference).toBe('CR-KEEP-DECLINED');
+
+        // 2c. R254: An existing organisation set to "Cleared with consent" keeps its status after a successful quote conversion
+        const consentOrg = saveOrganisationRecord(
+          {
+            legalName: 'Consent Existing Org Ltd',
+            conflictStatusId: clearedWithConsentStatusId,
+            conflictReference: 'CR-KEEP-CONSENT',
+          },
+          { byId: 'P-000001' },
+        ).organisation!;
+        const consentOrgQuote = saveQuoteRecord(
+          {
+            clientType: 'existing',
+            linkedOrganisationId: consentOrg.id,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            scope: 'Quote for cleared-with-consent existing org',
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 2200,
+          },
+          { byId: 'P-000001' },
+        ).quote!;
+        const consentOrgConv = prepareQuoteConversionRecord(consentOrgQuote.id, 'P-000001');
+        expect(consentOrgConv.ok).toBe(true);
+        expect(consentOrg.conflictStatusId).toBe(clearedWithConsentStatusId);
+        expect(consentOrg.conflictReference).toBe('CR-KEEP-CONSENT');
+        expect(
+          store.audit.some(
+            (a) =>
+              a.recordType === 'quote' &&
+              a.recordId === consentOrgQuote.id &&
+              a.action === 'conflict-decision',
+          ),
+        ).toBe(true);
+
+        // 2d. R255: A quote with a non-blocking amber warning (private client whose employer is an existing client) converts without blocking
+        const existingClientOrgId = matterWithOpponent.clientId;
+        const privateClientEmployee = savePersonRecord(
+          {
+            firstName: 'Nia',
+            surname: 'AmberWarningClient',
+          },
+          { byId: 'P-000001' },
+        ).person!;
+        store.links.push({
+          id: 'L-R255-AMBER',
+          personId: privateClientEmployee.id,
+          organisationId: existingClientOrgId,
+          jobTitle: 'Analyst',
+          department: 'Operations',
+          roleWithinOrganisation: 'Employee',
+          contactRoleIds: [],
+          isPrimaryContact: false,
+          isCurrent: true,
+          startDate: '2025-01-01',
+          endDate: null,
+          contactStatusId: null,
+          createdById: 'P-000001',
+          createdAt: '2025-01-01T09:00:00Z',
+          updatedById: 'P-000001',
+          updatedAt: '2025-01-01T09:00:00Z',
+        });
+        const amberQuote = saveQuoteRecord(
+          {
+            clientType: 'existing',
+            linkedPersonId: privateClientEmployee.id,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            scope: 'Private client quote with amber employer link',
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 1500,
+          },
+          { byId: 'P-000001' },
+        ).quote!;
+        const amberConv = prepareQuoteConversionRecord(amberQuote.id, 'P-000001');
+        expect(amberConv.ok).toBe(true);
+        expect(amberConv.conflictBlocked).toBeFalsy();
+        expect(amberConv.conflictWarnings?.length).toBeGreaterThan(0);
+        expect(amberConv.conflictWarnings?.[0]).toContain('linked to');
+        const amberAudit = store.audit.find(
+          (a) =>
+            a.recordType === 'quote' &&
+            a.recordId === amberQuote.id &&
+            a.action === 'conflict-decision',
+        );
+        expect(amberAudit).toBeDefined();
+        expect(amberAudit?.newValue).toContain('Potential conflict');
+
+        // 2e. R297: A quote matching a declined organisation by name (without linkedOrganisationId) does NOT block,
+        // emits the non-blocking warning even when the declined organisation is listed second among same-named organisations,
+        // and sets the new prospect organisation's conflictDecision.outcome to 'Potential conflict'
+        const clearedSameNameOrg = saveOrganisationRecord(
+          {
+            legalName: 'Declined Existing Org Ltd',
+            conflictStatusId: 'conflict_status.cleared',
+            conflictReference: 'CR-CLEARED-FIRST',
+          },
+          { byId: 'P-000001' },
+        ).organisation!;
+        // Move clearedSameNameOrg before declinedOrg so declinedOrg is listed second among same-named organisations
+        const clearedIdx = store.organisations.findIndex((o) => o.id === clearedSameNameOrg.id);
+        if (clearedIdx >= 0) {
+          store.organisations.splice(clearedIdx, 1);
+        }
+        const declinedIdx = store.organisations.findIndex((o) => o.id === declinedOrg.id);
+        store.organisations.splice(declinedIdx, 0, clearedSameNameOrg);
+
+        const declinedByNameQuote = saveQuoteRecord(
+          {
+            clientType: 'prospect',
+            prospectName: 'Dafydd NameMatch',
+            prospectOrganisationName: 'Declined Existing Org Ltd',
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            scope: 'Quote matching declined org by name',
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 1900,
+          },
+          { byId: 'P-000001' },
+        ).quote!;
+        const declinedByNameConv = prepareQuoteConversionRecord(
+          declinedByNameQuote.id,
+          'P-000001',
+        );
+        expect(declinedByNameConv.ok).toBe(true);
+        expect(declinedByNameConv.conflictBlocked).toBeFalsy();
+        expect(declinedByNameConv.conflictWarnings).toContain(
+          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        const createdSameNameProspectOrg = store.organisations.find(
+          (o) => o.id === declinedByNameConv.clientId,
+        )!;
+        expect(createdSameNameProspectOrg.conflictDecision?.outcome).toBe('Potential conflict');
+        expect(createdSameNameProspectOrg.conflictDecision?.matchesCount).toBe(0);
+        // R312: Quote conversion with a warning stores it on conflictDecision.warnings
+        expect(declinedByNameQuote.conflictDecision?.warnings).toContain(
+          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(amberQuote.conflictDecision?.warnings).toEqual(
+          amberConv.conflictWarnings,
+        );
+
+        // Linked declined organisation still hard-blocks
+        const linkedDeclinedRecheck = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
+        expect(linkedDeclinedRecheck.ok).toBe(false);
+        expect(linkedDeclinedRecheck.conflictBlocked).toBe(true);
+
+        // 3. Enquiry conversion for a new business also records conflictDecision and audit entry, and keeps conflictDecision on the converted matter (R304)
+        const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
+
+        // 3a. R307: An enquiry linked to a declined organisation is blocked on conversion, while an unlinked enquiry matching a declined organisation by name converts with the warning in conflictWarnings
+        const linkedDeclinedEnq = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Owain',
+            lastName: 'DeclinedLinkedCaller',
+            callingOnBehalfOf: declinedOrg.legalName,
+            linkedOrganisationId: declinedOrg.id,
+            email: 'owain@declined-linked.example',
+            phone: '029 2018 0771',
+            preferredContactMethodId: templateEnq.preferredContactMethodId,
+            sourceId: templateEnq.sourceId,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            summary: 'Enquiry linked to declined organisation',
+            notes: 'High-level notes for linked declined organisation enquiry conversion test.',
+            otherPartiesNamed: '',
+            urgencyId: templateEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000001', asDraft: false },
+        ).enquiry!;
+        const linkedDeclinedEnqConv = prepareEnquiryConversion(
+          linkedDeclinedEnq.id,
+          { useOrganisationId: declinedOrg.id, createForBusiness: true },
+          'P-000001',
+        );
+        expect(linkedDeclinedEnqConv.ok).toBe(false);
+        expect(linkedDeclinedEnqConv.conflictBlocked).toBe(true);
+        expect(linkedDeclinedEnqConv.conflictReasons).toContain(
+          'Client organisation has conflict status "Conflict – declined".',
+        );
+        expect(
+          store.audit.some(
+            (a) =>
+              a.recordType === 'enquiry' &&
+              a.recordId === linkedDeclinedEnq.id &&
+              a.action === 'conflict-decision' &&
+              a.field === 'Enquiry conversion blocked by conflict check',
+          ),
+        ).toBe(true);
+
+        const declinedEnqOrg = saveOrganisationRecord(
+          {
+            legalName: 'Declined Enquiry Org Ltd',
+            conflictStatusId: declinedStatusId,
+            conflictReference: 'CR-ENQ-DECLINED',
+          },
+          { byId: 'P-000001' },
+        ).organisation!;
+        const unlinkedDeclinedNameEnq = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Carys',
+            lastName: 'DeclinedNameCaller',
+            callingOnBehalfOf: declinedEnqOrg.legalName,
+            email: 'carys@declined-name.example',
+            phone: '029 2018 0772',
+            preferredContactMethodId: templateEnq.preferredContactMethodId,
+            sourceId: templateEnq.sourceId,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            summary: 'Unlinked enquiry matching declined organisation by name',
+            notes: 'High-level notes for unlinked declined organisation name match enquiry test.',
+            otherPartiesNamed: '',
+            urgencyId: templateEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000001', asDraft: false },
+        ).enquiry!;
+        const unlinkedDeclinedNameEnqConv = prepareEnquiryConversion(
+          unlinkedDeclinedNameEnq.id,
+          { createForBusiness: true },
+          'P-000001',
+        );
+        expect(unlinkedDeclinedNameEnqConv.ok).toBe(true);
+        expect(unlinkedDeclinedNameEnqConv.conflictBlocked).toBeFalsy();
+        expect(unlinkedDeclinedNameEnqConv.conflictWarnings).toContain(
+          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(unlinkedDeclinedNameEnq.conflictDecision?.outcome).toBe('Potential conflict');
+        expect(unlinkedDeclinedNameEnq.conflictDecision?.matchesCount).toBe(0);
+        // R312: Enquiry conversion with a warning stores it on conflictDecision.warnings
+        expect(unlinkedDeclinedNameEnq.conflictDecision?.warnings).toEqual(
+          unlinkedDeclinedNameEnqConv.conflictWarnings,
+        );
+        // R312: A user who cannot see the enquiry gets no warnings from the snapshot used by /matters/new
+        const restrictedMatter = store.matters[0]!;
+        const savedMatterSnap = structuredClone(restrictedMatter);
+        const prevConvertedMatterId = unlinkedDeclinedNameEnq.convertedMatterId;
+        restrictedMatter.isStaffMatter = true;
+        restrictedMatter.restrictedAccessUserIds = ['P-000001'];
+        restrictedMatter.responsiblePartnerId = 'P-000001';
+        restrictedMatter.supervisingPartnerId = 'P-000001';
+        restrictedMatter.leadFeeEarnerId = 'P-000001';
+        restrictedMatter.teamMemberIds = [];
+        unlinkedDeclinedNameEnq.convertedMatterId = restrictedMatter.id;
+        try {
+          const nonParticipantSnap = getAppSnapshot('P-000002');
+          const resolvedEnquiryForNonParticipant = nonParticipantSnap.enquiries.find(
+            (e) => e.id === unlinkedDeclinedNameEnq.id,
+          );
+          expect(resolvedEnquiryForNonParticipant).toBeUndefined();
+          expect(
+            normaliseConversionConflictWarnings(
+              resolvedEnquiryForNonParticipant?.conflictDecision?.warnings,
+            ),
+          ).toEqual([]);
+        } finally {
+          Object.assign(restrictedMatter, savedMatterSnap);
+          unlinkedDeclinedNameEnq.convertedMatterId = prevConvertedMatterId;
+        }
+        // R311: Shared helper turns conflictWarnings into the user-visible notice for toast and new-matter banner
+        expect(
+          formatConversionConflictWarningsNotice(
+            unlinkedDeclinedNameEnqConv.conflictWarnings,
+          ),
+        ).toBe(
+          "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(
+          formatConversionConflictWarningsNotice(declinedByNameConv.conflictWarnings),
+        ).toContain(
+          "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(formatConversionConflictWarningsNotice(undefined)).toBeNull();
+        expect(formatConversionConflictWarningsNotice([])).toBeNull();
+        expect(
+          normaliseConversionConflictWarnings([
+            '  First warning  ',
+            '',
+            'First warning',
+            'Second warning',
+          ]),
+        ).toEqual(['First warning', 'Second warning']);
+
+        const cleanEnqRes = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Idris',
+            lastName: 'ClearCaller',
+            callingOnBehalfOf: 'Meridian Clear Holdings Ltd',
+            email: 'idris@meridian-clear.example',
+            phone: '029 2018 0999',
+            preferredContactMethodId: templateEnq.preferredContactMethodId,
+            sourceId: templateEnq.sourceId,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            summary: 'Clean enquiry for conversion',
+            notes: 'High-level notes for clean enquiry conversion test.',
+            otherPartiesNamed: 'None',
+            urgencyId: templateEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000001', asDraft: false },
+        );
+        const cleanEnq = cleanEnqRes.enquiry!;
+        const enqConv = prepareEnquiryConversion(
+          cleanEnq.id,
+          { createForBusiness: true },
+          'P-000001',
+        );
+        expect(enqConv.ok).toBe(true);
+        const enqCreatedOrg = store.organisations.find((o) => o.id === enqConv.clientId)!;
+        expect(enqCreatedOrg.conflictDecision).toBeDefined();
+        expect(enqCreatedOrg.conflictDecision?.outcome).toBe('Cleared');
+        expect(enqCreatedOrg.conflictDecision?.decidedById).toBe('P-000001');
+        expect(enqCreatedOrg.conflictDecision?.searchedSources).toEqual([
+          ...CONFLICT_SEARCHED_SOURCES,
+        ]);
+        expect(
+          store.audit.some(
+            (a) =>
+              a.recordType === 'organisation' &&
+              a.recordId === enqCreatedOrg.id &&
+              a.action === 'conflict-decision',
+          ),
+        ).toBe(true);
+
+        setTestEntraSessionOverride({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000001',
+          email: 'glyn.morgan@notalawfirm.example',
+          displayName: 'Glyn Morgan',
+          entraRoles: ['managing_partner', 'admin'],
+          mappedRoles: ['managing_partner', 'admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const convertedMatterRes = await withPageActor(() =>
+          saveMatterRecord(
+            {
+              title: 'Meridian Clear Converted Matter',
+              shortDescription: 'Matter created from enquiry conversion',
+              clientId: enqConv.clientId!,
+              instructingContactId: enqConv.instructingContactId,
+              sourceEnquiryId: cleanEnq.id,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              workTypeSubcategoryId: matterWithOpponent.workTypeSubcategoryId,
+              matterTypeId: matterWithOpponent.matterTypeId,
+              billingBasisId: matterWithOpponent.billingBasisId,
+              jurisdictionGroupId: matterWithOpponent.jurisdictionGroupId,
+              leadFeeEarnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+            },
+            { byId: 'P-000001', saveMode: 'draft' },
+          ),
+        );
+        expect(convertedMatterRes.matter?.conflictDecision).toBeDefined();
+        expect(convertedMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
+        expect(convertedMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(cleanEnq.id);
+
+        // R308: Quote conversion conflictDecision is also carried onto matter.conflictDecision when opening a matter from a converted quote
+        const convertedFromQuoteMatterRes = await withPageActor(() =>
+          saveMatterRecord(
+            {
+              title: 'Solaris Clean Quote Converted Matter',
+              shortDescription: 'Matter created from quote conversion',
+              clientId: cleanConv.clientId!,
+              instructingContactId: cleanConv.instructingContactId,
+              sourceQuoteId: cleanQuote.id,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              workTypeSubcategoryId: matterWithOpponent.workTypeSubcategoryId,
+              matterTypeId: matterWithOpponent.matterTypeId,
+              billingBasisId: matterWithOpponent.billingBasisId,
+              jurisdictionGroupId: matterWithOpponent.jurisdictionGroupId,
+              leadFeeEarnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+            },
+            { byId: 'P-000001', saveMode: 'draft' },
+          ),
+        );
+        expect(convertedFromQuoteMatterRes.matter?.conflictDecision).toBeDefined();
+        expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
+        expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(
+          cleanQuote.id,
+        );
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('finds hits from instructingContactId, billingContactId, additionalClientIds, and person–organisation links in both searches, records searchedSources, and redacts restricted matters in blocked reasons (B7)', () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+
+        // Create dedicated test records for the 4 new search sources
+        const instrPerson = savePersonRecord(
+          { firstName: 'Iolo', surname: 'InstructingHit' },
+          { byId: 'P-000001' },
+        ).person;
+        const billPerson = savePersonRecord(
+          { firstName: 'Bryn', surname: 'BillingHit' },
+          { byId: 'P-000001' },
+        ).person;
+        const addlClientOrg = store.organisations[1]!;
+        const employerOrg = store.organisations[2]!;
+        const linkedEmployeePerson = savePersonRecord(
+          { firstName: 'Ceri', surname: 'LinkedToOpponentOrg' },
+          { byId: 'P-000001' },
+        ).person;
+
+        // Link Ceri to employerOrg
+        store.links.push({
+          id: 'L-S007-TEST',
+          personId: linkedEmployeePerson.id,
+          organisationId: employerOrg.id,
+          jobTitle: 'Director',
+          department: 'Board',
+          roleWithinOrganisation: 'Director',
+          contactRoleIds: [],
+          isPrimaryContact: true,
+          isCurrent: true,
+          startDate: '2025-01-01',
+          endDate: null,
+          contactStatusId: null,
+          createdById: 'P-000001',
+          createdAt: '2025-01-01T09:00:00Z',
+          updatedById: 'P-000001',
+          updatedAt: '2025-01-01T09:00:00Z',
+        });
+
+        // Set up an existing visible matter with instructingContactId, billingContactId, additionalClientIds, and employerOrg as Opponent
+        const baseMatter = store.matters.find(
+          (m) => !m.isStaffMatter && !m.hasEthicalWall,
+        )!;
+        baseMatter.instructingContactId = instrPerson.id;
+        baseMatter.billingContactId = billPerson.id;
+        baseMatter.additionalClientIds = [addlClientOrg.id];
+        baseMatter.parties.push({
+          id: 'MP-S007-OPP',
+          name: employerOrg.legalName,
+          entityType: 'organisation',
+          role: 'Opponent',
+          linkedRecordId: employerOrg.id,
+        });
+
+        // Verify buildEffectiveConflictParties includes billingContactId
+        const builtParties = buildEffectiveConflictParties({
+          submittedParties: [],
+          clientId: baseMatter.clientId,
+          instructingContactId: instrPerson.id,
+          billingContactId: billPerson.id,
+          people: store.people,
+          organisations: store.organisations,
+        });
+        expect(builtParties.some((p) => p.linkedRecordId === billPerson.id)).toBe(true);
+
+        // 1. searchMatterConflicts finds instructingContactId, billingContactId, additionalClientIds, and person–organisation links
+        const matterMatches = searchMatterConflicts(
+          {
+            currentMatterId: null,
+            parties: [
+              {
+                id: 'cp-1',
+                name: `${instrPerson.firstName} ${instrPerson.surname}`,
+                entityType: 'person',
+                role: 'Opponent',
+                linkedRecordId: null,
+              },
+              {
+                id: 'cp-2',
+                name: `${billPerson.firstName} ${billPerson.surname}`,
+                entityType: 'person',
+                role: 'Opponent',
+                linkedRecordId: null,
+              },
+              {
+                id: 'cp-3',
+                name: addlClientOrg.legalName,
+                entityType: 'organisation',
+                role: 'Opponent',
+                linkedRecordId: null,
+              },
+              {
+                id: 'cp-4',
+                name: `${linkedEmployeePerson.firstName} ${linkedEmployeePerson.surname}`,
+                entityType: 'person',
+                role: 'Client',
+                linkedRecordId: linkedEmployeePerson.id,
+                isClientFixed: true,
+              },
+            ],
+            canReviewConditions: true,
+          },
+          {
+            matters: store.matters,
+            enquiries: store.enquiries,
+            people: store.people,
+            organisations: store.organisations,
+            links: store.links,
+            tenantId: 'not-a-law-firm',
+            canView: () => true,
+            canViewEnquiry: () => true,
+          },
+        );
+        expect(
+          matterMatches.some(
+            (m) => m.partyId === 'cp-1' && m.whereFound.includes('Instructing contact'),
+          ),
+        ).toBe(true);
+        expect(
+          matterMatches.some(
+            (m) => m.partyId === 'cp-2' && m.whereFound.includes('Billing contact'),
+          ),
+        ).toBe(true);
+        expect(
+          matterMatches.some(
+            (m) => m.partyId === 'cp-3' && m.whereFound.includes('Client on'),
+          ),
+        ).toBe(true);
+        expect(
+          matterMatches.some(
+            (m) =>
+              m.partyId === 'cp-4' &&
+              m.matchedRecordId === employerOrg.id &&
+              m.matterId === baseMatter.id,
+          ),
+        ).toBe(true);
+
+        // 2. runEnquiryConflictSearch finds all 4 sources and computeEnquiryConflictSnapshot records searchedSources
+        const enqCheck = runEnquiryConflictSearch(
+          {
+            firstName: linkedEmployeePerson.firstName,
+            lastName: linkedEmployeePerson.surname,
+            callingOnBehalfOf: '',
+            otherPartiesNamed: `${instrPerson.firstName} ${instrPerson.surname}, ${billPerson.firstName} ${billPerson.surname}, ${addlClientOrg.legalName}`,
+            linkedPersonId: linkedEmployeePerson.id,
+          },
+          store.people,
+          store.organisations,
+          store.matters,
+          store.values,
+          store.enquiries,
+          null,
+          store.links,
+          () => true,
+          'not-a-law-firm',
+        );
+        expect(
+          enqCheck.allConflicts.some((h) =>
+            h.matchedFields.some((f) => f.includes('instructing contact')),
+          ),
+        ).toBe(true);
+        expect(
+          enqCheck.allConflicts.some((h) =>
+            h.matchedFields.some((f) => f.includes('billing contact')),
+          ),
+        ).toBe(true);
+        expect(
+          enqCheck.otherPartyClientMatches.some((h) => h.recordId === addlClientOrg.id),
+        ).toBe(true);
+        expect(
+          enqCheck.clientAgainstPartyMatches.some((h) =>
+            h.matchedFields.some(
+              (f) => f.includes('person–organisation link') || f.includes('linked organisation'),
+            ),
+          ),
+        ).toBe(true);
+
+        const snap = computeEnquiryConflictSnapshot(
+          {
+            firstName: linkedEmployeePerson.firstName,
+            lastName: linkedEmployeePerson.surname,
+            callingOnBehalfOf: '',
+            otherPartiesNamed: addlClientOrg.legalName,
+            email: '',
+            phone: '',
+            postcode: '',
+            addressLine1: '',
+            addressLine2: '',
+          },
+          store.people,
+          store.organisations,
+          store.matters,
+          store.values,
+          {
+            recordedAt: new Date().toISOString(),
+            recordedById: 'P-000001',
+            enquiries: store.enquiries,
+            excludeEnquiryId: null,
+            links: store.links,
+            canViewMatter: () => true,
+            tenantId: 'not-a-law-firm',
+          },
+        );
+        expect(snap.searchedInput.searchedSources).toEqual([...CONFLICT_SEARCHED_SOURCES]);
+
+        // 3. Redaction of restricted matters in blocked reasons for an actor without access
+        const restrictedMatter = store.matters.find((m) => m.id !== baseMatter.id)!;
+        restrictedMatter.hasEthicalWall = true;
+        restrictedMatter.restrictedAccessUserIds = ['P-000001'];
+        restrictedMatter.responsiblePartnerId = 'P-000001';
+        restrictedMatter.supervisingPartnerId = 'P-000001';
+        restrictedMatter.leadFeeEarnerId = 'P-000001';
+        restrictedMatter.teamMemberIds = [];
+        restrictedMatter.title = 'Ultra Secret Restricted Acquisition';
+        restrictedMatter.parties = [
+          {
+            id: 'MP-SECRET-OPP',
+            name: 'Vanguard Secret Counterparty Ltd',
+            entityType: 'organisation',
+            role: 'Opponent',
+            linkedRecordId: null,
+          },
+        ];
+
+        const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
+        const blockedEnqRes = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Evan',
+            lastName: 'BlockedCaller',
+            callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd',
+            email: 'evan@vanguard.example',
+            phone: '029 2018 0777',
+            preferredContactMethodId: templateEnq.preferredContactMethodId,
+            sourceId: templateEnq.sourceId,
+            practiceAreaId: baseMatter.practiceAreaId,
+            summary: 'Enquiry hitting restricted matter',
+            notes: 'High-level notes for restricted matter hit test.',
+            otherPartiesNamed: 'None',
+            urgencyId: templateEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002', asDraft: false },
+        );
+        const blockedEnq = blockedEnqRes.enquiry!;
+        // R280 (R258 follow-up): Quick conflict check recorded audit entry uses action 'conflict-decision' in both main and draft paths
+        const mainQuickAudit = store.audit.find(
+          (a) =>
+            a.recordType === 'enquiry' &&
+            a.recordId === blockedEnq.id &&
+            a.field === 'Quick conflict check recorded',
+        );
+        expect(mainQuickAudit).toBeDefined();
+        expect(mainQuickAudit?.action).toBe('conflict-decision');
+
+        const draftCheckEnq = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Draft',
+            lastName: 'AuditCaller',
+            practiceAreaId: baseMatter.practiceAreaId,
+            summary: 'Draft enquiry conflict audit test',
+            urgencyId: templateEnq.urgencyId,
+          },
+          { byId: 'P-000002', asDraft: true },
+        ).enquiry!;
+        const draftQuickAudit = store.audit.find(
+          (a) =>
+            a.recordType === 'enquiry' &&
+            a.recordId === draftCheckEnq.id &&
+            a.field === 'Quick conflict check recorded',
+        );
+        expect(draftQuickAudit).toBeDefined();
+        expect(draftQuickAudit?.action).toBe('conflict-decision');
+
+        // R256, R257 & R290: saveEnquiryRecord stores a redacted restricted hit in conflictSnapshot with a tenant-salted SHA-256 recordId
+        expect(blockedEnq.conflictSnapshot).toBeDefined();
+        const redactedSnapshotHit = blockedEnq.conflictSnapshot!.conflicts.find(
+          (h) => h.name === 'Restricted matter',
+        );
+        expect(redactedSnapshotHit).toBeDefined();
+        expect(redactedSnapshotHit!.recordId).toMatch(/^restricted-[0-9a-f]{16}$/);
+        const expectedSha256Prefix = crypto
+          .createHash('sha256')
+          .update(`not-a-law-firm:${restrictedMatter.id}`)
+          .digest('hex')
+          .slice(0, 16);
+        expect(redactRecordId('not-a-law-firm', restrictedMatter.id)).toBe(expectedSha256Prefix);
+        expect(redactedSnapshotHit!.recordId).toBe(`restricted-${expectedSha256Prefix}`);
+        expect(redactRecordId('not-a-law-firm', restrictedMatter.id)).not.toBe(
+          redactRecordId('pembroke-vaughan', restrictedMatter.id),
+        );
+        const searchTenantA = runEnquiryConflictSearch(
+          { callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd' },
+          store.people,
+          store.organisations,
+          store.matters,
+          store.values,
+          [],
+          null,
+          store.links,
+          () => false,
+          'not-a-law-firm',
+        );
+        const searchTenantB = runEnquiryConflictSearch(
+          { callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd' },
+          store.people,
+          store.organisations,
+          store.matters,
+          store.values,
+          [],
+          null,
+          store.links,
+          () => false,
+          'pembroke-vaughan',
+        );
+        expect(searchTenantA.allConflicts[0]?.recordId).toMatch(/^restricted-[0-9a-f]{16}$/);
+        expect(searchTenantB.allConflicts[0]?.recordId).toMatch(/^restricted-[0-9a-f]{16}$/);
+        expect(searchTenantA.allConflicts[0]?.recordId).not.toBe(
+          searchTenantB.allConflicts[0]?.recordId,
+        );
+        // R304: detectPreliminaryConflicts forwards tenantId so client and server hashes match
+        const prelimTenantA = detectPreliminaryConflicts(
+          { callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd' },
+          store.people,
+          store.organisations,
+          store.matters,
+          store.values,
+          [],
+          null,
+          store.links,
+          () => false,
+          'not-a-law-firm',
+        );
+        expect(prelimTenantA[0]?.recordId).toBe(searchTenantA.allConflicts[0]?.recordId);
+        expect(redactedSnapshotHit!.recordId).not.toContain(restrictedMatter.id);
+        expect(JSON.stringify(blockedEnq.conflictSnapshot)).not.toContain(restrictedMatter.id);
+        expect(JSON.stringify(blockedEnq.conflictSnapshot)).not.toContain(
+          restrictedMatter.matterNumber,
+        );
+        expect(JSON.stringify(blockedEnq.conflictSnapshot)).not.toContain(
+          'Ultra Secret Restricted Acquisition',
+        );
+
+        // Fee earner P-000002 cannot view restrictedMatter
+        const convDenied = prepareEnquiryConversion(blockedEnq.id, {}, 'P-000002');
+        expect(convDenied.ok).toBe(false);
+        expect(convDenied.conflictBlocked).toBe(true);
+        const combinedReasons = (convDenied.conflictReasons ?? []).join(' | ');
+        expect(combinedReasons).toContain('a restricted matter');
+        expect(combinedReasons).not.toContain(restrictedMatter.matterNumber);
+        expect(combinedReasons).not.toContain('Ultra Secret Restricted Acquisition');
       } finally {
         resetAllDemoData('P-000001');
       }

@@ -421,6 +421,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.organisations,
       store.matters,
       store.values,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(liveConflicts.length).toBeGreaterThan(0);
     expect(liveConflicts.some((h) => h.severity === 'high' && h.blocking)).toBe(true);
@@ -438,7 +443,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.organisations,
       store.matters,
       store.values,
-      { recordedAt: '2026-10-18T16:40:00.000Z', recordedById: 'P-000018' },
+      {
+        recordedAt: '2026-10-18T16:40:00.000Z',
+        recordedById: 'P-000018',
+        tenantId: 'not-a-law-firm',
+      },
     );
     expect(updatedSnapshot.conflictStatus).toBe('Possible conflict');
   });
@@ -543,6 +552,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.organisations,
       store.matters,
       store.values,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
 
     const hit = check.clientAgainstPartyMatches.find((h) => h.recordId === 'P-000026');
@@ -741,6 +755,10 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.matters,
       store.values,
       store.enquiries,
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(
       conflictWhenCallerIsEnqOtherParty.some((h) => h.recordId === savedEnq.id),
@@ -758,6 +776,10 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.matters,
       store.values,
       store.enquiries,
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(
       conflictWhenOtherPartyIsEnqCaller.some((h) => h.recordId === savedEnq.id),

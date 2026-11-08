@@ -8,7 +8,19 @@ import type {
   MatterParty,
   Organisation,
   Person,
+  PersonOrganisationLink,
 } from './types';
+
+export const CONFLICT_SEARCHED_SOURCES = [
+  'matter clients',
+  'additional clients',
+  'parties',
+  'instructing contacts',
+  'billing contacts',
+  'person–organisation links',
+  'enquiries',
+  'directory',
+] as const;
 
 export interface MatterConflictSearchInput {
   currentMatterId?: string | null;
@@ -26,17 +38,97 @@ export interface MatterConflictSearchDeps {
   enquiries: Enquiry[];
   people: Person[];
   organisations: Organisation[];
+  links?: PersonOrganisationLink[];
+  tenantId: string;
   canView: (matter: Matter) => boolean;
   canViewEnquiry: (enquiry: Enquiry) => boolean;
 }
 
-function redactMatchKeyHash(input: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+/**
+ * Returns the first 16 lowercase hex characters of SHA-256 over `${tenantId}:${recordId}`.
+ * Uses standard FIPS 180-4 SHA-256 so it produces identical results to `node:crypto`
+ * `createHash('sha256')` while remaining safe for client-bundled domain modules (R290).
+ */
+export function redactRecordId(tenantId: string, recordId: string): string {
+  const bytes = new TextEncoder().encode(`${tenantId}:${recordId}`);
+  const bitLen = bytes.length * 8;
+  const totalLen = (((bytes.length + 8) >> 6) + 1) << 6;
+  const padded = new Uint8Array(totalLen);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(totalLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(totalLen - 4, bitLen >>> 0, false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+  const w = new Uint32Array(64);
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+
+  for (let offset = 0; offset < totalLen; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15]!, 7) ^ rotr(w[i - 15]!, 18) ^ (w[i - 15]! >>> 3);
+      const s1 = rotr(w[i - 2]!, 17) ^ rotr(w[i - 2]!, 19) ^ (w[i - 2]! >>> 10);
+      w[i] = (w[i - 16]! + s0 + w[i - 7]! + s1) >>> 0;
+    }
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_K[i]! + w[i]!) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
   }
-  return hash.toString(16).padStart(8, '0');
+
+  return (
+    (h0 >>> 0).toString(16).padStart(8, '0') +
+    (h1 >>> 0).toString(16).padStart(8, '0')
+  );
 }
 
 function namesMatch(aLower: string, bLower: string): boolean {
@@ -53,6 +145,7 @@ export function buildEffectiveConflictParties(params: {
   clientId?: string | null;
   additionalClientIds?: string[];
   instructingContactId?: string | null;
+  billingContactId?: string | null;
   matterParties?: MatterParty[];
   people: Person[];
   organisations: Organisation[];
@@ -107,6 +200,20 @@ export function buildEffectiveConflictParties(params: {
     }
   }
 
+  if (params.billingContactId) {
+    const info = resolveRecordNameAndType(params.billingContactId);
+    if (info && !hasPartyForRecord(params.billingContactId, info.name.trim().toLowerCase())) {
+      result.push({
+        id: 'cp-billing-1',
+        name: info.name,
+        entityType: 'person',
+        role: 'Client contact',
+        linkedRecordId: params.billingContactId,
+        isClientFixed: true,
+      });
+    }
+  }
+
   for (const mp of params.matterParties ?? []) {
     const nameLower = mp.name.trim().toLowerCase();
     if (!nameLower && !mp.linkedRecordId) continue;
@@ -127,7 +234,8 @@ export function buildEffectiveConflictParties(params: {
 }
 
 /**
- * Pure server-side conflict search across all tenant matters, enquiries, people, and organisations.
+ * Pure server-side conflict search across all tenant matters, enquiries, people, organisations,
+ * and person–organisation links.
  * When a match occurs on a matter that fails `deps.canView(m)`, returns a redacted match with
  * `restricted: true` and no matter number, client name, or partner name.
  */
@@ -200,6 +308,25 @@ export function searchMatterConflicts(
     generated.push(applyPreviousDecision(match, prev));
   };
 
+  const personById = new Map<string, Person>();
+  for (const p of deps.people) {
+    personById.set(p.id, p);
+  }
+  const orgById = new Map<string, Organisation>();
+  for (const o of deps.organisations) {
+    orgById.set(o.id, o);
+  }
+
+  const resolveRecord = (
+    id: string,
+  ): { id: string; name: string; type: 'person' | 'organisation' } | null => {
+    const org = orgById.get(id);
+    if (org) return { id: org.id, name: org.legalName, type: 'organisation' };
+    const person = personById.get(id);
+    if (person) return { id: person.id, name: personDisplayName(person), type: 'person' };
+    return null;
+  };
+
   for (const party of input.parties) {
     const lower = party.name.trim().toLowerCase();
     if (!lower && !party.linkedRecordId) continue;
@@ -219,8 +346,8 @@ export function searchMatterConflicts(
       } | null = null;
 
       for (const cid of allMatterClientIds) {
-        const cOrg = deps.organisations.find((o) => o.id === cid);
-        const cPerson = deps.people.find((p) => p.id === cid);
+        const cOrg = orgById.get(cid);
+        const cPerson = personById.get(cid);
         const cName = cOrg?.legalName || (cPerson ? personDisplayName(cPerson) : '');
         const cLower = cName.toLowerCase();
         const linkedMatch = Boolean(party.linkedRecordId && party.linkedRecordId === cid);
@@ -244,8 +371,45 @@ export function searchMatterConflicts(
         return linkedMatch || namesMatch(mpLower, lower);
       });
 
+      const matchingMatterContacts: Array<{
+        id: string;
+        name: string;
+        type: 'person' | 'organisation';
+        exact: boolean;
+        key: 'instructing' | 'billing';
+        label: 'Instructing contact' | 'Billing contact';
+      }> = [];
+      const contactSlots: Array<{
+        id: string | null | undefined;
+        key: 'instructing' | 'billing';
+        label: 'Instructing contact' | 'Billing contact';
+      }> = [
+        { id: m.instructingContactId, key: 'instructing', label: 'Instructing contact' },
+        { id: m.billingContactId, key: 'billing', label: 'Billing contact' },
+      ];
+      for (const slot of contactSlots) {
+        if (!slot.id) continue;
+        const resolved = resolveRecord(slot.id);
+        const cName = resolved?.name ?? '';
+        const cLower = cName.toLowerCase();
+        const linkedMatch = Boolean(party.linkedRecordId && party.linkedRecordId === slot.id);
+        const nameMatch = namesMatch(cLower, lower);
+        if (linkedMatch || nameMatch) {
+          matchingMatterContacts.push({
+            id: slot.id,
+            name: cName || slot.id,
+            type: resolved?.type ?? 'person',
+            exact: linkedMatch || (Boolean(cLower) && cLower === lower),
+            key: slot.key,
+            label: slot.label,
+          });
+        }
+      }
+
       const hasAnyMatchOnMatter =
-        matchedClientRecord !== null || matchingMatterParties.length > 0;
+        matchedClientRecord !== null ||
+        matchingMatterParties.length > 0 ||
+        matchingMatterContacts.length > 0;
       if (!hasAnyMatchOnMatter) continue;
 
       const isVisible = deps.canView(m);
@@ -257,8 +421,9 @@ export function searchMatterConflicts(
             (mp) =>
               (party.linkedRecordId && mp.linkedRecordId === party.linkedRecordId) ||
               mp.name.trim().toLowerCase() === lower,
-          );
-        const redactedId = `match-restricted-${party.id}-${redactMatchKeyHash(`${party.id}:${m.id}`)}`;
+          ) ||
+          matchingMatterContacts.some((mc) => mc.exact);
+        const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${m.id}`)}`;
         const fallbackKey = `${lower}__match on a restricted matter__restricted matter: refer to risk`;
         pushMatch(
           {
@@ -285,7 +450,9 @@ export function searchMatterConflicts(
         continue;
       }
 
-      const respPartner = deps.people.find((p) => p.id === m.responsiblePartnerId);
+      const respPartner = m.responsiblePartnerId
+        ? personById.get(m.responsiblePartnerId)
+        : undefined;
       const respPartnerName = respPartner ? personDisplayName(respPartner) : '';
       const dateLabel = formatDate(m.openedAt || m.createdAt) || '';
 
@@ -361,6 +528,216 @@ export function searchMatterConflicts(
           fallbackKey,
         );
       }
+
+      const sameClientOnInput = allMatterClientIds.some((cid) =>
+        input.parties.some(
+          (ip) =>
+            ip.isClientFixed &&
+            (ip.role === 'Client' || ip.role === 'Joint client') &&
+            ip.linkedRecordId === cid,
+        ),
+      );
+      for (const mc of matchingMatterContacts) {
+        if (
+          party.isClientFixed &&
+          party.role === 'Client contact' &&
+          sameClientOnInput &&
+          party.linkedRecordId === mc.id
+        ) {
+          continue;
+        }
+        const matchId = `match-${party.id}-${m.id}-${mc.key}`;
+        const whereFound = `${mc.label} on ${m.matterNumber} (${m.title})`;
+        const fallbackKey = `${lower}__${mc.name.toLowerCase()}__${whereFound.toLowerCase()}`;
+        pushMatch(
+          {
+            id: matchId,
+            partyId: party.id,
+            partyName: party.name,
+            matchedRecordId: mc.id,
+            matchedRecordName: mc.name,
+            matchedRecordType: mc.type,
+            strength: mc.exact ? 'Exact' : 'Close',
+            whereFound,
+            matterId: m.id,
+            matterNumber: m.matterNumber,
+            responsiblePartnerId: m.responsiblePartnerId || null,
+            responsiblePartnerName: respPartnerName,
+            dateLabel,
+            matchedOn: mc.exact
+              ? `Exact ${mc.label.toLowerCase()} name on matter`
+              : `Similar ${mc.label.toLowerCase()} name on matter`,
+            disposition: null,
+            note: '',
+          },
+          fallbackKey,
+        );
+      }
+    }
+
+    // 1b. Check person–organisation links (B7, R259: pre-indexed maps)
+    for (const link of deps.links ?? []) {
+      if (link.isCurrent === false) continue;
+      const linkPerson = personById.get(link.personId);
+      if (!linkPerson || linkPerson.mergedIntoId || linkPerson.demo) continue;
+      const linkOrg = orgById.get(link.organisationId);
+      if (!linkOrg || linkOrg.mergedIntoId) continue;
+
+      const pName = personDisplayName(linkPerson);
+      const pLower = pName.toLowerCase();
+      const oName = linkOrg.legalName;
+      const oLower = oName.toLowerCase();
+
+      const personMatched =
+        Boolean(party.linkedRecordId && party.linkedRecordId === linkPerson.id) ||
+        namesMatch(pLower, lower);
+      const orgMatched =
+        !personMatched &&
+        (Boolean(party.linkedRecordId && party.linkedRecordId === linkOrg.id) ||
+          namesMatch(oLower, lower));
+      if (!personMatched && !orgMatched) continue;
+
+      const bothFixedInInput =
+        input.parties.some((ip) => ip.isClientFixed && ip.linkedRecordId === linkPerson.id) &&
+        input.parties.some((ip) => ip.isClientFixed && ip.linkedRecordId === linkOrg.id);
+
+      const counterpartId = personMatched ? linkOrg.id : linkPerson.id;
+      const counterpartName = personMatched ? oName : pName;
+      const counterpartLower = counterpartName.toLowerCase();
+      const counterpartType: 'person' | 'organisation' = personMatched
+        ? 'organisation'
+        : 'person';
+      const isExact = personMatched
+        ? Boolean(party.linkedRecordId && party.linkedRecordId === linkPerson.id) ||
+          pLower === lower
+        : Boolean(party.linkedRecordId && party.linkedRecordId === linkOrg.id) ||
+          oLower === lower;
+
+      for (const m of deps.matters) {
+        if (input.currentMatterId && m.id === input.currentMatterId) continue;
+        const allMatterClientIds = [m.clientId, ...(m.additionalClientIds ?? [])].filter(Boolean);
+        const counterpartOnMatter =
+          allMatterClientIds.includes(counterpartId) ||
+          m.instructingContactId === counterpartId ||
+          m.billingContactId === counterpartId ||
+          m.parties.some(
+            (mp) =>
+              mp.linkedRecordId === counterpartId ||
+              namesMatch(mp.name.trim().toLowerCase(), counterpartLower),
+          );
+        if (!counterpartOnMatter) continue;
+
+        if (!deps.canView(m)) {
+          const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${m.id}`)}`;
+          const fallbackKey = `${lower}__match on a restricted matter__restricted matter: refer to risk`;
+          pushMatch(
+            {
+              id: redactedId,
+              partyId: party.id,
+              partyName: party.name,
+              matchedRecordId: '',
+              matchedRecordName: 'Match on a restricted matter',
+              matchedRecordType: 'matter',
+              strength: isExact ? 'Exact' : 'Close',
+              whereFound: 'Restricted matter: refer to Risk',
+              matterId: null,
+              matterNumber: null,
+              responsiblePartnerId: null,
+              responsiblePartnerName: '',
+              dateLabel: '',
+              matchedOn: 'Restricted matter: refer to Risk',
+              restricted: true,
+              disposition: 'potential_conflict',
+              note: 'Match on a restricted matter — must be referred to Risk & Compliance.',
+            },
+            fallbackKey,
+          );
+          continue;
+        }
+
+        const sameClientOnMatter =
+          (bothFixedInInput && allMatterClientIds.includes(linkOrg.id)) ||
+          Boolean(
+            party.isClientFixed &&
+              (party.role === 'Client' || party.role === 'Joint client') &&
+              party.linkedRecordId &&
+              allMatterClientIds.includes(party.linkedRecordId) &&
+              (m.instructingContactId === counterpartId ||
+                m.billingContactId === counterpartId),
+          );
+        if (sameClientOnMatter) continue;
+
+        const respPartner = m.responsiblePartnerId
+          ? personById.get(m.responsiblePartnerId)
+          : undefined;
+        const respPartnerName = respPartner ? personDisplayName(respPartner) : '';
+        const dateLabel = formatDate(m.openedAt || m.createdAt) || '';
+        const matchId = `match-${party.id}-link-${link.id}-${m.id}`;
+        const whereFound = `Linked ${counterpartType} (${counterpartName}) on ${m.matterNumber} (${m.title})`;
+        const fallbackKey = `${lower}__${counterpartLower}__${whereFound.toLowerCase()}`;
+        pushMatch(
+          {
+            id: matchId,
+            partyId: party.id,
+            partyName: party.name,
+            matchedRecordId: counterpartId,
+            matchedRecordName: counterpartName,
+            matchedRecordType: counterpartType,
+            strength: isExact ? 'Exact' : 'Close',
+            whereFound,
+            matterId: m.id,
+            matterNumber: m.matterNumber,
+            responsiblePartnerId: m.responsiblePartnerId || null,
+            responsiblePartnerName: respPartnerName,
+            dateLabel,
+            matchedOn: 'Person–organisation link on matter',
+            disposition: null,
+            note: '',
+          },
+          fallbackKey,
+        );
+      }
+
+      if (!bothFixedInInput) {
+        const ownerCandidateId = personMatched
+          ? linkOrg.relationshipPartnerId || linkOrg.recordOwnerId
+          : linkPerson.relationshipOwnerId || linkPerson.recordOwnerId;
+        const ownerPerson = ownerCandidateId ? personById.get(ownerCandidateId) : undefined;
+        const ownerName = ownerPerson ? personDisplayName(ownerPerson) : '';
+        const ownerId =
+          ownerPerson?.id ??
+          (personMatched
+            ? linkOrg.relationshipPartnerId ?? linkOrg.recordOwnerId
+            : linkPerson.relationshipOwnerId ?? linkPerson.recordOwnerId) ??
+          null;
+        const dateLabel = formatDate(link.startDate || linkOrg.createdAt) || '';
+        const matchId = `match-${party.id}-link-${link.id}`;
+        const whereFound = personMatched
+          ? `Linked to ${oName} (${link.roleWithinOrganisation || 'Contact link'})`
+          : `Linked person ${pName} at ${oName}`;
+        const fallbackKey = `${lower}__${counterpartLower}__${whereFound.toLowerCase()}`;
+        pushMatch(
+          {
+            id: matchId,
+            partyId: party.id,
+            partyName: party.name,
+            matchedRecordId: counterpartId,
+            matchedRecordName: counterpartName,
+            matchedRecordType: counterpartType,
+            strength: isExact ? 'Exact' : 'Close',
+            whereFound,
+            matterId: null,
+            matterNumber: null,
+            responsiblePartnerId: ownerId,
+            responsiblePartnerName: ownerName,
+            dateLabel,
+            matchedOn: 'Person–organisation link',
+            disposition: null,
+            note: '',
+          },
+          fallbackKey,
+        );
+      }
     }
 
     // 2. Check enquiries
@@ -386,7 +763,7 @@ export function searchMatterConflicts(
         if (matchedOther) {
           const isExact = matchedOther.toLowerCase() === lower;
           if (!deps.canViewEnquiry(enq)) {
-            const redactedId = `match-restricted-enq-${party.id}-${redactMatchKeyHash(`${party.id}:${enq.id}`)}`;
+            const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${enq.id}`)}`;
             const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
             pushMatch(
               {
@@ -479,7 +856,7 @@ export function searchMatterConflicts(
           (callerMatched && callerLower === lower) ||
           (behalfMatched && behalfLower === lower) ||
           (matchedOther !== undefined && matchedOther.toLowerCase() === lower);
-        const redactedId = `match-restricted-enq-${party.id}-${redactMatchKeyHash(`${party.id}:${enq.id}`)}`;
+        const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${enq.id}`)}`;
         const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
         pushMatch(
           {
@@ -828,4 +1205,39 @@ export function hasUnapprovedRestrictedMatches(
   return matches.some((m) => m.restricted && !approved.has(m.id));
 }
 
+/**
+ * Normalises a list of non-blocking conflict warnings returned by `prepareEnquiryConversion`
+ * or `prepareQuoteConversionRecord`, stripping blanks and duplicates.
+ */
+export function normaliseConversionConflictWarnings(
+  conflictWarnings: readonly string[] | string | undefined | null,
+): string[] {
+  if (!conflictWarnings) return [];
+  const rawList = Array.isArray(conflictWarnings)
+    ? conflictWarnings
+    : [conflictWarnings];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of rawList) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Turns non-blocking conversion `conflictWarnings` into a single plain-English notice string
+ * for toast notifications and the new-matter conversion warning banner (R311).
+ * Returns `null` when there are no warnings.
+ */
+export function formatConversionConflictWarningsNotice(
+  conflictWarnings: readonly string[] | string | undefined | null,
+): string | null {
+  const warnings = normaliseConversionConflictWarnings(conflictWarnings);
+  if (warnings.length === 0) return null;
+  return `Conflict warning: ${warnings.join(' · ')}`;
+}
 

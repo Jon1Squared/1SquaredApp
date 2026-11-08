@@ -53,6 +53,10 @@ import {
 } from '@/domain/employment';
 import { resolveLabel } from '@/domain/lists';
 import {
+  formatConversionConflictWarningsNotice,
+  normaliseConversionConflictWarnings,
+} from '@/domain/matterConflicts';
+import {
   buildDefaultMatterPartyTaxonomy,
   CAPACITY_GROUPS,
   formatPartyRoleDisplay,
@@ -151,6 +155,7 @@ interface MatterFormClientProps {
   initialEnquiry?: Enquiry | null;
   initialQuote?: Quote | null;
   initialInstructingContactId?: string | null;
+  initialConflictWarnings?: string[];
   activeViewingRole?: string;
   people: Person[];
   organisations: Organisation[];
@@ -174,6 +179,7 @@ interface MatterFormClientProps {
   };
   enableAiMatterExtraction?: boolean;
   aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
+  tenantId: string;
 }
 
 type OptionalTabKey =
@@ -259,6 +265,7 @@ export function MatterFormClient({
   initialEnquiry,
   initialQuote,
   initialInstructingContactId,
+  initialConflictWarnings,
   activeViewingRole = 'fee_earner',
   people: initialPeople,
   organisations: initialOrganisations,
@@ -279,12 +286,21 @@ export function MatterFormClient({
   suggestedMatterGovernanceAssignees,
   enableAiMatterExtraction = false,
   aiProviderChoice = 'disabled',
+  tenantId,
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
   const today = toIsoDate(new Date());
 
   const costsConfig = matterCostsConfig;
+  const conversionConflictWarnings = useMemo(
+    () => normaliseConversionConflictWarnings(initialConflictWarnings),
+    [initialConflictWarnings],
+  );
+  const conversionConflictWarningNotice = useMemo(
+    () => formatConversionConflictWarningsNotice(conversionConflictWarnings),
+    [conversionConflictWarnings],
+  );
 
   const taxonomy = useMemo(
     () => matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(values),
@@ -5343,6 +5359,20 @@ export function MatterFormClient({
               >
                 View enquiry ↗
               </Link>
+            </div>
+          ) : null}
+
+          {conversionConflictWarningNotice ? (
+            <div
+              className="conflict-banner conflict-banner--amber"
+              role="status"
+              data-testid="conversion-conflict-warning-banner"
+              style={{ marginBottom: 0 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <AlertTriangle size={16} style={{ flexShrink: 0 }} />
+                <span>{conversionConflictWarningNotice}</span>
+              </div>
             </div>
           ) : null}
 
@@ -12117,6 +12147,7 @@ export function MatterFormClient({
                   values={values}
                   customFields={customFields}
                   currentUserId={currentUser.id}
+                  tenantId={tenantId}
                   orgStructure={orgStructure}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingPerson={(existingPerson) => {
@@ -12195,6 +12226,7 @@ export function MatterFormClient({
                   values={values}
                   customFields={customFields}
                   currentUserId={currentUser.id}
+                  tenantId={tenantId}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingOrganisation={(existingOrg) => {
                     handleAddClientsToMatter(
@@ -12594,6 +12626,7 @@ export function MatterFormClient({
                       values={values}
                       customFields={customFields}
                       currentUserId={currentUser.id}
+                      tenantId={tenantId}
                       orgStructure={orgStructure}
                       onCancelModal={resetAddPartyForm}
                       onSelectExistingPerson={(existingPerson) => {
@@ -12699,6 +12732,7 @@ export function MatterFormClient({
                     values={values}
                     customFields={customFields}
                     currentUserId={currentUser.id}
+                    tenantId={tenantId}
                     onCancelModal={resetAddPartyForm}
                     onSelectExistingOrganisation={(existingOrg) => {
                       addOrgRecordToMatter(

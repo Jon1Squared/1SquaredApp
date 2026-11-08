@@ -44,7 +44,11 @@ import {
   migrateEmployeesToEmploymentRecords,
 } from '../../src/domain/employment';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
-import { reconcileServerConflictMatches } from '../../src/domain/matterConflicts';
+import {
+  reconcileServerConflictMatches,
+  searchMatterConflicts,
+} from '../../src/domain/matterConflicts';
+import { runEnquiryConflictSearch } from '../../src/domain/enquiries';
 import {
   conflictStatusPillFromLegacy,
   legacyConflictStatusFromRecord,
@@ -106,12 +110,15 @@ import {
   logQuoteFollowUpAction,
   markQuoteSentAction,
   mergeRecordsAction,
+  prepareEnquiryConversionAction,
+  prepareQuoteConversionAction,
   reassignLeaverOwnedRecordsAction,
   recordQuoteOutcomeAction,
   reorderChoiceValueAction,
   reorderCustomFieldAction,
   reopenEnquiryAction,
   reviseQuoteAction,
+  runMatterConflictSearchAction,
   saveCustomFieldAction,
   saveEnquiryAction,
   saveLinkAction,
@@ -7329,6 +7336,353 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         )?.legalName,
       ).toBe('Pembroke Vaughan Holdings Ltd');
       expect(cluster.getRecordById(ctxA, tamperedIds.org)).toBeNull();
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('S0-07: rejects forged tenant claims and tampered IDs on conflict search and conversion actions (with positive Tenant A controls and data-layer cluster checks)', async () => {
+    try {
+      resetAllDemoData('P-000001');
+      const store = getStore();
+      const ctxA = resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-s007-a',
+      });
+      const ctxB = resolveTenantFromVerifiedToken({
+        verifiedToken: tenantBToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-s007-b',
+      });
+      expect(ctxA.tenantId).toBe('not-a-law-firm');
+      expect(ctxB.tenantId).toBe('fictional-chambers-uk');
+
+      // 1. Forged tenant claim: session whose tenant claim ('pembroke-vaughan') differs from the active tenant ('not-a-law-firm')
+      const forgedTenantBSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'pembroke-vaughan',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '99999999-8888-7777-6666-555555555555',
+          sub: 'P-000001',
+          email: 'rhian.morgan@pembroke.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(forgedTenantBSession);
+      await expect(
+        runMatterConflictSearchAction({
+          currentMatterId: store.matters[0]!.id,
+          parties: [
+            {
+              id: 'cp-forged-1',
+              name: 'Forged Claim Party',
+              entityType: 'organisation',
+              role: 'Client',
+              linkedRecordId: null,
+            },
+          ],
+        }),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+      await expect(
+        prepareEnquiryConversionAction(store.enquiries[0]!.id, {}),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+      await expect(
+        prepareQuoteConversionAction(store.quotes[0]!.id),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+
+      // 2. Tampered IDs under a valid Tenant A session fail closed with explicit "not found" errors and create nothing
+      const validTenantASession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'P-000001',
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(validTenantASession);
+      const peopleBefore = store.people.length;
+      const orgsBefore = store.organisations.length;
+      const tamperedEnqConv = await prepareEnquiryConversionAction('ENQ-TENANT-B-501', {});
+      expect(tamperedEnqConv.ok).toBe(false);
+      expect(tamperedEnqConv.conflictReasons).toEqual(['Enquiry not found.']);
+      const tamperedQuoteConv = await prepareQuoteConversionAction('Q-TENANT-B-501');
+      expect(tamperedQuoteConv.ok).toBe(false);
+      expect(tamperedQuoteConv.error).toBe('Quote not found.');
+      expect(store.people.length).toBe(peopleBefore);
+      expect(store.organisations.length).toBe(orgsBefore);
+
+      // 3. Positive controls: the same actions succeed with Tenant A's valid session and valid Tenant A records
+      const tenantAClientOrg = store.organisations.find(
+        (o) => o.id === store.matters[0]!.clientId,
+      )!;
+      const posSearchRes = await runMatterConflictSearchAction({
+        currentMatterId: null,
+        parties: [
+          {
+            id: 'cp-pos-1',
+            name: tenantAClientOrg.legalName,
+            entityType: 'organisation',
+            role: 'Opponent',
+            linkedRecordId: tenantAClientOrg.id,
+          },
+        ],
+      });
+      expect(posSearchRes.errors).toBeUndefined();
+      expect(posSearchRes.matches.some((m) => m.matterId === store.matters[0]!.id)).toBe(true);
+
+      const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
+      const cleanTenantAEnqRes = await saveEnquiryAction(
+        {
+          channelId: templateEnq.channelId,
+          firstName: 'Carys',
+          lastName: 'PositiveEnqControl',
+          callingOnBehalfOf: 'Brecon Positive Control Holdings Ltd',
+          email: 'carys@brecon-pos.example',
+          phone: '029 2018 0444',
+          preferredContactMethodId: templateEnq.preferredContactMethodId,
+          sourceId: templateEnq.sourceId,
+          practiceAreaId: store.matters[0]!.practiceAreaId,
+          summary: 'Positive control Tenant A enquiry conversion',
+          notes: 'Notes for positive control conversion.',
+          otherPartiesNamed: 'None',
+          urgencyId: templateEnq.urgencyId,
+          privacyNoticeGiven: true,
+        },
+        { asDraft: false },
+      );
+      expect(isActionDenied(cleanTenantAEnqRes)).toBe(false);
+      const cleanTenantAEnq = (cleanTenantAEnqRes as { enquiry?: { id: string } }).enquiry!;
+      const posEnqConv = await prepareEnquiryConversionAction(cleanTenantAEnq.id, {
+        createForBusiness: true,
+      });
+      expect(posEnqConv.ok).toBe(true);
+      expect(posEnqConv.clientId).toBeTruthy();
+
+      const cleanTenantAQuoteRes = await saveQuoteAction({
+        clientType: 'prospect',
+        prospectName: 'Gareth PositiveQuoteControl',
+        prospectOrganisationName: 'Taff Positive Quote Control Ltd',
+        practiceAreaId: store.matters[0]!.practiceAreaId,
+        scope: 'Positive control Tenant A quote conversion',
+        feeBasis: 'Fixed fee',
+        feeAmountExVat: 1750,
+      });
+      expect(isActionDenied(cleanTenantAQuoteRes)).toBe(false);
+      const cleanTenantAQuote = (cleanTenantAQuoteRes as { quote?: { id: string } }).quote!;
+      const posQuoteConv = await prepareQuoteConversionAction(cleanTenantAQuote.id);
+      expect(posQuoteConv.ok).toBe(true);
+      expect(posQuoteConv.clientId).toBeTruthy();
+
+      // 4. Domain and data-layer cluster checks (testing domain conflict helpers on separate stores and PostgresTenantCluster, not single-tenant store actions)
+      const tenantBStore = createSeedStore();
+      const cluster = new PostgresTenantCluster();
+      const tenantBPerson = {
+        ...tenantBStore.people[0]!,
+        id: 'P-TENANT-B-501',
+        firstName: 'Owain',
+        surname: 'PembrokeSecretContact',
+        isEmployee: false,
+      };
+      const tenantBOrg = {
+        ...tenantBStore.organisations[0]!,
+        id: 'O-TENANT-B-501',
+        legalName: 'Pembroke Vaughan Secret Client Holdings Ltd',
+      };
+      const tenantBLink = {
+        ...tenantBStore.links[0]!,
+        id: 'L-TENANT-B-501',
+        personId: tenantBPerson.id,
+        organisationId: tenantBOrg.id,
+        isCurrent: true,
+      };
+      const tenantBMatter = {
+        ...tenantBStore.matters[0]!,
+        id: 'M-TENANT-B-501',
+        matterNumber: 'PV-999999',
+        title: 'Pembroke Secret Matter',
+        clientId: tenantBOrg.id,
+        additionalClientIds: [tenantBPerson.id],
+        instructingContactId: tenantBPerson.id,
+        billingContactId: tenantBPerson.id,
+        parties: [
+          {
+            id: 'MP-TB-1',
+            name: tenantBOrg.legalName,
+            entityType: 'organisation' as const,
+            role: 'Opponent',
+            linkedRecordId: tenantBOrg.id,
+          },
+        ],
+      };
+      const tenantBEnquiry = {
+        ...tenantBStore.enquiries[0]!,
+        id: 'ENQ-TENANT-B-501',
+        firstName: tenantBPerson.firstName,
+        lastName: tenantBPerson.surname,
+        callingOnBehalfOf: tenantBOrg.legalName,
+      };
+      const tenantBQuote = {
+        ...tenantBStore.quotes[0]!,
+        id: 'Q-TENANT-B-501',
+        prospectName: `${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+        prospectOrganisationName: tenantBOrg.legalName,
+      };
+
+      tenantBStore.people.push(tenantBPerson);
+      tenantBStore.organisations.push(tenantBOrg);
+      tenantBStore.links.push(tenantBLink);
+      tenantBStore.matters.push(tenantBMatter);
+      tenantBStore.enquiries.push(tenantBEnquiry);
+      tenantBStore.quotes.push(tenantBQuote);
+
+      cluster.putRecord(ctxB, { ...tenantBPerson, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBOrg, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBLink, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBMatter, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBEnquiry, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBQuote, tenantId: ctxB.tenantId });
+
+      const matterSearchB = searchMatterConflicts(
+        {
+          currentMatterId: null,
+          parties: [
+            {
+              id: 'cp-tb-1',
+              name: tenantBOrg.legalName,
+              entityType: 'organisation',
+              role: 'Opponent',
+              linkedRecordId: tenantBOrg.id,
+            },
+            {
+              id: 'cp-tb-2',
+              name: `${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+              entityType: 'person',
+              role: 'Opponent',
+              linkedRecordId: tenantBPerson.id,
+            },
+          ],
+          canReviewConditions: true,
+        },
+        {
+          matters: tenantBStore.matters,
+          enquiries: tenantBStore.enquiries,
+          people: tenantBStore.people,
+          organisations: tenantBStore.organisations,
+          links: tenantBStore.links,
+          tenantId: ctxB.tenantId,
+          canView: () => true,
+          canViewEnquiry: () => true,
+        },
+      );
+      expect(matterSearchB.some((m) => m.matterId === tenantBMatter.id)).toBe(true);
+
+      const enqSearchB = runEnquiryConflictSearch(
+        {
+          firstName: tenantBPerson.firstName,
+          lastName: tenantBPerson.surname,
+          callingOnBehalfOf: tenantBOrg.legalName,
+          otherPartiesNamed: `${tenantBOrg.legalName}, ${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+        },
+        tenantBStore.people,
+        tenantBStore.organisations,
+        tenantBStore.matters,
+        tenantBStore.values,
+        tenantBStore.enquiries,
+        tenantBEnquiry.id,
+        tenantBStore.links,
+        () => true,
+        ctxB.tenantId,
+      );
+      expect(enqSearchB.allConflicts.length).toBeGreaterThan(0);
+
+      const matterSearchA = searchMatterConflicts(
+        {
+          currentMatterId: null,
+          parties: [
+            {
+              id: 'cp-tb-1',
+              name: tenantBOrg.legalName,
+              entityType: 'organisation',
+              role: 'Opponent',
+              linkedRecordId: tenantBOrg.id,
+            },
+            {
+              id: 'cp-tb-2',
+              name: `${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+              entityType: 'person',
+              role: 'Opponent',
+              linkedRecordId: tenantBPerson.id,
+            },
+          ],
+          canReviewConditions: true,
+        },
+        {
+          matters: store.matters,
+          enquiries: store.enquiries,
+          people: store.people,
+          organisations: store.organisations,
+          links: store.links,
+          tenantId: ctxA.tenantId,
+          canView: () => true,
+          canViewEnquiry: () => true,
+        },
+      );
+      expect(matterSearchA).toEqual([]);
+      expect(JSON.stringify(matterSearchA)).not.toContain(tenantBMatter.matterNumber);
+
+      const enqSearchA = runEnquiryConflictSearch(
+        {
+          firstName: tenantBPerson.firstName,
+          lastName: tenantBPerson.surname,
+          callingOnBehalfOf: tenantBOrg.legalName,
+          otherPartiesNamed: `${tenantBOrg.legalName}, ${tenantBPerson.firstName} ${tenantBPerson.surname}`,
+        },
+        store.people,
+        store.organisations,
+        store.matters,
+        store.values,
+        store.enquiries,
+        null,
+        store.links,
+        () => true,
+        ctxA.tenantId,
+      );
+      expect(enqSearchA.allConflicts).toEqual([]);
+      expect(enqSearchA.otherPartyClientMatches).toEqual([]);
+      expect(enqSearchA.clientAgainstPartyMatches).toEqual([]);
+      expect(enqSearchA.hasBlockingConflict).toBe(false);
+
+      expect(cluster.getRecordById(ctxA, tenantBMatter.id)).toBeNull();
+      expect(cluster.getRecordById(ctxA, tenantBEnquiry.id)).toBeNull();
+      expect(cluster.getRecordById(ctxA, tenantBQuote.id)).toBeNull();
+      expect(
+        cluster.getRecordById<{ id: string; tenantId: string }>(ctxB, tenantBEnquiry.id)?.id,
+      ).toBe(tenantBEnquiry.id);
+      expect(
+        cluster.getRecordById<{ id: string; tenantId: string }>(ctxB, tenantBQuote.id)?.id,
+      ).toBe(tenantBQuote.id);
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

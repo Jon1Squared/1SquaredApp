@@ -590,6 +590,18 @@ export interface Person extends RecordBase {
   createdFromEnquiryId?: string | null;
 }
 
+export interface OrganisationConflictDecision {
+  outcome: 'Cleared' | 'Potential conflict' | 'Conflict – declined';
+  decidedById: string;
+  decidedByName: string;
+  decidedAt: string;
+  sourceRecordId: string;
+  matchesCount: number;
+  searchedSources: string[];
+  summary: string;
+  warnings?: string[];
+}
+
 export interface Organisation extends RecordBase {
   recordType: 'organisation';
   // A. Identity
@@ -624,6 +636,7 @@ export interface Organisation extends RecordBase {
   onboardingStatusId: string | null;
   conflictStatusId: string | null;
   conflictReference: string;
+  conflictDecision?: OrganisationConflictDecision | null;
   riskRatingId: string | null;
   riskAssessmentStatusId: string | null;
   verificationStatusId: string | null;
@@ -830,6 +843,7 @@ export interface ConflictCheckRunAudit {
   partiesCount: number;
   matchesCount: number;
   potentialConflictsCount: number;
+  searchedSources?: string[];
 }
 
 export interface ConflictReviewerComment {
@@ -950,6 +964,8 @@ export interface Matter extends RecordBase {
   fieldValues: Record<string, unknown>;
   /** Full built-in conflict check snapshot & audit record */
   conflictCheckRecord?: ConflictCheckRecord;
+  /** Pre-conversion conflict decision carried across when converted from an enquiry or quote */
+  conflictDecision?: OrganisationConflictDecision | null;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
   /** True when an ethical wall / information barrier applies to this matter. */
@@ -1075,6 +1091,7 @@ export interface EnquiryConflictSnapshot {
     postcode: string;
     addressLine1: string;
     addressLine2: string;
+    searchedSources?: string[];
   };
   matchCount: number;
   highestSeverity: 'high' | 'medium' | 'low' | 'none';
@@ -1158,6 +1175,7 @@ export interface Enquiry {
   nextActionDate: string | null; // YYYY-MM-DD
   conflictStatus?: EnquiryConflictStatus;
   conflictSnapshot?: EnquiryConflictSnapshot | null;
+  conflictDecision?: OrganisationConflictDecision | null;
   closeReasonId: string | null; // enquiry_close_reason picklist id
   closeNotes?: string;
   referredToOrganisationId: string | null; // O-xxxxxx
@@ -1285,6 +1303,7 @@ export interface Quote {
   followUps: QuoteFollowUpEntry[];
   versionHistory: QuoteVersionSnapshot[];
   timeline: QuoteTimelineEvent[];
+  conflictDecision?: OrganisationConflictDecision | null;
   createdById: string;
   createdAt: string;
   updatedById: string;
@@ -1405,7 +1424,8 @@ export type AuditAction =
   | 'matter-restriction-lift'
   | 'matter-imported-open'
   | 'data-reset'
-  | 'data-cleared';
+  | 'data-cleared'
+  | 'conflict-decision';
 
 export interface AuditEntry {
   id: string;

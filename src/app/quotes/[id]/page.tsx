@@ -34,6 +34,7 @@ export default async function QuoteDetailPage({
         links={snap.links}
         values={snap.values}
         currentUserId={snap.currentUserId}
+        tenantId={snap.tenantId}
         initialAction={sp.action ?? null}
       />
     );

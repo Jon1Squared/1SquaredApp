@@ -47,6 +47,7 @@ import {
   type EnquiryFormState,
 } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
+import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
   resolveAddressSuggestion,
   searchAddressSuggestions,
@@ -110,6 +111,7 @@ interface Props {
   canReopen?: boolean;
   canAnonymise?: boolean;
   firmName?: string;
+  tenantId: string;
 }
 
 const DEMO_POSTCODE_ADDRESSES: Record<
@@ -157,6 +159,7 @@ export function EnquiryFormClient({
   canReopen: canReopenProp = false,
   canAnonymise = false,
   firmName = 'the firm',
+  tenantId,
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
   const isDraftMode = isSavedEnquiry && enquiry?.status === 'Draft';
@@ -645,6 +648,9 @@ export function EnquiryFormClient({
         values,
         enquiries,
         enquiry?.id ?? null,
+        undefined,
+        undefined,
+        tenantId,
       ),
     [
       firstName,
@@ -664,6 +670,7 @@ export function EnquiryFormClient({
       values,
       enquiries,
       enquiry?.id,
+      tenantId,
     ],
   );
 
@@ -1089,6 +1096,9 @@ export function EnquiryFormClient({
         values,
         enquiries,
         enquiry?.id ?? null,
+        undefined,
+        undefined,
+        tenantId,
       ),
     [
       firstName,
@@ -1110,6 +1120,7 @@ export function EnquiryFormClient({
       values,
       enquiries,
       enquiry?.id,
+      tenantId,
     ],
   );
 
@@ -1217,11 +1228,21 @@ export function EnquiryFormClient({
         useOrganisationId: convertForBusiness ? convertUseOrgId || null : null,
         createForBusiness: convertForBusiness,
       });
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
       if (!res.ok) {
         showToast(res.conflictReasons?.[0] ?? 'Cannot convert enquiry due to conflict');
         return;
       }
       setConvertModalOpen(false);
+      const warningNotice = formatConversionConflictWarningsNotice(
+        res.conflictWarnings,
+      );
+      if (warningNotice) {
+        showToast(warningNotice);
+      }
       router.push(
         `/matters/new?enquiryId=${enquiry.id}&clientId=${res.clientId ?? ''}&instructingContactId=${res.instructingContactId ?? ''}`,
       );

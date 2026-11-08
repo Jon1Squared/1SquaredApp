@@ -47,6 +47,7 @@ export default async function EnquiryDetailPage({
           canReopen={Boolean(snap.canReopenByEnquiryId[enquiry.id])}
           canAnonymise={snap.currentUserPermissions.includes('enquiry:anonymise')}
           firmName={snap.firm.name}
+          tenantId={snap.tenantId}
         />
         <div style={{ maxWidth: 1240, margin: '0 auto', padding: '0 24px 32px' }}>
           <KeyDatesPanel

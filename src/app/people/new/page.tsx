@@ -24,6 +24,7 @@ export default async function NewPersonPage() {
         leaverOwnedRecords={snap.leaverOwnedRecords}
         firmPrimaryDomain={snap.firmPrimaryDomain}
         firmName={snap.firm.name}
+        tenantId={snap.tenantId}
       />
     );
   });

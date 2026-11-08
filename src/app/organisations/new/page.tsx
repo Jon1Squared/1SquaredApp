@@ -19,6 +19,7 @@ export default async function NewOrganisationPage() {
         values={snap.values}
         customFields={snap.customFields}
         currentUserId={userId}
+        tenantId={snap.tenantId}
       />
     );
   });

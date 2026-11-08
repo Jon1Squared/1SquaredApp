@@ -325,6 +325,11 @@ describe('enquiries and tasks', () => {
       demo.organisations,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(conflicts.hasBlockingConflict).toBe(true);
     expect(conflicts.otherPartyClientMatches[0]?.recordId).toBe('O-000001');
@@ -482,6 +487,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const hit = conflicts.allConflicts.find((c) => c.recordId === 'O-900001');
     expect(hit).toBeDefined();
@@ -503,6 +513,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(conflicts.allConflicts.some((c) => c.recordId === 'O-900001' && c.severity === 'high')).toBe(
       true,
@@ -582,6 +597,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(conflicts.hasBlockingConflict).toBe(false);
   });
@@ -593,6 +613,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const castellHit = conflicts.allConflicts.find((c) => c.recordId === 'O-900001');
     const penarthHit = conflicts.allConflicts.find((c) => c.recordId === 'O-000001');
@@ -660,6 +685,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const distinctIdsNoHigh = new Set([
       ...conflictsNoHigh.allConflicts.map((c) => `${c.recordType}:${c.recordId}`),
@@ -680,6 +710,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const distinctIdsWithHigh = new Set([
       ...conflictsWithHigh.allConflicts.map((c) => `${c.recordType}:${c.recordId}`),
@@ -716,6 +751,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(conflicts.hasBlockingConflict).toBe(false);
     expect(conflicts.allConflicts.some((c) => c.severity === 'high')).toBe(false);
@@ -737,6 +777,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const hit = conflicts.allConflicts.find((c) => c.recordId === lisa.id);
     expect(hit).toBeDefined();
@@ -761,6 +806,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(conflicts.allConflicts.find((c) => c.recordId === lisa.id)?.severity).toBe('high');
   });
@@ -781,6 +831,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const hit = conflicts.allConflicts.find((c) => c.recordId === 'O-900001');
     expect(hit?.severity).toBe('medium');
@@ -806,6 +861,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const hit = conflicts.allConflicts.find((c) => c.recordId === lisa.id);
     expect(hit?.severity).toBe('high');
@@ -820,6 +880,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(conflicts.allConflicts.find((c) => c.recordId === lisa.id)?.severity).toBe('high');
   });
@@ -831,6 +896,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const hits = conflicts.allConflicts.filter((c) => c.recordId === lisa.id);
     expect(hits.length).toBe(1);
@@ -844,6 +914,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(conflicts.allConflicts.find((c) => c.recordId === 'O-900001')?.severity).toBe('medium');
 
@@ -854,6 +929,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       [...fixtureOrgs, gmailOrg],
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(free.allConflicts.some((c) => c.recordId === 'O-900098')).toBe(false);
   });
@@ -896,6 +976,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const hit = conflicts.allConflicts.find((c) => c.recordId === lisa.id);
     expect(hit?.severity).toBe('medium');
@@ -932,6 +1017,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     const hit = conflicts.allConflicts.find((c) => c.recordId === 'O-900001');
     expect(hit?.severity).toBe('medium');
@@ -943,6 +1033,11 @@ describe('Quick Conflict Check (New Enquiry screen)', () => {
       fixtureOrgs,
       demo.matters,
       allValues,
+      [],
+      null,
+      [],
+      undefined,
+      'not-a-law-firm',
     );
     expect(postcodeOnly.allConflicts.length).toBe(0);
 

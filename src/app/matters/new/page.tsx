@@ -1,4 +1,5 @@
 import React from 'react';
+import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
 import { getAppSnapshot, withPageActor } from '@/server/services';
 import { MatterFormClient } from '@/components/MatterFormClient';
 
@@ -42,6 +43,10 @@ export default async function NewMatterPage({
         initialEnquiry={initialEnquiry}
         initialQuote={initialQuote}
         initialInstructingContactId={params.instructingContactId ?? null}
+        initialConflictWarnings={normaliseConversionConflictWarnings(
+          initialQuote?.conflictDecision?.warnings ??
+            initialEnquiry?.conflictDecision?.warnings,
+        )}
         activeViewingRole={snap.activeViewingRole}
         people={snap.people}
         organisations={snap.organisations}
@@ -70,6 +75,7 @@ export default async function NewMatterPage({
         suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
         enableAiMatterExtraction={snap.enableAiMatterExtraction}
         aiProviderChoice={snap.aiProviderChoice}
+        tenantId={snap.tenantId}
       />
     );
   });
