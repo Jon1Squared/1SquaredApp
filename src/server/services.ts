@@ -5646,7 +5646,6 @@ export function executeMerge(
 
   // R272: Snapshot the store before changing anything so any failure restores the store atomically
   const storeSnapshot = structuredClone(store);
-  let storeSaved = false;
 
   try {
     // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
@@ -5919,18 +5918,6 @@ export function executeMerge(
     }
     store.pmsLinks = nextPmsLinks;
 
-    // 8a. Prepare repointed document and documentLink arrays on store before saveStore
-    const storeDocsPrepared = prepareMergedEntityDocumentsInStore(
-      store,
-      resolvedMergeCtx,
-      recordType,
-      merged.id,
-      survivor.id,
-    );
-    if (storeDocsPrepared > 0 && !plan.fieldsTaken.includes('Generated documents')) {
-      plan.fieldsTaken.push('Generated documents');
-    }
-
     // 9. Copy notes to survivor
     let notesMoved = 0;
     for (const note of store.notes) {
@@ -6018,6 +6005,18 @@ export function executeMerge(
     };
     store.mergeHistory.unshift(history);
 
+    // 8a. Prepare repointed document and documentLink arrays on store after all in-memory repointing and before saveStore (R296)
+    const storeDocsPrepared = prepareMergedEntityDocumentsInStore(
+      store,
+      resolvedMergeCtx,
+      recordType,
+      merged.id,
+      survivor.id,
+    );
+    if (storeDocsPrepared > 0 && !plan.fieldsTaken.includes('Generated documents')) {
+      plan.fieldsTaken.push('Generated documents');
+    }
+
     writeAudit(store, {
       recordType,
       recordId: survivor.id,
@@ -6043,7 +6042,6 @@ export function executeMerge(
     });
 
     saveStore(store);
-    storeSaved = true;
 
     // 8b. Write repointed documents and links to TenantDocumentRepository after saveStore (R272)
     repointMergedEntityInDocRepository(
@@ -6060,9 +6058,7 @@ export function executeMerge(
       delete (store as unknown as Record<string, unknown>)[key];
     }
     Object.assign(store, storeSnapshot);
-    if (storeSaved) {
-      saveStore(store);
-    }
+    saveStore(store);
     throw err;
   }
 }

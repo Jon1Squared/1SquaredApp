@@ -5,8 +5,9 @@ All notable changes to `@platform/core` and `@platform/core-api` are documented 
 ## 2026-11-08 — Slice S0-09 (Tenant Document Repository Entity Repointing and Recipient Matching)
 
 ### Added
-- **`TenantDocumentRepository.repointMergedEntity` (`@platform/core`, `core/src/tenancy/documentRepository.ts`):**
+- **`TenantDocumentRepository.repointMergedEntity`, `snapshotTenantDocumentsAndLinks`, and `restoreTenantDocumentsAndLinks` (`@platform/core`, `core/src/tenancy/documentRepository.ts`):**
   - Added tenant-scoped `repointMergedEntity(ctx, entityType, mergedId, survivorId): number` on `TenantDocumentRepository` (exported via `@platform/core`) to repoint `GeneratedDocumentRecord.primaryClientId` and `GeneratedDocumentRecord.recipientPartyId` and repoint or de-duplicate `DocumentLinkRecord.entityId` within the caller's `ctx.tenantId` partition when an organisation or person record is merged.
+  - Added additive tenant-scoped `snapshotTenantDocumentsAndLinks(ctx): { documents: GeneratedDocumentRecord[]; links: DocumentLinkRecord[] }` and `restoreTenantDocumentsAndLinks(ctx, snapshot): void` on `TenantDocumentRepository` so callers can capture and atomically restore a tenant's document and link partition on rollback (validating that every snapshot record belongs to `ctx.tenantId` before modifying the repository).
 
 ### Changed
 - **`TenantDocumentRepository.listDocumentsForEntity` (`core/src/tenancy/documentRepository.ts`):**

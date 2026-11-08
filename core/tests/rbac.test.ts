@@ -5512,7 +5512,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('10. Atomic rollback (R272, R282): rolls back both TenantDocumentRepository and store when putDocument fails part-way through the repository loop, and leaves persisted store unchanged when prepareMergedEntityDocumentsInStore throws before saveStore', () => {
+    it('10. Atomic rollback (R272, R282, R296): rolls back both TenantDocumentRepository and store when putDocument fails part-way through the repository loop, and rolls back in-memory and persisted store (test-mode __oneSquaredLastSavedStoreJson copy) when prepareMergedEntityDocumentsInStore throws after repointing and before saveStore', () => {
       resetAllDemoData('P-000001');
       const repo = getDocumentRepository();
       const origPutDoc = repo.putDocument.bind(repo);
@@ -5598,7 +5598,31 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         repo.putDocumentLink(ctx, link1);
         saveStore(store);
 
-        // Case 1 (R282): Force failure part-way through the repository putDocument loop (succeeds on 1st doc, throws on 2nd doc after repointMergedEntity already ran)
+        // R296: restoreTenantDocumentsAndLinks checks that every snapshot record belongs to ctx.tenantId BEFORE deleting anything
+        expect(() =>
+          repo.restoreTenantDocumentsAndLinks(ctx, {
+            documents: [{ ...doc1, tenantId: 'other-tenant-id' }],
+            links: [],
+          }),
+        ).toThrow(/TENANCY_ISOLATION_ERROR/);
+        expect(repo.getDocumentById(ctx, doc1.id)?.id).toBe(doc1.id);
+        expect(repo.getDocumentById(ctx, doc2.id)?.id).toBe(doc2.id);
+
+        // R296: clearStoreMemoryCache throws outside test environments
+        const prevVitest = process.env.VITEST;
+        const prevNodeEnv = process.env.NODE_ENV;
+        try {
+          delete process.env.VITEST;
+          (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+          expect(() => clearStoreMemoryCache()).toThrow(
+            /clearStoreMemoryCache is only permitted in test environments/,
+          );
+        } finally {
+          if (prevVitest !== undefined) process.env.VITEST = prevVitest;
+          (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+        }
+
+        // Case 1 (R282, R296): Force failure part-way through the repository putDocument loop (succeeds on 1st doc, throws on 2nd doc after repointMergedEntity already ran)
         let putCalls = 0;
         repo.putDocument = (callCtx, d) => {
           putCalls += 1;
@@ -5627,7 +5651,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(survivorRepoDocIds).not.toContain(doc1.id);
         expect(survivorRepoDocIds).not.toContain(doc2.id);
 
-        // Store (both in-memory and reloaded after clearing cache) is unchanged
+        // Note (R296): In tests, "persisted store" means the test-mode global.__oneSquaredLastSavedStoreJson copy reloaded by clearStoreMemoryCache() + getStore().
+        expect(
+          getStore().matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
         clearStoreMemoryCache();
         const reloadedAfterLoopFail = getStore();
         expect(
@@ -5643,8 +5670,37 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           reloadedAfterLoopFail.documents?.find((d) => d.id === doc1.id)?.primaryClientId,
         ).toBe(mergedPerson.id);
         expect(reloadedAfterLoopFail.mergeHistory).toHaveLength(0);
+      } finally {
+        repo.putDocument = origPutDoc;
+        repo.listDocuments = origListDocs;
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
 
-        // Case 2 (R282): Force the document step before saveStore (~5919, prepareMergedEntityDocumentsInStore) to throw
+    it('10b. Atomic rollback Case 2 (R272, R282, R296): rolls back in-memory and persisted store (test-mode __oneSquaredLastSavedStoreJson copy) when prepareMergedEntityDocumentsInStore throws after repointing and before saveStore', () => {
+      resetAllDemoData('P-000001');
+      const repo = getDocumentRepository();
+      const origListDocs = repo.listDocuments.bind(repo);
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackSurvivorCase2', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackMergedCase2', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+
+        const store = getStore();
+        const matter = store.matters[0]!;
+        matter.instructingContactId = mergedPerson.id;
+        const enq = store.enquiries[0]!;
+        enq.linkedPersonId = mergedPerson.id;
+        saveStore(store);
+
+        // Case 2 (R282, R296): Force prepareMergedEntityDocumentsInStore (which runs AFTER in-memory repointing of matters, enquiries, and mergedIntoId, and BEFORE saveStore) to throw
         repo.listDocuments = () => {
           throw new Error('SIMULATED_PRE_SAVE_DOC_STEP_FAILURE');
         };
@@ -5653,7 +5709,19 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toThrow(/SIMULATED_PRE_SAVE_DOC_STEP_FAILURE/);
         repo.listDocuments = origListDocs;
 
-        // Reload persisted store with getStore() after clearing the cache and assert it is unchanged
+        // Assert both the in-memory store and the persisted store (test-mode __oneSquaredLastSavedStoreJson copy via clearStoreMemoryCache() + getStore()) are unchanged
+        const inMemoryAfterPreSaveFail = getStore();
+        expect(
+          inMemoryAfterPreSaveFail.matters.find((m) => m.id === matter.id)?.instructingContactId,
+        ).toBe(mergedPerson.id);
+        expect(
+          inMemoryAfterPreSaveFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId,
+        ).toBe(mergedPerson.id);
+        expect(
+          inMemoryAfterPreSaveFail.people.find((p) => p.id === mergedPerson.id)?.mergedIntoId,
+        ).toBeNull();
+        expect(inMemoryAfterPreSaveFail.mergeHistory).toHaveLength(0);
+
         clearStoreMemoryCache();
         const reloadedAfterPreSaveFail = getStore();
         expect(
@@ -5667,7 +5735,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBeNull();
         expect(reloadedAfterPreSaveFail.mergeHistory).toHaveLength(0);
       } finally {
-        repo.putDocument = origPutDoc;
         repo.listDocuments = origListDocs;
         setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');

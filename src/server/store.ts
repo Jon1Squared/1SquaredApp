@@ -211,7 +211,15 @@ declare global {
   var __oneSquaredLastSavedStoreJson: string | undefined;
 }
 
+/**
+ * Test-only helper that clears `global.__oneSquaredStore` so the next `getStore()` call reloads
+ * from the persisted store (which in tests is the test-mode `global.__oneSquaredLastSavedStoreJson`
+ * copy rather than disk). Throws if called outside test environments (`VITEST` or `NODE_ENV === 'test'`).
+ */
 export function clearStoreMemoryCache(): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('clearStoreMemoryCache is only permitted in test environments.');
+  }
   global.__oneSquaredStore = undefined;
 }
 

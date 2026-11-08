@@ -368,6 +368,14 @@ export class TenantDocumentRepository {
     };
   }
 
+  /**
+   * Restores the caller's tenant partition of documents and links from a snapshot captured by
+   * `snapshotTenantDocumentsAndLinks`.
+   *
+   * Note (R304): `restoreTenantDocumentsAndLinks` replaces the whole tenant partition in memory,
+   * so a concurrent write in the same process would be lost. This is acceptable in the single-process
+   * transitional store prior to S0-17 database transactions.
+   */
   public restoreTenantDocumentsAndLinks(
     ctx: TenantContext,
     snapshot: {
@@ -376,6 +384,13 @@ export class TenantDocumentRepository {
     },
   ): void {
     const db = this.getDb(ctx);
+    // R296: Verify that every snapshot record belongs to ctx.tenantId BEFORE deleting anything.
+    for (const doc of snapshot.documents) {
+      this.assertRecordTenant(ctx, doc.tenantId, 'GeneratedDocumentRecord');
+    }
+    for (const link of snapshot.links) {
+      this.assertRecordTenant(ctx, link.tenantId, 'DocumentLinkRecord');
+    }
     for (const [docId, doc] of db.documents.entries()) {
       if (doc.tenantId === ctx.tenantId) {
         db.documents.delete(docId);
@@ -387,11 +402,9 @@ export class TenantDocumentRepository {
       }
     }
     for (const doc of snapshot.documents) {
-      this.assertRecordTenant(ctx, doc.tenantId, 'GeneratedDocumentRecord');
       db.documents.set(doc.id, { ...doc });
     }
     for (const link of snapshot.links) {
-      this.assertRecordTenant(ctx, link.tenantId, 'DocumentLinkRecord');
       db.links.set(link.id, { ...link });
     }
   }
