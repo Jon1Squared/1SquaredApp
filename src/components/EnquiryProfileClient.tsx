@@ -67,6 +67,7 @@ interface Props {
   canReopen?: boolean;
   canAnonymise?: boolean;
   canTakeByTaskId?: Record<string, boolean>;
+  tenantId?: string;
 }
 
 export function EnquiryProfileClient({
@@ -83,6 +84,7 @@ export function EnquiryProfileClient({
   canReopen = false,
   canAnonymise = false,
   canTakeByTaskId,
+  tenantId = 'default-tenant',
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -218,8 +220,13 @@ export function EnquiryProfileClient({
         organisations,
         matters,
         values,
+        undefined,
+        enquiry.id,
+        undefined,
+        undefined,
+        tenantId,
       ),
-    [enquiry, convertUsePersonId, convertUseOrgId, people, organisations, matters, values],
+    [enquiry, convertUsePersonId, convertUseOrgId, people, organisations, matters, values, tenantId],
   );
 
   const nameOfPerson = (id: string | null | undefined) => {

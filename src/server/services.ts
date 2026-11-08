@@ -1115,6 +1115,7 @@ function getAppSnapshotInScope(
 
   return {
     firm: store.firm,
+    tenantId: activeTenantCfg.tenantId,
     firmPrimaryDomain,
     enableAiMatterExtraction: Boolean(activeTenantCfg.featureFlags?.enableAiMatterExtraction),
     aiProviderChoice: activeTenantCfg.integrations?.aiProviderChoice ?? 'disabled',
@@ -4296,6 +4297,9 @@ export async function saveMatterRecord(
       ...stripServerOwnedFieldValues(input.fieldValues),
     },
     conflictCheckRecord: resolvedConflictCheckRecord,
+    ...(existing?.conflictDecision
+      ? { conflictDecision: existing.conflictDecision }
+      : {}),
     owningDepartmentId: nextOwningDepartmentId,
     owningTeamId: nextOwningTeamId,
     isStaffMatter: effectiveIsStaffMatter,
@@ -8146,16 +8150,28 @@ export function prepareEnquiryConversion(
 
   enq.linkedPersonId = personId;
 
+  const outcomeLabel: 'Cleared' | 'Potential conflict' =
+    conflicts.allConflicts.length > 0 ? 'Potential conflict' : 'Cleared';
+  const decisionSummary = `${outcomeLabel} by ${actorName} on ${today} (${conflicts.allConflicts.length} ${conflicts.allConflicts.length === 1 ? 'match' : 'matches'})`;
+  const conflictReference = `${enq.reference} · ${decisionSummary}`;
+  const decisionSnapshot = {
+    outcome: outcomeLabel,
+    decidedById: byId,
+    decidedByName: actorName,
+    decidedAt: nowIso,
+    sourceRecordId: enq.id,
+    matchesCount: conflicts.allConflicts.length,
+    searchedSources: [...CONFLICT_SEARCHED_SOURCES],
+    summary: decisionSummary,
+  };
+  enq.conflictDecision = decisionSnapshot;
+
   // If enquiry was made on behalf of a business, link or create the Organisation and link caller as contact
   let clientId = personId;
   const instructingContactId: string | null = personId;
 
   if (opts.createForBusiness || enq.callingOnBehalfOf.trim() || opts.useOrganisationId || enq.linkedOrganisationId) {
     let orgId = opts.useOrganisationId || enq.linkedOrganisationId;
-    const outcomeLabel: 'Cleared' | 'Potential conflict' =
-      conflicts.allConflicts.length > 0 ? 'Potential conflict' : 'Cleared';
-    const decisionSummary = `${outcomeLabel} by ${actorName} on ${today} (${conflicts.allConflicts.length} ${conflicts.allConflicts.length === 1 ? 'match' : 'matches'})`;
-    const conflictReference = `${enq.reference} · ${decisionSummary}`;
 
     if (!orgId && enq.callingOnBehalfOf.trim()) {
       const createdOrg = saveOrganisationRecord(
@@ -8179,16 +8195,7 @@ export function prepareEnquiryConversion(
       orgId = createdOrg.organisation.id;
       const orgRecord = store.organisations.find((o) => o.id === orgId);
       if (orgRecord) {
-        orgRecord.conflictDecision = {
-          outcome: outcomeLabel,
-          decidedById: byId,
-          decidedByName: actorName,
-          decidedAt: nowIso,
-          sourceRecordId: enq.id,
-          matchesCount: conflicts.allConflicts.length,
-          searchedSources: [...CONFLICT_SEARCHED_SOURCES],
-          summary: decisionSummary,
-        };
+        orgRecord.conflictDecision = decisionSnapshot;
         writeAudit(store, {
           recordType: 'organisation',
           recordId: orgId,
@@ -8264,6 +8271,9 @@ function finalizeEnquiryConversionToMatter(
   if (!enq.assignedToId) enq.assignedToId = matter.leadFeeEarnerId || byId;
   enq.updatedAt = now;
   enq.updatedById = byId;
+  if (enq.conflictDecision && !matter.conflictDecision) {
+    matter.conflictDecision = enq.conflictDecision;
+  }
 
   if (!alreadyConvertedToThisMatter) {
     writeAudit(store, {
@@ -11371,19 +11381,21 @@ export function prepareQuoteConversionRecord(
 
   const hasRestrictedMatch = hasUnapprovedRestrictedMatches(reconciledMatches, []);
   const clientOrgNameLower = clientOrgName.trim().toLowerCase();
-  const matchedOrgByName =
+  const matchingOrgsByName =
     !existingOrg && clientOrgNameLower
-      ? store.organisations.find(
+      ? store.organisations.filter(
           (o) =>
             !o.mergedIntoId &&
             (o.legalName.trim().toLowerCase() === clientOrgNameLower ||
               o.otherNames.some((n) => n.name.trim().toLowerCase() === clientOrgNameLower)),
         )
-      : undefined;
-  const orgForConflictStatusCheck = existingOrg ?? matchedOrgByName;
+      : [];
+  const hasDeclinedOrgNameMatch = matchingOrgsByName.some(
+    (o) => o.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
+  );
   const existingOrgDeclined = Boolean(
-    orgForConflictStatusCheck &&
-      orgForConflictStatusCheck.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
+    existingOrg &&
+      existingOrg.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
   );
   const isConflictBlocked =
     existingOrgDeclined ||
@@ -11393,6 +11405,7 @@ export function prepareQuoteConversionRecord(
   const totalMatchesCount = Math.max(
     reconciledMatches.length,
     prelimConflicts.allConflicts.length,
+    hasDeclinedOrgNameMatch ? 1 : 0,
   );
 
   if (isConflictBlocked) {
@@ -11453,9 +11466,11 @@ export function prepareQuoteConversionRecord(
 
   // Conflict check passed: determine outcome status from search result, not a hard-coded Cleared
   const hasNonSelfMatches =
+    hasDeclinedOrgNameMatch ||
     reconciledMatches.some(
       (m) => m.matchedRecordId !== orgId && m.matchedRecordId !== personId,
-    ) || prelimConflicts.allConflicts.length > 0;
+    ) ||
+    prelimConflicts.allConflicts.length > 0;
   const outcomeLabel: 'Cleared' | 'Potential conflict' = hasNonSelfMatches
     ? 'Potential conflict'
     : 'Cleared';
@@ -11593,6 +11608,7 @@ export function prepareQuoteConversionRecord(
     snapshot: decisionSnapshot,
   });
 
+  quote.conflictDecision = decisionSnapshot;
   quote.linkedPersonId = personId;
   quote.linkedOrganisationId = orgId;
   quote.updatedAt = nowIso;
@@ -11605,6 +11621,13 @@ export function prepareQuoteConversionRecord(
   const conflictWarnings = prelimConflicts.allConflicts
     .filter((h) => !h.blocking && h.severity !== 'high')
     .map((h) => h.reason);
+  if (hasDeclinedOrgNameMatch) {
+    const declinedNameWarning =
+      "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.";
+    if (!conflictWarnings.includes(declinedNameWarning)) {
+      conflictWarnings.push(declinedNameWarning);
+    }
+  }
 
   return {
     ok: true,
@@ -11633,6 +11656,9 @@ function finalizeQuoteConversionToMatter(
   quote.nextFollowUpDate = null;
   quote.updatedAt = now;
   quote.updatedById = byId;
+  if (quote.conflictDecision) {
+    matter.conflictDecision = quote.conflictDecision;
+  }
 
   if (!alreadyConverted) {
     quote.timeline.push({

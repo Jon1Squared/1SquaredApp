@@ -400,6 +400,7 @@ export function detectPreliminaryConflicts(
   excludeEnquiryId?: string | null,
   links: PersonOrganisationLink[] = [],
   canViewMatter?: (matter: Matter) => boolean,
+  tenantId = 'default-tenant',
 ): ConflictHit[] {
   const res = runEnquiryConflictSearch(
     input,
@@ -411,6 +412,7 @@ export function detectPreliminaryConflicts(
     excludeEnquiryId,
     links,
     canViewMatter,
+    tenantId,
   );
   return res.allConflicts;
 }

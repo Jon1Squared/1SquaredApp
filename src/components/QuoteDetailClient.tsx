@@ -50,6 +50,7 @@ interface Props {
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
   currentUserId: string;
+  tenantId?: string;
   initialAction?: string | null;
 }
 
@@ -62,6 +63,7 @@ export function QuoteDetailClient({
   links = [],
   values,
   currentUserId,
+  tenantId = 'default-tenant',
   initialAction = null,
 }: Props) {
   const router = useRouter();
@@ -219,6 +221,7 @@ export function QuoteDetailClient({
         links={links}
         values={values}
         currentUserId={currentUserId}
+        tenantId={tenantId}
         onCancelOverride={() => setViewMode('detail')}
         onSuccessOverride={() => {
           setViewMode('detail');

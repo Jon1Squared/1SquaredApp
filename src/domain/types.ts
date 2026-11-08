@@ -963,6 +963,8 @@ export interface Matter extends RecordBase {
   fieldValues: Record<string, unknown>;
   /** Full built-in conflict check snapshot & audit record */
   conflictCheckRecord?: ConflictCheckRecord;
+  /** Pre-conversion conflict decision carried across when converted from an enquiry or quote */
+  conflictDecision?: OrganisationConflictDecision | null;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
   /** True when an ethical wall / information barrier applies to this matter. */
@@ -1172,6 +1174,7 @@ export interface Enquiry {
   nextActionDate: string | null; // YYYY-MM-DD
   conflictStatus?: EnquiryConflictStatus;
   conflictSnapshot?: EnquiryConflictSnapshot | null;
+  conflictDecision?: OrganisationConflictDecision | null;
   closeReasonId: string | null; // enquiry_close_reason picklist id
   closeNotes?: string;
   referredToOrganisationId: string | null; // O-xxxxxx
@@ -1299,6 +1302,7 @@ export interface Quote {
   followUps: QuoteFollowUpEntry[];
   versionHistory: QuoteVersionSnapshot[];
   timeline: QuoteTimelineEvent[];
+  conflictDecision?: OrganisationConflictDecision | null;
   createdById: string;
   createdAt: string;
   updatedById: string;

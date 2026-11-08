@@ -34,6 +34,7 @@ export default async function NewQuotePage({
         links={snap.links}
         values={snap.values}
         currentUserId={snap.currentUserId}
+        tenantId={snap.tenantId}
       />
     );
   });

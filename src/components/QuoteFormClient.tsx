@@ -56,6 +56,7 @@ interface Props {
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
   currentUserId: string;
+  tenantId?: string;
   onCancelOverride?: () => void;
   onSuccessOverride?: (quote: Quote) => void;
 }
@@ -82,6 +83,7 @@ export function QuoteFormClient({
   links = [],
   values,
   currentUserId,
+  tenantId = 'default-tenant',
   onCancelOverride,
   onSuccessOverride,
 }: Props) {
@@ -552,6 +554,10 @@ export function QuoteFormClient({
         matters,
         values,
         enquiries,
+        null,
+        links,
+        undefined,
+        tenantId,
       ),
     [
       firstName,
@@ -566,6 +572,8 @@ export function QuoteFormClient({
       matters,
       values,
       enquiries,
+      links,
+      tenantId,
     ],
   );
 
