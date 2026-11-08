@@ -21,9 +21,14 @@ import { useToast } from './Toast';
 interface Props {
   initialConfig: MatterCostsConfig;
   values: ChoiceValue[];
+  enablePmsLiveRateSync?: boolean;
 }
 
-export function MatterCostsAdminSection({ initialConfig, values }: Props) {
+export function MatterCostsAdminSection({
+  initialConfig,
+  values,
+  enablePmsLiveRateSync = true,
+}: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
 
@@ -287,15 +292,17 @@ export function MatterCostsAdminSection({ initialConfig, values }: Props) {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button
-              type="button"
-              className="btn btn--secondary"
-              disabled={pending}
-              onClick={handleSyncFromPms}
-            >
-              <RefreshCw size={14} />
-              <span>Pull / Sync Rates from PMS</span>
-            </button>
+            {enablePmsLiveRateSync ? (
+              <button
+                type="button"
+                className="btn btn--secondary"
+                disabled={pending}
+                onClick={handleSyncFromPms}
+              >
+                <RefreshCw size={14} />
+                <span>Pull / Sync Rates from PMS</span>
+              </button>
+            ) : null}
             <button
               type="button"
               className="btn btn--primary"

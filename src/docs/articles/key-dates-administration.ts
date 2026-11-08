@@ -6,7 +6,7 @@ export const keyDatesAdministrationArticle: DocArticle = {
   section: 'key-dates-limitation',
   summary:
     'How administrators and COLPs configure key date types, matter type policies, countdown schedules, limitation rule sets, and business calendars under strict JSON Schema validation and audit logging.',
-  updated: '2026-11-03',
+  updated: '2026-11-08',
   body: `
 All statutory limitation periods, reminder schedules, verification rules, and business calendars in 1Squared live in **schema-validated tenant configuration** (\`schemas/keyDates.config.schema.json\`), never in hardcoded core code.
 
@@ -19,12 +19,13 @@ Users with the \`keydate:configure\` permission (by default \`admin\` and \`risk
    - Set the default business calendar (\`defaultBusinessCalendarId\`), default reminder schedule, default verification policy, and default Outlook calendar sync rules.
 2. **Key date types**:
    - Add, edit, or deactivate key date types (\`limitation\`, \`procedural\`, \`contractual\`, \`regulatory\`, \`internal\`), set whether a type is critical by default, and link default calculator rules and reminder schedules.
+   - Set \`allowManualEntry\` (defaults to \`true\`). When \`allowManualEntry\` is \`false\`, manual date entry is disabled for that key date type: the Manual Date Entry button is disabled, the form switches to the limitation calculator when \`allowCalculation\` is enabled (or displays a notice if neither is enabled), and any attempt to create or supersede a manual date—or supply an internal system source from a client request—returns a structured validation denial (\`ActionDenied\` with code \`FORBIDDEN\`).
 3. **Matter type settings**:
    - Configure \`requiredKeyDateTypeIds\` (enforced at the matter opening gate), \`blockClosureWithOpenDates\` (enforced at the matter closure gate), two-step verification policy (\`all\`, \`critical_only\`, \`limitation_only\`), and per-matter-type Outlook calendar sync.
 4. **Reminder schedules**:
    - Inspect and configure countdown stages (\`daysBefore\`, \`priority\`, \`requiresAcknowledgement\`) and unacknowledged escalation levels (\`matter_supervisor\`, \`team_lead\`, \`risk_compliance\`, \`custom_role\`).
 5. **Limitation rule sets**:
-   - Review jurisdictional rule sets and toggle \`reviewStatus\` between \`unreviewed\` and \`reviewed\` once a qualified lawyer or COLP has verified the statutory periods.
+   - Review jurisdictional rule sets and toggle \`reviewStatus\` between \`unreviewed\` and \`reviewed\` once a qualified lawyer or COLP has verified the statutory periods. When a rule set is marked \`reviewed\`, the server records the authenticated actor's person ID in \`reviewedBy\` and sets \`reviewedOn\` on the server to today's date (preserving existing values when an unchanged reviewed rule set is re-saved); unknown \`reviewStatus\` values are rejected, and unmarking a rule set back to \`unreviewed\` clears both \`reviewedBy\` and \`reviewedOn\`.
 6. **Business calendars**:
    - Maintain working days and bank holidays per jurisdiction (for example, England & Wales) used by the limitation calculator and overdue verification checks.
 

@@ -34,24 +34,52 @@
     },
     "hostingMode": {
       "type": "string",
-      "enum": ["single_tenant", "multi_tenant"],
+      "enum": [
+        "single_tenant",
+        "multi_tenant"
+      ],
       "default": "multi_tenant",
       "description": "Deployment tenancy mode"
     },
     "environment": {
       "type": "string",
-      "enum": ["dev", "test", "training", "live"],
+      "enum": [
+        "dev",
+        "test",
+        "training",
+        "live"
+      ],
       "default": "dev",
       "description": "Target deployment environment"
     },
     "branding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["primaryDomain", "accentColorHex", "logoAssetKey"],
+      "required": [
+        "primaryDomain",
+        "accentColorHex",
+        "logoAssetKey"
+      ],
       "properties": {
-        "primaryDomain": { "type": "string" },
-        "accentColorHex": { "type": "string", "default": "#1f6feb" },
-        "logoAssetKey": { "type": "string", "default": "default-logo.svg" },
+        "primaryDomain": {
+          "type": "string"
+        },
+        "accentColorHex": {
+          "type": "string",
+          "default": "#1f6feb",
+          "x-reserved": {
+            "for": "S0-11b",
+            "reason": "Reserved for tenant branding theme rendering in S0-11b."
+          }
+        },
+        "logoAssetKey": {
+          "type": "string",
+          "default": "default-logo.svg",
+          "x-reserved": {
+            "for": "S0-11b",
+            "reason": "Reserved for tenant firm logo rendering in S0-11b."
+          }
+        },
         "contactEmail": {
           "type": "string",
           "default": "",
@@ -91,14 +119,20 @@
       "description": "Routing configuration for referred matter conflict review tasks",
       "properties": {
         "assigneeTeamKey": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
           "default": null,
           "description": "Stable team ID or organisation team code of the team that receives referred conflict reviews"
         },
         "assigneeRoleKey": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "pattern": "^[a-z][a-z0-9_.:-]{1,63}$",
           "default": null,
@@ -115,9 +149,18 @@
         "enableAiMatterExtraction"
       ],
       "properties": {
-        "enableMatterCostsGovernance": { "type": "boolean", "default": true },
-        "enablePmsLiveRateSync": { "type": "boolean", "default": true },
-        "enableAiMatterExtraction": { "type": "boolean", "default": false },
+        "enableMatterCostsGovernance": {
+          "type": "boolean",
+          "default": true
+        },
+        "enablePmsLiveRateSync": {
+          "type": "boolean",
+          "default": true
+        },
+        "enableAiMatterExtraction": {
+          "type": "boolean",
+          "default": false
+        },
         "enableDemoMode": {
           "type": "boolean",
           "default": false,
@@ -138,13 +181,46 @@
       "properties": {
         "rateSourceMode": {
           "type": "string",
-          "enum": ["application_table", "pms_when_linked"],
-          "default": "pms_when_linked"
+          "enum": [
+            "application_table",
+            "pms_when_linked"
+          ],
+          "default": "pms_when_linked",
+          "x-reserved": {
+            "for": "S0-23",
+            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
+          }
         },
-        "allowMatterRateOverrides": { "type": "boolean", "default": true },
-        "partnerSignOffThresholdGbp": { "type": "number", "default": 25000 },
-        "rateCards": { "type": "array" },
-        "disbursementPresets": { "type": "array" }
+        "allowMatterRateOverrides": {
+          "type": "boolean",
+          "default": true,
+          "x-reserved": {
+            "for": "S0-23",
+            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
+          }
+        },
+        "partnerSignOffThresholdGbp": {
+          "type": "number",
+          "default": 25000,
+          "x-reserved": {
+            "for": "S0-23",
+            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
+          }
+        },
+        "rateCards": {
+          "type": "array",
+          "x-reserved": {
+            "for": "S0-23",
+            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
+          }
+        },
+        "disbursementPresets": {
+          "type": "array",
+          "x-reserved": {
+            "for": "S0-23",
+            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
+          }
+        }
       }
     },
     "integrations": {
@@ -156,11 +232,27 @@
         "aiProviderChoice"
       ],
       "properties": {
-        "pmsConnectionSecretVaultRef": { "type": "string" },
-        "companiesHouseApiKeyVaultRef": { "type": "string" },
+        "pmsConnectionSecretVaultRef": {
+          "type": "string",
+          "x-reserved": {
+            "for": "S0-18",
+            "reason": "Reserved for live tenant-scoped PMS database connection secret resolution in S0-18."
+          }
+        },
+        "companiesHouseApiKeyVaultRef": {
+          "type": "string",
+          "x-reserved": {
+            "for": "S0-18",
+            "reason": "Reserved for live Companies House API integration in S0-18."
+          }
+        },
         "aiProviderChoice": {
           "type": "string",
-          "enum": ["azure_openai_uk", "anthropic", "disabled"],
+          "enum": [
+            "azure_openai_uk",
+            "anthropic",
+            "disabled"
+          ],
           "default": "disabled",
           "description": "AI provider for tenant AI features ('anthropic' or 'disabled' active today; 'azure_openai_uk' reserved in the enum for a future UK Azure OpenAI adapter)"
         },
@@ -169,24 +261,66 @@
           "additionalProperties": false,
           "description": "Two-way Finance/PMS synchronisation settings and field mappings",
           "properties": {
-            "enabled": { "type": "boolean", "default": true },
-            "providerKey": { "type": "string", "default": "generic_sql" },
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "x-reserved": {
+                "for": "S0-18",
+                "reason": "Reserved for live tenant-scoped PMS synchronisation in S0-18."
+              }
+            },
+            "providerKey": {
+              "type": "string",
+              "default": "generic_sql",
+              "x-reserved": {
+                "for": "S0-18",
+                "reason": "Reserved for live tenant-scoped PMS adapter selection in S0-18."
+              }
+            },
             "syncMode": {
               "type": "string",
-              "enum": ["read_only", "two_way"],
-              "default": "two_way"
+              "enum": [
+                "read_only",
+                "two_way"
+              ],
+              "default": "two_way",
+              "x-reserved": {
+                "for": "S0-18",
+                "reason": "Reserved for live tenant-scoped PMS sync direction control in S0-18."
+              }
             },
             "matterCodeAllocation": {
               "type": "string",
-              "enum": ["onesquared", "pms_on_open"],
-              "default": "onesquared"
+              "enum": [
+                "onesquared",
+                "pms_on_open"
+              ],
+              "default": "onesquared",
+              "x-reserved": {
+                "for": "S0-18",
+                "reason": "Reserved for live tenant-scoped PMS matter number allocation in S0-18."
+              }
             },
             "clientCodeAllocation": {
               "type": "string",
-              "enum": ["onesquared", "pms_on_open"],
-              "default": "onesquared"
+              "enum": [
+                "onesquared",
+                "pms_on_open"
+              ],
+              "default": "onesquared",
+              "x-reserved": {
+                "for": "S0-18",
+                "reason": "Reserved for live tenant-scoped PMS client code allocation in S0-18."
+              }
             },
-            "pollIntervalMinutes": { "type": "integer", "default": 15 },
+            "pollIntervalMinutes": {
+              "type": "integer",
+              "default": 15,
+              "x-reserved": {
+                "for": "S0-18",
+                "reason": "Reserved for live tenant-scoped PMS delta polling interval in S0-18."
+              }
+            },
             "fieldMappings": {
               "type": "array",
               "default": [],
@@ -202,7 +336,13 @@
                   "active"
                 ],
                 "properties": {
-                  "id": { "type": "string" },
+                  "id": {
+                    "type": "string",
+                    "x-reserved": {
+                      "for": "S0-18",
+                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                    }
+                  },
                   "entityType": {
                     "type": "string",
                     "enum": [
@@ -211,17 +351,52 @@
                       "matter",
                       "fee_estimate",
                       "employee"
-                    ]
+                    ],
+                    "x-reserved": {
+                      "for": "S0-18",
+                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                    }
                   },
-                  "onesquaredFieldKey": { "type": "string" },
-                  "externalFieldKey": { "type": "string" },
+                  "onesquaredFieldKey": {
+                    "type": "string",
+                    "x-reserved": {
+                      "for": "S0-18",
+                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                    }
+                  },
+                  "externalFieldKey": {
+                    "type": "string",
+                    "x-reserved": {
+                      "for": "S0-18",
+                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                    }
+                  },
                   "ownership": {
                     "type": "string",
-                    "enum": ["onesquared_master", "pms_master", "bidirectional"],
-                    "default": "onesquared_master"
+                    "enum": [
+                      "onesquared_master",
+                      "pms_master",
+                      "bidirectional"
+                    ],
+                    "default": "onesquared_master",
+                    "x-reserved": {
+                      "for": "S0-18",
+                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                    }
                   },
-                  "active": { "type": "boolean", "default": true }
+                  "active": {
+                    "type": "boolean",
+                    "default": true,
+                    "x-reserved": {
+                      "for": "S0-18",
+                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                    }
+                  }
                 }
+              },
+              "x-reserved": {
+                "for": "S0-18",
+                "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
               }
             }
           }
@@ -232,6 +407,10 @@
       "type": "array",
       "description": "Per-client custom fields, screen locations, and mandatory rules",
       "default": [],
+      "x-reserved": {
+        "for": "S0-17",
+        "reason": "Reserved for moving custom field definitions off the transitional JSON store in S0-17."
+      },
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -246,31 +425,67 @@
           "active"
         ],
         "properties": {
-          "id": { "type": "string" },
+          "id": {
+            "type": "string"
+          },
           "recordType": {
             "type": "string",
-            "enum": ["enquiry", "person", "organisation", "matter", "quote", "task"]
+            "enum": [
+              "enquiry",
+              "person",
+              "organisation",
+              "matter",
+              "quote",
+              "task"
+            ]
           },
-          "label": { "type": "string" },
+          "label": {
+            "type": "string"
+          },
           "fieldType": {
             "type": "string",
-            "enum": ["text", "longText", "number", "date", "yesNo", "choice"]
+            "enum": [
+              "text",
+              "longText",
+              "number",
+              "date",
+              "yesNo",
+              "choice"
+            ]
           },
-          "optionsListKey": { "type": "string" },
+          "optionsListKey": {
+            "type": "string"
+          },
           "options": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
-          "section": { "type": "string", "default": "additional" },
-          "required": { "type": "boolean", "default": false },
-          "sortOrder": { "type": "integer", "default": 1 },
-          "active": { "type": "boolean", "default": true }
+          "section": {
+            "type": "string",
+            "default": "additional"
+          },
+          "required": {
+            "type": "boolean",
+            "default": false
+          },
+          "sortOrder": {
+            "type": "integer",
+            "default": 1
+          },
+          "active": {
+            "type": "boolean",
+            "default": true
+          }
         }
       }
     },
     "enabledExtensions": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "default": []
     },
     "documentGeneration": {
@@ -292,7 +507,10 @@
         },
         "defaultOutputFormat": {
           "type": "string",
-          "enum": ["docx", "pdf"],
+          "enum": [
+            "docx",
+            "pdf"
+          ],
           "default": "docx",
           "description": "Default output format when generating documents"
         },
@@ -303,7 +521,13 @@
         },
         "storageProvider": {
           "type": "string",
-          "enum": ["local-fs", "azure-blob", "sharepoint", "imanage", "netdocuments"],
+          "enum": [
+            "local-fs",
+            "azure-blob",
+            "sharepoint",
+            "imanage",
+            "netdocuments"
+          ],
           "default": "local-fs",
           "description": "Configured document storage provider"
         },
@@ -311,8 +535,14 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "requireApproval": { "type": "boolean", "default": true },
-            "allowSelfApproval": { "type": "boolean", "default": false }
+            "requireApproval": {
+              "type": "boolean",
+              "default": true
+            },
+            "allowSelfApproval": {
+              "type": "boolean",
+              "default": false
+            }
           }
         },
         "usage": {
@@ -323,7 +553,11 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 120,
-              "default": 24
+              "default": 24,
+              "x-reserved": {
+                "for": "S0-19",
+                "reason": "Reserved for S0-19 (Tenant-aware scheduler running executeUsageRetentionPurgeJob)."
+              }
             },
             "lowUseThreshold": {
               "type": "integer",
@@ -348,15 +582,60 @@
               "deprecated": true,
               "additionalProperties": false,
               "properties": {
-                "document_template:view": { "type": "array", "items": { "type": "string" } },
-                "document_template:build": { "type": "array", "items": { "type": "string" } },
-                "document_template:approve": { "type": "array", "items": { "type": "string" } },
-                "document_template:view_usage": { "type": "array", "items": { "type": "string" } },
-                "document_template:view_usage_by_user": { "type": "array", "items": { "type": "string" } },
-                "document:generate": { "type": "array", "items": { "type": "string" } },
-                "document:view": { "type": "array", "items": { "type": "string" } },
-                "document:delete": { "type": "array", "items": { "type": "string" } },
-                "finance:view": { "type": "array", "items": { "type": "string" } }
+                "document_template:view": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document_template:build": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document_template:approve": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document_template:view_usage": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document_template:view_usage_by_user": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document:generate": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document:view": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document:delete": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "finance:view": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
@@ -364,13 +643,24 @@
         "customDocumentTypes": {
           "type": "array",
           "default": [],
+          "x-reserved": {
+            "for": "backlog",
+            "reason": "Reserved for backlog item F20 (Tenant-configured custom document classification types in document generation)."
+          },
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["key", "label"],
+            "required": [
+              "key",
+              "label"
+            ],
             "properties": {
-              "key": { "type": "string" },
-              "label": { "type": "string" }
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
             }
           }
         }
@@ -386,16 +676,33 @@
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["key", "label", "permissions"],
+            "required": [
+              "key",
+              "label",
+              "permissions"
+            ],
             "properties": {
-              "key": { "type": "string", "pattern": "^[a-z0-9_]+$" },
-              "label": { "type": "string" },
-              "shortLabel": { "type": "string" },
-              "description": { "type": "string" },
-              "isBuiltIn": { "type": "boolean" },
+              "key": {
+                "type": "string",
+                "pattern": "^[a-z0-9_]+$"
+              },
+              "label": {
+                "type": "string"
+              },
+              "shortLabel": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "isBuiltIn": {
+                "type": "boolean"
+              },
               "permissions": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -404,7 +711,9 @@
           "type": "object",
           "additionalProperties": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           }
         },
         "relationshipGrants": {
@@ -412,7 +721,10 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["relationship", "permissions"],
+            "required": [
+              "relationship",
+              "permissions"
+            ],
             "properties": {
               "relationship": {
                 "type": "string",
@@ -425,9 +737,13 @@
               },
               "permissions": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               },
-              "description": { "type": "string" }
+              "description": {
+                "type": "string"
+              }
             }
           }
         },
@@ -437,21 +753,29 @@
           "properties": {
             "authorityMode": {
               "type": "string",
-              "enum": ["token_only", "hybrid", "store_only"],
+              "enum": [
+                "token_only",
+                "hybrid",
+                "store_only"
+              ],
               "default": "hybrid"
             },
             "entraGroupToRoleKey": {
               "type": "object",
               "additionalProperties": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "entraAppRoleToRoleKey": {
               "type": "object",
               "additionalProperties": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "requireMfaForAdminPermissions": {
@@ -468,36 +792,73 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["storeId", "displayName", "providerType", "auth"],
+        "required": [
+          "storeId",
+          "displayName",
+          "providerType",
+          "auth"
+        ],
         "properties": {
-          "storeId": { "type": "string", "minLength": 1 },
-          "displayName": { "type": "string", "minLength": 1 },
+          "storeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1
+          },
           "providerType": {
             "type": "string",
-            "enum": ["sharepoint", "azure_blob", "imanage", "netdocuments"]
+            "enum": [
+              "sharepoint",
+              "azure_blob",
+              "imanage",
+              "netdocuments"
+            ]
           },
-          "isDefault": { "type": "boolean", "default": false },
-          "enabled": { "type": "boolean", "default": true },
+          "isDefault": {
+            "type": "boolean",
+            "default": false
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
           "auth": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["entraTenantId"],
+            "required": [
+              "entraTenantId"
+            ],
             "properties": {
-              "entraTenantId": { "type": "string", "minLength": 1 },
+              "entraTenantId": {
+                "type": "string",
+                "minLength": 1
+              },
               "credentialMode": {
                 "type": "string",
-                "enum": ["client_certificate", "managed_identity"],
+                "enum": [
+                  "client_certificate",
+                  "managed_identity"
+                ],
                 "default": "client_certificate"
               },
-              "clientId": { "type": "string" },
+              "clientId": {
+                "type": "string"
+              },
               "certificateKeyVaultSecretRef": {
                 "type": "string",
                 "pattern": "^kv://[a-z0-9-]+/[a-z0-9-]+$"
               },
-              "managedIdentityClientId": { "type": "string" },
+              "managedIdentityClientId": {
+                "type": "string"
+              },
               "delegatedPermissionScope": {
                 "type": "string",
-                "enum": ["Files.ReadWrite.All", "Sites.Selected"],
+                "enum": [
+                  "Files.ReadWrite.All",
+                  "Sites.Selected"
+                ],
                 "default": "Files.ReadWrite.All"
               }
             }
@@ -505,26 +866,50 @@
           "sharepoint": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["hostname", "siteRelativePath", "libraries"],
+            "required": [
+              "hostname",
+              "siteRelativePath",
+              "libraries"
+            ],
             "properties": {
-              "hostname": { "type": "string", "minLength": 3 },
+              "hostname": {
+                "type": "string",
+                "minLength": 3
+              },
               "siteRelativePath": {
                 "type": "string",
                 "pattern": "^/(sites|teams)/[A-Za-z0-9._-]+$"
               },
-              "siteId": { "type": "string" },
+              "siteId": {
+                "type": "string"
+              },
               "libraries": {
                 "type": "array",
                 "minItems": 1,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["libraryId", "displayName", "libraryUrlSegment"],
+                  "required": [
+                    "libraryId",
+                    "displayName",
+                    "libraryUrlSegment"
+                  ],
                   "properties": {
-                    "libraryId": { "type": "string", "minLength": 1 },
-                    "displayName": { "type": "string", "minLength": 1 },
-                    "libraryUrlSegment": { "type": "string", "minLength": 1 },
-                    "driveId": { "type": "string" }
+                    "libraryId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "displayName": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "libraryUrlSegment": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "driveId": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -539,25 +924,45 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["match", "storeId", "libraryId", "basePath"],
+        "required": [
+          "match",
+          "storeId",
+          "libraryId",
+          "basePath"
+        ],
         "properties": {
-          "ruleId": { "type": "string" },
+          "ruleId": {
+            "type": "string"
+          },
           "match": {
             "oneOf": [
-              { "type": "string", "const": "default" },
+              {
+                "type": "string",
+                "const": "default"
+              },
               {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "departmentId": { "type": "string" },
-                  "teamId": { "type": "string" },
-                  "workTypeId": { "type": "string" }
+                  "departmentId": {
+                    "type": "string"
+                  },
+                  "teamId": {
+                    "type": "string"
+                  },
+                  "workTypeId": {
+                    "type": "string"
+                  }
                 }
               }
             ]
           },
-          "storeId": { "type": "string" },
-          "libraryId": { "type": "string" },
+          "storeId": {
+            "type": "string"
+          },
+          "libraryId": {
+            "type": "string"
+          },
           "basePath": {
             "type": "string",
             "default": "{departmentCode}/{teamCode}"
@@ -577,11 +982,15 @@
       "properties": {
         "departmentEntraGroups": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "teamEntraGroups": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "uniqueScopeWarningThreshold": {
           "type": "integer",
@@ -589,7 +998,11 @@
         },
         "autoRemediateDrift": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "x-reserved": {
+            "for": "S0-25",
+            "reason": "Reserved for scheduled automatic SharePoint permission drift remediation in S0-25."
+          }
         },
         "defaultPolicy": {
           "type": "object"
@@ -603,11 +1016,19 @@
       "type": "object",
       "additionalProperties": false,
       "description": "Versioned matter folder templates with inheritance (workType -> department -> default)",
-      "required": ["default"],
+      "required": [
+        "default"
+      ],
       "properties": {
-        "default": { "type": "object" },
-        "byDepartment": { "type": "object" },
-        "byWorkType": { "type": "object" }
+        "default": {
+          "type": "object"
+        },
+        "byDepartment": {
+          "type": "object"
+        },
+        "byWorkType": {
+          "type": "object"
+        }
       }
     },
     "keyDates": {

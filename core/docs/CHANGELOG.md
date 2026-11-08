@@ -2,6 +2,18 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-08 — Slice S0-12 (Tenant Configuration Reserved Settings & Template Approval Gate)
+
+### Added
+- **Reserved Tenant Settings Inspection (`@platform/core`, `core/src/config-engine/index.ts`, `core/schemas/tenant-config.schema.json`):**
+  - Added `"x-reserved": { "for": "S0-... | backlog", "reason": "..." }` metadata in `core/schemas/tenant-config.schema.json` and `core/schemas/keyDates.config.schema.json` (and `[x-reserved:...]` descriptions in `TenantConfigurationSchema`) for all 24 reserved tenant settings: `branding.accentColorHex` and `branding.logoAssetKey` (`S0-11b`), `matterCosts.*` (`S0-23`), `integrations.pmsConnectionSecretVaultRef`, `integrations.companiesHouseApiKeyVaultRef`, and `integrations.pmsSync.*` (`S0-18`), `customFields` (`S0-17`), `documentGeneration.usage.retentionMonths` (`S0-19`), `documentGeneration.customDocumentTypes` (`backlog`), `documentAccess.autoRemediateDrift` (`S0-25`), and `keyDates.defaults.teamAssignment`, `keyDates.matterTypes[].defaultRuleSetIds`, `keyDates.limitationRuleSets[].rules[].claimType`, and `keyDates.calendarSync.provider` (`backlog`), recording reserved array settings once at the array node without expanding child fields.
+  - Exported `ConfigReservedSettingNotice`, `RESERVED_TENANT_CONFIG_SETTINGS` (derived directly from the JSON schemas' `x-reserved` entries, resolving relative `$ref` files), `collectStructuredConfigReservedSettings`, and `collectConfigReservedSettings` from `@platform/core`.
+  - Extended `validateTenantConfigWithWarnings` to return `reservedSettings: string[]` and `structuredReservedSettings: ConfigReservedSettingNotice[]` alongside `deprecationWarnings` and `structuredDeprecationWarnings`.
+
+### Changed
+- **`submitTemplateVersionForApproval` (`core/src/domain/document-generation/approvalWorkflow.ts`):**
+  - Enforced `config.documentGeneration.approval.requireApproval` (default `true`): when `requireApproval === false`, submitting a clean, mapped `Draft` template version retires any previously `Active` version and transitions the version and template directly to `'Active'`.
+
 ## 2026-11-08 — Slice S0-09 (Tenant Document Repository Entity Repointing and Recipient Matching)
 
 ### Added

@@ -78,6 +78,8 @@ export default async function AdminCatchAllPage({
         matterPartyTaxonomy={snap.matterPartyTaxonomy}
         matterPartyMigrationReport={snap.matterPartyMigrationReport}
         matterCostsConfig={snap.matterCostsConfig}
+        enableMatterCostsGovernance={snap.enableMatterCostsGovernance}
+        enablePmsLiveRateSync={snap.enablePmsLiveRateSync}
         currentUserId={snap.currentUserId}
         currentUserPermissions={snap.currentUserPermissions}
         appRoleByPersonId={snap.appRoleByPersonId}

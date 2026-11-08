@@ -33,6 +33,7 @@ import { quickConflictCheck } from './articles/quick-conflict-check';
 import { sharepointDocumentStoreArticle } from './articles/sharepoint-document-store';
 import { sharepointSitesSelectedSetupArticle } from './articles/sharepoint-sites-selected-setup';
 import { signOffQueueArticle } from './articles/sign-off-queue';
+import { tenantSettingsArticle } from './articles/tenant-settings';
 
 export interface DocArticle {
   /** URL slug: /docs/<slug>. Keep stable once published, because screens link to it. */
@@ -66,6 +67,7 @@ export const ARTICLES: DocArticle[] = [
   mattersEnquiriesTasksNavigationArticle,
   signOffQueueArticle,
   deploymentAndSecurityArticle,
+  tenantSettingsArticle,
   authenticationRbacAndMfaArticle,
   dataAdministrationAndRetentionArticle,
   developmentProcessArticle,

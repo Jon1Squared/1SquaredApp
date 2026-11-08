@@ -41,6 +41,7 @@ import {
   switchViewingRoleAction,
   updateMatterConflictRecordAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import type { PartnerCostSignOffRecord } from '@/domain/matterFieldValues';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import {
@@ -179,6 +180,7 @@ interface MatterFormClientProps {
   };
   enableAiMatterExtraction?: boolean;
   aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
+  enableMatterCostsGovernance?: boolean;
   tenantId: string;
 }
 
@@ -286,6 +288,7 @@ export function MatterFormClient({
   suggestedMatterGovernanceAssignees,
   enableAiMatterExtraction = false,
   aiProviderChoice = 'disabled',
+  enableMatterCostsGovernance = false,
   tenantId,
 }: MatterFormClientProps) {
   const router = useRouter();
@@ -4332,6 +4335,10 @@ export function MatterFormClient({
         signOffNote.trim() || undefined,
       );
       setSigningOffCosts(false);
+      if (isActionDenied(res)) {
+        showToast(res.message || 'Could not sign off matter costs');
+        return;
+      }
       if (res.errors && Object.keys(res.errors).length > 0) {
         showToast(
           Object.values(res.errors)[0] ?? 'Could not sign off matter costs',
@@ -8290,8 +8297,9 @@ export function MatterFormClient({
                   ) : null}
                 </div>
 
-                {partnerCostSignOff ||
-                (canSignOffCosts && (savedDraftMatterId || existing?.id)) ? (
+                {enableMatterCostsGovernance &&
+                (partnerCostSignOff ||
+                  (canSignOffCosts && (savedDraftMatterId || existing?.id))) ? (
                   <div
                     style={{
                       display: 'flex',

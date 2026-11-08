@@ -110,10 +110,24 @@ export function KeyDatesPanel({
 
   // Add / Calculator form state
   const [showAddForm, setShowAddForm] = useState(false);
-  const [entryMode, setEntryMode] = useState<'manual' | 'calculator'>('manual');
   const [keyDateTypeId, setKeyDateTypeId] = useState(
     keyDateTypes[0]?.id ?? 'limitation',
   );
+  const selectedKeyDateType = useMemo(
+    () => keyDateTypes.find((t) => t.id === keyDateTypeId) ?? keyDateTypes[0],
+    [keyDateTypes, keyDateTypeId],
+  );
+  const [entryMode, setEntryMode] = useState<'manual' | 'calculator'>(() => {
+    const initialType = keyDateTypes[0];
+    if (
+      initialType &&
+      initialType.allowManualEntry === false &&
+      Boolean(initialType.allowCalculation)
+    ) {
+      return 'calculator';
+    }
+    return 'manual';
+  });
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [dueTime, setDueTime] = useState('');
@@ -250,6 +264,8 @@ export function KeyDatesPanel({
       if (!title) setTitle(kdType.label);
       if (kdType.allowCalculation) {
         setEntryMode('calculator');
+      } else if (kdType.allowManualEntry !== false) {
+        setEntryMode('manual');
       }
     }
   }
@@ -324,7 +340,13 @@ export function KeyDatesPanel({
         intent,
       });
       if (!res.ok) {
-        setFeedback({ kind: 'err', text: res.error || 'Could not save key date.' });
+        setFeedback({
+          kind: 'err',
+          text:
+            ('message' in res && res.message) ||
+            res.error ||
+            'Could not save key date.',
+        });
       } else {
         setFeedback({
           kind: 'ok',
@@ -570,7 +592,17 @@ export function KeyDatesPanel({
               type="button"
               className={entryMode === 'manual' ? 'btn btn-primary' : 'btn'}
               style={{ fontSize: 12, padding: '5px 10px' }}
-              onClick={() => setEntryMode('manual')}
+              disabled={selectedKeyDateType?.allowManualEntry === false}
+              title={
+                selectedKeyDateType?.allowManualEntry === false
+                  ? 'Manual entry is disabled for this key date type'
+                  : undefined
+              }
+              onClick={() => {
+                if (selectedKeyDateType?.allowManualEntry !== false) {
+                  setEntryMode('manual');
+                }
+              }}
             >
               Manual Date Entry
             </button>
@@ -657,7 +689,24 @@ export function KeyDatesPanel({
             </div>
           </div>
 
-          {entryMode === 'manual' ? (
+          {selectedKeyDateType?.allowManualEntry === false &&
+          !selectedKeyDateType?.allowCalculation ? (
+            <div
+              style={{
+                padding: '8px 10px',
+                marginBottom: 12,
+                borderRadius: 6,
+                background: '#fef2f2',
+                border: '1px solid #fecaca',
+                fontSize: 12,
+                color: '#991b1b',
+              }}
+            >
+              Manual entry is disabled for &ldquo;
+              {selectedKeyDateType.label || selectedKeyDateType.id}&rdquo;, and
+              the limitation calculator is not enabled for this key date type.
+            </div>
+          ) : entryMode === 'manual' ? (
             <div
               style={{
                 display: 'grid',
@@ -1074,7 +1123,11 @@ export function KeyDatesPanel({
             <button
               type="submit"
               className="btn btn-primary"
-              disabled={isPending}
+              disabled={
+                isPending ||
+                (selectedKeyDateType?.allowManualEntry === false &&
+                  !selectedKeyDateType?.allowCalculation)
+              }
               style={{ fontSize: 12, padding: '6px 14px' }}
             >
               {isPending ? 'Saving…' : 'Save Key Date'}
@@ -1543,7 +1596,10 @@ export function KeyDatesPanel({
                   if (!res.ok) {
                     setFeedback({
                       kind: 'err',
-                      text: res.error || 'Supersede failed.',
+                      text:
+                        ('message' in res && res.message) ||
+                        res.error ||
+                        'Supersede failed.',
                     });
                   } else {
                     setFeedback({

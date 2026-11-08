@@ -130,7 +130,6 @@ import type {
   KeyDateCalculation,
   KeyDateExceptionKind,
   KeyDatesConfig,
-  KeyDateSource,
   StandstillPeriod,
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
@@ -1423,7 +1422,7 @@ export async function createOrProposeKeyDateAction(input: {
   dueDate: string;
   dueTime?: string;
   isCritical?: boolean;
-  source?: KeyDateSource;
+  source?: 'manual' | 'calculated';
   teamId?: string;
   responsiblePersonIds?: string[];
   calculation?: KeyDateCalculation;

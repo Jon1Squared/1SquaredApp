@@ -200,7 +200,10 @@ import {
   recordKeyDateNotApplicable,
   rejectProposedKeyDate,
   resolveKeyDateOutcome,
+  resolveKeyDateSource,
+  resolveSupersedeKeyDateSource,
   supersedeConfirmedKeyDate,
+  validateKeyDateManualEntry,
   verifyProposedKeyDate,
 } from '@/domain/keyDates';
 import {
@@ -2998,16 +3001,17 @@ async function runMatterOpeningGate(params: {
     }
   }
 
-  // 3. beforeMatterOpen extension hook.
+  // 3. beforeMatterOpen extension hook (when Matter Costs Governance is enabled for the tenant).
   const host = getPlatformExtensionHost();
-  const openGovernance = gateLoadFailure
-    ? null
-    : await host.executeMatterCostsHook(
-        'beforeMatterOpen',
-        extensionCtx,
-        tenantCfg,
-        costsHookInput,
-      );
+  const openGovernance =
+    gateLoadFailure || !tenantCfg.featureFlags?.enableMatterCostsGovernance
+      ? null
+      : await host.executeMatterCostsHook(
+          'beforeMatterOpen',
+          extensionCtx,
+          tenantCfg,
+          costsHookInput,
+        );
 
   if (openGovernance && !openGovernance.allowProceed) {
     const rawWarning = openGovernance.governanceWarnings[0] ?? '';
@@ -4377,12 +4381,19 @@ export async function saveMatterRecord(
     disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
     partnerSignOffCompleted,
   };
-  const calcGovernance = await host.executeMatterCostsHook(
-    'beforeMatterCostsCalculate',
-    extensionCtx,
-    tenantCfg,
-    costsHookInput,
-  );
+  const calcGovernance = tenantCfg.featureFlags?.enableMatterCostsGovernance
+    ? await host.executeMatterCostsHook(
+        'beforeMatterCostsCalculate',
+        extensionCtx,
+        tenantCfg,
+        costsHookInput,
+      )
+    : {
+        allowProceed: true,
+        requiresPartnerSignOff: false,
+        governanceWarnings: [],
+        appliedTransformations: [],
+      };
   const gateResult =
     !isDraftSave && !existingHasOpened && !isPmsImport
       ? await runMatterOpeningGate({
@@ -5324,11 +5335,22 @@ export async function signOffMatterCostsRecord(
   matterId: string,
   byId: string,
   note?: string,
-): Promise<{
-  matter: Matter | null;
-  errors?: Record<string, string>;
-  warnings?: string[];
-}> {
+): Promise<
+  {
+    matter: Matter | null;
+    errors?: Record<string, string>;
+    warnings?: string[];
+  } & Partial<ActionDenied>
+> {
+  const tenantCfg = getActiveTenantConfiguration();
+  if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
+    const msg =
+      'Forbidden: Matter costs governance is disabled for this tenant (featureFlags.enableMatterCostsGovernance is false).';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      matter: null,
+    };
+  }
   const store = getStore();
   const matter = store.matters.find((m) => m.id === matterId) ?? null;
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
@@ -5369,7 +5391,6 @@ export async function signOffMatterCostsRecord(
       },
     };
   }
-  const tenantCfg = getActiveTenantConfiguration();
   let extensionCtx: TenantContext;
   try {
     extensionCtx = resolveCurrentTenantContext(
@@ -12173,6 +12194,17 @@ export function saveMatterCostsConfig(
   config: MatterCostsConfig,
   byId: string,
 ): MatterCostsConfig {
+  const tenantCfg = getActiveTenantConfiguration();
+  if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message:
+        'Forbidden: Matter costs governance is disabled for this tenant (featureFlags.enableMatterCostsGovernance is false).',
+      tenantId: tenantCfg.tenantId,
+      correlationId: `corr-costs-cfg-${randomUUID()}`,
+      actorUserId: byId,
+    });
+  }
   const store = getStore();
   const now = new Date().toISOString();
   const next: MatterCostsConfig = {
@@ -12198,10 +12230,20 @@ export function saveMatterCostsConfig(
 export function syncMatterCostsRatesFromPms(
   byId: string,
 ): MatterCostsConfig {
+  const tenantCfg = getActiveTenantConfiguration();
+  if (!tenantCfg.featureFlags?.enablePmsLiveRateSync) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message:
+        'Forbidden: PMS live rate sync is disabled for this tenant (featureFlags.enablePmsLiveRateSync is false).',
+      tenantId: tenantCfg.tenantId,
+      correlationId: `corr-pms-rates-${randomUUID()}`,
+      actorUserId: byId,
+    });
+  }
   const store = getStore();
   const pms = getPmsSource();
   const feeEarners = pms.listFeeEarners();
-  const tenantCfg = getActiveTenantConfiguration();
   const base =
     store.matterCostsConfig ??
     createDefaultMatterCostsConfig(store.values, {
@@ -12587,7 +12629,14 @@ export async function createOrProposeKeyDateRecord(
     intent?: 'provisional' | 'propose';
   },
   byId: string,
-): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+): Promise<{
+  ok: boolean;
+  keyDate?: KeyDate;
+  error?: string;
+  denied?: true;
+  code?: ActionDenied['code'];
+  message?: string;
+}> {
   try {
     const store = getStore();
     const config = getKeyDatesConfig(store);
@@ -12614,6 +12663,23 @@ export async function createOrProposeKeyDateRecord(
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
+    const resolvedSource = resolveKeyDateSource({
+      source: input.source,
+      hasCalculation: Boolean(input.calculation),
+      allowSystemSource: false,
+    });
+    if (!resolvedSource.ok) {
+      return buildActionDenied('FORBIDDEN', resolvedSource.error);
+    }
+    const manualCheck = validateKeyDateManualEntry(
+      config,
+      input.keyDateTypeId,
+      resolvedSource.source,
+    );
+    if (!manualCheck.ok) {
+      return buildActionDenied('FORBIDDEN', manualCheck.error);
+    }
+
     store.keyDates = store.keyDates ?? [];
     store.keyDateReminderStates = store.keyDateReminderStates ?? [];
     store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
@@ -12627,7 +12693,7 @@ export async function createOrProposeKeyDateRecord(
       dueDate: input.dueDate,
       dueTime: input.dueTime,
       isCritical: input.isCritical,
-      source: input.source,
+      source: resolvedSource.source,
       teamId: input.teamId,
       responsiblePersonIds: input.responsiblePersonIds,
       calculation: input.calculation,
@@ -12908,6 +12974,7 @@ export async function supersedeConfirmedKeyDateRecord(
     dueDate: string;
     dueTime?: string;
     isCritical?: boolean;
+    source?: 'manual' | 'calculated';
     teamId?: string;
     responsiblePersonIds?: string[];
     calculation?: KeyDateCalculation;
@@ -12921,6 +12988,9 @@ export async function supersedeConfirmedKeyDateRecord(
   supersededKeyDate?: KeyDate;
   replacementKeyDate?: KeyDate;
   error?: string;
+  denied?: true;
+  code?: ActionDenied['code'];
+  message?: string;
 }> {
   try {
     const store = getStore();
@@ -12949,6 +13019,25 @@ export async function supersedeConfirmedKeyDateRecord(
       (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
     ) {
       return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    const resolvedSupersede = resolveSupersedeKeyDateSource({
+      existingKeyDate: existing,
+      updates,
+      reason,
+      config,
+      allowSystemSource: false,
+    });
+    if (!resolvedSupersede.ok) {
+      return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
+    }
+    const manualCheck = validateKeyDateManualEntry(
+      config,
+      existing.keyDateTypeId,
+      resolvedSupersede.source,
+    );
+    if (!manualCheck.ok) {
+      return buildActionDenied('FORBIDDEN', manualCheck.error);
     }
 
     const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
@@ -13633,8 +13722,45 @@ export function saveKeyDatesConfigRecord(
       };
     }
 
+    for (const rs of newConfigInput.limitationRuleSets ?? []) {
+      const rawStatus = (rs as { reviewStatus?: unknown }).reviewStatus;
+      if (rawStatus !== 'reviewed' && rawStatus !== 'unreviewed') {
+        return {
+          ok: false,
+          error: `Invalid reviewStatus "${String(rawStatus)}" on limitation rule set "${rs.id}". Expected "reviewed" or "unreviewed".`,
+        };
+      }
+    }
+
     const validated = validateKeyDatesConfig(newConfigInput) as unknown as KeyDatesConfig;
     const nowIso = new Date().toISOString();
+    const todayIso = nowIso.slice(0, 10);
+    const prevRuleSetsById = new Map(
+      (currentConfig.limitationRuleSets ?? []).map((rs) => [rs.id, rs]),
+    );
+    if (validated.limitationRuleSets) {
+      validated.limitationRuleSets = validated.limitationRuleSets.map((rs) => {
+        if (rs.reviewStatus === 'unreviewed') {
+          const nextUnreviewed = { ...rs, reviewStatus: 'unreviewed' as const };
+          delete nextUnreviewed.reviewedBy;
+          delete nextUnreviewed.reviewedOn;
+          return nextUnreviewed;
+        }
+        const prev = prevRuleSetsById.get(rs.id);
+        const keepPreviousReviewer =
+          prev?.reviewStatus === 'reviewed' &&
+          prev.version === rs.version &&
+          Boolean(prev.reviewedBy);
+        return {
+          ...rs,
+          reviewStatus: 'reviewed' as const,
+          reviewedBy: keepPreviousReviewer ? prev!.reviewedBy : actor.id,
+          reviewedOn: keepPreviousReviewer
+            ? (prev!.reviewedOn ?? todayIso)
+            : todayIso,
+        };
+      });
+    }
 
     store.keyDatesConfigOverride = validated;
     store.audit.unshift({
