@@ -25,10 +25,7 @@ import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/dupli
 import { enquiryDisplayName, isEnquiryOpen } from '@/domain/enquiries';
 import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
-import {
-  formatConversionConflictWarningsNotice,
-  normaliseConversionConflictWarnings,
-} from '@/domain/matterConflicts';
+import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import { findOneSquaredIdForPmsCode, formatGbp } from '@/domain/pms';
@@ -448,9 +445,6 @@ export function HomeClient({
     qs.set('enquiryId', enq.id);
     if (res.clientId) qs.set('clientId', res.clientId);
     if (res.instructingContactId) qs.set('instructingContactId', res.instructingContactId);
-    for (const w of normaliseConversionConflictWarnings(res.conflictWarnings)) {
-      qs.append('conflictWarning', w);
-    }
     router.push(`/matters/new?${qs.toString()}`);
   }
 

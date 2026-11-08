@@ -591,7 +591,7 @@ export interface Person extends RecordBase {
 }
 
 export interface OrganisationConflictDecision {
-  outcome: 'Cleared' | 'Potential conflict';
+  outcome: 'Cleared' | 'Potential conflict' | 'Conflict – declined';
   decidedById: string;
   decidedByName: string;
   decidedAt: string;
@@ -599,6 +599,7 @@ export interface OrganisationConflictDecision {
   matchesCount: number;
   searchedSources: string[];
   summary: string;
+  warnings?: string[];
 }
 
 export interface Organisation extends RecordBase {

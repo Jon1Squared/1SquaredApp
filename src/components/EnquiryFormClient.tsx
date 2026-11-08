@@ -47,10 +47,7 @@ import {
   type EnquiryFormState,
 } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
-import {
-  formatConversionConflictWarningsNotice,
-  normaliseConversionConflictWarnings,
-} from '@/domain/matterConflicts';
+import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
   resolveAddressSuggestion,
   searchAddressSuggestions,
@@ -1246,14 +1243,9 @@ export function EnquiryFormClient({
       if (warningNotice) {
         showToast(warningNotice);
       }
-      const qs = new URLSearchParams();
-      qs.set('enquiryId', enquiry.id);
-      qs.set('clientId', res.clientId ?? '');
-      qs.set('instructingContactId', res.instructingContactId ?? '');
-      for (const w of normaliseConversionConflictWarnings(res.conflictWarnings)) {
-        qs.append('conflictWarning', w);
-      }
-      router.push(`/matters/new?${qs.toString()}`);
+      router.push(
+        `/matters/new?enquiryId=${enquiry.id}&clientId=${res.clientId ?? ''}&instructingContactId=${res.instructingContactId ?? ''}`,
+      );
     });
   };
 

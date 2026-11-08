@@ -4065,6 +4065,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         )!;
         expect(createdSameNameProspectOrg.conflictDecision?.outcome).toBe('Potential conflict');
         expect(createdSameNameProspectOrg.conflictDecision?.matchesCount).toBe(0);
+        // R312: Quote conversion with a warning stores it on conflictDecision.warnings
+        expect(declinedByNameQuote.conflictDecision?.warnings).toContain(
+          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(amberQuote.conflictDecision?.warnings).toEqual(
+          amberConv.conflictWarnings,
+        );
 
         // Linked declined organisation still hard-blocks
         const linkedDeclinedRecheck = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
@@ -4154,6 +4161,36 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(unlinkedDeclinedNameEnq.conflictDecision?.outcome).toBe('Potential conflict');
         expect(unlinkedDeclinedNameEnq.conflictDecision?.matchesCount).toBe(0);
+        // R312: Enquiry conversion with a warning stores it on conflictDecision.warnings
+        expect(unlinkedDeclinedNameEnq.conflictDecision?.warnings).toEqual(
+          unlinkedDeclinedNameEnqConv.conflictWarnings,
+        );
+        // R312: A user who cannot see the enquiry gets no warnings from the snapshot used by /matters/new
+        const restrictedMatter = store.matters[0]!;
+        const savedMatterSnap = structuredClone(restrictedMatter);
+        const prevConvertedMatterId = unlinkedDeclinedNameEnq.convertedMatterId;
+        restrictedMatter.isStaffMatter = true;
+        restrictedMatter.restrictedAccessUserIds = ['P-000001'];
+        restrictedMatter.responsiblePartnerId = 'P-000001';
+        restrictedMatter.supervisingPartnerId = 'P-000001';
+        restrictedMatter.leadFeeEarnerId = 'P-000001';
+        restrictedMatter.teamMemberIds = [];
+        unlinkedDeclinedNameEnq.convertedMatterId = restrictedMatter.id;
+        try {
+          const nonParticipantSnap = getAppSnapshot('P-000002');
+          const resolvedEnquiryForNonParticipant = nonParticipantSnap.enquiries.find(
+            (e) => e.id === unlinkedDeclinedNameEnq.id,
+          );
+          expect(resolvedEnquiryForNonParticipant).toBeUndefined();
+          expect(
+            normaliseConversionConflictWarnings(
+              resolvedEnquiryForNonParticipant?.conflictDecision?.warnings,
+            ),
+          ).toEqual([]);
+        } finally {
+          Object.assign(restrictedMatter, savedMatterSnap);
+          unlinkedDeclinedNameEnq.convertedMatterId = prevConvertedMatterId;
+        }
         // R311: Shared helper turns conflictWarnings into the user-visible notice for toast and new-matter banner
         expect(
           formatConversionConflictWarningsNotice(

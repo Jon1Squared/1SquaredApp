@@ -15,7 +15,6 @@ export default async function NewMatterPage({
     fromEnquiry?: string;
     quoteId?: string;
     instructingContactId?: string;
-    conflictWarning?: string | string[];
     draftId?: string;
     scenario?: string;
   }>;
@@ -44,7 +43,10 @@ export default async function NewMatterPage({
         initialEnquiry={initialEnquiry}
         initialQuote={initialQuote}
         initialInstructingContactId={params.instructingContactId ?? null}
-        initialConflictWarnings={normaliseConversionConflictWarnings(params.conflictWarning)}
+        initialConflictWarnings={normaliseConversionConflictWarnings(
+          initialQuote?.conflictDecision?.warnings ??
+            initialEnquiry?.conflictDecision?.warnings,
+        )}
         activeViewingRole={snap.activeViewingRole}
         people={snap.people}
         organisations={snap.organisations}

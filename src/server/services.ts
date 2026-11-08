@@ -8156,9 +8156,13 @@ export function prepareEnquiryConversion(
     );
     const reasons = redactRestrictedMatterReasons(rawReasons);
     const blockedMatchesCount = conflicts.allConflicts.length;
-    const blockedDecisionSummary = `Potential conflict identified by ${actorName} on ${today} (${blockedMatchesCount} ${blockedMatchesCount === 1 ? 'match' : 'matches'})`;
+    const blockedOutcome: 'Conflict – declined' | 'Potential conflict' =
+      declinedOrgAssessment.existingOrgDeclined
+        ? 'Conflict – declined'
+        : 'Potential conflict';
+    const blockedDecisionSummary = `${blockedOutcome} identified by ${actorName} on ${today} (${blockedMatchesCount} ${blockedMatchesCount === 1 ? 'match' : 'matches'})`;
     const blockedDecisionSnapshot = {
-      outcome: 'Potential conflict' as const,
+      outcome: blockedOutcome,
       decidedById: byId,
       decidedByName: actorName,
       decidedAt: nowIso,
@@ -8231,6 +8235,18 @@ export function prepareEnquiryConversion(
 
   enq.linkedPersonId = personId;
 
+  const conflictWarnings = redactRestrictedMatterReasons(
+    conflicts.allConflicts
+      .filter((h) => !h.blocking && h.severity !== 'high')
+      .map((h) => h.reason),
+  );
+  if (
+    declinedOrgAssessment.nameMatchWarning &&
+    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
+  ) {
+    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
+  }
+
   const outcomeLabel: 'Cleared' | 'Potential conflict' =
     conflicts.allConflicts.length > 0 || declinedOrgAssessment.hasDeclinedOrgNameMatch
       ? 'Potential conflict'
@@ -8246,6 +8262,7 @@ export function prepareEnquiryConversion(
     matchesCount: conflicts.allConflicts.length,
     searchedSources: [...CONFLICT_SEARCHED_SOURCES],
     summary: decisionSummary,
+    ...(conflictWarnings.length > 0 ? { warnings: [...conflictWarnings] } : {}),
   };
   enq.conflictDecision = decisionSnapshot;
 
@@ -8319,18 +8336,6 @@ export function prepareEnquiryConversion(
         );
       }
     }
-  }
-
-  const conflictWarnings = redactRestrictedMatterReasons(
-    conflicts.allConflicts
-      .filter((h) => !h.blocking && h.severity !== 'high')
-      .map((h) => h.reason),
-  );
-  if (
-    declinedOrgAssessment.nameMatchWarning &&
-    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
-  ) {
-    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
   }
 
   saveStore(store);
@@ -11546,6 +11551,16 @@ export function prepareQuoteConversionRecord(
     };
   }
 
+  const conflictWarnings = prelimConflicts.allConflicts
+    .filter((h) => !h.blocking && h.severity !== 'high')
+    .map((h) => h.reason);
+  if (
+    declinedOrgAssessment.nameMatchWarning &&
+    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
+  ) {
+    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
+  }
+
   // Conflict check passed: determine outcome status from search result, not a hard-coded Cleared
   const hasNonSelfMatches =
     hasDeclinedOrgNameMatch ||
@@ -11567,6 +11582,7 @@ export function prepareQuoteConversionRecord(
     matchesCount: totalMatchesCount,
     searchedSources: [...CONFLICT_SEARCHED_SOURCES],
     summary: decisionSummary,
+    ...(conflictWarnings.length > 0 ? { warnings: [...conflictWarnings] } : {}),
   };
 
   if (!personId && hasPersonName) {
@@ -11700,15 +11716,6 @@ export function prepareQuoteConversionRecord(
 
   const clientId = orgId || personId || '';
   const instructingContactId = orgId ? personId : personId;
-  const conflictWarnings = prelimConflicts.allConflicts
-    .filter((h) => !h.blocking && h.severity !== 'high')
-    .map((h) => h.reason);
-  if (
-    declinedOrgAssessment.nameMatchWarning &&
-    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
-  ) {
-    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
-  }
 
   return {
     ok: true,
