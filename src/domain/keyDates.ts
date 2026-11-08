@@ -314,22 +314,26 @@ export function findMatterTypeKeyDateConfig(
   return config.matterTypes?.find((m) => m.matterTypeId === matterTypeId);
 }
 
-export function resolveDefaultRuleSetIdsForMatterType(
-  config: KeyDatesConfig | null | undefined,
-  matterTypeId: string | null | undefined,
-): string[] {
-  const mtConfig = findMatterTypeKeyDateConfig(config, matterTypeId);
-  if (mtConfig?.defaultRuleSetIds && mtConfig.defaultRuleSetIds.length > 0) {
-    return [...mtConfig.defaultRuleSetIds];
-  }
-  return (config?.limitationRuleSets ?? []).map((rs) => rs.id);
-}
-
 export function findKeyDateTypeConfig(
   config: KeyDatesConfig | null | undefined,
   keyDateTypeId: KeyDateTypeId,
 ): KeyDateTypeConfig | undefined {
   return config?.keyDateTypes?.find((t) => t.id === keyDateTypeId);
+}
+
+export function validateKeyDateManualEntry(
+  config: KeyDatesConfig | null | undefined,
+  keyDateTypeId: KeyDateTypeId,
+  source: KeyDateSource,
+): { ok: true } | { ok: false; error: string } {
+  const kdType = findKeyDateTypeConfig(config, keyDateTypeId);
+  if (source === 'manual' && kdType?.allowManualEntry === false) {
+    return {
+      ok: false,
+      error: `Manual entry is disabled for key date type "${kdType.label || keyDateTypeId}". Please use the limitation calculator.`,
+    };
+  }
+  return { ok: true };
 }
 
 /**
@@ -872,16 +876,8 @@ export function createOrProposeKeyDate(
         ? 'calculated'
         : (input.source ?? 'manual');
 
-  if (source === 'manual' && kdType?.allowManualEntry === false) {
-    throw new Error(
-      `KEY_DATE_VALIDATION_ERROR: Manual entry is disabled for key date type "${keyDateTypeId}".`,
-    );
-  }
-
   const resolvedFallbackTeamId = (): TeamId => {
-    const teamAssignmentMode =
-      config.defaults?.teamAssignment ?? 'matter_owning_team';
-    if (matter && teamAssignmentMode === 'matter_owning_team') {
+    if (matter) {
       return resolveMatterOwningTeamId(matter, teams);
     }
     if (

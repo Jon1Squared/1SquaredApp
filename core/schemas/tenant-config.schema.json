@@ -565,7 +565,11 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 120,
-              "default": 24
+              "default": 24,
+              "x-reserved": {
+                "for": "S0-19",
+                "reason": "Reserved for S0-19 (Tenant-aware scheduler running executeUsageRetentionPurgeJob)."
+              }
             },
             "lowUseThreshold": {
               "type": "integer",
@@ -651,6 +655,10 @@
         "customDocumentTypes": {
           "type": "array",
           "default": [],
+          "x-reserved": {
+            "for": "S0-17",
+            "reason": "Reserved for S0-17 (Moving document generation metadata and custom document types off the transitional JSON store)."
+          },
           "items": {
             "type": "object",
             "additionalProperties": false,

@@ -248,7 +248,7 @@ export function KeyDatesPanel({
     if (kdType) {
       setIsCritical(Boolean(kdType.defaultCritical));
       if (!title) setTitle(kdType.label);
-      if (kdType.allowCalculation) {
+      if (kdType.allowCalculation || kdType.allowManualEntry === false) {
         setEntryMode('calculator');
       }
     }

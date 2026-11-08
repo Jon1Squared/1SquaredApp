@@ -1062,13 +1062,16 @@ export async function submitTemplateVersionService(
     changeNote,
   });
 
+  const activatedDirectly = result.version.status === 'Active';
   appendAudit(store, {
     recordType: 'matter',
     recordId: result.template.id,
     action: 'update',
-    field: `Document Template Submitted for Approval (${result.template.code} v${result.version.versionNumber})`,
+    field: activatedDirectly
+      ? `Document Template Activated (approval not required) (${result.template.code} v${result.version.versionNumber})`
+      : `Document Template Submitted for Approval (${result.template.code} v${result.version.versionNumber})`,
     oldValue: 'Draft',
-    newValue: 'Submitted',
+    newValue: result.version.status,
     byId: user.id,
   });
 

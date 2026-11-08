@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-07',
+  updated: '2026-11-08',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -35,8 +35,8 @@ Every leaf property in the tenant configuration schema is either actively read a
 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
-| \`featureFlags.enableMatterCostsGovernance\` | \`true\` | Active | Gates the Rates & matter costs administration tab, partner cost sign-off UI, \`saveMatterCostsConfigAction\` (\`admin:access\`), \`signOffMatterCostsAction\` (\`matter:costs:sign_off\`), and matter costs opening governance hooks. **Warning:** setting \`enableMatterCostsGovernance\` to \`false\` also skips the \`beforeMatterOpen\` partner cost sign-off check when opening a matter |
-| \`featureFlags.enablePmsLiveRateSync\` | \`true\` | Active | Gates the Pull / Sync Rates from PMS action (\`syncMatterCostsRatesFromPmsAction\`, requiring \`admin:access\`) and button |
+| \`featureFlags.enableMatterCostsGovernance\` | \`true\` | Active | Gates the Rates & matter costs administration tab, partner cost sign-off UI, \`saveMatterCostsConfigAction\` (\`admin:access\`), \`signOffMatterCostsAction\` (\`matter:costs:sign_off\`), and matter costs opening governance hooks. \`AdminClient\` defaults its \`enableMatterCostsGovernance\` prop to \`false\` when omitted so UI controls fail closed unless explicitly enabled by the server snapshot. **Warning:** setting \`enableMatterCostsGovernance\` to \`false\` also skips the \`beforeMatterOpen\` partner cost sign-off check when opening a matter |
+| \`featureFlags.enablePmsLiveRateSync\` | \`true\` | Active | Gates the Pull / Sync Rates from PMS action (\`syncMatterCostsRatesFromPmsAction\`, requiring \`admin:access\`) and button. \`AdminClient\` defaults its \`enablePmsLiveRateSync\` prop to \`false\` when omitted |
 | \`featureFlags.enableAiMatterExtraction\` | \`false\` | Active | Gates \`/api/matters/extract\` (\`matter:create\`) and the AI matter extraction panel (together with \`integrations.aiProviderChoice === "anthropic"\`) |
 | \`featureFlags.enableDemoMode\` | \`false\` | Active | Enables persona switching in non-live environments; always forced off in \`live\` |
 
@@ -73,7 +73,9 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 |---|---|---|---|
 | \`customFields\` | \`[]\` | Reserved (S0-17) | Reserved for moving custom field definitions off the transitional JSON store in S0-17 (runtime custom fields are currently managed in the firm store) |
 | \`enabledExtensions\` | \`[]\` | Active | Registered extension IDs active for the tenant |
-| \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules (\`requireApproval\` controls whether \`submitTemplateVersionForApproval\` requires a separate approval step or activates clean templates directly; \`allowSelfApproval\` controls whether a builder may approve their own submitted version), and usage reporting |
+| \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules (\`requireApproval\` controls whether \`submitTemplateVersionForApproval\` requires a separate approval step or activates clean template versions directly on submit without a separate approver check, recording \`Document Template Activated (approval not required)\` in the audit trail; \`allowSelfApproval\` controls whether a builder may approve their own submitted version), and usage reporting |
+| \`documentGeneration.usage.retentionMonths\` | \`24\` | Reserved (S0-19) | Reserved for automated document usage event retention pruning |
+| \`documentGeneration.customDocumentTypes\` | \`[]\` | Reserved (S0-17) | Reserved for tenant-configured custom document type picklists |
 | \`rbac.*\` | Built-in roles | Active | Role definitions, department grants, relationship grants, and Entra ID identity mapping |
 | \`documentStores\` | Optional | Active | External SharePoint Online document stores |
 | \`documentRouting\` | Optional | Active | Ordered rules mapping matters to a document store, library, and base path |
@@ -84,6 +86,10 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 | \`documentAccess.autoRemediateDrift\` | \`false\` | Reserved (S0-25) | Reserved for scheduled automatic SharePoint permission drift remediation |
 | \`documentAccess.defaultPolicy\` / \`policiesByStore\` | Built-in policy | Active | Inheritance-based document access policies |
 | \`matterFolderTemplates.*\` | Required \`default\` | Active | Versioned matter folder templates with work-type and department inheritance |
-| \`keyDates.*\` | Enabled | Active | Key dates, limitation rule sets, verification rules, reminder schedules, and calendar sync |
+| \`keyDates.*\` | Enabled | Active | Key dates, limitation rule sets (marking a rule set \`reviewed\` records the saving actor's person ID in \`reviewedBy\` on the server and clears \`reviewedBy\` / \`reviewedOn\` when unmarked), key date types (\`allowManualEntry: false\` disables manual date entry, switches the UI form to calculator mode, and returns \`ActionDenied\` (\`FORBIDDEN\`) on manual creation attempts), verification rules, reminder schedules, and calendar sync |
+| \`keyDates.defaults.teamAssignment\` | \`"matter_owning_team"\` | Reserved (S0-15) | Reserved for key dates runtime repository and team diary assignment modes beyond \`matter_owning_team\` |
+| \`keyDates.matterTypes[].defaultRuleSetIds\` | \`[]\` | Reserved (S0-22) | Reserved for departments and work types default limitation rule set filtering by matter type |
+| \`keyDates.limitationRuleSets[].rules[].claimType\` | Optional | Reserved (S0-22) | Reserved for departments and work types claim-type classification on limitation rules |
+| \`keyDates.calendarSync.provider\` | \`"microsoft_graph"\` | Reserved (S0-15) | Reserved for key dates runtime repository and multi-provider calendar adapter selection |
 `.trim(),
 };

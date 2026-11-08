@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod';
+import keyDatesJsonSchema from '../../schemas/keyDates.config.schema.json';
 import tenantConfigJsonSchema from '../../schemas/tenant-config.schema.json';
 import type {
   DocumentGenerationConfig,
@@ -282,7 +283,7 @@ export const DocumentGenerationConfigSchema = z
           .max(120)
           .default(24)
           .describe(
-            'Number of months to retain template usage events and daily summaries',
+            'Number of months to retain template usage events and daily summaries [x-reserved:S0-19]',
           ),
         lowUseThreshold: z
           .number()
@@ -327,7 +328,7 @@ export const DocumentGenerationConfigSchema = z
       )
       .default([])
       .describe(
-        'Additional tenant-configured document classification types beyond core defaults',
+        'Additional tenant-configured document classification types beyond core defaults [x-reserved:S0-17]',
       ),
   })
   .strict();
@@ -1378,7 +1379,12 @@ export const TenantConfigurationSchema = z
         .object({
           id: IdSchema,
           label: z.string().min(1),
-          claimType: z.string().optional(),
+          claimType: z
+            .string()
+            .optional()
+            .describe(
+              'Optional category or cause-of-action label for the rule [x-reserved:S0-22]',
+            ),
           guidanceNote: z.string().optional(),
           trigger: z.union([
             z
@@ -1444,7 +1450,10 @@ export const TenantConfigurationSchema = z
               reminderScheduleId: z.string().default('standard'),
               teamAssignment: z
                 .enum(['matter_owning_team'])
-                .default('matter_owning_team'),
+                .default('matter_owning_team')
+                .describe(
+                  'How the team diary is chosen for a new key date [x-reserved:S0-15]',
+                ),
             })
             .strict()
             .default({
@@ -1484,7 +1493,12 @@ export const TenantConfigurationSchema = z
                   requiredKeyDateTypeIds: z.array(z.string()).default([]),
                   allowNotApplicable: z.boolean().default(true),
                   blockClosureWithOpenDates: z.boolean().default(true),
-                  defaultRuleSetIds: z.array(z.string()).default([]),
+                  defaultRuleSetIds: z
+                    .array(z.string())
+                    .default([])
+                    .describe(
+                      'Limitation rule set IDs offered by default for matters of this type [x-reserved:S0-22]',
+                    ),
                   verification: VerificationPolicySchema.optional(),
                   calendarSync: CalendarSyncPolicySchema.optional(),
                 })
@@ -1600,7 +1614,12 @@ export const TenantConfigurationSchema = z
             .default([]),
           calendarSync: z
             .object({
-              provider: z.enum(['microsoft_graph']).default('microsoft_graph'),
+              provider: z
+                .enum(['microsoft_graph'])
+                .default('microsoft_graph')
+                .describe(
+                  'External calendar provider adapter [x-reserved:S0-15]',
+                ),
               targets: z
                 .array(z.enum(['responsible_persons', 'team_calendar']))
                 .default(['responsible_persons']),
@@ -2101,29 +2120,137 @@ export interface ConfigReservedSettingNotice {
   message: string;
 }
 
+const EXTERNAL_CONFIG_JSON_SCHEMAS: Readonly<
+  Record<string, Record<string, unknown>>
+> = {
+  './keyDates.config.schema.json': keyDatesJsonSchema as unknown as Record<
+    string,
+    unknown
+  >,
+};
+
 function extractReservedSettingsFromSchema(
   node: Record<string, unknown>,
   prefix = '',
+  rootSchema: Record<string, unknown> = tenantConfigJsonSchema as unknown as Record<
+    string,
+    unknown
+  >,
+  inheritedReserved?: { for: string; reason: string },
 ): Array<{ path: string; forSlice: string; reason: string }> {
   const results: Array<{ path: string; forSlice: string; reason: string }> = [];
-  if (!node || typeof node !== 'object' || !node.properties) {
+  if (!node || typeof node !== 'object') {
     return results;
   }
-  for (const [key, child] of Object.entries(
-    node.properties as Record<string, Record<string, unknown>>,
-  )) {
-    const childPath = prefix ? `${prefix}.${key}` : key;
-    if (child.properties && typeof child.properties === 'object') {
-      results.push(...extractReservedSettingsFromSchema(child, childPath));
-    } else if (child['x-reserved'] && typeof child['x-reserved'] === 'object') {
-      const reserved = child['x-reserved'] as { for: string; reason: string };
-      results.push({
-        path: childPath,
-        forSlice: reserved.for,
-        reason: reserved.reason,
-      });
+
+  if (typeof node.$ref === 'string') {
+    const ref = node.$ref;
+    if (ref.startsWith('#/$defs/')) {
+      const defName = ref.slice('#/$defs/'.length);
+      const defs = rootSchema.$defs as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      const target = defs?.[defName];
+      if (target) {
+        const rest = { ...node };
+        delete rest.$ref;
+        return extractReservedSettingsFromSchema(
+          { ...target, ...rest },
+          prefix,
+          rootSchema,
+          inheritedReserved,
+        );
+      }
+    } else if (ref in EXTERNAL_CONFIG_JSON_SCHEMAS) {
+      const extSchema = EXTERNAL_CONFIG_JSON_SCHEMAS[ref]!;
+      const rest = { ...node };
+      delete rest.$ref;
+      return extractReservedSettingsFromSchema(
+        { ...extSchema, ...rest },
+        prefix,
+        extSchema,
+        inheritedReserved,
+      );
     }
   }
+
+  const nodeReserved =
+    (node['x-reserved'] && typeof node['x-reserved'] === 'object'
+      ? (node['x-reserved'] as { for: string; reason: string })
+      : undefined) ?? inheritedReserved;
+
+  if (node.properties && typeof node.properties === 'object') {
+    for (const [key, child] of Object.entries(
+      node.properties as Record<string, Record<string, unknown>>,
+    )) {
+      const childPath = prefix ? `${prefix}.${key}` : key;
+      const children = extractReservedSettingsFromSchema(
+        child,
+        childPath,
+        rootSchema,
+        nodeReserved,
+      );
+      if (children.length === 0) {
+        const leafReserved =
+          (child['x-reserved'] && typeof child['x-reserved'] === 'object'
+            ? (child['x-reserved'] as { for: string; reason: string })
+            : undefined) ?? nodeReserved;
+        if (leafReserved) {
+          results.push({
+            path: childPath,
+            forSlice: leafReserved.for,
+            reason: leafReserved.reason,
+          });
+        }
+      } else {
+        results.push(...children);
+      }
+    }
+    return results;
+  }
+
+  if (node.items && typeof node.items === 'object') {
+    const children = extractReservedSettingsFromSchema(
+      node.items as Record<string, unknown>,
+      `${prefix}[]`,
+      rootSchema,
+      nodeReserved,
+    );
+    if (children.length > 0) {
+      results.push(...children);
+      return results;
+    }
+  }
+
+  if (
+    node.additionalProperties &&
+    typeof node.additionalProperties === 'object'
+  ) {
+    const children = extractReservedSettingsFromSchema(
+      node.additionalProperties as Record<string, unknown>,
+      `${prefix}.*`,
+      rootSchema,
+      nodeReserved,
+    );
+    if (children.length > 0) {
+      results.push(...children);
+      return results;
+    }
+  }
+
+  if (Array.isArray(node.oneOf)) {
+    for (const variant of node.oneOf as Record<string, unknown>[]) {
+      results.push(
+        ...extractReservedSettingsFromSchema(
+          variant,
+          prefix,
+          rootSchema,
+          nodeReserved,
+        ),
+      );
+    }
+  }
+
   return results;
 }
 
@@ -2141,14 +2268,27 @@ function hasNestedConfigValue(
 ): boolean {
   if (!obj || typeof obj !== 'object') return false;
   const parts = dottedPath.split('.');
-  let cur: unknown = obj;
-  for (const part of parts) {
-    if (!cur || typeof cur !== 'object' || !(part in (cur as Record<string, unknown>))) {
+  const walk = (cur: unknown, idx: number): boolean => {
+    if (idx >= parts.length) return cur !== undefined;
+    if (!cur || typeof cur !== 'object') return false;
+    const part = parts[idx]!;
+    if (part === '*') {
+      return Object.values(cur as Record<string, unknown>).some((v) =>
+        walk(v, idx + 1),
+      );
+    }
+    if (part.endsWith('[]')) {
+      const arrayKey = part.slice(0, -2);
+      const arr = (cur as Record<string, unknown>)[arrayKey];
+      if (!Array.isArray(arr) || arr.length === 0) return false;
+      return arr.some((item) => walk(item, idx + 1));
+    }
+    if (!(part in (cur as Record<string, unknown>))) {
       return false;
     }
-    cur = (cur as Record<string, unknown>)[part];
-  }
-  return cur !== undefined;
+    return walk((cur as Record<string, unknown>)[part], idx + 1);
+  };
+  return walk(obj, 0);
 }
 
 export function collectStructuredConfigReservedSettings(

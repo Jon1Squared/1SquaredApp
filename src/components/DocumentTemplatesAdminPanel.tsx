@@ -443,7 +443,10 @@ export function DocumentTemplatesAdminPanel({
       const res = await submitTemplateVersionAction(selectedVersion.id);
       setBanner({
         tone: 'success',
-        text: `Submitted "${res.template.name}" v${res.version.versionNumber} to the Approval Queue.`,
+        text:
+          res.version.status === 'Active'
+            ? `Activated "${res.template.name}" v${res.version.versionNumber} (approval not required).`
+            : `Submitted "${res.template.name}" v${res.version.versionNumber} to the Approval Queue.`,
       });
       await loadData();
     } catch (err) {

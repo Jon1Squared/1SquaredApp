@@ -29,7 +29,13 @@ Settings that are validated by `core/schemas/tenant-config.schema.json` for back
 | `integrations.companiesHouseApiKeyVaultRef` | `S0-18` | Reserved for live Companies House API integration |
 | `integrations.pmsSync.*` (`enabled`, `providerKey`, `syncMode`, `matterCodeAllocation`, `clientCodeAllocation`, `pollIntervalMinutes`, `fieldMappings`) | `S0-18` | Reserved for live tenant-scoped PMS synchronisation and code allocation |
 | `customFields` | `S0-17` | Reserved for moving custom field definitions off the transitional JSON store |
+| `documentGeneration.usage.retentionMonths` | `S0-19` | Reserved for automated document usage event retention pruning |
+| `documentGeneration.customDocumentTypes` | `S0-17` | Reserved for tenant-configured custom document type picklists |
 | `documentAccess.autoRemediateDrift` | `S0-25` | Reserved for scheduled automatic SharePoint permission drift remediation |
+| `keyDates.defaults.teamAssignment` | `S0-15` | Reserved for key dates runtime repository and team diary assignment modes beyond `matter_owning_team` |
+| `keyDates.matterTypes[].defaultRuleSetIds` | `S0-22` | Reserved for departments and work types default limitation rule set filtering by matter type |
+| `keyDates.limitationRuleSets[].rules[].claimType` | `S0-22` | Reserved for departments and work types claim-type classification on limitation rules |
+| `keyDates.calendarSync.provider` | `S0-15` | Reserved for key dates runtime repository and multi-provider calendar adapter selection |
 
 ## AI Matter Extraction Configuration & Data Flow Record (Standard Section 10, ADR 0031)
 

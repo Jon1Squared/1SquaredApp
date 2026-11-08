@@ -201,6 +201,7 @@ import {
   rejectProposedKeyDate,
   resolveKeyDateOutcome,
   supersedeConfirmedKeyDate,
+  validateKeyDateManualEntry,
   verifyProposedKeyDate,
 } from '@/domain/keyDates';
 import {
@@ -5346,9 +5347,6 @@ export async function signOffMatterCostsRecord(
     return {
       ...buildActionDenied('FORBIDDEN', msg),
       matter: null,
-      errors: {
-        featureDisabled: msg,
-      },
     };
   }
   const store = getStore();
@@ -12629,7 +12627,14 @@ export async function createOrProposeKeyDateRecord(
     intent?: 'provisional' | 'propose';
   },
   byId: string,
-): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
+): Promise<{
+  ok: boolean;
+  keyDate?: KeyDate;
+  error?: string;
+  denied?: true;
+  code?: ActionDenied['code'];
+  message?: string;
+}> {
   try {
     const store = getStore();
     const config = getKeyDatesConfig(store);
@@ -12654,6 +12659,22 @@ export async function createOrProposeKeyDateRecord(
       (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
     ) {
       return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    const effectiveSource: KeyDateSource =
+      input.source === 'document_extraction' ||
+      input.source === 'carried_from_enquiry'
+        ? input.source
+        : input.calculation
+          ? 'calculated'
+          : (input.source ?? 'manual');
+    const manualCheck = validateKeyDateManualEntry(
+      config,
+      input.keyDateTypeId,
+      effectiveSource,
+    );
+    if (!manualCheck.ok) {
+      return buildActionDenied('FORBIDDEN', manualCheck.error);
     }
 
     store.keyDates = store.keyDates ?? [];
@@ -13677,6 +13698,35 @@ export function saveKeyDatesConfigRecord(
 
     const validated = validateKeyDatesConfig(newConfigInput) as unknown as KeyDatesConfig;
     const nowIso = new Date().toISOString();
+    const todayIso = nowIso.slice(0, 10);
+    const prevRuleSetsById = new Map(
+      (currentConfig.limitationRuleSets ?? []).map((rs) => [rs.id, rs]),
+    );
+    if (validated.limitationRuleSets) {
+      validated.limitationRuleSets = validated.limitationRuleSets.map((rs) => {
+        if (rs.reviewStatus !== 'reviewed') {
+          const { reviewedBy: _rb, reviewedOn: _ro, ...rest } = rs;
+          return {
+            ...rest,
+            reviewStatus: 'unreviewed' as const,
+          };
+        }
+        const prev = prevRuleSetsById.get(rs.id);
+        const keepPreviousReviewer =
+          prev?.reviewStatus === 'reviewed' &&
+          prev.version === rs.version &&
+          Boolean(prev.reviewedBy) &&
+          rs.reviewedBy === prev.reviewedBy;
+        return {
+          ...rs,
+          reviewStatus: 'reviewed' as const,
+          reviewedBy: keepPreviousReviewer ? prev!.reviewedBy : actor.id,
+          reviewedOn: keepPreviousReviewer
+            ? (prev!.reviewedOn ?? rs.reviewedOn ?? todayIso)
+            : (rs.reviewedOn ?? todayIso),
+        };
+      });
+    }
 
     store.keyDatesConfigOverride = validated;
     store.audit.unshift({

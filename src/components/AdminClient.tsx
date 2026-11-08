@@ -1376,6 +1376,7 @@ export function AdminClient({
         <KeyDatesAdminPanel
           initialConfig={keyDatesConfig}
           userPermissions={currentUserKeyDatePermissions}
+          currentUserId={currentUserId}
         />
       )}
 

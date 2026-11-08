@@ -37,7 +37,11 @@
           "type": "string",
           "enum": ["matter_owning_team"],
           "default": "matter_owning_team",
-          "description": "How the team diary is chosen for a new key date. Users with keydate:edit can change it."
+          "description": "How the team diary is chosen for a new key date. Users with keydate:edit can change it.",
+          "x-reserved": {
+            "for": "S0-15",
+            "reason": "Reserved for S0-15 (Key dates runtime repository and team diary assignment modes beyond matter_owning_team)."
+          }
         }
       }
     },
@@ -129,7 +133,11 @@
             "type": "array",
             "items": { "type": "string" },
             "default": [],
-            "description": "Limitation rule set IDs offered by default for matters of this type."
+            "description": "Limitation rule set IDs offered by default for matters of this type.",
+            "x-reserved": {
+              "for": "S0-22",
+              "reason": "Reserved for S0-22 (Departments and work types default limitation rule set filtering by matter type)."
+            }
           },
           "verification": {
             "$ref": "#/$defs/verificationPolicy",
@@ -327,7 +335,11 @@
           "type": "string",
           "enum": ["microsoft_graph"],
           "default": "microsoft_graph",
-          "description": "External calendar provider adapter."
+          "description": "External calendar provider adapter.",
+          "x-reserved": {
+            "for": "S0-15",
+            "reason": "Reserved for S0-15 (Key dates runtime repository and multi-provider calendar adapter selection)."
+          }
         },
         "targets": {
           "type": "array",
@@ -499,7 +511,11 @@
         },
         "claimType": {
           "type": "string",
-          "description": "Optional category or cause-of-action label for the rule."
+          "description": "Optional category or cause-of-action label for the rule.",
+          "x-reserved": {
+            "for": "S0-22",
+            "reason": "Reserved for S0-22 (Departments and work types claim-type classification on limitation rules)."
+          }
         },
         "guidanceNote": {
           "type": "string",
