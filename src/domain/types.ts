@@ -144,9 +144,9 @@ export interface Phone {
 
 // ------------------------------------------------------------------ Organisation Structure Reference Tables
 export interface OrgLegalEntity {
-  id: string; // e.g. 'LE-PV-LLP'
-  name: string; // e.g. 'Pembroke Vaughan LLP'
-  code: string; // e.g. 'PVLLP'
+  id: string; // e.g. 'LE-DEFAULT'
+  name: string; // Legal entity display name
+  code: string; // Short entity code
   isDefault?: boolean;
   active: boolean;
 }
@@ -910,7 +910,7 @@ export type ConflictCheckRecordInput = Omit<
 export interface Matter extends RecordBase {
   recordType: 'matter';
   // CORE-001..008 Identification
-  matterNumber: string; // e.g. PEN001-0004
+  matterNumber: string; // e.g. ABC001-0001
   title: string; // CORE-002
   shortDescription: string; // CORE-003
   clientId: string; // CORE-004 (P-xxxxxx or O-xxxxxx)
@@ -1007,7 +1007,7 @@ export interface Matter extends RecordBase {
 
 // ------------------------------------------------------------------ Teams
 export interface Team {
-  id: string; // TM-000001
+  id: string; // Team record identifier
   name: string;
   description: string;
   memberIds: string[]; // Employee P-xxxxxx ids
@@ -1709,7 +1709,7 @@ export interface MatterCostsSnapshot {
  */
 export interface MatterCostsConfig {
   clientProfileCode: string; // e.g. 'BASE-STANDARD'
-  clientProfileName: string; // e.g. 'Pembroke Vaughan LLP'
+  clientProfileName: string; // Tenant profile display name
   sectionTitle: string; // default 'Matter Costs'
   rateSourceMode: RateTableSourceMode; // 'app_table' | 'pms_when_linked' | 'pms_only'
   pmsLinkActive: boolean; // Whether a live/imported PMS rate link is enabled

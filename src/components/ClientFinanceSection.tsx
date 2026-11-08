@@ -90,7 +90,7 @@ export function ClientFinanceSection({
           </div>
         </section>
 
-        {/* Even if a parent holding company is not directly linked (though Severn Holdings plc IS linked), render group view if subsidiaries exist */}
+        {/* Even if a parent holding company is not directly linked, render group view if subsidiaries exist */}
         {groupView && <GroupFinanceCard groupView={groupView} asAtLabel={asAtLabel} />}
       </div>
     );
@@ -134,7 +134,7 @@ export function ClientFinanceSection({
         )}
       </div>
 
-      {/* Group view for parent organisation with subsidiaries (e.g. Severn Holdings plc) */}
+      {/* Group view for parent organisation with subsidiaries */}
       {recordType === 'organisation' && groupView && (
         <GroupFinanceCard groupView={groupView} asAtLabel={asAtLabel} />
       )}

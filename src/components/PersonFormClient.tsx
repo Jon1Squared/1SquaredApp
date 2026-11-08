@@ -11,6 +11,7 @@ import {
   savePersonAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import { resolveAddressSuggestion, searchAddressSuggestions } from '@/domain/addressLookup';
 import { findPersonDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
 import {
   buildSensitiveSubmissionPayload,
@@ -118,33 +119,6 @@ interface Props {
   onPersonCreated?: (person: Person, linkedOrgId?: string) => void;
   tenantId: string;
 }
-
-const DEMO_POSTCODE_ADDRESSES: Record<
-  string,
-  { line1: string; line2: string; town: string; county: string }[]
-> = {
-  CF101AA: [
-    { line1: '12 Park Place', line2: '', town: 'Cardiff', county: 'South Glamorgan' },
-    { line1: '14 Park Place', line2: 'Suite 2', town: 'Cardiff', county: 'South Glamorgan' },
-  ],
-  CF105FQ: [
-    {
-      line1: '3 Bute Dock Chambers',
-      line2: 'Mount Stuart Square',
-      town: 'Cardiff',
-      county: 'South Glamorgan',
-    },
-  ],
-  CF119HS: [
-    { line1: '18 Cathedral View', line2: 'Pontcanna', town: 'Cardiff', county: 'South Glamorgan' },
-  ],
-  CF641TQ: [
-    { line1: 'Marina House, 14 Ferry Road', line2: '', town: 'Penarth', county: 'Vale of Glamorgan' },
-  ],
-  BS16DZ: [
-    { line1: 'Severn House, 1 Temple Quay', line2: '', town: 'Bristol', county: 'Bristol' },
-  ],
-};
 
 type SectionKey =
   | 'most_used'
@@ -1162,7 +1136,7 @@ export function PersonFormClient({
     showToast(`Linked to ${o.legalName} (${o.id})`);
   };
 
-  const handleFindAddress = () => {
+  const handleFindAddress = async () => {
     setAddressModalOpen(true);
     const clean = (primaryAddr.postcode ?? '').replace(/\s+/g, '').toUpperCase();
     if (!clean) {
@@ -1200,25 +1174,25 @@ export function PersonFormClient({
         return;
       }
     }
-    const preset = DEMO_POSTCODE_ADDRESSES[clean]?.[0];
-    if (preset) {
-      updatePrimaryAddress({
-        line1: preset.line1,
-        line2: preset.line2,
-        town: preset.town,
-        county: preset.county,
-      });
-      showToast(`Filled address for ${primaryAddr.postcode.toUpperCase()}`);
+    const lookup = await searchAddressSuggestions(clean);
+    if (lookup.error) {
+      showToast(`${lookup.error} — enter address manually`);
       return;
     }
-    const isBristol = clean.startsWith('BS');
-    updatePrimaryAddress({
-      line1: '14 High Street',
-      line2: '',
-      town: isBristol ? 'Bristol' : 'Cardiff',
-      county: isBristol ? 'Bristol' : 'South Glamorgan',
-    });
-    showToast(`Filled address for ${primaryAddr.postcode.toUpperCase()}`);
+    const suggestion = lookup.suggestions[0];
+    const resolved = suggestion ? await resolveAddressSuggestion(suggestion.id) : null;
+    if (resolved?.address) {
+      updatePrimaryAddress({
+        line1: resolved.address.line1,
+        line2: resolved.address.line2,
+        town: resolved.address.town,
+        county: resolved.address.county,
+        postcode: resolved.address.postcode,
+      });
+      showToast(`Filled address for ${resolved.address.postcode}`);
+      return;
+    }
+    showToast(`No address found for ${primaryAddr.postcode.toUpperCase()} — enter address manually`);
   };
 
   const submitPerson = (forceFlagDuplicate = false) => {

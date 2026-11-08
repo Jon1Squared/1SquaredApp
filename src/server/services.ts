@@ -859,6 +859,8 @@ function getAppSnapshotInScope(
     }
   }
 
+  const resolvedFirmName =
+    activeTenantCfg.displayName || store.firm?.shortName || store.firm?.name || '';
   const searchIndex = buildSearchIndex(
     store.people,
     store.organisations,
@@ -868,6 +870,7 @@ function getAppSnapshotInScope(
     visibleEnquiries,
     visibleTasks,
     store.teams,
+    resolvedFirmName,
   );
   const attention = attentionList([...store.people, ...store.organisations], store.values, now, {
     userId: effectiveWorkPerson.id,

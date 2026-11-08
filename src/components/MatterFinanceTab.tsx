@@ -394,7 +394,7 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
           )}
         </div>
 
-        {/* Capped fee callout (e.g. SEV001-0001) */}
+        {/* Capped fee callout */}
         {isCappedFee && fin.fixed_fee_amount > 0 && (
           <div
             className={`banner ${capExceeded ? 'banner--alert' : 'banner--warning'}`}
@@ -411,7 +411,7 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
           </div>
         )}
 
-        {/* Annual retainer callout (e.g. HAR001-0003) */}
+        {/* Annual retainer callout */}
         {isRetainer && fin.fee_estimate > 0 && (
           <div className="subcard" style={{ marginBottom: 14 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' }}>

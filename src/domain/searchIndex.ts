@@ -40,6 +40,7 @@ export function buildSearchIndex(
   enquiries: Enquiry[] = [],
   tasks: Task[] = [],
   teams: Team[] = [],
+  firmName = '',
 ): SearchDoc[] {
   const orgName = new Map(organisations.map((o) => [o.id, o.legalName]));
   const personName = new Map(people.map((p) => [p.id, personDisplayName(p)]));
@@ -63,7 +64,7 @@ export function buildSearchIndex(
     const main = mainLinkFor(p.id, links);
     let subtitle: string;
     if (p.isEmployee) {
-      subtitle = ['Not A Law Firm', resolveLabel(values, p.employeeRoleId)].filter(Boolean).join(' · ');
+      subtitle = [firmName.trim() || null, resolveLabel(values, p.employeeRoleId)].filter(Boolean).join(' · ') || 'Employee';
     } else if (main) {
       subtitle = [orgName.get(main.organisationId), main.jobTitle || p.jobTitle].filter(Boolean).join(' · ');
     } else {

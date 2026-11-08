@@ -220,7 +220,7 @@ export function hasQuickConflictCheckInputs(input: {
 /**
  * Compare two names (person or organisation) after full normalisation.
  * Requires at least one token >= 3 chars. A single-token query against a multi-token person name
- * (e.g. surname "Jones" alone vs "Sam Jones") does NOT match as a full name match.
+ * (e.g. surname alone vs full name) does NOT match as a full name match.
  */
 export function namesLikelyMatch(
   query: string | null | undefined,
@@ -1773,7 +1773,7 @@ export function getAvailableEnquiryActions(
 
 /**
  * Format a conflict hit's display label so the record ID appears once, never duplicated
- * as "Lisa Kendall (P-000026) (P-000026)".
+ * with a repeated trailing record ID suffix.
  */
 export function formatConflictAlertLabel(hit: { recordLabel: string; recordId: string }): string {
   const suffix = `(${hit.recordId})`;
