@@ -330,33 +330,41 @@ export const ACTION_PERMISSIONS = {
   // ---------------------------------------------------------------------------
   // S0-03: Destructive, sign-off approval, retention anonymisation, compliance reminder & person save (7)
   savePersonAction: {
-    kind: 'gap',
-    slice: 'S0-03',
-    note: 'Checks employment permissions only when employment data is submitted and copies security fields from payload (B11).',
+    kind: 'permission',
+    key: {
+      anyOf: ['employee:edit_core', 'contact:create', 'contact:edit'],
+    },
+    enforcedBy: 'service',
   },
   resetDemoDataAction: {
-    kind: 'gap',
-    slice: 'S0-03',
+    kind: 'permission',
+    key: 'admin:data_reset',
+    enforcedBy: 'action',
   },
   clearAllDataAction: {
-    kind: 'gap',
-    slice: 'S0-03',
+    kind: 'permission',
+    key: 'admin:data_reset',
+    enforcedBy: 'action',
   },
   approveSignOffAction: {
-    kind: 'gap',
-    slice: 'S0-03',
+    kind: 'permission',
+    key: 'signoff:approve',
+    enforcedBy: 'service',
   },
   discussSignOffAction: {
-    kind: 'gap',
-    slice: 'S0-03',
+    kind: 'permission',
+    key: 'signoff:approve',
+    enforcedBy: 'service',
   },
   anonymiseExpiredEnquiriesAction: {
-    kind: 'gap',
-    slice: 'S0-03',
+    kind: 'permission',
+    key: 'enquiry:anonymise',
+    enforcedBy: 'action',
   },
   remindTeamLeadOverdueComplianceAction: {
-    kind: 'gap',
-    slice: 'S0-03',
+    kind: 'permission',
+    key: 'risk:view',
+    enforcedBy: 'action',
   },
 
   // S0-04: Admin saves — lists, custom fields, teams, settings, org structure, party taxonomy, costs config & PMS links (22)
@@ -639,4 +647,4 @@ export type RegisteredRouteName = keyof typeof ROUTE_PERMISSIONS;
  * `ROUTE_PERMISSIONS`. Equals the exact S0-02 baseline (54 actions + 1 route = 55)
  * and may only decrease as slices S0-03 to S0-07 and S0-10 close gaps.
  */
-export const MAX_KNOWN_GAPS = 55;
+export const MAX_KNOWN_GAPS = 48;

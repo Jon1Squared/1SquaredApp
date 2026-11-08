@@ -6,7 +6,7 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How Microsoft Entra ID OIDC sign-in and sign-out work in 1Squared, how role-based access control (RBAC) and Entra identity mapping are configured, and which administrative actions require multi-factor authentication (MFA).',
-  updated: '2026-11-06',
+  updated: '2026-11-07',
   body: `
 1Squared authenticates every user through **Microsoft Entra ID (OpenID Connect with PKCE)** and evaluates access on every server action and API route through the central **Role-Based Access Control (RBAC)** engine in \`@platform/core\`.
 
@@ -43,10 +43,11 @@ Administrators can configure \`rbac.identityMapping.authorityMode\` in **Admin �
 
 Permissions are grouped into built-in and custom roles in the tenant RBAC configuration:
 
-- **Core Administration & RBAC**: \`admin:access\`, \`rbac:manage_config\`, \`rbac:manage_user_overrides\`
+- **Core Administration & RBAC**: \`admin:access\`, \`admin:data_reset\` (granted to \`admin\` only, requiring MFA), \`rbac:manage_config\`, \`rbac:manage_user_overrides\`
 - **Employee & HR Records**: \`employee:view_core\`, \`employee:edit_core\`, \`employee:hr_restricted\`, \`employee:payroll\`, \`employee:sensitive\`
-- **Matters & Restricted Matters**: \`matter:create\`, \`matter:edit\`, \`matter:reassign_ownership\` (granted to \`supervisor\`, \`partner\`, \`managing_partner\`, and \`admin\`, and not granted automatically to team leads via \`is_team_lead_of_any_team\`), \`matter:restricted:access\`, \`matter:restriction:lift\` (granted to \`managing_partner\`, \`risk_compliance\`, and \`admin\`, requiring MFA), \`matter:costs:sign_off\` (granted to \`partner\`, \`managing_partner\`, and \`admin\` to sign off high-value matter fee estimates via \`signOffMatterCostsRecord\` / \`signOffMatterCostsAction\`)
-- **Finance & Risk**: \`finance:view\`, \`finance:view_matter\`, \`finance:credit_control\`, \`finance:manage_links\`, \`risk:view\`
+- **Contacts & Organisations**: \`contact:create\`, \`contact:edit\`
+- **Matters, Sign-offs & Restricted Matters**: \`matter:create\`, \`matter:edit\`, \`matter:reassign_ownership\` (granted to \`supervisor\`, \`partner\`, \`managing_partner\`, and \`admin\`, and not granted automatically to team leads via \`is_team_lead_of_any_team\`), \`matter:restricted:access\`, \`matter:restriction:lift\` (granted to \`managing_partner\`, \`risk_compliance\`, and \`admin\`, requiring MFA), \`matter:costs:sign_off\` (granted to \`partner\`, \`managing_partner\`, and \`admin\` to sign off high-value matter fee estimates via \`signOffMatterCostsRecord\` / \`signOffMatterCostsAction\`), \`signoff:approve\` (granted to \`partner\`, \`managing_partner\`, and \`admin\` for partner sign-off items)
+- **Enquiries, Finance & Risk**: \`enquiry:intake_view\`, \`enquiry:anonymise\` (granted to \`risk_compliance\` and \`admin\`), \`finance:view\`, \`finance:view_matter\`, \`finance:credit_control\`, \`finance:manage_links\`, \`risk:view\`
 - **Document Templates & SharePoint DMS**: \`document_template:view\`, \`document_template:build\`, \`document_template:approve\`, \`document_template:view_usage\`, \`document_template:view_usage_by_user\`, \`document_template:configure\`, \`document:generate\`, \`document:view\`, \`document:download\`, \`document:upload\`, \`document:edit\`, \`document:delete\`, \`document:provision\`, \`document_store:configure\`, \`document_access:review\`
 - **Key Dates & Limitation**: \`keydate:view\`, \`keydate:view_any_team\`, \`keydate:edit\`, \`keydate:verify\`, \`keydate:override_calculation\`, \`keydate:resolve\`, \`keydate:waive\`, \`keydate:configure\`
 
@@ -56,7 +57,8 @@ In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_over
 
 1. **No Self-Modification**: No user—including a System Administrator—can modify their own roles or permission overrides.
 2. **No Granting Unheld Permissions**: A user cannot grant a permission or assign a role containing a permission that the acting user does not themselves hold.
-3. **Before/After Audit Trail**: Every change to employee roles, \`appRole\`, \`permissionOverrides\`, or tenant RBAC configuration writes a structured before/after JSON audit entry.
+3. **Dedicated RBAC Actions Only**: Security and role fields (\`roles\`, \`permissionOverrides\`, \`appRole\`, \`employeePermissions\`, \`documentPermissions\`, \`supportsIds\`, \`showsWorkOfId\`, and \`demo\`) can only be changed through the dedicated RBAC administration screens and actions (\`updateEmployeeRoleSetting\`, \`updateEmployeeRolesAndSupports\`, and \`updatePersonPermissionOverrides\`). Any attempt to set or change these fields through the general person save form (\`savePersonAction\` / \`savePersonRecord\`) is rejected with \`ActionDenied\`, and existing values (including \`entraObjectId\`) are preserved.
+4. **Before/After Audit Trail**: Every change to employee roles, \`appRole\`, \`permissionOverrides\`, or tenant RBAC configuration writes a structured before/after JSON audit entry.
 
 ## 4. Multi-factor authentication (MFA) enforcement
 
@@ -64,7 +66,7 @@ In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_over
 
 Even if a user holds an administrative or partner role, **MFA verification (\`mfaVerified === true\`) is strictly required** before the server permits any high-privilege action, including:
 
-- Accessing the \`/admin\` console (\`admin:access\`)
+- Accessing the \`/admin\` console (\`admin:access\`) or resetting/clearing non-live environment data (\`admin:data_reset\`, restricted to \`admin\` only)
 - Modifying tenant RBAC roles or Entra ID mappings (\`rbac:manage_config\`)
 - Changing an employee’s roles or permission overrides (\`rbac:manage_user_overrides\`)
 - Viewing or editing payroll and sensitive HR records (\`employee:payroll\`, \`employee:sensitive\`)

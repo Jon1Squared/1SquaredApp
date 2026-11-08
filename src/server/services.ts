@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import { attentionList } from '@/domain/attention';
+import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { diffRecords } from '@/domain/audit';
 import { validateCustomFields } from '@/domain/customFields';
 import {
@@ -412,6 +413,23 @@ export function isDemoModeEnabled(): boolean {
     return false;
   }
   return Boolean(activeTenantConfig.featureFlags?.enableDemoMode);
+}
+
+export function isDataResetAllowedEnvironment(): boolean {
+  const activeTenantConfig = getActiveTenantConfiguration();
+  const env = activeTenantConfig.environment;
+  if (env === 'live') {
+    return false;
+  }
+  if (
+    process.env.NODE_ENV === 'production' &&
+    env !== 'dev' &&
+    env !== 'test' &&
+    env !== 'training'
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export async function switchUserInDemoMode(targetUserId: string): Promise<{
@@ -1411,6 +1429,7 @@ export function savePersonRecord(
     sensitiveSectionOpened?: boolean;
     sensitiveSectionEdited?: boolean;
     keepAsContactOnLeave?: boolean;
+    internalSystemStep?: 'enquiry_conversion' | 'quote_conversion';
     initialLink?: {
       organisationId: string;
       jobTitle?: string;
@@ -1421,18 +1440,57 @@ export function savePersonRecord(
       startDate?: string | null;
     } | null;
   },
-): { person: Person; errors?: Record<string, string> } {
+): ({ person: Person; errors?: Record<string, string> } & Partial<ActionDenied>) {
   const store = getStore();
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const existing = opts.id ? store.people.find((p) => p.id === opts.id) ?? null : null;
   const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
-  const userPerms = new Set(resolveEmployeePermissions(actingUser, store.people, store.teams));
+  const permSet = resolvePersonPermissionSet(actingUser, {
+    allPeople: store.people,
+    teams: store.teams,
+    targetPersonId: existing?.id,
+  });
+  const userPerms = new Set([
+    ...resolveEmployeePermissions(actingUser, store.people, store.teams, {
+      targetPersonId: existing?.id,
+    }),
+    ...Array.from(permSet.permissions),
+  ]);
   const orgStructure =
     store.orgStructure ??
     buildDefaultOrgStructure({
       legalName: getActiveTenantConfiguration().displayName,
     });
+
+  // B11: Reject any attempt to set or change RBAC / security fields via savePersonRecord.
+  const PERSON_SECURITY_FIELDS = [
+    'roles',
+    'permissionOverrides',
+    'appRole',
+    'employeePermissions',
+    'documentPermissions',
+    'supportsIds',
+    'showsWorkOfId',
+    'demo',
+  ] as const;
+  const attemptedSecurityField = PERSON_SECURITY_FIELDS.find((key) => {
+    if (input[key] === undefined) return false;
+    if (!existing) return true;
+    // Allow unchanged values only when the caller spread an existing Person record (`{ ...existingPerson, ... }`).
+    if (input.createdAt !== undefined && input.createdAt === existing.createdAt) {
+      return JSON.stringify(input[key]) !== JSON.stringify(existing[key]);
+    }
+    return true;
+  });
+  if (attemptedSecurityField) {
+    const msg = `Security field "${attemptedSecurityField}" cannot be set or modified through person save. Use the dedicated RBAC administration actions.`;
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      person: existing as Person,
+      errors: { permission: msg },
+    };
+  }
 
   if (!input.firstName?.trim() || !input.surname?.trim()) {
     return { person: existing as Person, errors: { name: 'First name and surname are required.' } };
@@ -1451,13 +1509,62 @@ export function savePersonRecord(
   const rawEmpInput: Partial<EmploymentRecord> | null =
     opts.employmentSubmitted ?? input.employment ?? null;
 
+  const isLegacyEmployeeFieldChange =
+    (input.isEmployee !== undefined &&
+      Boolean(input.isEmployee) !== Boolean(existing?.isEmployee)) ||
+    (opts.worksAtFirm !== undefined &&
+      Boolean(opts.worksAtFirm) !== Boolean(existing?.employment && existing.employment.status !== 'Leaver')) ||
+    (opts.worksAtFirm === false && Boolean(existing?.employment || existing?.isEmployee)) ||
+    (input.employeeRoleId !== undefined &&
+      (input.employeeRoleId ?? null) !== (existing?.employeeRoleId ?? null)) ||
+    (input.departmentId !== undefined &&
+      (input.departmentId ?? null) !== (existing?.departmentId ?? null)) ||
+    (input.employment !== undefined &&
+      JSON.stringify(input.employment ?? null) !== JSON.stringify(existing?.employment ?? null));
+
+  const requiresEmployeeEditCore =
+    Boolean(rawEmpInput) ||
+    hasEmploymentPayload ||
+    isLegacyEmployeeFieldChange;
+
+  if (requiresEmployeeEditCore) {
+    if (!userPerms.has('employee:edit_core')) {
+      const msg =
+        'You do not have permission (employee:edit_core) to create or edit employment records.';
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        person: existing as Person,
+        errors: {
+          permission: msg,
+        },
+      };
+    }
+  } else if (!opts.internalSystemStep) {
+    const requiredContactKey = existing ? 'contact:edit' : 'contact:create';
+    if (!userPerms.has(requiredContactKey)) {
+      const msg = existing
+        ? 'You do not have permission (contact:edit) to edit contact records.'
+        : 'You do not have permission (contact:create) to create contact records.';
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        person: existing as Person,
+        errors: {
+          permission: msg,
+        },
+      };
+    }
+  }
+
   // Enforce API-level permission checks on employment & sensitive data modifications
   if (rawEmpInput) {
     if (!userPerms.has('employee:edit_core')) {
+      const msg =
+        'You do not have permission (employee:edit_core) to create or edit employment records.';
       return {
+        ...buildActionDenied('FORBIDDEN', msg),
         person: existing as Person,
         errors: {
-          permission: 'You do not have permission (employee:edit_core) to create or edit employment records.',
+          permission: msg,
         },
       };
     }
@@ -1467,19 +1574,24 @@ export function savePersonRecord(
         rawEmpInput.emergencyContacts !== undefined) &&
       !userPerms.has('employee:hr_restricted')
     ) {
+      const msg =
+        'You do not have permission (employee:hr_restricted) to edit HR restricted fields (contract, right to work, emergency contacts).';
       return {
+        ...buildActionDenied('FORBIDDEN', msg),
         person: existing as Person,
         errors: {
-          permission:
-            'You do not have permission (employee:hr_restricted) to edit HR restricted fields (contract, right to work, emergency contacts).',
+          permission: msg,
         },
       };
     }
     if (rawEmpInput.payroll !== undefined && !userPerms.has('employee:payroll')) {
+      const msg =
+        'You do not have permission (employee:payroll) to edit payroll and benefits fields.';
       return {
+        ...buildActionDenied('FORBIDDEN', msg),
         person: existing as Person,
         errors: {
-          permission: 'You do not have permission (employee:payroll) to edit payroll and benefits fields.',
+          permission: msg,
         },
       };
     }
@@ -1487,10 +1599,13 @@ export function savePersonRecord(
 
   if (opts.sensitiveSubmitted !== undefined && opts.sensitiveSubmitted !== null) {
     if (!userPerms.has('employee:sensitive')) {
+      const msg =
+        'You do not have permission (employee:sensitive) to edit sensitive employee information.';
       return {
+        ...buildActionDenied('FORBIDDEN', msg),
         person: existing as Person,
         errors: {
-          permission: 'You do not have permission (employee:sensitive) to edit sensitive employee information.',
+          permission: msg,
         },
       };
     }
@@ -1923,46 +2038,33 @@ export function savePersonRecord(
         : input.departmentId ?? existing?.departmentId ?? null
       : null,
     employment: nextEmployment,
-    ...(input.employeePermissions !== undefined
-      ? { employeePermissions: input.employeePermissions }
-      : existing?.employeePermissions !== undefined
-        ? { employeePermissions: existing.employeePermissions }
-        : {}),
-    ...(input.documentPermissions !== undefined
-      ? { documentPermissions: input.documentPermissions }
-      : existing?.documentPermissions !== undefined
-        ? { documentPermissions: existing.documentPermissions }
-        : {}),
-    ...(input.permissionOverrides !== undefined
-      ? { permissionOverrides: input.permissionOverrides }
-      : existing?.permissionOverrides !== undefined
-        ? { permissionOverrides: existing.permissionOverrides }
-        : {}),
-    ...(input.appRole !== undefined
-      ? { appRole: input.appRole }
-      : existing?.appRole !== undefined
-        ? { appRole: existing.appRole }
-        : {}),
-    ...(input.roles !== undefined
-      ? { roles: input.roles }
-      : existing?.roles !== undefined
-        ? { roles: existing.roles }
-        : {}),
-    ...(input.demo !== undefined
-      ? { demo: input.demo }
-      : existing?.demo !== undefined
-        ? { demo: existing.demo }
-        : {}),
-    ...(input.showsWorkOfId !== undefined
-      ? { showsWorkOfId: input.showsWorkOfId }
-      : existing?.showsWorkOfId !== undefined
-        ? { showsWorkOfId: existing.showsWorkOfId }
-        : {}),
-    ...(input.supportsIds !== undefined
-      ? { supportsIds: input.supportsIds }
-      : existing?.supportsIds !== undefined
-        ? { supportsIds: existing.supportsIds }
-        : {}),
+    ...(existing?.entraObjectId !== undefined
+      ? { entraObjectId: existing.entraObjectId }
+      : {}),
+    ...(existing?.employeePermissions !== undefined
+      ? { employeePermissions: existing.employeePermissions }
+      : {}),
+    ...(existing?.documentPermissions !== undefined
+      ? { documentPermissions: existing.documentPermissions }
+      : {}),
+    ...(existing?.permissionOverrides !== undefined
+      ? { permissionOverrides: existing.permissionOverrides }
+      : {}),
+    ...(existing?.appRole !== undefined
+      ? { appRole: existing.appRole }
+      : {}),
+    ...(existing?.roles !== undefined
+      ? { roles: existing.roles }
+      : {}),
+    ...(existing?.demo !== undefined
+      ? { demo: existing.demo }
+      : {}),
+    ...(existing?.showsWorkOfId !== undefined
+      ? { showsWorkOfId: existing.showsWorkOfId }
+      : {}),
+    ...(existing?.supportsIds !== undefined
+      ? { supportsIds: existing.supportsIds }
+      : {}),
     createdFromEnquiryId:
       input.createdFromEnquiryId ??
       existing?.createdFromEnquiryId ??
@@ -5662,22 +5764,37 @@ export function reorderCustomField(id: string, direction: -1 | 1, byId: string):
 }
 
 export function resetAllDemoData(byId: string): void {
+  const prevStore = getStore();
+  const actor = prevStore.people.find((p) => p.id === byId) ?? null;
+  const actorName = actor ? personDisplayName(actor) : byId;
   const fresh = resetStore();
   writeAudit(fresh, {
     recordType: 'system',
     recordId: 'demo-data',
-    action: 'create',
+    action: 'data-reset',
     field: 'Reset demo data',
     oldValue: null,
-    newValue: `Restored initial ${fresh.firm.name} dataset`,
+    newValue: `Restored initial ${fresh.firm.name} dataset (by ${actorName} [${byId}])`,
     byId,
   });
   saveStore(fresh);
 }
 
 export function clearAllDataToCleanDeployment(byId: string = 'system'): void {
-  void byId;
-  clearStoreToCleanDeployment();
+  const prevStore = getStore();
+  const actor = prevStore.people.find((p) => p.id === byId) ?? null;
+  const actorName = actor ? personDisplayName(actor) : byId;
+  const clean = clearStoreToCleanDeployment();
+  writeAudit(clean, {
+    recordType: 'system',
+    recordId: 'clean-deployment',
+    action: 'data-cleared',
+    field: 'Clear all data to clean deployment',
+    oldValue: null,
+    newValue: `Cleared store to clean deployment (by ${actorName} [${byId}])`,
+    byId,
+  });
+  saveStore(clean);
 }
 
 // ------------------------------------------------------------------ Notifications
@@ -7308,7 +7425,7 @@ export function prepareEnquiryConversion(
         sourceId: vid('data_source', 'Manual entry'),
         createdFromEnquiryId: enq.id,
       },
-      { byId },
+      { byId, internalSystemStep: 'enquiry_conversion' },
     );
     personId = createdPerson.person.id;
   }
@@ -7496,6 +7613,12 @@ function finalizeEnquiryConversionToMatter(
 /** Anonymise unconverted closed enquiries past the firm's retention period (or a specific enquiry). */
 export function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: string): number {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  requirePermission(permSet, 'enquiry:anonymise');
   const now = new Date();
   const nowIso = now.toISOString();
   const months = store.enquirySettings.retentionMonths || 12;
@@ -7503,7 +7626,7 @@ export function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: stri
 
   for (const enq of store.enquiries) {
     const matchTarget = specificEnquiryId
-      ? enq.id === specificEnquiryId && enq.status !== 'Converted' && !isEnquiryOpen(enq)
+      ? enq.id === specificEnquiryId && isReadyForRetentionAnonymisation(enq, months, now)
       : isReadyForRetentionAnonymisation(enq, months, now);
     if (!matchTarget || enq.anonymisedAt) continue;
 
@@ -8848,11 +8971,63 @@ export function updateTenantRbacConfig(
 export function approveSignOff(
   signOffId: string,
   byId: string,
-): { ok: boolean; error?: string } {
+): { ok: true } | ActionDenied {
   const store = getStore();
-  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
-  if (!item) return { ok: false, error: 'Sign-off item not found.' };
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  if (!permSet.permissions.has('signoff:approve')) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission (signoff:approve) to approve sign-off requests.',
+    );
+  }
 
+  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
+  if (!item) {
+    return buildActionDenied('FORBIDDEN', 'Sign-off item not found or access denied.');
+  }
+
+  if (item.matterId) {
+    const linkedMatter = store.matters.find((m) => m.id === item.matterId) ?? null;
+    if (
+      !linkedMatter ||
+      !canPersonAccessMatter(linkedMatter, byId, actor, {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        'You do not have access to the matter linked to this sign-off request.',
+      );
+    }
+  }
+
+  if (item.assignedPartnerId && item.assignedPartnerId !== byId) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Only the assigned partner may approve this sign-off request.',
+    );
+  }
+
+  if (item.requestedById === byId) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Self-approval is not permitted: the requester cannot approve their own sign-off.',
+    );
+  }
+
+  if (item.status !== 'Pending' && item.status !== 'Discussing') {
+    return buildActionDenied(
+      'FORBIDDEN',
+      `Cannot approve a sign-off with status "${item.status}".`,
+    );
+  }
+
+  const previousStatus = item.status;
   const nowIso = new Date().toISOString();
   item.status = 'Approved';
   item.approvedById = byId;
@@ -8863,7 +9038,7 @@ export function approveSignOff(
     recordId: item.matterId ?? item.id,
     action: 'status-change',
     field: 'Partner sign-off',
-    oldValue: 'Pending',
+    oldValue: previousStatus,
     newValue: `Approved: ${item.title}`,
     byId,
     at: nowIso,
@@ -8878,13 +9053,77 @@ export function discussSignOff(
   signOffId: string,
   note: string,
   byId: string,
-): { ok: boolean; error?: string } {
+): { ok: true } | ActionDenied {
   const store = getStore();
-  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
-  if (!item) return { ok: false, error: 'Sign-off item not found.' };
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  if (!permSet.permissions.has('signoff:approve')) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission (signoff:approve) to discuss sign-off requests.',
+    );
+  }
 
+  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
+  if (!item) {
+    return buildActionDenied('FORBIDDEN', 'Sign-off item not found or access denied.');
+  }
+
+  if (item.matterId) {
+    const linkedMatter = store.matters.find((m) => m.id === item.matterId) ?? null;
+    if (
+      !linkedMatter ||
+      !canPersonAccessMatter(linkedMatter, byId, actor, {
+        allPeople: store.people,
+        teams: store.teams,
+      })
+    ) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        'You do not have access to the matter linked to this sign-off request.',
+      );
+    }
+  }
+
+  if (item.assignedPartnerId && item.assignedPartnerId !== byId) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Only the assigned partner may discuss this sign-off request.',
+    );
+  }
+
+  if (item.requestedById === byId) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Self-approval is not permitted: the requester cannot discuss their own sign-off.',
+    );
+  }
+
+  if (item.status !== 'Pending' && item.status !== 'Discussing') {
+    return buildActionDenied(
+      'FORBIDDEN',
+      `Cannot discuss a sign-off with status "${item.status}".`,
+    );
+  }
+
+  const previousStatus = item.status;
+  const nowIso = new Date().toISOString();
   item.status = 'Discussing';
   item.discussionNote = note.trim() || 'Partner requested discussion before sign-off.';
+
+  writeAudit(store, {
+    recordType: item.matterId ? 'matter' : 'system',
+    recordId: item.matterId ?? item.id,
+    action: 'status-change',
+    field: 'Partner sign-off',
+    oldValue: previousStatus,
+    newValue: `Discussing: ${item.title} (${item.discussionNote})`,
+    byId,
+    at: nowIso,
+  });
 
   // Create a follow-up task for the requester
   const linkedRecords: TaskLinkedRecord[] = [];
@@ -9028,10 +9267,23 @@ export function flagMatterWriteOff(
 export function remindTeamLeadOverdueCompliance(
   teamId: string,
   byId: string,
-): { ok: boolean } {
+): { ok: boolean } | ActionDenied {
   const store = getStore();
+  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  if (!permSet.permissions.has('risk:view')) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission (risk:view) to send overdue compliance reminders.',
+    );
+  }
   const team = store.teams.find((t) => t.id === teamId);
-  if (!team) return { ok: false };
+  if (!team) {
+    return buildActionDenied('FORBIDDEN', 'Team not found.');
+  }
   const leadId = team.leadIds[0] ?? null;
   if (!leadId) {
     const tenantCfg = getActiveTenantConfiguration();
@@ -10108,7 +10360,7 @@ export function prepareQuoteConversionRecord(
         relationshipOwnerId: quote.feeEarnerId || byId,
         sourceId: vid('data_source', 'Manual entry'),
       },
-      { byId },
+      { byId, internalSystemStep: 'quote_conversion' },
     );
     personId = createdPerson.person.id;
   }

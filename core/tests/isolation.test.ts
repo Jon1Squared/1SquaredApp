@@ -72,12 +72,16 @@ import {
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
+  approveSignOff,
   createOrProposeKeyDateRecord,
+  discussSignOff,
   flagMatterWriteOff,
   getAppSnapshot,
+  getKeyDateExceptionsReportRecord,
   getMatterPmsViewBundle,
   liftMatterRestriction,
   markEngagementLetterDrafted,
+  queryKeyDatesTeamDiaryRecord,
   recordInvoiceCreditControlAction,
   recordKeyDateNotApplicableRecord,
   requestMatterBill,
@@ -88,7 +92,13 @@ import {
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
 } from '../../src/server/services';
-import { saveMatterAction } from '../../src/app/actions';
+import {
+  approveSignOffAction,
+  discussSignOffAction,
+  saveMatterAction,
+  savePersonAction,
+} from '../../src/app/actions';
+import { isActionDenied } from '../../src/domain/actionResult';
 import { getStore } from '../../src/server/store';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
@@ -6287,5 +6297,170 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       reason: 'site_or_drive_mismatch',
     });
     expect(backend.getCallLog()).toHaveLength(0);
+  });
+
+  it('S0-03 (B12, B11, B3): empty-allowlist ethical-wall matter is hidden from snapshots, search, and reports for non-participants (partner, fee earner, admin without matter:restricted:access), and blocks tampered matter/sign-off/person IDs and cross-tenant claims', async () => {
+    try {
+      const store = getStore();
+      const namedPartner = store.people.find((p) => p.id === 'P-000005')!;
+      const unnamedPartner = store.people.find((p) => p.id === 'P-000001')!;
+      const unnamedFeeEarner = store.people.find((p) => p.id === 'P-000002')!;
+      const adminPerson = store.people.find((p) => p.id === 'P-000004')!;
+
+      // Create an ethical-wall matter owned by namedPartner (P-000005) and explicitly clear restrictedAccessUserIds to []
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      void _omittedId;
+
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const namedPartnerCookie = createSignedEntraSessionCookie({
+        personId: namedPartner.id,
+        tenantId: 'not-a-law-firm',
+        oid: namedPartner.entraObjectId ?? '00000000-0000-4000-8000-000000000005',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: namedPartner.id,
+        email: namedPartner.emails[0]?.address ?? 'partner5@notalawfirm.example',
+        displayName: 'Named Partner',
+        entraRoles: ['partner'],
+        mappedRoles: ['partner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedNamedSession = verifySignedEntraSessionCookie(namedPartnerCookie)!;
+      const namedSession = {
+        personId: namedPartner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedNamedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifiedNamedSession,
+      };
+
+      const wallSaveRes = await runWithActiveActorSession(namedSession, () =>
+        saveMatterRecord(
+          {
+            ...matterTemplate,
+            title: 'S0-03 Empty Allowlist Ethical Wall Secret Acquisition',
+            isStaffMatter: false,
+            hasEthicalWall: true,
+            restrictedAccessUserIds: [],
+            responsiblePartnerId: namedPartner.id,
+            supervisingPartnerId: namedPartner.id,
+            leadFeeEarnerId: namedPartner.id,
+            teamMemberIds: [namedPartner.id],
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+          },
+          { byId: namedPartner.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(wallSaveRes.matter).not.toBeNull();
+      const wallMatter = store.matters.find((m) => m.id === wallSaveRes.matter!.id)!;
+      // Force restrictedAccessUserIds to empty array (B12 condition: hasEthicalWall === true, isStaffMatter === false, restrictedAccessUserIds === [])
+      wallMatter.isStaffMatter = false;
+      wallMatter.hasEthicalWall = true;
+      wallMatter.restrictedAccessUserIds = [];
+
+      // Create a key date and a sign-off linked to wallMatter
+      await runWithActiveActorSession(namedSession, () =>
+        createOrProposeKeyDateRecord(
+          {
+            matterId: wallMatter.id,
+            keyDateTypeId: 'limitation',
+            title: 'S0-03 Walled Matter Key Date',
+            dueDate: '2026-01-01',
+            responsiblePersonIds: [namedPartner.id],
+            teamId: wallMatter.owningTeamId || 'TM-000001',
+            source: 'manual',
+          },
+          namedPartner.id,
+        ),
+      );
+      store.signOffs.unshift({
+        id: 'SO-WALLED-01',
+        kind: 'write_off',
+        title: 'Walled write-off',
+        matterNumber: wallMatter.matterNumber,
+        matterId: wallMatter.id,
+        subtitle: 'Walled matter write-off',
+        requestedById: namedPartner.id,
+        requestedAt: nowIso,
+        assignedPartnerId: unnamedPartner.id,
+        status: 'Pending',
+      });
+
+      // Revoke matter:restricted:access on adminPerson to test admin without matter:restricted:access
+      adminPerson.permissionOverrides = {
+        grant: [],
+        revoke: ['matter:restricted:access'],
+      };
+
+      for (const excludedActor of [unnamedPartner, unnamedFeeEarner, adminPerson]) {
+        const snap = getAppSnapshot(excludedActor.id);
+        expect(snap.matters.some((m) => m.id === wallMatter.id)).toBe(false);
+        expect(
+          snap.searchIndex.some(
+            (doc) =>
+              doc.id === wallMatter.id ||
+              doc.title.includes('Empty Allowlist Ethical Wall'),
+          ),
+        ).toBe(false);
+        expect(snap.keyDates.some((kd) => kd.matterId === wallMatter.id)).toBe(false);
+
+        const diary = queryKeyDatesTeamDiaryRecord({}, excludedActor.id);
+        expect(diary.some((e) => e.matterId === wallMatter.id)).toBe(false);
+      }
+
+      // Reports also exclude the walled matter for an actor without matter:restricted:access
+      const partnerExceptions = getKeyDateExceptionsReportRecord({}, unnamedPartner.id);
+      expect(
+        partnerExceptions.some((ex) => ex.matterId === wallMatter.id),
+      ).toBe(false);
+
+      // Tampered matterId / signOffId attempts by unnamedPartner and unnamedFeeEarner are denied
+      expect(
+        getMatterPmsViewBundle(wallMatter.id, unnamedPartner.id).matterBundle,
+      ).toBeNull();
+      const tamperedSignOffApprove = approveSignOff('SO-WALLED-01', unnamedPartner.id);
+      expect(isActionDenied(tamperedSignOffApprove)).toBe(true);
+      const tamperedSignOffId = approveSignOff('SO-NONEXISTENT-999', unnamedPartner.id);
+      expect(isActionDenied(tamperedSignOffId)).toBe(true);
+      const tamperedDiscuss = discussSignOff('SO-WALLED-01', 'Probe', unnamedPartner.id);
+      expect(isActionDenied(tamperedDiscuss)).toBe(true);
+
+      // Forged cross-tenant session is rejected by guardedAction on S0-03 actions
+      setTestEntraSessionOverride({
+        personId: unnamedPartner.id,
+        tenantId: 'tenant-beta-forged',
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '99999999-8888-7777-6666-555555555555',
+        sub: unnamedPartner.id,
+        email: 'forged@pembrokevaughan.example',
+        displayName: 'Forged Partner',
+        entraRoles: ['partner', 'admin'],
+        mappedRoles: ['partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+
+      await expect(approveSignOffAction('SO-000001')).rejects.toThrow(
+        /TENANCY_FORGERY_DETECTED/i,
+      );
+      await expect(
+        discussSignOffAction('SO-000001', 'Cross-tenant note'),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+      await expect(
+        savePersonAction({ firstName: 'Forged', surname: 'Tenant' }, {}),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
   });
 });

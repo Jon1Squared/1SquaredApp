@@ -552,7 +552,8 @@ export function toMatterAccessSubject(
   return {
     id: matter.id,
     clientId: matter.clientId ?? undefined,
-    isStaffMatter: Boolean(matter.isStaffMatter || matter.hasEthicalWall),
+    isStaffMatter: Boolean(matter.isStaffMatter),
+    hasEthicalWall: Boolean(matter.hasEthicalWall),
     restrictedAccessUserIds: matter.restrictedAccessUserIds ?? [],
     responsiblePartnerId: matter.responsiblePartnerId ?? undefined,
     responsibleSolicitorId:

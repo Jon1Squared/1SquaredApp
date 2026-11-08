@@ -19,6 +19,7 @@ import {
   saveTaskAction,
   takeTaskAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { formatDate } from '@/domain/dates';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import { enquiryDisplayName, isEnquiryOpen } from '@/domain/enquiries';
@@ -3600,7 +3601,11 @@ export function HomeClient({
                           type="button"
                           className="btn btn--primary btn--sm"
                           onClick={async () => {
-                            await approveSignOffAction(so.id);
+                            const res = await approveSignOffAction(so.id);
+                            if (isActionDenied(res)) {
+                              showToast(res.message);
+                              return;
+                            }
                             showToast(`Approved: ${so.title}`);
                             router.refresh();
                           }}
@@ -5080,7 +5085,11 @@ export function HomeClient({
                           type="button"
                           className="btn btn--ghost btn--sm"
                           onClick={async () => {
-                            await remindTeamLeadOverdueComplianceAction('TM-000001');
+                            const res = await remindTeamLeadOverdueComplianceAction('TM-000001');
+                            if (isActionDenied(res)) {
+                              showToast(res.message);
+                              return;
+                            }
                             showToast('Sent compliance reminder to Rhian Morgan (Real Estate).');
                           }}
                         >
@@ -5099,7 +5108,11 @@ export function HomeClient({
                           type="button"
                           className="btn btn--ghost btn--sm"
                           onClick={async () => {
-                            await remindTeamLeadOverdueComplianceAction('TM-000005');
+                            const res = await remindTeamLeadOverdueComplianceAction('TM-000005');
+                            if (isActionDenied(res)) {
+                              showToast(res.message);
+                              return;
+                            }
                             showToast('Sent compliance reminder to Siân Llewellyn (Employment).');
                           }}
                         >
@@ -5118,7 +5131,11 @@ export function HomeClient({
                           type="button"
                           className="btn btn--ghost btn--sm"
                           onClick={async () => {
-                            await remindTeamLeadOverdueComplianceAction('TM-000002');
+                            const res = await remindTeamLeadOverdueComplianceAction('TM-000002');
+                            if (isActionDenied(res)) {
+                              showToast(res.message);
+                              return;
+                            }
                             showToast('Sent compliance reminder to Catrin Hopkins (Corporate).');
                           }}
                         >
@@ -5733,7 +5750,11 @@ export function HomeClient({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                await discussSignOffAction(discussSignOffItem.id, discussNote);
+                const res = await discussSignOffAction(discussSignOffItem.id, discussNote);
+                if (isActionDenied(res)) {
+                  showToast(res.message);
+                  return;
+                }
                 showToast(`Sent discussion task to requester on ${discussSignOffItem.matterNumber}`);
                 setDiscussSignOffItem(null);
                 router.refresh();

@@ -11,6 +11,7 @@
  */
 import { aboutDocs } from './articles/about-documentation';
 import { authenticationRbacAndMfaArticle } from './articles/authentication-rbac-and-mfa';
+import { dataAdministrationAndRetentionArticle } from './articles/data-administration-and-retention';
 import { deploymentAndSecurityArticle } from './articles/deployment-and-security';
 import { developmentProcessArticle } from './articles/development-process';
 import { documentGenerationArticle } from './articles/document-generation';
@@ -29,6 +30,7 @@ import { mattersEnquiriesTasksNavigationArticle } from './articles/matters-enqui
 import { quickConflictCheck } from './articles/quick-conflict-check';
 import { sharepointDocumentStoreArticle } from './articles/sharepoint-document-store';
 import { sharepointSitesSelectedSetupArticle } from './articles/sharepoint-sites-selected-setup';
+import { signOffQueueArticle } from './articles/sign-off-queue';
 
 export interface DocArticle {
   /** URL slug: /docs/<slug>. Keep stable once published, because screens link to it. */
@@ -59,8 +61,10 @@ export const ARTICLES: DocArticle[] = [
   aboutDocs,
   matterOpeningAndRiskArticle,
   mattersEnquiriesTasksNavigationArticle,
+  signOffQueueArticle,
   deploymentAndSecurityArticle,
   authenticationRbacAndMfaArticle,
+  dataAdministrationAndRetentionArticle,
   developmentProcessArticle,
   keyDatesOverviewArticle,
   keyDatesManagingArticle,
