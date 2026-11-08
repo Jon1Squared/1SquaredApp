@@ -107,7 +107,7 @@ export function attentionList(
       teams = [],
       matters = [],
       pmsSummaryByMatterId = {},
-      canViewFinance = true,
+      canViewFinance = false,
     } = extras;
     const myTeams = userId ? userTeams(userId, teams) : [];
     const myTeamIds = new Set(myTeams.map((t) => t.id));

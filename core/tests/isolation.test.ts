@@ -81,6 +81,7 @@ import {
   discussSignOff,
   flagMatterWriteOff,
   getAppSnapshot,
+  getClientPmsViewBundle,
   getKeyDateExceptionsReportRecord,
   getMatterPmsViewBundle,
   liftMatterRestriction,
@@ -98,6 +99,11 @@ import {
 } from '../../src/server/services';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import {
+  getFirmFinance,
+  getMatterFinanceRows,
+  getMyFinanceFigures,
+} from '../../src/server/financeServices';
+import {
   addNoteAction,
   addTaskCommentAction,
   approveSignOffAction,
@@ -106,6 +112,7 @@ import {
   deleteLinkAction,
   discussSignOffAction,
   dismissDuplicateAction,
+  flagMatterWriteOffAction,
   linkPmsRecordAction,
   logEnquiryContactAction,
   logQuoteFollowUpAction,
@@ -114,10 +121,12 @@ import {
   prepareEnquiryConversionAction,
   prepareQuoteConversionAction,
   reassignLeaverOwnedRecordsAction,
+  recordInvoiceCreditControlActionAction,
   recordQuoteOutcomeAction,
   reorderChoiceValueAction,
   reorderCustomFieldAction,
   reopenEnquiryAction,
+  requestMatterBillAction,
   reviseQuoteAction,
   runMatterConflictSearchAction,
   saveCustomFieldAction,
@@ -1766,17 +1775,27 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           (a) => a.recordId === staffMatterId || a.recordId === wallMatterId,
         ),
       ).toBe(false);
-      expect(
-        outsiderSnap.pmsSummaryByMatterId[staffMatterId],
-      ).toBeUndefined();
-      expect(outsiderSnap.pmsSummaryByMatterId[wallMatterId]).toBeUndefined();
+      const outsiderRows = runWithActiveActorSession(outsiderSession, () =>
+        getMatterFinanceRows(outsiderFeeEarner.id),
+      );
+      expect(isActionDenied(outsiderRows)).toBe(false);
+      if (!isActionDenied(outsiderRows)) {
+        expect(
+          outsiderRows.pmsSummaryByMatterId[staffMatterId],
+        ).toBeUndefined();
+        expect(
+          outsiderRows.pmsSummaryByMatterId[wallMatterId],
+        ).toBeUndefined();
+      }
 
       // Direct PMS bundle lookup and tampered-ID actions by non-participant fail closed
       const outsiderPmsView = runWithActiveActorSession(outsiderSession, () =>
         getMatterPmsViewBundle(staffMatterId, outsiderFeeEarner.id),
       );
-      expect(outsiderPmsView.matterBundle).toBeNull();
-      expect(outsiderPmsView.link).toBeNull();
+      expect(isActionDenied(outsiderPmsView)).toBe(true);
+      if (isActionDenied(outsiderPmsView)) {
+        expect(outsiderPmsView.code).toBe('FORBIDDEN');
+      }
       expect(
         runWithActiveActorSession(outsiderSession, () =>
           markEngagementLetterDrafted(staffMatterId, outsiderFeeEarner.id),
@@ -2991,20 +3010,26 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       targetMatter.supervisingPartnerId = null;
 
       const billRes = requestMatterBill(targetMatter.matterNumber, 'P-000001');
-      expect(billRes.ok).toBe(true);
-      const billingTask = store.tasks.find((t) => t.id === billRes.taskId);
-      expect(billingTask).toBeDefined();
-      expect(billingTask?.assignedPersonId).toBeNull();
+      expect(isActionDenied(billRes)).toBe(false);
+      if (!isActionDenied(billRes)) {
+        expect(billRes.ok).toBe(true);
+        const billingTask = store.tasks.find((t) => t.id === billRes.taskId);
+        expect(billingTask).toBeDefined();
+        expect(billingTask?.assignedPersonId).toBeNull();
+      }
 
       const writeOffRes = flagMatterWriteOff(
         targetMatter.matterNumber,
         1500,
         'P-000001',
       );
-      expect(writeOffRes.ok).toBe(true);
-      const signOff = store.signOffs.find((s) => s.id === writeOffRes.signOffId);
-      expect(signOff).toBeDefined();
-      expect(signOff?.assignedPartnerId).toBeNull();
+      expect(isActionDenied(writeOffRes)).toBe(false);
+      if (!isActionDenied(writeOffRes)) {
+        expect(writeOffRes.ok).toBe(true);
+        const signOff = store.signOffs.find((s) => s.id === writeOffRes.signOffId);
+        expect(signOff).toBeDefined();
+        expect(signOff?.assignedPartnerId).toBeNull();
+      }
 
       const ccRes = recordInvoiceCreditControlAction(
         {
@@ -3016,10 +3041,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
         'P-000001',
       );
-      expect(ccRes.ok).toBe(true);
-      const ccTask = store.tasks.find((t) => t.id === ccRes.taskId);
-      expect(ccTask).toBeDefined();
-      expect(ccTask?.assignedPersonId).toBeNull();
+      expect(isActionDenied(ccRes)).toBe(false);
+      if (!isActionDenied(ccRes)) {
+        expect(ccRes.ok).toBe(true);
+        const ccTask = store.tasks.find((t) => t.id === ccRes.taskId);
+        expect(ccTask).toBeDefined();
+        expect(ccTask?.assignedPersonId).toBeNull();
+      }
 
       // Verify getStore() does not overwrite store.firm with demo FIRM when demo mode is disabled
       store.firm.name = 'Custom Non-Demo Firm Name LLP';
@@ -6457,9 +6485,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toBe(false);
 
       // Tampered matterId / signOffId attempts by unnamedPartner and unnamedFeeEarner are denied
-      expect(
-        getMatterPmsViewBundle(wallMatter.id, unnamedPartner.id).matterBundle,
-      ).toBeNull();
+      const tamperedPmsView = getMatterPmsViewBundle(
+        wallMatter.id,
+        unnamedPartner.id,
+      );
+      expect(isActionDenied(tamperedPmsView)).toBe(true);
+      if (isActionDenied(tamperedPmsView)) {
+        expect(tamperedPmsView.code).toBe('FORBIDDEN');
+      }
       const tamperedSignOffApprove = approveSignOff('SO-WALLED-01', unnamedPartner.id);
       expect(isActionDenied(tamperedSignOffApprove)).toBe(true);
       const tamperedSignOffId = approveSignOff('SO-NONEXISTENT-999', unnamedPartner.id);
@@ -7923,6 +7956,261 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           tenantBOrgMerg.id,
         )?.mergedIntoId,
       ).toBeFalsy();
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+
+  it('S0-10: enforces two-tenant isolation, tampered record ID rejection, and positive controls across all five finance loaders and three credit-control actions', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const validTenantASession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: '00000000-0000-4000-8000-000000000001',
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+
+      const forgedTenantBSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'pembroke-vaughan',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '99999999-8888-7777-6666-555555555555',
+          sub: '00000000-0000-4000-8000-000000000001',
+          email: 'rhian.morgan@pembroke.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+
+      const validActorScope = {
+        tenantId: validTenantASession.tenantId,
+        personId: validTenantASession.personId,
+        tokenRoles: validTenantASession.mappedRoles,
+        expiresAtMs: Date.now() + 3600_000,
+        verifiedSession: validTenantASession,
+      };
+
+      const forgedActorScope = {
+        ...validActorScope,
+        tenantId: forgedTenantBSession.tenantId,
+        verifiedSession: forgedTenantBSession,
+      };
+
+      // --- 1. getMatterFinanceRows ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      expect(() =>
+        runWithActiveActorSession(forgedActorScope, () =>
+          getMatterFinanceRows('P-000001', ['M-000001']),
+        ),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered record ID -> ActionDenied FORBIDDEN
+      const tamperedRows = runWithActiveActorSession(validActorScope, () =>
+        getMatterFinanceRows('P-000001', ['M-TENANT-B-999']),
+      );
+      expect(isActionDenied(tamperedRows)).toBe(true);
+      if (isActionDenied(tamperedRows)) {
+        expect(tamperedRows.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid ID -> succeeds
+      const okRows = runWithActiveActorSession(validActorScope, () =>
+        getMatterFinanceRows('P-000001', ['M-000001']),
+      );
+      expect(isActionDenied(okRows)).toBe(false);
+      if (!isActionDenied(okRows)) {
+        expect(okRows.pmsSummaryByMatterId['M-000001']).toBeDefined();
+      }
+
+      // --- 2. getMyFinanceFigures ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      expect(() =>
+        runWithActiveActorSession(forgedActorScope, () =>
+          getMyFinanceFigures('P-000001'),
+        ),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered actor ID -> ActionDenied FORBIDDEN
+      const tamperedMine = runWithActiveActorSession(validActorScope, () =>
+        getMyFinanceFigures('P-TENANT-B-999'),
+      );
+      expect(isActionDenied(tamperedMine)).toBe(true);
+      if (isActionDenied(tamperedMine)) {
+        expect(tamperedMine.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid actor ID -> succeeds
+      const okMine = runWithActiveActorSession(validActorScope, () =>
+        getMyFinanceFigures('P-000001'),
+      );
+      expect(isActionDenied(okMine)).toBe(false);
+      if (!isActionDenied(okMine)) {
+        expect(okMine.myFeeEarnerFigures?.fee_earner_id).toBe('FE001');
+      }
+
+      // --- 3. getFirmFinance ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      expect(() =>
+        runWithActiveActorSession(forgedActorScope, () =>
+          getFirmFinance('P-000001'),
+        ),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered actor ID -> ActionDenied FORBIDDEN
+      const tamperedFirm = runWithActiveActorSession(validActorScope, () =>
+        getFirmFinance('P-TENANT-B-999'),
+      );
+      expect(isActionDenied(tamperedFirm)).toBe(true);
+      if (isActionDenied(tamperedFirm)) {
+        expect(tamperedFirm.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid actor ID -> succeeds
+      const okFirm = runWithActiveActorSession(validActorScope, () =>
+        getFirmFinance('P-000001'),
+      );
+      expect(isActionDenied(okFirm)).toBe(false);
+      if (!isActionDenied(okFirm)) {
+        expect(okFirm.allFeeEarnerPerformance.length).toBeGreaterThan(0);
+      }
+
+      // --- 4. getMatterPmsViewBundle ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      expect(() =>
+        runWithActiveActorSession(forgedActorScope, () =>
+          getMatterPmsViewBundle('M-000001', 'P-000001'),
+        ),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered matter ID -> ActionDenied FORBIDDEN
+      const tamperedMatterView = runWithActiveActorSession(validActorScope, () =>
+        getMatterPmsViewBundle('M-TENANT-B-999', 'P-000001'),
+      );
+      expect(isActionDenied(tamperedMatterView)).toBe(true);
+      if (isActionDenied(tamperedMatterView)) {
+        expect(tamperedMatterView.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid matter ID -> succeeds
+      const okMatterView = runWithActiveActorSession(validActorScope, () =>
+        getMatterPmsViewBundle('M-000001', 'P-000001'),
+      );
+      expect(isActionDenied(okMatterView)).toBe(false);
+      if (!isActionDenied(okMatterView)) {
+        expect(okMatterView.matterBundle).not.toBeNull();
+      }
+
+      // --- 5. getClientPmsViewBundle ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      expect(() =>
+        runWithActiveActorSession(forgedActorScope, () =>
+          getClientPmsViewBundle('organisation', 'O-000001', 'P-000001'),
+        ),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered client record ID -> ActionDenied FORBIDDEN
+      const tamperedClientView = runWithActiveActorSession(validActorScope, () =>
+        getClientPmsViewBundle('organisation', 'O-TENANT-B-999', 'P-000001'),
+      );
+      expect(isActionDenied(tamperedClientView)).toBe(true);
+      if (isActionDenied(tamperedClientView)) {
+        expect(tamperedClientView.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid client ID -> succeeds
+      const okClientView = runWithActiveActorSession(validActorScope, () =>
+        getClientPmsViewBundle('organisation', 'O-000001', 'P-000001'),
+      );
+      expect(isActionDenied(okClientView)).toBe(false);
+      if (!isActionDenied(okClientView)) {
+        expect(okClientView.clientBundle).not.toBeNull();
+      }
+
+      // --- 6. requestMatterBillAction ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      setTestEntraSessionOverride(forgedTenantBSession);
+      await expect(
+        requestMatterBillAction('HAR001-0003'),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered matter code -> ActionDenied FORBIDDEN
+      setTestEntraSessionOverride(validTenantASession);
+      const tamperedBill = await requestMatterBillAction('TENANTB-9999');
+      expect(isActionDenied(tamperedBill)).toBe(true);
+      if (isActionDenied(tamperedBill)) {
+        expect(tamperedBill.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid matter code -> succeeds
+      const okBill = await requestMatterBillAction('HAR001-0003');
+      expect(isActionDenied(okBill)).toBe(false);
+      if (!isActionDenied(okBill)) {
+        expect(okBill.ok).toBe(true);
+      }
+
+      // --- 7. flagMatterWriteOffAction ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      setTestEntraSessionOverride(forgedTenantBSession);
+      await expect(
+        flagMatterWriteOffAction('HAR001-0003', 350),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered matter code -> ActionDenied FORBIDDEN
+      setTestEntraSessionOverride(validTenantASession);
+      const tamperedWriteOff = await flagMatterWriteOffAction('TENANTB-9999', 350);
+      expect(isActionDenied(tamperedWriteOff)).toBe(true);
+      if (isActionDenied(tamperedWriteOff)) {
+        expect(tamperedWriteOff.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid matter code -> succeeds
+      const okWriteOff = await flagMatterWriteOffAction('HAR001-0003', 350);
+      expect(isActionDenied(okWriteOff)).toBe(false);
+      if (!isActionDenied(okWriteOff)) {
+        expect(okWriteOff.ok).toBe(true);
+      }
+
+      // --- 8. recordInvoiceCreditControlActionAction ---
+      // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
+      setTestEntraSessionOverride(forgedTenantBSession);
+      await expect(
+        recordInvoiceCreditControlActionAction({
+          invoiceNumber: 'PV/2026/0003',
+          matterCode: 'HAR001-0003',
+          clientCode: 'HAR001',
+          actionType: 'log_call',
+        }),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+      // (b) Tampered matter code -> ActionDenied FORBIDDEN
+      setTestEntraSessionOverride(validTenantASession);
+      const tamperedCc = await recordInvoiceCreditControlActionAction({
+        invoiceNumber: 'INV-TENANT-B-999',
+        matterCode: 'TENANTB-9999',
+        clientCode: 'TENANTB',
+        actionType: 'log_call',
+      });
+      expect(isActionDenied(tamperedCc)).toBe(true);
+      if (isActionDenied(tamperedCc)) {
+        expect(tamperedCc.code).toBe('FORBIDDEN');
+      }
+      // (c) Positive control: valid Tenant A session + valid matter code -> succeeds
+      const okCc = await recordInvoiceCreditControlActionAction({
+        invoiceNumber: 'PV/2026/0003',
+        matterCode: 'HAR001-0003',
+        clientCode: 'HAR001',
+        actionType: 'log_call',
+      });
+      expect(isActionDenied(okCc)).toBe(false);
+      if (!isActionDenied(okCc)) {
+        expect(okCc.ok).toBe(true);
+      }
     } finally {
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');

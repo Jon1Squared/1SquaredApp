@@ -14,6 +14,8 @@ import {
   syncHomeRolesWithEmployeeRoles,
 } from './homeConfig';
 import { getLeftRailVisibility } from '../server/rbacRuntime';
+import { isActionDenied } from './actionResult';
+import { buildFeeEarnerWeeklyTime, buildFirmFinanceRollups } from './pms';
 import { getPmsSource } from '@/pms/pmsSource';
 import { primaryEmail } from './names';
 import { switchUserAction } from '@/app/actions';
@@ -388,27 +390,44 @@ describe('Role-based Home pages & configuration', () => {
 
   it('provides accurate PMS queries for Home pages matching check-sheet totals', () => {
     const pms = getPmsSource();
-    const dafyddFe = pms.listFeeEarners().find((fe) => fe.last_name === 'Evans')!;
+    const extractInfo = pms.getExtractInfo();
+    const feeEarners = pms.listFeeEarners();
+    const timeEntries = pms.listAllTimeEntries();
+    const dafyddFe = feeEarners.find((fe) => fe.last_name === 'Evans')!;
     expect(dafyddFe).toBeDefined();
 
     // Check Dafydd Evans weekly time for 12-16 Oct 2026
-    const feWeek = pms.getFeeEarnerWeeklyTime(dafyddFe.fee_earner_id)!;
+    const feWeek = buildFeeEarnerWeeklyTime({
+      feeEarner: dafyddFe,
+      timeEntries,
+    })!;
     expect(feWeek).not.toBeNull();
     expect(feWeek.feeEarnerId).toBe(dafyddFe.fee_earner_id);
     expect(feWeek.weekdays.length).toBe(5);
     expect(feWeek.weekTotalHours).toBeGreaterThan(0);
 
+    const rollups = buildFirmFinanceRollups({
+      asAtDate: extractInfo.asAtDate,
+      matterFinancials: pms.getAllMatterFinancials(),
+      invoices: pms.getAgedDebt(),
+      timeEntries,
+      payments: pms.listAllPayments(),
+      clients: pms.listClients(),
+      feeEarners,
+      year: '2026',
+    });
+
     // Check Monthly fees billed Jan-Oct 2026
-    const monthly = pms.getMonthlyFeesBilled('2026');
+    const monthly = rollups.pmsMonthlyFeesBilled;
     expect(monthly.months.length).toBe(10);
     expect(monthly.yearToDateTotal).toBeGreaterThan(150000);
 
     // Check Cash received summary
-    const cash = pms.getCashReceivedSummary();
+    const cash = rollups.pmsCashReceived;
     expect(cash.octoberTotal).toBeGreaterThan(0);
 
     // Check Department financials
-    const depts = pms.getDepartmentFinancials();
+    const depts = rollups.pmsDepartmentFinancials;
     expect(depts.departments.length).toBe(6);
     expect(depts.firmTotal.unbilledWip).toBeCloseTo(34140.0, 2);
     expect(depts.firmTotal.outstandingDebt).toBeCloseTo(49130.22, 2);
@@ -430,12 +449,14 @@ describe('Role-based Home pages & configuration', () => {
     expect(snapAfter.signOffs.find((s) => s.id === 'SO-000001')?.status).toBe('Approved');
     expect(snapAfter.signOffs.find((s) => s.id === 'SO-000002')?.status).toBe('Discussing');
 
-    // Request bill on PEN001-0001 creates a Billing task
-    const billRes = requestMatterBill('PEN001-0001', 'P-000002');
+    // Request bill on PEN001-0001 by partner (finance:credit_control) creates a Billing task
+    const billRes = requestMatterBill('PEN001-0001', 'P-000001');
+    expect(isActionDenied(billRes)).toBe(false);
     expect(billRes.ok).toBe(true);
 
-    // Flag write-off on TGL001-0002 creates a new SignOffItem
-    const woRes = flagMatterWriteOff('TGL001-0002', 350, 'P-000002');
+    // Flag write-off on TGL001-0002 by partner (finance:credit_control) creates a new SignOffItem
+    const woRes = flagMatterWriteOff('TGL001-0002', 350, 'P-000001');
+    expect(isActionDenied(woRes)).toBe(false);
     expect(woRes.ok).toBe(true);
     const snapFinal = getAppSnapshot('P-000001');
     expect(snapFinal.signOffs.some((s) => s.matterNumber === 'TGL001-0002')).toBe(true);

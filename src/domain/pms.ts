@@ -30,7 +30,21 @@ import type {
   PmsOutboundCommand,
   PmsOutboundCommandType,
 } from '@platform/core-api';
-import type { PmsClient, PmsFeeEarner, PmsMatter, PmsMatterFinancials } from '@/pms/types';
+import type {
+  PmsCashReceivedSummary,
+  PmsClient,
+  PmsClientFinancials,
+  PmsDepartmentFinancials,
+  PmsFeeEarner,
+  PmsFeeEarnerPerformance,
+  PmsFeeEarnerWeeklyTime,
+  PmsInvoiceBalance,
+  PmsMatter,
+  PmsMatterFinancials,
+  PmsMonthlyFeesBilled,
+  PmsPayment,
+  PmsTimeEntry,
+} from '@/pms/types';
 
 /** Format GBP currency with £ and 2 decimal places; negatives in brackets. */
 export function formatGbp(amount: number | null | undefined): string {
@@ -71,7 +85,7 @@ export function canUserViewFinance(
   values: ChoiceValue[] = [],
   rbacOptions?: ResolvePersonPermissionsOptions,
 ): boolean {
-  if (!user) return true;
+  if (!user) return false;
   const appRole: AppRole = resolveUserAppRole(user, teams, values, rbacOptions);
   if (appRole === 'call_handler') return false;
   const perms = resolvePersonPermissionSet(user, { ...rbacOptions, teams });
@@ -516,5 +530,380 @@ export function reconcilePmsInboundMatterCommercials(
     updatedMatterFields,
     updatedFieldValues,
     discrepancies,
+  };
+}
+
+function roundMoney2(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+function sumMoneyPence<T>(rows: readonly T[], selector: (row: T) => number): number {
+  let totalPence = 0;
+  for (const row of rows) {
+    const val = selector(row);
+    if (Number.isFinite(val)) {
+      totalPence += Math.round(val * 100);
+    }
+  }
+  return roundMoney2(totalPence / 100);
+}
+
+/**
+ * Compute per-client financial summary (`PmsClientFinancials`) purely from
+ * matter-filtered `PmsMatterFinancials` and `PmsInvoiceBalance` rows (ADR 0029).
+ */
+export function buildClientFinancialsFromRows(
+  client: PmsClient,
+  visibleMatters: readonly PmsMatterFinancials[],
+  visibleInvoices: readonly PmsInvoiceBalance[],
+): PmsClientFinancials {
+  const clientMatters = visibleMatters.filter((m) => m.client_code === client.client_code);
+  const clientInvoices = visibleInvoices.filter(
+    (inv) => inv.client_code === client.client_code && inv.invoice_type !== 'Credit note',
+  );
+
+  const unbilled_wip = sumMoneyPence(clientMatters, (m) => m.unbilled_wip);
+  const fees_billed = sumMoneyPence(clientMatters, (m) => m.fees_billed);
+  const disbursements_billed = sumMoneyPence(clientMatters, (m) => m.disbursements_billed);
+  const total_invoiced_inc_vat = sumMoneyPence(clientMatters, (m) => m.total_invoiced_inc_vat);
+  const total_paid = sumMoneyPence(clientMatters, (m) => m.total_paid);
+  const outstanding_debt = sumMoneyPence(clientMatters, (m) => m.outstanding_debt);
+  const unbilled_disbursements = sumMoneyPence(clientMatters, (m) => m.unbilled_disbursements);
+  const client_account_balance = sumMoneyPence(clientMatters, (m) => m.client_account_balance);
+
+  const aged_not_yet_due = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === 'Not yet due' ? i.outstanding : 0,
+  );
+  const aged_1_30 = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '1-30' ? i.outstanding : 0,
+  );
+  const aged_31_60 = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '31-60' ? i.outstanding : 0,
+  );
+  const aged_61_90 = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '61-90' ? i.outstanding : 0,
+  );
+  const aged_90_plus = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '90+' ? i.outstanding : 0,
+  );
+
+  const credit_limit = roundMoney2(client.credit_limit);
+
+  return {
+    client_code: client.client_code,
+    client_name: client.client_name,
+    client_type: client.client_type,
+    company_number: client.company_number,
+    email: client.email,
+    client_partner_id: client.client_partner_id,
+    credit_terms_days: client.credit_terms_days,
+    credit_limit,
+    rate_discount_pct: client.rate_discount_pct,
+    status: client.status,
+    unbilled_wip,
+    fees_billed,
+    disbursements_billed,
+    total_invoiced_inc_vat,
+    total_paid,
+    outstanding_debt,
+    unbilled_disbursements,
+    client_account_balance,
+    aged_not_yet_due,
+    aged_1_30,
+    aged_31_60,
+    aged_61_90,
+    aged_90_plus,
+    credit_limit_used_pct: credit_limit > 0 ? outstanding_debt / credit_limit : null,
+  };
+}
+
+/**
+ * Compute a fee earner's weekly time and unbilled WIP (`PmsFeeEarnerWeeklyTime`)
+ * purely from matter-filtered `PmsTimeEntry` rows (ADR 0029).
+ */
+export function buildFeeEarnerWeeklyTime(params: {
+  feeEarner: Pick<PmsFeeEarner, 'fee_earner_id' | 'annual_target_hours'> | null | undefined;
+  timeEntries: readonly PmsTimeEntry[];
+  hiddenMatterCodes?: ReadonlySet<string>;
+  customDailyPace?: number | null;
+}): PmsFeeEarnerWeeklyTime | null {
+  const { feeEarner, timeEntries, hiddenMatterCodes, customDailyPace } = params;
+  if (!feeEarner) return null;
+
+  const targetHours = Number(feeEarner.annual_target_hours) || 1200;
+  const defaultDailyPace = Math.round((targetHours / (260 - 30)) * 10) / 10;
+  const dailyPaceHours =
+    typeof customDailyPace === 'number' && customDailyPace > 0
+      ? customDailyPace
+      : defaultDailyPace;
+  const weeklyPaceHours = Math.round(dailyPaceHours * 5 * 10) / 10;
+
+  const visibleEntries = timeEntries.filter(
+    (t) =>
+      t.fee_earner_id === feeEarner.fee_earner_id &&
+      !hiddenMatterCodes?.has(t.matter_code) &&
+      t.chargeable === 'Y',
+  );
+
+  const weekDaysSpec: { dayLabel: 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri'; date: string }[] = [
+    { dayLabel: 'Mon', date: '2026-10-12' },
+    { dayLabel: 'Tue', date: '2026-10-13' },
+    { dayLabel: 'Wed', date: '2026-10-14' },
+    { dayLabel: 'Thu', date: '2026-10-15' },
+    { dayLabel: 'Fri', date: '2026-10-16' },
+  ];
+
+  const hoursByDate = new Map<string, number>();
+  for (const t of visibleEntries) {
+    if (t.date >= '2026-10-12' && t.date <= '2026-10-16') {
+      hoursByDate.set(t.date, roundMoney2((hoursByDate.get(t.date) ?? 0) + t.hours));
+    }
+  }
+
+  const weekdays = weekDaysSpec.map((d) => ({
+    dayLabel: d.dayLabel,
+    date: d.date,
+    hours: hoursByDate.get(d.date) ?? 0,
+  }));
+  const weekTotalHours = Math.round(weekdays.reduce((acc, d) => acc + d.hours, 0) * 10) / 10;
+
+  let mtdHours = 0;
+  let unbilledWip = 0;
+  const unbilledMatters = new Set<string>();
+  let oldestUnbilledDate: string | null = null;
+
+  for (const t of visibleEntries) {
+    if (t.date >= '2026-10-01' && t.date <= '2026-10-31') {
+      mtdHours += t.hours;
+    }
+    if (t.billed_status === 'Unbilled') {
+      unbilledWip += t.value;
+      unbilledMatters.add(t.matter_code);
+      if (!oldestUnbilledDate || t.date < oldestUnbilledDate) {
+        oldestUnbilledDate = t.date;
+      }
+    }
+  }
+
+  return {
+    feeEarnerId: feeEarner.fee_earner_id,
+    weekTotalHours,
+    dailyPaceHours,
+    weeklyPaceHours,
+    weekdays,
+    monthToDateHours: roundMoney2(mtdHours),
+    myUnbilledWip: roundMoney2(unbilledWip),
+    myUnbilledMatterCount: unbilledMatters.size,
+    oldestUnbilledDate,
+  };
+}
+
+export interface FirmFinanceRollupInputRows {
+  asAtDate: string;
+  year?: string;
+  feeEarners: readonly PmsFeeEarner[];
+  clients: readonly PmsClient[];
+  matterFinancials: readonly PmsMatterFinancials[];
+  invoices: readonly PmsInvoiceBalance[];
+  timeEntries: readonly PmsTimeEntry[];
+  payments: readonly PmsPayment[];
+}
+
+export interface FirmFinanceRollups {
+  allFeeEarnerPerformance: PmsFeeEarnerPerformance[];
+  allClientFins: PmsClientFinancials[];
+  pmsMonthlyFeesBilled: { months: PmsMonthlyFeesBilled[]; yearToDateTotal: number };
+  pmsCashReceived: PmsCashReceivedSummary;
+  pmsDepartmentFinancials: {
+    departments: PmsDepartmentFinancials[];
+    firmTotal: PmsDepartmentFinancials;
+  };
+}
+
+/**
+ * Pure domain roll-up calculator (`buildFirmFinanceRollups`) that computes
+ * fee-earner performance, client financials, monthly fees billed, cash received,
+ * and department financials from matter-filtered row-level PMS records (ADR 0029).
+ *
+ * Restricted matters in `hiddenMatterCodes` (staff matters and ethical-wall matters
+ * the caller cannot access) are excluded from every total.
+ */
+export function buildFirmFinanceRollups(
+  rows: FirmFinanceRollupInputRows,
+  hiddenMatterCodes: ReadonlySet<string> = new Set(),
+): FirmFinanceRollups {
+  const visibleMatters = rows.matterFinancials.filter(
+    (m) => !hiddenMatterCodes.has(m.matter_code),
+  );
+  const visibleInvoices = rows.invoices.filter(
+    (inv) => !hiddenMatterCodes.has(inv.matter_code),
+  );
+  const visibleTimeEntries = rows.timeEntries.filter(
+    (t) => !hiddenMatterCodes.has(t.matter_code),
+  );
+  const visiblePayments = rows.payments.filter(
+    (p) => !hiddenMatterCodes.has(p.matter_code),
+  );
+
+  const currentYm = rows.asAtDate.slice(0, 7);
+
+  // 1. Fee-earner performance
+  const sortedFeeEarners = [...rows.feeEarners].sort((a, b) =>
+    a.fee_earner_id.localeCompare(b.fee_earner_id),
+  );
+  const allFeeEarnerPerformance: PmsFeeEarnerPerformance[] = sortedFeeEarners.map((fe) => {
+    const feEntries = visibleTimeEntries.filter((t) => t.fee_earner_id === fe.fee_earner_id);
+    const chargeable_hours = sumMoneyPence(feEntries, (t) =>
+      t.chargeable === 'Y' ? t.hours : 0,
+    );
+    const chargeable_hours_this_month = sumMoneyPence(feEntries, (t) =>
+      t.chargeable === 'Y' && t.date.slice(0, 7) === currentYm ? t.hours : 0,
+    );
+    const time_value = sumMoneyPence(feEntries, (t) => t.value);
+    const unbilled_wip = sumMoneyPence(feEntries, (t) =>
+      t.billed_status === 'Unbilled' ? t.value : 0,
+    );
+    const billed_value = sumMoneyPence(feEntries, (t) => t.billed_value);
+    const written_off = sumMoneyPence(feEntries, (t) => t.write_off_value);
+    const annual_target_hours = Number(fe.annual_target_hours ?? 0);
+    const pct_of_annual_target =
+      annual_target_hours > 0 ? chargeable_hours / annual_target_hours : 0;
+
+    return {
+      fee_earner_id: fe.fee_earner_id,
+      initials: fe.initials,
+      name: `${fe.first_name} ${fe.last_name}`,
+      email: fe.email,
+      grade: fe.grade,
+      department: fe.department,
+      standard_hourly_rate: roundMoney2(fe.standard_hourly_rate),
+      chargeable_hours,
+      chargeable_hours_this_month,
+      time_value,
+      unbilled_wip,
+      billed_value,
+      written_off,
+      annual_target_hours,
+      pct_of_annual_target,
+    };
+  });
+
+  // 2. Client financials
+  const sortedClients = [...rows.clients].sort((a, b) =>
+    a.client_code.localeCompare(b.client_code),
+  );
+  const allClientFins: PmsClientFinancials[] = sortedClients.map((client) =>
+    buildClientFinancialsFromRows(client, visibleMatters, visibleInvoices),
+  );
+
+  // 3. Monthly fees billed (current year by default)
+  const targetYear = rows.year ?? String(new Date().getFullYear());
+  const byYm = new Map<string, number>();
+  for (const inv of visibleInvoices) {
+    if (inv.invoice_date.slice(0, 4) !== targetYear || inv.exported_status === 'Draft') {
+      continue;
+    }
+    const ym = inv.invoice_date.slice(0, 7);
+    byYm.set(ym, roundMoney2((byYm.get(ym) ?? 0) + inv.fees_net));
+  }
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct'];
+  const months: PmsMonthlyFeesBilled[] = monthNames.map((shortName, idx) => {
+    const monthKey = `${targetYear}-${String(idx + 1).padStart(2, '0')}`;
+    return {
+      monthKey,
+      monthShort: shortName,
+      feesNet: byYm.get(monthKey) ?? 0,
+    };
+  });
+  const yearToDateTotal = roundMoney2(months.reduce((acc, m) => acc + m.feesNet, 0));
+
+  // 4. Cash received summary
+  let octoberTotal = 0;
+  let octoberReceiptCount = 0;
+  let septemberTotal = 0;
+  let septemberReceiptCount = 0;
+  for (const p of visiblePayments) {
+    const ym = p.receipt_date.slice(0, 7);
+    if (ym === '2026-10') {
+      octoberTotal += p.amount;
+      octoberReceiptCount += 1;
+    } else if (ym === '2026-09') {
+      septemberTotal += p.amount;
+      septemberReceiptCount += 1;
+    }
+  }
+  const pmsCashReceived: PmsCashReceivedSummary = {
+    octoberTotal: roundMoney2(octoberTotal),
+    octoberReceiptCount,
+    septemberTotal: roundMoney2(septemberTotal),
+    septemberReceiptCount,
+  };
+
+  // 5. Department financials
+  const matterPracticeAreaByCode = new Map<string, string>();
+  const mattersByPracticeArea = new Map<string, PmsMatterFinancials[]>();
+  for (const m of visibleMatters) {
+    matterPracticeAreaByCode.set(m.matter_code, m.practice_area);
+    const list = mattersByPracticeArea.get(m.practice_area) ?? [];
+    list.push(m);
+    mattersByPracticeArea.set(m.practice_area, list);
+  }
+
+  const departments: PmsDepartmentFinancials[] = [];
+  for (const [practiceArea, deptMatters] of mattersByPracticeArea.entries()) {
+    const openMatters = deptMatters.filter((m) => m.status === 'Open').length;
+    const billedThisYear = roundMoney2(deptMatters.reduce((s, m) => s + m.fees_billed, 0));
+    const unbilledWip = roundMoney2(deptMatters.reduce((s, m) => s + m.unbilled_wip, 0));
+    const outstandingDebt = roundMoney2(
+      deptMatters.reduce((s, m) => s + m.outstanding_debt, 0),
+    );
+    const overdueDebt = roundMoney2(
+      visibleInvoices
+        .filter(
+          (inv) =>
+            matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
+            (inv.days_past_due ?? 0) > 0,
+        )
+        .reduce((s, inv) => s + inv.outstanding, 0),
+    );
+    const octoberHours = roundMoney2(
+      visibleTimeEntries
+        .filter(
+          (t) =>
+            matterPracticeAreaByCode.get(t.matter_code) === practiceArea &&
+            t.chargeable === 'Y' &&
+            t.date.slice(0, 7) === '2026-10',
+        )
+        .reduce((s, t) => s + t.hours, 0),
+    );
+    departments.push({
+      practiceArea,
+      openMatters,
+      billedThisYear,
+      unbilledWip,
+      outstandingDebt,
+      overdueDebt,
+      octoberHours,
+    });
+  }
+  departments.sort((a, b) => b.billedThisYear - a.billedThisYear);
+
+  const firmTotal: PmsDepartmentFinancials = {
+    practiceArea: 'Firm total',
+    openMatters: departments.reduce((s, d) => s + d.openMatters, 0),
+    billedThisYear: roundMoney2(departments.reduce((s, d) => s + d.billedThisYear, 0)),
+    unbilledWip: roundMoney2(departments.reduce((s, d) => s + d.unbilledWip, 0)),
+    outstandingDebt: roundMoney2(departments.reduce((s, d) => s + d.outstandingDebt, 0)),
+    overdueDebt: roundMoney2(departments.reduce((s, d) => s + d.overdueDebt, 0)),
+    octoberHours: Math.round(departments.reduce((s, d) => s + d.octoberHours, 0) * 10) / 10,
+  };
+
+  return {
+    allFeeEarnerPerformance,
+    allClientFins,
+    pmsMonthlyFeesBilled: { months, yearToDateTotal },
+    pmsCashReceived,
+    pmsDepartmentFinancials: { departments, firmTotal },
   };
 }

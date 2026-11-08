@@ -72,7 +72,7 @@ export function MattersListClient({
   tasks = [],
   values,
   currentUserId = '',
-  canViewFinance = true,
+  canViewFinance = false,
   pmsSummaryByMatterId = {},
   pmsAsAtDate = '2026-10-16',
 }: MattersListClientProps) {

@@ -1,5 +1,6 @@
 import { notFound, redirect } from 'next/navigation';
 import { OrganisationProfileClient } from '@/components/OrganisationProfileClient';
+import { isActionDenied } from '@/domain/actionResult';
 import {
   findCandidateDuplicatesForRecord,
   getAppSnapshot,
@@ -52,7 +53,11 @@ export default async function OrganisationProfilePage({
         m.recordType === 'organisation' &&
         (m.survivorId === organisation.id || m.mergedId === organisation.id),
     );
-    const pmsView = getClientPmsViewBundle('organisation', organisation.id);
+    const pmsViewRes = snap.finance.canViewMatter
+      ? getClientPmsViewBundle('organisation', organisation.id, userId)
+      : null;
+    const pmsView =
+      pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined;
 
     return (
       <OrganisationProfileClient
@@ -67,7 +72,7 @@ export default async function OrganisationProfilePage({
         currentUserId={snap.currentUserId}
         currentUserRole={snap.currentUserRole}
         canTakeByTaskId={snap.canTakeByTaskId}
-        canViewFinance={snap.canViewFinance}
+        canViewFinance={snap.finance.canViewMatter}
         pmsView={pmsView}
         values={snap.values}
         customFields={snap.customFields}

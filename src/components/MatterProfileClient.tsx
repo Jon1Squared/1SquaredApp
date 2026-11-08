@@ -209,7 +209,7 @@ export function MatterProfileClient({
   userKeyDatePermissions = [],
   canVerifyByKeyDateId,
   canTakeByTaskId,
-  canViewFinance = true,
+  canViewFinance = false,
   canLiftRestriction = false,
   pmsView,
   notes,
@@ -223,7 +223,7 @@ export function MatterProfileClient({
       'parties',
       'documents',
       'tasks',
-      'finance',
+      ...(canViewFinance ? (['finance'] as const) : []),
       'compliance',
       'activity',
       'record',
@@ -460,8 +460,21 @@ export function MatterProfileClient({
   }
 
   // Financials data
-  const pmsFin = pmsView?.matterBundle?.summary ?? null;
+  const pmsFin = canViewFinance ? (pmsView?.matterBundle?.summary ?? null) : null;
   const financials = useMemo(() => {
+    if (!canViewFinance) {
+      return {
+        budget: 0,
+        billedPaid: 0,
+        billedUnpaid: 0,
+        overdueSub: '',
+        unbilledWip: 0,
+        remainingBudget: 0,
+        budgetUsedPct: 0,
+        matterProgressPct: 0,
+        footerText: '',
+      };
+    }
     if (isBrightwaterTribunal) {
       return {
         budget: 25000,
@@ -533,6 +546,7 @@ export function MatterProfileClient({
       footerText: `${billingBasisLabel || 'Hourly, capped estimate'} · Billed monthly · Billing party: client · Client account £${clientAcct.toLocaleString('en-GB')}`,
     };
   }, [
+    canViewFinance,
     isBrightwaterTribunal,
     isSeededDemoMatter,
     pmsFin,
@@ -900,7 +914,7 @@ export function MatterProfileClient({
     }[] = [];
     const seen = new Set<string>();
 
-    const hasHours = Boolean(pmsFin) || isSeededDemoMatter;
+    const hasHours = canViewFinance && (Boolean(pmsFin) || isSeededDemoMatter);
 
     if (matter.responsiblePartnerId) {
       const nm = nameMap.get(matter.responsiblePartnerId) ?? matter.responsiblePartnerId;
@@ -986,7 +1000,7 @@ export function MatterProfileClient({
     }
 
     return list;
-  }, [isBrightwaterTribunal, isSeededDemoMatter, pmsFin, matter, nameMap, people]);
+  }, [canViewFinance, isBrightwaterTribunal, isSeededDemoMatter, pmsFin, matter, nameMap, people]);
 
   function formatFieldValue(field: MatterModelField, val: unknown): React.ReactNode {
     if (val === undefined || val === null || val === '') {
@@ -1307,15 +1321,17 @@ export function MatterProfileClient({
         >
           Tasks &amp; dates
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'finance'}
-          className={`tab-btn ${tab === 'finance' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('finance')}
-        >
-          Time &amp; billing
-        </button>
+        {canViewFinance ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'finance'}
+            className={`tab-btn ${tab === 'finance' ? 'tab-btn--active' : ''}`}
+            onClick={() => setTab('finance')}
+          >
+            Time &amp; billing
+          </button>
+        ) : null}
         <button
           type="button"
           role="tab"
@@ -1438,282 +1454,284 @@ export function MatterProfileClient({
             </section>
 
             {/* FINANCIALS PANEL */}
-            <section className="home-panel">
-              <div className="panel-header">
-                <div className="panel-title-group">
-                  <h2 className="panel-title">Financials</h2>
-                  {!pmsFin && !isSeededDemoMatter ? (
-                    <StatusPill label="Not linked to PMS" tone="neutral" />
-                  ) : null}
+            {canViewFinance ? (
+              <section className="home-panel">
+                <div className="panel-header">
+                  <div className="panel-title-group">
+                    <h2 className="panel-title">Financials</h2>
+                    {!pmsFin && !isSeededDemoMatter ? (
+                      <StatusPill label="Not linked to PMS" tone="neutral" />
+                    ) : null}
+                  </div>
+                  <div className="panel-actions">
+                    <button
+                      type="button"
+                      className="panel-link"
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        padding: 0,
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => setTab('finance')}
+                    >
+                      Time &amp; billing →
+                    </button>
+                  </div>
                 </div>
-                <div className="panel-actions">
-                  <button
-                    type="button"
-                    className="panel-link"
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      padding: 0,
-                      cursor: 'pointer',
-                    }}
-                    onClick={() => setTab('finance')}
-                  >
-                    Time &amp; billing →
-                  </button>
-                </div>
-              </div>
 
-              <div className="panel-body padded">
-                <div className="matter-fin-grid">
-                  {/* Donut Chart */}
-                  <div
-                    style={{
-                      position: 'relative',
-                      width: 124,
-                      height: 124,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      margin: '0 auto',
-                    }}
-                  >
-                    <svg width="124" height="124" viewBox="0 0 118 118">
-                      <circle
-                        cx="59"
-                        cy="59"
-                        r="44"
-                        fill="none"
-                        stroke="var(--tw-track)"
-                        strokeWidth="15"
-                      />
-                      <g transform="rotate(-90 59 59)">
-                        {donutSegments.map((seg, i) => (
-                          <circle
-                            key={i}
-                            cx="59"
-                            cy="59"
-                            r="44"
-                            fill="none"
-                            stroke={seg.color}
-                            strokeWidth="15"
-                            strokeDasharray={seg.dasharray}
-                            strokeDashoffset={seg.dashoffset}
-                          />
-                        ))}
-                      </g>
-                    </svg>
+                <div className="panel-body padded">
+                  <div className="matter-fin-grid">
+                    {/* Donut Chart */}
                     <div
                       style={{
-                        position: 'absolute',
-                        inset: 0,
+                        position: 'relative',
+                        width: 124,
+                        height: 124,
                         display: 'flex',
-                        flexDirection: 'column',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        textAlign: 'center',
-                        pointerEvents: 'none',
+                        margin: '0 auto',
                       }}
                     >
-                      <span
-                        style={{
-                          fontFamily: 'var(--font-heading)',
-                          fontSize: 22,
-                          fontWeight: 800,
-                          color: 'var(--text-primary)',
-                          lineHeight: 1.05,
-                        }}
-                      >
-                        {financials.budgetUsedPct}%
-                      </span>
-                      <span
-                        style={{
-                          fontSize: 12,
-                          color: 'var(--text-muted)',
-                          marginTop: 2,
-                        }}
-                      >
-                        of £{financials.budget.toLocaleString('en-GB')}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Legend Breakdown */}
-                  <div>
-                    <div className="matter-fin-legend-row">
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                        <span
-                          className="matter-fin-dot"
-                          style={{ background: 'var(--color-primary)' }}
+                      <svg width="124" height="124" viewBox="0 0 118 118">
+                        <circle
+                          cx="59"
+                          cy="59"
+                          r="44"
+                          fill="none"
+                          stroke="var(--tw-track)"
+                          strokeWidth="15"
                         />
-                        <span style={{ color: 'var(--text-secondary)' }}>Billed &amp; paid</span>
-                      </div>
-                      <strong
-                        style={{
-                          fontFamily: 'var(--font-heading)',
-                          color: 'var(--text-primary)',
-                        }}
-                      >
-                        £{financials.billedPaid.toLocaleString('en-GB')}
-                      </strong>
-                    </div>
-
-                    <div className="matter-fin-legend-row">
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                        <span className="matter-fin-dot" style={{ background: '#9e6730' }} />
-                        <div>
-                          <div style={{ color: 'var(--text-secondary)' }}>Billed, unpaid</div>
-                          {financials.overdueSub ? (
-                            <div
-                              style={{
-                                fontSize: 12.5,
-                                fontWeight: 700,
-                                color: 'var(--pill-warning-fg)',
-                                marginTop: 2,
-                              }}
-                            >
-                              {financials.overdueSub}
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                      <strong
-                        style={{
-                          fontFamily: 'var(--font-heading)',
-                          color: 'var(--text-primary)',
-                        }}
-                      >
-                        £{financials.billedUnpaid.toLocaleString('en-GB')}
-                      </strong>
-                    </div>
-
-                    <div className="matter-fin-legend-row">
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                        <span className="matter-fin-dot" style={{ background: '#84b59f' }} />
-                        <span style={{ color: 'var(--text-secondary)' }}>Unbilled WIP</span>
-                      </div>
-                      <strong
-                        style={{
-                          fontFamily: 'var(--font-heading)',
-                          color: 'var(--text-primary)',
-                        }}
-                      >
-                        £{financials.unbilledWip.toLocaleString('en-GB')}
-                      </strong>
-                    </div>
-
-                    <div className="matter-fin-legend-row">
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                        <span
-                          className="matter-fin-dot"
-                          style={{ background: 'var(--tw-track)' }}
-                        />
-                        <span style={{ color: 'var(--text-secondary)' }}>Remaining budget</span>
-                      </div>
-                      <strong
-                        style={{
-                          fontFamily: 'var(--font-heading)',
-                          color: 'var(--text-primary)',
-                        }}
-                      >
-                        £{financials.remainingBudget.toLocaleString('en-GB')}
-                      </strong>
-                    </div>
-                  </div>
-
-                  {/* Spend vs progress */}
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: 'var(--text-muted)',
-                        marginBottom: 8,
-                        fontWeight: 600,
-                      }}
-                    >
-                      Spend vs progress
-                    </div>
-
-                    <div style={{ marginBottom: 14 }}>
+                        <g transform="rotate(-90 59 59)">
+                          {donutSegments.map((seg, i) => (
+                            <circle
+                              key={i}
+                              cx="59"
+                              cy="59"
+                              r="44"
+                              fill="none"
+                              stroke={seg.color}
+                              strokeWidth="15"
+                              strokeDasharray={seg.dasharray}
+                              strokeDashoffset={seg.dashoffset}
+                            />
+                          ))}
+                        </g>
+                      </svg>
                       <div
                         style={{
+                          position: 'absolute',
+                          inset: 0,
                           display: 'flex',
-                          justifyContent: 'space-between',
-                          fontSize: 14,
-                          color: 'var(--text-secondary)',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          textAlign: 'center',
+                          pointerEvents: 'none',
                         }}
                       >
-                        <span>Budget used</span>
-                        <strong
+                        <span
                           style={{
                             fontFamily: 'var(--font-heading)',
+                            fontSize: 22,
+                            fontWeight: 800,
                             color: 'var(--text-primary)',
+                            lineHeight: 1.05,
                           }}
                         >
                           {financials.budgetUsedPct}%
-                        </strong>
-                      </div>
-                      <div className="tw-bar-track" style={{ margin: '6px 0 0' }}>
-                        <div
-                          className="tw-bar-fill"
+                        </span>
+                        <span
                           style={{
-                            width: `${financials.budgetUsedPct}%`,
-                            background: '#9e6730',
+                            fontSize: 12,
+                            color: 'var(--text-muted)',
+                            marginTop: 2,
                           }}
-                        />
+                        >
+                          of £{financials.budget.toLocaleString('en-GB')}
+                        </span>
                       </div>
                     </div>
 
+                    {/* Legend Breakdown */}
                     <div>
-                      <div
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          fontSize: 14,
-                          color: 'var(--text-secondary)',
-                        }}
-                      >
-                        <span>Matter progress</span>
+                      <div className="matter-fin-legend-row">
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                          <span
+                            className="matter-fin-dot"
+                            style={{ background: 'var(--color-primary)' }}
+                          />
+                          <span style={{ color: 'var(--text-secondary)' }}>Billed &amp; paid</span>
+                        </div>
                         <strong
                           style={{
                             fontFamily: 'var(--font-heading)',
                             color: 'var(--text-primary)',
                           }}
                         >
-                          {financials.matterProgressPct}%
+                          £{financials.billedPaid.toLocaleString('en-GB')}
                         </strong>
                       </div>
-                      <div className="tw-bar-track" style={{ margin: '6px 0 0' }}>
-                        <div
-                          className="tw-bar-fill"
+
+                      <div className="matter-fin-legend-row">
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                          <span className="matter-fin-dot" style={{ background: '#9e6730' }} />
+                          <div>
+                            <div style={{ color: 'var(--text-secondary)' }}>Billed, unpaid</div>
+                            {financials.overdueSub ? (
+                              <div
+                                style={{
+                                  fontSize: 12.5,
+                                  fontWeight: 700,
+                                  color: 'var(--pill-warning-fg)',
+                                  marginTop: 2,
+                                }}
+                              >
+                                {financials.overdueSub}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                        <strong
                           style={{
-                            width: `${financials.matterProgressPct}%`,
-                            background: 'var(--color-primary)',
+                            fontFamily: 'var(--font-heading)',
+                            color: 'var(--text-primary)',
                           }}
-                        />
+                        >
+                          £{financials.billedUnpaid.toLocaleString('en-GB')}
+                        </strong>
+                      </div>
+
+                      <div className="matter-fin-legend-row">
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                          <span className="matter-fin-dot" style={{ background: '#84b59f' }} />
+                          <span style={{ color: 'var(--text-secondary)' }}>Unbilled WIP</span>
+                        </div>
+                        <strong
+                          style={{
+                            fontFamily: 'var(--font-heading)',
+                            color: 'var(--text-primary)',
+                          }}
+                        >
+                          £{financials.unbilledWip.toLocaleString('en-GB')}
+                        </strong>
+                      </div>
+
+                      <div className="matter-fin-legend-row">
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                          <span
+                            className="matter-fin-dot"
+                            style={{ background: 'var(--tw-track)' }}
+                          />
+                          <span style={{ color: 'var(--text-secondary)' }}>Remaining budget</span>
+                        </div>
+                        <strong
+                          style={{
+                            fontFamily: 'var(--font-heading)',
+                            color: 'var(--text-primary)',
+                          }}
+                        >
+                          £{financials.remainingBudget.toLocaleString('en-GB')}
+                        </strong>
                       </div>
                     </div>
 
-                    {financials.budgetUsedPct > financials.matterProgressPct + 10 ? (
+                    {/* Spend vs progress */}
+                    <div>
                       <div
                         style={{
                           fontSize: 13,
+                          color: 'var(--text-muted)',
+                          marginBottom: 8,
                           fontWeight: 600,
-                          color: 'var(--pill-warning-fg)',
-                          marginTop: 10,
-                          lineHeight: 1.35,
                         }}
                       >
-                        Spend is running ahead of progress — consider revising the estimate
+                        Spend vs progress
                       </div>
-                    ) : null}
+
+                      <div style={{ marginBottom: 14 }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            fontSize: 14,
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          <span>Budget used</span>
+                          <strong
+                            style={{
+                              fontFamily: 'var(--font-heading)',
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            {financials.budgetUsedPct}%
+                          </strong>
+                        </div>
+                        <div className="tw-bar-track" style={{ margin: '6px 0 0' }}>
+                          <div
+                            className="tw-bar-fill"
+                            style={{
+                              width: `${financials.budgetUsedPct}%`,
+                              background: '#9e6730',
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            fontSize: 14,
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          <span>Matter progress</span>
+                          <strong
+                            style={{
+                              fontFamily: 'var(--font-heading)',
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            {financials.matterProgressPct}%
+                          </strong>
+                        </div>
+                        <div className="tw-bar-track" style={{ margin: '6px 0 0' }}>
+                          <div
+                            className="tw-bar-fill"
+                            style={{
+                              width: `${financials.matterProgressPct}%`,
+                              background: 'var(--color-primary)',
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {financials.budgetUsedPct > financials.matterProgressPct + 10 ? (
+                        <div
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: 'var(--pill-warning-fg)',
+                            marginTop: 10,
+                            lineHeight: 1.35,
+                          }}
+                        >
+                          Spend is running ahead of progress — consider revising the estimate
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="panel-footer">
-                <span>{financials.footerText}</span>
-              </div>
-            </section>
+                <div className="panel-footer">
+                  <span>{financials.footerText}</span>
+                </div>
+              </section>
+            ) : null}
 
             {/* TASKS PANEL (Exact Home page Task Card A structure & classes) */}
             <section className="home-panel task-card">
@@ -2449,9 +2467,9 @@ export function MatterProfileClient({
       ) : null}
 
       {/* ===================== TAB: TIME & BILLING ===================== */}
-      {tab === 'finance' ? (
+      {tab === 'finance' && canViewFinance ? (
         <div>
-          {canViewFinance && pmsView ? (
+          {pmsView ? (
             <MatterFinanceTab
               matterId={matter.id}
               matterNumber={matter.matterNumber}

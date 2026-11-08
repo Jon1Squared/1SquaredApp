@@ -117,7 +117,7 @@ export function PersonProfileClient({
   currentUserId = 'P-0001',
   currentUserRole = 'admin',
   canTakeByTaskId,
-  canViewFinance = true,
+  canViewFinance = false,
   pmsView,
   values,
   customFields,
@@ -541,21 +541,24 @@ export function PersonProfileClient({
       : '';
     const languageLabel = resolveLabel(values, person.preferredLanguageId) || 'English';
 
-    const pmsSummary = pmsView?.clientBundle?.summary;
-    const unbilledWipGbp =
-      person.id === 'P-000018'
+    const pmsSummary = canViewFinance ? pmsView?.clientBundle?.summary : undefined;
+    const unbilledWipGbp = !canViewFinance
+      ? 0
+      : person.id === 'P-000018'
         ? 18240
         : pmsSummary
           ? pmsSummary.unbilled_wip
           : displayClientMatters.length * 4250;
-    const outstandingGbp =
-      person.id === 'P-000018'
+    const outstandingGbp = !canViewFinance
+      ? 0
+      : person.id === 'P-000018'
         ? 6480
         : pmsSummary
           ? pmsSummary.outstanding_debt
           : 0;
-    const overdueCount =
-      person.id === 'P-000018'
+    const overdueCount = !canViewFinance
+      ? 0
+      : person.id === 'P-000018'
         ? 1
         : pmsSummary &&
             pmsSummary.aged_1_30 +
@@ -826,7 +829,7 @@ export function PersonProfileClient({
         </section>
 
         {/* 2. OVERDUE INVOICE ALERT BANNER */}
-        {overdueCount > 0 ? (
+        {canViewFinance && overdueCount > 0 ? (
           <div className="client-invoice-banner" role="region" aria-label="Overdue invoice alert">
             <div>
               <strong>Invoice INV-0412 is 14 days overdue</strong> ·{' '}
@@ -859,29 +862,33 @@ export function PersonProfileClient({
             </div>
           </div>
 
-          <div className="client-kpi-card">
-            <div className="client-kpi-label">UNBILLED WIP</div>
-            <div className="client-kpi-value">{formatGbp(unbilledWipGbp)}</div>
-            <div className="client-kpi-sub">
-              {displayClientMatters.length === 2
-                ? 'Across both matters'
-                : displayClientMatters.length === 1
-                  ? 'Across 1 matter'
-                  : `Across ${displayClientMatters.length} matters`}
-            </div>
-          </div>
+          {canViewFinance ? (
+            <>
+              <div className="client-kpi-card">
+                <div className="client-kpi-label">UNBILLED WIP</div>
+                <div className="client-kpi-value">{formatGbp(unbilledWipGbp)}</div>
+                <div className="client-kpi-sub">
+                  {displayClientMatters.length === 2
+                    ? 'Across both matters'
+                    : displayClientMatters.length === 1
+                      ? 'Across 1 matter'
+                      : `Across ${displayClientMatters.length} matters`}
+                </div>
+              </div>
 
-          <div className="client-kpi-card">
-            <div className="client-kpi-label">OUTSTANDING</div>
-            <div className="client-kpi-value">{formatGbp(outstandingGbp)}</div>
-            <div
-              className={`client-kpi-sub ${overdueCount > 0 ? 'client-kpi-sub--warn' : ''}`}
-            >
-              {overdueCount > 0
-                ? `${overdueCount} invoice overdue`
-                : 'No overdue invoices'}
-            </div>
-          </div>
+              <div className="client-kpi-card">
+                <div className="client-kpi-label">OUTSTANDING</div>
+                <div className="client-kpi-value">{formatGbp(outstandingGbp)}</div>
+                <div
+                  className={`client-kpi-sub ${overdueCount > 0 ? 'client-kpi-sub--warn' : ''}`}
+                >
+                  {overdueCount > 0
+                    ? `${overdueCount} invoice overdue`
+                    : 'No overdue invoices'}
+                </div>
+              </div>
+            </>
+          ) : null}
 
           <div className="client-kpi-card">
             <div className="client-kpi-label">LAST INTERACTION</div>

@@ -92,7 +92,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(pugLedger[pugLedger.length - 1]?.running_balance).toBe(33510.6);
   });
 
-  it('reproduces every row of check_aged_debt (invoices and client buckets) via v_invoice_balances and v_client_financials', () => {
+  it('reproduces every row of check_aged_debt (invoices and client buckets) via v_invoice_balances and domain rollups', async () => {
     const wb = openXlsxWorkbook(resolveWorkbookPath());
     const checkMatrix = wb.getSheetMatrix('check_aged_debt');
     const source = new DemoDbPmsSource();
@@ -128,7 +128,17 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(finalBill.credit_notes).toBe(-540);
 
     // Rows 59..68 in check_aged_debt are the 10 clients
-    const clients = source.getAllClientFinancials();
+    const { buildFirmFinanceRollups } = await import('@/domain/pms');
+    const rollups = buildFirmFinanceRollups({
+      asAtDate: source.getExtractInfo().asAtDate,
+      matterFinancials: source.getAllMatterFinancials(),
+      invoices: source.getAgedDebt(),
+      timeEntries: source.listAllTimeEntries(),
+      payments: source.listAllPayments(),
+      clients: source.listClients(),
+      feeEarners: source.listFeeEarners(),
+    });
+    const clients = rollups.allClientFins;
     const clientByCode = new Map(clients.map((c) => [c.client_code, c]));
     const clientCheckRows = checkMatrix.filter((r) => r.rowNumber >= 59 && r.rowNumber <= 68);
     expect(clientCheckRows.length).toBe(10);
@@ -153,11 +163,21 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(bay.aged_1_30).toBe(1080.0);
   });
 
-  it('reproduces every row of check_fee_earners via v_fee_earner_performance', () => {
+  it('reproduces every row of check_fee_earners via domain rollups', async () => {
+    const { buildFirmFinanceRollups } = await import('@/domain/pms');
     const wb = openXlsxWorkbook(resolveWorkbookPath());
     const checkMatrix = wb.getSheetMatrix('check_fee_earners');
     const source = new DemoDbPmsSource();
-    const perf = source.getFeeEarnerPerformance();
+    const rollups = buildFirmFinanceRollups({
+      asAtDate: source.getExtractInfo().asAtDate,
+      matterFinancials: source.getAllMatterFinancials(),
+      invoices: source.getAgedDebt(),
+      timeEntries: source.listAllTimeEntries(),
+      payments: source.listAllPayments(),
+      clients: source.listClients(),
+      feeEarners: source.listFeeEarners(),
+    });
+    const perf = rollups.allFeeEarnerPerformance;
     const perfById = new Map(perf.map((p) => [p.fee_earner_id, p]));
 
     const feRows = checkMatrix.filter((r) => r.rowNumber >= 5 && r.rowNumber <= 12);
@@ -228,8 +248,11 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   });
 
   it('computes Severn Holdings plc corporate group rollup across parent and two subsidiaries', async () => {
+    const { isActionDenied } = await import('@/domain/actionResult');
     const { getClientPmsViewBundle } = await import('@/server/services');
-    const view = getClientPmsViewBundle('organisation', 'O-000005');
+    const view = getClientPmsViewBundle('organisation', 'O-000005', 'P-000001');
+    expect(isActionDenied(view)).toBe(false);
+    if (isActionDenied(view)) return;
     expect(view.link?.pmsCode).toBe('SEV001');
     expect(view.groupView).not.toBeNull();
     const gv = view.groupView!;
@@ -247,11 +270,18 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(gv.totals.outstanding_debt).toBe(sumDebt);
   });
 
-  it('surfaces PMS financial alerts on the home page attention list and hides them for call_handler', async () => {
+  it('surfaces PMS financial alerts on the home page attention list and hides them without finance capability', async () => {
     const { attentionList } = await import('@/domain/attention');
+    const { isActionDenied } = await import('@/domain/actionResult');
+    const { canUserViewFinance } = await import('@/domain/pms');
+    const { getMatterFinanceRows } = await import('@/server/financeServices');
     const { getAppSnapshot } = await import('@/server/services');
 
     const snap = getAppSnapshot('P-000001');
+    const matterRows = getMatterFinanceRows('P-000001');
+    expect(isActionDenied(matterRows)).toBe(false);
+    if (isActionDenied(matterRows)) return;
+
     const allRecords = [...snap.people, ...snap.organisations];
     const today = new Date('2026-10-16T10:00:00Z');
 
@@ -260,7 +290,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       enquiries: snap.enquiries,
       teams: snap.teams,
       matters: snap.matters,
-      pmsSummaryByMatterId: snap.pmsSummaryByMatterId,
+      pmsSummaryByMatterId: matterRows.pmsSummaryByMatterId,
       canViewFinance: true,
     });
 
@@ -271,27 +301,34 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(pmsKinds.has('pms_old_wip_30')).toBe(true);
     expect(pmsKinds.has('pms_pending_estimate_revision')).toBe(true);
 
-    // Call handler role (canViewFinance = false) must not see any PMS financial alerts
+    // Call handler role (canViewFinance = false, or omitted default) must not see any PMS financial alerts
     const callHandlerItems = attentionList(allRecords, snap.values, today, {
       tasks: snap.tasks,
       enquiries: snap.enquiries,
       teams: snap.teams,
       matters: snap.matters,
-      pmsSummaryByMatterId: snap.pmsSummaryByMatterId,
-      canViewFinance: false,
+      pmsSummaryByMatterId: matterRows.pmsSummaryByMatterId,
     });
     expect(callHandlerItems.some((i) => i.kind.startsWith('pms_'))).toBe(false);
+    expect(canUserViewFinance(null, snap.teams, snap.values)).toBe(false);
+    expect(canUserViewFinance(undefined, snap.teams, snap.values)).toBe(false);
   });
 
   it('builds two-way outbound PMS commands and reconciles inbound commercials respecting System-of-Record ownership', async () => {
+    const { isActionDenied } = await import('@/domain/actionResult');
     const {
       buildPmsOutboundMatterCommand,
       reconcilePmsInboundMatterCommercials,
     } = await import('@/domain/pms');
+    const { getMatterFinanceRows } = await import('@/server/financeServices');
     const { getAppSnapshot } = await import('@/server/services');
     const { getActiveTenantConfiguration } = await import('@/platform/tenantRuntime');
 
     const snap = getAppSnapshot('P-000001');
+    const matterRows = getMatterFinanceRows('P-000001');
+    expect(isActionDenied(matterRows)).toBe(false);
+    if (isActionDenied(matterRows)) return;
+
     const tenantConfig = getActiveTenantConfiguration();
     const mappings = tenantConfig.integrations.pmsSync?.fieldMappings ?? [];
     expect(mappings.length).toBeGreaterThan(0);
@@ -308,7 +345,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
         agreedFeeCapGbp: 20000,
         fieldValues: { ...matter.fieldValues, 'CORE-050': 'PO-9988' },
       },
-      pmsLinks: snap.pmsLinks,
+      pmsLinks: matterRows.pmsLinks,
       fieldMappings: mappings,
       values: snap.values,
       createdById: 'P-000001',

@@ -1,0 +1,450 @@
+import 'server-only';
+
+/**
+ * Gated server-side finance loaders (`src/server/financeServices.ts`, ADR 0029 / Slice S0-10).
+ *
+ * Every function resolves the actor's permissions against the active tenant and
+ * filters PMS rows by `canPersonAccessMatter` (`buildRecordVisibility`) before
+ * computing any summary or roll-up.
+ */
+
+import type { PermissionKey } from '@platform/core';
+import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
+import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
+import {
+  buildFeeEarnerWeeklyTime,
+  buildFirmFinanceRollups,
+  findPmsCodeForRecord,
+} from '@/domain/pms';
+import { getActiveActorSession } from '@/domain/rbac';
+import type { Person, PmsLink } from '@/domain/types';
+import {
+  getActiveTenantConfiguration,
+  resolveCurrentTenantContext,
+} from '@/platform/tenantRuntime';
+import { getPmsSource } from '@/pms/pmsSource';
+import type {
+  PmsCashReceivedSummary,
+  PmsClientAccountEntry,
+  PmsClientFinancials,
+  PmsDepartmentFinancials,
+  PmsDisbursement,
+  PmsExtractInfo,
+  PmsFeeEarnerPerformance,
+  PmsFeeEarnerWeeklyTime,
+  PmsInvoiceBalance,
+  PmsInvoiceDetail,
+  PmsMatterFinancials,
+  PmsMonthlyFeesBilled,
+} from '@/pms/types';
+import {
+  createVerifiedSessionActorFromEntraSession,
+  type VerifiedEntraSessionPayload,
+} from './entraAuth';
+import { canPersonAccessMatter, resolvePersonPermissionSet } from './rbacRuntime';
+import { getStore, type FirmStore } from './store';
+import { buildRecordVisibility } from './visibility';
+
+export type FinanceActorInput =
+  | string
+  | { readonly personId: string }
+  | { readonly id: string }
+  | null
+  | undefined;
+
+export interface MatterFinanceRowsResult {
+  pmsExtractInfo: PmsExtractInfo;
+  pmsLinks: PmsLink[];
+  pmsSummaryByMatterId: Record<string, PmsMatterFinancials>;
+  allMatterFins: PmsMatterFinancials[];
+  pmsAgedDebt: PmsInvoiceBalance[];
+  pmsInvoices: PmsInvoiceDetail[];
+  pmsAllDisbursements: PmsDisbursement[];
+  pmsClientAccountByMatterCode: Record<string, PmsClientAccountEntry[]>;
+}
+
+export interface MyFinanceFiguresResult {
+  myFeeEarnerFigures: PmsFeeEarnerPerformance | null;
+  myWeeklyTime: PmsFeeEarnerWeeklyTime | null;
+}
+
+export interface FirmFinanceResult {
+  allFeeEarnerPerformance: PmsFeeEarnerPerformance[];
+  pmsMonthlyFeesBilled: { months: PmsMonthlyFeesBilled[]; yearToDateTotal: number };
+  pmsCashReceived: PmsCashReceivedSummary;
+  pmsDepartmentFinancials: {
+    departments: PmsDepartmentFinancials[];
+    firmTotal: PmsDepartmentFinancials;
+  };
+  allClientFins: PmsClientFinancials[];
+  pmsSummaryByClientId: Record<string, PmsClientFinancials>;
+}
+
+function extractActorId(actor: FinanceActorInput): string | null {
+  if (typeof actor === 'string') {
+    return actor.trim() || null;
+  }
+  if (actor && typeof actor === 'object') {
+    if ('personId' in actor && typeof actor.personId === 'string') {
+      return actor.personId.trim() || null;
+    }
+    if ('id' in actor && typeof actor.id === 'string') {
+      return actor.id.trim() || null;
+    }
+  }
+  const sessionPersonId = getActiveActorSession()?.personId;
+  return sessionPersonId ? sessionPersonId.trim() : null;
+}
+
+export function verifyFinanceActorAndPermission(
+  actorInput: FinanceActorInput,
+  requiredPermission: PermissionKey,
+):
+  | {
+      ok: true;
+      store: FirmStore;
+      actor: Person;
+      effectiveWorkPerson: Person;
+      hiddenMatterIds: ReadonlySet<string>;
+      hiddenPmsMatterCodes: Set<string>;
+      visiblePmsLinks: PmsLink[];
+    }
+  | ActionDenied {
+  const tenantCfg = getActiveTenantConfiguration();
+  const activeSession = getActiveActorSession();
+  const activeVerifiedSession = activeSession?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  if (activeVerifiedSession) {
+    resolveCurrentTenantContext(
+      createVerifiedSessionActorFromEntraSession(activeVerifiedSession),
+      tenantCfg,
+    );
+  } else if (
+    activeSession?.tenantId &&
+    activeSession.tenantId.trim() !== tenantCfg.tenantId
+  ) {
+    throw new Error(
+      `TENANCY_FORGERY_DETECTED: Session tenant "${activeSession.tenantId}" does not match active tenant "${tenantCfg.tenantId}".`,
+    );
+  }
+
+  const actorId = extractActorId(actorInput);
+  if (!actorId) {
+    return buildActionDenied(
+      'UNAUTHENTICATED',
+      'Authentication is required to view finance data.',
+    );
+  }
+
+  const store = getStore();
+  const actor = store.people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
+  if (!actor) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Authenticated user record was not found or access is denied.',
+    );
+  }
+
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: store.people,
+    teams: store.teams,
+    tokenRoles:
+      activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined,
+  });
+  if (!permSet.permissions.has(requiredPermission)) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      `You do not have permission (${requiredPermission}) to view this finance data.`,
+    );
+  }
+
+  const visibility = buildRecordVisibility(store, actor, {
+    tokenRoles:
+      activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined,
+  });
+  const hiddenMatterIds = visibility.hiddenMatterIds;
+  const hiddenPmsMatterCodes = new Set(
+    store.pmsLinks
+      .filter((l) => l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId))
+      .map((l) => l.pmsCode),
+  );
+  const visiblePmsLinks = store.pmsLinks.filter(
+    (l) => !(l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId)),
+  );
+  const effectiveWorkPerson: Person =
+    actor.demo && actor.showsWorkOfId
+      ? (store.people.find((p) => p.id === actor.showsWorkOfId) ?? actor)
+      : actor;
+
+  return {
+    ok: true,
+    store,
+    actor,
+    effectiveWorkPerson,
+    hiddenMatterIds,
+    hiddenPmsMatterCodes,
+    visiblePmsLinks,
+  };
+}
+
+/**
+ * Loads per-matter PMS summaries, aged debt, invoices, disbursements, and client
+ * account entries for matters the actor can access.
+ *
+ * Requires `finance:view_matter` and checks `canPersonAccessMatter` for every row.
+ */
+export function getMatterFinanceRows(
+  actorInput: FinanceActorInput,
+  matterIds?: readonly string[],
+): MatterFinanceRowsResult | ActionDenied {
+  const auth = verifyFinanceActorAndPermission(actorInput, 'finance:view_matter');
+  if (!auth.ok) return auth;
+
+  const { store, actor, hiddenPmsMatterCodes, visiblePmsLinks } = auth;
+
+  let allowedPmsCodesFilter: Set<string> | null = null;
+  let allowedMatterIdsFilter: Set<string> | null = null;
+
+  if (matterIds !== undefined) {
+    allowedMatterIdsFilter = new Set<string>();
+    allowedPmsCodesFilter = new Set<string>();
+    for (const matterId of matterIds) {
+      const matter = store.matters.find((m) => m.id === matterId && !m.mergedIntoId);
+      if (
+        !matter ||
+        !canPersonAccessMatter(matter, actor.id, actor, {
+          allPeople: store.people,
+          teams: store.teams,
+        })
+      ) {
+        return buildActionDenied(
+          'FORBIDDEN',
+          'Matter not found or access denied.',
+        );
+      }
+      allowedMatterIdsFilter.add(matter.id);
+      const code = findPmsCodeForRecord(visiblePmsLinks, 'matter', matter.id);
+      if (code) {
+        allowedPmsCodesFilter.add(code);
+      }
+    }
+  }
+
+  const now = new Date();
+  const pms = getPmsSource();
+  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+
+  const pmsExtractInfo: PmsExtractInfo = isCleanEmpty
+    ? {
+        asAtDate: now.toISOString().slice(0, 10),
+        sourceFile: 'No PMS linked (Clean Client Deployment)',
+        importedAt: now.toISOString(),
+      }
+    : pms.getExtractInfo();
+
+  const isCodeAllowed = (matterCode: string): boolean => {
+    if (hiddenPmsMatterCodes.has(matterCode)) return false;
+    if (allowedPmsCodesFilter && !allowedPmsCodesFilter.has(matterCode)) return false;
+    return true;
+  };
+
+  const rawMatterFins = isCleanEmpty ? [] : pms.getAllMatterFinancials();
+  const allMatterFins = rawMatterFins.filter((f) => isCodeAllowed(f.matter_code));
+  const finByMatterCode = new Map(allMatterFins.map((f) => [f.matter_code, f]));
+
+  const pmsSummaryByMatterId: Record<string, PmsMatterFinancials> = {};
+  for (const link of visiblePmsLinks) {
+    if (link.entityType !== 'matter') continue;
+    if (allowedMatterIdsFilter && !allowedMatterIdsFilter.has(link.onesquaredId)) {
+      continue;
+    }
+    const fin = finByMatterCode.get(link.pmsCode);
+    if (fin) {
+      pmsSummaryByMatterId[link.onesquaredId] = fin;
+    }
+  }
+
+  const pmsAgedDebt: PmsInvoiceBalance[] = isCleanEmpty
+    ? []
+    : pms.getAgedDebt().filter((inv) => isCodeAllowed(inv.matter_code));
+  const pmsInvoices: PmsInvoiceDetail[] = isCleanEmpty
+    ? []
+    : pms.getInvoices().filter((inv) => isCodeAllowed(inv.matter_code));
+
+  const pmsAllDisbursements: PmsDisbursement[] = [];
+  const pmsClientAccountByMatterCode: Record<string, PmsClientAccountEntry[]> = {};
+  if (!isCleanEmpty) {
+    for (const mf of allMatterFins) {
+      if (mf.unbilled_disbursements > 0) {
+        pmsAllDisbursements.push(...pms.getDisbursements(mf.matter_code));
+      }
+      const ledgerEntries = pms.getClientAccountLedger(mf.matter_code);
+      if (mf.client_account_balance > 0 || ledgerEntries.length > 0) {
+        pmsClientAccountByMatterCode[mf.matter_code] = ledgerEntries;
+      }
+    }
+  }
+
+  return {
+    pmsExtractInfo,
+    pmsLinks: visiblePmsLinks,
+    pmsSummaryByMatterId,
+    allMatterFins,
+    pmsAgedDebt,
+    pmsInvoices,
+    pmsAllDisbursements,
+    pmsClientAccountByMatterCode,
+  };
+}
+
+/**
+ * Loads the signed-in actor's own fee-earner hours and WIP (`myFeeEarnerFigures`,
+ * `myWeeklyTime`), counting only matters the actor can access.
+ *
+ * Requires `finance:view_matter`.
+ */
+export function getMyFinanceFigures(
+  actorInput: FinanceActorInput,
+): MyFinanceFiguresResult | ActionDenied {
+  const auth = verifyFinanceActorAndPermission(actorInput, 'finance:view_matter');
+  if (!auth.ok) return auth;
+
+  const { store, actor, effectiveWorkPerson, hiddenPmsMatterCodes, visiblePmsLinks } =
+    auth;
+  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+  if (isCleanEmpty) {
+    return { myFeeEarnerFigures: null, myWeeklyTime: null };
+  }
+
+  const myFeCode =
+    findPmsCodeForRecord(visiblePmsLinks, 'employee', effectiveWorkPerson.id) ??
+    findPmsCodeForRecord(visiblePmsLinks, 'employee', actor.id);
+  if (!myFeCode) {
+    return { myFeeEarnerFigures: null, myWeeklyTime: null };
+  }
+
+  const pms = getPmsSource();
+  const extractInfo = pms.getExtractInfo();
+  const feeEarners = pms.listFeeEarners();
+  const myFe = feeEarners.find((fe) => fe.fee_earner_id === myFeCode) ?? null;
+  if (!myFe) {
+    return { myFeeEarnerFigures: null, myWeeklyTime: null };
+  }
+
+  const timeEntries = pms.listAllTimeEntries();
+  const rollups = buildFirmFinanceRollups(
+    {
+      asAtDate: extractInfo.asAtDate,
+      feeEarners: [myFe],
+      clients: [],
+      matterFinancials: [],
+      invoices: [],
+      timeEntries,
+      payments: [],
+    },
+    hiddenPmsMatterCodes,
+  );
+  const myFeeEarnerFigures = rollups.allFeeEarnerPerformance[0] ?? null;
+
+  const activeTenantCfg = getActiveTenantConfiguration();
+  const rawHomePagesConfig =
+    store.homePagesConfig ??
+    createDefaultHomePagesConfig(
+      new Date().toISOString(),
+      activeTenantCfg.branding.primaryDomain,
+    );
+  const myWeeklyTime = buildFeeEarnerWeeklyTime({
+    feeEarner: myFe,
+    timeEntries,
+    hiddenMatterCodes: hiddenPmsMatterCodes,
+    customDailyPace: rawHomePagesConfig.firmSettings.workingDayPaceHours,
+  });
+
+  return {
+    myFeeEarnerFigures,
+    myWeeklyTime,
+  };
+}
+
+/**
+ * Loads firm-wide financial roll-ups (`allFeeEarnerPerformance`, `pmsMonthlyFeesBilled`,
+ * `pmsCashReceived`, `pmsDepartmentFinancials`, `allClientFins`, `pmsSummaryByClientId`),
+ * calculated strictly from matter-filtered rows via `buildFirmFinanceRollups`.
+ *
+ * Requires `finance:view`.
+ */
+export function getFirmFinance(
+  actorInput: FinanceActorInput,
+): FirmFinanceResult | ActionDenied {
+  const auth = verifyFinanceActorAndPermission(actorInput, 'finance:view');
+  if (!auth.ok) return auth;
+
+  const { store, hiddenPmsMatterCodes, visiblePmsLinks } = auth;
+  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+  if (isCleanEmpty) {
+    return {
+      allFeeEarnerPerformance: [],
+      pmsMonthlyFeesBilled: { months: [], yearToDateTotal: 0 },
+      pmsCashReceived: {
+        octoberTotal: 0,
+        octoberReceiptCount: 0,
+        septemberTotal: 0,
+        septemberReceiptCount: 0,
+      },
+      pmsDepartmentFinancials: {
+        departments: [],
+        firmTotal: {
+          practiceArea: 'Firm total',
+          openMatters: 0,
+          billedThisYear: 0,
+          unbilledWip: 0,
+          outstandingDebt: 0,
+          overdueDebt: 0,
+          octoberHours: 0,
+        },
+      },
+      allClientFins: [],
+      pmsSummaryByClientId: {},
+    };
+  }
+
+  const pms = getPmsSource();
+  const extractInfo = pms.getExtractInfo();
+  const currentYear = String(new Date().getFullYear());
+  const rollups = buildFirmFinanceRollups(
+    {
+      asAtDate: extractInfo.asAtDate,
+      year: currentYear,
+      feeEarners: pms.listFeeEarners(),
+      clients: pms.listClients(),
+      matterFinancials: pms.getAllMatterFinancials(),
+      invoices: pms.getInvoices(),
+      timeEntries: pms.listAllTimeEntries(),
+      payments: pms.listAllPayments(),
+    },
+    hiddenPmsMatterCodes,
+  );
+
+  const finByClientCode = new Map(
+    rollups.allClientFins.map((f) => [f.client_code, f]),
+  );
+  const pmsSummaryByClientId: Record<string, PmsClientFinancials> = {};
+  for (const link of visiblePmsLinks) {
+    if (link.entityType === 'organisation' || link.entityType === 'person') {
+      const fin = finByClientCode.get(link.pmsCode);
+      if (fin) {
+        pmsSummaryByClientId[link.onesquaredId] = fin;
+      }
+    }
+  }
+
+  return {
+    allFeeEarnerPerformance: rollups.allFeeEarnerPerformance,
+    pmsMonthlyFeesBilled: rollups.pmsMonthlyFeesBilled,
+    pmsCashReceived: rollups.pmsCashReceived,
+    pmsDepartmentFinancials: rollups.pmsDepartmentFinancials,
+    allClientFins: rollups.allClientFins,
+    pmsSummaryByClientId,
+  };
+}
