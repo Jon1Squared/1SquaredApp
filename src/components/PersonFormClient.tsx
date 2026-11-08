@@ -456,16 +456,16 @@ export function PersonFormClient({
     Boolean(existingEmp?.isTopOfHierarchy),
   );
   const [empLineManagerId, setEmpLineManagerId] = useState<string | null>(
-    existingEmp?.lineManagerId ?? (existingEmp?.isTopOfHierarchy ? null : 'P-000001'),
+    existingEmp?.lineManagerId ?? (existingEmp?.isTopOfHierarchy ? null : (currentUserId ?? null)),
   );
   const [empSupervisingPartnerId, setEmpSupervisingPartnerId] = useState<string | null>(
     existingEmp?.supervisingPartnerId ?? null,
   );
   const [empTimesheetApproverId, setEmpTimesheetApproverId] = useState<string | null>(
-    existingEmp?.timesheetApproverId ?? existingEmp?.lineManagerId ?? 'P-000001',
+    existingEmp?.timesheetApproverId ?? existingEmp?.lineManagerId ?? currentUserId ?? null,
   );
   const [empHolidayApproverId, setEmpHolidayApproverId] = useState<string | null>(
-    existingEmp?.holidayApproverId ?? existingEmp?.lineManagerId ?? 'P-000001',
+    existingEmp?.holidayApproverId ?? existingEmp?.lineManagerId ?? currentUserId ?? null,
   );
   const [empOnboardingBuddyId, setEmpOnboardingBuddyId] = useState<string | null>(
     existingEmp?.onboardingBuddyId ?? null,
@@ -707,7 +707,7 @@ export function PersonFormClient({
 
   // Reassignment target state when a person is marked as Leaver and owns records
   const [reassignTargetEmployeeId, setReassignTargetEmployeeId] = useState<string>(
-    employees.find((e) => e.id !== existing?.id)?.id ?? 'P-000001',
+    employees.find((e) => e.id !== existing?.id)?.id ?? currentUserId ?? '',
   );
 
   // Check if existing contact/client is a party on any open matter (for conflict check on hire)
