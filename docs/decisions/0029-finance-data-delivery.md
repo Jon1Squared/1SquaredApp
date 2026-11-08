@@ -1,24 +1,24 @@
 # ADR 0029: Finance Data Delivery
 
 - **Date:** 2026-11-06
-- **Status:** Proposed
+- **Status:** Accepted (8 November 2026)
 - **Roadmap:** Stage 0 decision D4, slice S0-10 (`docs/roadmap/stage-0-plan.md`); backlog gap P4, items 14 and 26
 - **Builds on:** [ADR 0004](./0004-document-permissions-and-finance-view.md), [ADR 0010](./0010-central-permission-registry-and-resolver.md), [ADR 0014](./0014-staff-matter-access-by-permission.md), [ADR 0025](./0025-permission-enforcement-pattern.md)
 
 ## Context
 
-At commit `a0a5534`, `getAppSnapshot` (`src/server/services.ts:608-613`, returning at about lines 1144-1160) sends firm-wide finance and Practice Management System (PMS) data to every signed-in user, whatever their permissions. That data includes:
+At commit `fb4b08d`, `getAppSnapshot` (`src/server/services.ts:626-636`, computing finance at lines 830-938 and returning at lines 1150-1166) sends firm-wide finance and Practice Management System (PMS) data to every signed-in user, whatever their permissions. That data includes:
 - matter and client financials
-- fee-earner performance
+- fee-earner performance and weekly time
 - aged debt and invoices
 - monthly fees billed
 - cash received
 - department financials
 - disbursements and client account balances
 
-Some matter-level lists are filtered for restricted matters. The firm-wide roll-ups are not: they are read straight from PMS views and sums (`src/pms/pmsSource.ts:524, 744, 777, 807`, and `v_client_financials`). So they include figures from staff matters and matters behind ethical walls.
+Some matter-level lists are filtered for restricted matters. The firm-wide and client-level roll-ups are not: they are read straight from PMS views and sums (`getClientFinancials` at `src/pms/pmsSource.ts:245` and `getAllClientFinancials` at `:257` from `v_client_financials`, `getFeeEarnerPerformance` at `:524` from `v_fee_earner_performance`, `getFeeEarnerWeeklyTime` at `:666` summing `time_entries`, `getMonthlyFeesBilled` at `:744`, `getCashReceivedSummary` at `:777`, and `getDepartmentFinancials` at `:807` with firm total at `:852-860`), as well as `getMatterPmsViewBundle` (`src/server/services.ts:8981`) and `getClientPmsViewBundle` (`:9040`, including `clientBundle.summary`, `groupView` company financials at `:9101` and summed totals at `:9111-9136`). So they include figures from staff matters and matters behind ethical walls.
 
-The attention list is called with `canViewFinance: true` hard-coded (`services.ts:958`). Several components also default `canViewFinance` to `true`.
+The attention list is called with `canViewFinance: true` hard-coded (`services.ts:957`). `canUserViewFinance` (`src/domain/pms.ts:74`), `attentionList` (`src/domain/attention.ts:110`), and several components (`MatterProfileClient.tsx:212`, `MattersListClient.tsx:75`, `OrganisationProfileClient.tsx:133`, `PersonProfileClient.tsx:120`) also default `canViewFinance` to `true`.
 
 ## Decision
 
