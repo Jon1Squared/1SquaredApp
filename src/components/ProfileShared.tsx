@@ -12,7 +12,6 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
-import { isActionDenied } from '@/domain/actionResult';
 import { optionsFor, resolveLabel, resolveLabels } from '@/domain/lists';
 import { isEmployeeOrLeaverRecord, planMerge } from '@/domain/merge';
 import { hrefForId, personDisplayName, recordDisplayName } from '@/domain/names';
@@ -98,6 +97,7 @@ export function PossibleDuplicateBanner({
     const res = await dismissDuplicateAction(record.recordType, record.id, null);
     setBusy(false);
     if (isActionDenied(res)) {
+      showToast(res.message);
       return;
     }
     showToast('Marked as not a duplicate');
@@ -107,6 +107,14 @@ export function PossibleDuplicateBanner({
   async function onConfirmMerge() {
     if (!selectedSurvivor) return;
     setBusy(true);
+    const res = await mergeRecordsAction(
+      record.recordType,
+      selectedSurvivor.id,
+      record.id,
+    );
+    setBusy(false);
+    if (isActionDenied(res)) {
+      showToast(res.message);
       return;
     }
     setMergeOpen(false);

@@ -2,6 +2,16 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-08 — Slice S0-09 (Tenant Document Repository Entity Repointing and Recipient Matching)
+
+### Added
+- **`TenantDocumentRepository.repointMergedEntity` (`@platform/core`, `core/src/tenancy/documentRepository.ts`):**
+  - Added tenant-scoped `repointMergedEntity(ctx, entityType, mergedId, survivorId): number` on `TenantDocumentRepository` (exported via `@platform/core`) to repoint `GeneratedDocumentRecord.primaryClientId` and `GeneratedDocumentRecord.recipientPartyId` and repoint or de-duplicate `DocumentLinkRecord.entityId` within the caller's `ctx.tenantId` partition when an organisation or person record is merged.
+
+### Changed
+- **`TenantDocumentRepository.listDocumentsForEntity` (`core/src/tenancy/documentRepository.ts`):**
+  - Extended `listDocumentsForEntity(ctx, entityType, entityId, options)` so that, in addition to matching `DocumentLinkRecord` entries and `primaryMatterId` / `primaryClientId`, it also matches `GeneratedDocumentRecord.recipientPartyId === entityId` when `entityType` is `'person'` or `'organisation'`, ensuring generated documents addressed to a recipient party are returned by `listDocumentsForEntity` and core `generationService` entity queries after a merge.
+
 ## 2026-11-07 — Slice S0-03 (B12, RBAC Registry Additions)
 
 ### Added

@@ -81,9 +81,8 @@ import {
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
-  createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,
-  verifySignedEntraSessionCookie,
+  getTestEntraSessionOverride,
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
 import {
@@ -240,7 +239,9 @@ export function resolveTenantContextForStoreUser(
     session ??
     (getActiveActorSession()?.verifiedSession as
       | VerifiedEntraSessionPayload
-      | undefined);
+      | undefined) ??
+    getTestEntraSessionOverride() ??
+    undefined;
   if (!verifiedSession) {
     throw new Error(
       `UNAUTHENTICATED: Verified Entra ID session is required for user "${user.id}".`,
@@ -335,61 +336,41 @@ export function getDocumentRepository(): TenantDocumentRepository {
   return global.__oneSquaredDocRepo;
 }
 
-export function repointMergedEntityInDocRepository(
+export function prepareMergedEntityDocumentsInStore(
   store: FirmStore,
-  actor: Person | null,
+  ctx: TenantContext,
   entityType: 'organisation' | 'person',
   mergedId: string,
   survivorId: string,
 ): number {
   const repo = getDocumentRepository();
-  const cfg = getEffectiveTenantConfig(store);
-
-  let ctx: TenantContext;
-  const activeVerified = getActiveActorSession()?.verifiedSession as
-    | VerifiedEntraSessionPayload
-    | undefined;
-  if (actor && activeVerified && activeVerified.personId === actor.id) {
-    ctx = resolveTenantContextForStoreUser(store, actor.id, activeVerified).ctx;
-  } else {
-    const fallbackOidSuffix = (actor?.id ?? '000000000000')
-      .replace(/\D/g, '')
-      .padStart(12, '0')
-      .slice(-12);
-    const verifiedSession = verifySignedEntraSessionCookie(
-      createSignedEntraSessionCookie({
-        personId: actor?.id ?? 'system',
-        tenantId: cfg.tenantId,
-        oid:
-          actor?.entraObjectId ||
-          `00000000-0000-4000-8000-${fallbackOidSuffix}`,
-        tid: '11111111-2222-3333-4444-000000000000',
-        sub: actor?.id ?? 'system',
-        email:
-          actor?.emails?.find((e) => e.isPrimary)?.address ||
-          actor?.emails?.[0]?.address ||
-          `${actor?.id ?? 'system'}@notalawfirm.example`,
-        displayName: actor
-          ? `${actor.firstName} ${actor.surname}`.trim()
-          : 'System',
-        entraRoles: actor?.roles ? [...actor.roles] : ['admin'],
-        mappedRoles: actor?.roles ? [...actor.roles] : ['admin'],
-        entraGroups: [],
-        mfaVerified: true,
-        amr: ['pwd', 'mfa'],
-        authenticatedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      }),
-    )!;
-    ctx = resolveCurrentTenantContext(
-      createVerifiedSessionActorFromEntraSession(verifiedSession, {
-        correlationId: `merge-doc-${crypto.randomUUID()}`,
-      }),
-      cfg,
-    );
-  }
-
   let updatedCount = 0;
+
+  // Include any documents/links present in the repository for this tenant before repointing store arrays
+  const repoDocs = repo.listDocuments(ctx, { includeDeleted: true });
+  if (repoDocs.length > 0) {
+    const storeDocById = new Map(
+      (store.documents ?? []).map((d) => [d.id, d]),
+    );
+    for (const d of repoDocs) {
+      if (!storeDocById.has(d.id)) {
+        storeDocById.set(d.id, { ...d });
+      }
+    }
+    store.documents = Array.from(storeDocById.values());
+
+    const storeLinkById = new Map(
+      (store.documentLinks ?? []).map((l) => [l.id, l]),
+    );
+    for (const d of repoDocs) {
+      for (const l of repo.listLinksForDocument(ctx, d.id)) {
+        if (!storeLinkById.has(l.id)) {
+          storeLinkById.set(l.id, { ...l });
+        }
+      }
+    }
+    store.documentLinks = Array.from(storeLinkById.values());
+  }
 
   if (Array.isArray(store.documents)) {
     for (const doc of store.documents) {
@@ -447,6 +428,39 @@ export function repointMergedEntityInDocRepository(
     store.documentLinks = nextLinks;
   }
 
+  return updatedCount;
+}
+
+export function repointMergedEntityInDocRepository(
+  store: FirmStore,
+  actor: Person | null,
+  entityType: 'organisation' | 'person',
+  mergedId: string,
+  survivorId: string,
+): number {
+  const repo = getDocumentRepository();
+  if (!actor) {
+    throw new Error(
+      'UNAUTHENTICATED: Verified Entra ID session is required for document merge repointing.',
+    );
+  }
+  const activeVerified = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  const { ctx } = resolveTenantContextForStoreUser(
+    store,
+    actor.id,
+    activeVerified,
+  );
+
+  let updatedCount = prepareMergedEntityDocumentsInStore(
+    store,
+    ctx,
+    entityType,
+    mergedId,
+    survivorId,
+  );
+
   const repoUpdated = repo.repointMergedEntity(
     ctx,
     entityType,
@@ -464,30 +478,6 @@ export function repointMergedEntityInDocRepository(
     if (l.tenantId === ctx.tenantId) {
       repo.putDocumentLink(ctx, l);
     }
-  }
-
-  // Also ensure any documents/links that were added directly to repo are reflected in store
-  const repoDocs = repo.listDocuments(ctx, { includeDeleted: true });
-  if (repoDocs.length > 0) {
-    const storeDocById = new Map(
-      (store.documents ?? []).map((d) => [d.id, d]),
-    );
-    for (const d of repoDocs) {
-      storeDocById.set(d.id, d);
-    }
-    store.documents = Array.from(storeDocById.values());
-
-    const storeLinkById = new Map(
-      (store.documentLinks ?? []).map((l) => [l.id, l]),
-    );
-    for (const d of repoDocs) {
-      for (const l of repo.listLinksForDocument(ctx, d.id)) {
-        storeLinkById.set(l.id, l);
-      }
-    }
-    store.documentLinks = Array.from(storeLinkById.values()).filter(
-      (l) => !(l.entityType === entityType && l.entityId === mergedId),
-    );
   }
 
   return updatedCount;

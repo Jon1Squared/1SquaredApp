@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
-import { repointMergedEntityInDocRepository } from './documentGenerationServices';
+import {
+  prepareMergedEntityDocumentsInStore,
+  repointMergedEntityInDocRepository,
+  resolveTenantContextForStoreUser,
+} from './documentGenerationServices';
 import { attentionList } from '@/domain/attention';
 import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { diffRecords } from '@/domain/audit';
@@ -150,10 +154,10 @@ import {
   type VerifiedOidcTokenClaims,
 } from './rbacRuntime';
 import {
-  createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,
   ENTRA_SESSION_COOKIE,
   getEntraSession,
+  persistEntraSessionCookie,
   setTestEntraSessionOverride,
   shouldUseSecureCookies,
   type EntraSessionPayload,
@@ -530,22 +534,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     expiresAt: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
   };
 
-  const signedSession = createSignedEntraSessionCookie(nextSession);
-  if (process.env.NODE_ENV === 'test') {
-    setTestEntraSessionOverride(nextSession);
-  }
-  try {
-    const jar = await cookies();
-    jar.set(ENTRA_SESSION_COOKIE, signedSession, {
-      httpOnly: true,
-      secure: shouldUseSecureCookies(),
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 8 * 60 * 60,
-    });
-  } catch {
-    // Ignore when called outside Next.js request context in unit tests
-  }
+  await persistEntraSessionCookie(nextSession);
 
   writeAudit(store, {
     recordType: 'person',
@@ -5547,6 +5536,52 @@ export function dismissDuplicateMatch(
   return { ok: true };
 }
 
+function mergeCollidingLinkIntoSurvivor(
+  survivorLink: PersonOrganisationLink,
+  mergedLink: PersonOrganisationLink,
+): void {
+  const becameCurrent = Boolean(mergedLink.isCurrent && !survivorLink.isCurrent);
+  if (mergedLink.isCurrent) {
+    survivorLink.isCurrent = true;
+  }
+  if (mergedLink.isPrimaryContact) {
+    survivorLink.isPrimaryContact = true;
+  }
+  if (mergedLink.startDate) {
+    if (!survivorLink.startDate || mergedLink.startDate < survivorLink.startDate) {
+      survivorLink.startDate = mergedLink.startDate;
+    }
+  }
+  if (survivorLink.isCurrent) {
+    if (becameCurrent || !mergedLink.endDate) {
+      survivorLink.endDate = null;
+    }
+  } else if (mergedLink.endDate) {
+    if (!survivorLink.endDate || mergedLink.endDate > survivorLink.endDate) {
+      survivorLink.endDate = mergedLink.endDate;
+    }
+  }
+  if (!survivorLink.jobTitle && mergedLink.jobTitle) {
+    survivorLink.jobTitle = mergedLink.jobTitle;
+  }
+  if (!survivorLink.department && mergedLink.department) {
+    survivorLink.department = mergedLink.department;
+  }
+  if (!survivorLink.roleWithinOrganisation && mergedLink.roleWithinOrganisation) {
+    survivorLink.roleWithinOrganisation = mergedLink.roleWithinOrganisation;
+  }
+  if (Array.isArray(mergedLink.contactRoleIds) && mergedLink.contactRoleIds.length > 0) {
+    survivorLink.contactRoleIds = Array.from(
+      new Set([...(survivorLink.contactRoleIds ?? []), ...mergedLink.contactRoleIds]),
+    );
+  }
+}
+
+function replaceRecordIdPathSegment(href: string, mergedId: string, survivorId: string): string {
+  const escaped = mergedId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return href.replace(new RegExp(`(?<=^|/)${escaped}(?=$|/|\\?|#)`, 'g'), survivorId);
+}
+
 export function executeMerge(
   recordType: RecordType,
   survivorId: string,
@@ -5595,6 +5630,11 @@ export function executeMerge(
     ) as unknown as MergeHistory & Partial<ActionDenied>;
   }
 
+  // R271 & R272: Resolve verified tenant context before mutating any record
+  const { ctx: resolvedMergeCtx } = resolveTenantContextForStoreUser(
+    store,
+    actor!.id,
+  );
   const plan = planMerge(survivor, merged);
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
   const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
@@ -5604,387 +5644,427 @@ export function executeMerge(
     'merged',
   )!.id;
 
-  // 1. Repoint person-organisation links and delete duplicates rather than leaving them pointing at the tombstone
-  let linksMoved = 0;
-  const nextLinks: PersonOrganisationLink[] = [];
-  for (const link of store.links) {
-    if (recordType === 'person' && link.personId === merged.id) {
-      const duplicateLink =
-        store.links.some(
-          (l) =>
-            l !== link &&
-            l.personId === survivor.id &&
-            l.organisationId === link.organisationId,
-        ) ||
-        nextLinks.some(
-          (l) =>
-            l.personId === survivor.id &&
-            l.organisationId === link.organisationId,
-        );
-      if (!duplicateLink) {
-        link.personId = survivor.id;
-        nextLinks.push(link);
-        linksMoved++;
-      }
-    } else if (
-      recordType === 'organisation' &&
-      link.organisationId === merged.id
-    ) {
-      const duplicateLink =
-        store.links.some(
-          (l) =>
-            l !== link &&
-            l.organisationId === survivor.id &&
-            l.personId === link.personId,
-        ) ||
-        nextLinks.some(
-          (l) =>
-            l.organisationId === survivor.id &&
-            l.personId === link.personId,
-        );
-      if (!duplicateLink) {
-        link.organisationId = survivor.id;
-        nextLinks.push(link);
-        linksMoved++;
-      }
-    } else {
-      nextLinks.push(link);
-    }
-  }
-  store.links = nextLinks;
-  if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
-    plan.fieldsTaken.push('Organisation links');
-  }
+  // R272: Snapshot the store before changing anything so any failure restores the store atomically
+  const storeSnapshot = structuredClone(store);
+  let storeSaved = false;
 
-  // 2. Repoint subsidiary parent links if merging an organisation (relationshipPartnerId is never changed)
-  if (recordType === 'organisation') {
-    for (const org of store.organisations) {
-      if (org.parentOrganisationId === merged.id && org.id !== survivor.id) {
-        org.parentOrganisationId = survivor.id;
-      }
-    }
-  }
-
-  // 3. Repoint Matter references and conflict check records
-  const repointConflictRecordObject = (
-    cr:
-      | {
-          parties?: { linkedRecordId: string | null }[];
-          matches?: { matchedRecordId: string }[];
+  try {
+    // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
+    let linksMoved = 0;
+    const nextLinks: PersonOrganisationLink[] = [];
+    for (const link of store.links) {
+      if (recordType === 'person' && link.personId === merged.id) {
+        const existingSurvivorLink =
+          nextLinks.find(
+            (l) =>
+              l.personId === survivor.id &&
+              l.organisationId === link.organisationId,
+          ) ??
+          store.links.find(
+            (l) =>
+              l !== link &&
+              l.personId === survivor.id &&
+              l.organisationId === link.organisationId,
+          );
+        if (existingSurvivorLink) {
+          mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
+          linksMoved++;
+        } else {
+          link.personId = survivor.id;
+          nextLinks.push(link);
+          linksMoved++;
         }
-      | null
-      | undefined,
-  ) => {
-    if (!cr || typeof cr !== 'object') return;
-    if (Array.isArray(cr.parties)) {
-      for (const cp of cr.parties) {
-        if (cp && cp.linkedRecordId === merged.id) {
-          cp.linkedRecordId = survivor.id;
+      } else if (
+        recordType === 'organisation' &&
+        link.organisationId === merged.id
+      ) {
+        const existingSurvivorLink =
+          nextLinks.find(
+            (l) =>
+              l.organisationId === survivor.id &&
+              l.personId === link.personId,
+          ) ??
+          store.links.find(
+            (l) =>
+              l !== link &&
+              l.organisationId === survivor.id &&
+              l.personId === link.personId,
+          );
+        if (existingSurvivorLink) {
+          mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
+          linksMoved++;
+        } else {
+          link.organisationId = survivor.id;
+          nextLinks.push(link);
+          linksMoved++;
         }
-      }
-    }
-    if (Array.isArray(cr.matches)) {
-      for (const match of cr.matches) {
-        if (match && match.matchedRecordId === merged.id) {
-          match.matchedRecordId = survivor.id;
-        }
-      }
-    }
-  };
-
-  for (const matter of store.matters) {
-    if (matter.clientId === merged.id) {
-      matter.clientId = survivor.id;
-    }
-    if (
-      Array.isArray(matter.additionalClientIds) &&
-      matter.additionalClientIds.includes(merged.id)
-    ) {
-      matter.additionalClientIds = Array.from(
-        new Set(
-          matter.additionalClientIds.map((id) =>
-            id === merged.id ? survivor.id : id,
-          ),
-        ),
-      );
-    }
-    if (matter.instructingContactId === merged.id) {
-      matter.instructingContactId = survivor.id;
-    }
-    if (matter.billingContactId === merged.id) {
-      matter.billingContactId = survivor.id;
-    }
-    if (matter.referrerContactId === merged.id) {
-      matter.referrerContactId = survivor.id;
-    }
-    for (const party of matter.parties ?? []) {
-      if (party.linkedRecordId === merged.id) {
-        party.linkedRecordId = survivor.id;
-      }
-    }
-    repointConflictRecordObject(matter.conflictCheckRecord);
-    if (matter.fieldValues && typeof matter.fieldValues === 'object') {
-      repointConflictRecordObject(
-        matter.fieldValues['conflictCheckRecord'] as {
-          parties?: { linkedRecordId: string | null }[];
-          matches?: { matchedRecordId: string }[];
-        },
-      );
-      repointConflictRecordObject(
-        matter.fieldValues['conflictCheck'] as {
-          parties?: { linkedRecordId: string | null }[];
-          matches?: { matchedRecordId: string }[];
-        },
-      );
-    }
-  }
-
-  // 4. Repoint Enquiry references and conflict snapshots
-  for (const enq of store.enquiries) {
-    if (enq.linkedOrganisationId === merged.id) {
-      enq.linkedOrganisationId = survivor.id;
-    }
-    if (enq.referrerPersonId === merged.id) {
-      enq.referrerPersonId = survivor.id;
-    }
-    if (enq.linkedPersonId === merged.id) {
-      enq.linkedPersonId = survivor.id;
-    }
-    if (enq.referredToOrganisationId === merged.id) {
-      enq.referredToOrganisationId = survivor.id;
-    }
-    if (enq.conflictSnapshot) {
-      for (const hit of enq.conflictSnapshot.conflicts ?? []) {
-        if (hit.recordId === merged.id) {
-          hit.recordId = survivor.id;
-          if (typeof hit.href === 'string' && hit.href.includes(merged.id)) {
-            hit.href = hit.href.replaceAll(merged.id, survivor.id);
-          }
-        }
-      }
-      if (Array.isArray(enq.conflictSnapshot.knownPeople)) {
-        const seen = new Set<string>();
-        const nextKnownPeople: typeof enq.conflictSnapshot.knownPeople = [];
-        for (const kp of enq.conflictSnapshot.knownPeople) {
-          const nextIdVal = kp.id === merged.id ? survivor.id : kp.id;
-          if (!seen.has(nextIdVal)) {
-            seen.add(nextIdVal);
-            nextKnownPeople.push({ ...kp, id: nextIdVal });
-          }
-        }
-        enq.conflictSnapshot.knownPeople = nextKnownPeople;
-      }
-      if (Array.isArray(enq.conflictSnapshot.knownOrganisations)) {
-        const seen = new Set<string>();
-        const nextKnownOrgs: typeof enq.conflictSnapshot.knownOrganisations = [];
-        for (const ko of enq.conflictSnapshot.knownOrganisations) {
-          const nextIdVal = ko.id === merged.id ? survivor.id : ko.id;
-          if (!seen.has(nextIdVal)) {
-            seen.add(nextIdVal);
-            nextKnownOrgs.push({ ...ko, id: nextIdVal });
-          }
-        }
-        enq.conflictSnapshot.knownOrganisations = nextKnownOrgs;
-      }
-    }
-  }
-
-  // 5. Repoint Quote references
-  for (const quote of store.quotes) {
-    if (quote.linkedOrganisationId === merged.id) {
-      quote.linkedOrganisationId = survivor.id;
-    }
-    if (quote.linkedPersonId === merged.id) {
-      quote.linkedPersonId = survivor.id;
-    }
-  }
-
-  // 6. Repoint Task linkedRecords (de-duplicated)
-  for (const task of store.tasks) {
-    if (
-      Array.isArray(task.linkedRecords) &&
-      task.linkedRecords.some((lr) => lr.recordId === merged.id)
-    ) {
-      const seen = new Set<string>();
-      const nextLinkedRecords: typeof task.linkedRecords = [];
-      for (const lr of task.linkedRecords) {
-        const nextRecId = lr.recordId === merged.id ? survivor.id : lr.recordId;
-        const key = `${lr.recordType}:${nextRecId}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          nextLinkedRecords.push({ ...lr, recordId: nextRecId });
-        }
-      }
-      task.linkedRecords = nextLinkedRecords;
-    }
-  }
-
-  // 7. Repoint PMS links (handle collision when survivor already has a PMS link)
-  const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
-  const nextPmsLinks: PmsLink[] = [];
-  for (const pmsLink of store.pmsLinks) {
-    if (pmsLink.onesquaredId === merged.id) {
-      const existingSurvivorPmsLink =
-        store.pmsLinks.find(
-          (other) =>
-            other !== pmsLink &&
-            other.entityType === pmsLink.entityType &&
-            other.onesquaredId === survivor.id,
-        ) ??
-        nextPmsLinks.find(
-          (other) =>
-            other.entityType === pmsLink.entityType &&
-            other.onesquaredId === survivor.id,
-        );
-      if (existingSurvivorPmsLink) {
-        pmsLinkConflicts.push({
-          keptPmsCode: existingSurvivorPmsLink.pmsCode,
-          discardedPmsCode: pmsLink.pmsCode,
-        });
-        const conflictSummary = `PMS link conflict (kept ${existingSurvivorPmsLink.pmsCode}, discarded ${pmsLink.pmsCode})`;
-        if (!plan.fieldsTaken.includes(conflictSummary)) {
-          plan.fieldsTaken.push(conflictSummary);
-        }
-        writeAudit(store, {
-          recordType,
-          recordId: survivor.id,
-          action: 'merge',
-          field: 'PMS link conflict',
-          oldValue: pmsLink.pmsCode,
-          newValue: existingSurvivorPmsLink.pmsCode,
-          byId,
-          at: now,
-        });
       } else {
-        pmsLink.onesquaredId = survivor.id;
-        nextPmsLinks.push(pmsLink);
-        if (!plan.fieldsTaken.includes('PMS link')) {
-          plan.fieldsTaken.push('PMS link');
+        nextLinks.push(link);
+      }
+    }
+    store.links = nextLinks;
+    if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
+      plan.fieldsTaken.push('Organisation links');
+    }
+
+    // 2. Repoint subsidiary parent links if merging an organisation (relationshipPartnerId is never changed)
+    if (recordType === 'organisation') {
+      for (const org of store.organisations) {
+        if (org.parentOrganisationId === merged.id && org.id !== survivor.id) {
+          org.parentOrganisationId = survivor.id;
         }
       }
-    } else {
-      nextPmsLinks.push(pmsLink);
     }
-  }
-  store.pmsLinks = nextPmsLinks;
 
-  // 8. Repoint Generated Documents & Document Links in both store and TenantDocumentRepository
-  const docsMoved = repointMergedEntityInDocRepository(
-    store,
-    actor,
-    recordType,
-    merged.id,
-    survivor.id,
-  );
-  if (docsMoved > 0 && !plan.fieldsTaken.includes('Generated documents')) {
-    plan.fieldsTaken.push('Generated documents');
-  }
-
-  // 9. Copy notes to survivor
-  let notesMoved = 0;
-  for (const note of store.notes) {
-    if (note.recordType === recordType && note.recordId === merged.id) {
-      note.recordId = survivor.id;
-      note.mergedFromId = merged.id;
-      notesMoved++;
-    }
-  }
-  if (notesMoved > 0 && !plan.fieldsTaken.includes('Notes')) {
-    plan.fieldsTaken.push('Notes');
-  }
-
-  // 10. Other references: Person.createdFromEnquiryId, store.recentlyViewed, store.notifications
-  if (recordType === 'person') {
-    const mergedPerson = merged as Person;
-    const survivorPerson = plan.survivor as Person;
-    if (mergedPerson.createdFromEnquiryId) {
-      if (!survivorPerson.createdFromEnquiryId) {
-        survivorPerson.createdFromEnquiryId = mergedPerson.createdFromEnquiryId;
+    // 3. Repoint Matter references and conflict check records
+    const repointConflictRecordObject = (
+      cr:
+        | {
+            parties?: { linkedRecordId: string | null }[];
+            matches?: { matchedRecordId: string }[];
+          }
+        | null
+        | undefined,
+    ) => {
+      if (!cr || typeof cr !== 'object') return;
+      if (Array.isArray(cr.parties)) {
+        for (const cp of cr.parties) {
+          if (cp && cp.linkedRecordId === merged.id) {
+            cp.linkedRecordId = survivor.id;
+          }
+        }
       }
-      mergedPerson.createdFromEnquiryId = null;
-    }
-  }
+      if (Array.isArray(cr.matches)) {
+        for (const match of cr.matches) {
+          if (match && match.matchedRecordId === merged.id) {
+            match.matchedRecordId = survivor.id;
+          }
+        }
+      }
+    };
 
-  if (store.recentlyViewed && typeof store.recentlyViewed === 'object') {
-    for (const [uid, viewedIds] of Object.entries(store.recentlyViewed)) {
-      if (Array.isArray(viewedIds) && viewedIds.includes(merged.id)) {
-        store.recentlyViewed[uid] = Array.from(
+    for (const matter of store.matters) {
+      if (matter.clientId === merged.id) {
+        matter.clientId = survivor.id;
+      }
+      if (
+        Array.isArray(matter.additionalClientIds) &&
+        matter.additionalClientIds.includes(merged.id)
+      ) {
+        matter.additionalClientIds = Array.from(
           new Set(
-            viewedIds.map((id) => (id === merged.id ? survivor.id : id)),
+            matter.additionalClientIds.map((id) =>
+              id === merged.id ? survivor.id : id,
+            ),
           ),
         );
       }
+      if (matter.instructingContactId === merged.id) {
+        matter.instructingContactId = survivor.id;
+      }
+      if (matter.billingContactId === merged.id) {
+        matter.billingContactId = survivor.id;
+      }
+      if (matter.referrerContactId === merged.id) {
+        matter.referrerContactId = survivor.id;
+      }
+      for (const party of matter.parties ?? []) {
+        if (party.linkedRecordId === merged.id) {
+          party.linkedRecordId = survivor.id;
+        }
+      }
+      repointConflictRecordObject(matter.conflictCheckRecord);
+      if (matter.fieldValues && typeof matter.fieldValues === 'object') {
+        repointConflictRecordObject(
+          matter.fieldValues['conflictCheckRecord'] as {
+            parties?: { linkedRecordId: string | null }[];
+            matches?: { matchedRecordId: string }[];
+          },
+        );
+        repointConflictRecordObject(
+          matter.fieldValues['conflictCheck'] as {
+            parties?: { linkedRecordId: string | null }[];
+            matches?: { matchedRecordId: string }[];
+          },
+        );
+      }
     }
-  }
 
-  for (const notification of store.notifications ?? []) {
-    if (notification.recordId === merged.id) {
-      notification.recordId = survivor.id;
+    // 4. Repoint Enquiry references and conflict snapshots
+    for (const enq of store.enquiries) {
+      if (enq.linkedOrganisationId === merged.id) {
+        enq.linkedOrganisationId = survivor.id;
+      }
+      if (enq.referrerPersonId === merged.id) {
+        enq.referrerPersonId = survivor.id;
+      }
+      if (enq.linkedPersonId === merged.id) {
+        enq.linkedPersonId = survivor.id;
+      }
+      if (enq.referredToOrganisationId === merged.id) {
+        enq.referredToOrganisationId = survivor.id;
+      }
+      if (enq.conflictSnapshot) {
+        for (const hit of enq.conflictSnapshot.conflicts ?? []) {
+          if (hit.recordId === merged.id) {
+            hit.recordId = survivor.id;
+            if (typeof hit.href === 'string' && hit.href.includes(merged.id)) {
+              hit.href = replaceRecordIdPathSegment(hit.href, merged.id, survivor.id);
+            }
+          }
+        }
+        if (Array.isArray(enq.conflictSnapshot.knownPeople)) {
+          const seen = new Set<string>();
+          const nextKnownPeople: typeof enq.conflictSnapshot.knownPeople = [];
+          for (const kp of enq.conflictSnapshot.knownPeople) {
+            const nextIdVal = kp.id === merged.id ? survivor.id : kp.id;
+            if (!seen.has(nextIdVal)) {
+              seen.add(nextIdVal);
+              nextKnownPeople.push({ ...kp, id: nextIdVal });
+            }
+          }
+          enq.conflictSnapshot.knownPeople = nextKnownPeople;
+        }
+        if (Array.isArray(enq.conflictSnapshot.knownOrganisations)) {
+          const seen = new Set<string>();
+          const nextKnownOrgs: typeof enq.conflictSnapshot.knownOrganisations = [];
+          for (const ko of enq.conflictSnapshot.knownOrganisations) {
+            const nextIdVal = ko.id === merged.id ? survivor.id : ko.id;
+            if (!seen.has(nextIdVal)) {
+              seen.add(nextIdVal);
+              nextKnownOrgs.push({ ...ko, id: nextIdVal });
+            }
+          }
+          enq.conflictSnapshot.knownOrganisations = nextKnownOrgs;
+        }
+      }
     }
-    if (
-      typeof notification.href === 'string' &&
-      notification.href.includes(merged.id)
-    ) {
-      notification.href = notification.href.replaceAll(merged.id, survivor.id);
+
+    // 5. Repoint Quote references
+    for (const quote of store.quotes) {
+      if (quote.linkedOrganisationId === merged.id) {
+        quote.linkedOrganisationId = survivor.id;
+      }
+      if (quote.linkedPersonId === merged.id) {
+        quote.linkedPersonId = survivor.id;
+      }
     }
+
+    // 6. Repoint Task linkedRecords (de-duplicated)
+    for (const task of store.tasks) {
+      if (
+        Array.isArray(task.linkedRecords) &&
+        task.linkedRecords.some((lr) => lr.recordId === merged.id)
+      ) {
+        const seen = new Set<string>();
+        const nextLinkedRecords: typeof task.linkedRecords = [];
+        for (const lr of task.linkedRecords) {
+          const nextRecId = lr.recordId === merged.id ? survivor.id : lr.recordId;
+          const key = `${lr.recordType}:${nextRecId}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            nextLinkedRecords.push({ ...lr, recordId: nextRecId });
+          }
+        }
+        task.linkedRecords = nextLinkedRecords;
+      }
+    }
+
+    // 7. Repoint PMS links (handle collision when survivor already has a PMS link)
+    const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
+    const nextPmsLinks: PmsLink[] = [];
+    for (const pmsLink of store.pmsLinks) {
+      if (pmsLink.onesquaredId === merged.id) {
+        const existingSurvivorPmsLink =
+          store.pmsLinks.find(
+            (other) =>
+              other !== pmsLink &&
+              other.entityType === pmsLink.entityType &&
+              other.onesquaredId === survivor.id,
+          ) ??
+          nextPmsLinks.find(
+            (other) =>
+              other.entityType === pmsLink.entityType &&
+              other.onesquaredId === survivor.id,
+          );
+        if (existingSurvivorPmsLink) {
+          pmsLinkConflicts.push({
+            keptPmsCode: existingSurvivorPmsLink.pmsCode,
+            discardedPmsCode: pmsLink.pmsCode,
+          });
+          const conflictSummary = `PMS link conflict (kept ${existingSurvivorPmsLink.pmsCode}, discarded ${pmsLink.pmsCode})`;
+          if (!plan.fieldsTaken.includes(conflictSummary)) {
+            plan.fieldsTaken.push(conflictSummary);
+          }
+          writeAudit(store, {
+            recordType,
+            recordId: survivor.id,
+            action: 'merge',
+            field: 'PMS link conflict',
+            oldValue: pmsLink.pmsCode,
+            newValue: existingSurvivorPmsLink.pmsCode,
+            byId,
+            at: now,
+          });
+        } else {
+          pmsLink.onesquaredId = survivor.id;
+          nextPmsLinks.push(pmsLink);
+          if (!plan.fieldsTaken.includes('PMS link')) {
+            plan.fieldsTaken.push('PMS link');
+          }
+        }
+      } else {
+        nextPmsLinks.push(pmsLink);
+      }
+    }
+    store.pmsLinks = nextPmsLinks;
+
+    // 8a. Prepare repointed document and documentLink arrays on store before saveStore
+    const storeDocsPrepared = prepareMergedEntityDocumentsInStore(
+      store,
+      resolvedMergeCtx,
+      recordType,
+      merged.id,
+      survivor.id,
+    );
+    if (storeDocsPrepared > 0 && !plan.fieldsTaken.includes('Generated documents')) {
+      plan.fieldsTaken.push('Generated documents');
+    }
+
+    // 9. Copy notes to survivor
+    let notesMoved = 0;
+    for (const note of store.notes) {
+      if (note.recordType === recordType && note.recordId === merged.id) {
+        note.recordId = survivor.id;
+        note.mergedFromId = merged.id;
+        notesMoved++;
+      }
+    }
+    if (notesMoved > 0 && !plan.fieldsTaken.includes('Notes')) {
+      plan.fieldsTaken.push('Notes');
+    }
+
+    // 10. Other references: Person.createdFromEnquiryId, store.recentlyViewed, store.notifications
+    if (recordType === 'person') {
+      const mergedPerson = merged as Person;
+      const survivorPerson = plan.survivor as Person;
+      if (mergedPerson.createdFromEnquiryId) {
+        if (!survivorPerson.createdFromEnquiryId) {
+          survivorPerson.createdFromEnquiryId = mergedPerson.createdFromEnquiryId;
+        }
+        mergedPerson.createdFromEnquiryId = null;
+      }
+    }
+
+    if (store.recentlyViewed && typeof store.recentlyViewed === 'object') {
+      for (const [uid, viewedIds] of Object.entries(store.recentlyViewed)) {
+        if (Array.isArray(viewedIds) && viewedIds.includes(merged.id)) {
+          store.recentlyViewed[uid] = Array.from(
+            new Set(
+              viewedIds.map((id) => (id === merged.id ? survivor.id : id)),
+            ),
+          );
+        }
+      }
+    }
+
+    for (const notification of store.notifications ?? []) {
+      if (notification.recordId === merged.id) {
+        notification.recordId = survivor.id;
+      }
+      if (
+        typeof notification.href === 'string' &&
+        notification.href.includes(merged.id)
+      ) {
+        notification.href = replaceRecordIdPathSegment(
+          notification.href,
+          merged.id,
+          survivor.id,
+        );
+      }
+    }
+
+    // Update survivor
+    plan.survivor.updatedAt = now;
+    plan.survivor.updatedById = byId;
+    plan.survivor.possibleMatchIds = plan.survivor.possibleMatchIds.filter(
+      (id) => id !== merged.id,
+    );
+    if (plan.survivor.possibleMatchIds.length === 0) {
+      plan.survivor.duplicateStatusId = dupNone;
+    }
+
+    const sIdx = list.findIndex((r) => r.id === survivor.id);
+    list[sIdx] = plan.survivor;
+
+    // Mark merged record
+    merged.mergedIntoId = survivor.id;
+    merged.recordStatusId = statusMerged;
+    merged.duplicateStatusId = dupMerged;
+    merged.possibleMatchIds = [];
+    merged.updatedAt = now;
+    merged.updatedById = byId;
+
+    const history: MergeHistory = {
+      id: nextId(store, 'M'),
+      recordType,
+      survivorId: survivor.id,
+      mergedId: merged.id,
+      mergedLabel: recordDisplayName(merged),
+      byId,
+      at: now,
+      fieldsTaken: plan.fieldsTaken,
+      ...(pmsLinkConflicts.length > 0 ? { pmsLinkConflicts } : {}),
+    };
+    store.mergeHistory.unshift(history);
+
+    writeAudit(store, {
+      recordType,
+      recordId: survivor.id,
+      action: 'merge',
+      field: `Merged ${merged.id} (${recordDisplayName(merged)}) into ${survivor.id}`,
+      oldValue: merged.id,
+      newValue: plan.fieldsTaken.length
+        ? `Fields taken: ${plan.fieldsTaken.join(', ')}`
+        : 'No additional fields needed',
+      byId,
+      at: now,
+    });
+
+    writeAudit(store, {
+      recordType,
+      recordId: merged.id,
+      action: 'merged-into',
+      field: 'Merged into surviving record',
+      oldValue: merged.id,
+      newValue: survivor.id,
+      byId,
+      at: now,
+    });
+
+    saveStore(store);
+    storeSaved = true;
+
+    // 8b. Write repointed documents and links to TenantDocumentRepository after saveStore (R272)
+    repointMergedEntityInDocRepository(
+      store,
+      actor,
+      recordType,
+      merged.id,
+      survivor.id,
+    );
+
+    return history;
+  } catch (err) {
+    for (const key of Object.keys(store)) {
+      delete (store as unknown as Record<string, unknown>)[key];
+    }
+    Object.assign(store, storeSnapshot);
+    if (storeSaved) {
+      saveStore(store);
+    }
+    throw err;
   }
-
-  // Update survivor
-  plan.survivor.updatedAt = now;
-  plan.survivor.updatedById = byId;
-  plan.survivor.possibleMatchIds = plan.survivor.possibleMatchIds.filter((id) => id !== merged.id);
-  if (plan.survivor.possibleMatchIds.length === 0) {
-    plan.survivor.duplicateStatusId = dupNone;
-  }
-
-  const sIdx = list.findIndex((r) => r.id === survivor.id);
-  list[sIdx] = plan.survivor;
-
-  // Mark merged record
-  merged.mergedIntoId = survivor.id;
-  merged.recordStatusId = statusMerged;
-  merged.duplicateStatusId = dupMerged;
-  merged.possibleMatchIds = [];
-  merged.updatedAt = now;
-  merged.updatedById = byId;
-
-  const history: MergeHistory = {
-    id: nextId(store, 'M'),
-    recordType,
-    survivorId: survivor.id,
-    mergedId: merged.id,
-    mergedLabel: recordDisplayName(merged),
-    byId,
-    at: now,
-    fieldsTaken: plan.fieldsTaken,
-    ...(pmsLinkConflicts.length > 0 ? { pmsLinkConflicts } : {}),
-  };
-  store.mergeHistory.unshift(history);
-
-  writeAudit(store, {
-    recordType,
-    recordId: survivor.id,
-    action: 'merge',
-    field: `Merged ${merged.id} (${recordDisplayName(merged)}) into ${survivor.id}`,
-    oldValue: merged.id,
-    newValue: plan.fieldsTaken.length ? `Fields taken: ${plan.fieldsTaken.join(', ')}` : 'No additional fields needed',
-    byId,
-    at: now,
-  });
-
-  writeAudit(store, {
-    recordType,
-    recordId: merged.id,
-    action: 'merged-into',
-    field: 'Merged into surviving record',
-    oldValue: merged.id,
-    newValue: survivor.id,
-    byId,
-    at: now,
-  });
-
-  saveStore(store);
-  return history;
 }
 
 export function findCandidateDuplicatesForRecord(record: AnyRecord): AnyRecord[] {

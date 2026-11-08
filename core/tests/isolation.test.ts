@@ -7716,8 +7716,41 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
 
       const repo = getDocumentRepository();
-      const tenantBPersonSurvId = 'P-TENANT-B-SURV';
-      const tenantBPersonMergId = 'P-TENANT-B-MERG';
+      const tenantBStore = createSeedStore();
+      const cluster = new PostgresTenantCluster();
+      const tenantBPersonSurv = {
+        ...tenantBStore.people[0]!,
+        id: 'P-TENANT-B-SURV',
+        firstName: 'Owain',
+        surname: 'PembrokeSurvivor',
+        isEmployee: false,
+      };
+      const tenantBPersonMerg = {
+        ...tenantBStore.people[1]!,
+        id: 'P-TENANT-B-MERG',
+        firstName: 'Owain',
+        surname: 'PembrokeDuplicate',
+        isEmployee: false,
+      };
+      const tenantBOrgSurv = {
+        ...tenantBStore.organisations[0]!,
+        id: 'O-TENANT-B-SURV',
+        legalName: 'Pembroke Survivor Holdings Ltd',
+      };
+      const tenantBOrgMerg = {
+        ...tenantBStore.organisations[1]!,
+        id: 'O-TENANT-B-MERG',
+        legalName: 'Pembroke Duplicate Holdings Ltd',
+      };
+      tenantBStore.people.push(tenantBPersonSurv, tenantBPersonMerg);
+      tenantBStore.organisations.push(tenantBOrgSurv, tenantBOrgMerg);
+      cluster.putRecord(ctxB, { ...tenantBPersonSurv, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBPersonMerg, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBOrgSurv, tenantId: ctxB.tenantId });
+      cluster.putRecord(ctxB, { ...tenantBOrgMerg, tenantId: ctxB.tenantId });
+
+      const tenantBPersonSurvId = tenantBPersonSurv.id;
+      const tenantBPersonMergId = tenantBPersonMerg.id;
 
       const docB = {
         id: 'DOC-TENANT-B-09',
@@ -7786,7 +7819,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ]);
       expect(repo.listDocumentsForEntity(ctxA, 'person', mA.id)).toHaveLength(0);
 
-      // 2. Tampered survivor and merged IDs pointing at Tenant B records are denied in Tenant A
+      // 2. Tampered survivor and merged IDs pointing at real stored Tenant B records are denied in Tenant A
       const tamperedSurv = await mergeRecordsAction('person', tenantBPersonSurvId, sA.id);
       expect(isActionDenied(tamperedSurv)).toBe(true);
       const tamperedMerg = await mergeRecordsAction('person', sA.id, tenantBPersonMergId);
@@ -7797,7 +7830,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         tenantBPersonMergId,
       );
       expect(isActionDenied(tamperedBoth)).toBe(true);
+      const tamperedOrg = await mergeRecordsAction(
+        'organisation',
+        tenantBOrgSurv.id,
+        tenantBOrgMerg.id,
+      );
+      expect(isActionDenied(tamperedOrg)).toBe(true);
       expect(getStore().people.find((p) => p.id === sA.id)?.mergedIntoId).toBeNull();
+      expect(
+        cluster.getRecordById<{ id: string; tenantId: string; mergedIntoId?: string | null }>(
+          ctxB,
+          tenantBPersonMerg.id,
+        )?.mergedIntoId,
+      ).toBeFalsy();
+      expect(
+        cluster.getRecordById<{ id: string; tenantId: string; mergedIntoId?: string | null }>(
+          ctxB,
+          tenantBOrgMerg.id,
+        )?.mergedIntoId,
+      ).toBeFalsy();
 
       // 3. Forged Tenant B session claim is rejected
       const forgedTenantBSession = verifySignedEntraSessionCookie(
