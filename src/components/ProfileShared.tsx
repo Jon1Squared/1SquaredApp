@@ -10,6 +10,7 @@ import {
   mergeRecordsAction,
   saveLinkAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { optionsFor, resolveLabel, resolveLabels } from '@/domain/lists';
 import { planMerge } from '@/domain/merge';
@@ -81,8 +82,12 @@ export function PossibleDuplicateBanner({
 
   async function onDismiss() {
     setBusy(true);
-    await dismissDuplicateAction(record.recordType, record.id, null);
+    const res = await dismissDuplicateAction(record.recordType, record.id, null);
     setBusy(false);
+    if (isActionDenied(res)) {
+      showToast(res.message);
+      return;
+    }
     showToast('Marked as not a duplicate');
     router.refresh();
   }
@@ -90,8 +95,12 @@ export function PossibleDuplicateBanner({
   async function onConfirmMerge() {
     if (!selectedSurvivor) return;
     setBusy(true);
-    await mergeRecordsAction(record.recordType, selectedSurvivor.id, record.id);
+    const res = await mergeRecordsAction(record.recordType, selectedSurvivor.id, record.id);
     setBusy(false);
+    if (isActionDenied(res)) {
+      showToast(res.message);
+      return;
+    }
     setMergeOpen(false);
     showToast(`Merged into ${recordDisplayName(selectedSurvivor)}`);
     router.push(hrefForId(selectedSurvivor.id));
@@ -239,8 +248,12 @@ export function NoteModal({
     e.preventDefault();
     if (!text.trim()) return;
     setBusy(true);
-    await addNoteAction(recordType, recordId, text.trim());
+    const res = await addNoteAction(recordType, recordId, text.trim());
     setBusy(false);
+    if (isActionDenied(res)) {
+      showToast(res.message);
+      return;
+    }
     setText('');
     onClose();
     showToast('Note added');
@@ -346,7 +359,7 @@ export function LinkModal({
     e.preventDefault();
     if (!personId || !organisationId) return;
     setBusy(true);
-    await saveLinkAction({
+    const res = await saveLinkAction({
       id: existing?.id,
       personId,
       organisationId,
@@ -361,6 +374,10 @@ export function LinkModal({
       contactStatusId: contactStatusId || null,
     });
     setBusy(false);
+    if (isActionDenied(res)) {
+      showToast(res.message);
+      return;
+    }
     onClose();
     showToast(existing ? 'Link updated' : 'Linked to organisation');
     router.refresh();
@@ -549,7 +566,11 @@ export function LinkModal({
               type="button"
               className="btn btn--ghost"
               onClick={async () => {
-                await deleteLinkAction(existing.id);
+                const res = await deleteLinkAction(existing.id);
+                if (isActionDenied(res)) {
+                  showToast(res.message);
+                  return;
+                }
                 onClose();
                 showToast('Link removed');
                 router.refresh();
@@ -594,8 +615,12 @@ export function NotesSection({
     e.preventDefault();
     if (!text.trim()) return;
     setBusy(true);
-    await addNoteAction(recordType, recordId, text.trim());
+    const res = await addNoteAction(recordType, recordId, text.trim());
     setBusy(false);
+    if (isActionDenied(res)) {
+      showToast(res.message);
+      return;
+    }
     setText('');
     showToast('Note added');
     router.refresh();

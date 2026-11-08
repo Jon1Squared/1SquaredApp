@@ -269,7 +269,13 @@ export async function saveOrganisationAction(
   },
 ) {
   return guardedAction('saveOrganisationAction', ({ personId: byId }) => {
-    const res = saveOrganisationRecord(payload, { ...opts, byId });
+    const res = saveOrganisationRecord(payload, {
+      id: opts?.id,
+      byId,
+      customFieldsSubmitted: opts?.customFieldsSubmitted,
+      flagPossibleDuplicate: opts?.flagPossibleDuplicate,
+      matchedDuplicateIds: opts?.matchedDuplicateIds,
+    });
     revalidateAll();
     return res;
   });
@@ -714,7 +720,15 @@ export async function prepareEnquiryConversionAction(
   } = {},
 ) {
   return guardedAction('prepareEnquiryConversionAction', ({ personId: byId }) => {
-    const res = prepareEnquiryConversion(enquiryId, opts, byId);
+    const res = prepareEnquiryConversion(
+      enquiryId,
+      {
+        usePersonId: opts?.usePersonId,
+        useOrganisationId: opts?.useOrganisationId,
+        createForBusiness: opts?.createForBusiness,
+      },
+      byId,
+    );
     revalidateAll();
     return res;
   });
@@ -1023,7 +1037,11 @@ export async function saveQuoteAction(
   opts: { id?: string; markAsSent?: boolean } = {},
 ) {
   return guardedAction('saveQuoteAction', ({ personId: byId }) => {
-    const res = saveQuoteRecord(input, { ...opts, byId });
+    const res = saveQuoteRecord(input, {
+      id: opts?.id,
+      markAsSent: opts?.markAsSent,
+      byId,
+    });
     revalidateAll();
     return res;
   });

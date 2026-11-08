@@ -428,7 +428,21 @@ export function findRecordsOwnedByLeavers(
 
   for (const t of tasks) {
     if (t.status === 'Done' || t.status === 'Cancelled') continue;
-    pushIfLeaver(t.assignedPersonId, 'task', t.id, `${t.reference} — ${t.title}`, 'assignedPersonId', 'Assigned person');
+    const taskOwnerIds = new Set<string>();
+    if (t.assignedPersonId) taskOwnerIds.add(t.assignedPersonId);
+    for (const pid of t.assignedPersonIds ?? []) {
+      if (pid) taskOwnerIds.add(pid);
+    }
+    for (const ownerId of taskOwnerIds) {
+      pushIfLeaver(
+        ownerId,
+        'task',
+        t.id,
+        `${t.reference} — ${t.title}`,
+        'assignedPersonId',
+        'Assigned person',
+      );
+    }
   }
 
   for (const e of enquiries) {

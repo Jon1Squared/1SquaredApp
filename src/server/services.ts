@@ -6728,7 +6728,13 @@ export function saveTaskRecord(
     for (const lr of task.linkedRecords) {
       if (lr.recordType === 'enquiry') {
         const enq = store.enquiries.find((e) => e.id === lr.recordId);
-        if (enq && visibility.canViewEnquiry(enq) && (enq.status === 'New' || !enq.assignedToId)) {
+        if (
+          enq &&
+          visibility.canViewEnquiry(enq) &&
+          isEnquiryRouted(enq) &&
+          isEnquiryOpen(enq) &&
+          (enq.status === 'New' || !enq.assignedToId)
+        ) {
           const prevStatus = enq.status;
           const prevAssignee = enq.assignedToId;
           enq.assignedToId = task.assignedPersonId;
@@ -7054,6 +7060,25 @@ export function saveEnquiryRecord(
         errors: { permission: msg },
       };
     }
+    if (existing.status !== 'Draft') {
+      const attemptedStatusChange =
+        Boolean(opts.asDraft) ||
+        (input.status !== undefined && input.status !== existing.status);
+      const attemptedAssigneeChange =
+        input.assignedToId !== undefined &&
+        (input.assignedToId ?? null) !== (existing.assignedToId ?? null);
+      const attemptedTeamChange =
+        input.assignedTeamId !== undefined &&
+        (input.assignedTeamId ?? null) !== (existing.assignedTeamId ?? null);
+      if (attemptedStatusChange || attemptedAssigneeChange || attemptedTeamChange) {
+        const msg =
+          'Status and assignment on a non-draft enquiry cannot be changed through saveEnquiryRecord; use assignEnquiryAction, closeEnquiryAction, or reopenEnquiryAction.';
+        return {
+          ...buildActionDenied('FORBIDDEN', msg),
+          errors: { permission: msg },
+        };
+      }
+    }
   }
   if (
     input.linkedOrganisationId &&
@@ -7321,8 +7346,11 @@ export function saveEnquiryRecord(
     : existing?.firstContactDueAt ?? calculateFirstContactDue(receivedAt, urgencyLabel, whCfg);
 
   // Route to practice area team or fallback to Intake
-  let assignedTeamId =
-    input.assignedTeamId !== undefined ? input.assignedTeamId : existing?.assignedTeamId ?? null;
+  let assignedTeamId = isInitialRoute
+    ? input.assignedTeamId !== undefined
+      ? input.assignedTeamId
+      : existing?.assignedTeamId ?? null
+    : existing?.assignedTeamId ?? null;
   let routedToIntakeFallback = existing?.routedToIntakeFallback ?? false;
   if (isInitialRoute && !assignedTeamId) {
     const routed = resolveRoutedTeam(mergedInput.practiceAreaId, store.teams);
@@ -7330,14 +7358,17 @@ export function saveEnquiryRecord(
     routedToIntakeFallback = routed.isFallbackIntake;
   }
 
-  const assignedToId =
-    input.assignedToId !== undefined ? input.assignedToId : existing?.assignedToId ?? null;
+  const assignedToId = isInitialRoute
+    ? input.assignedToId !== undefined
+      ? input.assignedToId
+      : existing?.assignedToId ?? null
+    : existing?.assignedToId ?? null;
   const defaultStatus: EnquiryStatus = assignedToId ? 'Assigned' : 'New';
   const nextStatus: EnquiryStatus = isInitialRoute
     ? input.status && input.status !== 'Draft'
       ? input.status
       : defaultStatus
-    : input.status ?? existing?.status ?? defaultStatus;
+    : existing.status;
 
   const enquiry: Enquiry = {
     id,

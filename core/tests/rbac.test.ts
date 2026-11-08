@@ -33,6 +33,7 @@ import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json'
 import {
   computeStaffMatterStatus,
   createDefaultEmploymentRecord,
+  findRecordsOwnedByLeavers,
   resolveEmployeePermissions as domainResolveEmployeePermissions,
 } from '../../src/domain/employment';
 import {
@@ -69,10 +70,17 @@ import {
   addTaskCommentRecord,
   anonymiseExpiredEnquiries,
   approveSignOff,
+  assignEnquiryRecord,
+  closeEnquiryRecord,
+  createOrUpdateLink,
+  deleteLink,
   discussSignOff,
+  dismissDuplicateMatch,
+  executeMerge,
   getAppSnapshot,
   getEmployeeDetailsForUser,
   logEmployeeRestrictedAccess,
+  logEnquiryContactRecord,
   logQuoteFollowUpRecord,
   markQuoteSentRecord,
   previewRbacOverrides,
@@ -84,15 +92,22 @@ import {
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
   reviseQuoteRecord,
+  saveEnquiryRecord,
+  saveOrganisationRecord,
   savePersonRecord,
   saveQuoteRecord,
   saveTaskRecord,
+  sendEnquiryEmailRecord,
   updateEmployeeRolesAndSupports,
   updateEmployeeRoleSetting,
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
   withPageActor,
 } from '../../src/server/services';
+import {
+  flushDocumentLifecycleSyncForTesting,
+  retryMatterDocumentProvisioning,
+} from '../../src/server/documentStoreServices';
 import { getStore } from '../../src/server/store';
 import {
   buildEntraSessionPayload,
@@ -125,6 +140,7 @@ import {
   saveEnquirySettingsAction,
   saveHomePagesConfigAction,
   saveMatterCostsConfigAction,
+  saveOrganisationAction,
   savePersonAction,
   saveMatterPartyCapacityAction,
   saveMatterPartyRelationshipAction,
@@ -3020,6 +3036,16 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const reopenByNonLead = reopenEnquiryRecord(closedEnq.id, nonLeadFeeEarner.id);
         expect(isActionDenied(reopenByNonLead)).toBe(true);
 
+        // Team lead with enquiry:reopen revoked is refused (R267)
+        const teamLeadPerson = store.people.find((p) => p.id === teamLeadId)!;
+        teamLeadPerson.permissionOverrides = {
+          grant: [],
+          revoke: ['enquiry:reopen'],
+        };
+        const reopenNoPerm = reopenEnquiryRecord(closedEnq.id, teamLeadId);
+        expect(isActionDenied(reopenNoPerm)).toBe(true);
+        teamLeadPerson.permissionOverrides = undefined;
+
         // Team lead reopens unassigned closed enquiry -> status becomes 'New' and assignedToId stays null (B8)
         const reopenedRes = reopenEnquiryRecord(closedEnq.id, teamLeadId);
         expect(isActionDenied(reopenedRes)).toBe(false);
@@ -3030,7 +3056,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('denies quote viewing and editing for the finance role (quote:view and quote:edit)', () => {
+    it('denies quote viewing and editing for the finance role, and hides quotes linked to hidden enquiries or restricted matters (quote:view, quote:edit, R267)', () => {
       try {
         resetAllDemoData('P-000001');
         const store = getStore();
@@ -3044,6 +3070,37 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(snap.currentUserPermissions).not.toContain('quote:view');
         expect(snap.currentUserPermissions).not.toContain('quote:edit');
         expect(snap.quotes).toEqual([]);
+
+        // R267: Fee earner P-000002 holds quote:view, but quotes linked to a restricted matter or hidden enquiry are hidden
+        const wallMatter = store.matters[0]!;
+        wallMatter.hasEthicalWall = true;
+        wallMatter.restrictedAccessUserIds = ['P-000001'];
+        wallMatter.responsiblePartnerId = 'P-000001';
+        wallMatter.supervisingPartnerId = 'P-000001';
+        wallMatter.leadFeeEarnerId = 'P-000001';
+        wallMatter.teamMemberIds = [];
+
+        const hiddenEnq = store.enquiries[0]!;
+        hiddenEnq.status = 'Draft';
+        hiddenEnq.createdById = 'P-000001';
+        hiddenEnq.takenById = 'P-000001';
+
+        const quoteOnRestrictedMatter = store.quotes[0]!;
+        quoteOnRestrictedMatter.convertedMatterId = wallMatter.id;
+        quoteOnRestrictedMatter.linkedEnquiryId = null;
+
+        const quoteOnHiddenEnquiry = store.quotes[1]!;
+        quoteOnHiddenEnquiry.linkedEnquiryId = hiddenEnq.id;
+        quoteOnHiddenEnquiry.convertedMatterId = null;
+
+        const feeEarnerSnap = getAppSnapshot('P-000002');
+        expect(feeEarnerSnap.currentUserPermissions).toContain('quote:view');
+        expect(
+          feeEarnerSnap.quotes.some((q) => q.id === quoteOnRestrictedMatter.id),
+        ).toBe(false);
+        expect(
+          feeEarnerSnap.quotes.some((q) => q.id === quoteOnHiddenEnquiry.id),
+        ).toBe(false);
 
         const existingQuote = store.quotes[0]!;
         expect(
@@ -3098,13 +3155,34 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('enforces dual permissions, leaver check, restricted matter allowlist update, assignedPersonIds, open-only enquiries, and per-record audit on reassignLeaverOwnedRecords (Item 13)', () => {
+    it('enforces dual permissions, leaver check, restricted matter allowlist update, SharePoint lifecycle sync, assignedPersonIds, open-only enquiries, and per-record audit on reassignLeaverOwnedRecords (Item 13, R266, R270)', async () => {
       try {
         resetAllDemoData('P-000001');
         const store = getStore();
         const actor = store.people.find((p) => p.id === 'P-000001')!;
         const activeEmp = store.people.find((p) => p.id === 'P-000002')!;
         const replacementEmp = store.people.find((p) => p.id === 'P-000003')!;
+
+        const actorSession = {
+          personId: actor.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: actor.id,
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner'],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        };
+        const verifiedActorSession = verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie(actorSession),
+        )!;
+        setTestEntraSessionOverride(verifiedActorSession);
 
         // 1. Rejects when source person is still an active employee (not a leaver)
         const notLeaverRes = reassignLeaverOwnedRecords(
@@ -3155,10 +3233,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         restrictedMatter.leadFeeEarnerId = activeEmp.id;
         restrictedMatter.restrictedAccessUserIds = ['P-000001', activeEmp.id];
 
+        // Provision a document store folder on restrictedMatter so syncMatterLifecycleOnSaveSync is exercised (R266)
+        await retryMatterDocumentProvisioning(restrictedMatter.id, actor.id, {
+          session: verifiedActorSession,
+        });
+
         const sharedTask = store.tasks[0]!;
         sharedTask.status = 'To do';
         sharedTask.assignedPersonId = 'P-000001';
         sharedTask.assignedPersonIds = ['P-000001', activeEmp.id];
+
+        // R270: findRecordsOwnedByLeavers finds multi-assignee tasks where leaver is in assignedPersonIds
+        const ownedBefore = findRecordsOwnedByLeavers(
+          store.people,
+          store.organisations,
+          store.matters,
+          store.tasks,
+          store.enquiries,
+          activeEmp.id,
+        );
+        expect(
+          ownedBefore.some((item) => item.recordType === 'task' && item.recordId === sharedTask.id),
+        ).toBe(true);
 
         const closedEnq = store.enquiries[0]!;
         closedEnq.status = 'Declined';
@@ -3169,11 +3265,17 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         openEnq.assignedToId = activeEmp.id;
 
         const auditCountBefore = store.audit.length;
-        const okRes = reassignLeaverOwnedRecords(
-          activeEmp.id,
-          replacementEmp.id,
-          actor.id,
+        const okRes = runWithActiveActorSession(
+          {
+            personId: actor.id,
+            tenantId: 'not-a-law-firm',
+            tokenRoles: ['partner'],
+            expiresAtMs: Date.now() + 3_600_000,
+            verifiedSession: verifiedActorSession,
+          },
+          () => reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
         );
+        await flushDocumentLifecycleSyncForTesting();
         expect(isActionDenied(okRes)).toBe(false);
         expect(okRes.reassignedCount).toBeGreaterThan(0);
 
@@ -3182,6 +3284,16 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(restrictedMatter.restrictedAccessUserIds).toContain(replacementEmp.id);
         expect(restrictedMatter.restrictedAccessUserIds).not.toContain(activeEmp.id);
         expect(restrictedMatter.restrictedAccessUserIds).toContain('P-000001');
+
+        // R266: SharePoint lifecycle re-permission sync job ran for the restricted matter
+        const leaverSyncJob = (store.documentLifecycleJobs ?? []).find(
+          (j) =>
+            j.matterId === restrictedMatter.id &&
+            j.jobType === 'recalculate_permissions' &&
+            j.correlationId.startsWith('corr-leaver-reassign-'),
+        );
+        expect(leaverSyncJob).toBeDefined();
+        expect(leaverSyncJob?.status).toBe('succeeded');
 
         // Task assignedPersonIds updated
         expect(sharedTask.assignedPersonIds).toContain(replacementEmp.id);
@@ -3209,6 +3321,307 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ),
         ).toBe(true);
       } finally {
+        setTestEntraSessionOverride(null);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('enforces contact:create, contact:edit, internalSystemStep stripping on saveOrganisationAction (R252), record:merge on duplicates, enquiry permissions, R264 status/assignment lock, and R268 automatic enquiry assignment in saveTaskRecord (R267)', async () => {
+      try {
+        resetAllDemoData('P-000001');
+        const store = getStore();
+        const financeUser = store.people.find((p) => p.id === 'P-000009')!;
+        const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+        const riskOfficer = store.people.find((p) => p.id === 'P-000003')!;
+        const existingOrg = store.organisations[0]!;
+        const existingContact = store.people.find((p) => !p.isEmployee)!;
+
+        // 1. saveOrganisationRecord, createOrUpdateLink, and deleteLink enforce contact:create / contact:edit
+        expect(
+          isActionDenied(
+            saveOrganisationRecord(
+              { legalName: 'Denied Org' },
+              { byId: financeUser.id },
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            saveOrganisationRecord(
+              { legalName: 'Denied Org Edit' },
+              { id: existingOrg.id, byId: financeUser.id },
+            ),
+          ),
+        ).toBe(true);
+
+        const createdOrgRes = saveOrganisationRecord(
+          { legalName: 'Allowed Org Ltd' },
+          { byId: feeEarner.id },
+        );
+        expect(isActionDenied(createdOrgRes)).toBe(false);
+
+        const linkDeniedCreate = createOrUpdateLink(
+          {
+            personId: existingContact.id,
+            organisationId: existingOrg.id,
+            jobTitle: 'Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: '2026-01-01',
+            endDate: null,
+            contactStatusId: null,
+          },
+          financeUser.id,
+        );
+        expect(isActionDenied(linkDeniedCreate)).toBe(true);
+
+        const linkCreated = createOrUpdateLink(
+          {
+            personId: existingContact.id,
+            organisationId: createdOrgRes.organisation.id,
+            jobTitle: 'Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: '2026-01-01',
+            endDate: null,
+            contactStatusId: null,
+          },
+          feeEarner.id,
+        );
+        expect(isActionDenied(linkCreated)).toBe(false);
+        if (!isActionDenied(linkCreated)) {
+          expect(
+            isActionDenied(
+              createOrUpdateLink(
+                {
+                  id: linkCreated.id,
+                  personId: existingContact.id,
+                  organisationId: createdOrgRes.organisation.id,
+                  jobTitle: 'Updated Director',
+                  department: '',
+                  roleWithinOrganisation: 'Director',
+                  contactRoleIds: [],
+                  isPrimaryContact: false,
+                  isCurrent: true,
+                  startDate: '2026-01-01',
+                  endDate: null,
+                  contactStatusId: null,
+                },
+                financeUser.id,
+              ),
+            ),
+          ).toBe(true);
+          expect(isActionDenied(deleteLink(linkCreated.id, financeUser.id))).toBe(true);
+          expect(isActionDenied(deleteLink(linkCreated.id, feeEarner.id))).toBe(false);
+        }
+
+        // 2 (R252). saveOrganisationAction strips internalSystemStep so a user with contact:edit only cannot create an org
+        riskOfficer.permissionOverrides = {
+          grant: ['contact:edit'],
+          revoke: ['contact:create'],
+        };
+        setTestEntraSessionOverride({
+          personId: riskOfficer.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000003',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: riskOfficer.id,
+          email: 'bethan.rees@notalawfirm.example',
+          displayName: 'Bethan Rees',
+          entraRoles: ['risk_compliance'],
+          mappedRoles: ['risk_compliance'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const spoofedOrgCreate = await saveOrganisationAction(
+          { legalName: 'Spoofed Conversion Org' },
+          {
+            internalSystemStep: 'enquiry_conversion',
+          } as unknown as Parameters<typeof saveOrganisationAction>[1],
+        );
+        expect(isActionDenied(spoofedOrgCreate)).toBe(true);
+        expect(spoofedOrgCreate.errors?.permission).toMatch(/contact:create/);
+        riskOfficer.permissionOverrides = undefined;
+
+        // 3. record:merge on dismissDuplicateMatch and executeMerge
+        const secondOrgRes = saveOrganisationRecord(
+          { legalName: 'Duplicate Org Ltd' },
+          { byId: feeEarner.id },
+        );
+        expect(
+          isActionDenied(
+            dismissDuplicateMatch(
+              'organisation',
+              createdOrgRes.organisation.id,
+              secondOrgRes.organisation.id,
+              feeEarner.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            executeMerge(
+              'organisation',
+              createdOrgRes.organisation.id,
+              secondOrgRes.organisation.id,
+              feeEarner.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            dismissDuplicateMatch(
+              'organisation',
+              createdOrgRes.organisation.id,
+              secondOrgRes.organisation.id,
+              riskOfficer.id,
+            ),
+          ),
+        ).toBe(false);
+
+        // 4. Refusals by permission key on assignEnquiryRecord, closeEnquiryRecord, logEnquiryContactRecord, sendEnquiryEmailRecord
+        const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
+        financeUser.permissionOverrides = {
+          grant: [],
+          revoke: ['enquiry:assign'],
+        };
+        expect(
+          isActionDenied(assignEnquiryRecord(openEnq.id, feeEarner.id, null, financeUser.id)),
+        ).toBe(true);
+        financeUser.permissionOverrides = undefined;
+        expect(
+          isActionDenied(
+            closeEnquiryRecord(
+              openEnq.id,
+              { targetStatus: 'Declined', closeNotes: 'Denied close' },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            logEnquiryContactRecord(
+              openEnq.id,
+              { method: 'Phone', outcome: 'Spoke', note: 'Denied log' },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            sendEnquiryEmailRecord(
+              openEnq.id,
+              {
+                to: 'prospect@notalawfirm.example',
+                subject: 'Test',
+                bodyHtml: '<p>Test</p>',
+                bodyText: 'Test',
+              },
+              financeUser.id,
+            ),
+          ),
+        ).toBe(true);
+
+        // 5 (R264). saveEnquiryRecord refuses status or assignment changes on an existing non-draft enquiry
+        const closedEnq = store.enquiries.find((e) => e.id !== openEnq.id)!;
+        closedEnq.status = 'Declined';
+        closedEnq.assignedToId = feeEarner.id;
+        expect(
+          isActionDenied(
+            saveEnquiryRecord(
+              { status: 'Assigned', summary: closedEnq.summary },
+              { id: closedEnq.id, byId: feeEarner.id },
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            saveEnquiryRecord(
+              { status: 'Declined', summary: openEnq.summary },
+              { id: openEnq.id, byId: feeEarner.id },
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            saveEnquiryRecord(
+              { assignedToId: 'P-000001', summary: openEnq.summary },
+              { id: openEnq.id, byId: feeEarner.id },
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isActionDenied(
+            saveEnquiryRecord(
+              { assignedTeamId: 'TM-999999', summary: openEnq.summary },
+              { id: openEnq.id, byId: feeEarner.id },
+            ),
+          ),
+        ).toBe(true);
+
+        // 6 (R267, R268). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft enquiries
+        const draftEnqRes = saveEnquiryRecord(
+          { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
+          { asDraft: true, byId: feeEarner.id },
+        );
+        const draftEnq = draftEnqRes.enquiry!;
+        saveTaskRecord(
+          {
+            title: 'Task on draft enquiry',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: draftEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(draftEnq.status).toBe('Draft');
+        expect(draftEnq.assignedToId).toBeNull();
+
+        const routedNewEnq = store.enquiries.find((e) => e.id === openEnq.id)!;
+        routedNewEnq.status = 'New';
+        routedNewEnq.assignedToId = null;
+
+        // Actor without enquiry:assign does not auto-assign the enquiry
+        feeEarner.permissionOverrides = {
+          grant: [],
+          revoke: ['enquiry:assign'],
+        };
+        saveTaskRecord(
+          {
+            title: 'Task without enquiry:assign',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(routedNewEnq.assignedToId).toBeNull();
+        expect(routedNewEnq.status).toBe('New');
+
+        // Actor with enquiry:assign auto-assigns the routed New enquiry
+        feeEarner.permissionOverrides = undefined;
+        saveTaskRecord(
+          {
+            title: 'Task with enquiry:assign',
+            dueAt: '2026-12-01',
+            assignedPersonId: feeEarner.id,
+            linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
+          },
+          feeEarner.id,
+        );
+        expect(routedNewEnq.assignedToId).toBe(feeEarner.id);
+        expect(routedNewEnq.status).toBe('Assigned');
+      } finally {
+        setTestEntraSessionOverride(null);
         resetAllDemoData('P-000001');
       }
     });
