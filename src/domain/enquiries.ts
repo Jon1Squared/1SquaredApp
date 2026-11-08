@@ -397,10 +397,10 @@ export function detectPreliminaryConflicts(
   matters: Matter[] = [],
   values: ChoiceValue[] = [],
   enquiries: Enquiry[] = [],
-  excludeEnquiryId?: string | null,
+  excludeEnquiryId: string | null | undefined = null,
   links: PersonOrganisationLink[] = [],
-  canViewMatter?: (matter: Matter) => boolean,
-  tenantId = 'default-tenant',
+  canViewMatter: ((matter: Matter) => boolean) | undefined = undefined,
+  tenantId: string,
 ): ConflictHit[] {
   const res = runEnquiryConflictSearch(
     input,
@@ -463,10 +463,10 @@ export function runEnquiryConflictSearch(
   matters: Matter[] = [],
   values: ChoiceValue[] = [],
   enquiries: Enquiry[] = [],
-  excludeEnquiryId?: string | null,
+  excludeEnquiryId: string | null | undefined = null,
   links: PersonOrganisationLink[] = [],
-  canViewMatter?: (matter: Matter) => boolean,
-  tenantId = 'default-tenant',
+  canViewMatter: ((matter: Matter) => boolean) | undefined = undefined,
+  tenantId: string,
 ): {
   otherPartyClientMatches: ConflictHit[];
   clientAgainstPartyMatches: ConflictHit[];
@@ -1591,7 +1591,7 @@ export function computeEnquiryConflictSnapshot(
     excludeEnquiryId?: string | null;
     links?: PersonOrganisationLink[];
     canViewMatter?: (matter: Matter) => boolean;
-    tenantId?: string;
+    tenantId: string;
   },
 ): EnquiryConflictSnapshot {
   const searchedInput = {
@@ -1633,7 +1633,7 @@ export function computeEnquiryConflictSnapshot(
     opts.excludeEnquiryId ?? null,
     opts.links ?? [],
     opts.canViewMatter,
-    opts.tenantId ?? 'default-tenant',
+    opts.tenantId,
   );
 
   const entityMatches = findEnquiryEntityMatches(

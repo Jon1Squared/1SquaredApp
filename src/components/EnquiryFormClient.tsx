@@ -110,7 +110,7 @@ interface Props {
   canReopen?: boolean;
   canAnonymise?: boolean;
   firmName?: string;
-  tenantId?: string;
+  tenantId: string;
 }
 
 const DEMO_POSTCODE_ADDRESSES: Record<
@@ -158,7 +158,7 @@ export function EnquiryFormClient({
   canReopen: canReopenProp = false,
   canAnonymise = false,
   firmName = 'the firm',
-  tenantId = 'default-tenant',
+  tenantId,
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
   const isDraftMode = isSavedEnquiry && enquiry?.status === 'Draft';

@@ -174,6 +174,7 @@ interface MatterFormClientProps {
   };
   enableAiMatterExtraction?: boolean;
   aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
+  tenantId: string;
 }
 
 type OptionalTabKey =
@@ -279,6 +280,7 @@ export function MatterFormClient({
   suggestedMatterGovernanceAssignees,
   enableAiMatterExtraction = false,
   aiProviderChoice = 'disabled',
+  tenantId,
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -12117,6 +12119,7 @@ export function MatterFormClient({
                   values={values}
                   customFields={customFields}
                   currentUserId={currentUser.id}
+                  tenantId={tenantId}
                   orgStructure={orgStructure}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingPerson={(existingPerson) => {
@@ -12195,6 +12198,7 @@ export function MatterFormClient({
                   values={values}
                   customFields={customFields}
                   currentUserId={currentUser.id}
+                  tenantId={tenantId}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingOrganisation={(existingOrg) => {
                     handleAddClientsToMatter(
@@ -12594,6 +12598,7 @@ export function MatterFormClient({
                       values={values}
                       customFields={customFields}
                       currentUserId={currentUser.id}
+                      tenantId={tenantId}
                       orgStructure={orgStructure}
                       onCancelModal={resetAddPartyForm}
                       onSelectExistingPerson={(existingPerson) => {
@@ -12699,6 +12704,7 @@ export function MatterFormClient({
                     values={values}
                     customFields={customFields}
                     currentUserId={currentUser.id}
+                    tenantId={tenantId}
                     onCancelModal={resetAddPartyForm}
                     onSelectExistingOrganisation={(existingOrg) => {
                       addOrgRecordToMatter(

@@ -7989,6 +7989,46 @@ export function reopenEnquiryRecord(
   return { enquiry: enq };
 }
 
+const DECLINED_ORG_BLOCKED_REASON =
+  'Client organisation has conflict status "Conflict – declined".';
+const DECLINED_ORG_NAME_WARNING =
+  "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.";
+
+function assessDeclinedOrganisation(
+  store: FirmStore,
+  existingOrg: Organisation | undefined,
+  clientOrgName: string,
+): {
+  existingOrgDeclined: boolean;
+  hasDeclinedOrgNameMatch: boolean;
+  blockedReason: string | null;
+  nameMatchWarning: string | null;
+} {
+  const declinedStatusId = vid('conflict_status', 'Conflict – declined');
+  const existingOrgDeclined = Boolean(
+    existingOrg && existingOrg.conflictStatusId === declinedStatusId,
+  );
+  const clientOrgNameLower = clientOrgName.trim().toLowerCase();
+  const matchingOrgsByName =
+    !existingOrg && clientOrgNameLower
+      ? store.organisations.filter(
+          (o) =>
+            !o.mergedIntoId &&
+            (o.legalName.trim().toLowerCase() === clientOrgNameLower ||
+              o.otherNames.some((n) => n.name.trim().toLowerCase() === clientOrgNameLower)),
+        )
+      : [];
+  const hasDeclinedOrgNameMatch = matchingOrgsByName.some(
+    (o) => o.conflictStatusId === declinedStatusId,
+  );
+  return {
+    existingOrgDeclined,
+    hasDeclinedOrgNameMatch,
+    blockedReason: existingOrgDeclined ? DECLINED_ORG_BLOCKED_REASON : null,
+    nameMatchWarning: hasDeclinedOrgNameMatch ? DECLINED_ORG_NAME_WARNING : null,
+  };
+}
+
 /**
  * Step 1 & 2 of Converting an enquiry to a matter:
  * - Runs the conflict check against the client and other parties named.
@@ -8007,6 +8047,7 @@ export function prepareEnquiryConversion(
   ok: boolean;
   conflictBlocked?: boolean;
   conflictReasons?: string[];
+  conflictWarnings?: string[];
   clientId?: string;
   instructingContactId?: string | null;
   enquiryId?: string;
@@ -8093,16 +8134,32 @@ export function prepareEnquiryConversion(
     });
   };
 
-  if (conflicts.hasBlockingConflict) {
-    const rawReasons = [
+  const linkedOrgId = opts.useOrganisationId ?? enq.linkedOrganisationId ?? null;
+  const existingOrg = linkedOrgId
+    ? store.organisations.find((o) => o.id === linkedOrgId)
+    : undefined;
+  const clientOrgName = existingOrg?.legalName || enq.callingOnBehalfOf.trim();
+  const declinedOrgAssessment = assessDeclinedOrganisation(
+    store,
+    existingOrg,
+    clientOrgName,
+  );
+
+  if (declinedOrgAssessment.existingOrgDeclined || conflicts.hasBlockingConflict) {
+    const rawReasons: string[] = [];
+    if (declinedOrgAssessment.blockedReason) {
+      rawReasons.push(declinedOrgAssessment.blockedReason);
+    }
+    rawReasons.push(
       ...conflicts.otherPartyClientMatches.filter((h) => h.blocking).map((h) => h.reason),
       ...conflicts.clientAgainstPartyMatches.filter((h) => h.blocking).map((h) => h.reason),
-    ];
+    );
     const reasons = redactRestrictedMatterReasons(rawReasons);
     return {
       ok: false,
       conflictBlocked: true,
       conflictReasons: reasons,
+      error: reasons[0],
     };
   }
 
@@ -8151,7 +8208,9 @@ export function prepareEnquiryConversion(
   enq.linkedPersonId = personId;
 
   const outcomeLabel: 'Cleared' | 'Potential conflict' =
-    conflicts.allConflicts.length > 0 ? 'Potential conflict' : 'Cleared';
+    conflicts.allConflicts.length > 0 || declinedOrgAssessment.hasDeclinedOrgNameMatch
+      ? 'Potential conflict'
+      : 'Cleared';
   const decisionSummary = `${outcomeLabel} by ${actorName} on ${today} (${conflicts.allConflicts.length} ${conflicts.allConflicts.length === 1 ? 'match' : 'matches'})`;
   const conflictReference = `${enq.reference} · ${decisionSummary}`;
   const decisionSnapshot = {
@@ -8238,12 +8297,23 @@ export function prepareEnquiryConversion(
     }
   }
 
+  const conflictWarnings = conflicts.allConflicts
+    .filter((h) => !h.blocking && h.severity !== 'high')
+    .map((h) => h.reason);
+  if (
+    declinedOrgAssessment.nameMatchWarning &&
+    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
+  ) {
+    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
+  }
+
   saveStore(store);
   return {
     ok: true,
     clientId,
     instructingContactId,
     enquiryId: enq.id,
+    ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
   };
 }
 
@@ -11380,23 +11450,12 @@ export function prepareQuoteConversionRecord(
   );
 
   const hasRestrictedMatch = hasUnapprovedRestrictedMatches(reconciledMatches, []);
-  const clientOrgNameLower = clientOrgName.trim().toLowerCase();
-  const matchingOrgsByName =
-    !existingOrg && clientOrgNameLower
-      ? store.organisations.filter(
-          (o) =>
-            !o.mergedIntoId &&
-            (o.legalName.trim().toLowerCase() === clientOrgNameLower ||
-              o.otherNames.some((n) => n.name.trim().toLowerCase() === clientOrgNameLower)),
-        )
-      : [];
-  const hasDeclinedOrgNameMatch = matchingOrgsByName.some(
-    (o) => o.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
+  const declinedOrgAssessment = assessDeclinedOrganisation(
+    store,
+    existingOrg,
+    clientOrgName,
   );
-  const existingOrgDeclined = Boolean(
-    existingOrg &&
-      existingOrg.conflictStatusId === vid('conflict_status', 'Conflict – declined'),
-  );
+  const { existingOrgDeclined, hasDeclinedOrgNameMatch } = declinedOrgAssessment;
   const isConflictBlocked =
     existingOrgDeclined ||
     hasRestrictedMatch ||
@@ -11405,15 +11464,12 @@ export function prepareQuoteConversionRecord(
   const totalMatchesCount = Math.max(
     reconciledMatches.length,
     prelimConflicts.allConflicts.length,
-    hasDeclinedOrgNameMatch ? 1 : 0,
   );
 
   if (isConflictBlocked) {
     const reasons: string[] = [];
-    if (existingOrgDeclined) {
-      reasons.push(
-        'Client organisation has conflict status "Conflict – declined".',
-      );
+    if (declinedOrgAssessment.blockedReason) {
+      reasons.push(declinedOrgAssessment.blockedReason);
     }
     if (hasRestrictedMatch) {
       reasons.push(
@@ -11621,12 +11677,11 @@ export function prepareQuoteConversionRecord(
   const conflictWarnings = prelimConflicts.allConflicts
     .filter((h) => !h.blocking && h.severity !== 'high')
     .map((h) => h.reason);
-  if (hasDeclinedOrgNameMatch) {
-    const declinedNameWarning =
-      "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.";
-    if (!conflictWarnings.includes(declinedNameWarning)) {
-      conflictWarnings.push(declinedNameWarning);
-    }
+  if (
+    declinedOrgAssessment.nameMatchWarning &&
+    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
+  ) {
+    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
   }
 
   return {

@@ -4062,6 +4062,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           (o) => o.id === declinedByNameConv.clientId,
         )!;
         expect(createdSameNameProspectOrg.conflictDecision?.outcome).toBe('Potential conflict');
+        expect(createdSameNameProspectOrg.conflictDecision?.matchesCount).toBe(0);
 
         // Linked declined organisation still hard-blocks
         const linkedDeclinedRecheck = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
@@ -4070,6 +4071,79 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // 3. Enquiry conversion for a new business also records conflictDecision and audit entry, and keeps conflictDecision on the converted matter (R304)
         const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
+
+        // 3a. R307: An enquiry linked to a declined organisation is blocked on conversion, while an unlinked enquiry matching a declined organisation by name converts with the warning in conflictWarnings
+        const linkedDeclinedEnq = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Owain',
+            lastName: 'DeclinedLinkedCaller',
+            callingOnBehalfOf: declinedOrg.legalName,
+            linkedOrganisationId: declinedOrg.id,
+            email: 'owain@declined-linked.example',
+            phone: '029 2018 0771',
+            preferredContactMethodId: templateEnq.preferredContactMethodId,
+            sourceId: templateEnq.sourceId,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            summary: 'Enquiry linked to declined organisation',
+            notes: 'High-level notes for linked declined organisation enquiry conversion test.',
+            otherPartiesNamed: '',
+            urgencyId: templateEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000001', asDraft: false },
+        ).enquiry!;
+        const linkedDeclinedEnqConv = prepareEnquiryConversion(
+          linkedDeclinedEnq.id,
+          { useOrganisationId: declinedOrg.id, createForBusiness: true },
+          'P-000001',
+        );
+        expect(linkedDeclinedEnqConv.ok).toBe(false);
+        expect(linkedDeclinedEnqConv.conflictBlocked).toBe(true);
+        expect(linkedDeclinedEnqConv.conflictReasons).toContain(
+          'Client organisation has conflict status "Conflict – declined".',
+        );
+
+        const declinedEnqOrg = saveOrganisationRecord(
+          {
+            legalName: 'Declined Enquiry Org Ltd',
+            conflictStatusId: declinedStatusId,
+            conflictReference: 'CR-ENQ-DECLINED',
+          },
+          { byId: 'P-000001' },
+        ).organisation!;
+        const unlinkedDeclinedNameEnq = saveEnquiryRecord(
+          {
+            channelId: templateEnq.channelId,
+            firstName: 'Carys',
+            lastName: 'DeclinedNameCaller',
+            callingOnBehalfOf: declinedEnqOrg.legalName,
+            email: 'carys@declined-name.example',
+            phone: '029 2018 0772',
+            preferredContactMethodId: templateEnq.preferredContactMethodId,
+            sourceId: templateEnq.sourceId,
+            practiceAreaId: matterWithOpponent.practiceAreaId,
+            summary: 'Unlinked enquiry matching declined organisation by name',
+            notes: 'High-level notes for unlinked declined organisation name match enquiry test.',
+            otherPartiesNamed: '',
+            urgencyId: templateEnq.urgencyId,
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000001', asDraft: false },
+        ).enquiry!;
+        const unlinkedDeclinedNameEnqConv = prepareEnquiryConversion(
+          unlinkedDeclinedNameEnq.id,
+          { createForBusiness: true },
+          'P-000001',
+        );
+        expect(unlinkedDeclinedNameEnqConv.ok).toBe(true);
+        expect(unlinkedDeclinedNameEnqConv.conflictBlocked).toBeFalsy();
+        expect(unlinkedDeclinedNameEnqConv.conflictWarnings).toContain(
+          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(unlinkedDeclinedNameEnq.conflictDecision?.outcome).toBe('Potential conflict');
+        expect(unlinkedDeclinedNameEnq.conflictDecision?.matchesCount).toBe(0);
+
         const cleanEnqRes = saveEnquiryRecord(
           {
             channelId: templateEnq.channelId,
@@ -4150,6 +4224,32 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(convertedMatterRes.matter?.conflictDecision).toBeDefined();
         expect(convertedMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
         expect(convertedMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(cleanEnq.id);
+
+        // R308: Quote conversion conflictDecision is also carried onto matter.conflictDecision when opening a matter from a converted quote
+        const convertedFromQuoteMatterRes = await withPageActor(() =>
+          saveMatterRecord(
+            {
+              title: 'Solaris Clean Quote Converted Matter',
+              shortDescription: 'Matter created from quote conversion',
+              clientId: cleanConv.clientId!,
+              instructingContactId: cleanConv.instructingContactId,
+              sourceQuoteId: cleanQuote.id,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              workTypeSubcategoryId: matterWithOpponent.workTypeSubcategoryId,
+              matterTypeId: matterWithOpponent.matterTypeId,
+              billingBasisId: matterWithOpponent.billingBasisId,
+              jurisdictionGroupId: matterWithOpponent.jurisdictionGroupId,
+              leadFeeEarnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+            },
+            { byId: 'P-000001', saveMode: 'draft' },
+          ),
+        );
+        expect(convertedFromQuoteMatterRes.matter?.conflictDecision).toBeDefined();
+        expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
+        expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(
+          cleanQuote.id,
+        );
       } finally {
         setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');
@@ -4266,6 +4366,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             people: store.people,
             organisations: store.organisations,
             links: store.links,
+            tenantId: 'not-a-law-firm',
             canView: () => true,
             canViewEnquiry: () => true,
           },
@@ -4311,6 +4412,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           null,
           store.links,
           () => true,
+          'not-a-law-firm',
         );
         expect(
           enqCheck.allConflicts.some((h) =>
@@ -4356,6 +4458,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             excludeEnquiryId: null,
             links: store.links,
             canViewMatter: () => true,
+            tenantId: 'not-a-law-firm',
           },
         );
         expect(snap.searchedInput.searchedSources).toEqual([...CONFLICT_SEARCHED_SOURCES]);

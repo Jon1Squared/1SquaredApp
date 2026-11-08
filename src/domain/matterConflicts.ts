@@ -39,7 +39,7 @@ export interface MatterConflictSearchDeps {
   people: Person[];
   organisations: Organisation[];
   links?: PersonOrganisationLink[];
-  tenantId?: string;
+  tenantId: string;
   canView: (matter: Matter) => boolean;
   canViewEnquiry: (enquiry: Enquiry) => boolean;
 }
@@ -423,7 +423,7 @@ export function searchMatterConflicts(
               mp.name.trim().toLowerCase() === lower,
           ) ||
           matchingMatterContacts.some((mc) => mc.exact);
-        const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId || 'default-tenant', `${party.id}:${m.id}`)}`;
+        const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${m.id}`)}`;
         const fallbackKey = `${lower}__match on a restricted matter__restricted matter: refer to risk`;
         pushMatch(
           {
@@ -628,7 +628,7 @@ export function searchMatterConflicts(
         if (!counterpartOnMatter) continue;
 
         if (!deps.canView(m)) {
-          const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId || 'default-tenant', `${party.id}:${m.id}`)}`;
+          const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${m.id}`)}`;
           const fallbackKey = `${lower}__match on a restricted matter__restricted matter: refer to risk`;
           pushMatch(
             {
@@ -763,7 +763,7 @@ export function searchMatterConflicts(
         if (matchedOther) {
           const isExact = matchedOther.toLowerCase() === lower;
           if (!deps.canViewEnquiry(enq)) {
-            const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId || 'default-tenant', `${party.id}:${enq.id}`)}`;
+            const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${enq.id}`)}`;
             const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
             pushMatch(
               {
@@ -856,7 +856,7 @@ export function searchMatterConflicts(
           (callerMatched && callerLower === lower) ||
           (behalfMatched && behalfLower === lower) ||
           (matchedOther !== undefined && matchedOther.toLowerCase() === lower);
-        const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId || 'default-tenant', `${party.id}:${enq.id}`)}`;
+        const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${enq.id}`)}`;
         const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
         pushMatch(
           {

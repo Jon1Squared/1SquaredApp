@@ -50,7 +50,7 @@ interface Props {
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
   currentUserId: string;
-  tenantId?: string;
+  tenantId: string;
   initialAction?: string | null;
 }
 
@@ -63,7 +63,7 @@ export function QuoteDetailClient({
   links = [],
   values,
   currentUserId,
-  tenantId = 'default-tenant',
+  tenantId,
   initialAction = null,
 }: Props) {
   const router = useRouter();

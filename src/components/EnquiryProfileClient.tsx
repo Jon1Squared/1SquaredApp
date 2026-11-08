@@ -67,7 +67,7 @@ interface Props {
   canReopen?: boolean;
   canAnonymise?: boolean;
   canTakeByTaskId?: Record<string, boolean>;
-  tenantId?: string;
+  tenantId: string;
 }
 
 export function EnquiryProfileClient({
@@ -84,7 +84,7 @@ export function EnquiryProfileClient({
   canReopen = false,
   canAnonymise = false,
   canTakeByTaskId,
-  tenantId = 'default-tenant',
+  tenantId,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();

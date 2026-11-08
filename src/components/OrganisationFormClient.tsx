@@ -52,7 +52,7 @@ interface Props {
   values: ChoiceValue[];
   customFields: CustomFieldDefinition[];
   currentUserId: string;
-  tenantId?: string;
+  tenantId: string;
   embeddedInModal?: boolean;
   nameOnlyMandatory?: boolean;
   modalTitle?: string;
@@ -81,7 +81,7 @@ export function OrganisationFormClient({
   values,
   customFields,
   currentUserId,
-  tenantId = 'default-tenant',
+  tenantId,
   embeddedInModal = false,
   nameOnlyMandatory = false,
   modalTitle,

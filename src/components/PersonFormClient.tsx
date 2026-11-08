@@ -116,7 +116,7 @@ interface Props {
   onCancelModal?: () => void;
   onSelectExistingPerson?: (person: Person) => void;
   onPersonCreated?: (person: Person, linkedOrgId?: string) => void;
-  tenantId?: string;
+  tenantId: string;
 }
 
 const DEMO_POSTCODE_ADDRESSES: Record<
@@ -182,7 +182,7 @@ export function PersonFormClient({
   leaverOwnedRecords: leaverOwnedRecordsProp,
   firmPrimaryDomain,
   firmName = 'Firm',
-  tenantId = 'default-tenant',
+  tenantId,
   embeddedInModal = false,
   nameOnlyMandatory = false,
   modalTitle,
