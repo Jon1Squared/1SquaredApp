@@ -1204,3 +1204,40 @@ export function hasUnapprovedRestrictedMatches(
   const approved = new Set(approvedIds ?? []);
   return matches.some((m) => m.restricted && !approved.has(m.id));
 }
+
+/**
+ * Normalises a list of non-blocking conflict warnings returned by `prepareEnquiryConversion`
+ * or `prepareQuoteConversionRecord`, stripping blanks and duplicates.
+ */
+export function normaliseConversionConflictWarnings(
+  conflictWarnings: readonly string[] | string | undefined | null,
+): string[] {
+  if (!conflictWarnings) return [];
+  const rawList = Array.isArray(conflictWarnings)
+    ? conflictWarnings
+    : [conflictWarnings];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of rawList) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Turns non-blocking conversion `conflictWarnings` into a single plain-English notice string
+ * for toast notifications and the new-matter conversion warning banner (R311).
+ * Returns `null` when there are no warnings.
+ */
+export function formatConversionConflictWarningsNotice(
+  conflictWarnings: readonly string[] | string | undefined | null,
+): string | null {
+  const warnings = normaliseConversionConflictWarnings(conflictWarnings);
+  if (warnings.length === 0) return null;
+  return `Conflict warning: ${warnings.join(' · ')}`;
+}
+

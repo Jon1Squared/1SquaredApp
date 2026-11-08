@@ -165,6 +165,8 @@ import { isActionDenied } from '../../src/domain/actionResult';
 import {
   buildEffectiveConflictParties,
   CONFLICT_SEARCHED_SOURCES,
+  formatConversionConflictWarningsNotice,
+  normaliseConversionConflictWarnings,
   redactRecordId,
   searchMatterConflicts,
 } from '../../src/domain/matterConflicts';
@@ -4103,6 +4105,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(linkedDeclinedEnqConv.conflictReasons).toContain(
           'Client organisation has conflict status "Conflict – declined".',
         );
+        expect(
+          store.audit.some(
+            (a) =>
+              a.recordType === 'enquiry' &&
+              a.recordId === linkedDeclinedEnq.id &&
+              a.action === 'conflict-decision' &&
+              a.field === 'Enquiry conversion blocked by conflict check',
+          ),
+        ).toBe(true);
 
         const declinedEnqOrg = saveOrganisationRecord(
           {
@@ -4143,6 +4154,29 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(unlinkedDeclinedNameEnq.conflictDecision?.outcome).toBe('Potential conflict');
         expect(unlinkedDeclinedNameEnq.conflictDecision?.matchesCount).toBe(0);
+        // R311: Shared helper turns conflictWarnings into the user-visible notice for toast and new-matter banner
+        expect(
+          formatConversionConflictWarningsNotice(
+            unlinkedDeclinedNameEnqConv.conflictWarnings,
+          ),
+        ).toBe(
+          "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(
+          formatConversionConflictWarningsNotice(declinedByNameConv.conflictWarnings),
+        ).toContain(
+          "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+        );
+        expect(formatConversionConflictWarningsNotice(undefined)).toBeNull();
+        expect(formatConversionConflictWarningsNotice([])).toBeNull();
+        expect(
+          normaliseConversionConflictWarnings([
+            '  First warning  ',
+            '',
+            'First warning',
+            'Second warning',
+          ]),
+        ).toEqual(['First warning', 'Second warning']);
 
         const cleanEnqRes = saveEnquiryRecord(
           {

@@ -1,4 +1,5 @@
 import React from 'react';
+import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
 import { getAppSnapshot, withPageActor } from '@/server/services';
 import { MatterFormClient } from '@/components/MatterFormClient';
 
@@ -14,6 +15,7 @@ export default async function NewMatterPage({
     fromEnquiry?: string;
     quoteId?: string;
     instructingContactId?: string;
+    conflictWarning?: string | string[];
     draftId?: string;
     scenario?: string;
   }>;
@@ -42,6 +44,7 @@ export default async function NewMatterPage({
         initialEnquiry={initialEnquiry}
         initialQuote={initialQuote}
         initialInstructingContactId={params.instructingContactId ?? null}
+        initialConflictWarnings={normaliseConversionConflictWarnings(params.conflictWarning)}
         activeViewingRole={snap.activeViewingRole}
         people={snap.people}
         organisations={snap.organisations}

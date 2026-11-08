@@ -33,6 +33,10 @@ import {
 } from '@/domain/enquiries';
 import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, valuesForList } from '@/domain/lists';
+import {
+  formatConversionConflictWarningsNotice,
+  normaliseConversionConflictWarnings,
+} from '@/domain/matterConflicts';
 import { personDisplayName } from '@/domain/names';
 import type {
   Address,
@@ -362,9 +366,20 @@ export function EnquiryProfileClient({
         return;
       }
       setConvertModalOpen(false);
-      router.push(
-        `/matters/new?enquiryId=${enquiry.id}&clientId=${res.clientId ?? ''}&instructingContactId=${res.instructingContactId ?? ''}`,
+      const warningNotice = formatConversionConflictWarningsNotice(
+        res.conflictWarnings,
       );
+      if (warningNotice) {
+        showToast(warningNotice);
+      }
+      const qs = new URLSearchParams();
+      qs.set('enquiryId', enquiry.id);
+      qs.set('clientId', res.clientId ?? '');
+      qs.set('instructingContactId', res.instructingContactId ?? '');
+      for (const w of normaliseConversionConflictWarnings(res.conflictWarnings)) {
+        qs.append('conflictWarning', w);
+      }
+      router.push(`/matters/new?${qs.toString()}`);
     });
   };
 

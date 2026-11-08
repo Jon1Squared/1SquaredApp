@@ -8155,6 +8155,30 @@ export function prepareEnquiryConversion(
       ...conflicts.clientAgainstPartyMatches.filter((h) => h.blocking).map((h) => h.reason),
     );
     const reasons = redactRestrictedMatterReasons(rawReasons);
+    const blockedMatchesCount = conflicts.allConflicts.length;
+    const blockedDecisionSummary = `Potential conflict identified by ${actorName} on ${today} (${blockedMatchesCount} ${blockedMatchesCount === 1 ? 'match' : 'matches'})`;
+    const blockedDecisionSnapshot = {
+      outcome: 'Potential conflict' as const,
+      decidedById: byId,
+      decidedByName: actorName,
+      decidedAt: nowIso,
+      sourceRecordId: enq.id,
+      matchesCount: blockedMatchesCount,
+      searchedSources: [...CONFLICT_SEARCHED_SOURCES],
+      summary: blockedDecisionSummary,
+    };
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'conflict-decision',
+      field: 'Enquiry conversion blocked by conflict check',
+      oldValue: null,
+      newValue: `${blockedDecisionSummary} · ${reasons.join(' · ')}`,
+      byId,
+      at: nowIso,
+      snapshot: blockedDecisionSnapshot,
+    });
+    saveStore(store);
     return {
       ok: false,
       conflictBlocked: true,
@@ -8297,9 +8321,11 @@ export function prepareEnquiryConversion(
     }
   }
 
-  const conflictWarnings = conflicts.allConflicts
-    .filter((h) => !h.blocking && h.severity !== 'high')
-    .map((h) => h.reason);
+  const conflictWarnings = redactRestrictedMatterReasons(
+    conflicts.allConflicts
+      .filter((h) => !h.blocking && h.severity !== 'high')
+      .map((h) => h.reason),
+  );
   if (
     declinedOrgAssessment.nameMatchWarning &&
     !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)

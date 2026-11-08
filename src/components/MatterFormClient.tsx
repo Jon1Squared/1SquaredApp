@@ -53,6 +53,10 @@ import {
 } from '@/domain/employment';
 import { resolveLabel } from '@/domain/lists';
 import {
+  formatConversionConflictWarningsNotice,
+  normaliseConversionConflictWarnings,
+} from '@/domain/matterConflicts';
+import {
   buildDefaultMatterPartyTaxonomy,
   CAPACITY_GROUPS,
   formatPartyRoleDisplay,
@@ -151,6 +155,7 @@ interface MatterFormClientProps {
   initialEnquiry?: Enquiry | null;
   initialQuote?: Quote | null;
   initialInstructingContactId?: string | null;
+  initialConflictWarnings?: string[];
   activeViewingRole?: string;
   people: Person[];
   organisations: Organisation[];
@@ -260,6 +265,7 @@ export function MatterFormClient({
   initialEnquiry,
   initialQuote,
   initialInstructingContactId,
+  initialConflictWarnings,
   activeViewingRole = 'fee_earner',
   people: initialPeople,
   organisations: initialOrganisations,
@@ -287,6 +293,14 @@ export function MatterFormClient({
   const today = toIsoDate(new Date());
 
   const costsConfig = matterCostsConfig;
+  const conversionConflictWarnings = useMemo(
+    () => normaliseConversionConflictWarnings(initialConflictWarnings),
+    [initialConflictWarnings],
+  );
+  const conversionConflictWarningNotice = useMemo(
+    () => formatConversionConflictWarningsNotice(conversionConflictWarnings),
+    [conversionConflictWarnings],
+  );
 
   const taxonomy = useMemo(
     () => matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(values),
@@ -5345,6 +5359,20 @@ export function MatterFormClient({
               >
                 View enquiry ↗
               </Link>
+            </div>
+          ) : null}
+
+          {conversionConflictWarningNotice ? (
+            <div
+              className="conflict-banner conflict-banner--amber"
+              role="status"
+              data-testid="conversion-conflict-warning-banner"
+              style={{ marginBottom: 0 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <AlertTriangle size={16} style={{ flexShrink: 0 }} />
+                <span>{conversionConflictWarningNotice}</span>
+              </div>
             </div>
           ) : null}
 

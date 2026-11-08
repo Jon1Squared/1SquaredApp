@@ -14,6 +14,10 @@ import { quoteStatusTone } from '@/domain/badges';
 import { addDays, formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { resolveLabel } from '@/domain/lists';
+import {
+  formatConversionConflictWarningsNotice,
+  normaliseConversionConflictWarnings,
+} from '@/domain/matterConflicts';
 import { personDisplayName } from '@/domain/names';
 import {
   calculateQuoteTotals,
@@ -193,11 +197,20 @@ export function QuoteDetailClient({
         showToast(res.error ?? res.conflictReasons?.[0] ?? 'Could not prepare quote conversion');
         return;
       }
+      const warningNotice = formatConversionConflictWarningsNotice(
+        res.conflictWarnings,
+      );
+      if (warningNotice) {
+        showToast(warningNotice);
+      }
       const params = new URLSearchParams();
       params.set('quoteId', quote.id);
       if (res.clientId) params.set('clientId', res.clientId);
       if (res.instructingContactId) params.set('instructingContactId', res.instructingContactId);
       if (res.enquiryId) params.set('enquiryId', res.enquiryId);
+      for (const w of normaliseConversionConflictWarnings(res.conflictWarnings)) {
+        params.append('conflictWarning', w);
+      }
       router.push(`/matters/new?${params.toString()}`);
     });
   };
