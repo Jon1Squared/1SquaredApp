@@ -374,8 +374,9 @@ export function resolveKeyDateSource(input: {
  * Single canonical source and calculation resolver when superseding a confirmed key date (R294).
  */
 export function resolveSupersedeKeyDateSource(params: {
-  existingKeyDate: Pick<KeyDate, 'source' | 'calculation'>;
+  existingKeyDate: Pick<KeyDate, 'source' | 'calculation' | 'dueDate'>;
   updates: {
+    dueDate: IsoDate;
     source?: KeyDateSource;
     calculation?: KeyDateCalculation;
   };
@@ -461,7 +462,10 @@ export function resolveSupersedeKeyDateSource(params: {
 
   return {
     ok: true,
-    source: updates.source ?? existingKeyDate.source,
+    source:
+      updates.dueDate !== existingKeyDate.dueDate
+        ? 'manual'
+        : (updates.source ?? existingKeyDate.source),
     carriedCalculation: undefined,
     convertedRemovedRuleToManual: false,
   };
@@ -942,9 +946,10 @@ export function createOrProposeKeyDate(
       );
     }
 
-    const calendar = findBusinessCalendar(config, foundRule.rule.calendarId);
+    const limitationRule = foundRule.rule;
+    const calendar = findBusinessCalendar(config, limitationRule.calendarId);
     const calcResult = calculateLimitationDate({
-      rule: foundRule.rule,
+      rule: limitationRule,
       triggers: calculation.triggers,
       calendar,
       ruleSetReviewStatus: foundRule.ruleSet.reviewStatus,

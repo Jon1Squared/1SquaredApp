@@ -306,7 +306,7 @@ const SUBTREE_ALIASES_BY_PARENT_PATH: Readonly<
   },
   'documentRouting[].match': {
     aliases: ['criteria'],
-    scopeAnchor: /\b(?:DocumentRoutingRule|rule\??\.match)\b/,
+    scopeAnchor: /\b(?:DocumentRoutingRule|routingRule\??\.match)\b/,
   },
   'keyDates.keyDateTypes[]': {
     aliases: ['kdType'],
@@ -317,7 +317,7 @@ const SUBTREE_ALIASES_BY_PARENT_PATH: Readonly<
     scopeAnchor: /\b(?:matterTypes|findMatterTypeKeyDateConfig)\b/,
   },
   'keyDates.limitationRuleSets[].rules[]': {
-    aliases: ['rule'],
+    aliases: ['limitationRule'],
     scopeAnchor:
       /\b(?:limitationRuleSets|LimitationRuleConfig|CalculateLimitationDateOptions|findLimitationRule)\b/,
   },
@@ -1189,6 +1189,37 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         todayIso,
       );
 
+      // R310: An unchanged reviewed rule set (same version) keeps its stored reviewedOn as well as reviewedBy
+      const storedWithPastReview = structuredClone(savedReviewed.config!);
+      storedWithPastReview.limitationRuleSets![0] = {
+        ...storedWithPastReview.limitationRuleSets![0]!,
+        reviewedBy: 'P-000001',
+        reviewedOn: '2025-05-10',
+      };
+      store.keyDatesConfigOverride = storedWithPastReview;
+      saveStore(store);
+
+      const unchangedReviewedPayload = structuredClone(storedWithPastReview);
+      unchangedReviewedPayload.limitationRuleSets![0] = {
+        ...unchangedReviewedPayload.limitationRuleSets![0]!,
+        // Same version and reviewStatus: 'reviewed', attempting to spoof reviewedBy and reviewedOn
+        reviewedBy: 'P-000004',
+        reviewedOn: '2020-01-01',
+      };
+      const savedUnchangedReviewed = saveKeyDatesConfigRecord(
+        unchangedReviewedPayload,
+        'Save config without changing reviewed rule set version',
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(savedUnchangedReviewed.ok).toBe(true);
+      expect(
+        savedUnchangedReviewed.config?.limitationRuleSets?.[0]?.reviewedBy,
+      ).toBe('P-000001');
+      expect(
+        savedUnchangedReviewed.config?.limitationRuleSets?.[0]?.reviewedOn,
+      ).toBe('2025-05-10');
+
       // R295: Reject unknown reviewStatus values rather than coercing them to 'unreviewed'
       const invalidStatusConfig = structuredClone(savedReviewed.config!);
       (
@@ -1363,6 +1394,58 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
           'Manual entry is disabled',
         );
       }
+
+      // R306: Superseding a carried_from_enquiry key date with a new due date on a type with allowManualEntry: false is denied with ActionDenied (FORBIDDEN)
+      const carriedKd = structuredClone(createdKd);
+      carriedKd.id = 'KD-R306-CARRIED';
+      carriedKd.source = 'carried_from_enquiry';
+      carriedKd.calculation = undefined;
+      carriedKd.dueDate = '2027-06-01';
+      carriedKd.status = 'confirmed';
+      getStore().keyDates!.push(carriedKd);
+      saveStore(getStore());
+
+      const supersedeCarriedDenied = await supersedeConfirmedKeyDateRecord(
+        carriedKd.id,
+        {
+          dueDate: '2027-08-15',
+          notes: 'Attempted manual date change on carried_from_enquiry key date',
+        },
+        'Manual date change on carried_from_enquiry test',
+        'P-000001',
+      );
+      expect(supersedeCarriedDenied.ok).toBe(false);
+      expect(isActionDenied(supersedeCarriedDenied)).toBe(true);
+      if (isActionDenied(supersedeCarriedDenied)) {
+        expect(supersedeCarriedDenied.code).toBe('FORBIDDEN');
+        expect(supersedeCarriedDenied.message).toContain(
+          'Manual entry is disabled',
+        );
+      }
+
+      // R306: The same supersede on a type that allows manual entry succeeds and stores source: 'manual'
+      const configAllowingManual = structuredClone(getKeyDatesConfig(getStore()));
+      configAllowingManual.keyDateTypes![0] = {
+        ...configAllowingManual.keyDateTypes![0]!,
+        allowManualEntry: true,
+      };
+      getStore().keyDatesConfigOverride = configAllowingManual;
+      saveStore(getStore());
+
+      const supersedeCarriedAllowed = await supersedeConfirmedKeyDateRecord(
+        carriedKd.id,
+        {
+          dueDate: '2027-08-15',
+          notes: 'Allowed manual date change on carried_from_enquiry key date',
+        },
+        'Manual date change allowed test',
+        'P-000001',
+      );
+      expect(supersedeCarriedAllowed.ok).toBe(true);
+      expect(supersedeCarriedAllowed.replacementKeyDate?.source).toBe('manual');
+      expect(supersedeCarriedAllowed.replacementKeyDate?.dueDate).toBe(
+        '2027-08-15',
+      );
     } finally {
       saveStore(snapshot);
     }

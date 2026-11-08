@@ -32,9 +32,9 @@ export function findLimitationRule(
 ): { ruleSet: LimitationRuleSetConfig; rule: LimitationRuleConfig } | undefined {
   const rs = config?.limitationRuleSets?.find((s) => s.id === ruleSetId);
   if (!rs) return undefined;
-  const rule = rs.rules.find((r) => r.id === ruleId);
-  if (!rule) return undefined;
-  return { ruleSet: rs, rule };
+  const limitationRule = rs.rules.find((r) => r.id === ruleId);
+  if (!limitationRule) return undefined;
+  return { ruleSet: rs, rule: limitationRule };
 }
 import type {
   BusinessCalendarConfig,
@@ -224,15 +224,15 @@ function formatPeriodDescription(period: LimitationPeriodConfig): string {
  * satisfying the personal data minimisation requirement (§11).
  */
 export function sanitizeTriggerValuesForRule(
-  rule: LimitationRuleConfig,
+  limitationRule: LimitationRuleConfig,
   triggers: KeyDateTriggerValues,
 ): { sanitized: KeyDateTriggerValues; strippedDateOfBirth: boolean } {
-  const usesMinority = Boolean(rule.minorityAdjustment?.enabled);
+  const usesMinority = Boolean(limitationRule.minorityAdjustment?.enabled);
   const triggerUsesDob =
-    (rule.trigger.kind === 'single' &&
-      rule.trigger.field === 'claimantDateOfBirth') ||
-    (rule.trigger.kind === 'later_of' &&
-      rule.trigger.fields.includes('claimantDateOfBirth'));
+    (limitationRule.trigger.kind === 'single' &&
+      limitationRule.trigger.field === 'claimantDateOfBirth') ||
+    (limitationRule.trigger.kind === 'later_of' &&
+      limitationRule.trigger.fields.includes('claimantDateOfBirth'));
 
   const clone: KeyDateTriggerValues = {
     ...(triggers.accrualDate ? { accrualDate: triggers.accrualDate } : {}),
@@ -281,7 +281,12 @@ export function calculateLimitationDate(
           ruleSetReviewStatus: extraOptions?.ruleSetReviewStatus,
         };
 
-  const { rule, triggers, calendar, ruleSetReviewStatus } = opts;
+  const {
+    rule: limitationRule,
+    triggers,
+    calendar,
+    ruleSetReviewStatus,
+  } = opts;
   const explanation: string[] = [];
   const warnings: string[] = [];
 
@@ -291,7 +296,10 @@ export function calculateLimitationDate(
     );
   }
 
-  const { strippedDateOfBirth } = sanitizeTriggerValuesForRule(rule, triggers);
+  const { strippedDateOfBirth } = sanitizeTriggerValuesForRule(
+    limitationRule,
+    triggers,
+  );
   if (strippedDateOfBirth) {
     warnings.push(
       'Claimant date of birth was ignored because this rule does not use a minority adjustment.',
@@ -300,20 +308,23 @@ export function calculateLimitationDate(
 
   // 1. Resolve trigger date (`single` or `later_of`)
   let effectiveStart: IsoDate;
-  if (rule.trigger.kind === 'single') {
-    const rawVal = resolveTriggerFieldValue(triggers, rule.trigger.field);
+  if (limitationRule.trigger.kind === 'single') {
+    const rawVal = resolveTriggerFieldValue(
+      triggers,
+      limitationRule.trigger.field,
+    );
     if (!rawVal || !parseIsoDateStrict(rawVal)) {
       throw new Error(
-        `CALCULATOR_MISSING_TRIGGER: Trigger field "${rule.trigger.field}" is required and must be a valid YYYY-MM-DD date.`,
+        `CALCULATOR_MISSING_TRIGGER: Trigger field "${limitationRule.trigger.field}" is required and must be a valid YYYY-MM-DD date.`,
       );
     }
     effectiveStart = rawVal.trim();
     explanation.push(
-      `Trigger (${rule.trigger.field}): started from ${effectiveStart}`,
+      `Trigger (${limitationRule.trigger.field}): started from ${effectiveStart}`,
     );
   } else {
     const candidates: Array<{ field: TriggerFieldKey; date: IsoDate }> = [];
-    for (const field of rule.trigger.fields) {
+    for (const field of limitationRule.trigger.fields) {
       const val = resolveTriggerFieldValue(triggers, field);
       if (val) {
         if (!parseIsoDateStrict(val)) {
@@ -326,11 +337,11 @@ export function calculateLimitationDate(
     }
     if (candidates.length === 0) {
       throw new Error(
-        `CALCULATOR_MISSING_TRIGGER: At least one trigger field from [${rule.trigger.fields.join(', ')}] must be provided.`,
+        `CALCULATOR_MISSING_TRIGGER: At least one trigger field from [${limitationRule.trigger.fields.join(', ')}] must be provided.`,
       );
     }
-    if (candidates.length < rule.trigger.fields.length) {
-      const missing = rule.trigger.fields.filter(
+    if (candidates.length < limitationRule.trigger.fields.length) {
+      const missing = limitationRule.trigger.fields.filter(
         (f) => !candidates.some((c) => c.field === f),
       );
       warnings.push(
@@ -347,13 +358,17 @@ export function calculateLimitationDate(
   }
 
   // 2. Minority adjustment (if enabled and claimantDateOfBirth provided)
-  if (rule.minorityAdjustment?.enabled && triggers.claimantDateOfBirth) {
+  if (
+    limitationRule.minorityAdjustment?.enabled &&
+    triggers.claimantDateOfBirth
+  ) {
     if (!parseIsoDateStrict(triggers.claimantDateOfBirth)) {
       throw new Error(
         `CALCULATOR_INVALID_DATE: claimantDateOfBirth "${triggers.claimantDateOfBirth}" is not a valid YYYY-MM-DD date.`,
       );
     }
-    const ageOfMajority = rule.minorityAdjustment.ageOfMajority ?? 18;
+    const ageOfMajority =
+      limitationRule.minorityAdjustment.ageOfMajority ?? 18;
     const majorityDate = addYearsAndMonths(
       triggers.claimantDateOfBirth,
       ageOfMajority,
@@ -373,10 +388,10 @@ export function calculateLimitationDate(
 
   // 3. Apply period (years, months, days) with countMethod ('calendar' | 'business_days' | 'clear_days')
   let current = effectiveStart;
-  const years = rule.period.years ?? 0;
-  const months = rule.period.months ?? 0;
-  const days = rule.period.days ?? 0;
-  const countMethod = rule.countMethod ?? 'calendar';
+  const years = limitationRule.period.years ?? 0;
+  const months = limitationRule.period.months ?? 0;
+  const days = limitationRule.period.days ?? 0;
+  const countMethod = limitationRule.countMethod ?? 'calendar';
 
   if (years !== 0 || months !== 0) {
     const next = addYearsAndMonths(current, years, months);
@@ -413,7 +428,7 @@ export function calculateLimitationDate(
   }
 
   // 4. Standstill periods (add paused days)
-  const applyStandstill = rule.applyStandstillPeriods ?? true;
+  const applyStandstill = limitationRule.applyStandstillPeriods ?? true;
   if (
     applyStandstill &&
     Array.isArray(triggers.standstillPeriods) &&
@@ -447,41 +462,41 @@ export function calculateLimitationDate(
   }
 
   // 5. Longstop (the earlier of the calculated date and the longstop wins)
-  if (rule.longstop) {
+  if (limitationRule.longstop) {
     const longstopTrigger =
-      resolveTriggerFieldValue(triggers, rule.longstop.field) ??
+      resolveTriggerFieldValue(triggers, limitationRule.longstop.field) ??
       triggers.accrualDate;
     if (longstopTrigger && parseIsoDateStrict(longstopTrigger)) {
       let longstopDate = addYearsAndMonths(
         longstopTrigger,
-        rule.longstop.period.years ?? 0,
-        rule.longstop.period.months ?? 0,
+        limitationRule.longstop.period.years ?? 0,
+        limitationRule.longstop.period.months ?? 0,
       );
-      if (rule.longstop.period.days) {
+      if (limitationRule.longstop.period.days) {
         longstopDate = addCalendarDays(
           longstopDate,
-          rule.longstop.period.days,
+          limitationRule.longstop.period.days,
         );
       }
       if (longstopDate < current) {
         explanation.push(
-          `Longstop: capped at ${longstopDate} (${formatPeriodDescription(rule.longstop.period)} from ${rule.longstop.field} ${longstopTrigger}), which is earlier than ${current}`,
+          `Longstop: capped at ${longstopDate} (${formatPeriodDescription(limitationRule.longstop.period)} from ${limitationRule.longstop.field} ${longstopTrigger}), which is earlier than ${current}`,
         );
         current = longstopDate;
       } else {
         explanation.push(
-          `Longstop: calculated date ${current} is on or before longstop ${longstopDate} (${formatPeriodDescription(rule.longstop.period)} from ${rule.longstop.field} ${longstopTrigger})`,
+          `Longstop: calculated date ${current} is on or before longstop ${longstopDate} (${formatPeriodDescription(limitationRule.longstop.period)} from ${limitationRule.longstop.field} ${longstopTrigger})`,
         );
       }
     } else {
       warnings.push(
-        `Longstop trigger field "${rule.longstop.field}" was not supplied; longstop could not be evaluated.`,
+        `Longstop trigger field "${limitationRule.longstop.field}" was not supplied; longstop could not be evaluated.`,
       );
     }
   }
 
   // 6. Non-working-day adjustment
-  const adjustment = rule.nonWorkingDayAdjustment ?? 'none';
+  const adjustment = limitationRule.nonWorkingDayAdjustment ?? 'none';
   if (adjustment !== 'none') {
     const check = isNonWorkingDate(current, calendar);
     if (check.nonWorking) {
@@ -498,8 +513,8 @@ export function calculateLimitationDate(
     }
   }
 
-  if (rule.guidanceNote) {
-    explanation.push(`Guidance note: ${rule.guidanceNote}`);
+  if (limitationRule.guidanceNote) {
+    explanation.push(`Guidance note: ${limitationRule.guidanceNote}`);
   }
   explanation.push(LIMITATION_CALCULATOR_DISCLAIMER);
 

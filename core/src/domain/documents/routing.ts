@@ -290,14 +290,14 @@ export function resolveMatterDocumentRoute(params: {
   let matchedRule: DocumentRoutingRule | undefined;
 
   for (let i = 0; i < routingRules.length; i++) {
-    const rule = routingRules[i]!;
-    if (rule.match === 'default') {
+    const routingRule = routingRules[i]!;
+    if (routingRule.match === 'default') {
       matchedIndex = i;
-      matchedRule = rule;
+      matchedRule = routingRule;
       break;
     }
 
-    const criteria = rule.match;
+    const criteria = routingRule.match;
     const deptMatches =
       !criteria.departmentId || criteria.departmentId === subject.departmentId;
     const teamMatches =
@@ -311,7 +311,7 @@ export function resolveMatterDocumentRoute(params: {
 
     if (deptMatches && teamMatches && workTypeMatches) {
       matchedIndex = i;
-      matchedRule = rule;
+      matchedRule = routingRule;
       break;
     }
   }
