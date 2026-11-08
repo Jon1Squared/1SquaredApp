@@ -200,6 +200,8 @@ import {
   recordKeyDateNotApplicable,
   rejectProposedKeyDate,
   resolveKeyDateOutcome,
+  resolveKeyDateSource,
+  resolveSupersedeKeyDateSource,
   supersedeConfirmedKeyDate,
   validateKeyDateManualEntry,
   verifyProposedKeyDate,
@@ -12661,17 +12663,18 @@ export async function createOrProposeKeyDateRecord(
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
-    const effectiveSource: KeyDateSource =
-      input.source === 'document_extraction' ||
-      input.source === 'carried_from_enquiry'
-        ? input.source
-        : input.calculation
-          ? 'calculated'
-          : (input.source ?? 'manual');
+    const resolvedSource = resolveKeyDateSource({
+      source: input.source,
+      hasCalculation: Boolean(input.calculation),
+      allowSystemSource: false,
+    });
+    if (!resolvedSource.ok) {
+      return buildActionDenied('FORBIDDEN', resolvedSource.error);
+    }
     const manualCheck = validateKeyDateManualEntry(
       config,
       input.keyDateTypeId,
-      effectiveSource,
+      resolvedSource.source,
     );
     if (!manualCheck.ok) {
       return buildActionDenied('FORBIDDEN', manualCheck.error);
@@ -12690,7 +12693,7 @@ export async function createOrProposeKeyDateRecord(
       dueDate: input.dueDate,
       dueTime: input.dueTime,
       isCritical: input.isCritical,
-      source: input.source,
+      source: resolvedSource.source,
       teamId: input.teamId,
       responsiblePersonIds: input.responsiblePersonIds,
       calculation: input.calculation,
@@ -12971,6 +12974,7 @@ export async function supersedeConfirmedKeyDateRecord(
     dueDate: string;
     dueTime?: string;
     isCritical?: boolean;
+    source?: 'manual' | 'calculated';
     teamId?: string;
     responsiblePersonIds?: string[];
     calculation?: KeyDateCalculation;
@@ -12984,6 +12988,9 @@ export async function supersedeConfirmedKeyDateRecord(
   supersededKeyDate?: KeyDate;
   replacementKeyDate?: KeyDate;
   error?: string;
+  denied?: true;
+  code?: ActionDenied['code'];
+  message?: string;
 }> {
   try {
     const store = getStore();
@@ -13012,6 +13019,25 @@ export async function supersedeConfirmedKeyDateRecord(
       (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
     ) {
       return { ok: false, error: 'Matter not found or restricted.' };
+    }
+
+    const resolvedSupersede = resolveSupersedeKeyDateSource({
+      existingKeyDate: existing,
+      updates,
+      reason,
+      config,
+      allowSystemSource: false,
+    });
+    if (!resolvedSupersede.ok) {
+      return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
+    }
+    const manualCheck = validateKeyDateManualEntry(
+      config,
+      existing.keyDateTypeId,
+      resolvedSupersede.source,
+    );
+    if (!manualCheck.ok) {
+      return buildActionDenied('FORBIDDEN', manualCheck.error);
     }
 
     const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
@@ -13696,6 +13722,16 @@ export function saveKeyDatesConfigRecord(
       };
     }
 
+    for (const rs of newConfigInput.limitationRuleSets ?? []) {
+      const rawStatus = (rs as { reviewStatus?: unknown }).reviewStatus;
+      if (rawStatus !== 'reviewed' && rawStatus !== 'unreviewed') {
+        return {
+          ok: false,
+          error: `Invalid reviewStatus "${String(rawStatus)}" on limitation rule set "${rs.id}". Expected "reviewed" or "unreviewed".`,
+        };
+      }
+    }
+
     const validated = validateKeyDatesConfig(newConfigInput) as unknown as KeyDatesConfig;
     const nowIso = new Date().toISOString();
     const todayIso = nowIso.slice(0, 10);
@@ -13704,26 +13740,24 @@ export function saveKeyDatesConfigRecord(
     );
     if (validated.limitationRuleSets) {
       validated.limitationRuleSets = validated.limitationRuleSets.map((rs) => {
-        if (rs.reviewStatus !== 'reviewed') {
-          const { reviewedBy: _rb, reviewedOn: _ro, ...rest } = rs;
-          return {
-            ...rest,
-            reviewStatus: 'unreviewed' as const,
-          };
+        if (rs.reviewStatus === 'unreviewed') {
+          const nextUnreviewed = { ...rs, reviewStatus: 'unreviewed' as const };
+          delete nextUnreviewed.reviewedBy;
+          delete nextUnreviewed.reviewedOn;
+          return nextUnreviewed;
         }
         const prev = prevRuleSetsById.get(rs.id);
         const keepPreviousReviewer =
           prev?.reviewStatus === 'reviewed' &&
           prev.version === rs.version &&
-          Boolean(prev.reviewedBy) &&
-          rs.reviewedBy === prev.reviewedBy;
+          Boolean(prev.reviewedBy);
         return {
           ...rs,
           reviewStatus: 'reviewed' as const,
           reviewedBy: keepPreviousReviewer ? prev!.reviewedBy : actor.id,
           reviewedOn: keepPreviousReviewer
-            ? (prev!.reviewedOn ?? rs.reviewedOn ?? todayIso)
-            : (rs.reviewedOn ?? todayIso),
+            ? (prev!.reviewedOn ?? todayIso)
+            : todayIso,
         };
       });
     }

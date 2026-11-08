@@ -328,7 +328,7 @@ export const DocumentGenerationConfigSchema = z
       )
       .default([])
       .describe(
-        'Additional tenant-configured document classification types beyond core defaults [x-reserved:S0-17]',
+        'Additional tenant-configured document classification types beyond core defaults [x-reserved:backlog]',
       ),
   })
   .strict();
@@ -1383,7 +1383,7 @@ export const TenantConfigurationSchema = z
             .string()
             .optional()
             .describe(
-              'Optional category or cause-of-action label for the rule [x-reserved:S0-22]',
+              'Optional category or cause-of-action label for the rule [x-reserved:backlog]',
             ),
           guidanceNote: z.string().optional(),
           trigger: z.union([
@@ -1452,7 +1452,7 @@ export const TenantConfigurationSchema = z
                 .enum(['matter_owning_team'])
                 .default('matter_owning_team')
                 .describe(
-                  'How the team diary is chosen for a new key date [x-reserved:S0-15]',
+                  'How the team diary is chosen for a new key date [x-reserved:backlog]',
                 ),
             })
             .strict()
@@ -1497,7 +1497,7 @@ export const TenantConfigurationSchema = z
                     .array(z.string())
                     .default([])
                     .describe(
-                      'Limitation rule set IDs offered by default for matters of this type [x-reserved:S0-22]',
+                      'Limitation rule set IDs offered by default for matters of this type [x-reserved:backlog]',
                     ),
                   verification: VerificationPolicySchema.optional(),
                   calendarSync: CalendarSyncPolicySchema.optional(),
@@ -1618,7 +1618,7 @@ export const TenantConfigurationSchema = z
                 .enum(['microsoft_graph'])
                 .default('microsoft_graph')
                 .describe(
-                  'External calendar provider adapter [x-reserved:S0-15]',
+                  'External calendar provider adapter [x-reserved:backlog]',
                 ),
               targets: z
                 .array(z.enum(['responsible_persons', 'team_calendar']))
@@ -2174,10 +2174,20 @@ function extractReservedSettingsFromSchema(
     }
   }
 
-  const nodeReserved =
-    (node['x-reserved'] && typeof node['x-reserved'] === 'object'
+  const ownReserved =
+    node['x-reserved'] && typeof node['x-reserved'] === 'object'
       ? (node['x-reserved'] as { for: string; reason: string })
-      : undefined) ?? inheritedReserved;
+      : undefined;
+  if (ownReserved && prefix) {
+    results.push({
+      path: prefix,
+      forSlice: ownReserved.for,
+      reason: ownReserved.reason,
+    });
+    return results;
+  }
+
+  const nodeReserved = ownReserved ?? inheritedReserved;
 
   if (node.properties && typeof node.properties === 'object') {
     for (const [key, child] of Object.entries(

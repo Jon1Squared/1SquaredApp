@@ -337,6 +337,137 @@ export function validateKeyDateManualEntry(
 }
 
 /**
+ * Single canonical source resolver for key date creation (R294).
+ * When `allowSystemSource` is `false` (client-facing actions/services), only `'manual'` or `'calculated'`
+ * may be supplied by the caller; `'document_extraction'` and `'carried_from_enquiry'` are rejected.
+ */
+export function resolveKeyDateSource(input: {
+  source?: KeyDateSource;
+  hasCalculation: boolean;
+  allowSystemSource?: boolean;
+}): { ok: true; source: KeyDateSource } | { ok: false; error: string } {
+  const { source, hasCalculation, allowSystemSource = false } = input;
+  if (
+    !allowSystemSource &&
+    source !== undefined &&
+    source !== 'manual' &&
+    source !== 'calculated'
+  ) {
+    return {
+      ok: false,
+      error: `Source "${String(source)}" cannot be set by a client request; only "manual" or "calculated" is permitted.`,
+    };
+  }
+  if (
+    allowSystemSource &&
+    (source === 'document_extraction' || source === 'carried_from_enquiry')
+  ) {
+    return { ok: true, source };
+  }
+  if (hasCalculation || source === 'calculated') {
+    return { ok: true, source: 'calculated' };
+  }
+  return { ok: true, source: 'manual' };
+}
+
+/**
+ * Single canonical source and calculation resolver when superseding a confirmed key date (R294).
+ */
+export function resolveSupersedeKeyDateSource(params: {
+  existingKeyDate: Pick<KeyDate, 'source' | 'calculation'>;
+  updates: {
+    source?: KeyDateSource;
+    calculation?: KeyDateCalculation;
+  };
+  reason: string;
+  config: KeyDatesConfig;
+  allowSystemSource?: boolean;
+}):
+  | {
+      ok: true;
+      source: KeyDateSource;
+      carriedCalculation?: KeyDateCalculation;
+      convertedRemovedRuleToManual: boolean;
+      missingRuleKind?: 'removed_rule_set' | 'missing_calculation_rule';
+    }
+  | { ok: false; error: string } {
+  const {
+    existingKeyDate,
+    updates,
+    reason,
+    config,
+    allowSystemSource = false,
+  } = params;
+  if (
+    !allowSystemSource &&
+    updates.source !== undefined &&
+    updates.source !== 'manual' &&
+    updates.source !== 'calculated'
+  ) {
+    return {
+      ok: false,
+      error: `Source "${String(updates.source)}" cannot be set by a client request; only "manual" or "calculated" is permitted.`,
+    };
+  }
+
+  const cleanReason = reason?.trim() || '';
+  if (updates.calculation) {
+    return {
+      ok: true,
+      source: 'calculated',
+      carriedCalculation: updates.calculation,
+      convertedRemovedRuleToManual: false,
+    };
+  }
+
+  if (existingKeyDate.calculation) {
+    const ruleStillExists = Boolean(
+      findLimitationRule(
+        config,
+        existingKeyDate.calculation.ruleSetId,
+        existingKeyDate.calculation.ruleId,
+      ),
+    );
+    if (ruleStillExists) {
+      const carriedCalculation: KeyDateCalculation = {
+        ...existingKeyDate.calculation,
+        overrideReason: existingKeyDate.calculation.overrideReason || cleanReason,
+      };
+      return {
+        ok: true,
+        source: updates.source ?? 'calculated',
+        carriedCalculation,
+        convertedRemovedRuleToManual: false,
+      };
+    }
+    return {
+      ok: true,
+      source: 'manual',
+      carriedCalculation: undefined,
+      convertedRemovedRuleToManual: true,
+      missingRuleKind: 'removed_rule_set',
+    };
+  }
+
+  if (existingKeyDate.source === 'calculated') {
+    return {
+      ok: true,
+      source: 'manual',
+      carriedCalculation: undefined,
+      convertedRemovedRuleToManual: true,
+      missingRuleKind: 'missing_calculation_rule',
+    };
+  }
+
+  return {
+    ok: true,
+    source: updates.source ?? existingKeyDate.source,
+    carriedCalculation: undefined,
+    convertedRemovedRuleToManual: false,
+  };
+}
+
+/**
  * Resolves the verification policy from `matterTypes[].verification`,
  * falling back to `defaults.verification` (off by default: `{ required: false, appliesTo: 'all' }`).
  */
@@ -868,13 +999,23 @@ export function createOrProposeKeyDate(
     }
   }
 
-  const source: KeyDateSource =
-    input.source === 'document_extraction' ||
-    input.source === 'carried_from_enquiry'
-      ? input.source
-      : resolvedCalculation
-        ? 'calculated'
-        : (input.source ?? 'manual');
+  const resolvedSource = resolveKeyDateSource({
+    source: input.source,
+    hasCalculation: Boolean(resolvedCalculation),
+    allowSystemSource: true,
+  });
+  if (!resolvedSource.ok) {
+    throw new Error(`KEY_DATE_VALIDATION_ERROR: ${resolvedSource.error}`);
+  }
+  const source: KeyDateSource = resolvedSource.source;
+  const manualEntryCheck = validateKeyDateManualEntry(
+    config,
+    keyDateTypeId,
+    source,
+  );
+  if (!manualEntryCheck.ok) {
+    throw new Error(`KEY_DATE_MANUAL_ENTRY_FORBIDDEN: ${manualEntryCheck.error}`);
+  }
 
   const resolvedFallbackTeamId = (): TeamId => {
     if (matter) {
@@ -1303,54 +1444,46 @@ export function supersedeConfirmedKeyDate(params: {
   }
 
   const beforeOld = structuredClone(existingKeyDate);
-  let carriedCalculation: KeyDateCalculation | undefined = updates.calculation;
-  let convertedRemovedRuleToManual = false;
+  const resolvedSupersede = resolveSupersedeKeyDateSource({
+    existingKeyDate,
+    updates,
+    reason: cleanReason,
+    config,
+    allowSystemSource: true,
+  });
+  if (!resolvedSupersede.ok) {
+    throw new Error(`KEY_DATE_VALIDATION_ERROR: ${resolvedSupersede.error}`);
+  }
+  const {
+    source: effectiveSupersedeSource,
+    carriedCalculation,
+    convertedRemovedRuleToManual,
+    missingRuleKind,
+  } = resolvedSupersede;
 
-  if (!updates.calculation) {
-    if (existingKeyDate.calculation) {
-      const ruleStillExists = Boolean(
-        findLimitationRule(
-          config,
-          existingKeyDate.calculation.ruleSetId,
-          existingKeyDate.calculation.ruleId,
-        ),
+  if (convertedRemovedRuleToManual) {
+    if (
+      !hasKeyDatePermission(actor, 'keydate:override_calculation', {
+        config,
+        allPeople: people,
+        teams,
+      })
+    ) {
+      throw new Error(
+        missingRuleKind === 'removed_rule_set'
+          ? 'KEY_DATE_PERMISSION_ERROR: You need "keydate:override_calculation" to supersede a calculated key date whose limitation rule set has been removed from configuration.'
+          : 'KEY_DATE_PERMISSION_ERROR: You need "keydate:override_calculation" to supersede a calculated key date without a calculation rule.',
       );
-      if (ruleStillExists) {
-        carriedCalculation = {
-          ...existingKeyDate.calculation,
-          overrideReason:
-            existingKeyDate.calculation.overrideReason || cleanReason,
-        };
-      } else {
-        if (
-          !hasKeyDatePermission(actor, 'keydate:override_calculation', {
-            config,
-            allPeople: people,
-            teams,
-          })
-        ) {
-          throw new Error(
-            'KEY_DATE_PERMISSION_ERROR: You need "keydate:override_calculation" to supersede a calculated key date whose limitation rule set has been removed from configuration.',
-          );
-        }
-        carriedCalculation = undefined;
-        convertedRemovedRuleToManual = true;
-      }
-    } else if (existingKeyDate.source === 'calculated') {
-      if (
-        !hasKeyDatePermission(actor, 'keydate:override_calculation', {
-          config,
-          allPeople: people,
-          teams,
-        })
-      ) {
-        throw new Error(
-          'KEY_DATE_PERMISSION_ERROR: You need "keydate:override_calculation" to supersede a calculated key date without a calculation rule.',
-        );
-      }
-      carriedCalculation = undefined;
-      convertedRemovedRuleToManual = true;
     }
+  }
+
+  const manualEntryCheck = validateKeyDateManualEntry(
+    config,
+    existingKeyDate.keyDateTypeId,
+    effectiveSupersedeSource,
+  );
+  if (!manualEntryCheck.ok) {
+    throw new Error(`KEY_DATE_MANUAL_ENTRY_FORBIDDEN: ${manualEntryCheck.error}`);
   }
 
   const replacementKeyDate = createOrProposeKeyDate({
@@ -1362,10 +1495,7 @@ export function supersedeConfirmedKeyDate(params: {
     dueDate: updates.dueDate,
     dueTime: updates.dueTime ?? existingKeyDate.dueTime,
     isCritical: updates.isCritical ?? existingKeyDate.isCritical,
-    source: convertedRemovedRuleToManual
-      ? 'manual'
-      : (updates.source ??
-        (carriedCalculation ? 'calculated' : existingKeyDate.source)),
+    source: effectiveSupersedeSource,
     teamId: updates.teamId ?? existingKeyDate.teamId,
     responsiblePersonIds:
       updates.responsiblePersonIds ?? existingKeyDate.responsiblePersonIds,

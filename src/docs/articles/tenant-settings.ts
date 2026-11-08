@@ -75,7 +75,7 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 | \`enabledExtensions\` | \`[]\` | Active | Registered extension IDs active for the tenant |
 | \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules (\`requireApproval\` controls whether \`submitTemplateVersionForApproval\` requires a separate approval step or activates clean template versions directly on submit without a separate approver check, recording \`Document Template Activated (approval not required)\` in the audit trail; \`allowSelfApproval\` controls whether a builder may approve their own submitted version), and usage reporting |
 | \`documentGeneration.usage.retentionMonths\` | \`24\` | Reserved (S0-19) | Reserved for automated document usage event retention pruning |
-| \`documentGeneration.customDocumentTypes\` | \`[]\` | Reserved (S0-17) | Reserved for tenant-configured custom document type picklists |
+| \`documentGeneration.customDocumentTypes\` | \`[]\` | Reserved (backlog, F20) | Reserved for tenant-configured custom document classification types in document generation |
 | \`rbac.*\` | Built-in roles | Active | Role definitions, department grants, relationship grants, and Entra ID identity mapping |
 | \`documentStores\` | Optional | Active | External SharePoint Online document stores |
 | \`documentRouting\` | Optional | Active | Ordered rules mapping matters to a document store, library, and base path |
@@ -86,10 +86,10 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 | \`documentAccess.autoRemediateDrift\` | \`false\` | Reserved (S0-25) | Reserved for scheduled automatic SharePoint permission drift remediation |
 | \`documentAccess.defaultPolicy\` / \`policiesByStore\` | Built-in policy | Active | Inheritance-based document access policies |
 | \`matterFolderTemplates.*\` | Required \`default\` | Active | Versioned matter folder templates with work-type and department inheritance |
-| \`keyDates.*\` | Enabled | Active | Key dates, limitation rule sets (marking a rule set \`reviewed\` records the saving actor's person ID in \`reviewedBy\` on the server and clears \`reviewedBy\` / \`reviewedOn\` when unmarked), key date types (\`allowManualEntry: false\` disables manual date entry, switches the UI form to calculator mode, and returns \`ActionDenied\` (\`FORBIDDEN\`) on manual creation attempts), verification rules, reminder schedules, and calendar sync |
-| \`keyDates.defaults.teamAssignment\` | \`"matter_owning_team"\` | Reserved (S0-15) | Reserved for key dates runtime repository and team diary assignment modes beyond \`matter_owning_team\` |
-| \`keyDates.matterTypes[].defaultRuleSetIds\` | \`[]\` | Reserved (S0-22) | Reserved for departments and work types default limitation rule set filtering by matter type |
-| \`keyDates.limitationRuleSets[].rules[].claimType\` | Optional | Reserved (S0-22) | Reserved for departments and work types claim-type classification on limitation rules |
-| \`keyDates.calendarSync.provider\` | \`"microsoft_graph"\` | Reserved (S0-15) | Reserved for key dates runtime repository and multi-provider calendar adapter selection |
+| \`keyDates.*\` | Enabled | Active | Key dates, limitation rule sets (marking a rule set \`reviewed\` records the saving actor's person ID in \`reviewedBy\` and today's ISO date in \`reviewedOn\` on the server, rejects invalid \`reviewStatus\` values, and clears \`reviewedBy\` / \`reviewedOn\` when unmarked), key date types (\`allowManualEntry: false\` disables the Manual Date Entry button, switches to the limitation calculator when \`allowCalculation\` is enabled or displays a notice when neither is enabled, and returns \`ActionDenied\` (\`FORBIDDEN\`) on manual creation, manual supersede, or spoofed system sources), verification rules, reminder schedules, and calendar sync |
+| \`keyDates.defaults.teamAssignment\` | \`"matter_owning_team"\` | Reserved (backlog, F19) | Reserved for additional key dates team diary assignment modes beyond \`matter_owning_team\` |
+| \`keyDates.matterTypes[].defaultRuleSetIds\` | \`[]\` | Reserved (backlog, F19) | Reserved for default limitation rule set filtering by matter type |
+| \`keyDates.limitationRuleSets[].rules[].claimType\` | Optional | Reserved (backlog, F19) | Reserved for claim-type classification and filtering on limitation rules |
+| \`keyDates.calendarSync.provider\` | \`"microsoft_graph"\` | Reserved (backlog, F19) | Reserved for multi-provider external calendar adapter selection |
 `.trim(),
 };

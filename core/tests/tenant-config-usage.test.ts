@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AuthorisationError,
@@ -31,6 +32,7 @@ import {
   saveKeyDatesConfigRecord,
   saveMatterCostsConfig,
   signOffMatterCostsRecord,
+  supersedeConfirmedKeyDateRecord,
   syncMatterCostsRatesFromPms,
 } from '../../src/server/services';
 import {
@@ -110,9 +112,22 @@ function walkTenantSchemaProperties(
     }
   }
 
-  const nodeReserved =
-    (node['x-reserved'] as { for: string; reason: string } | undefined) ??
-    inheritedReserved;
+  const ownReserved = node['x-reserved'] as
+    | { for: string; reason: string }
+    | undefined;
+  if (ownReserved && prefix) {
+    const segments = prefix.split('.');
+    const rawLast = segments[segments.length - 1]!.replace(/\[\]$/, '');
+    results.push({
+      path: prefix,
+      key: rawLast,
+      deprecated: Boolean(node.deprecated) || inheritedDeprecated,
+      reserved: ownReserved,
+    });
+    return results;
+  }
+
+  const nodeReserved = ownReserved ?? inheritedReserved;
   const nodeDeprecated = Boolean(node.deprecated) || inheritedDeprecated;
 
   if (node.properties && typeof node.properties === 'object') {
@@ -227,24 +242,44 @@ function collectRuntimeSourceFiles(dir: string): string[] {
 const CONFIG_RECEIVER_NAMES =
   '(?:config|tenantConfig|tenantCfg|cfg|baseCfg|activeTenantConfig|effectiveConfig|rawConfig|validated)';
 
-function extractFunctionScopes(content: string): string[] {
+function extractFunctionScopes(
+  content: string,
+  fileName = 'source.tsx',
+): string[] {
+  const scriptKind = fileName.endsWith('.tsx')
+    ? ts.ScriptKind.TSX
+    : ts.ScriptKind.TS;
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    content,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind,
+  );
   const scopes: string[] = [];
-  const fnBoundary =
-    /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class)\s+[A-Za-z0-9_]+/gm;
-  const indices: number[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = fnBoundary.exec(content)) !== null) {
-    indices.push(m.index);
-  }
-  if (indices.length === 0 || indices[0] !== 0) {
-    indices.unshift(0);
-  }
-  for (let i = 0; i < indices.length; i++) {
-    const start = indices[i]!;
-    const end = i + 1 < indices.length ? indices[i + 1]! : content.length;
-    if (content.slice(start, end).trim().length > 0) {
-      scopes.push(content.slice(start, end));
+
+  const isScopeNode = (node: ts.Node): boolean =>
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node);
+
+  const visit = (node: ts.Node): void => {
+    if (isScopeNode(node)) {
+      const text = node.getText(sourceFile).trim();
+      if (text.length > 0) {
+        scopes.push(text);
+      }
     }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  if (scopes.length === 0 && content.trim().length > 0) {
+    scopes.push(content);
   }
   return scopes;
 }
@@ -259,7 +294,7 @@ const SUBTREE_ALIASES_BY_PARENT_PATH: Readonly<
   },
   'documentStores[].auth': {
     aliases: ['authConfig'],
-    scopeAnchor: /\b(?:documentStores|DocumentStoreAuthConfig|auth)\b/,
+    scopeAnchor: /\b(?:DocumentStoreAuthConfig|storeConfig\??\.auth)\b/,
   },
   documentAccess: {
     aliases: ['accessConfig'],
@@ -271,7 +306,7 @@ const SUBTREE_ALIASES_BY_PARENT_PATH: Readonly<
   },
   'documentRouting[].match': {
     aliases: ['criteria'],
-    scopeAnchor: /\.match\b/,
+    scopeAnchor: /\b(?:DocumentRoutingRule|rule\??\.match)\b/,
   },
   'keyDates.keyDateTypes[]': {
     aliases: ['kdType'],
@@ -335,9 +370,16 @@ function isLeafReferencedInRuntime(
   // If the immediate parent is a named object (not an array `[]` or wildcard `*`),
   // require `<parentKey>.<leafKey>` or `<subtreeAlias>.<leafKey>` for that exact subtree only.
   if (!prevSegment.endsWith('[]') && prevSegment !== '*') {
-    const directParentDotted = new RegExp(
-      `(?<!patch\\.|patch\\?\\.)\\b${esc(prevSegment)}\\??\\.${esc(lastSegment)}\\b`,
+    const parentIsNestedUnderArray = Boolean(
+      rawSegments[rawSegments.length - 3]?.endsWith('[]'),
     );
+    const directParentDotted = parentIsNestedUnderArray
+      ? new RegExp(
+          `(?:\\.|\\?\\.)\\b${esc(prevSegment)}\\??\\.${esc(lastSegment)}\\b`,
+        )
+      : new RegExp(
+          `(?<!patch\\.|patch\\?\\.)\\b${esc(prevSegment)}\\??\\.${esc(lastSegment)}\\b`,
+        );
     if (directParentDotted.test(runtimeCorpus)) {
       return true;
     }
@@ -396,7 +438,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     const leaves = walkTenantSchemaProperties(
       tenantConfigJsonSchema as unknown as Record<string, unknown>,
     );
-    expect(leaves.length).toBeGreaterThan(180);
+    expect(leaves.length).toBeGreaterThan(170);
     expect(
       leaves.some((l) => l.path === 'keyDates.defaults.verification.required'),
     ).toBe(true);
@@ -409,14 +451,14 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       fs.readFileSync(filePath, 'utf8'),
     );
     const runtimeCorpus = runtimeFileContents.join('\n');
-    const runtimeFunctionScopes = runtimeFileContents.flatMap((content) =>
-      extractFunctionScopes(content),
+    const runtimeFunctionScopes = runtimeFiles.flatMap((filePath, idx) =>
+      extractFunctionScopes(runtimeFileContents[idx]!, filePath),
     );
 
     const unreferencedNonReserved: string[] = [];
     for (const leaf of leaves) {
       if (leaf.reserved) {
-        expect(leaf.reserved.for).toMatch(/^S0-\d+[a-z]?$/);
+        expect(leaf.reserved.for).toMatch(/^(?:S0-\d+[a-z]?|backlog)$/);
         expect(leaf.reserved.reason.trim().length).toBeGreaterThan(10);
         continue;
       }
@@ -513,6 +555,48 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         decoyNonArrayScopes,
       ),
     ).toBe(false);
+
+    // 4. R303: A function that calls 'x'.match(/y/) and touches a local `criteria` variable must NOT satisfy documentRouting[].match.*
+    const decoyStringMatch = `
+      export function fnStringMatch(config: TenantConfiguration, criteria: { departmentId?: string }) {
+        const routing = config.documentRouting;
+        const m = 'x'.match(/y/);
+        return Boolean(routing) && Boolean(m) && criteria.departmentId === 'DEPT-1';
+      }
+    `;
+    const decoyStringMatchScopes = extractFunctionScopes(decoyStringMatch);
+    expect(
+      isLeafReferencedInRuntime(
+        {
+          path: 'documentRouting[].match.departmentId',
+          key: 'departmentId',
+          deprecated: false,
+        },
+        decoyStringMatch,
+        decoyStringMatchScopes,
+      ),
+    ).toBe(false);
+
+    // 5. R303: A function with a local variable named `auth` must NOT satisfy documentStores[].auth.*
+    const decoyLocalAuth = `
+      export const fnLocalAuth = (config: TenantConfiguration, authConfig: { clientId?: string }) => {
+        const stores = config.documentStores;
+        const auth = { clientId: 'decoy-client' };
+        return Boolean(stores) && auth.clientId === authConfig.clientId;
+      };
+    `;
+    const decoyLocalAuthScopes = extractFunctionScopes(decoyLocalAuth);
+    expect(
+      isLeafReferencedInRuntime(
+        {
+          path: 'documentStores[].auth.clientId',
+          key: 'clientId',
+          deprecated: false,
+        },
+        decoyLocalAuth,
+        decoyLocalAuthScopes,
+      ),
+    ).toBe(false);
   });
 
   it('marks all unused settings as x-reserved with their target slice in JSON schema and Zod descriptions, including $ref keyDates settings', () => {
@@ -535,12 +619,12 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       'integrations.pmsSync.fieldMappings': 'S0-18',
       customFields: 'S0-17',
       'documentGeneration.usage.retentionMonths': 'S0-19',
-      'documentGeneration.customDocumentTypes': 'S0-17',
+      'documentGeneration.customDocumentTypes': 'backlog',
       'documentAccess.autoRemediateDrift': 'S0-25',
-      'keyDates.defaults.teamAssignment': 'S0-15',
-      'keyDates.matterTypes[].defaultRuleSetIds': 'S0-22',
-      'keyDates.limitationRuleSets[].rules[].claimType': 'S0-22',
-      'keyDates.calendarSync.provider': 'S0-15',
+      'keyDates.defaults.teamAssignment': 'backlog',
+      'keyDates.matterTypes[].defaultRuleSetIds': 'backlog',
+      'keyDates.limitationRuleSets[].rules[].claimType': 'backlog',
+      'keyDates.calendarSync.provider': 'backlog',
     };
 
     const leaves = walkTenantSchemaProperties(
@@ -550,14 +634,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     for (const [expectedPath, expectedSlice] of Object.entries(
       expectedReservedByPath,
     )) {
-      const matchingLeaves = leaves.filter(
-        (l) =>
-          l.path === expectedPath || l.path.startsWith(`${expectedPath}[].`),
-      );
-      expect(matchingLeaves.length).toBeGreaterThan(0);
-      for (const match of matchingLeaves) {
-        expect(match.reserved?.for).toBe(expectedSlice);
-      }
+      const matchingLeaves = leaves.filter((l) => l.path === expectedPath);
+      expect(matchingLeaves).toHaveLength(1);
+      expect(matchingLeaves[0]!.reserved?.for).toBe(expectedSlice);
     }
 
     const reservedLeaves = leaves.filter((l) => Boolean(l.reserved));
@@ -572,45 +651,128 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       RESERVED_TENANT_CONFIG_SETTINGS.some(
         (s) =>
           s.path === 'keyDates.defaults.teamAssignment' &&
-          s.forSlice === 'S0-15',
+          s.forSlice === 'backlog',
       ),
     ).toBe(true);
     expect(
       RESERVED_TENANT_CONFIG_SETTINGS.some(
         (s) =>
           s.path === 'keyDates.matterTypes[].defaultRuleSetIds' &&
-          s.forSlice === 'S0-22',
+          s.forSlice === 'backlog',
       ),
     ).toBe(true);
     expect(
       RESERVED_TENANT_CONFIG_SETTINGS.some(
         (s) =>
           s.path === 'keyDates.limitationRuleSets[].rules[].claimType' &&
-          s.forSlice === 'S0-22',
+          s.forSlice === 'backlog',
       ),
     ).toBe(true);
     expect(
       RESERVED_TENANT_CONFIG_SETTINGS.some(
         (s) =>
           s.path === 'keyDates.calendarSync.provider' &&
-          s.forSlice === 'S0-15',
+          s.forSlice === 'backlog',
       ),
     ).toBe(true);
+    // R302: Reserved array settings are recorded once by their setting path, never per child field
+    expect(
+      RESERVED_TENANT_CONFIG_SETTINGS.some((s) =>
+        s.path.startsWith('documentGeneration.customDocumentTypes[].'),
+      ),
+    ).toBe(false);
+    expect(
+      RESERVED_TENANT_CONFIG_SETTINGS.some((s) =>
+        s.path.startsWith('customFields[].'),
+      ),
+    ).toBe(false);
+    expect(
+      RESERVED_TENANT_CONFIG_SETTINGS.some((s) =>
+        s.path.startsWith('integrations.pmsSync.fieldMappings[].'),
+      ),
+    ).toBe(false);
 
-    expect(
-      TenantConfigurationSchema.shape.branding.shape.accentColorHex.description,
-    ).toContain('[x-reserved:S0-11b]');
-    expect(
-      TenantConfigurationSchema.shape.matterCosts.shape.rateSourceMode
-        .description,
-    ).toContain('[x-reserved:S0-23]');
-    expect(
-      TenantConfigurationSchema.shape.integrations.shape
-        .pmsConnectionSecretVaultRef.description,
-    ).toContain('[x-reserved:S0-18]');
-    expect(TenantConfigurationSchema.shape.customFields.description).toContain(
-      '[x-reserved:S0-17]',
-    );
+    // R301: Verify Zod .describe() [x-reserved:...] tag parity across all 24 reserved settings
+    interface ZodInspectable {
+      description?: string;
+      shape?: Record<string, ZodInspectable>;
+      element?: ZodInspectable;
+      unwrap?: () => ZodInspectable;
+      _def?: {
+        description?: string;
+        shape?: () => Record<string, ZodInspectable>;
+        innerType?: ZodInspectable;
+        schema?: ZodInspectable;
+        in?: ZodInspectable;
+        type?: ZodInspectable;
+      };
+    }
+
+    const getZodDescriptionByPath = (
+      rootSchema: unknown,
+      dottedPath: string,
+    ): string | undefined => {
+      let current: ZodInspectable | undefined = rootSchema as ZodInspectable;
+      const unwrap = (node: ZodInspectable | undefined): ZodInspectable | undefined => {
+        let cur = node;
+        while (cur && !cur.shape && !cur.element) {
+          const next =
+            typeof cur.unwrap === 'function'
+              ? cur.unwrap()
+              : (cur._def?.innerType ?? cur._def?.schema ?? cur._def?.in);
+          if (!next || next === cur) break;
+          cur = next;
+        }
+        return cur;
+      };
+      const findDescription = (node: ZodInspectable | undefined): string | undefined => {
+        let cur = node;
+        while (cur) {
+          if (typeof cur.description === 'string' && cur.description.length > 0) {
+            return cur.description;
+          }
+          if (
+            typeof cur._def?.description === 'string' &&
+            cur._def.description.length > 0
+          ) {
+            return cur._def.description;
+          }
+          const next =
+            typeof cur.unwrap === 'function'
+              ? cur.unwrap()
+              : (cur._def?.innerType ?? cur._def?.schema ?? cur._def?.in);
+          if (!next || next === cur) break;
+          cur = next;
+        }
+        return undefined;
+      };
+      for (const rawPart of dottedPath.split('.')) {
+        const isArrayHop = rawPart.endsWith('[]');
+        const key = isArrayHop ? rawPart.slice(0, -2) : rawPart;
+        const objNode = unwrap(current);
+        const shape =
+          typeof objNode?._def?.shape === 'function'
+            ? objNode._def.shape()
+            : objNode?.shape;
+        if (!shape || !(key in shape)) {
+          return undefined;
+        }
+        current = shape[key];
+        if (isArrayHop) {
+          const arrNode = unwrap(current);
+          current = arrNode?.element ?? arrNode?._def?.type;
+        }
+      }
+      return findDescription(current);
+    };
+
+    for (const [expectedPath, expectedSlice] of Object.entries(
+      expectedReservedByPath,
+    )) {
+      expect(
+        getZodDescriptionByPath(TenantConfigurationSchema, expectedPath),
+      ).toContain(`[x-reserved:${expectedSlice}]`);
+    }
   });
 
   it('applies documentGeneration.approval.requireApproval when submitting a template version', async () => {
@@ -991,22 +1153,23 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     }
   });
 
-  it('enforces server-side reviewedBy from the authenticated actor in saveKeyDatesConfigRecord (R284)', () => {
+  it('enforces server-side reviewedBy and reviewedOn from the authenticated actor and rejects invalid reviewStatus in saveKeyDatesConfigRecord (R284, R295)', () => {
     const store = getStore();
     const snapshot = structuredClone(store);
     try {
       const current = structuredClone(getKeyDatesConfig(store));
       expect((current.limitationRuleSets ?? []).length).toBeGreaterThan(0);
 
-      // Prepare rule set 0 as newly reviewed, attempting to spoof reviewedBy as P-000001 while saving as P-000004 (admin)
+      // Prepare rule set 0 as newly reviewed, attempting to spoof reviewedBy as P-000001 and backdate reviewedOn to 2020-01-01 while saving as P-000004 (admin)
       const firstRuleSet = current.limitationRuleSets![0]!;
+      const todayIso = new Date().toISOString().slice(0, 10);
       const nextForReview = structuredClone(current);
       nextForReview.limitationRuleSets![0] = {
         ...firstRuleSet,
         version: firstRuleSet.version + 1,
         reviewStatus: 'reviewed',
         reviewedBy: 'P-000001',
-        reviewedOn: '2026-11-08',
+        reviewedOn: '2020-01-01',
       };
 
       const savedReviewed = saveKeyDatesConfigRecord(
@@ -1023,8 +1186,24 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         'P-000004',
       );
       expect(savedReviewed.config?.limitationRuleSets?.[0]?.reviewedOn).toBe(
-        '2026-11-08',
+        todayIso,
       );
+
+      // R295: Reject unknown reviewStatus values rather than coercing them to 'unreviewed'
+      const invalidStatusConfig = structuredClone(savedReviewed.config!);
+      (
+        invalidStatusConfig.limitationRuleSets![0] as unknown as {
+          reviewStatus: string;
+        }
+      ).reviewStatus = 'invalid_status';
+      const rejectedInvalidStatus = saveKeyDatesConfigRecord(
+        invalidStatusConfig,
+        'Attempt invalid reviewStatus',
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(rejectedInvalidStatus.ok).toBe(false);
+      expect(rejectedInvalidStatus.error).toMatch(/Invalid reviewStatus/i);
 
       // Unmarking reviewStatus clears both reviewedBy and reviewedOn even if the client sends them
       const nextUnreviewed = structuredClone(savedReviewed.config!);
@@ -1032,7 +1211,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         ...nextUnreviewed.limitationRuleSets![0]!,
         reviewStatus: 'unreviewed',
         reviewedBy: 'P-000004',
-        reviewedOn: '2026-11-08',
+        reviewedOn: '2020-01-01',
       };
 
       const savedUnreviewed = saveKeyDatesConfigRecord(
@@ -1056,7 +1235,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     }
   });
 
-  it('returns structured ActionDenied (without throwing) when allowManualEntry is false on manual key date creation (R285)', async () => {
+  it('returns structured ActionDenied (without throwing) when allowManualEntry is false on manual creation, supersede, or spoofed system source (R285, R294)', async () => {
     const store = getStore();
     const snapshot = structuredClone(store);
     try {
@@ -1105,6 +1284,27 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         expect(manualAttempt.message).toContain('Manual entry is disabled');
       }
 
+      // R294: A client-sent source: 'document_extraction' is rejected with ActionDenied
+      const spoofedDocExtraction = await createOrProposeKeyDateRecord(
+        {
+          matterId: matter.id,
+          keyDateTypeId: targetType.id,
+          title: 'Spoofed document_extraction attempt',
+          dueDate: '2027-06-01',
+          source: 'document_extraction',
+          intent: 'propose',
+        },
+        'P-000001',
+      );
+      expect(spoofedDocExtraction.ok).toBe(false);
+      expect(isActionDenied(spoofedDocExtraction)).toBe(true);
+      if (isActionDenied(spoofedDocExtraction)) {
+        expect(spoofedDocExtraction.code).toBe('FORBIDDEN');
+        expect(spoofedDocExtraction.message).toMatch(
+          /cannot be set by a client request|Manual entry is disabled/i,
+        );
+      }
+
       const firstRuleSet = current.limitationRuleSets![0]!;
       const firstRule = firstRuleSet.rules[0]!;
       const triggers = {
@@ -1135,6 +1335,34 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       );
       expect(calculatedAttempt.ok).toBe(true);
       expect(calculatedAttempt.keyDate?.source).toBe('calculated');
+
+      const createdKd = calculatedAttempt.keyDate!;
+      createdKd.status = 'confirmed';
+      saveStore(getStore());
+
+      // R294: Superseding into a manual date on a type with allowManualEntry: false is denied with ActionDenied
+      const configWithoutRuleSets = structuredClone(getKeyDatesConfig(getStore()));
+      configWithoutRuleSets.limitationRuleSets = [];
+      getStore().keyDatesConfigOverride = configWithoutRuleSets;
+      saveStore(getStore());
+
+      const supersedeToManualAttempt = await supersedeConfirmedKeyDateRecord(
+        createdKd.id,
+        {
+          dueDate: '2027-07-01',
+          notes: 'Attempted supersede to manual when rule removed and allowManualEntry is false',
+        },
+        'Rule removed supersede test',
+        'P-000001',
+      );
+      expect(supersedeToManualAttempt.ok).toBe(false);
+      expect(isActionDenied(supersedeToManualAttempt)).toBe(true);
+      if (isActionDenied(supersedeToManualAttempt)) {
+        expect(supersedeToManualAttempt.code).toBe('FORBIDDEN');
+        expect(supersedeToManualAttempt.message).toContain(
+          'Manual entry is disabled',
+        );
+      }
     } finally {
       saveStore(snapshot);
     }

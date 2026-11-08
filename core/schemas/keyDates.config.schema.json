@@ -39,8 +39,8 @@
           "default": "matter_owning_team",
           "description": "How the team diary is chosen for a new key date. Users with keydate:edit can change it.",
           "x-reserved": {
-            "for": "S0-15",
-            "reason": "Reserved for S0-15 (Key dates runtime repository and team diary assignment modes beyond matter_owning_team)."
+            "for": "backlog",
+            "reason": "Reserved for backlog item F19 (Key dates team assignment modes beyond matter_owning_team)."
           }
         }
       }
@@ -135,8 +135,8 @@
             "default": [],
             "description": "Limitation rule set IDs offered by default for matters of this type.",
             "x-reserved": {
-              "for": "S0-22",
-              "reason": "Reserved for S0-22 (Departments and work types default limitation rule set filtering by matter type)."
+              "for": "backlog",
+              "reason": "Reserved for backlog item F19 (Default limitation rule set filtering by matter type)."
             }
           },
           "verification": {
@@ -337,8 +337,8 @@
           "default": "microsoft_graph",
           "description": "External calendar provider adapter.",
           "x-reserved": {
-            "for": "S0-15",
-            "reason": "Reserved for S0-15 (Key dates runtime repository and multi-provider calendar adapter selection)."
+            "for": "backlog",
+            "reason": "Reserved for backlog item F19 (Multi-provider external calendar adapter selection)."
           }
         },
         "targets": {
@@ -513,8 +513,8 @@
           "type": "string",
           "description": "Optional category or cause-of-action label for the rule.",
           "x-reserved": {
-            "for": "S0-22",
-            "reason": "Reserved for S0-22 (Departments and work types claim-type classification on limitation rules)."
+            "for": "backlog",
+            "reason": "Reserved for backlog item F19 (Claim-type classification and filtering on limitation rules)."
           }
         },
         "guidanceNote": {

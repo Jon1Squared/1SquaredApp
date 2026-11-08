@@ -221,10 +221,6 @@
             "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
           }
         }
-      },
-      "x-reserved": {
-        "for": "S0-23",
-        "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
       }
     },
     "integrations": {
@@ -403,10 +399,6 @@
                 "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
               }
             }
-          },
-          "x-reserved": {
-            "for": "S0-18",
-            "reason": "Reserved for live tenant-scoped PMS synchronisation and code allocation in S0-18."
           }
         }
       }
@@ -422,10 +414,6 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "x-reserved": {
-          "for": "S0-17",
-          "reason": "Reserved for moving custom field definitions off the transitional JSON store in S0-17."
-        },
         "required": [
           "id",
           "recordType",
@@ -656,8 +644,8 @@
           "type": "array",
           "default": [],
           "x-reserved": {
-            "for": "S0-17",
-            "reason": "Reserved for S0-17 (Moving document generation metadata and custom document types off the transitional JSON store)."
+            "for": "backlog",
+            "reason": "Reserved for backlog item F20 (Tenant-configured custom document classification types in document generation)."
           },
           "items": {
             "type": "object",
