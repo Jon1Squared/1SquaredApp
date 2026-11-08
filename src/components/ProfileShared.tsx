@@ -12,8 +12,9 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
+import { isActionDenied } from '@/domain/actionResult';
 import { optionsFor, resolveLabel, resolveLabels } from '@/domain/lists';
-import { planMerge } from '@/domain/merge';
+import { isEmployeeOrLeaverRecord, planMerge } from '@/domain/merge';
 import { hrefForId, personDisplayName, recordDisplayName } from '@/domain/names';
 import type {
   AnyRecord,
@@ -57,18 +58,30 @@ export function PossibleDuplicateBanner({
   const router = useRouter();
   const { showToast } = useToast();
   const [mergeOpen, setMergeOpen] = useState(false);
+  const recordIsEmployeeOrLeaver = isEmployeeOrLeaverRecord(record);
+  const mergeableCandidates = useMemo(
+    () => candidates.filter((c) => !isEmployeeOrLeaverRecord(c)),
+    [candidates],
+  );
   const selectableTargets = useMemo(
-    () => allSameType.filter((r) => r.id !== record.id && !r.mergedIntoId),
+    () =>
+      allSameType.filter(
+        (r) =>
+          r.id !== record.id && !r.mergedIntoId && !isEmployeeOrLeaverRecord(r),
+      ),
     [allSameType, record.id],
   );
   const [survivorId, setSurvivorId] = useState<string>(
-    candidates[0]?.id ?? selectableTargets[0]?.id ?? '',
+    mergeableCandidates[0]?.id ?? selectableTargets[0]?.id ?? '',
   );
   const [busy, setBusy] = useState(false);
 
   const selectedSurvivor = useMemo(
-    () => selectableTargets.find((r) => r.id === survivorId) ?? candidates[0] ?? null,
-    [selectableTargets, candidates, survivorId],
+    () =>
+      selectableTargets.find((r) => r.id === survivorId) ??
+      mergeableCandidates[0] ??
+      null,
+    [selectableTargets, mergeableCandidates, survivorId],
   );
 
   const preview = useMemo(() => {
@@ -85,7 +98,6 @@ export function PossibleDuplicateBanner({
     const res = await dismissDuplicateAction(record.recordType, record.id, null);
     setBusy(false);
     if (isActionDenied(res)) {
-      showToast(res.message);
       return;
     }
     showToast('Marked as not a duplicate');
@@ -95,10 +107,6 @@ export function PossibleDuplicateBanner({
   async function onConfirmMerge() {
     if (!selectedSurvivor) return;
     setBusy(true);
-    const res = await mergeRecordsAction(record.recordType, selectedSurvivor.id, record.id);
-    setBusy(false);
-    if (isActionDenied(res)) {
-      showToast(res.message);
       return;
     }
     setMergeOpen(false);
@@ -138,23 +146,30 @@ export function PossibleDuplicateBanner({
           >
             Not a duplicate
           </button>
-          <button
-            type="button"
-            className="btn btn--primary btn--sm"
-            disabled={busy}
-            onClick={() => {
-              if (!survivorId && (candidates[0]?.id || selectableTargets[0]?.id)) {
-                setSurvivorId(candidates[0]?.id ?? selectableTargets[0]?.id ?? '');
-              }
-              setMergeOpen(true);
-            }}
-          >
-            Merge into…
-          </button>
+          {!recordIsEmployeeOrLeaver ? (
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              disabled={busy}
+              onClick={() => {
+                if (
+                  !survivorId &&
+                  (mergeableCandidates[0]?.id || selectableTargets[0]?.id)
+                ) {
+                  setSurvivorId(
+                    mergeableCandidates[0]?.id ?? selectableTargets[0]?.id ?? '',
+                  );
+                }
+                setMergeOpen(true);
+              }}
+            >
+              Merge into…
+            </button>
+          ) : null}
         </div>
       </div>
 
-      {mergeOpen ? (
+      {mergeOpen && !recordIsEmployeeOrLeaver ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Merge duplicate record">
           <div className="modal-panel">
             <h2>Merge {recordDisplayName(record)} ({record.id}) into…</h2>
@@ -172,9 +187,9 @@ export function PossibleDuplicateBanner({
                 value={survivorId}
                 onChange={(e) => setSurvivorId(e.target.value)}
               >
-                {candidates.length > 0 ? (
+                {mergeableCandidates.length > 0 ? (
                   <optgroup label="Suggested matches">
-                    {candidates.map((c) => (
+                    {mergeableCandidates.map((c) => (
                       <option key={c.id} value={c.id}>
                         {recordDisplayName(c)} ({c.id})
                       </option>

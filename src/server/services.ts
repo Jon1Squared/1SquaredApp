@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
+import { repointMergedEntityInDocRepository } from './documentGenerationServices';
 import { attentionList } from '@/domain/attention';
 import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { diffRecords } from '@/domain/audit';
@@ -67,7 +68,7 @@ import {
   systemKeyOf,
   valueBySystemKey,
 } from '@/domain/lists';
-import { planMerge } from '@/domain/merge';
+import { isEmployeeOrLeaverRecord, planMerge } from '@/domain/merge';
 import { personDisplayName, recordDisplayName } from '@/domain/names';
 import {
   computeAutomaticPmsLinks,
@@ -5565,6 +5566,12 @@ export function executeMerge(
       'You do not have permission (record:merge) to merge duplicate records.',
     ) as unknown as MergeHistory & Partial<ActionDenied>;
   }
+  if (survivorId === mergedId) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Cannot merge a record into itself.',
+    ) as unknown as MergeHistory & Partial<ActionDenied>;
+  }
   const now = new Date().toISOString();
   const list: AnyRecord[] = recordType === 'person' ? store.people : store.organisations;
   const survivor = list.find((r) => r.id === survivorId);
@@ -5573,6 +5580,18 @@ export function executeMerge(
     return buildActionDenied(
       'FORBIDDEN',
       'Record not found for merge.',
+    ) as unknown as MergeHistory & Partial<ActionDenied>;
+  }
+  if (isEmployeeOrLeaverRecord(survivor) || isEmployeeOrLeaverRecord(merged)) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Employee and leaver records cannot be merged.',
+    ) as unknown as MergeHistory & Partial<ActionDenied>;
+  }
+  if (survivor.mergedIntoId || merged.mergedIntoId) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Cannot merge a record that has already been merged.',
     ) as unknown as MergeHistory & Partial<ActionDenied>;
   }
 
@@ -5585,32 +5604,59 @@ export function executeMerge(
     'merged',
   )!.id;
 
-  // Repoint links
+  // 1. Repoint person-organisation links and delete duplicates rather than leaving them pointing at the tombstone
   let linksMoved = 0;
+  const nextLinks: PersonOrganisationLink[] = [];
   for (const link of store.links) {
     if (recordType === 'person' && link.personId === merged.id) {
-      const duplicateLink = store.links.some(
-        (l) => l.personId === survivor.id && l.organisationId === link.organisationId && l.isCurrent === link.isCurrent,
-      );
+      const duplicateLink =
+        store.links.some(
+          (l) =>
+            l !== link &&
+            l.personId === survivor.id &&
+            l.organisationId === link.organisationId,
+        ) ||
+        nextLinks.some(
+          (l) =>
+            l.personId === survivor.id &&
+            l.organisationId === link.organisationId,
+        );
       if (!duplicateLink) {
         link.personId = survivor.id;
+        nextLinks.push(link);
         linksMoved++;
       }
-    } else if (recordType === 'organisation' && link.organisationId === merged.id) {
-      const duplicateLink = store.links.some(
-        (l) => l.organisationId === survivor.id && l.personId === link.personId && l.isCurrent === link.isCurrent,
-      );
+    } else if (
+      recordType === 'organisation' &&
+      link.organisationId === merged.id
+    ) {
+      const duplicateLink =
+        store.links.some(
+          (l) =>
+            l !== link &&
+            l.organisationId === survivor.id &&
+            l.personId === link.personId,
+        ) ||
+        nextLinks.some(
+          (l) =>
+            l.organisationId === survivor.id &&
+            l.personId === link.personId,
+        );
       if (!duplicateLink) {
         link.organisationId = survivor.id;
+        nextLinks.push(link);
         linksMoved++;
       }
+    } else {
+      nextLinks.push(link);
     }
   }
+  store.links = nextLinks;
   if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
     plan.fieldsTaken.push('Organisation links');
   }
 
-  // Repoint subsidiary parent links if merging an organisation
+  // 2. Repoint subsidiary parent links if merging an organisation (relationshipPartnerId is never changed)
   if (recordType === 'organisation') {
     for (const org of store.organisations) {
       if (org.parentOrganisationId === merged.id && org.id !== survivor.id) {
@@ -5619,7 +5665,222 @@ export function executeMerge(
     }
   }
 
-  // Copy notes to survivor
+  // 3. Repoint Matter references and conflict check records
+  const repointConflictRecordObject = (
+    cr:
+      | {
+          parties?: { linkedRecordId: string | null }[];
+          matches?: { matchedRecordId: string }[];
+        }
+      | null
+      | undefined,
+  ) => {
+    if (!cr || typeof cr !== 'object') return;
+    if (Array.isArray(cr.parties)) {
+      for (const cp of cr.parties) {
+        if (cp && cp.linkedRecordId === merged.id) {
+          cp.linkedRecordId = survivor.id;
+        }
+      }
+    }
+    if (Array.isArray(cr.matches)) {
+      for (const match of cr.matches) {
+        if (match && match.matchedRecordId === merged.id) {
+          match.matchedRecordId = survivor.id;
+        }
+      }
+    }
+  };
+
+  for (const matter of store.matters) {
+    if (matter.clientId === merged.id) {
+      matter.clientId = survivor.id;
+    }
+    if (
+      Array.isArray(matter.additionalClientIds) &&
+      matter.additionalClientIds.includes(merged.id)
+    ) {
+      matter.additionalClientIds = Array.from(
+        new Set(
+          matter.additionalClientIds.map((id) =>
+            id === merged.id ? survivor.id : id,
+          ),
+        ),
+      );
+    }
+    if (matter.instructingContactId === merged.id) {
+      matter.instructingContactId = survivor.id;
+    }
+    if (matter.billingContactId === merged.id) {
+      matter.billingContactId = survivor.id;
+    }
+    if (matter.referrerContactId === merged.id) {
+      matter.referrerContactId = survivor.id;
+    }
+    for (const party of matter.parties ?? []) {
+      if (party.linkedRecordId === merged.id) {
+        party.linkedRecordId = survivor.id;
+      }
+    }
+    repointConflictRecordObject(matter.conflictCheckRecord);
+    if (matter.fieldValues && typeof matter.fieldValues === 'object') {
+      repointConflictRecordObject(
+        matter.fieldValues['conflictCheckRecord'] as {
+          parties?: { linkedRecordId: string | null }[];
+          matches?: { matchedRecordId: string }[];
+        },
+      );
+      repointConflictRecordObject(
+        matter.fieldValues['conflictCheck'] as {
+          parties?: { linkedRecordId: string | null }[];
+          matches?: { matchedRecordId: string }[];
+        },
+      );
+    }
+  }
+
+  // 4. Repoint Enquiry references and conflict snapshots
+  for (const enq of store.enquiries) {
+    if (enq.linkedOrganisationId === merged.id) {
+      enq.linkedOrganisationId = survivor.id;
+    }
+    if (enq.referrerPersonId === merged.id) {
+      enq.referrerPersonId = survivor.id;
+    }
+    if (enq.linkedPersonId === merged.id) {
+      enq.linkedPersonId = survivor.id;
+    }
+    if (enq.referredToOrganisationId === merged.id) {
+      enq.referredToOrganisationId = survivor.id;
+    }
+    if (enq.conflictSnapshot) {
+      for (const hit of enq.conflictSnapshot.conflicts ?? []) {
+        if (hit.recordId === merged.id) {
+          hit.recordId = survivor.id;
+          if (typeof hit.href === 'string' && hit.href.includes(merged.id)) {
+            hit.href = hit.href.replaceAll(merged.id, survivor.id);
+          }
+        }
+      }
+      if (Array.isArray(enq.conflictSnapshot.knownPeople)) {
+        const seen = new Set<string>();
+        const nextKnownPeople: typeof enq.conflictSnapshot.knownPeople = [];
+        for (const kp of enq.conflictSnapshot.knownPeople) {
+          const nextIdVal = kp.id === merged.id ? survivor.id : kp.id;
+          if (!seen.has(nextIdVal)) {
+            seen.add(nextIdVal);
+            nextKnownPeople.push({ ...kp, id: nextIdVal });
+          }
+        }
+        enq.conflictSnapshot.knownPeople = nextKnownPeople;
+      }
+      if (Array.isArray(enq.conflictSnapshot.knownOrganisations)) {
+        const seen = new Set<string>();
+        const nextKnownOrgs: typeof enq.conflictSnapshot.knownOrganisations = [];
+        for (const ko of enq.conflictSnapshot.knownOrganisations) {
+          const nextIdVal = ko.id === merged.id ? survivor.id : ko.id;
+          if (!seen.has(nextIdVal)) {
+            seen.add(nextIdVal);
+            nextKnownOrgs.push({ ...ko, id: nextIdVal });
+          }
+        }
+        enq.conflictSnapshot.knownOrganisations = nextKnownOrgs;
+      }
+    }
+  }
+
+  // 5. Repoint Quote references
+  for (const quote of store.quotes) {
+    if (quote.linkedOrganisationId === merged.id) {
+      quote.linkedOrganisationId = survivor.id;
+    }
+    if (quote.linkedPersonId === merged.id) {
+      quote.linkedPersonId = survivor.id;
+    }
+  }
+
+  // 6. Repoint Task linkedRecords (de-duplicated)
+  for (const task of store.tasks) {
+    if (
+      Array.isArray(task.linkedRecords) &&
+      task.linkedRecords.some((lr) => lr.recordId === merged.id)
+    ) {
+      const seen = new Set<string>();
+      const nextLinkedRecords: typeof task.linkedRecords = [];
+      for (const lr of task.linkedRecords) {
+        const nextRecId = lr.recordId === merged.id ? survivor.id : lr.recordId;
+        const key = `${lr.recordType}:${nextRecId}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          nextLinkedRecords.push({ ...lr, recordId: nextRecId });
+        }
+      }
+      task.linkedRecords = nextLinkedRecords;
+    }
+  }
+
+  // 7. Repoint PMS links (handle collision when survivor already has a PMS link)
+  const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
+  const nextPmsLinks: PmsLink[] = [];
+  for (const pmsLink of store.pmsLinks) {
+    if (pmsLink.onesquaredId === merged.id) {
+      const existingSurvivorPmsLink =
+        store.pmsLinks.find(
+          (other) =>
+            other !== pmsLink &&
+            other.entityType === pmsLink.entityType &&
+            other.onesquaredId === survivor.id,
+        ) ??
+        nextPmsLinks.find(
+          (other) =>
+            other.entityType === pmsLink.entityType &&
+            other.onesquaredId === survivor.id,
+        );
+      if (existingSurvivorPmsLink) {
+        pmsLinkConflicts.push({
+          keptPmsCode: existingSurvivorPmsLink.pmsCode,
+          discardedPmsCode: pmsLink.pmsCode,
+        });
+        const conflictSummary = `PMS link conflict (kept ${existingSurvivorPmsLink.pmsCode}, discarded ${pmsLink.pmsCode})`;
+        if (!plan.fieldsTaken.includes(conflictSummary)) {
+          plan.fieldsTaken.push(conflictSummary);
+        }
+        writeAudit(store, {
+          recordType,
+          recordId: survivor.id,
+          action: 'merge',
+          field: 'PMS link conflict',
+          oldValue: pmsLink.pmsCode,
+          newValue: existingSurvivorPmsLink.pmsCode,
+          byId,
+          at: now,
+        });
+      } else {
+        pmsLink.onesquaredId = survivor.id;
+        nextPmsLinks.push(pmsLink);
+        if (!plan.fieldsTaken.includes('PMS link')) {
+          plan.fieldsTaken.push('PMS link');
+        }
+      }
+    } else {
+      nextPmsLinks.push(pmsLink);
+    }
+  }
+  store.pmsLinks = nextPmsLinks;
+
+  // 8. Repoint Generated Documents & Document Links in both store and TenantDocumentRepository
+  const docsMoved = repointMergedEntityInDocRepository(
+    store,
+    actor,
+    recordType,
+    merged.id,
+    survivor.id,
+  );
+  if (docsMoved > 0 && !plan.fieldsTaken.includes('Generated documents')) {
+    plan.fieldsTaken.push('Generated documents');
+  }
+
+  // 9. Copy notes to survivor
   let notesMoved = 0;
   for (const note of store.notes) {
     if (note.recordType === recordType && note.recordId === merged.id) {
@@ -5630,6 +5891,42 @@ export function executeMerge(
   }
   if (notesMoved > 0 && !plan.fieldsTaken.includes('Notes')) {
     plan.fieldsTaken.push('Notes');
+  }
+
+  // 10. Other references: Person.createdFromEnquiryId, store.recentlyViewed, store.notifications
+  if (recordType === 'person') {
+    const mergedPerson = merged as Person;
+    const survivorPerson = plan.survivor as Person;
+    if (mergedPerson.createdFromEnquiryId) {
+      if (!survivorPerson.createdFromEnquiryId) {
+        survivorPerson.createdFromEnquiryId = mergedPerson.createdFromEnquiryId;
+      }
+      mergedPerson.createdFromEnquiryId = null;
+    }
+  }
+
+  if (store.recentlyViewed && typeof store.recentlyViewed === 'object') {
+    for (const [uid, viewedIds] of Object.entries(store.recentlyViewed)) {
+      if (Array.isArray(viewedIds) && viewedIds.includes(merged.id)) {
+        store.recentlyViewed[uid] = Array.from(
+          new Set(
+            viewedIds.map((id) => (id === merged.id ? survivor.id : id)),
+          ),
+        );
+      }
+    }
+  }
+
+  for (const notification of store.notifications ?? []) {
+    if (notification.recordId === merged.id) {
+      notification.recordId = survivor.id;
+    }
+    if (
+      typeof notification.href === 'string' &&
+      notification.href.includes(merged.id)
+    ) {
+      notification.href = notification.href.replaceAll(merged.id, survivor.id);
+    }
   }
 
   // Update survivor
@@ -5660,6 +5957,7 @@ export function executeMerge(
     byId,
     at: now,
     fieldsTaken: plan.fieldsTaken,
+    ...(pmsLinkConflicts.length > 0 ? { pmsLinkConflicts } : {}),
   };
   store.mergeHistory.unshift(history);
 

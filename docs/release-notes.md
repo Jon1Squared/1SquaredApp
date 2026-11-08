@@ -1,5 +1,15 @@
 # 1Squared — Release Notes
 
+## Unreleased — Record Merge Reference Repointing and Employee Refusal (`s0-09-merge-references`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Core Document Repository, Host Domain & Server Services (`core/src/tenancy/documentRepository.ts`, `src/domain/merge.ts`, `src/domain/types.ts`, `src/server/documentGenerationServices.ts`, `src/server/services.ts`, `src/components/ProfileShared.tsx`, `src/docs/`, `docs/`):**
+  - **Complete Reference Repointing on Merge (Bug B4, Item 28, `src/server/services.ts`, `src/server/documentGenerationServices.ts`, `core/src/tenancy/documentRepository.ts`):** Updated `executeMerge` to repoint every reference in a single operation across matters (`clientId`, de-duplicated `additionalClientIds`, `instructingContactId`, `billingContactId`, `referrerContactId`, `parties[].linkedRecordId`, and `conflictCheckRecord` `parties[].linkedRecordId` and `matches[].matchedRecordId`), enquiries (`linkedOrganisationId`, `referrerPersonId`, `linkedPersonId`, `referredToOrganisationId`, and `conflictSnapshot` `conflicts`, `knownPeople`, and `knownOrganisations`), quotes (`linkedOrganisationId` and `linkedPersonId`), tasks (de-duplicated `linkedRecords[]`), PMS links (`onesquaredId`, keeping the survivor's link and recording `pmsLinkConflicts` in `MergeHistory` and `store.audit` when both records have PMS links), person–organisation links (deleting duplicate links on the merged record rather than leaving them pointing at the tombstone), parent organisations (`parentOrganisationId`), generated documents and document links in both `store` and `TenantDocumentRepository` (`repointMergedEntity`), notes, `Person.createdFromEnquiryId`, `store.recentlyViewed`, and `store.notifications`, while leaving historical `store.audit` `recordId` values untouched.
+  - **Employee & Leaver Merge Refusal and `relationshipPartnerId` Preservation (`src/domain/merge.ts`, `src/server/services.ts`, `src/components/ProfileShared.tsx`):** Added `isEmployeeOrLeaverRecord`, refused merges in `executeMerge` when either record is an employee, works at the firm, or has `employment` data (including leavers), hid the merge button and filtered employee/leaver records in `PossibleDuplicateBanner`, and added `'relationshipPartnerId'` to `SKIP` in `planMerge` so organisation `relationshipPartnerId` (an employee ID) is never modified by a merge.
+  - **Tests & Documentation (`core/tests/rbac.test.ts`, `core/tests/isolation.test.ts`, `src/docs/articles/duplicate-checks.ts`, `docs/roadmap/feature-list.md`):** Added unit tests covering every record type, link de-duplication, PMS link collision, `TenantDocumentRepository.listDocumentsForEntity` read-back, employee/leaver refusal, tombstone redirects, and `record:merge` denial, plus two-tenant isolation tests (`core/tests/isolation.test.ts`), and updated `duplicate-checks`.
+
+---
+
 ## Unreleased — Conflict Search Coverage and Conversion Conflict Checks (`s0-07-conflict-fixes`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

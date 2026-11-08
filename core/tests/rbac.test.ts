@@ -70,15 +70,10 @@ import {
   addTaskCommentRecord,
   anonymiseExpiredEnquiries,
   approveSignOff,
-  assignEnquiryRecord,
-  closeEnquiryRecord,
-  createOrUpdateLink,
-  deleteLink,
-  discussSignOff,
-  dismissDuplicateMatch,
   executeMerge,
   getAppSnapshot,
   getEmployeeDetailsForUser,
+  linkPmsRecord,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
   logQuoteFollowUpRecord,
@@ -170,6 +165,11 @@ import {
   redactRecordId,
   searchMatterConflicts,
 } from '../../src/domain/matterConflicts';
+import { getDocumentRepository } from '../../src/server/documentGenerationServices';
+import PersonProfilePage from '../../src/app/people/[id]/page';
+import EditPersonPage from '../../src/app/people/[id]/edit/page';
+import OrganisationProfilePage from '../../src/app/organisations/[id]/page';
+import EditOrganisationPage from '../../src/app/organisations/[id]/edit/page';
 import {
   computeEnquiryConflictSnapshot,
   detectPreliminaryConflicts,
@@ -4682,6 +4682,702 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(combinedReasons).not.toContain(restrictedMatter.matterNumber);
         expect(combinedReasons).not.toContain('Ultra Secret Restricted Acquisition');
       } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+  });
+
+  describe('S0-09: Merge repoints every reference, link de-duplication, PMS collision, document repository read-back, employee/leaver refusal, and tombstone redirects', () => {
+    it('denies merge without record:merge and refuses to merge active employees, firm staff, or leavers', () => {
+      resetAllDemoData('P-000001');
+      try {
+        const s1 = savePersonRecord(
+          { firstName: 'Gareth', surname: 'Survivor', isEmployee: false },
+          { byId: 'P-000001' },
+        ).person!;
+        const m1 = savePersonRecord(
+          { firstName: 'Gareth', surname: 'Duplicate', isEmployee: false },
+          { byId: 'P-000001' },
+        ).person!;
+
+        // 1. Denied without record:merge (fee earner P-000002 lacks record:merge)
+        const deniedNoPerm = executeMerge('person', s1.id, m1.id, 'P-000002');
+        expect(isActionDenied(deniedNoPerm)).toBe(true);
+        if (isActionDenied(deniedNoPerm)) {
+          expect(deniedNoPerm.code).toBe('FORBIDDEN');
+        }
+
+        // 2. Denied when either record is an active employee (P-000002)
+        const deniedActiveEmpAsMerged = executeMerge('person', s1.id, 'P-000002', 'P-000004');
+        expect(isActionDenied(deniedActiveEmpAsMerged)).toBe(true);
+        const deniedActiveEmpAsSurvivor = executeMerge('person', 'P-000002', m1.id, 'P-000004');
+        expect(isActionDenied(deniedActiveEmpAsSurvivor)).toBe(true);
+
+        // 3. Denied when a record has worksAtFirm or employment data (including a leaver)
+        const store = getStore();
+        const leaverContact = store.people.find((p) => p.id === m1.id)!;
+        leaverContact.isEmployee = false;
+        leaverContact.employment = createDefaultEmploymentRecord({
+          person: leaverContact,
+          allPeople: store.people,
+          byId: 'P-000004',
+          status: 'Leaver',
+          primaryDomain: 'notalawfirm.example',
+        });
+        const deniedLeaver = executeMerge('person', s1.id, m1.id, 'P-000004');
+        expect(isActionDenied(deniedLeaver)).toBe(true);
+        if (isActionDenied(deniedLeaver)) {
+          expect(deniedLeaver.code).toBe('FORBIDDEN');
+        }
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('repoints every person and organisation reference across matters, enquiries, quotes, tasks, PMS links, links, documents, notes, recentlyViewed, and notifications while leaving audit recordId and relationshipPartnerId unchanged', () => {
+      resetAllDemoData('P-000001');
+      try {
+        const survivorPerson = savePersonRecord(
+          {
+            firstName: 'Alun',
+            surname: 'BrynSurvivor',
+            isEmployee: false,
+            emails: [{ id: 'em-s', address: 'alun.survivor@bryn.example', typeId: null, isPrimary: true }],
+          },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          {
+            firstName: 'Alun',
+            surname: 'BrynDuplicate',
+            isEmployee: false,
+            emails: [{ id: 'em-m', address: 'alun.dup@bryn.example', typeId: null, isPrimary: true }],
+          },
+          { byId: 'P-000004' },
+        ).person!;
+
+        const survivorOrg = saveOrganisationRecord(
+          {
+            legalName: 'Bryn Holdings Survivor Ltd',
+            relationshipPartnerId: 'P-000001',
+          },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mergedOrg = saveOrganisationRecord(
+          {
+            legalName: 'Bryn Holdings Duplicate Ltd',
+            relationshipPartnerId: 'P-000003',
+          },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const childOrg = saveOrganisationRecord(
+          {
+            legalName: 'Bryn Subsidiary Ltd',
+            parentOrganisationId: mergedOrg.id,
+          },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const secondOrg = saveOrganisationRecord(
+          {
+            legalName: 'Bryn Second Counterpart Ltd',
+          },
+          { byId: 'P-000004' },
+        ).organisation!;
+
+        const store = getStore();
+        const storeMergedPerson = store.people.find((p) => p.id === mergedPerson.id)!;
+        storeMergedPerson.createdFromEnquiryId = 'ENQ-ORIGIN-99';
+
+        // Person-organisation links: both survivorPerson and mergedPerson linked to survivorOrg (will de-duplicate),
+        // plus mergedPerson linked to secondOrg (will repoint).
+        createOrUpdateLink(
+          {
+            personId: survivorPerson.id,
+            organisationId: survivorOrg.id,
+            jobTitle: 'Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: true,
+            isCurrent: true,
+            startDate: null,
+            endDate: null,
+            contactStatusId: null,
+          },
+          'P-000004',
+        );
+        createOrUpdateLink(
+          {
+            personId: mergedPerson.id,
+            organisationId: survivorOrg.id,
+            jobTitle: 'Duplicate Director',
+            department: '',
+            roleWithinOrganisation: 'Director',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: null,
+            endDate: null,
+            contactStatusId: null,
+          },
+          'P-000004',
+        );
+        createOrUpdateLink(
+          {
+            personId: mergedPerson.id,
+            organisationId: secondOrg.id,
+            jobTitle: 'Advisor',
+            department: '',
+            roleWithinOrganisation: 'Advisor',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: null,
+            endDate: null,
+            contactStatusId: null,
+          },
+          'P-000004',
+        );
+
+        // Matter references
+        const matter = store.matters[0]!;
+        matter.clientId = mergedOrg.id;
+        matter.additionalClientIds = [survivorPerson.id, mergedPerson.id];
+        matter.instructingContactId = mergedPerson.id;
+        matter.billingContactId = mergedPerson.id;
+        matter.referrerContactId = mergedPerson.id;
+        matter.parties = [
+          {
+            id: 'MP-MERGE-1',
+            name: 'Alun BrynDuplicate',
+            role: 'Opponent',
+            entityType: 'person',
+            linkedRecordId: mergedPerson.id,
+          },
+          {
+            id: 'MP-MERGE-2',
+            name: 'Bryn Holdings Duplicate Ltd',
+            role: 'Other party',
+            entityType: 'organisation',
+            linkedRecordId: mergedOrg.id,
+          },
+        ];
+        matter.conflictCheckRecord = {
+          status: 'Cleared',
+          outcomeLabel: 'Cleared by fee earner',
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '2026-11-07',
+          lastRunById: 'P-000001',
+          lastRunByName: 'Carys',
+          parties: [
+            {
+              id: 'CP-1',
+              name: 'Alun',
+              entityType: 'person',
+              role: 'Client contact',
+              linkedRecordId: mergedPerson.id,
+            },
+            {
+              id: 'CP-2',
+              name: 'Bryn Dup',
+              entityType: 'organisation',
+              role: 'Client',
+              linkedRecordId: mergedOrg.id,
+            },
+          ],
+          matches: [
+            {
+              id: 'CM-1',
+              partyId: 'CP-1',
+              partyName: 'Alun',
+              matchedRecordId: mergedPerson.id,
+              matchedRecordName: 'Alun',
+              matchedRecordType: 'person',
+              strength: 'Exact',
+              whereFound: 'Directory',
+              responsiblePartnerId: null,
+              responsiblePartnerName: '',
+              dateLabel: '2026-11-07',
+              disposition: 'same_no_conflict',
+              note: 'Same contact',
+            },
+            {
+              id: 'CM-2',
+              partyId: 'CP-2',
+              partyName: 'Bryn Dup',
+              matchedRecordId: mergedOrg.id,
+              matchedRecordName: 'Bryn Dup',
+              matchedRecordType: 'organisation',
+              strength: 'Exact',
+              whereFound: 'Directory',
+              responsiblePartnerId: null,
+              responsiblePartnerName: '',
+              dateLabel: '2026-11-07',
+              disposition: 'same_no_conflict',
+              note: 'Same org',
+            },
+          ],
+          runs: [],
+          comments: [],
+        };
+
+        // Enquiry references and conflictSnapshot
+        const enq = store.enquiries[0]!;
+        enq.linkedOrganisationId = mergedOrg.id;
+        enq.referredToOrganisationId = mergedOrg.id;
+        enq.referrerPersonId = mergedPerson.id;
+        enq.linkedPersonId = mergedPerson.id;
+        enq.conflictSnapshot = {
+          recordedAt: new Date().toISOString(),
+          recordedById: 'P-000001',
+          searchedInput: {
+            firstName: 'Alun',
+            lastName: 'Bryn',
+            callingOnBehalfOf: 'Bryn Holdings',
+            otherPartiesNamed: '',
+            email: '',
+            phone: '',
+            postcode: '',
+            addressLine1: '',
+            addressLine2: '',
+          },
+          matchCount: 2,
+          highestSeverity: 'medium',
+          conflictStatus: 'Check',
+          conflicts: [
+            {
+              recordId: mergedPerson.id,
+              recordType: 'person',
+              name: 'Alun',
+              recordLabel: 'Person',
+              queryTerm: 'Alun',
+              href: `/people/${mergedPerson.id}`,
+              reason: 'Name match',
+              matchedFields: ['Name'],
+              severity: 'medium',
+              strength: 80,
+              blocking: false,
+            },
+            {
+              recordId: mergedOrg.id,
+              recordType: 'organisation',
+              name: 'Bryn Holdings',
+              recordLabel: 'Organisation',
+              queryTerm: 'Bryn',
+              href: `/organisations/${mergedOrg.id}`,
+              reason: 'Name match',
+              matchedFields: ['Name'],
+              severity: 'medium',
+              strength: 80,
+              blocking: false,
+            },
+          ],
+          knownPeople: [
+            { id: survivorPerson.id, formattedReasons: 'Existing' },
+            { id: mergedPerson.id, formattedReasons: 'Duplicate' },
+          ],
+          knownOrganisations: [
+            { id: mergedOrg.id, formattedReasons: 'Duplicate Org' },
+          ],
+        };
+
+        // Quote references
+        const quote = store.quotes[0]!;
+        quote.linkedOrganisationId = mergedOrg.id;
+        quote.linkedPersonId = mergedPerson.id;
+
+        // Task linkedRecords (both survivorPerson and mergedPerson linked so we verify de-duplication)
+        const task = store.tasks[0]!;
+        task.linkedRecords = [
+          { recordType: 'person', recordId: survivorPerson.id },
+          { recordType: 'person', recordId: mergedPerson.id },
+          { recordType: 'organisation', recordId: mergedOrg.id },
+        ];
+
+        // PMS links:
+        // - For person: only mergedPerson has a PMS link -> repoints to survivorPerson.
+        // - For organisation: both survivorOrg and mergedOrg have PMS links -> collision keeps survivorOrg's link and records conflict.
+        linkPmsRecord('person', mergedPerson.id, 'PMS-PER-MERGED', 'P-000004');
+        linkPmsRecord('organisation', survivorOrg.id, 'PMS-ORG-SURV', 'P-000004');
+        linkPmsRecord('organisation', mergedOrg.id, 'PMS-ORG-MERG', 'P-000004');
+
+        // Generated documents & documentLinks in both store and TenantDocumentRepository
+        const tenantCfg = getActiveTenantConfiguration();
+        const repo = getDocumentRepository();
+        const adminActor = store.people.find((p) => p.id === 'P-000004')!;
+        const ctx = resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: adminActor.id,
+            tenantId: tenantCfg.tenantId,
+            email: adminActor.emails[0]?.address ?? 'admin@notalawfirm.example',
+            name: 'Admin User',
+            roles: ['admin'],
+            entraObjectId: adminActor.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+            mfaVerified: true,
+          },
+          hostingMode: tenantCfg.hostingMode,
+          environment: tenantCfg.environment,
+          correlationId: 'test-s0-09-doc-repo',
+        });
+
+        const docRecord = {
+          id: 'DOC-S009-1',
+          tenantId: ctx.tenantId,
+          title: 'Client Care Letter',
+          fileName: 'ccl.docx',
+          documentType: 'letter',
+          outputFormat: 'docx' as const,
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          fileSizeBytes: 1024,
+          fileSha256: 'abc123',
+          templateId: 'TPL-1',
+          templateName: 'CCL',
+          templateVersionId: 'TPLV-1',
+          templateVersionNumber: 1,
+          storageProvider: 'local-fs' as const,
+          storageKey: 'blob-s009-1',
+          generatedByUserId: 'P-000004',
+          generatedAt: new Date().toISOString(),
+          primaryMatterId: matter.id,
+          primaryClientId: mergedOrg.id,
+          recipientPartyId: mergedPerson.id,
+          isDeleted: false,
+        };
+        const docLinkPerson = {
+          id: 'DL-S009-PER',
+          tenantId: ctx.tenantId,
+          documentId: docRecord.id,
+          entityType: 'person' as const,
+          entityId: mergedPerson.id,
+          linkRole: 'recipient_party' as const,
+          createdAt: new Date().toISOString(),
+        };
+        const docLinkOrg = {
+          id: 'DL-S009-ORG',
+          tenantId: ctx.tenantId,
+          documentId: docRecord.id,
+          entityType: 'organisation' as const,
+          entityId: mergedOrg.id,
+          linkRole: 'primary_client' as const,
+          createdAt: new Date().toISOString(),
+        };
+        store.documents = [...(store.documents ?? []), { ...docRecord }];
+        store.documentLinks = [
+          ...(store.documentLinks ?? []),
+          { ...docLinkPerson },
+          { ...docLinkOrg },
+        ];
+        repo.putDocument(ctx, docRecord);
+        repo.putDocumentLink(ctx, docLinkPerson);
+        repo.putDocumentLink(ctx, docLinkOrg);
+
+        // Notes, recentlyViewed, notifications
+        addNoteToRecord('person', mergedPerson.id, 'Merged person note', 'P-000004');
+        store.recentlyViewed['P-000001'] = [mergedPerson.id, survivorPerson.id, mergedOrg.id];
+        store.notifications.push({
+          id: 'NTF-MERGE-1',
+          recipientId: 'P-000001',
+          kind: 'enquiry_assigned',
+          title: 'Follow up with Alun',
+          detail: 'Call client',
+          href: `/people/${mergedPerson.id}`,
+          recordId: mergedPerson.id,
+          createdAt: new Date().toISOString(),
+          read: false,
+          byId: 'P-000004',
+        });
+
+        const preMergeAuditIdsForMergedPerson = store.audit
+          .filter((a) => a.recordId === mergedPerson.id)
+          .map((a) => a.id);
+        expect(preMergeAuditIdsForMergedPerson.length).toBeGreaterThan(0);
+
+        // Execute both merges as admin (P-000004 holds record:merge)
+        const personMergeHistory = executeMerge(
+          'person',
+          survivorPerson.id,
+          mergedPerson.id,
+          'P-000004',
+        );
+        expect(isActionDenied(personMergeHistory)).toBe(false);
+
+        const orgMergeHistory = executeMerge(
+          'organisation',
+          survivorOrg.id,
+          mergedOrg.id,
+          'P-000004',
+        );
+        expect(isActionDenied(orgMergeHistory)).toBe(false);
+
+        const updatedStore = getStore();
+
+        // Verify Matter references
+        const updatedMatter = updatedStore.matters.find((m) => m.id === matter.id)!;
+        expect(updatedMatter.clientId).toBe(survivorOrg.id);
+        expect(updatedMatter.additionalClientIds).toEqual([survivorPerson.id]);
+        expect(updatedMatter.instructingContactId).toBe(survivorPerson.id);
+        expect(updatedMatter.billingContactId).toBe(survivorPerson.id);
+        expect(updatedMatter.referrerContactId).toBe(survivorPerson.id);
+        expect(updatedMatter.parties.find((p) => p.id === 'MP-MERGE-1')?.linkedRecordId).toBe(
+          survivorPerson.id,
+        );
+        expect(updatedMatter.parties.find((p) => p.id === 'MP-MERGE-2')?.linkedRecordId).toBe(
+          survivorOrg.id,
+        );
+        expect(
+          updatedMatter.conflictCheckRecord?.parties.find((p) => p.id === 'CP-1')?.linkedRecordId,
+        ).toBe(survivorPerson.id);
+        expect(
+          updatedMatter.conflictCheckRecord?.parties.find((p) => p.id === 'CP-2')?.linkedRecordId,
+        ).toBe(survivorOrg.id);
+        expect(
+          updatedMatter.conflictCheckRecord?.matches.find((m) => m.id === 'CM-1')?.matchedRecordId,
+        ).toBe(survivorPerson.id);
+        expect(
+          updatedMatter.conflictCheckRecord?.matches.find((m) => m.id === 'CM-2')?.matchedRecordId,
+        ).toBe(survivorOrg.id);
+
+        // Verify Enquiry references & conflictSnapshot
+        const updatedEnq = updatedStore.enquiries.find((e) => e.id === enq.id)!;
+        expect(updatedEnq.linkedOrganisationId).toBe(survivorOrg.id);
+        expect(updatedEnq.referredToOrganisationId).toBe(survivorOrg.id);
+        expect(updatedEnq.referrerPersonId).toBe(survivorPerson.id);
+        expect(updatedEnq.linkedPersonId).toBe(survivorPerson.id);
+        expect(updatedEnq.conflictSnapshot?.conflicts[0]?.recordId).toBe(survivorPerson.id);
+        expect(updatedEnq.conflictSnapshot?.conflicts[0]?.href).toBe(
+          `/people/${survivorPerson.id}`,
+        );
+        expect(updatedEnq.conflictSnapshot?.conflicts[1]?.recordId).toBe(survivorOrg.id);
+        expect(updatedEnq.conflictSnapshot?.conflicts[1]?.href).toBe(
+          `/organisations/${survivorOrg.id}`,
+        );
+        expect(updatedEnq.conflictSnapshot?.knownPeople.map((kp) => kp.id)).toEqual([
+          survivorPerson.id,
+        ]);
+        expect(updatedEnq.conflictSnapshot?.knownOrganisations.map((ko) => ko.id)).toEqual([
+          survivorOrg.id,
+        ]);
+
+        // Verify Quote references
+        const updatedQuote = updatedStore.quotes.find((q) => q.id === quote.id)!;
+        expect(updatedQuote.linkedOrganisationId).toBe(survivorOrg.id);
+        expect(updatedQuote.linkedPersonId).toBe(survivorPerson.id);
+
+        // Verify Task linkedRecords (repointed and de-duplicated)
+        const updatedTask = updatedStore.tasks.find((t) => t.id === task.id)!;
+        expect(updatedTask.linkedRecords).toEqual([
+          { recordType: 'person', recordId: survivorPerson.id },
+          { recordType: 'organisation', recordId: survivorOrg.id },
+        ]);
+
+        // Verify Person-organisation link de-duplication (no link left on mergedPerson.id)
+        expect(
+          updatedStore.links.some(
+            (l) => l.personId === mergedPerson.id || l.organisationId === mergedOrg.id,
+          ),
+        ).toBe(false);
+        expect(
+          updatedStore.links.filter(
+            (l) => l.personId === survivorPerson.id && l.organisationId === survivorOrg.id,
+          ),
+        ).toHaveLength(1);
+        expect(
+          updatedStore.links.some(
+            (l) => l.personId === survivorPerson.id && l.organisationId === secondOrg.id,
+          ),
+        ).toBe(true);
+
+        // Verify Organisation parentOrganisationId repointed and relationshipPartnerId unchanged
+        const updatedChildOrg = updatedStore.organisations.find((o) => o.id === childOrg.id)!;
+        expect(updatedChildOrg.parentOrganisationId).toBe(survivorOrg.id);
+        const updatedSurvivorOrg = updatedStore.organisations.find((o) => o.id === survivorOrg.id)!;
+        expect(updatedSurvivorOrg.relationshipPartnerId).toBe('P-000001');
+
+        // Verify PMS link repointing and collision handling
+        const personPmsLinks = updatedStore.pmsLinks.filter(
+          (l) =>
+            l.entityType === 'person' &&
+            (l.onesquaredId === survivorPerson.id || l.onesquaredId === mergedPerson.id),
+        );
+        expect(personPmsLinks).toHaveLength(1);
+        expect(personPmsLinks[0]?.onesquaredId).toBe(survivorPerson.id);
+        expect(personPmsLinks[0]?.pmsCode).toBe('PMS-PER-MERGED');
+
+        const orgPmsLinks = updatedStore.pmsLinks.filter(
+          (l) =>
+            l.entityType === 'organisation' &&
+            (l.onesquaredId === survivorOrg.id || l.onesquaredId === mergedOrg.id),
+        );
+        expect(orgPmsLinks).toHaveLength(1);
+        expect(orgPmsLinks[0]?.onesquaredId).toBe(survivorOrg.id);
+        expect(orgPmsLinks[0]?.pmsCode).toBe('PMS-ORG-SURV');
+        expect(orgMergeHistory.pmsLinkConflicts).toEqual([
+          { keptPmsCode: 'PMS-ORG-SURV', discardedPmsCode: 'PMS-ORG-MERG' },
+        ]);
+        expect(
+          updatedStore.audit.some(
+            (a) =>
+              a.recordId === survivorOrg.id &&
+              a.action === 'merge' &&
+              a.field === 'PMS link conflict' &&
+              a.oldValue === 'PMS-ORG-MERG' &&
+              a.newValue === 'PMS-ORG-SURV',
+          ),
+        ).toBe(true);
+
+        // Verify Generated Documents in store AND TenantDocumentRepository via listDocumentsForEntity
+        const storeDoc = (updatedStore.documents ?? []).find((d) => d.id === docRecord.id)!;
+        expect(storeDoc.primaryClientId).toBe(survivorOrg.id);
+        expect(storeDoc.recipientPartyId).toBe(survivorPerson.id);
+        expect(
+          updatedStore.documentLinks?.some(
+            (l) => l.entityId === mergedPerson.id || l.entityId === mergedOrg.id,
+          ),
+        ).toBe(false);
+
+        const docsForSurvivorPerson = repo.listDocumentsForEntity(
+          ctx,
+          'person',
+          survivorPerson.id,
+        );
+        expect(docsForSurvivorPerson.map((d) => d.id)).toContain(docRecord.id);
+        expect(repo.listDocumentsForEntity(ctx, 'person', mergedPerson.id)).toHaveLength(0);
+
+        const docsForSurvivorOrg = repo.listDocumentsForEntity(
+          ctx,
+          'organisation',
+          survivorOrg.id,
+        );
+        expect(docsForSurvivorOrg.map((d) => d.id)).toContain(docRecord.id);
+        expect(repo.listDocumentsForEntity(ctx, 'organisation', mergedOrg.id)).toHaveLength(0);
+
+        // Verify Notes, Person.createdFromEnquiryId, recentlyViewed, notifications, and untouched audit recordIds
+        expect(
+          updatedStore.notes.some(
+            (n) =>
+              n.recordId === survivorPerson.id &&
+              n.mergedFromId === mergedPerson.id &&
+              n.text === 'Merged person note',
+          ),
+        ).toBe(true);
+        const updatedSurvivorPerson = updatedStore.people.find(
+          (p) => p.id === survivorPerson.id,
+        )!;
+        const updatedMergedPerson = updatedStore.people.find((p) => p.id === mergedPerson.id)!;
+        expect(updatedSurvivorPerson.createdFromEnquiryId).toBe('ENQ-ORIGIN-99');
+        expect(updatedMergedPerson.createdFromEnquiryId).toBeNull();
+        expect(updatedMergedPerson.mergedIntoId).toBe(survivorPerson.id);
+
+        expect(updatedStore.recentlyViewed['P-000001']).toEqual([
+          survivorPerson.id,
+          survivorOrg.id,
+        ]);
+        const updatedNotif = updatedStore.notifications.find((n) => n.id === 'NTF-MERGE-1')!;
+        expect(updatedNotif.recordId).toBe(survivorPerson.id);
+        expect(updatedNotif.href).toBe(`/people/${survivorPerson.id}`);
+
+        // Pre-existing audit entries on mergedPerson keep their recordId
+        for (const auditId of preMergeAuditIdsForMergedPerson) {
+          const entry = updatedStore.audit.find((a) => a.id === auditId)!;
+          expect(entry.recordId).toBe(mergedPerson.id);
+        }
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('redirects merged person and organisation tombstone pages and edit pages to the survivor', async () => {
+      resetAllDemoData('P-000001');
+      try {
+        const sPerson = savePersonRecord(
+          { firstName: 'Nia', surname: 'Survivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mPerson = savePersonRecord(
+          { firstName: 'Nia', surname: 'Merged', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        executeMerge('person', sPerson.id, mPerson.id, 'P-000004');
+
+        const sOrg = saveOrganisationRecord(
+          { legalName: 'Nia Survivor Co' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        const mOrg = saveOrganisationRecord(
+          { legalName: 'Nia Merged Co' },
+          { byId: 'P-000004' },
+        ).organisation!;
+        executeMerge('organisation', sOrg.id, mOrg.id, 'P-000004');
+
+        const adminPerson = getStore().people.find((p) => p.id === 'P-000004')!;
+        const cfg = getActiveTenantConfiguration();
+        const sessionPayload = verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: adminPerson.id,
+            tenantId: cfg.tenantId,
+            oid: adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: adminPerson.id,
+            email: adminPerson.emails[0]?.address ?? 'admin@notalawfirm.example',
+            displayName: 'Admin',
+            entraRoles: ['admin'],
+            mappedRoles: ['admin'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+        )!;
+        setTestEntraSessionOverride(sessionPayload);
+
+        const captureRedirect = async (fn: () => Promise<unknown>): Promise<string> => {
+          try {
+            await fn();
+            return '';
+          } catch (err) {
+            const digest = (err as { digest?: string })?.digest ?? '';
+            return digest || (err instanceof Error ? err.message : String(err));
+          }
+        };
+
+        const personViewRedirect = await captureRedirect(() =>
+          PersonProfilePage({
+            params: Promise.resolve({ id: mPerson.id }),
+            searchParams: Promise.resolve({}),
+          }),
+        );
+        expect(personViewRedirect).toContain(
+          `/people/${sPerson.id}?mergedFrom=${mPerson.id}`,
+        );
+
+        const personEditRedirect = await captureRedirect(() =>
+          EditPersonPage({
+            params: Promise.resolve({ id: mPerson.id }),
+          }),
+        );
+        expect(personEditRedirect).toContain(`/people/${sPerson.id}/edit`);
+
+        const orgViewRedirect = await captureRedirect(() =>
+          OrganisationProfilePage({
+            params: Promise.resolve({ id: mOrg.id }),
+            searchParams: Promise.resolve({}),
+          }),
+        );
+        expect(orgViewRedirect).toContain(
+          `/organisations/${sOrg.id}?mergedFrom=${mOrg.id}`,
+        );
+
+        const orgEditRedirect = await captureRedirect(() =>
+          EditOrganisationPage({
+            params: Promise.resolve({ id: mOrg.id }),
+          }),
+        );
+        expect(orgEditRedirect).toContain(`/organisations/${sOrg.id}/edit`);
+      } finally {
+        setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');
       }
     });

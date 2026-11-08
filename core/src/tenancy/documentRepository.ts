@@ -282,13 +282,75 @@ export class TenantDocumentRepository {
         }
         if (
           (entityType === 'organisation' || entityType === 'person') &&
-          d.primaryClientId === entityId
+          (d.primaryClientId === entityId || d.recipientPartyId === entityId)
         ) {
           return true;
         }
         return false;
       })
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+  }
+
+  public repointMergedEntity(
+    ctx: TenantContext,
+    entityType: 'organisation' | 'person',
+    mergedId: string,
+    survivorId: string,
+  ): number {
+    const db = this.getDb(ctx);
+    let updatedCount = 0;
+
+    for (const [docId, doc] of db.documents.entries()) {
+      if (doc.tenantId !== ctx.tenantId) continue;
+      let changed = false;
+      const copy: GeneratedDocumentRecord = { ...doc };
+      if (copy.primaryClientId === mergedId) {
+        copy.primaryClientId = survivorId;
+        changed = true;
+      }
+      if (copy.recipientPartyId === mergedId) {
+        copy.recipientPartyId = survivorId;
+        changed = true;
+      }
+      if (changed) {
+        db.documents.set(docId, copy);
+        updatedCount++;
+      }
+    }
+
+    const toDelete: string[] = [];
+    for (const [linkId, link] of db.links.entries()) {
+      if (
+        link.tenantId !== ctx.tenantId ||
+        link.entityType !== entityType ||
+        link.entityId !== mergedId
+      ) {
+        continue;
+      }
+      const duplicateExists = Array.from(db.links.values()).some(
+        (other) =>
+          other.id !== linkId &&
+          other.tenantId === ctx.tenantId &&
+          other.documentId === link.documentId &&
+          other.entityType === entityType &&
+          other.entityId === survivorId &&
+          other.linkRole === link.linkRole,
+      );
+      if (duplicateExists) {
+        toDelete.push(linkId);
+      } else {
+        db.links.set(linkId, {
+          ...link,
+          entityId: survivorId,
+        });
+        updatedCount++;
+      }
+    }
+    for (const linkId of toDelete) {
+      db.links.delete(linkId);
+    }
+
+    return updatedCount;
   }
 
   // ============================================================================

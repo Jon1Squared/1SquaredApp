@@ -81,7 +81,9 @@ import {
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
+  createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,
+  verifySignedEntraSessionCookie,
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
 import {
@@ -324,6 +326,171 @@ function syncStoreToRepository(
         });
       });
   }
+}
+
+export function getDocumentRepository(): TenantDocumentRepository {
+  if (!global.__oneSquaredDocRepo) {
+    global.__oneSquaredDocRepo = new TenantDocumentRepository();
+  }
+  return global.__oneSquaredDocRepo;
+}
+
+export function repointMergedEntityInDocRepository(
+  store: FirmStore,
+  actor: Person | null,
+  entityType: 'organisation' | 'person',
+  mergedId: string,
+  survivorId: string,
+): number {
+  const repo = getDocumentRepository();
+  const cfg = getEffectiveTenantConfig(store);
+
+  let ctx: TenantContext;
+  const activeVerified = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  if (actor && activeVerified && activeVerified.personId === actor.id) {
+    ctx = resolveTenantContextForStoreUser(store, actor.id, activeVerified).ctx;
+  } else {
+    const fallbackOidSuffix = (actor?.id ?? '000000000000')
+      .replace(/\D/g, '')
+      .padStart(12, '0')
+      .slice(-12);
+    const verifiedSession = verifySignedEntraSessionCookie(
+      createSignedEntraSessionCookie({
+        personId: actor?.id ?? 'system',
+        tenantId: cfg.tenantId,
+        oid:
+          actor?.entraObjectId ||
+          `00000000-0000-4000-8000-${fallbackOidSuffix}`,
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: actor?.id ?? 'system',
+        email:
+          actor?.emails?.find((e) => e.isPrimary)?.address ||
+          actor?.emails?.[0]?.address ||
+          `${actor?.id ?? 'system'}@notalawfirm.example`,
+        displayName: actor
+          ? `${actor.firstName} ${actor.surname}`.trim()
+          : 'System',
+        entraRoles: actor?.roles ? [...actor.roles] : ['admin'],
+        mappedRoles: actor?.roles ? [...actor.roles] : ['admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    )!;
+    ctx = resolveCurrentTenantContext(
+      createVerifiedSessionActorFromEntraSession(verifiedSession, {
+        correlationId: `merge-doc-${crypto.randomUUID()}`,
+      }),
+      cfg,
+    );
+  }
+
+  let updatedCount = 0;
+
+  if (Array.isArray(store.documents)) {
+    for (const doc of store.documents) {
+      if (doc.tenantId && doc.tenantId !== ctx.tenantId) continue;
+      let changed = false;
+      if (doc.primaryClientId === mergedId) {
+        doc.primaryClientId = survivorId;
+        changed = true;
+      }
+      if (doc.recipientPartyId === mergedId) {
+        doc.recipientPartyId = survivorId;
+        changed = true;
+      }
+      if (changed) {
+        updatedCount++;
+      }
+    }
+  }
+
+  if (Array.isArray(store.documentLinks)) {
+    const nextLinks: DocumentLinkRecord[] = [];
+    for (const link of store.documentLinks) {
+      if (
+        (!link.tenantId || link.tenantId === ctx.tenantId) &&
+        link.entityType === entityType &&
+        link.entityId === mergedId
+      ) {
+        const duplicateExists =
+          store.documentLinks.some(
+            (other) =>
+              other !== link &&
+              (!other.tenantId || other.tenantId === ctx.tenantId) &&
+              other.documentId === link.documentId &&
+              other.entityType === entityType &&
+              other.entityId === survivorId &&
+              other.linkRole === link.linkRole,
+          ) ||
+          nextLinks.some(
+            (other) =>
+              (!other.tenantId || other.tenantId === ctx.tenantId) &&
+              other.documentId === link.documentId &&
+              other.entityType === entityType &&
+              other.entityId === survivorId &&
+              other.linkRole === link.linkRole,
+          );
+        if (!duplicateExists) {
+          link.entityId = survivorId;
+          nextLinks.push(link);
+          updatedCount++;
+        }
+      } else {
+        nextLinks.push(link);
+      }
+    }
+    store.documentLinks = nextLinks;
+  }
+
+  const repoUpdated = repo.repointMergedEntity(
+    ctx,
+    entityType,
+    mergedId,
+    survivorId,
+  );
+  updatedCount += repoUpdated;
+
+  for (const d of store.documents ?? []) {
+    if (d.tenantId === ctx.tenantId) {
+      repo.putDocument(ctx, d);
+    }
+  }
+  for (const l of store.documentLinks ?? []) {
+    if (l.tenantId === ctx.tenantId) {
+      repo.putDocumentLink(ctx, l);
+    }
+  }
+
+  // Also ensure any documents/links that were added directly to repo are reflected in store
+  const repoDocs = repo.listDocuments(ctx, { includeDeleted: true });
+  if (repoDocs.length > 0) {
+    const storeDocById = new Map(
+      (store.documents ?? []).map((d) => [d.id, d]),
+    );
+    for (const d of repoDocs) {
+      storeDocById.set(d.id, d);
+    }
+    store.documents = Array.from(storeDocById.values());
+
+    const storeLinkById = new Map(
+      (store.documentLinks ?? []).map((l) => [l.id, l]),
+    );
+    for (const d of repoDocs) {
+      for (const l of repo.listLinksForDocument(ctx, d.id)) {
+        storeLinkById.set(l.id, l);
+      }
+    }
+    store.documentLinks = Array.from(storeLinkById.values()).filter(
+      (l) => !(l.entityType === entityType && l.entityId === mergedId),
+    );
+  }
+
+  return updatedCount;
 }
 
 function persistRepositoryToStore(
