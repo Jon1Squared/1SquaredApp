@@ -314,6 +314,17 @@ export function findMatterTypeKeyDateConfig(
   return config.matterTypes?.find((m) => m.matterTypeId === matterTypeId);
 }
 
+export function resolveDefaultRuleSetIdsForMatterType(
+  config: KeyDatesConfig | null | undefined,
+  matterTypeId: string | null | undefined,
+): string[] {
+  const mtConfig = findMatterTypeKeyDateConfig(config, matterTypeId);
+  if (mtConfig?.defaultRuleSetIds && mtConfig.defaultRuleSetIds.length > 0) {
+    return [...mtConfig.defaultRuleSetIds];
+  }
+  return (config?.limitationRuleSets ?? []).map((rs) => rs.id);
+}
+
 export function findKeyDateTypeConfig(
   config: KeyDatesConfig | null | undefined,
   keyDateTypeId: KeyDateTypeId,
@@ -861,8 +872,16 @@ export function createOrProposeKeyDate(
         ? 'calculated'
         : (input.source ?? 'manual');
 
+  if (source === 'manual' && kdType?.allowManualEntry === false) {
+    throw new Error(
+      `KEY_DATE_VALIDATION_ERROR: Manual entry is disabled for key date type "${keyDateTypeId}".`,
+    );
+  }
+
   const resolvedFallbackTeamId = (): TeamId => {
-    if (matter) {
+    const teamAssignmentMode =
+      config.defaults?.teamAssignment ?? 'matter_owning_team';
+    if (matter && teamAssignmentMode === 'matter_owning_team') {
       return resolveMatterOwningTeamId(matter, teams);
     }
     if (

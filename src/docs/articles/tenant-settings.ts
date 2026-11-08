@@ -35,7 +35,7 @@ Every leaf property in the tenant configuration schema is either actively read a
 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
-| \`featureFlags.enableMatterCostsGovernance\` | \`true\` | Active | Gates the Rates & matter costs administration tab, partner cost sign-off UI, \`saveMatterCostsConfigAction\` (\`admin:access\`), \`signOffMatterCostsAction\` (\`matter:costs:sign_off\`), and matter costs opening governance hooks |
+| \`featureFlags.enableMatterCostsGovernance\` | \`true\` | Active | Gates the Rates & matter costs administration tab, partner cost sign-off UI, \`saveMatterCostsConfigAction\` (\`admin:access\`), \`signOffMatterCostsAction\` (\`matter:costs:sign_off\`), and matter costs opening governance hooks. **Warning:** setting \`enableMatterCostsGovernance\` to \`false\` also skips the \`beforeMatterOpen\` partner cost sign-off check when opening a matter |
 | \`featureFlags.enablePmsLiveRateSync\` | \`true\` | Active | Gates the Pull / Sync Rates from PMS action (\`syncMatterCostsRatesFromPmsAction\`, requiring \`admin:access\`) and button |
 | \`featureFlags.enableAiMatterExtraction\` | \`false\` | Active | Gates \`/api/matters/extract\` (\`matter:create\`) and the AI matter extraction panel (together with \`integrations.aiProviderChoice === "anthropic"\`) |
 | \`featureFlags.enableDemoMode\` | \`false\` | Active | Enables persona switching in non-live environments; always forced off in \`live\` |
@@ -71,9 +71,9 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
-| \`customFields\` | \`[]\` | Active | Per-tenant custom field definitions across enquiry, person, organisation, matter, quote, and task screens |
+| \`customFields\` | \`[]\` | Reserved (S0-17) | Reserved for moving custom field definitions off the transitional JSON store in S0-17 (runtime custom fields are currently managed in the firm store) |
 | \`enabledExtensions\` | \`[]\` | Active | Registered extension IDs active for the tenant |
-| \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules, and usage reporting |
+| \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules (\`requireApproval\` controls whether \`submitTemplateVersionForApproval\` requires a separate approval step or activates clean templates directly; \`allowSelfApproval\` controls whether a builder may approve their own submitted version), and usage reporting |
 | \`rbac.*\` | Built-in roles | Active | Role definitions, department grants, relationship grants, and Entra ID identity mapping |
 | \`documentStores\` | Optional | Active | External SharePoint Online document stores |
 | \`documentRouting\` | Optional | Active | Ordered rules mapping matters to a document store, library, and base path |

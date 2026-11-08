@@ -285,6 +285,10 @@ export function calculateLimitationDate(
   const explanation: string[] = [];
   const warnings: string[] = [];
 
+  if (rule.claimType) {
+    explanation.push(`Claim type: ${rule.claimType}`);
+  }
+
   if (ruleSetReviewStatus === 'unreviewed') {
     warnings.push(
       'Rule set is unreviewed: a solicitor must verify this date before it can be confirmed.',

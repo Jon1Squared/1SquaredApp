@@ -480,6 +480,43 @@ export function submitTemplateVersionForApproval(params: {
   }
 
   const nowIso = new Date().toISOString();
+  const requireApproval =
+    config.documentGeneration.approval.requireApproval ?? true;
+
+  if (!requireApproval) {
+    for (const existingVer of repo.listVersionsForTemplate(ctx, template.id)) {
+      if (existingVer.id !== version.id && existingVer.status === 'Active') {
+        repo.putTemplateVersion(ctx, {
+          ...existingVer,
+          status: 'Retired',
+        });
+      }
+    }
+
+    const activatedVersion: DocumentTemplateVersionRecord = {
+      ...version,
+      status: 'Active',
+      submittedByUserId: actor.id,
+      submittedAt: nowIso,
+      reviewedByUserId: actor.id,
+      reviewedAt: nowIso,
+      rejectionReason: null,
+      changeNote: params.changeNote ?? version.changeNote,
+    };
+
+    const updatedTemplate: DocumentTemplateRecord = {
+      ...template,
+      activeVersionId: activatedVersion.id,
+      status: 'Active',
+      updatedAt: nowIso,
+    };
+
+    repo.putTemplateVersion(ctx, activatedVersion);
+    repo.putTemplate(ctx, updatedTemplate);
+
+    return { template: updatedTemplate, version: activatedVersion };
+  }
+
   const submittedVersion: DocumentTemplateVersionRecord = {
     ...version,
     status: 'Submitted',

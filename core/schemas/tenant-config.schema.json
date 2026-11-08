@@ -415,9 +415,17 @@
       "type": "array",
       "description": "Per-client custom fields, screen locations, and mandatory rules",
       "default": [],
+      "x-reserved": {
+        "for": "S0-17",
+        "reason": "Reserved for moving custom field definitions off the transitional JSON store in S0-17."
+      },
       "items": {
         "type": "object",
         "additionalProperties": false,
+        "x-reserved": {
+          "for": "S0-17",
+          "reason": "Reserved for moving custom field definitions off the transitional JSON store in S0-17."
+        },
         "required": [
           "id",
           "recordType",

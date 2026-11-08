@@ -5332,18 +5332,22 @@ export async function signOffMatterCostsRecord(
   matterId: string,
   byId: string,
   note?: string,
-): Promise<{
-  matter: Matter | null;
-  errors?: Record<string, string>;
-  warnings?: string[];
-}> {
+): Promise<
+  {
+    matter: Matter | null;
+    errors?: Record<string, string>;
+    warnings?: string[];
+  } & Partial<ActionDenied>
+> {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
+    const msg =
+      'Forbidden: Matter costs governance is disabled for this tenant (featureFlags.enableMatterCostsGovernance is false).';
     return {
+      ...buildActionDenied('FORBIDDEN', msg),
       matter: null,
       errors: {
-        featureDisabled:
-          'Forbidden: Matter costs governance is disabled for this tenant (featureFlags.enableMatterCostsGovernance is false).',
+        featureDisabled: msg,
       },
     };
   }

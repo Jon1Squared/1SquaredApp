@@ -3,11 +3,19 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AuthorisationError,
+  BasicMergeEngine,
+  buildValidDocxArchive,
   collectConfigReservedSettings,
   collectStructuredConfigReservedSettings,
+  CORE_FIELD_CATALOGUE,
+  createDocumentStorageProvider,
+  createOrUploadDraftTemplateVersion,
   loadAndValidateTenantConfig,
   RESERVED_TENANT_CONFIG_SETTINGS,
+  resolveTenantFromVerifiedToken,
+  submitTemplateVersionForApproval,
   TenantConfigurationSchema,
+  TenantDocumentRepository,
   validateTenantConfigWithWarnings,
   type PlatformEnvironment,
 } from '@platform/core';
@@ -22,11 +30,13 @@ import {
   signOffMatterCostsRecord,
   syncMatterCostsRatesFromPms,
 } from '../../src/server/services';
+import { isActionDenied } from '../../src/domain/actionResult';
 import { getStore, saveStore } from '../../src/server/store';
 import { runWithActiveActorSession } from '../../src/server/rbacRuntime';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
+const SCHEMA_DIR = path.join(REPO_ROOT, 'core', 'schemas');
 
 interface SchemaLeafEntry {
   path: string;
@@ -41,6 +51,10 @@ interface SchemaLeafEntry {
 function walkTenantSchemaProperties(
   node: Record<string, unknown>,
   prefix = '',
+  rootSchema: Record<string, unknown> = tenantConfigJsonSchema as unknown as Record<
+    string,
+    unknown
+  >,
   inheritedReserved?: { for: string; reason: string },
   inheritedDeprecated = false,
 ): SchemaLeafEntry[] {
@@ -49,9 +63,44 @@ function walkTenantSchemaProperties(
     return results;
   }
 
-  const nodeReserved = (node['x-reserved'] as
-    | { for: string; reason: string }
-    | undefined) ?? inheritedReserved;
+  if (typeof node.$ref === 'string') {
+    const ref = node.$ref;
+    if (ref.startsWith('#/$defs/')) {
+      const defName = ref.slice('#/$defs/'.length);
+      const defs = rootSchema.$defs as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      const target = defs?.[defName];
+      if (target) {
+        const rest = { ...node };
+        delete rest.$ref;
+        return walkTenantSchemaProperties(
+          { ...target, ...rest },
+          prefix,
+          rootSchema,
+          inheritedReserved,
+          inheritedDeprecated,
+        );
+      }
+    } else if (ref.startsWith('./')) {
+      const extSchema = JSON.parse(
+        fs.readFileSync(path.join(SCHEMA_DIR, ref), 'utf8'),
+      ) as Record<string, unknown>;
+      const rest = { ...node };
+      delete rest.$ref;
+      return walkTenantSchemaProperties(
+        { ...extSchema, ...rest },
+        prefix,
+        extSchema,
+        inheritedReserved,
+        inheritedDeprecated,
+      );
+    }
+  }
+
+  const nodeReserved =
+    (node['x-reserved'] as { for: string; reason: string } | undefined) ??
+    inheritedReserved;
   const nodeDeprecated = Boolean(node.deprecated) || inheritedDeprecated;
 
   if (node.properties && typeof node.properties === 'object') {
@@ -62,13 +111,15 @@ function walkTenantSchemaProperties(
       const children = walkTenantSchemaProperties(
         child,
         childPath,
+        rootSchema,
         nodeReserved,
         nodeDeprecated,
       );
       if (children.length === 0) {
-        const leafReserved = (child['x-reserved'] as
-          | { for: string; reason: string }
-          | undefined) ?? nodeReserved;
+        const leafReserved =
+          (child['x-reserved'] as
+            | { for: string; reason: string }
+            | undefined) ?? nodeReserved;
         results.push({
           path: childPath,
           key,
@@ -82,73 +133,35 @@ function walkTenantSchemaProperties(
     return results;
   }
 
-  if (
-    node.items &&
-    typeof node.items === 'object' &&
-    (node.items as Record<string, unknown>).properties
-  ) {
-    const itemsObj = node.items as Record<string, unknown>;
-    const itemsReserved = (itemsObj['x-reserved'] as
-      | { for: string; reason: string }
-      | undefined) ?? nodeReserved;
-    for (const [key, child] of Object.entries(
-      itemsObj.properties as Record<string, Record<string, unknown>>,
-    )) {
-      const childPath = `${prefix}[].${key}`;
-      const children = walkTenantSchemaProperties(
-        child,
-        childPath,
-        itemsReserved,
-        nodeDeprecated,
-      );
-      if (children.length === 0) {
-        const leafReserved = (child['x-reserved'] as
-          | { for: string; reason: string }
-          | undefined) ?? itemsReserved;
-        results.push({
-          path: childPath,
-          key,
-          deprecated: Boolean(child.deprecated) || nodeDeprecated,
-          reserved: leafReserved,
-        });
-      } else {
-        results.push(...children);
-      }
+  if (node.items && typeof node.items === 'object') {
+    const children = walkTenantSchemaProperties(
+      node.items as Record<string, unknown>,
+      `${prefix}[]`,
+      rootSchema,
+      nodeReserved,
+      nodeDeprecated,
+    );
+    if (children.length > 0) {
+      results.push(...children);
+      return results;
     }
-    return results;
   }
 
   if (
     node.additionalProperties &&
-    typeof node.additionalProperties === 'object' &&
-    (node.additionalProperties as Record<string, unknown>).properties
+    typeof node.additionalProperties === 'object'
   ) {
-    const addPropsObj = node.additionalProperties as Record<string, unknown>;
-    for (const [key, child] of Object.entries(
-      addPropsObj.properties as Record<string, Record<string, unknown>>,
-    )) {
-      const childPath = `${prefix}.*.${key}`;
-      const children = walkTenantSchemaProperties(
-        child,
-        childPath,
-        nodeReserved,
-        nodeDeprecated,
-      );
-      if (children.length === 0) {
-        const leafReserved = (child['x-reserved'] as
-          | { for: string; reason: string }
-          | undefined) ?? nodeReserved;
-        results.push({
-          path: childPath,
-          key,
-          deprecated: Boolean(child.deprecated) || nodeDeprecated,
-          reserved: leafReserved,
-        });
-      } else {
-        results.push(...children);
-      }
+    const children = walkTenantSchemaProperties(
+      node.additionalProperties as Record<string, unknown>,
+      `${prefix}.*`,
+      rootSchema,
+      nodeReserved,
+      nodeDeprecated,
+    );
+    if (children.length > 0) {
+      results.push(...children);
+      return results;
     }
-    return results;
   }
 
   if (Array.isArray(node.oneOf)) {
@@ -157,6 +170,7 @@ function walkTenantSchemaProperties(
         ...walkTenantSchemaProperties(
           variant,
           prefix,
+          rootSchema,
           nodeReserved,
           nodeDeprecated,
         ),
@@ -187,6 +201,7 @@ function collectRuntimeSourceFiles(dir: string): string[] {
       /\.(ts|tsx)$/.test(entry.name) &&
       !entry.name.endsWith('.test.ts') &&
       !entry.name.endsWith('.d.ts') &&
+      !entry.name.endsWith('.types.ts') &&
       entry.name !== 'types.ts' &&
       !fullPath.endsWith(path.join('core', 'src', 'api', 'index.ts')) &&
       !fullPath.endsWith(path.join('core', 'src', 'config-engine', 'index.ts'))
@@ -197,25 +212,104 @@ function collectRuntimeSourceFiles(dir: string): string[] {
   return files.sort();
 }
 
+const CONFIG_RECEIVER_NAMES =
+  '(?:config|tenantConfig|tenantCfg|cfg|baseCfg|activeTenantConfig|effectiveConfig|rawConfig|validated)';
+
+function isLeafReferencedInRuntime(
+  leaf: SchemaLeafEntry,
+  runtimeCorpus: string,
+  runtimeFileContents: readonly string[],
+): boolean {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rawSegments = leaf.path.split('.');
+  const topKey = rawSegments[0]!.replace(/\[\]$/, '');
+
+  // 1. Top-level TenantConfiguration property must be accessed on a config receiver (never e.g. store.customFields)
+  const topReceiverPattern = new RegExp(
+    `\\b${CONFIG_RECEIVER_NAMES}\\??\\.${esc(topKey)}\\b`,
+  );
+  if (!topReceiverPattern.test(runtimeCorpus)) {
+    return false;
+  }
+
+  if (rawSegments.length === 1) {
+    return true;
+  }
+
+  const lastSegment = rawSegments[rawSegments.length - 1]!.replace(/\[\]$/, '');
+  const prevSegment = rawSegments[rawSegments.length - 2]!;
+
+  // Deprecated roleDefaults permission keys contain colons and are indexed by string key
+  if (lastSegment.includes(':')) {
+    const colonKeyPattern = new RegExp(`['"]${esc(lastSegment)}['"]`);
+    const parentClean = prevSegment.replace(/\[\]$/, '');
+    const parentAccessPattern = new RegExp(
+      `(?:\\.|\\?\\.)\\b${esc(parentClean)}\\b`,
+    );
+    return (
+      colonKeyPattern.test(runtimeCorpus) &&
+      parentAccessPattern.test(runtimeCorpus)
+    );
+  }
+
+  // If the immediate parent is a named object (not an array `[]` or wildcard `*`),
+  // match the dotted path `<parentKey>.<leafKey>` or `<parentKey>?.<leafKey>` or typed sub-config receiver (excluding `patch.`).
+  if (!prevSegment.endsWith('[]') && prevSegment !== '*') {
+    const directDotted = new RegExp(
+      `(?<!patch\\.|patch\\?\\.)\\b(?:${esc(prevSegment)}|storeConfig|authConfig|accessConfig|templatesConfig)\\??\\.${esc(lastSegment)}\\b`,
+    );
+    if (directDotted.test(runtimeCorpus)) {
+      return true;
+    }
+  }
+
+  // Otherwise, for typed sub-config accessors or array/map elements, verify that a runtime module
+  // accesses both the parent property (`.parentSeg`) and the leaf property (`.lastSegment`),
+  // or accesses the leaf on a typed sub-config variable (`storeConfig.enabled`).
+  const typedElementAccessor = new RegExp(
+    `\\b(?:storeConfig|authConfig|accessConfig|templatesConfig)\\??\\.${esc(lastSegment)}\\b`,
+  );
+  if (typedElementAccessor.test(runtimeCorpus)) {
+    return true;
+  }
+
+  const cleanSegments = rawSegments
+    .map((s) => s.replace(/\[\]$/, ''))
+    .filter((s) => s !== '*');
+  const parentSeg = cleanSegments[cleanSegments.length - 2]!;
+  const parentPattern = new RegExp(`(?:\\.|\\?\\.)\\b${esc(parentSeg)}\\b`);
+  const leafPattern = new RegExp(
+    `(?<!patch)(?:\\.|\\?\\.)\\b${esc(lastSegment)}\\b|\\['${esc(lastSegment)}'\\]|\\["${esc(lastSegment)}"\\]`,
+  );
+
+  return runtimeFileContents.some(
+    (content) => parentPattern.test(content) && leafPattern.test(content),
+  );
+}
+
 describe('S0-12: tenant configuration schema usage, reserved markers, and feature flag gates', () => {
   afterEach(() => {
     setActiveTenantConfigForTesting(null);
     vi.restoreAllMocks();
   });
 
-  it('walks tenantConfigJsonSchema.properties recursively and asserts every leaf key is either referenced in runtime code or marked x-reserved', () => {
+  it('walks tenantConfigJsonSchema.properties (including $ref schemas) recursively and asserts every leaf key is either referenced in runtime code via a dotted/typed accessor or marked x-reserved', () => {
     const leaves = walkTenantSchemaProperties(
       tenantConfigJsonSchema as unknown as Record<string, unknown>,
     );
-    expect(leaves.length).toBeGreaterThan(50);
+    expect(leaves.length).toBeGreaterThan(180);
+    expect(
+      leaves.some((l) => l.path === 'keyDates.defaults.verification.required'),
+    ).toBe(true);
 
     const runtimeFiles = [
       ...collectRuntimeSourceFiles(path.join(REPO_ROOT, 'src')),
       ...collectRuntimeSourceFiles(path.join(REPO_ROOT, 'core', 'src')),
     ];
-    const runtimeCorpus = runtimeFiles
-      .map((filePath) => fs.readFileSync(filePath, 'utf8'))
-      .join('\n');
+    const runtimeFileContents = runtimeFiles.map((filePath) =>
+      fs.readFileSync(filePath, 'utf8'),
+    );
+    const runtimeCorpus = runtimeFileContents.join('\n');
 
     const unreferencedNonReserved: string[] = [];
     for (const leaf of leaves) {
@@ -225,9 +319,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         continue;
       }
 
-      const escapedKey = leaf.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const keyPattern = new RegExp(`\\b${escapedKey}\\b`);
-      if (!keyPattern.test(runtimeCorpus)) {
+      if (
+        !isLeafReferencedInRuntime(leaf, runtimeCorpus, runtimeFileContents)
+      ) {
         unreferencedNonReserved.push(leaf.path);
       }
     }
@@ -253,6 +347,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       'integrations.pmsSync.clientCodeAllocation': 'S0-18',
       'integrations.pmsSync.pollIntervalMinutes': 'S0-18',
       'integrations.pmsSync.fieldMappings': 'S0-18',
+      customFields: 'S0-17',
       'documentAccess.autoRemediateDrift': 'S0-25',
     };
 
@@ -288,6 +383,114 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       TenantConfigurationSchema.shape.integrations.shape
         .pmsConnectionSecretVaultRef.description,
     ).toContain('[x-reserved:S0-18]');
+    expect(TenantConfigurationSchema.shape.customFields.description).toContain(
+      '[x-reserved:S0-17]',
+    );
+  });
+
+  it('applies documentGeneration.approval.requireApproval when submitting a template version', async () => {
+    const ctx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-0001',
+        tenantId: 'not-a-law-firm',
+        email: 'admin@notalawfirm.example',
+        name: 'Aldous Vane',
+        roles: ['admin', 'partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'dev',
+      correlationId: 'corr-s0-12-docgen',
+    });
+    const repo = new TenantDocumentRepository();
+    const storage = createDocumentStorageProvider('local-fs', {
+      inMemoryOnly: true,
+      tokenSigningKey: 'test-signing-key-32-chars-minimum-12345',
+    });
+    const engine = new BasicMergeEngine();
+    const docxBytes = buildValidDocxArchive({
+      paragraphs: [{ text: 'Dear {{client.name}}, ref {{matter.reference}}.' }],
+    });
+    const actor = {
+      id: 'P-0001',
+      tenantId: 'not-a-law-firm',
+      roles: ['admin', 'partner'] as const,
+    };
+
+    const configRequireApproval = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+    );
+    const created1 = await createOrUploadDraftTemplateVersion({
+      ctx,
+      repo,
+      storage,
+      engine,
+      catalogue: CORE_FIELD_CATALOGUE,
+      actor,
+      config: configRequireApproval,
+      input: {
+        code: 'TPL-REQ-APPROVAL',
+        name: 'Requires Approval Template',
+        description: 'Test template',
+        category: 'General',
+        outputDocumentType: 'Letter',
+        filenamePattern: '{matter.reference}-letter',
+        availabilityRules: { sourceContexts: ['matter'] },
+        fileName: 'test.docx',
+        docxBytes,
+      },
+    });
+    const submitted = submitTemplateVersionForApproval({
+      ctx,
+      repo,
+      catalogue: CORE_FIELD_CATALOGUE,
+      actor,
+      config: configRequireApproval,
+      versionId: created1.version.id,
+    });
+    expect(submitted.version.status).toBe('Submitted');
+
+    const configNoApproval = loadAndValidateTenantConfig({
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      documentGeneration: {
+        approval: {
+          requireApproval: false,
+          allowSelfApproval: false,
+        },
+      },
+    });
+    const created2 = await createOrUploadDraftTemplateVersion({
+      ctx,
+      repo,
+      storage,
+      engine,
+      catalogue: CORE_FIELD_CATALOGUE,
+      actor,
+      config: configNoApproval,
+      input: {
+        code: 'TPL-NO-APPROVAL',
+        name: 'Auto-Active Template',
+        description: 'Test template without approval step',
+        category: 'General',
+        outputDocumentType: 'Letter',
+        filenamePattern: '{matter.reference}-auto',
+        availabilityRules: { sourceContexts: ['matter'] },
+        fileName: 'auto.docx',
+        docxBytes,
+      },
+    });
+    const autoActivated = submitTemplateVersionForApproval({
+      ctx,
+      repo,
+      catalogue: CORE_FIELD_CATALOGUE,
+      actor,
+      config: configNoApproval,
+      versionId: created2.version.id,
+    });
+    expect(autoActivated.version.status).toBe('Active');
+    expect(autoActivated.template.activeVersionId).toBe(created2.version.id);
+    expect(autoActivated.template.status).toBe('Active');
   });
 
   it('validates client-not-a-law-firm/config/base.json and all environment overlays unchanged (Rule 7 backward compatibility)', () => {
@@ -428,8 +631,10 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
             'Attempted sign-off while feature disabled',
           ),
       );
+      expect(isActionDenied(signOffDenied)).toBe(true);
+      expect(signOffDenied.code).toBe('FORBIDDEN');
       expect(signOffDenied.matter).toBeNull();
-      expect(signOffDenied.errors?.featureDisabled).toContain(
+      expect(signOffDenied.message).toContain(
         'enableMatterCostsGovernance is false',
       );
     } finally {

@@ -221,8 +221,10 @@ export async function syncKeyDateToOutlookCalendar(
   const isUnconfiguredDefaultAdapter =
     adapter instanceof ManagedIdentityGraphCalendarAdapter &&
     !adapter.isConfigured;
+  const syncProvider = config.calendarSync?.provider ?? 'microsoft_graph';
   if (
     !config?.enabled ||
+    syncProvider !== 'microsoft_graph' ||
     isRestricted ||
     !syncPolicy.enabled ||
     isUnconfiguredDefaultAdapter

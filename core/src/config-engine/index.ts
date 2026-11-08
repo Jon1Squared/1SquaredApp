@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod';
+import tenantConfigJsonSchema from '../../schemas/tenant-config.schema.json';
 import type {
   DocumentGenerationConfig,
   DocumentPermission,
@@ -741,7 +742,7 @@ export const TenantConfigurationSchema = z
       .array(CustomFieldConfigEntrySchema)
       .default([])
       .describe(
-        'Per-client custom fields, screen locations, and mandatory rules',
+        '[x-reserved:S0-17] Per-client custom fields, screen locations, and mandatory rules (reserved for S0-17)',
       ),
     enabledExtensions: z
       .array(z.string())
@@ -2100,112 +2101,39 @@ export interface ConfigReservedSettingNotice {
   message: string;
 }
 
+function extractReservedSettingsFromSchema(
+  node: Record<string, unknown>,
+  prefix = '',
+): Array<{ path: string; forSlice: string; reason: string }> {
+  const results: Array<{ path: string; forSlice: string; reason: string }> = [];
+  if (!node || typeof node !== 'object' || !node.properties) {
+    return results;
+  }
+  for (const [key, child] of Object.entries(
+    node.properties as Record<string, Record<string, unknown>>,
+  )) {
+    const childPath = prefix ? `${prefix}.${key}` : key;
+    if (child.properties && typeof child.properties === 'object') {
+      results.push(...extractReservedSettingsFromSchema(child, childPath));
+    } else if (child['x-reserved'] && typeof child['x-reserved'] === 'object') {
+      const reserved = child['x-reserved'] as { for: string; reason: string };
+      results.push({
+        path: childPath,
+        forSlice: reserved.for,
+        reason: reserved.reason,
+      });
+    }
+  }
+  return results;
+}
+
 export const RESERVED_TENANT_CONFIG_SETTINGS: readonly {
   path: string;
   forSlice: string;
   reason: string;
-}[] = [
-  {
-    path: 'branding.accentColorHex',
-    forSlice: 'S0-11b',
-    reason: 'Reserved for tenant branding theme rendering in S0-11b.',
-  },
-  {
-    path: 'branding.logoAssetKey',
-    forSlice: 'S0-11b',
-    reason: 'Reserved for tenant firm logo rendering in S0-11b.',
-  },
-  {
-    path: 'matterCosts.rateSourceMode',
-    forSlice: 'S0-23',
-    reason:
-      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
-  },
-  {
-    path: 'matterCosts.allowMatterRateOverrides',
-    forSlice: 'S0-23',
-    reason:
-      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
-  },
-  {
-    path: 'matterCosts.partnerSignOffThresholdGbp',
-    forSlice: 'S0-23',
-    reason:
-      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
-  },
-  {
-    path: 'matterCosts.rateCards',
-    forSlice: 'S0-23',
-    reason:
-      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
-  },
-  {
-    path: 'matterCosts.disbursementPresets',
-    forSlice: 'S0-23',
-    reason:
-      'Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23.',
-  },
-  {
-    path: 'integrations.pmsConnectionSecretVaultRef',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS database connection secret resolution in S0-18.',
-  },
-  {
-    path: 'integrations.companiesHouseApiKeyVaultRef',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live Companies House API integration in S0-18.',
-  },
-  {
-    path: 'integrations.pmsSync.enabled',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS synchronisation in S0-18.',
-  },
-  {
-    path: 'integrations.pmsSync.providerKey',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS adapter selection in S0-18.',
-  },
-  {
-    path: 'integrations.pmsSync.syncMode',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS sync direction control in S0-18.',
-  },
-  {
-    path: 'integrations.pmsSync.matterCodeAllocation',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS matter number allocation in S0-18.',
-  },
-  {
-    path: 'integrations.pmsSync.clientCodeAllocation',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS client code allocation in S0-18.',
-  },
-  {
-    path: 'integrations.pmsSync.pollIntervalMinutes',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS delta polling interval in S0-18.',
-  },
-  {
-    path: 'integrations.pmsSync.fieldMappings',
-    forSlice: 'S0-18',
-    reason:
-      'Reserved for live tenant-scoped PMS field-level synchronisation in S0-18.',
-  },
-  {
-    path: 'documentAccess.autoRemediateDrift',
-    forSlice: 'S0-25',
-    reason:
-      'Reserved for scheduled automatic SharePoint permission drift remediation in S0-25.',
-  },
-];
+}[] = extractReservedSettingsFromSchema(
+  tenantConfigJsonSchema as unknown as Record<string, unknown>,
+);
 
 function hasNestedConfigValue(
   obj: Record<string, unknown> | undefined,

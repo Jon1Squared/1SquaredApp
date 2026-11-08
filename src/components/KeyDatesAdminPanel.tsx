@@ -130,6 +130,8 @@ export function KeyDatesAdminPanel({
           ? {
               ...rs,
               reviewStatus: rs.reviewStatus === 'reviewed' ? 'unreviewed' : 'reviewed',
+              reviewedBy:
+                rs.reviewStatus === 'reviewed' ? undefined : rs.reviewedBy,
               reviewedOn:
                 rs.reviewStatus === 'reviewed' ? undefined : new Date().toISOString().slice(0, 10),
             }
@@ -608,7 +610,7 @@ export function KeyDatesAdminPanel({
                   <StatusPill
                     label={
                       rs.reviewStatus === 'reviewed'
-                        ? `Reviewed (${rs.reviewedOn ?? 'verified'})`
+                        ? `Reviewed (${rs.reviewedOn ?? 'verified'}${rs.reviewedBy ? ` by ${rs.reviewedBy}` : ''})`
                         : 'Unreviewed (forces two-step verification)'
                     }
                     tone={rs.reviewStatus === 'reviewed' ? 'positive' : 'warning'}

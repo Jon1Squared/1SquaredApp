@@ -28,6 +28,7 @@ Settings that are validated by `core/schemas/tenant-config.schema.json` for back
 | `integrations.pmsConnectionSecretVaultRef` | `S0-18` | Reserved for live tenant-scoped PMS database connection secret resolution |
 | `integrations.companiesHouseApiKeyVaultRef` | `S0-18` | Reserved for live Companies House API integration |
 | `integrations.pmsSync.*` (`enabled`, `providerKey`, `syncMode`, `matterCodeAllocation`, `clientCodeAllocation`, `pollIntervalMinutes`, `fieldMappings`) | `S0-18` | Reserved for live tenant-scoped PMS synchronisation and code allocation |
+| `customFields` | `S0-17` | Reserved for moving custom field definitions off the transitional JSON store |
 | `documentAccess.autoRemediateDrift` | `S0-25` | Reserved for scheduled automatic SharePoint permission drift remediation |
 
 ## AI Matter Extraction Configuration & Data Flow Record (Standard Section 10, ADR 0031)
