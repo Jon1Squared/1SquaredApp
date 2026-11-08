@@ -9,6 +9,7 @@ import {
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
 import { resetAllDemoData } from '@/server/services';
 import { getStore } from '@/server/store';
+import { buildRecordVisibility } from '@/server/visibility';
 
 const ORIGINAL_ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -365,8 +366,9 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     ).toBe(false);
   });
 
-  it('excludes a person created from a hidden enquiry from CRM matching and the response (R263)', async () => {
+  it('excludes a person created from a hidden enquiry from CRM matching and the response while matching a visible person (R263, R291)', async () => {
     const store = getStore();
+    const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     // Create a private Draft enquiry owned by P-000001 (hidden from P-000002) and a person created from it
     const hiddenEnq = {
       ...structuredClone(store.enquiries[0]!),
@@ -377,6 +379,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
       takenById: 'P-000001',
       assignedToId: null,
       assignedTeamId: null,
+      convertedMatterId: null,
       firstName: 'Idris',
       lastName: 'HiddenEnquirer',
     };
@@ -396,8 +399,27 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
         },
       ],
     };
+    const visiblePerson = {
+      ...structuredClone(store.people.find((p) => !p.isEmployee)!),
+      id: 'P-VISIBLE-PARTY-S006',
+      firstName: 'Meinir',
+      surname: 'VisibleOpponent',
+      isEmployee: false,
+      createdFromEnquiryId: null,
+      emails: [
+        {
+          id: 'em-visible-s006',
+          address: 'meinir.visible@notalawfirm.example',
+          typeId: 'email_type.personal',
+          isPrimary: true,
+        },
+      ],
+    };
     store.enquiries.push(hiddenEnq);
     store.people.push(hiddenEnqPerson);
+    store.people.push(visiblePerson);
+
+    expect(buildRecordVisibility(store, feeEarner).canViewEnquiry(hiddenEnq)).toBe(false);
 
     globalThis.fetch = mockAnthropicSuccessResponse({
       matters: [
@@ -415,13 +437,22 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
               relationship_code: 'OP',
               source: ['instruction.eml'],
             },
+            {
+              name: 'Meinir VisibleOpponent',
+              entity_type: 'person',
+              role: 'Co-Claimant',
+              relationship_code: 'OP',
+              source: ['instruction.eml'],
+            },
           ],
         },
       ],
     }) as unknown as typeof fetch;
 
     const res = await matterExtractPost(
-      buildExtractRequest('Instruction naming Idris HiddenEnquirer from a hidden enquiry.'),
+      buildExtractRequest(
+        'Instruction naming Idris HiddenEnquirer from a hidden enquiry and Meinir VisibleOpponent.',
+      ),
     );
     expect(res.status).toBe(200);
     const data = (await res.json()) as {
@@ -433,11 +464,13 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     };
 
     expect(data.people.some((p) => p.id === hiddenEnqPerson.id)).toBe(false);
+    expect(data.people.some((p) => p.id === visiblePerson.id)).toBe(true);
     const allParties = [
       ...(data.extraction.otherParties ?? []),
       ...(data.extraction.matters ?? []).flatMap((m) => m.otherParties ?? []),
     ];
     expect(allParties.some((pt) => pt.matchedRecordId === hiddenEnqPerson.id)).toBe(false);
+    expect(allParties.some((pt) => pt.matchedRecordId === visiblePerson.id)).toBe(true);
   });
 
   it('labels local fallback provenance as local-fallback and hides internal error messages on 500', async () => {
