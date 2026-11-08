@@ -697,7 +697,7 @@ export const TenantConfigurationSchema = z
         pmsConnectionSecretVaultRef: KeyVaultRefSchema,
         companiesHouseApiKeyVaultRef: KeyVaultRefSchema,
         aiProviderChoice: z
-          .enum(['azure_openai_uk', 'disabled'])
+          .enum(['azure_openai_uk', 'anthropic', 'disabled'])
           .default('disabled')
           .describe('Configured AI model provider for this tenant'),
         pmsSync: PmsIntegrationSyncConfigSchema.optional().describe(

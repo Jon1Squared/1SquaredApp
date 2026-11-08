@@ -160,7 +160,7 @@
         "companiesHouseApiKeyVaultRef": { "type": "string" },
         "aiProviderChoice": {
           "type": "string",
-          "enum": ["azure_openai_uk", "disabled"],
+          "enum": ["azure_openai_uk", "anthropic", "disabled"],
           "default": "disabled"
         },
         "pmsSync": {

@@ -812,7 +812,7 @@ export interface TenantConfiguration {
   integrations: {
     pmsConnectionSecretVaultRef: string;
     companiesHouseApiKeyVaultRef: string;
-    aiProviderChoice: 'azure_openai_uk' | 'disabled';
+    aiProviderChoice: 'azure_openai_uk' | 'anthropic' | 'disabled';
     pmsSync?: PmsIntegrationSyncConfig;
   };
   customFields: CustomFieldConfigEntry[];

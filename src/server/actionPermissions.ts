@@ -676,9 +676,9 @@ export const ROUTE_PERMISSIONS = {
     enforcedBy: 'service',
   },
   'POST /api/matters/extract': {
-    kind: 'gap',
-    slice: 'S0-06',
-    note: 'Checks sign-in only today; S0-06 adds create permissions, feature-flag checks, and blocks employee creation.',
+    kind: 'permission',
+    key: 'matter:create',
+    enforcedBy: 'action',
   },
 } as const satisfies Record<string, ActionPolicy>;
 
@@ -689,4 +689,4 @@ export type RegisteredRouteName = keyof typeof ROUTE_PERMISSIONS;
  * `ROUTE_PERMISSIONS`. Equals the exact S0-02 baseline (54 actions + 1 route = 55)
  * and may only decrease as slices S0-03 to S0-07 and S0-10 close gaps.
  */
-export const MAX_KNOWN_GAPS = 6;
+export const MAX_KNOWN_GAPS = 5;
