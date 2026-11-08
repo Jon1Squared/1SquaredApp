@@ -6058,7 +6058,23 @@ export function executeMerge(
       delete (store as unknown as Record<string, unknown>)[key];
     }
     Object.assign(store, storeSnapshot);
-    saveStore(store);
+    try {
+      saveStore(store);
+    } catch {
+      const tenantId = getActiveTenantConfiguration().tenantId;
+      const activeSession = getActiveActorSession();
+      const correlationId =
+        (activeSession as { correlationId?: string } | null)?.correlationId ??
+        `merge-rollback-${randomUUID()}`;
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'merge.rollback_save_failed',
+          correlationId,
+          tenantId,
+        }),
+      );
+    }
     throw err;
   }
 }

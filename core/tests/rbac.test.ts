@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import {
   ALL_BUILTIN_ROLE_KEYS,
   ALL_PERMISSION_KEYS,
@@ -5736,6 +5736,68 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(reloadedAfterPreSaveFail.mergeHistory).toHaveLength(0);
       } finally {
         repo.listDocuments = origListDocs;
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('10c. Atomic rollback Case 3 (R309): when both the first saveStore and the rollback saveStore throw, logs rollback failure with correlationId and tenantId only and rethrows the original error', () => {
+      resetAllDemoData('P-000001');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackSurvivorCase3', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+        const mergedPerson = savePersonRecord(
+          { firstName: 'Alun', surname: 'RollbackMergedCase3', isEmployee: false },
+          { byId: 'P-000004' },
+        ).person!;
+
+        const priorSavedJson = global.__oneSquaredLastSavedStoreJson;
+        let saveAttempts = 0;
+        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
+          configurable: true,
+          get() {
+            return priorSavedJson;
+          },
+          set() {
+            saveAttempts += 1;
+            if (saveAttempts === 1) {
+              throw new Error('SIMULATED_FIRST_SAVE_STORE_FAILURE');
+            }
+            throw new Error('SIMULATED_ROLLBACK_SAVE_STORE_FAILURE');
+          },
+        });
+
+        expect(() =>
+          executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
+        ).toThrow('SIMULATED_FIRST_SAVE_STORE_FAILURE');
+        expect(saveAttempts).toBe(2);
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        const loggedArg = String(errorSpy.mock.calls[0]?.[0] ?? '');
+        const parsedLog = JSON.parse(loggedArg) as {
+          level?: string;
+          event?: string;
+          correlationId?: string;
+          tenantId?: string;
+        };
+        expect(parsedLog.level).toBe('error');
+        expect(parsedLog.event).toBe('merge.rollback_save_failed');
+        expect(parsedLog.correlationId).toBeTruthy();
+        expect(parsedLog.tenantId).toBe('not-a-law-firm');
+        expect(loggedArg).not.toContain('RollbackSurvivorCase3');
+        expect(loggedArg).not.toContain('RollbackMergedCase3');
+        expect(loggedArg).not.toContain('SIMULATED_');
+      } finally {
+        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
+          configurable: true,
+          writable: true,
+          value: savedJsonValue,
+        });
+        errorSpy.mockRestore();
         setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');
       }
