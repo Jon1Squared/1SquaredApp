@@ -441,7 +441,7 @@ export function findRecordsOwnedByLeavers(
         t.id,
         `${t.reference} — ${t.title}`,
         isPrimaryAssignee ? 'assignedPersonId' : 'assignedPersonIds',
-        isPrimaryAssignee ? 'Assigned person' : 'Assigned person (assignedPersonIds)',
+        isPrimaryAssignee ? 'Assigned person' : 'Co-assignee',
       );
     }
   }

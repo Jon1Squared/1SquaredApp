@@ -6759,11 +6759,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const linksBefore = store.links.length;
       const notesBefore = store.notes.length;
 
-      const expectTamperedForbidden = (res: unknown) => {
+      const expectTamperedForbidden = (res: unknown, expectedMessage: string) => {
         expect(isActionDenied(res)).toBe(true);
         if (isActionDenied(res)) {
           expect(res.code).toBe('FORBIDDEN');
-          expect(res.message).toMatch(/not found|access denied|existing leaver/i);
+          expect(res.message).toBe(expectedMessage);
         }
       };
 
@@ -6774,6 +6774,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           dueAt: '2026-12-01',
           assignedPersonId: 'P-000001',
         }),
+        'Task not found.',
       );
       expectTamperedForbidden(
         await saveTaskAction({
@@ -6782,23 +6783,32 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assignedPersonId: 'P-000001',
           linkedRecords: [{ recordType: 'matter', recordId: tamperedIds.matter }],
         }),
+        'Linked matter not found or access denied.',
       );
-      expectTamperedForbidden(await takeTaskAction(tamperedIds.task));
-      expectTamperedForbidden(await addTaskCommentAction(tamperedIds.task, 'Tampered comment'));
+      expectTamperedForbidden(await takeTaskAction(tamperedIds.task), 'Task not found.');
+      expectTamperedForbidden(
+        await addTaskCommentAction(tamperedIds.task, 'Tampered comment'),
+        'Task not found or access denied.',
+      );
 
       expectTamperedForbidden(
         await saveEnquiryAction(
           { firstName: 'Tampered', lastName: 'Enquiry' },
           { id: tamperedIds.enquiry, asDraft: true },
         ),
+        'Enquiry not found.',
       );
-      expectTamperedForbidden(await assignEnquiryAction(tamperedIds.enquiry, 'P-000001'));
+      expectTamperedForbidden(
+        await assignEnquiryAction(tamperedIds.enquiry, 'P-000001'),
+        'Enquiry not found.',
+      );
       expectTamperedForbidden(
         await logEnquiryContactAction(tamperedIds.enquiry, {
           method: 'Phone',
           outcome: 'Spoke',
           note: 'Tampered',
         }),
+        'Enquiry not found.',
       );
       expectTamperedForbidden(
         await sendEnquiryEmailAction(tamperedIds.enquiry, {
@@ -6807,14 +6817,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           bodyHtml: '<p>Test</p>',
           bodyText: 'Test',
         }),
+        'Enquiry not found.',
       );
       expectTamperedForbidden(
         await closeEnquiryAction(tamperedIds.enquiry, {
           targetStatus: 'Declined',
           closeReasonId: 'enquiry_close_reason.conflict',
         }),
+        'Enquiry not found.',
       );
-      expectTamperedForbidden(await reopenEnquiryAction(tamperedIds.enquiry));
+      expectTamperedForbidden(
+        await reopenEnquiryAction(tamperedIds.enquiry),
+        'Enquiry not found.',
+      );
 
       expectTamperedForbidden(
         await saveQuoteAction(
@@ -6828,14 +6843,16 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           },
           { id: tamperedIds.quote },
         ),
+        'Quote not found.',
       );
-      expectTamperedForbidden(await markQuoteSentAction(tamperedIds.quote));
+      expectTamperedForbidden(await markQuoteSentAction(tamperedIds.quote), 'Quote not found.');
       expectTamperedForbidden(
         await logQuoteFollowUpAction(tamperedIds.quote, {
           method: 'Phone',
           note: 'Tampered',
           nextFollowUpDate: '2026-12-01',
         }),
+        'Quote not found.',
       );
       expectTamperedForbidden(
         await reviseQuoteAction(tamperedIds.quote, {
@@ -6843,9 +6860,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           feeAmountExVat: 1200,
           scope: 'Tampered',
         }),
+        'Quote not found.',
       );
       expectTamperedForbidden(
         await recordQuoteOutcomeAction(tamperedIds.quote, { outcome: 'Accepted' }),
+        'Quote not found.',
       );
 
       expectTamperedForbidden(
@@ -6853,6 +6872,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           { legalName: 'Tampered Org' },
           { id: tamperedIds.org },
         ),
+        'Organisation not found.',
       );
       expectTamperedForbidden(
         await saveLinkAction({
@@ -6869,17 +6889,27 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           endDate: null,
           contactStatusId: null,
         }),
+        `Organisation link "${tamperedIds.link}" not found.`,
       );
-      expectTamperedForbidden(await deleteLinkAction(tamperedIds.link));
-      expectTamperedForbidden(await addNoteAction('matter', tamperedIds.matter, 'Tampered note'));
+      expectTamperedForbidden(
+        await deleteLinkAction(tamperedIds.link),
+        `Organisation link "${tamperedIds.link}" not found.`,
+      );
+      expectTamperedForbidden(
+        await addNoteAction('matter', tamperedIds.matter, 'Tampered note'),
+        `Target matter "${tamperedIds.matter}" not found.`,
+      );
       expectTamperedForbidden(
         await dismissDuplicateAction('person', tamperedIds.person, 'P-000001'),
+        `Target person "${tamperedIds.person}" not found.`,
       );
       expectTamperedForbidden(
         await mergeRecordsAction('person', 'P-000001', tamperedIds.person),
+        'Record not found for merge.',
       );
       expectTamperedForbidden(
         await reassignLeaverOwnedRecordsAction(tamperedIds.person, 'P-000001'),
+        'Source person must be an existing leaver.',
       );
 
       expect(store.tasks.length).toBe(tasksBefore);
@@ -6889,40 +6919,298 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(store.links.length).toBe(linksBefore);
       expect(store.notes.length).toBe(notesBefore);
 
-      // 3. Positive controls (R281): the same actions succeed with Tenant A's valid session and valid Tenant A record IDs
+      // 3. Positive controls (R281, R298): all 20 S0-05 actions (plus takeTaskAction) succeed with Tenant A's valid session and valid Tenant A record IDs, producing observable state changes
       const validTask = store.tasks[0]!;
       const validTaskSave = await saveTaskAction({
         id: validTask.id,
-        title: validTask.title,
+        title: 'Tenant A Verified Task Title',
         dueAt: validTask.dueAt,
+        assignedTeamId: validTask.assignedTeamId,
         assignedPersonId: validTask.assignedPersonId,
       });
       expect(isActionDenied(validTaskSave)).toBe(false);
-      const validTaskComment = await addTaskCommentAction(validTask.id, 'Tenant A valid comment');
-      expect(isActionDenied(validTaskComment)).toBe(false);
+      expect(validTaskSave.error).toBeUndefined();
+      expect(store.tasks.find((t) => t.id === validTask.id)?.title).toBe(
+        'Tenant A Verified Task Title',
+      );
 
-      const validEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
-      const validEnqAssign = await assignEnquiryAction(validEnq.id, 'P-000001');
+      const actorTeam = store.teams.find(
+        (tm) => tm.memberIds.includes('P-000001') || tm.leadIds.includes('P-000001'),
+      )!;
+      const unclaimedTaskCreate = await saveTaskAction({
+        title: 'Tenant A Unclaimed Queue Task',
+        dueAt: '2026-12-10',
+        assignedTeamId: actorTeam.id,
+        assignedPersonId: null,
+      });
+      expect(isActionDenied(unclaimedTaskCreate)).toBe(false);
+      const unclaimedTaskId = unclaimedTaskCreate.task!.id;
+      const validTaskTake = await takeTaskAction(unclaimedTaskId);
+      expect(isActionDenied(validTaskTake)).toBe(false);
+      expect(store.tasks.find((t) => t.id === unclaimedTaskId)?.assignedPersonId).toBe(
+        'P-000001',
+      );
+
+      const validTaskComment = await addTaskCommentAction(
+        validTask.id,
+        'Tenant A valid comment',
+      );
+      expect(isActionDenied(validTaskComment)).toBe(false);
+      expect(
+        store.tasks
+          .find((t) => t.id === validTask.id)
+          ?.comments.some((c) => c.text === 'Tenant A valid comment'),
+      ).toBe(true);
+
+      const templateEnq = store.enquiries.find(
+        (e) => e.status === 'New' || e.status === 'Assigned',
+      )!;
+      const validEnqCreate = await saveEnquiryAction({
+        firstName: 'TenantA',
+        lastName: 'PositiveControl',
+        email: 'tenanta.control@notalawfirm.example',
+        phone: '029 2000 5555',
+        channelId: templateEnq.channelId,
+        practiceAreaId: templateEnq.practiceAreaId,
+        summary: 'Tenant A positive control enquiry',
+        notes: 'Initial notes for Tenant A positive control enquiry',
+        urgencyId: templateEnq.urgencyId,
+        privacyNoticeGiven: true,
+      });
+      expect(isActionDenied(validEnqCreate)).toBe(false);
+      const validEnqId = validEnqCreate.enquiry!.id;
+      expect(
+        store.enquiries.some(
+          (e) => e.id === validEnqId && e.firstName === 'TenantA',
+        ),
+      ).toBe(true);
+
+      const validEnqAssign = await assignEnquiryAction(validEnqId, 'P-000001');
       expect(isActionDenied(validEnqAssign)).toBe(false);
-      const validQuote = store.quotes[0]!;
-      const validQuoteFollowUp = await logQuoteFollowUpAction(validQuote.id, {
+      expect(store.enquiries.find((e) => e.id === validEnqId)?.assignedToId).toBe(
+        'P-000001',
+      );
+
+      const validEnqContactLog = await logEnquiryContactAction(validEnqId, {
+        method: 'Phone',
+        outcome: 'Spoke',
+        note: 'Tenant A valid contact log note',
+      });
+      expect(isActionDenied(validEnqContactLog)).toBe(false);
+      expect(
+        store.enquiries
+          .find((e) => e.id === validEnqId)
+          ?.contactLog.some((c) => c.note === 'Tenant A valid contact log note'),
+      ).toBe(true);
+
+      const auditBeforeEmail = store.audit.length;
+      const validEnqEmail = await sendEnquiryEmailAction(validEnqId, {
+        to: 'tenanta.control@notalawfirm.example',
+        subject: 'Tenant A Valid Follow-up Email',
+        bodyHtml: '<p>Tenant A email body</p>',
+        bodyText: 'Tenant A email body',
+      });
+      expect(isActionDenied(validEnqEmail)).toBe(false);
+      expect(store.audit.length).toBeGreaterThan(auditBeforeEmail);
+      expect(
+        store.audit.some(
+          (a) =>
+            a.recordType === 'enquiry' &&
+            a.recordId === validEnqId &&
+            a.action === 'email-sent' &&
+            a.newValue?.includes('Tenant A Valid Follow-up Email'),
+        ),
+      ).toBe(true);
+
+      const validEnqClose = await closeEnquiryAction(validEnqId, {
+        targetStatus: 'Declined',
+        closeReasonId: 'enquiry_close_reason.conflict',
+        closeNotes: 'Closed in Tenant A positive control',
+      });
+      expect(isActionDenied(validEnqClose)).toBe(false);
+      expect(store.enquiries.find((e) => e.id === validEnqId)?.status).toBe(
+        'Declined',
+      );
+
+      const validEnqReopen = await reopenEnquiryAction(validEnqId);
+      expect(isActionDenied(validEnqReopen)).toBe(false);
+      expect(store.enquiries.find((e) => e.id === validEnqId)?.status).toBe(
+        'Assigned',
+      );
+
+      const validQuoteCreate = await saveQuoteAction({
+        clientType: 'prospect',
+        prospectName: 'Tenant A Prospect',
+        practiceAreaId: store.quotes[0]!.practiceAreaId,
+        scope: 'Tenant A valid quote scope',
+        feeBasis: 'Fixed fee',
+        feeAmountExVat: 1250,
+      });
+      expect(isActionDenied(validQuoteCreate)).toBe(false);
+      const validQuoteId = validQuoteCreate.quote!.id;
+      expect(
+        store.quotes.some(
+          (q) => q.id === validQuoteId && q.scope === 'Tenant A valid quote scope',
+        ),
+      ).toBe(true);
+
+      const validQuoteSent = await markQuoteSentAction(validQuoteId);
+      expect(isActionDenied(validQuoteSent)).toBe(false);
+      expect(store.quotes.find((q) => q.id === validQuoteId)?.status).toBe(
+        'Sent',
+      );
+
+      const validQuoteFollowUp = await logQuoteFollowUpAction(validQuoteId, {
         method: 'Phone',
         note: 'Tenant A valid quote follow-up',
         nextFollowUpDate: '2026-12-01',
       });
       expect(isActionDenied(validQuoteFollowUp)).toBe(false);
+      expect(
+        store.quotes
+          .find((q) => q.id === validQuoteId)
+          ?.followUps.some((f) => f.note === 'Tenant A valid quote follow-up'),
+      ).toBe(true);
+
+      const validQuoteRevise = await reviseQuoteAction(validQuoteId, {
+        feeBasis: 'Fixed fee',
+        feeAmountExVat: 1500,
+        scope: 'Tenant A revised quote scope',
+        markAsSent: true,
+      });
+      expect(isActionDenied(validQuoteRevise)).toBe(false);
+      expect(store.quotes.find((q) => q.id === validQuoteId)?.version).toBe(2);
+      expect(
+        store.quotes.find((q) => q.id === validQuoteId)?.feeAmountExVat,
+      ).toBe(1500);
+
+      const validQuoteOutcome = await recordQuoteOutcomeAction(validQuoteId, {
+        outcome: 'Accepted',
+        note: 'Tenant A accepted quote',
+      });
+      expect(isActionDenied(validQuoteOutcome)).toBe(false);
+      expect(store.quotes.find((q) => q.id === validQuoteId)?.status).toBe(
+        'Accepted',
+      );
+
       const validOrg = store.organisations[0]!;
       const validOrgSave = await saveOrganisationAction(
-        { legalName: validOrg.legalName },
+        {
+          legalName: validOrg.legalName,
+          clientReference: 'TA-CTRL-01',
+        },
         { id: validOrg.id },
       );
       expect(isActionDenied(validOrgSave)).toBe(false);
+      expect(
+        store.organisations.find((o) => o.id === validOrg.id)?.clientReference,
+      ).toBe('TA-CTRL-01');
+
+      const validContact = store.people.find((p) => !p.isEmployee)!;
+      const validLinkSave = await saveLinkAction({
+        personId: validContact.id,
+        organisationId: validOrg.id,
+        jobTitle: 'Tenant A General Counsel',
+        department: 'Legal',
+        roleWithinOrganisation: 'General Counsel',
+        contactRoleIds: [],
+        isPrimaryContact: false,
+        isCurrent: true,
+        startDate: '2026-01-01',
+        endDate: null,
+        contactStatusId: null,
+      });
+      expect(isActionDenied(validLinkSave)).toBe(false);
+      expect(
+        store.links.some(
+          (l) =>
+            l.id === validLinkSave.id &&
+            l.jobTitle === 'Tenant A General Counsel',
+        ),
+      ).toBe(true);
+
+      const validLinkDelete = await deleteLinkAction(validLinkSave.id);
+      expect(isActionDenied(validLinkDelete)).toBe(false);
+      expect(store.links.some((l) => l.id === validLinkSave.id)).toBe(false);
+
       const validMatterNote = await addNoteAction(
         'matter',
         store.matters[0]!.id,
         'Tenant A valid matter note',
       );
       expect(isActionDenied(validMatterNote)).toBe(false);
+      expect(
+        store.notes.some(
+          (n) =>
+            n.recordType === 'matter' &&
+            n.recordId === store.matters[0]!.id &&
+            n.text === 'Tenant A valid matter note',
+        ),
+      ).toBe(true);
+
+      const dupOrgA = await saveOrganisationAction(
+        { legalName: 'Tenant A Duplicate Candidate Alpha Ltd' },
+        {},
+      );
+      const dupOrgB = await saveOrganisationAction(
+        { legalName: 'Tenant A Duplicate Candidate Beta Ltd' },
+        {},
+      );
+      expect(isActionDenied(dupOrgA)).toBe(false);
+      expect(isActionDenied(dupOrgB)).toBe(false);
+      const validDismissDup = await dismissDuplicateAction(
+        'organisation',
+        dupOrgA.organisation.id,
+        dupOrgB.organisation.id,
+      );
+      expect(isActionDenied(validDismissDup)).toBe(false);
+      expect(
+        store.organisations
+          .find((o) => o.id === dupOrgA.organisation.id)
+          ?.notDuplicateOf.includes(dupOrgB.organisation.id),
+      ).toBe(true);
+
+      const mergeOrgSurvivor = await saveOrganisationAction(
+        { legalName: 'Tenant A Merge Survivor Ltd' },
+        {},
+      );
+      const mergeOrgTarget = await saveOrganisationAction(
+        { legalName: 'Tenant A Merge Target Ltd' },
+        {},
+      );
+      expect(isActionDenied(mergeOrgSurvivor)).toBe(false);
+      expect(isActionDenied(mergeOrgTarget)).toBe(false);
+      const validMerge = await mergeRecordsAction(
+        'organisation',
+        mergeOrgSurvivor.organisation.id,
+        mergeOrgTarget.organisation.id,
+      );
+      expect(isActionDenied(validMerge)).toBe(false);
+      expect(
+        store.organisations.find((o) => o.id === mergeOrgTarget.organisation.id)
+          ?.mergedIntoId,
+      ).toBe(mergeOrgSurvivor.organisation.id);
+
+      const leaverCandidate = store.people.find(
+        (p) => p.isEmployee && p.id !== 'P-000001' && p.id !== 'P-000002',
+      )!;
+      leaverCandidate.isEmployee = false;
+      leaverCandidate.employment = {
+        ...(leaverCandidate.employment!),
+        status: 'Leaver',
+      };
+      const taskInStore = store.tasks.find((t) => t.id === validTask.id)!;
+      taskInStore.assignedPersonId = leaverCandidate.id;
+      taskInStore.assignedPersonIds = [leaverCandidate.id];
+      const validLeaverReassign = await reassignLeaverOwnedRecordsAction(
+        leaverCandidate.id,
+        'P-000001',
+      );
+      expect(isActionDenied(validLeaverReassign)).toBe(false);
+      expect(validLeaverReassign.reassignedCount).toBeGreaterThan(0);
+      expect(
+        store.tasks.find((t) => t.id === validTask.id)?.assignedPersonId,
+      ).toBe('P-000001');
 
       // 4. Data-layer isolation check (PostgresTenantCluster, separate from the single-tenant ADR 0001 host store)
       const cluster = new PostgresTenantCluster();

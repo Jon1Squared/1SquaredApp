@@ -3257,6 +3257,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(coOwnedTaskItem).toBeDefined();
         expect(coOwnedTaskItem?.roleField).toBe('assignedPersonIds');
+        expect(coOwnedTaskItem?.roleLabel).toBe('Co-assignee');
 
         const closedEnq = store.enquiries[0]!;
         closedEnq.status = 'Declined';
@@ -3626,13 +3627,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(routedFromDraftRes.enquiry?.assignedToId).toBe(feeEarner.id);
         expect(routedFromDraftRes.enquiry?.assignedTeamId).toBe(targetTeamId);
 
-        // 6 (R267, R268, R293). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft and closed enquiries
+        // 6 (R267, R268, R293, R299). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft and closed enquiries
         const draftEnqRes = saveEnquiryRecord(
           { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
           { asDraft: true, byId: feeEarner.id },
         );
         const draftEnq = draftEnqRes.enquiry!;
-        saveTaskRecord(
+        const draftTaskRes = saveTaskRecord(
           {
             title: 'Task on draft enquiry',
             dueAt: '2026-12-01',
@@ -3641,13 +3642,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
           feeEarner.id,
         );
+        expect(isActionDenied(draftTaskRes)).toBe(false);
+        expect(draftTaskRes.task?.id).toBeTruthy();
+        expect(draftTaskRes.task?.linkedRecords).toEqual([
+          { recordType: 'enquiry', recordId: draftEnq.id },
+        ]);
         expect(draftEnq.status).toBe('Draft');
         expect(draftEnq.assignedToId).toBeNull();
 
-        // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293)
+        // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293, R299)
         closedEnq.status = 'Declined';
         closedEnq.assignedToId = null;
-        saveTaskRecord(
+        const closedTaskRes = saveTaskRecord(
           {
             title: 'Task on declined enquiry',
             dueAt: '2026-12-01',
@@ -3656,6 +3662,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
           feeEarner.id,
         );
+        expect(isActionDenied(closedTaskRes)).toBe(false);
+        expect(closedTaskRes.task?.id).toBeTruthy();
+        expect(closedTaskRes.task?.linkedRecords).toEqual([
+          { recordType: 'enquiry', recordId: closedEnq.id },
+        ]);
         expect(closedEnq.status).toBe('Declined');
         expect(closedEnq.assignedToId).toBeNull();
 
