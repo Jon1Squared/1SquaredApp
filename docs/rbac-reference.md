@@ -148,6 +148,18 @@ Implemented in `core/src/domain/rbac/resolver.ts` (and bridged for host entities
   3. Actor cannot grant a permission or role containing a permission they do not themselves hold (`PRIVILEGE_ESCALATION_FORBIDDEN`).
 - Legacy `Person.employeePermissions` (replacement) and `Person.documentPermissions` (additive) are migrated losslessly via `migrateLegacyPersonOverrides`.
 
+### 5.4 Employee Identity Binding & Sign-In Email Linking (`S0-30`, `B13`)
+
+1. **Employee & Leaver Email Save Protection (`savePersonRecord` / `savePersonAction`):**
+   - Any change to final active email addresses (`person.emails` or `person.employment.systems.firmWorkEmail` after employment construction and `syncPersonWorkContactFlags`, compared after trimming and lower-casing active entries against the stored record) on a record that is, was, or will be an employee or leaver requires `employee:edit_core` (`FORBIDDEN` when missing).
+   - `mfaVerified === true` (`MFA_REQUIRED` when missing) is required **only when a sign-in address is added or changed to a new value** (including creating a new employee, promoting an existing contact with or without emails where a firm email is synthesised, changing `firmWorkEmail` to a new value, or creating an employee from PMS via `createRecordFromPms`). Removing or deactivating an address (such as marking a leaver, removing a secondary address, or clearing `firmWorkEmail`) requires `employee:edit_core` and is audited, without requiring MFA. Reordering emails or editing labels does not require MFA or `employee:edit_core`.
+   - Allowed changes (both additions and removals) write a dedicated `Employee sign-in email` audit entry and preserve any existing `entraObjectId` binding.
+2. **Sign-In Email Linking (`resolvePersonForEntraClaims` / `resolveOrProvisionEntraEmployee`):**
+   - First-time email linking is controlled by `rbac.identityMapping.emailLinking.enabled` (default `true`) and `rbac.identityMapping.emailLinking.domains` (default `[]`, which uses `branding.primaryDomain` only).
+   - Prefers `preferred_username` / `upn` over `email`; `email` is used only when the token marks it verified (`xms_edov === true`) and its domain is in the tenant's linking domains.
+   - Never email-links an employee whose resolved roles or permissions include any permission with `requiresMfa: true` or `sensitivity: 'critical'` (`isPrivilegedPersonForEmailLinking`), or when multiple unbound employees share the address. In both refusal cases, `resolveOrProvisionEntraEmployee` does **not** provision a duplicate employee, writes an `entra-link` refusal audit entry (`Entra ID Email Link Refused` or `Entra ID Email Link Ambiguous` with person ID(s) and a validated `correlationId` matching `^[A-Za-z0-9._:-]{1,128}$` via `resolveRequestCorrelationId` only), and denies sign-in with `"Your account needs to be linked by an administrator."`. Privileged employees must be bound by `oid` via `updatePersonPermissionOverrides` (**Admin → RBAC & Entra ID**) or `seed:demo --entra-map`.
+   - First-time email links write an audit entry with `action: 'entra-link'` and field `Entra ID Email Link`, and log only `personId`, `correlationId`, and `tenantId` (never the email address or `oid`).
+
 ---
 
 ## 6. "Viewing As" (`activeViewingRole`) Isolation
