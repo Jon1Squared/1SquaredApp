@@ -27,6 +27,7 @@ import {
   enquiryDisplayName,
   filterEnquiriesForPracticeAreasAndTeams,
   formatLondonDateIso,
+  isDueTimestampOverdue,
   isEnquiryOpen,
 } from '@/domain/enquiries';
 import { selectHomeCandidateTasks } from '@/domain/homeTasks';
@@ -3029,7 +3030,7 @@ export function HomeClient({
                     const isOverdue =
                       Boolean(e.firstContactDueAt) &&
                       e.contactLog.length === 0 &&
-                      formatLondonDateIso(e.firstContactDueAt!) < todayIso;
+                      isDueTimestampOverdue(e.firstContactDueAt!, nowIso, todayIso);
                     return (
                       <li key={e.id} className="worklist-row">
                         <div className="worklist-main">
@@ -3568,8 +3569,7 @@ export function HomeClient({
               <div className="panel-title-group">
                 <h2 className="panel-title">Team workload &amp; utilisation</h2>
                 <span className="panel-subtitle">
-                  1Squared open matters/tasks + PMS `v_fee_earner_performance` · as at{' '}
-                  {formattedAsAt}
+                  1Squared open matters/tasks + PMS `v_fee_earner_performance` · {pmsAsAtCaption}
                 </span>
               </div>
             </div>

@@ -168,6 +168,9 @@ export function EnquiryProfileClient({
   const [editKeyDate, setEditKeyDate] = useState(enquiry.keyDate ?? '');
   const [editKeyDateLabel, setEditKeyDateLabel] = useState(enquiry.keyDateLabel);
   const [editNextActionDate, setEditNextActionDate] = useState(enquiry.nextActionDate ?? '');
+  const [editPrivacyNoticeGiven, setEditPrivacyNoticeGiven] = useState(
+    Boolean(enquiry.privacyNoticeGiven),
+  );
   const [editLine1, setEditLine1] = useState(enquiry.address?.line1 ?? '');
   const [editLine2, setEditLine2] = useState(enquiry.address?.line2 ?? '');
   const [editTown, setEditTown] = useState(enquiry.address?.town ?? '');
@@ -427,7 +430,7 @@ export function EnquiryProfileClient({
           keyDate: editKeyDate || null,
           keyDateLabel: editKeyDateLabel.trim(),
           nextActionDate: editNextActionDate || null,
-          privacyNoticeGiven: enquiry.privacyNoticeGiven,
+          privacyNoticeGiven: editPrivacyNoticeGiven,
         },
         { id: enquiry.id },
       );
@@ -832,6 +835,19 @@ export function EnquiryProfileClient({
                 value={editNextActionDate}
                 onChange={(e) => setEditNextActionDate(e.target.value)}
               />
+            </div>
+            <div className="field-group field-group--full">
+              <label
+                className="field-label"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={editPrivacyNoticeGiven}
+                  onChange={(e) => setEditPrivacyNoticeGiven(e.target.checked)}
+                />
+                <span>Privacy notice read or sent to the caller</span>
+              </label>
             </div>
             <div className="field-group field-group--full">
               <SingleAddressEditor

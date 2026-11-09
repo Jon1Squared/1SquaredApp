@@ -6,8 +6,6 @@ import { pathToFileURL } from 'node:url';
 
 const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/g;
 const MATTER_CODE_RE = /\b(?<!#)[A-Z]{3}\d{3}-\d{4}\b/g;
-const PMS_CODE_RE =
-  /\b(?<!#)(?:FE\d{3}|(?:PEN|BAY|SEV|SJO|CAM|CWM|PEM|TAF|VAL|HAR)\d{3}(?!-\d{4}\b))\b/g;
 const PMS_HARDCODED_MONTH_RE = /['"`]20\d\d-\d\d['"`]/g;
 const FAKE_SANCTIONS_CLEAR_RE =
   /(?:Sanctions\s*(?:&(?:amp;)?|and|\/|\+)\s*PEP|PEP\s*(?:&(?:amp;)?|and|\/|\+)\s*Sanctions)[\s\S]{0,160}?['"`>:\u2013\u2014-](?:[\s\u00A0]|&nbsp;)*(?:all(?:[\s\u00A0]|&nbsp;)+)?clear(?:ed)?\b(?:(?:[\s\u00A0]|&nbsp;)*['"`<])?/gi;
@@ -36,6 +34,37 @@ export function loadPmsDemoCodes(rootDir = process.cwd()) {
     }
   }
   return codes;
+}
+
+/**
+ * Builds the regex matching PMS demo client and fee-earner codes from the prefixes
+ * loaded from `data/pms/pms-demo.sqlite` (`loadPmsDemoCodes()`), without a hand-written prefix list (R375).
+ */
+export function buildPmsCodeRegex(pmsCodes = loadPmsDemoCodes()) {
+  const clientPrefixes = new Set();
+  let hasFeeEarnerPrefix = false;
+  for (const code of pmsCodes) {
+    if (typeof code !== 'string') continue;
+    const match = /^([A-Z]{2,3})\d{3}$/.exec(code.trim());
+    if (!match) continue;
+    if (match[1] === 'FE') {
+      hasFeeEarnerPrefix = true;
+    } else {
+      clientPrefixes.add(match[1]);
+    }
+  }
+  const parts = [];
+  if (hasFeeEarnerPrefix) {
+    parts.push('FE\\d{3}');
+  }
+  if (clientPrefixes.size > 0) {
+    const alternation = Array.from(clientPrefixes).sort().join('|');
+    parts.push(`(?:${alternation})\\d{3}(?!-\\d{4}\\b)`);
+  }
+  if (parts.length === 0) {
+    return null;
+  }
+  return new RegExp(`\\b(?<!#)(?:${parts.join('|')})\\b`, 'g');
 }
 
 /**
@@ -157,6 +186,7 @@ export function scanTextForDemoLiterals(
   pmsCodes = loadPmsDemoCodes(),
 ) {
   const violations = [];
+  const pmsCodeRegex = buildPmsCodeRegex(pmsCodes);
   const lines = text.split(/\r?\n/);
 
   for (let i = 0; i < lines.length; i++) {
@@ -199,11 +229,13 @@ export function scanTextForDemoLiterals(
       }
     }
 
-    for (const pmsCodeMatch of line.matchAll(PMS_CODE_RE)) {
-      const token = pmsCodeMatch[0];
-      if (!isAllowListed(allowList, file, token)) {
-        const label = pmsCodes.has(token) ? `PMS demo code "${token}"` : `PMS-style code "${token}"`;
-        recordViolation(token, label);
+    if (pmsCodeRegex) {
+      for (const pmsCodeMatch of line.matchAll(pmsCodeRegex)) {
+        const token = pmsCodeMatch[0];
+        if (!isAllowListed(allowList, file, token)) {
+          const label = pmsCodes.has(token) ? `PMS demo code "${token}"` : `PMS-style code "${token}"`;
+          recordViolation(token, label);
+        }
       }
     }
 

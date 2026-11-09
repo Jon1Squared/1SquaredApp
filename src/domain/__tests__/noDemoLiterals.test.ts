@@ -243,6 +243,20 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
         pmsCodes,
       ),
     ).toEqual([]);
+
+    // R375: PMS client codes from pms-demo.sqlite such as PUG001, BRI001, and PRI001 are caught dynamically via loadPmsDemoCodes()
+    for (const pmsCode of ['PUG001', 'BRI001', 'PRI001']) {
+      const pmsViolations = scanTextForDemoLiterals(
+        'src/components/SampleWidget.tsx',
+        `const clientCode = '${pmsCode}';`,
+        denyLiterals,
+        [],
+        pmsCodes,
+      );
+      expect(pmsViolations, `Expected violation for ${pmsCode}`).toHaveLength(1);
+      expect(pmsViolations[0]?.match).toBe(pmsCode);
+      expect(pmsViolations[0]?.reason).toContain(`PMS demo code "${pmsCode}"`);
+    }
   });
 
   it('resolveMatterIntakeComplianceRows derives all four rows from stored matter fields including not-run conflict, not-started risk, and empty engagement letter status', () => {

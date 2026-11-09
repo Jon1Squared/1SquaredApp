@@ -2243,7 +2243,7 @@ export function formatLondonDateIso(isoOrDate: string): string {
   return londonDateFormatter.format(parsed);
 }
 
-function isDueTimestampOverdue(dueIso: string, nowIso: string, todayIso: string): boolean {
+export function isDueTimestampOverdue(dueIso: string, nowIso: string, todayIso: string): boolean {
   const trimmed = dueIso.trim();
   if (!trimmed) return false;
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {

@@ -7503,6 +7503,14 @@ export function saveEnquiryRecord(
       ...cfValidation.errors,
       ...validateEnquiryInput(mergedInput),
     };
+    if (
+      existing &&
+      existing.status !== 'Draft' &&
+      !existing.privacyNoticeGiven &&
+      !mergedInput.privacyNoticeGiven
+    ) {
+      delete errors.privacyNoticeGiven;
+    }
     if (!mergedInput.firstName) errors.firstName = 'First name is required.';
     if (!mergedInput.lastName) errors.lastName = 'Last name is required.';
 
