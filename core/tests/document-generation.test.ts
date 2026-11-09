@@ -985,30 +985,34 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     ).toBe(true);
   });
 
-  it('7. Verifies per-tenant reversible database migrations (up, rollback, re-apply)', () => {
+  it('7. Verifies per-tenant reversible database migrations (up, rollback, re-apply)', async () => {
     const runner = new TenantMigrationRunner();
+    try {
+      await runner.applyUp(ctxA);
+      expect(await runner.listAppliedMigrations(ctxA)).toHaveLength(6);
+      expect(await runner.getActiveTables(ctxA)).toContain('document_templates');
+      expect(await runner.getActiveTables(ctxA)).toContain('template_usage_daily_summaries');
+      expect(await runner.getActiveTables(ctxA)).toContain('matter_document_locations');
+      expect(await runner.getActiveTables(ctxA)).toContain('key_dates');
 
-    const applied = runner.applyUp(ctxA);
-    expect(applied).toHaveLength(4);
-    expect(runner.getActiveTables(ctxA)).toContain('document_templates');
-    expect(runner.getActiveTables(ctxA)).toContain('template_usage_daily_summaries');
-    expect(runner.getActiveTables(ctxA)).toContain('matter_document_locations');
-    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
-    // Tenant B is unaffected until its own migration runs
-    expect(runner.listAppliedMigrations(ctxB)).toHaveLength(0);
+      // Roll back migrations in reverse order down to 0001 on Tenant A (leaving Tenant B untouched!)
+      expect(await runner.rollbackVersion(ctxA, '0006')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0005')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0004')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0003')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0002')).toBe(true);
+      const rolledBack = await runner.rollbackVersion(ctxA, '0001');
+      expect(rolledBack).toBe(true);
+      expect(await runner.getActiveTables(ctxA)).not.toContain('document_templates');
+      expect(await runner.getActiveTables(ctxB)).toContain('document_templates');
 
-    // Roll back migrations in reverse order down to 0001 on Tenant A
-    expect(runner.rollbackVersion(ctxA, '0004')).toBe(true);
-    expect(runner.rollbackVersion(ctxA, '0003')).toBe(true);
-    expect(runner.rollbackVersion(ctxA, '0002')).toBe(true);
-    const rolledBack = runner.rollbackVersion(ctxA, '0001');
-    expect(rolledBack).toBe(true);
-    expect(runner.getActiveTables(ctxA)).not.toContain('document_templates');
-
-    // Re-apply cleanly
-    const reapplied = runner.applyUp(ctxA);
-    expect(reapplied).toHaveLength(4);
-    expect(runner.getActiveTables(ctxA)).toContain('documents');
+      // Re-apply cleanly
+      const reapplied = await runner.applyUp(ctxA);
+      expect(reapplied).toHaveLength(6);
+      expect(await runner.getActiveTables(ctxA)).toContain('documents');
+    } finally {
+      await runner.applyUp(ctxA);
+    }
   });
 
   it('8. Enforces R1, R15, R17, R24: requires explicit signing key, binds download tokens to sub and documentId, uses timingSafeEqual, and rejects unimplemented azure_blob provider', async () => {

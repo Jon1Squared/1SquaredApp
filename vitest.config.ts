@@ -17,11 +17,16 @@ export default defineConfig({
     environment: 'node',
     fileParallelism: false,
     testTimeout: 15000,
+    globalSetup: ['./src/test/vitest.global-setup.ts'],
     setupFiles: ['./src/test/vitest.setup.ts'],
     include: ['src/**/*.test.ts', 'core/tests/**/*.test.ts'],
     env: {
       PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
       PLATFORM_ENVIRONMENT: 'test',
+      PLATFORM_POSTGRES_HOST: process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1',
+      PLATFORM_POSTGRES_PORT: process.env.PLATFORM_POSTGRES_PORT || '5432',
+      PLATFORM_POSTGRES_MIGRATE_PORT:
+        process.env.PLATFORM_POSTGRES_MIGRATE_PORT || '5432',
     },
   },
 });

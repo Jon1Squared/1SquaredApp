@@ -9,6 +9,15 @@
 
 import crypto from 'node:crypto';
 import type { TenantContext } from '../../api/index';
+import {
+  assertValidPostgresTenantContext,
+  createDirectMigrationClient,
+  invalidateGlobalTenantSchemaReadiness,
+  quotePgIdentifier,
+  resolveTenantPostgresRoleName,
+  sanitizePostgresError,
+} from '../postgresPoolManager';
+import { toIsoString } from '../tenantScopedRepository';
 
 export interface TenantMigrationDefinition {
   readonly version: string;
@@ -497,11 +506,79 @@ ALTER TABLE key_date_reminder_states
 `.trim(),
 };
 
+export const KEY_DATES_MATTER_RESTRICTIONS_MIGRATION_0005: TenantMigrationDefinition = {
+  version: '0005',
+  name: '0005_key_dates_matter_restrictions_expand',
+  description:
+    'Adds matter_restriction_metadata and key_dates_tenant_configs tables so restricted/staff matter visibility and per-tenant key date configuration overrides persist in PostgreSQL.',
+  tablesChanged: ['matter_restriction_metadata', 'key_dates_tenant_configs'],
+  dependsOn: ['0003'],
+  upSql: `
+CREATE TABLE IF NOT EXISTS matter_restriction_metadata (
+  tenant_id TEXT NOT NULL,
+  matter_id TEXT NOT NULL,
+  is_restricted BOOLEAN NOT NULL DEFAULT FALSE,
+  restricted_access_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, matter_id)
+);
+
+CREATE TABLE IF NOT EXISTS key_dates_tenant_configs (
+  tenant_id TEXT PRIMARY KEY,
+  config_json JSONB NOT NULL,
+  updated_by_id TEXT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`.trim(),
+  downSql: `
+DROP TABLE IF EXISTS key_dates_tenant_configs;
+DROP TABLE IF EXISTS matter_restriction_metadata;
+`.trim(),
+};
+
+export const DOCUMENT_GENERATION_TENANT_CONFIG_MIGRATION_0006: TenantMigrationDefinition = {
+  version: '0006',
+  name: '0006_document_generation_tenant_config_expand',
+  description:
+    'Adds document_generation_tenant_configs and document_store_tenant_configs tables for per-tenant runtime configuration overrides and decouples generated documents historical template references.',
+  tablesChanged: [
+    'document_generation_tenant_configs',
+    'document_store_tenant_configs',
+    'documents',
+  ],
+  dependsOn: ['0001', '0002'],
+  upSql: `
+CREATE TABLE IF NOT EXISTS document_generation_tenant_configs (
+  tenant_id TEXT PRIMARY KEY,
+  config_json JSONB NOT NULL,
+  updated_by_id TEXT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS document_store_tenant_configs (
+  tenant_id TEXT PRIMARY KEY,
+  config_json JSONB NOT NULL,
+  updated_by_id TEXT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE documents
+  DROP CONSTRAINT IF EXISTS documents_template_id_fkey,
+  DROP CONSTRAINT IF EXISTS documents_template_version_id_fkey;
+`.trim(),
+  downSql: `
+DROP TABLE IF EXISTS document_store_tenant_configs;
+DROP TABLE IF EXISTS document_generation_tenant_configs;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
   KEY_DATES_MIGRATION_0003,
   KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
+  KEY_DATES_MATTER_RESTRICTIONS_MIGRATION_0005,
+  DOCUMENT_GENERATION_TENANT_CONFIG_MIGRATION_0006,
 ];
 
 export function validateMigrationCatalogueOrder(
@@ -522,19 +599,28 @@ export function validateMigrationCatalogueOrder(
 
 validateMigrationCatalogueOrder(CORE_TENANT_MIGRATIONS);
 
-export function computeMigrationChecksum(migration: TenantMigrationDefinition): string {
+export function computeMigrationChecksum(
+  migration: TenantMigrationDefinition,
+): string {
   return crypto
     .createHash('sha256')
-    .update(`${migration.version}:${migration.name}:${migration.upSql}:${migration.downSql}`)
+    .update(
+      `${migration.version}:${migration.name}:${migration.upSql}:${migration.downSql}`,
+    )
     .digest('hex');
 }
 
 export class TenantMigrationRunner {
-  private readonly appliedByDatabase = new Map<
-    string,
-    Map<string, AppliedTenantMigrationRecord>
-  >();
-  private readonly activeTablesByDatabase = new Map<string, Set<string>>();
+  private readonly hostOverride?: string;
+  private readonly portOverride?: number;
+
+  public constructor(options?: {
+    hostOverride?: string;
+    portOverride?: number;
+  }) {
+    this.hostOverride = options?.hostOverride;
+    this.portOverride = options?.portOverride;
+  }
 
   private ensureContext(ctx: TenantContext): void {
     if (!ctx?.tenantId || !ctx?.postgresDatabaseName) {
@@ -542,148 +628,336 @@ export class TenantMigrationRunner {
         'TENANCY_MIGRATION_ERROR: Per-tenant migrations require a valid TenantContext.',
       );
     }
+    assertValidPostgresTenantContext(ctx);
   }
 
-  public applyUp(
+  public async applyUp(
     ctx: TenantContext,
     migrations: readonly TenantMigrationDefinition[] = CORE_TENANT_MIGRATIONS,
-  ): AppliedTenantMigrationRecord[] {
+  ): Promise<AppliedTenantMigrationRecord[]> {
     this.ensureContext(ctx);
-    let dbMigrations = this.appliedByDatabase.get(ctx.postgresDatabaseName);
-    if (!dbMigrations) {
-      dbMigrations = new Map<string, AppliedTenantMigrationRecord>();
-      this.appliedByDatabase.set(ctx.postgresDatabaseName, dbMigrations);
-    }
+    const tenantRoleName = resolveTenantPostgresRoleName(ctx);
+    const tenantRoleIdent = quotePgIdentifier(tenantRoleName);
+    const runtimeUser =
+      process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
+    const runtimeIdent = quotePgIdentifier(runtimeUser);
+    const migrateUser =
+      process.env.PLATFORM_POSTGRES_MIGRATE_USER?.trim() || 'migrate_login';
+    const migrateIdent = quotePgIdentifier(migrateUser);
+    const dbIdent = quotePgIdentifier(ctx.postgresDatabaseName);
 
-    let tables = this.activeTablesByDatabase.get(ctx.postgresDatabaseName);
-    if (!tables) {
-      tables = new Set<string>(['tenant_schema_migrations']);
-      this.activeTablesByDatabase.set(ctx.postgresDatabaseName, tables);
-    }
+    const client = await createDirectMigrationClient({
+      ctx,
+      hostOverride: this.hostOverride,
+      portOverride: this.portOverride,
+    });
 
-    const newlyApplied: AppliedTenantMigrationRecord[] = [];
-    for (const migration of migrations) {
-      const checksum = computeMigrationChecksum(migration);
-      const existing = dbMigrations.get(migration.version);
-      if (existing) {
-        if (existing.checksum !== checksum) {
-          throw new Error(
-            `TENANCY_MIGRATION_CHECKSUM_MISMATCH: Migration ${migration.version} was modified after being applied to ${ctx.postgresDatabaseName}.`,
-          );
-        }
-        continue;
-      }
-
-      const missingDeps = (migration.dependsOn ?? []).filter(
-        (depVersion) => !dbMigrations.has(depVersion),
-      );
-      if (missingDeps.length > 0) {
-        throw new Error(
-          `MIGRATION_DEPENDENCY_ERROR: Cannot apply migration "${migration.version}" before prerequisite migration(s) ${missingDeps.map((d) => `"${d}"`).join(', ')} are applied.`,
+    try {
+      // Ensure schema_migrations ledger & R402 baseline privileges under advisory transaction lock
+      await client.query('BEGIN');
+      try {
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1))',
+          [`onesquared_migrate:${ctx.tenantId}`],
         );
+        await client.query(`REVOKE ALL ON DATABASE ${dbIdent} FROM PUBLIC`);
+        await client.query(
+          `GRANT CONNECT ON DATABASE ${dbIdent} TO ${runtimeIdent}, ${tenantRoleIdent}`,
+        );
+        await client.query(`REVOKE CREATE, USAGE ON SCHEMA public FROM PUBLIC`);
+        await client.query(`REVOKE ALL ON SCHEMA public FROM ${runtimeIdent}`);
+        await client.query(`GRANT USAGE ON SCHEMA public TO ${tenantRoleIdent}`);
+        await client.query(
+          `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${tenantRoleIdent}`,
+        );
+        await client.query(
+          `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${tenantRoleIdent}`,
+        );
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS tenant_schema_migrations (
+            tenant_id TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            name TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tenant_id, version)
+          )
+        `);
+        await client.query(
+          `REVOKE ALL ON TABLE tenant_schema_migrations FROM PUBLIC, ${runtimeIdent}`,
+        );
+        await client.query(
+          `GRANT SELECT ON TABLE tenant_schema_migrations TO ${tenantRoleIdent}`,
+        );
+        await client.query('COMMIT');
+      } catch (initErr) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw sanitizePostgresError(initErr, 'migration.bootstrap');
       }
 
-      for (const table of migration.tablesChanged) {
-        tables.add(table);
+      const newlyApplied: AppliedTenantMigrationRecord[] = [];
+      for (const migration of migrations) {
+        const checksum = computeMigrationChecksum(migration);
+        await client.query('BEGIN');
+        try {
+          await client.query(
+            'SELECT pg_advisory_xact_lock(hashtext($1))',
+            [`onesquared_migrate:${ctx.tenantId}`],
+          );
+
+          const existingRows = await client.query<{
+            version: string;
+            checksum: string;
+          }>(
+            'SELECT version, checksum FROM tenant_schema_migrations WHERE tenant_id = $1',
+            [ctx.tenantId],
+          );
+          const appliedMap = new Map(
+            existingRows.rows.map((r) => [r.version, r.checksum]),
+          );
+
+          if (appliedMap.has(migration.version)) {
+            if (appliedMap.get(migration.version) !== checksum) {
+              throw new Error(
+                `TENANCY_MIGRATION_CHECKSUM_MISMATCH: Migration ${migration.version} was modified after being applied to ${ctx.postgresDatabaseName}.`,
+              );
+            }
+            await client.query('COMMIT');
+            continue;
+          }
+
+          const missingDeps = (migration.dependsOn ?? []).filter(
+            (depVersion) => !appliedMap.has(depVersion),
+          );
+          if (missingDeps.length > 0) {
+            throw new Error(
+              `MIGRATION_DEPENDENCY_ERROR: Cannot apply migration "${migration.version}" before prerequisite migration(s) ${missingDeps.map((d) => `"${d}"`).join(', ')} are applied.`,
+            );
+          }
+
+          await client.query(migration.upSql);
+
+          await client.query(
+            `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, ${runtimeIdent}`,
+          );
+          await client.query(
+            `REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, ${runtimeIdent}`,
+          );
+          await client.query(
+            `GRANT SELECT ON TABLE tenant_schema_migrations TO ${tenantRoleIdent}`,
+          );
+
+          for (const tableName of migration.tablesChanged) {
+            const tableIdent = quotePgIdentifier(tableName);
+            const tableExists = await client.query(
+              `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+              [tableName],
+            );
+            if (tableExists.rowCount && tableExists.rowCount > 0) {
+              if (tableName === 'audit_entries') {
+                await client.query(
+                  `REVOKE ALL ON TABLE ${tableIdent} FROM ${tenantRoleIdent}`,
+                );
+                await client.query(
+                  `GRANT SELECT, INSERT ON TABLE ${tableIdent} TO ${tenantRoleIdent}`,
+                );
+              } else {
+                await client.query(
+                  `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${tableIdent} TO ${tenantRoleIdent}`,
+                );
+              }
+            }
+          }
+          await client.query(
+            `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${tenantRoleIdent}`,
+          );
+
+          const appliedAt = new Date().toISOString();
+          await client.query(
+            `INSERT INTO tenant_schema_migrations (tenant_id, database_name, version, name, checksum, applied_at)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              ctx.tenantId,
+              ctx.postgresDatabaseName,
+              migration.version,
+              migration.name,
+              checksum,
+              appliedAt,
+            ],
+          );
+          await client.query('COMMIT');
+
+          newlyApplied.push(
+            Object.freeze({
+              tenantId: ctx.tenantId,
+              databaseName: ctx.postgresDatabaseName,
+              version: migration.version,
+              name: migration.name,
+              checksum,
+              appliedAt,
+            }),
+          );
+        } catch (migErr) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw sanitizePostgresError(migErr, `migration.applyUp:${migration.version}`);
+        }
       }
 
-      const record: AppliedTenantMigrationRecord = Object.freeze({
-        tenantId: ctx.tenantId,
-        databaseName: ctx.postgresDatabaseName,
-        version: migration.version,
-        name: migration.name,
-        checksum,
-        appliedAt: new Date().toISOString(),
-      });
-      dbMigrations.set(migration.version, record);
-      newlyApplied.push(record);
+      invalidateGlobalTenantSchemaReadiness(ctx.postgresDatabaseName);
+      return newlyApplied;
+    } finally {
+      await client.end().catch(() => {});
     }
-
-    return newlyApplied;
   }
 
-  public rollbackVersion(
+  public async rollbackVersion(
     ctx: TenantContext,
     version: string,
     migrations: readonly TenantMigrationDefinition[] = CORE_TENANT_MIGRATIONS,
-  ): boolean {
+  ): Promise<boolean> {
     this.ensureContext(ctx);
-    const dbMigrations = this.appliedByDatabase.get(ctx.postgresDatabaseName);
-    const tables = this.activeTablesByDatabase.get(ctx.postgresDatabaseName);
-    if (!dbMigrations) {
-      return false;
-    }
+    const client = await createDirectMigrationClient({
+      ctx,
+      hostOverride: this.hostOverride,
+      portOverride: this.portOverride,
+    });
 
-    const combinedByVersion = new Map<string, TenantMigrationDefinition>();
-    for (const m of CORE_TENANT_MIGRATIONS) {
-      combinedByVersion.set(m.version, m);
-    }
-    for (const m of migrations) {
-      combinedByVersion.set(m.version, m);
-    }
-    const allKnownMigrations = Array.from(combinedByVersion.values());
+    try {
+      await client.query('BEGIN');
+      try {
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1))',
+          [`onesquared_migrate:${ctx.tenantId}`],
+        );
 
-    const targetIndex = migrations.findIndex(
-      (m) => m.version === version || m.name === version,
-    );
-    const definition =
-      targetIndex >= 0
-        ? migrations[targetIndex]
-        : allKnownMigrations.find(
+        const tableCheck = await client.query(
+          `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'tenant_schema_migrations'`,
+        );
+        if (!tableCheck.rowCount) {
+          await client.query('COMMIT');
+          return false;
+        }
+
+        const appliedRes = await client.query<{ version: string }>(
+          'SELECT version FROM tenant_schema_migrations WHERE tenant_id = $1',
+          [ctx.tenantId],
+        );
+        const appliedVersions = new Set(appliedRes.rows.map((r) => r.version));
+
+        const combinedByVersion = new Map<string, TenantMigrationDefinition>();
+        for (const m of CORE_TENANT_MIGRATIONS) {
+          combinedByVersion.set(m.version, m);
+        }
+        for (const m of migrations) {
+          combinedByVersion.set(m.version, m);
+        }
+        const allKnownMigrations = Array.from(combinedByVersion.values());
+
+        const definition =
+          migrations.find((m) => m.version === version || m.name === version) ??
+          allKnownMigrations.find(
             (m) => m.version === version || m.name === version,
           );
-    const targetVersion = definition?.version ?? version;
-    if (!dbMigrations.has(targetVersion)) {
-      return false;
-    }
-
-    const dependants = allKnownMigrations.filter(
-      (m) =>
-        dbMigrations.has(m.version) &&
-        (m.dependsOn ?? []).includes(targetVersion),
-    );
-    if (dependants.length > 0) {
-      throw new Error(
-        `MIGRATION_ROLLBACK_ORDER_ERROR: Cannot roll back "${targetVersion}" while ${dependants.map((d) => `"${d.version}"`).join(', ')} still depend on it.`,
-      );
-    }
-
-    if (!definition || !definition.downSql.trim()) {
-      throw new Error(
-        `TENANCY_MIGRATION_ERROR: Migration ${version} does not define a reversible downSql script.`,
-      );
-    }
-
-    if (tables) {
-      for (const table of definition.tablesChanged) {
-        const dropRegex = new RegExp(
-          `DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${table}\\b`,
-          'i',
-        );
-        if (dropRegex.test(definition.downSql)) {
-          tables.delete(table);
+        const targetVersion = definition?.version ?? version;
+        if (!appliedVersions.has(targetVersion)) {
+          await client.query('COMMIT');
+          return false;
         }
+
+        const dependants = allKnownMigrations.filter(
+          (m) =>
+            appliedVersions.has(m.version) &&
+            (m.dependsOn ?? []).includes(targetVersion),
+        );
+        if (dependants.length > 0) {
+          throw new Error(
+            `MIGRATION_ROLLBACK_ORDER_ERROR: Cannot roll back "${targetVersion}" while ${dependants.map((d) => `"${d.version}"`).join(', ')} still depend on it.`,
+          );
+        }
+
+        if (!definition || !definition.downSql.trim()) {
+          throw new Error(
+            `TENANCY_MIGRATION_ERROR: Migration ${version} does not define a reversible downSql script.`,
+          );
+        }
+
+        await client.query(definition.downSql);
+        await client.query(
+          'DELETE FROM tenant_schema_migrations WHERE tenant_id = $1 AND version = $2',
+          [ctx.tenantId, targetVersion],
+        );
+        await client.query('COMMIT');
+        invalidateGlobalTenantSchemaReadiness(ctx.postgresDatabaseName);
+        return true;
+      } catch (rbErr) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw sanitizePostgresError(rbErr, `migration.rollback:${version}`);
       }
+    } finally {
+      await client.end().catch(() => {});
     }
-    dbMigrations.delete(targetVersion);
-    return true;
   }
 
-  public listAppliedMigrations(
+  public async listAppliedMigrations(
     ctx: TenantContext,
-  ): AppliedTenantMigrationRecord[] {
+  ): Promise<AppliedTenantMigrationRecord[]> {
     this.ensureContext(ctx);
-    const dbMigrations = this.appliedByDatabase.get(ctx.postgresDatabaseName);
-    if (!dbMigrations) return [];
-    return Array.from(dbMigrations.values()).filter(
-      (m) => m.tenantId === ctx.tenantId,
-    );
+    const client = await createDirectMigrationClient({
+      ctx,
+      hostOverride: this.hostOverride,
+      portOverride: this.portOverride,
+    });
+    try {
+      const tableCheck = await client.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'tenant_schema_migrations'`,
+      );
+      if (!tableCheck.rowCount) {
+        return [];
+      }
+      const res = await client.query<{
+        tenant_id: string;
+        database_name: string;
+        version: string;
+        name: string;
+        checksum: string;
+        applied_at: Date | string;
+      }>(
+        `SELECT tenant_id, database_name, version, name, checksum, applied_at
+         FROM tenant_schema_migrations
+         WHERE tenant_id = $1
+         ORDER BY version ASC`,
+        [ctx.tenantId],
+      );
+      return res.rows.map((r) =>
+        Object.freeze({
+          tenantId: r.tenant_id,
+          databaseName: r.database_name,
+          version: r.version,
+          name: r.name,
+          checksum: r.checksum,
+          appliedAt: toIsoString(r.applied_at),
+        }),
+      );
+    } finally {
+      await client.end().catch(() => {});
+    }
   }
 
-  public getActiveTables(ctx: TenantContext): string[] {
+  public async getActiveTables(ctx: TenantContext): Promise<string[]> {
     this.ensureContext(ctx);
-    return Array.from(
-      this.activeTablesByDatabase.get(ctx.postgresDatabaseName) ?? [],
-    );
+    const client = await createDirectMigrationClient({
+      ctx,
+      hostOverride: this.hostOverride,
+      portOverride: this.portOverride,
+    });
+    try {
+      const res = await client.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name ASC`,
+      );
+      return res.rows.map((r) => r.table_name);
+    } finally {
+      await client.end().catch(() => {});
+    }
   }
 }

@@ -1693,29 +1693,34 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       expect(remediated.status).toBe('remediated');
     });
 
-    it('verifies reversible migration 0002 up, rollback, and re-apply', () => {
+    it('verifies reversible migration 0002 up, rollback, and re-apply', async () => {
       const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
       const runner = new TenantMigrationRunner();
-      runner.applyUp(ctx);
-      expect(runner.getActiveTables(ctx)).toContain(
-        'matter_document_locations',
-      );
-      expect(runner.getActiveTables(ctx)).toContain(
-        'document_reconciliation_findings',
-      );
+      try {
+        await runner.applyUp(ctx);
+        expect(await runner.getActiveTables(ctx)).toContain(
+          'matter_document_locations',
+        );
+        expect(await runner.getActiveTables(ctx)).toContain(
+          'document_reconciliation_findings',
+        );
 
-      const rolledBack = runner.rollbackVersion(ctx, '0002');
-      expect(rolledBack).toBe(true);
-      expect(runner.getActiveTables(ctx)).not.toContain(
-        'matter_document_locations',
-      );
-      expect(runner.getActiveTables(ctx)).toContain('key_dates');
-      expect(runner.getActiveTables(ctx)).toContain('key_date_reminder_states');
+        await runner.rollbackVersion(ctx, '0006');
+        const rolledBack = await runner.rollbackVersion(ctx, '0002');
+        expect(rolledBack).toBe(true);
+        expect(await runner.getActiveTables(ctx)).not.toContain(
+          'matter_document_locations',
+        );
+        expect(await runner.getActiveTables(ctx)).toContain('key_dates');
+        expect(await runner.getActiveTables(ctx)).toContain('key_date_reminder_states');
 
-      runner.applyUp(ctx);
-      expect(runner.getActiveTables(ctx)).toContain(
-        'matter_document_locations',
-      );
+        await runner.applyUp(ctx);
+        expect(await runner.getActiveTables(ctx)).toContain(
+          'matter_document_locations',
+        );
+      } finally {
+        await runner.applyUp(ctx);
+      }
     });
   });
 

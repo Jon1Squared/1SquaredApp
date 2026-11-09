@@ -74,80 +74,88 @@ function makeSampleKeyDate(overrides: Partial<KeyDate> = {}): KeyDate {
 }
 
 describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omission (Phase 1)', () => {
-  it('applies and rolls back migration 0003_key_dates_expand per tenant independently while retaining key_date_audit_events (R39, R48)', () => {
+  it('applies and rolls back migration 0003_key_dates_expand per tenant independently while retaining key_date_audit_events (R39, R48)', async () => {
     const runner = new TenantMigrationRunner();
     const ctxA = createVerifiedTenantContext('tenant-alpha');
     const ctxB = createVerifiedTenantContext('tenant-bravo');
 
-    expect(KEY_DATES_MIGRATION_0003.version).toBe('0003');
-    expect(KEY_DATES_MIGRATION_0003.name).toBe('0003_key_dates_expand');
-    expect(KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.version).toBe(
-      '0004',
-    );
-    expect(KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.name).toBe(
-      '0004_key_date_reminder_last_skipped_reason_expand',
-    );
-    expect(
-      KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.dependsOn,
-    ).toEqual(['0003']);
-    // R149: Verify 0004 downSql drops both the constraint and the last_skipped_reason column
-    expect(
-      KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.downSql,
-    ).toContain(
-      'DROP CONSTRAINT IF EXISTS chk_key_date_reminder_states_last_skipped_reason',
-    );
-    expect(
-      KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.downSql,
-    ).toContain('DROP COLUMN IF EXISTS last_skipped_reason');
+    try {
+      for (const v of ['0006', '0005', '0004', '0003', '0002', '0001']) {
+        await runner.rollbackVersion(ctxA, v);
+        await runner.rollbackVersion(ctxB, v);
+      }
 
-    // R145: Applying 0004 without its prerequisite 0003 throws MIGRATION_DEPENDENCY_ERROR
-    expect(() =>
-      runner.applyUp(ctxB, [
-        KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
-      ]),
-    ).toThrow(/MIGRATION_DEPENDENCY_ERROR/);
+      expect(KEY_DATES_MIGRATION_0003.version).toBe('0003');
+      expect(KEY_DATES_MIGRATION_0003.name).toBe('0003_key_dates_expand');
+      expect(KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.version).toBe(
+        '0004',
+      );
+      expect(KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.name).toBe(
+        '0004_key_date_reminder_last_skipped_reason_expand',
+      );
+      expect(
+        KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.dependsOn,
+      ).toEqual(['0003']);
+      expect(
+        KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.downSql,
+      ).toContain(
+        'DROP CONSTRAINT IF EXISTS chk_key_date_reminder_states_last_skipped_reason',
+      );
+      expect(
+        KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.downSql,
+      ).toContain('DROP COLUMN IF EXISTS last_skipped_reason');
 
-    const appliedA = runner.applyUp(ctxA, CORE_TENANT_MIGRATIONS);
-    expect(
-      appliedA.some((m) => m.version === KEY_DATES_MIGRATION_0003.version),
-    ).toBe(true);
-    expect(
-      appliedA.some(
-        (m) =>
-          m.version ===
-          KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.version,
-      ),
-    ).toBe(true);
-    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
-    expect(runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
-    expect(runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
-    expect(runner.getActiveTables(ctxB)).not.toContain('key_dates');
+      // R145: Applying 0004 without its prerequisite 0003 throws MIGRATION_DEPENDENCY_ERROR
+      await expect(
+        runner.applyUp(ctxB, [
+          KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
+        ]),
+      ).rejects.toThrow(/MIGRATION_DEPENDENCY_ERROR/);
 
-    // R145: Rolling back 0002 (which 0003 and 0004 do not depend on) succeeds independently and leaves key-date tables intact
-    expect(runner.rollbackVersion(ctxA, '0002')).toBe(true);
-    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
-    expect(runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
+      const appliedA = await runner.applyUp(ctxA, CORE_TENANT_MIGRATIONS);
+      expect(
+        appliedA.some((m) => m.version === KEY_DATES_MIGRATION_0003.version),
+      ).toBe(true);
+      expect(
+        appliedA.some(
+          (m) =>
+            m.version ===
+            KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004.version,
+        ),
+      ).toBe(true);
+      expect(await runner.getActiveTables(ctxA)).toContain('key_dates');
+      expect(await runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
+      expect(await runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
+      expect(await runner.getActiveTables(ctxB)).not.toContain('key_dates');
 
-    // R124 & R145: Attempting to roll back 0003 while 0004 (dependsOn: ['0003']) is still applied throws MIGRATION_ROLLBACK_ORDER_ERROR
-    expect(() => runner.rollbackVersion(ctxA, '0003')).toThrow(
-      /MIGRATION_ROLLBACK_ORDER_ERROR/,
-    );
-    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
+      // R145: Rolling back 0006 + 0002 leaves key-date tables intact
+      expect(await runner.rollbackVersion(ctxA, '0006')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0002')).toBe(true);
+      expect(await runner.getActiveTables(ctxA)).toContain('key_dates');
+      expect(await runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
 
-    // R110 & R124: Reversible rollback of 0004 ('0004' or '0004_key_date_reminder_last_skipped_reason_expand'), followed by 0003
-    const rolledBack0004 = runner.rollbackVersion(ctxA, '0004');
-    expect(rolledBack0004).toBe(true);
-    expect(runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
+      // R124 & R145: Attempting to roll back 0003 while 0004 and 0005 still depend on it throws MIGRATION_ROLLBACK_ORDER_ERROR
+      await expect(runner.rollbackVersion(ctxA, '0003')).rejects.toThrow(
+        /MIGRATION_ROLLBACK_ORDER_ERROR/,
+      );
+      expect(await runner.getActiveTables(ctxA)).toContain('key_dates');
 
-    // Reversible rollback on tenant-alpha (matching either version '0003' or name '0003_key_dates_expand')
-    const rolledBack = runner.rollbackVersion(
-      ctxA,
-      '0003_key_dates_expand',
-    );
-    expect(rolledBack).toBe(true);
-    expect(runner.getActiveTables(ctxA)).not.toContain('key_dates');
-    // Audit table is retained on rollback (R39)
-    expect(runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
+      expect(await runner.rollbackVersion(ctxA, '0005')).toBe(true);
+      const rolledBack0004 = await runner.rollbackVersion(ctxA, '0004');
+      expect(rolledBack0004).toBe(true);
+      expect(await runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');
+
+      const rolledBack = await runner.rollbackVersion(
+        ctxA,
+        '0003_key_dates_expand',
+      );
+      expect(rolledBack).toBe(true);
+      expect(await runner.getActiveTables(ctxA)).not.toContain('key_dates');
+      expect(await runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
+    } finally {
+      await runner.applyUp(ctxA, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxB, CORE_TENANT_MIGRATIONS);
+    }
   });
 
   it('isolates KeyDate, ReminderState, CalendarSync, NotApplicable, and AuditEvent records between Tenant A and Tenant B, including tampered record IDs and cross-tenant writes (R30, R31)', () => {

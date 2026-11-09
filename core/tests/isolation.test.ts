@@ -2541,7 +2541,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(syncOutcome.allowProceed).toBe(false);
   });
 
-  it('R161: conflictReview and firm schemas enforce parity and migration rollback checks CORE_TENANT_MIGRATIONS', () => {
+  it('R161: conflictReview and firm schemas enforce parity and migration rollback checks CORE_TENANT_MIGRATIONS', async () => {
     const crJsonProps = tenantConfigJsonSchema.properties.conflictReview.properties;
     expect(crJsonProps.assigneeTeamKey.minLength).toBe(1);
     expect(crJsonProps.assigneeRoleKey.minLength).toBe(1);
@@ -2598,14 +2598,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       correlationId: 'corr-mig-order-001',
     });
     const migRunner = new TenantMigrationRunner();
-    migRunner.applyUp(syncCtx, CORE_TENANT_MIGRATIONS);
-    expect(() =>
+    await migRunner.applyUp(syncCtx, CORE_TENANT_MIGRATIONS);
+    await expect(
       migRunner.rollbackVersion(syncCtx, '0003', [
         DOCUMENT_GENERATION_MIGRATION_0001,
         DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
         KEY_DATES_MIGRATION_0003,
       ]),
-    ).toThrow(/MIGRATION_ROLLBACK_ORDER_ERROR/);
+    ).rejects.toThrow(/MIGRATION_ROLLBACK_ORDER_ERROR/);
   });
 
   it('R162: conflict search returns a redacted match on restricted matters and saveMatterRecord refuses submit_cleared', async () => {

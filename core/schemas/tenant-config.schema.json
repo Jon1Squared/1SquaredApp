@@ -1073,6 +1073,18 @@
           "description": "Deployed per-tenant Azure Key Vault URI (output keyVaultUri from core/infra/modules/tenant.bicep)"
         }
       }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-tenant PostgreSQL server routing for tenants using a dedicated Flexible Server / CMK (ADR 0028 Decision 1)",
+      "properties": {
+        "dedicatedServerHost": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}[a-zA-Z0-9]$",
+          "description": "Optional dedicated PostgreSQL server FQDN (output from core/infra/modules/tenant.bicep when deployDedicatedPostgresServer is true)"
+        }
+      }
     }
   }
 }

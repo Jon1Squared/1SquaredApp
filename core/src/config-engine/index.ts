@@ -1911,6 +1911,24 @@ export const TenantConfigurationSchema = z
       .describe(
         'Optional per-tenant Azure Key Vault deployment outputs bound from tenant.bicep (R413)',
       ),
+    database: z
+      .object({
+        dedicatedServerHost: z
+          .string()
+          .regex(
+            /^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}[a-zA-Z0-9]$/,
+            'database.dedicatedServerHost must be a valid hostname',
+          )
+          .optional()
+          .describe(
+            'Optional dedicated PostgreSQL server FQDN for tenants requiring a dedicated Flexible Server or CMK (ADR 0028 Decision 1)',
+          ),
+      })
+      .strict()
+      .optional()
+      .describe(
+        'Optional per-tenant PostgreSQL server routing configuration (ADR 0028 Decision 1)',
+      ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -2690,6 +2708,19 @@ export function loadAndValidateTenantConfig(
     merged.keyVault = {
       ...(baseKeyVault ?? {}),
       ...(overlayKeyVault ?? {}),
+    };
+  }
+
+  const baseDatabase = baseConfig.database as
+    | Record<string, unknown>
+    | undefined;
+  const overlayDatabase = environmentOverlay.database as
+    | Record<string, unknown>
+    | undefined;
+  if (baseDatabase || overlayDatabase) {
+    merged.database = {
+      ...(baseDatabase ?? {}),
+      ...(overlayDatabase ?? {}),
     };
   }
 

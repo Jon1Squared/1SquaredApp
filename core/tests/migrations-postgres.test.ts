@@ -1,0 +1,390 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  CORE_REQUIRED_SCHEMA_VERSION,
+  CORE_TENANT_MIGRATIONS,
+  provisionPostgresClusterRolesAndDatabases,
+  resolveTenantFromVerifiedToken,
+  TenantMigrationRunner,
+  TenantPostgresPoolManager,
+  TenantScopedRepository,
+  validateTenantRegistry,
+  type TenantContext,
+  type TenantMigrationDefinition,
+} from '@platform/core';
+import { runMigrateJobSweep } from '../../scripts/run-job';
+
+const REPO_ROOT = path.resolve(__dirname, '../..');
+
+function makeTestTenantContext(
+  tenantId: string,
+  environment: 'test' | 'dev' = 'test',
+  correlationId = `corr-pg-${tenantId}`,
+): TenantContext {
+  return resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: `actor-${tenantId}`,
+      tenantId,
+      name: `Actor ${tenantId}`,
+      email: `actor@${tenantId}.example`,
+      roles: ['admin'],
+      mfaVerified: true,
+    },
+    hostingMode: 'multi_tenant',
+    environment,
+    correlationId,
+  });
+}
+
+class DiagnosticProbeRepository extends TenantScopedRepository {
+  public async readCurrentRoleAndBackendPid(ctx: TenantContext): Promise<{
+    currentUser: string;
+    sessionUser: string;
+    backendPid: number;
+  }> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{
+        current_user: string;
+        session_user: string;
+        pid: number;
+      }>(
+        'SELECT current_user, session_user, pg_backend_pid() AS pid',
+      );
+      const row = res.rows[0]!;
+      return {
+        currentUser: row.current_user,
+        sessionUser: row.session_user,
+        backendPid: Number(row.pid),
+      };
+    });
+  }
+
+  public async insertDiagnosticTemplateRow(
+    ctx: TenantContext,
+    id: string,
+    code: string,
+  ): Promise<void> {
+    await this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        `INSERT INTO document_templates (id, tenant_id, code, name, created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+        [id, ctx.tenantId, code, `Template ${code}`, ctx.actorId],
+      );
+    });
+  }
+
+  public async countDiagnosticTemplateRows(ctx: TenantContext): Promise<number> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ cnt: string }>(
+        'SELECT COUNT(*)::text AS cnt FROM document_templates WHERE tenant_id = $1',
+        [ctx.tenantId],
+      );
+      return Number(res.rows[0]?.cnt ?? '0');
+    });
+  }
+}
+
+function collectSourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (
+      entry.name === 'node_modules' ||
+      entry.name === '.next' ||
+      entry.name === '.git' ||
+      entry.name === 'dist' ||
+      entry.name === 'build' ||
+      entry.name === 'coverage'
+    ) {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...collectSourceFiles(full));
+    } else if (/\.(ts|tsx|mts|mjs|js)$/.test(entry.name)) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402 privileges, and TenantMigrationRunner (R401, R402, R403)', () => {
+  it('enforces the Owner Decision 2 contract: zero files outside core/src/tenancy/ import pg', () => {
+    const tenancyDir = path.join(REPO_ROOT, 'core', 'src', 'tenancy');
+    const files = collectSourceFiles(REPO_ROOT);
+    const violations: string[] = [];
+    const pgImportRegex =
+      /(?:from\s+['"]pg(?:\/[^'"]*)?['"]|import\s*\(\s*['"]pg(?:\/[^'"]*)?['"]\s*\)|require\s*\(\s*['"]pg(?:\/[^'"]*)?['"]\s*\))/;
+
+    for (const file of files) {
+      if (file.startsWith(tenancyDir + path.sep)) {
+        continue;
+      }
+      if (file.endsWith('migrations-postgres.test.ts')) {
+        continue;
+      }
+      const content = fs.readFileSync(file, 'utf8');
+      if (pgImportRegex.test(content)) {
+        violations.push(path.relative(REPO_ROOT, file));
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it('applies 0001-0006 idempotently, verifies checksums, rolls back failed SQL cleanly, and round-trips downSql -> upSql on real PostgreSQL 16', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'mig-roundtrip-firm', environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext('mig-roundtrip-firm');
+    const runner = new TenantMigrationRunner();
+    for (const v of ['0006', '0005', '0004', '0003', '0002', '0001']) {
+      await runner.rollbackVersion(ctx, v);
+    }
+
+    const firstApply = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(firstApply.map((m) => m.version)).toEqual([
+      '0001',
+      '0002',
+      '0003',
+      '0004',
+      '0005',
+      '0006',
+    ]);
+
+    // Idempotent second run applies 0 migrations
+    const secondApply = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(secondApply).toEqual([]);
+
+    // Failed SQL rolls back its transaction cleanly without recording in tenant_schema_migrations
+    const brokenMigration: TenantMigrationDefinition = {
+      version: '9999',
+      name: '9999_broken_sql_test',
+      description: 'Intentionally invalid SQL to verify transactional rollback',
+      tablesChanged: ['should_never_exist_table'],
+      dependsOn: ['0006'],
+      upSql: `
+        CREATE TABLE should_never_exist_table (id TEXT PRIMARY KEY);
+        SELECT * FROM table_that_definitely_does_not_exist_9999;
+      `,
+      downSql: 'DROP TABLE IF EXISTS should_never_exist_table;',
+    };
+
+    await expect(
+      runner.applyUp(ctx, [...CORE_TENANT_MIGRATIONS, brokenMigration]),
+    ).rejects.toThrow(/TENANCY_DATABASE_ERROR/);
+
+    const activeAfterFail = await runner.getActiveTables(ctx);
+    expect(activeAfterFail).not.toContain('should_never_exist_table');
+
+    // Round-trip rollback 0006 -> 0005 and re-apply
+    expect(await runner.rollbackVersion(ctx, '0006')).toBe(true);
+    expect(await runner.rollbackVersion(ctx, '0005')).toBe(true);
+    expect(await runner.getActiveTables(ctx)).not.toContain(
+      'matter_restriction_metadata',
+    );
+    expect(await runner.getActiveTables(ctx)).not.toContain(
+      'document_generation_tenant_configs',
+    );
+
+    const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(reapplied.map((m) => m.version)).toEqual(['0005', '0006']);
+  });
+
+  it('isolates per-tenant migration failures in runMigrateJobSweep and refuses unmigrated tenants at runtime with TENANT_SCHEMA_NOT_READY (R403)', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: 'mig-partial-fail-a', environment: 'test' },
+        { tenantId: 'mig-partial-ok-b', environment: 'test' },
+      ],
+    });
+
+    const host = process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1';
+    const registry = validateTenantRegistry({
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId: 'mig-partial-fail-a',
+          slug: 'mig_partial_fail_a',
+          environment: 'test',
+          postgresHost: host,
+          postgresDatabaseName: 'pg_tenant_mig_partial_fail_a_test',
+          postgresRoleName: 'role_tenant_mig_partial_fail_a_test',
+          keyVaultUri: 'https://kv-migpartiala-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+        {
+          tenantId: 'mig-partial-ok-b',
+          slug: 'mig_partial_ok_b',
+          environment: 'test',
+          postgresHost: host,
+          postgresDatabaseName: 'pg_tenant_mig_partial_ok_b_test',
+          postgresRoleName: 'role_tenant_mig_partial_ok_b_test',
+          keyVaultUri: 'https://kv-migpartialb-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    });
+
+    const failingFinalMigration: TenantMigrationDefinition = {
+      ...CORE_TENANT_MIGRATIONS[5]!,
+      upSql: 'SELECT * FROM nonexistent_relation_r403;',
+    };
+
+    const preCleanRunner = new TenantMigrationRunner();
+    for (const v of ['0006', '0005', '0004', '0003', '0002', '0001']) {
+      await preCleanRunner.rollbackVersion(makeTestTenantContext('mig-partial-fail-a'), v);
+    }
+    const summary = await runMigrateJobSweep({
+      registry,
+      migrationsByTenant: {
+        'mig-partial-fail-a': [
+          ...CORE_TENANT_MIGRATIONS.slice(0, 5),
+          failingFinalMigration,
+        ],
+        'mig-partial-ok-b': CORE_TENANT_MIGRATIONS,
+      },
+    });
+
+    expect(summary.exitCode).toBe(1);
+    expect(summary.failedTenants.map((f) => f.tenantId)).toEqual([
+      'mig-partial-fail-a',
+    ]);
+    expect(summary.succeededTenants).toEqual(['mig-partial-ok-b']);
+
+    const poolManager = new TenantPostgresPoolManager();
+    try {
+      const probeRepo = new DiagnosticProbeRepository({
+        poolManager,
+        requiredSchemaVersion: CORE_REQUIRED_SCHEMA_VERSION,
+      });
+      const ctxFailA = makeTestTenantContext('mig-partial-fail-a');
+      const ctxOkB = makeTestTenantContext('mig-partial-ok-b');
+
+      await expect(
+        probeRepo.readCurrentRoleAndBackendPid(ctxFailA),
+      ).rejects.toMatchObject({
+        code: 'TENANT_SCHEMA_NOT_READY',
+        message: expect.stringContaining('TENANT_SCHEMA_NOT_READY'),
+      });
+
+      const okInfo = await probeRepo.readCurrentRoleAndBackendPid(ctxOkB);
+      expect(okInfo.currentUser).toBe('role_tenant_mig_partial_ok_b_test');
+    } finally {
+      await poolManager.closeAllPools();
+    }
+  });
+
+  it('enforces transaction-scoped SET LOCAL ROLE across pooled backend connections (R401) and R402 NOINHERIT + wrong-database permission denial', async () => {
+    const ctxA = makeTestTenantContext('tenant-a');
+    const ctxB = makeTestTenantContext('tenant-b');
+
+    // 1. Single backend connection (`max: 1`) verification via pg_backend_pid() (R401)
+    const singleConnPoolMgr = new TenantPostgresPoolManager({
+      maxConnectionsPerTenant: 1,
+    });
+    try {
+      const repo = new DiagnosticProbeRepository({
+        poolManager: singleConnPoolMgr,
+      });
+      await repo.insertDiagnosticTemplateRow(ctxA, 'TPL-R401-A', 'R401-A');
+
+      const infoA1 = await repo.readCurrentRoleAndBackendPid(ctxA);
+      expect(infoA1.currentUser).toBe('role_tenant_tenant_a_test');
+
+      // On the exact same single-connection pool (`pg_tenant_tenant_a_test`), inspect raw client state:
+      // (a) `SET LOCAL ROLE` from infoA1 MUST have automatically reset back to `runtime_login` after COMMIT!
+      // (b) `runtime_login` (`NOINHERIT`) WITHOUT `SET LOCAL ROLE` MUST be denied reading `document_templates` (R402)!
+      // (c) `SET LOCAL ROLE role_tenant_tenant_b_test` on that same backend PID MUST have current_user = role_tenant_tenant_b_test
+      //     and MUST be denied reading Tenant A's `document_templates` (`42501` permission denied, R401 & R402)!
+      const { pool: poolA } = await singleConnPoolMgr.getPoolForTenant(ctxA);
+      const rawClient = await poolA.connect();
+      try {
+        await rawClient.query('BEGIN');
+        const unroled = await rawClient.query<{
+          current_user: string;
+          pid: number;
+        }>('SELECT current_user, pg_backend_pid() AS pid');
+        const runtimeUser =
+          process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
+        expect(unroled.rows[0]!.current_user).toBe(runtimeUser);
+        expect(Number(unroled.rows[0]!.pid)).toBe(infoA1.backendPid);
+
+        // Unscoped runtime_login cannot read tenant table (R402a)
+        await expect(
+          rawClient.query('SELECT * FROM public.document_templates'),
+        ).rejects.toMatchObject({ code: '42501' });
+        await rawClient.query('ROLLBACK');
+
+        // Same backend connection switching to Tenant B's role (R401)
+        await rawClient.query('BEGIN');
+        await rawClient.query('SET LOCAL ROLE "role_tenant_tenant_b_test"');
+        const asRoleB = await rawClient.query<{
+          current_user: string;
+          pid: number;
+        }>('SELECT current_user, pg_backend_pid() AS pid');
+        expect(asRoleB.rows[0]!.current_user).toBe('role_tenant_tenant_b_test');
+        expect(Number(asRoleB.rows[0]!.pid)).toBe(infoA1.backendPid);
+
+        await expect(
+          rawClient.query('SELECT * FROM public.document_templates'),
+        ).rejects.toMatchObject({ code: '42501' });
+        await rawClient.query('ROLLBACK');
+      } finally {
+        rawClient.release();
+      }
+
+      // Two-tenant repository calls through TenantPostgresPoolManager (ctxA vs ctxB)
+      const infoB = await repo.readCurrentRoleAndBackendPid(ctxB);
+      expect(infoB.currentUser).toBe('role_tenant_tenant_b_test');
+      expect(await repo.countDiagnosticTemplateRows(ctxA)).toBeGreaterThanOrEqual(
+        1,
+      );
+      expect(await repo.countDiagnosticTemplateRows(ctxB)).toBe(0);
+    } finally {
+      await singleConnPoolMgr.closeAllPools();
+    }
+
+    // 2. Real-pool wrong-database routing test (R402b):
+    // Pointing TenantPostgresPoolManager for Tenant A's context at `pg_tenant_tenant_b_test`
+    // fails closed with PostgreSQL permission denied (`42501`) via the real pool code path!
+    const misroutedPoolMgr = new TenantPostgresPoolManager({
+      databaseNameOverride: 'pg_tenant_tenant_b_test',
+    });
+    try {
+      const misroutedRepo = new DiagnosticProbeRepository({
+        poolManager: misroutedPoolMgr,
+      });
+      await expect(
+        misroutedRepo.insertDiagnosticTemplateRow(
+          ctxA,
+          'TPL-SHOULD-FAIL',
+          'FAIL-CODE',
+        ),
+      ).rejects.toMatchObject({
+        code: '42501',
+      });
+    } finally {
+      await misroutedPoolMgr.closeAllPools();
+    }
+
+    // Verify pg_tenant_tenant_b_test remains completely untouched
+    const cleanPoolMgr = new TenantPostgresPoolManager();
+    try {
+      const cleanRepo = new DiagnosticProbeRepository({
+        poolManager: cleanPoolMgr,
+      });
+      expect(await cleanRepo.countDiagnosticTemplateRows(ctxB)).toBe(0);
+    } finally {
+      await cleanPoolMgr.closeAllPools();
+    }
+  });
+});

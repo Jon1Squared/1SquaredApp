@@ -28,6 +28,10 @@ export * from './blobStorage';
 export * from './documentRepository';
 export * from './documentStoreRepository';
 export * from './keyVaultSecrets';
+export * from './tenantRegistry';
+export * from './postgresPoolManager';
+export * from './tenantScopedRepository';
+export * from './postgresAdminBootstrap';
 export * from './keyDateRepository';
 export {
   isEntraMfaVerified,
@@ -47,6 +51,7 @@ export interface ResolveTenantInput {
    */
   untrustedRequestTenantOverride?: string;
   configuredKeyVault?: TenantKeyVaultConfig;
+  configuredPostgresHost?: string;
 }
 
 export interface TenantPostgresConnectionConfig {
@@ -119,6 +124,9 @@ export function resolveTenantFromVerifiedToken(
     environment,
     correlationId,
     postgresDatabaseName: `pg_tenant_${slug}_${environment}`,
+    ...(input.configuredPostgresHost?.trim()
+      ? { configuredPostgresHost: input.configuredPostgresHost.trim() }
+      : {}),
     blobContainerName: `tenant-${tenantId}-${environment}`,
     keyVaultSecretPrefix:
       input.configuredKeyVault?.vaultName?.trim() ||

@@ -235,11 +235,16 @@ export interface TenantContext {
   readonly blobContainerName: string;
   readonly keyVaultSecretPrefix: string;
   readonly configuredKeyVault?: TenantKeyVaultConfig;
+  readonly configuredPostgresHost?: string;
 }
 
 export interface TenantKeyVaultConfig {
   readonly vaultName?: string;
   readonly vaultUri?: string;
+}
+
+export interface TenantDatabaseConfig {
+  readonly dedicatedServerHost?: string;
 }
 
 export interface RateCardConfigEntry {
@@ -838,6 +843,7 @@ export interface TenantConfiguration {
   matterFolderTemplates?: MatterFolderTemplatesConfig;
   keyDates?: KeyDatesConfiguration;
   keyVault?: TenantKeyVaultConfig;
+  database?: TenantDatabaseConfig;
 }
 
 // ------------------------------------------------------------------ External Document Store Integration Contracts (ADR-0017 .. ADR-0021)

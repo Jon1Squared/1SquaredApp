@@ -6,6 +6,7 @@ const nextConfig: NextConfig = {
   serverExternalPackages: [
     '@azure/monitor-opentelemetry',
     '@opentelemetry/api',
+    'pg',
   ],
 };
 

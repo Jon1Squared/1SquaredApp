@@ -12,6 +12,10 @@ const testEnv = {
   ...process.env,
   PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
   PLATFORM_ENVIRONMENT: 'test',
+  PLATFORM_POSTGRES_HOST: process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1',
+  PLATFORM_POSTGRES_PORT: process.env.PLATFORM_POSTGRES_PORT || '5432',
+  PLATFORM_POSTGRES_MIGRATE_PORT:
+    process.env.PLATFORM_POSTGRES_MIGRATE_PORT || '5432',
 };
 
 const liveBuildEnv = {
@@ -279,6 +283,13 @@ if (!registryContent.includes('extModule_0')) {
   );
   process.exit(1);
 }
+
+runStep(
+  '8b/12 Provision & migrate local test PostgreSQL 16 databases',
+  process.execPath,
+  ['scripts/setup-test-postgres.mjs'],
+  testEnv,
+);
 
 runStep(
   '9/12 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
