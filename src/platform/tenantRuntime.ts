@@ -9,6 +9,7 @@ import 'server-only';
 
 import {
   collectStructuredConfigReservedSettings,
+  emitPlatformStartupTelemetry,
   CORE_API_VERSION,
   CORE_VERSION,
   ExtensionHost,
@@ -23,6 +24,7 @@ import {
 } from '@platform/core';
 import type { PlatformExtension } from '@platform/core-api';
 import { BUNDLED_TENANT_EXTENSIONS } from './generated/extensionRegistry';
+import { resolveRequestCorrelationId } from '@/server/correlationId';
 
 let testBaseConfigOverride: Record<string, unknown> | null = null;
 let testDevOverlayOverride: Record<string, unknown> | null | undefined =
@@ -528,16 +530,39 @@ export function getPlatformPostgresCluster(): PostgresTenantCluster {
   return cachedCluster;
 }
 
+const ALLOWED_PLATFORM_ENVIRONMENTS = new Set<TenantConfiguration['environment']>([
+  'dev',
+  'test',
+  'training',
+  'demo',
+  'live',
+]);
+
+export function resolveConfiguredEnvironment(): TenantConfiguration['environment'] {
+  const raw = process.env.PLATFORM_ENVIRONMENT?.trim() ?? '';
+  if (!raw) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'TENANT_CONFIG_ERROR: PLATFORM_ENVIRONMENT must be explicitly set when NODE_ENV=production.',
+      );
+    }
+    return 'dev';
+  }
+  if (
+    !ALLOWED_PLATFORM_ENVIRONMENTS.has(
+      raw as TenantConfiguration['environment'],
+    )
+  ) {
+    throw new Error(
+      `TENANT_CONFIG_ERROR: Invalid PLATFORM_ENVIRONMENT "${raw}". Expected one of: dev, test, training, demo, live.`,
+    );
+  }
+  return raw as TenantConfiguration['environment'];
+}
+
 export function getActiveTenantConfiguration(): TenantConfiguration {
   const packageDir = resolveTenantPackageDir();
-  const env =
-    (process.env.PLATFORM_ENVIRONMENT as
-      | 'dev'
-      | 'test'
-      | 'training'
-      | 'demo'
-      | 'live'
-      | undefined) ?? 'dev';
+  const env = resolveConfiguredEnvironment();
   const hostingMode =
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
@@ -577,12 +602,29 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
       overlayCfg,
     );
     if (reservedNotices.length > 0) {
+      const startupCorrelationId = resolveRequestCorrelationId(
+        null,
+        `cfg-startup-${validated.tenantId}-${env}`,
+      );
+      emitPlatformStartupTelemetry({
+        eventName: 'tenant_config.reserved_settings',
+        hostingMode,
+        configuredTenantId: validated.tenantId,
+        correlationId: startupCorrelationId,
+        properties: {
+          environment: env,
+          reservedCount: reservedNotices.length,
+        },
+      });
       console.info(
         JSON.stringify({
           level: 'info',
           event: 'tenant_config.reserved_settings',
           tenantId: validated.tenantId,
-          correlationId: `cfg-startup-${validated.tenantId}-${env}`,
+          correlationId: resolveRequestCorrelationId(
+            null,
+            `cfg-startup-${validated.tenantId}-${env}`,
+          ),
           environment: env,
           reservedSettings: reservedNotices.map((n) => ({
             path: n.path,
@@ -673,7 +715,7 @@ export function resolveCurrentTenantContext(
     },
     hostingMode: cfg.hostingMode,
     environment: cfg.environment,
-    correlationId: actor.correlationId ?? `req-${Date.now()}`,
+    correlationId: resolveRequestCorrelationId(actor.correlationId, 'req'),
     untrustedRequestTenantOverride: actor.untrustedRequestTenantOverride,
   });
 }

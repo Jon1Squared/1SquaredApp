@@ -12,6 +12,8 @@ import {
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
   DocumentStoreTokenService,
+  emitTenantTelemetryEvent,
+  emitTenantTelemetryException,
   ExtensionHookPointSchema,
   ExtensionHost,
   ExtensionManifestSchema,
@@ -19,6 +21,7 @@ import {
   FirmConfigSubSchema,
   KEY_DATES_MIGRATION_0003,
   loadAndValidateTenantConfig,
+  PlatformTelemetryRecorder,
   PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
@@ -8578,5 +8581,89 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
+  });
+
+  it('S0-13b: isolates concurrent two-tenant telemetry events, rejects forged tenant claims with TENANCY_FORGERY_DETECTED, and scrubs PII', async () => {
+    const recorder = new PlatformTelemetryRecorder();
+
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-tel-forged-001',
+        untrustedRequestTenantOverride: 'fictional-chambers-uk',
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantAToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-tel-iso-a',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantBToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-tel-iso-b',
+    });
+
+    await Promise.all([
+      Promise.resolve().then(() =>
+        emitTenantTelemetryEvent({
+          eventName: 'matter.opened',
+          tenantId: ctxA.tenantId,
+          correlationId: ctxA.correlationId,
+          properties: {
+            matterId: 'M-A-001',
+            email: ctxA.actorEmail,
+            matterTitle: 'Confidential Alpha Acquisition',
+          },
+          recorder,
+        }),
+      ),
+      Promise.resolve().then(() =>
+        emitTenantTelemetryException({
+          eventName: 'matter.open_failed',
+          tenantId: ctxB.tenantId,
+          correlationId: ctxB.correlationId,
+          error: new Error(
+            'Validation failed for partner@fictionalchambers.co.uk',
+          ),
+          properties: {
+            matterId: 'M-B-999',
+            name: ctxB.actorName,
+          },
+          recorder,
+        }),
+      ),
+    ]);
+
+    const entriesA = recorder.getRecentEntries({ tenantId: ctxA.tenantId });
+    expect(entriesA).toHaveLength(1);
+    expect(entriesA[0]).toMatchObject({
+      eventName: 'matter.opened',
+      tenantId: 'not-a-law-firm',
+      correlationId: 'corr-tel-iso-a',
+      properties: {
+        matterId: 'M-A-001',
+      },
+    });
+    expect(JSON.stringify(entriesA)).not.toContain('notalawfirm.example');
+    expect(JSON.stringify(entriesA)).not.toContain(
+      'Confidential Alpha Acquisition',
+    );
+    expect(JSON.stringify(entriesA)).not.toContain('M-B-999');
+
+    const entriesB = recorder.getRecentEntries({ tenantId: ctxB.tenantId });
+    expect(entriesB).toHaveLength(1);
+    expect(entriesB[0]?.tenantId).toBe('fictional-chambers-uk');
+    expect(entriesB[0]?.correlationId).toBe('corr-tel-iso-b');
+    expect(entriesB[0]?.errorMessage).toBe(
+      'Validation failed for [REDACTED_EMAIL]',
+    );
+    expect(JSON.stringify(entriesB)).not.toContain('fictionalchambers.co.uk');
+    expect(JSON.stringify(entriesB)).not.toContain('Bernard Sterling');
   });
 });

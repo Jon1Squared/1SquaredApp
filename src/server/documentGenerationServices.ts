@@ -21,6 +21,7 @@ import {
   createOrUploadDraftTemplateVersion,
   deleteGeneratedDocument,
   DocumentGenerationConfigSchema,
+  emitPlatformStartupTelemetry,
   exportTemplatePackage,
   exportTemplateUsageReportCsv,
   findUnmappedPlaceholders,
@@ -76,6 +77,7 @@ import {
   hasPersonPermission,
 } from './rbacRuntime';
 import type { Person } from '@/domain/types';
+import { resolveRequestCorrelationId } from './correlationId';
 import {
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
@@ -142,10 +144,25 @@ function resolveDevFallbackSigningKey(): string {
   g.__oneSquaredDevBlobKey ??= crypto.randomBytes(32).toString('hex');
   if (!g.__oneSquaredDevBlobKeyWarned) {
     g.__oneSquaredDevBlobKeyWarned = true;
+    const blobKeyCorrelationId = resolveRequestCorrelationId(
+      null,
+      'corr-blob-key',
+    );
+    emitPlatformStartupTelemetry({
+      eventName: 'blob_signing_ephemeral_dev_key_in_use',
+      severity: 'warn',
+      hostingMode: getActiveTenantConfiguration().hostingMode,
+      configuredTenantId: getActiveTenantConfiguration().tenantId,
+      correlationId: blobKeyCorrelationId,
+      properties: {
+        environment: tenantEnv,
+      },
+    });
     console.warn(
       JSON.stringify({
         level: 'warn',
         event: 'blob_signing_ephemeral_dev_key_in_use',
+        correlationId: blobKeyCorrelationId,
         environment: tenantEnv,
         message:
           'PLATFORM_BLOB_SIGNING_KEY is unset; using an ephemeral per-process development signing key.',
