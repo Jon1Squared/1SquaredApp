@@ -1936,6 +1936,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         {
           id: externalClient.id,
           byId: 'P-000004',
+          mfaVerified: true,
           worksAtFirm: true,
           employmentSubmitted: {
             ...carys.employment!,
