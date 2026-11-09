@@ -70,6 +70,114 @@ function resolveGitleaksBinary() {
   process.exit(1);
 }
 
+function resolveBicepRunner() {
+  const directBicep = isWin ? 'bicep.exe' : 'bicep';
+  const directRes = spawnSync(directBicep, ['--version'], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  if (directRes.status === 0) {
+    return { kind: 'bicep', bin: directBicep };
+  }
+
+  if (isWin && process.env.LOCALAPPDATA) {
+    const wingetLinks = path.join(
+      process.env.LOCALAPPDATA,
+      'Microsoft',
+      'WinGet',
+      'Links',
+      'bicep.exe',
+    );
+    if (fs.existsSync(wingetLinks)) {
+      return { kind: 'bicep', bin: wingetLinks };
+    }
+
+    const wingetPackagesDir = path.join(
+      process.env.LOCALAPPDATA,
+      'Microsoft',
+      'WinGet',
+      'Packages',
+    );
+    if (fs.existsSync(wingetPackagesDir)) {
+      const entries = fs.readdirSync(wingetPackagesDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name.startsWith('Microsoft.Bicep')) {
+          const candidate = path.join(
+            wingetPackagesDir,
+            entry.name,
+            'bicep.exe',
+          );
+          if (fs.existsSync(candidate)) {
+            return { kind: 'bicep', bin: candidate };
+          }
+        }
+      }
+    }
+  }
+
+  const azCmd = isWin ? 'az.cmd' : 'az';
+  const azRes = spawnSync(azCmd, ['bicep', 'version'], {
+    stdio: 'ignore',
+    shell: isWin,
+  });
+  if (azRes.status === 0) {
+    return { kind: 'az', bin: azCmd };
+  }
+
+  console.error(
+    '[CI Verify] FAILED: Bicep CLI is not installed or not on PATH. Install it locally with `winget install --id Microsoft.Bicep --scope user` on Windows or `az bicep install`.',
+  );
+  process.exit(1);
+}
+
+function runBicepValidation(runner) {
+  console.log('\n=== [CI Verify] 2/12 Validate Bicep infrastructure templates (build & lint) ===');
+  const mainBicep = path.join('core', 'infra', 'main.bicep');
+  const modulesDir = path.join('core', 'infra', 'modules');
+  const moduleFiles = fs
+    .readdirSync(modulesDir)
+    .filter((name) => name.endsWith('.bicep'))
+    .sort()
+    .map((name) => path.join(modulesDir, name));
+  const allBicepFiles = [mainBicep, ...moduleFiles];
+
+  const buildArgs =
+    runner.kind === 'bicep'
+      ? ['build', mainBicep, '--stdout']
+      : ['bicep', 'build', '--file', mainBicep, '--stdout'];
+  const buildRes = spawnSync(runner.bin, buildArgs, {
+    encoding: 'utf8',
+    shell: isWin && runner.bin.endsWith('.cmd'),
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (buildRes.stderr && buildRes.stderr.trim().length > 0) {
+    console.error(buildRes.stderr.trim());
+  }
+  if (buildRes.status !== 0) {
+    console.error('[CI Verify] FAILED: Bicep build failed on core/infra/main.bicep.');
+    process.exit(buildRes.status ?? 1);
+  }
+
+  for (const bicepFile of allBicepFiles) {
+    const lintArgs =
+      runner.kind === 'bicep'
+        ? ['lint', bicepFile]
+        : ['bicep', 'lint', '--file', bicepFile];
+    const lintRes = spawnSync(runner.bin, lintArgs, {
+      encoding: 'utf8',
+      shell: isWin && runner.bin.endsWith('.cmd'),
+    });
+    const stderrText = (lintRes.stderr ?? '').trim();
+    if (stderrText.length > 0) {
+      console.error(stderrText);
+    }
+    if (lintRes.status !== 0 || /\bWarning\b/i.test(stderrText)) {
+      console.error(`[CI Verify] FAILED: Bicep lint failed or emitted warnings on ${bicepFile}.`);
+      process.exit(lintRes.status || 1);
+    }
+  }
+}
+
 function checkGitleaksVersion(gitleaksBin) {
   const versionRes = spawnSync(gitleaksBin, ['version'], {
     encoding: 'utf8',
@@ -132,30 +240,32 @@ console.log(`=== [CI Verify] Node.js ${process.versions.node} (matches Platform 
 
 const gitleaksBin = resolveGitleaksBinary();
 checkGitleaksVersion(gitleaksBin);
+const bicepRunner = resolveBicepRunner();
 
 runStep(
-  '1/11 Secret scan (gitleaks)',
+  '1/12 Secret scan (gitleaks)',
   gitleaksBin,
   ['dir', '.', '--config', '.gitleaks.toml', '--redact'],
   testEnv,
 );
-runStep('2/11 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
-runStep('3/11 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
-runStep('4/11 ESLint check', npmCmd, ['run', 'lint'], testEnv);
+runBicepValidation(bicepRunner);
+runStep('3/12 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
+runStep('4/12 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
+runStep('5/12 ESLint check', npmCmd, ['run', 'lint'], testEnv);
 runStep(
-  '5/11 Verify invented-only fixture data in data/ and src/seed/',
+  '6/12 Verify invented-only fixture data in data/ and src/seed/',
   process.execPath,
   ['scripts/verify-invented-fixtures.mjs'],
   testEnv,
 );
 runStep(
-  '6/11 Verify no demo literals in src/components/ and src/domain/',
+  '7/12 Verify no demo literals in src/components/ and src/domain/',
   process.execPath,
   ['scripts/verify-no-demo-literals.mjs'],
   testEnv,
 );
 
-console.log('\n=== [CI Verify] 7/11 Verify generated extension registry contains bundled extension ===');
+console.log('\n=== [CI Verify] 8/12 Verify generated extension registry contains bundled extension ===');
 const registryPath = path.resolve(
   process.cwd(),
   'src/platform/generated/extensionRegistry.ts',
@@ -171,19 +281,19 @@ if (!registryContent.includes('extModule_0')) {
 }
 
 runStep(
-  '8/11 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
+  '9/12 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
   npmCmd,
   ['test'],
   testEnv,
 );
 runStep(
-  '9/11 Verify production build (PLATFORM_ENVIRONMENT=live)',
+  '10/12 Verify production build (PLATFORM_ENVIRONMENT=live)',
   npmCmd,
   ['run', 'build'],
   liveBuildEnv,
 );
 
-console.log('\n=== [CI Verify] 10/11 Verify client bundle (.next/static) contains no API keys ===');
+console.log('\n=== [CI Verify] 11/12 Verify client bundle (.next/static) contains no API keys ===');
 const staticDir = path.resolve(process.cwd(), '.next/static');
 const staticFiles = collectFilesRecursively(staticDir);
 if (staticFiles.length === 0) {
@@ -202,7 +312,7 @@ for (const filePath of staticFiles) {
 }
 
 runStep(
-  '11/11 Run Playwright role journey smoke tests (PLATFORM_ENVIRONMENT=test)',
+  '12/12 Run Playwright role journey smoke tests (PLATFORM_ENVIRONMENT=test)',
   npmCmd,
   ['run', 'e2e'],
   testEnv,
