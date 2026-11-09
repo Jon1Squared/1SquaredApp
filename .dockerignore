@@ -1,0 +1,23 @@
+# Prevent secrets, local stores, VCS metadata, and build caches from entering the Docker build context (Rule 5)
+.git
+.github
+node_modules
+.next
+out
+build
+dist
+coverage
+playwright-report
+test-results
+e2e/.auth
+.env
+.env.*
+!.env.example
+*.pem
+*.tsbuildinfo
+npm-debug.log*
+data/runtime-store.json
+data/pembroke-vaughan.json
+data/storage
+data/entra-map*.json
+*.entra-map.json

@@ -221,7 +221,7 @@ Use this structure to build your client-facing slide deck:
 - **Key Takeaways:**
   - **Native Microsoft Entra ID SSO:** Uses your firm's Conditional Access policies, MFA, and Entra Security Groups.
   - **Granular RBAC + MFA Enforcement:** 32 permissions across Practice, Finance, HR, Risk, and Documents; critical admin actions require verified MFA claims and block self-escalation.
-  - **Privacy-First Logging:** Logs carry correlation and tenant IDs only—never client names, personal data, or file names.
+  - **Privacy-First Logging & OpenTelemetry Application Insights:** Structured events and exceptions exported via `@azure/monitor-opentelemetry` carry `tenantId` and `correlationId` (`resolveRequestCorrelationId`, with process start-up events tagged via `emitPlatformStartupTelemetry`) while a recursive deny-list scrubber strips all client names, personal data, document content, SQL text/parameters, and credentials; in Model A, telemetry export is opt-in via `APPLICATIONINSIGHTS_CONNECTION_STRING`. Runtime Key Vault secret references are checked against each tenant's `keyVault.vaultName` / `keyVault.vaultUri` Bicep outputs (`assertTenantOwnsKeyVaultSecretRef`), `NODE_ENV=production` fails closed unless `PLATFORM_ENVIRONMENT` is explicitly set, and the multi-stage non-root Node 24 `Dockerfile` bundles CLI jobs into `dist/jobs/run-job.mjs` without `tsx`.
   - **Assurance Roadmap:** Aligned with UK GDPR, SRA confidentiality principles, Cyber Essentials Plus, and ISO 27001 controls.
 
 ### Slide 8: Continuous Assurance — Tested on Every Change
