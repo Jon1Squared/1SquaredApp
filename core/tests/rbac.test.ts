@@ -22,6 +22,7 @@ import {
   resolveAuthoritativeRoles,
   resolvePermissions,
   resolveTenantFromVerifiedToken,
+  TenantConfigurationSchema,
   TenantDocumentRepository,
   validateTenantConfigWithWarnings,
   validateUserOverrideOrRoleMutation,
@@ -7802,6 +7803,65 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           '11111111-0000-4000-8000-000000000067',
         );
 
+        // 2f. emailLinking.enabled: false disables email binding while existing oid bindings still work
+        const unboundIntake = getStore().people.find((p) => p.id === 'P-000008')!;
+        unboundIntake.roles = ['intake'];
+        unboundIntake.employeeRoleId = 'employee_role.enquiries_coordinator';
+        const intakeEmail = unboundIntake.emails[0]!.address;
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              emailLinking: {
+                enabled: false,
+                domains: [],
+              },
+            },
+          },
+          'P-000004',
+          { mfaVerified: true },
+        );
+        const disabledEmailLinkAttempt = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000008',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-intake-008',
+          name: 'Carys Hughes',
+          preferred_username: intakeEmail,
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(disabledEmailLinkAttempt.person.id).not.toBe(unboundIntake.id);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000008')?.entraObjectId,
+        ).toBeUndefined();
+
+        // Existing oid binding on feeEarner (P-000002) still resolves P-000002 even when emailLinking.enabled is false
+        const existingOidSignIn = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000002',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-dafydd-002',
+          name: 'Dafydd Evans',
+          preferred_username: 'renamed.upn@other.example',
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(existingOidSignIn.person.id).toBe(feeEarner.id);
+
+        // Re-enable emailLinking for the end-to-end R373 attack test
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              emailLinking: {
+                enabled: true,
+                domains: [],
+              },
+            },
+          },
+          'P-000004',
+          { mfaVerified: true },
+        );
+
         // 2g. End-to-end R373 attack:
         // Step 1: Fee earner P-000002 tries to edit admin P-000004's email -> denied with FORBIDDEN
         const currentAdmin = getStore().people.find((p) => p.id === 'P-000004')!;
@@ -7869,5 +7929,115 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
+    it('3. validates rbac.identityMapping.emailLinking in TenantConfigurationSchema and updateTenantRbacConfig', () => {
+      const validCfg = structuredClone(notALawFirmBaseConfig) as Record<
+        string,
+        unknown
+      >;
+      validCfg.rbac = {
+        ...createDefaultRbacConfig(),
+        identityMapping: {
+          ...createDefaultRbacConfig().identityMapping,
+          emailLinking: {
+            enabled: true,
+            domains: ['notalawfirm.example', 'subsidiary.co.uk'],
+          },
+        },
+      };
+      const parsedValid = TenantConfigurationSchema.safeParse(validCfg);
+      expect(parsedValid.success).toBe(true);
+      if (parsedValid.success) {
+        expect(parsedValid.data.rbac.identityMapping.emailLinking).toEqual({
+          enabled: true,
+          domains: ['notalawfirm.example', 'subsidiary.co.uk'],
+        });
+      }
+
+      // Rejects a non-string domain or uppercase/invalid domain in TenantConfigurationSchema
+      const invalidNonStringCfg = structuredClone(validCfg);
+      (
+        (invalidNonStringCfg.rbac as Record<string, unknown>)
+          .identityMapping as Record<string, unknown>
+      ).emailLinking = {
+        enabled: true,
+        domains: [12345],
+      };
+      expect(
+        TenantConfigurationSchema.safeParse(invalidNonStringCfg).success,
+      ).toBe(false);
+
+      const invalidUppercaseCfg = structuredClone(validCfg);
+      (
+        (invalidUppercaseCfg.rbac as Record<string, unknown>)
+          .identityMapping as Record<string, unknown>
+      ).emailLinking = {
+        enabled: true,
+        domains: ['UpperCaseDomain.com'],
+      };
+      expect(
+        TenantConfigurationSchema.safeParse(invalidUppercaseCfg).success,
+      ).toBe(false);
+
+      // Also rejects invalid domain in updateTenantRbacConfig service
+      const badServiceUpdate = updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            emailLinking: {
+              enabled: true,
+              domains: ['not_a_valid_domain'],
+            },
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(badServiceUpdate.ok).toBe(false);
+      expect(badServiceUpdate.error).toContain('emailLinking.domains');
+
+      // R386: Rejects non-boolean emailLinking.enabled ("false" or null) in updateTenantRbacConfig and leaves stored configuration unchanged
+      const configBeforeBadEnabled = JSON.stringify(getDefaultTenantRbacConfig());
+      const stringEnabledUpdate = updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            emailLinking: {
+              enabled: 'false' as unknown as boolean,
+              domains: [],
+            },
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(stringEnabledUpdate.ok).toBe(false);
+      expect(stringEnabledUpdate.error).toBe(
+        'emailLinking.enabled must be a boolean.',
+      );
+      expect(JSON.stringify(getDefaultTenantRbacConfig())).toBe(
+        configBeforeBadEnabled,
+      );
+
+      const nullEnabledUpdate = updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            emailLinking: {
+              enabled: null as unknown as boolean,
+              domains: [],
+            },
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(nullEnabledUpdate.ok).toBe(false);
+      expect(nullEnabledUpdate.error).toBe(
+        'emailLinking.enabled must be a boolean.',
+      );
+      expect(JSON.stringify(getDefaultTenantRbacConfig())).toBe(
+        configBeforeBadEnabled,
+      );
+    });
   });
 });

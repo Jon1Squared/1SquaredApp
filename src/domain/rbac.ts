@@ -116,6 +116,19 @@ export function mergeRbacConfigOverlay(
             ...base.identityMapping.entraAppRoleToRoleKey,
             ...(overlay.identityMapping.entraAppRoleToRoleKey ?? {}),
           },
+          emailLinking: {
+            enabled:
+              typeof overlay.identityMapping.emailLinking?.enabled === 'boolean'
+                ? overlay.identityMapping.emailLinking.enabled
+                : typeof base.identityMapping.emailLinking?.enabled === 'boolean'
+                  ? base.identityMapping.emailLinking.enabled
+                  : true,
+            domains: Array.isArray(overlay.identityMapping.emailLinking?.domains)
+              ? overlay.identityMapping.emailLinking.domains
+              : Array.isArray(base.identityMapping.emailLinking?.domains)
+                ? base.identityMapping.emailLinking.domains
+                : [],
+          },
         }
       : base.identityMapping,
   };

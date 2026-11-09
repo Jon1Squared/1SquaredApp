@@ -2,6 +2,15 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-09 — Slice S0-30 (Employee Identity Binding & Sign-In Email Linking Configuration)
+
+### Added
+- **Sign-in email linking configuration (`@platform/core-api`, `@platform/core`, `core/schemas/tenant-config.schema.json`, `core/src/api/index.ts`, `core/src/domain/rbac/registry.ts`, `core/src/config-engine/index.ts`):**
+  - Added `RbacEmailLinkingConfig` (`{ enabled: boolean; domains: string[] }`) and optional `emailLinking?: RbacEmailLinkingConfig` on `RbacIdentityMappingConfig` in `@platform/core-api`.
+  - Added `rbac.identityMapping.emailLinking` (`enabled` default `true`; `domains` default `[]`, validated as lower-case domain names) to `core/schemas/tenant-config.schema.json`, `TenantConfigurationSchema`, `DEFAULT_RBAC_IDENTITY_MAPPING`, `createDefaultRbacConfig`, and `loadAndValidateTenantConfig`.
+- **Entra token email-verification claim (`@platform/core`, `core/src/domain/rbac/entra.ts`):**
+  - Added optional `xms_edov?: boolean` to `EntraIdRawTokenClaims`, honoured only when `xms_edov === true`.
+
 ## 2026-11-08 — Slice S0-11b (Additive `demo` Environment & Branding Re-reservation)
 
 ### Added

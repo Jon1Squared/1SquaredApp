@@ -10380,6 +10380,45 @@ export function updateTenantRbacConfig(
         }
       }
     }
+    if ('emailLinking' in patch.identityMapping && patch.identityMapping.emailLinking !== undefined) {
+      if (
+        typeof patch.identityMapping.emailLinking !== 'object' ||
+        patch.identityMapping.emailLinking === null
+      ) {
+        return {
+          ok: false,
+          error: 'emailLinking must be an object.',
+        };
+      }
+      if (
+        'enabled' in patch.identityMapping.emailLinking &&
+        typeof patch.identityMapping.emailLinking.enabled !== 'boolean'
+      ) {
+        return {
+          ok: false,
+          error: 'emailLinking.enabled must be a boolean.',
+        };
+      }
+      if ('domains' in patch.identityMapping.emailLinking) {
+        if (!Array.isArray(patch.identityMapping.emailLinking.domains)) {
+          return {
+            ok: false,
+            error: 'emailLinking.domains must be an array of lower-case domain names.',
+          };
+        }
+        for (const domain of patch.identityMapping.emailLinking.domains) {
+          if (
+            typeof domain !== 'string' ||
+            !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)
+          ) {
+            return {
+              ok: false,
+              error: `Invalid domain "${String(domain)}" in emailLinking.domains; each domain must be a lower-case domain name.`,
+            };
+          }
+        }
+      }
+    }
   }
 
   const beforeJson = JSON.stringify(currentRbac);

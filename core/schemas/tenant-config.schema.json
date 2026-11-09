@@ -782,6 +782,27 @@
             "requireMfaForAdminPermissions": {
               "type": "boolean",
               "default": true
+            },
+            "emailLinking": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Controls automatic sign-in linking by verified directory email domain for unbound employee records.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Whether unbound non-privileged employee records may be linked by a verified directory sign-in address on first sign-in. When false, only explicit oid bindings are used."
+                },
+                "domains": {
+                  "type": "array",
+                  "default": [],
+                  "description": "Allowed lower-case domain names for automatic email linking. An empty array means the tenant's branding.primaryDomain only.",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9.-]+\\.[a-z]{2,}$"
+                  }
+                }
+              }
             }
           }
         }
