@@ -305,6 +305,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         {
           id: nonEmployeeParty.id,
           byId: 'P-000004',
+          mfaVerified: true,
           worksAtFirm: true,
           employmentSubmitted: {
             engagementType: 'Employee',
@@ -480,6 +481,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         {
           id: target.id,
           byId: 'P-000004',
+          mfaVerified: true,
           worksAtFirm: true,
           keepAsContactOnLeave: true,
           employmentSubmitted: {

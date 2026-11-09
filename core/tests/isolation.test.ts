@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -70,9 +71,11 @@ import {
   setActiveTenantConfigForTesting,
 } from '../../src/platform/tenantRuntime';
 import {
+  clearJwksCache,
   createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,
   setTestEntraSessionOverride,
+  verifyEntraJwtSignatureAndClaims,
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
@@ -91,11 +94,13 @@ import {
   recordKeyDateNotApplicableRecord,
   requestMatterBill,
   resetAllDemoData,
+  resolveOrProvisionEntraEmployee,
   runMatterConflictSearchRecord,
   saveMatterRecord,
   savePersonRecord,
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
+  updatePersonPermissionOverrides,
 } from '../../src/server/services';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import {
@@ -144,7 +149,12 @@ import {
   updateChoiceValueAction,
 } from '../../src/app/actions';
 import { isActionDenied } from '../../src/domain/actionResult';
-import { createSeedStore, getStore } from '../../src/server/store';
+import {
+  clearStoreMemoryCache,
+  createSeedStore,
+  getStore,
+  saveStore,
+} from '../../src/server/store';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
@@ -1936,6 +1946,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         {
           id: externalClient.id,
           byId: 'P-000004',
+          mfaVerified: true,
           worksAtFirm: true,
           employmentSubmitted: {
             ...carys.employment!,
@@ -8285,6 +8296,285 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(okCc.ok).toBe(true);
       }
     } finally {
+      setTestEntraSessionOverride(undefined);
+      resetAllDemoData('P-000001');
+    }
+  });
+  it('S0-30 (B13): rejects forged tenant claims on savePersonAction and Entra JWT sign-in verification, and rejects tampered person IDs on savePersonAction, savePersonRecord, and updatePersonPermissionOverrides, with positive Tenant A controls', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const targetEmployeeA = store.people.find((p) => p.id === 'P-000002')!;
+      delete targetEmployeeA.entraObjectId;
+      saveStore(store);
+      const originalEmailsJson = JSON.stringify(targetEmployeeA.emails);
+      const tamperedPersonId = 'P-TENANT-B-EMP-99';
+      const tamperedEnquiryId = 'ENQ-TENANT-B-99';
+
+      // Set up RSA key pair and JWKS fetch stub for real Entra JWT verification (verifyEntraJwtSignatureAndClaims)
+      const tenantAEntraTid = '11111111-2222-3333-4444-000000000000';
+      const tenantBEntraTid = '99999999-8888-7777-6666-555555555555';
+      const clientId = '00000000-0000-4000-8000-000000000111';
+      const kid = 's0-30-isolation-kid';
+      const nonce = 's0-30-nonce-123';
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+      });
+      const publicJwk = {
+        ...(publicKey.export({ format: 'jwk' }) as Record<string, unknown>),
+        kid,
+        use: 'sig',
+        alg: 'RS256',
+      };
+      clearJwksCache();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ keys: [publicJwk] }),
+        }),
+      );
+      const signJwt = (payload: Record<string, unknown>): string => {
+        const rawHeader = Buffer.from(
+          JSON.stringify({ alg: 'RS256', kid, typ: 'JWT' }),
+          'utf8',
+        ).toString('base64url');
+        const rawPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString(
+          'base64url',
+        );
+        const signingInput = `${rawHeader}.${rawPayload}`;
+        const sig = crypto
+          .sign('RSA-SHA256', Buffer.from(signingInput, 'utf8'), privateKey)
+          .toString('base64url');
+        return `${signingInput}.${sig}`;
+      };
+      const nowSec = Math.floor(Date.now() / 1000);
+
+      // 1. Forged tenant claim: session whose tenantId ('pembroke-vaughan') does not match active tenant ('not-a-law-firm')
+      const forgedTenantBSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000004',
+          tenantId: 'pembroke-vaughan',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: tenantBEntraTid,
+          sub: 'P-000004',
+          email: 'admin@pembroke.example',
+          displayName: 'Admin',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(forgedTenantBSession);
+
+      await expect(
+        savePersonAction(
+          {
+            firstName: targetEmployeeA.firstName,
+            surname: targetEmployeeA.surname,
+            emails: [
+              {
+                id: 'em-forged',
+                address: 'forged@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: targetEmployeeA.id },
+        ),
+      ).rejects.toThrow(
+        'TENANCY_FORGERY_DETECTED: Request attempted to override authenticated session tenantId.',
+      );
+
+      // Forged Entra token whose tid belongs to Tenant B is rejected by verifyEntraJwtSignatureAndClaims
+      const forgedTidToken = signJwt({
+        aud: clientId,
+        tid: tenantBEntraTid,
+        iss: `https://login.microsoftonline.com/${tenantBEntraTid}/v2.0`,
+        sub: 'sub-forged-b',
+        oid: '22222222-0000-4000-8000-000000000002',
+        nonce,
+        iat: nowSec - 10,
+        nbf: nowSec - 10,
+        exp: nowSec + 3600,
+        preferred_username: targetEmployeeA.emails[0]!.address,
+        roles: [],
+        amr: ['pwd', 'mfa'],
+      });
+      await expect(
+        verifyEntraJwtSignatureAndClaims({
+          idToken: forgedTidToken,
+          tenantId: tenantAEntraTid,
+          clientId,
+          expectedNonce: nonce,
+        }),
+      ).rejects.toThrow(
+        'Microsoft Entra ID token tenant (tid) is missing or does not match ENTRA_TENANT_ID.',
+      );
+
+      // Clear in-memory store cache and reload from disk to confirm nothing was written under forged tenant claims
+      clearStoreMemoryCache();
+      const reloadedAfterForgery = getStore();
+      const reloadedEmployeeA = reloadedAfterForgery.people.find(
+        (p) => p.id === targetEmployeeA.id,
+      )!;
+      expect(JSON.stringify(reloadedEmployeeA.emails)).toBe(originalEmailsJson);
+      expect(reloadedEmployeeA.entraObjectId).toBeUndefined();
+
+      // 2. Tampered person ID (an ID not in active Tenant A, including a tampered ENQ- ID) is refused on both person save and identity binding
+      const validTenantASession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000004',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: tenantAEntraTid,
+          sub: 'P-000004',
+          email: 'catrin.williams@notalawfirm.example',
+          displayName: 'Catrin Williams',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(validTenantASession);
+
+      const tamperedActionRes = await savePersonAction(
+        {
+          firstName: 'Tampered',
+          surname: 'TenantBPerson',
+          emails: [
+            {
+              id: 'em-tampered',
+              address: 'tampered@notalawfirm.example',
+              typeId: 'email_type.work',
+              isPrimary: true,
+              active: true,
+            },
+          ],
+        },
+        { id: tamperedPersonId },
+      );
+      expect(isActionDenied(tamperedActionRes)).toBe(true);
+      if (isActionDenied(tamperedActionRes)) {
+        expect(tamperedActionRes.code).toBe('FORBIDDEN');
+        expect(tamperedActionRes.message).toBe('Person record not found.');
+      }
+
+      const tamperedServiceRes = savePersonRecord(
+        {
+          firstName: 'Tampered',
+          surname: 'TenantBPerson',
+          emails: [
+            {
+              id: 'em-tampered-svc',
+              address: 'tampered.svc@notalawfirm.example',
+              typeId: 'email_type.work',
+              isPrimary: true,
+              active: true,
+            },
+          ],
+        },
+        { id: tamperedPersonId, byId: 'P-000004', mfaVerified: true },
+      );
+      expect(isActionDenied(tamperedServiceRes)).toBe(true);
+      expect(tamperedServiceRes.code).toBe('FORBIDDEN');
+      expect(tamperedServiceRes.message).toBe('Person record not found.');
+
+      const peopleCountBeforeTamperedEnq = getStore().people.length;
+      const tamperedEnqServiceRes = savePersonRecord(
+        {
+          firstName: 'Tampered',
+          surname: 'EnquiryCaller',
+        },
+        { id: tamperedEnquiryId, byId: 'P-000004', mfaVerified: true },
+      );
+      expect(isActionDenied(tamperedEnqServiceRes)).toBe(true);
+      expect(tamperedEnqServiceRes.code).toBe('FORBIDDEN');
+      expect(tamperedEnqServiceRes.message).toBe('Person record not found.');
+      expect(getStore().people.length).toBe(peopleCountBeforeTamperedEnq);
+
+      const tamperedBindRes = updatePersonPermissionOverrides(
+        tamperedPersonId,
+        {
+          grant: [],
+          revoke: [],
+          entraObjectId: '99999999-0000-4000-8000-000000000099',
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(tamperedBindRes.ok).toBe(false);
+      expect(tamperedBindRes.error).toBe('Target employee not found.');
+
+      expect(getStore().people.some((p) => p.id === tamperedPersonId)).toBe(false);
+
+      // 3. Positive controls: valid Tenant A session updates Tenant A employee email and valid Tenant A JWT binds unbound non-privileged employee on sign-in
+      const validEmailUpdate = await savePersonAction(
+        {
+          firstName: targetEmployeeA.firstName,
+          surname: targetEmployeeA.surname,
+          emails: [
+            {
+              id: targetEmployeeA.emails[0]!.id,
+              address: 'dafydd.verified@notalawfirm.example',
+              typeId: 'email_type.work',
+              isPrimary: true,
+              active: true,
+            },
+          ],
+        },
+        { id: targetEmployeeA.id },
+      );
+      expect(isActionDenied(validEmailUpdate)).toBe(false);
+      clearStoreMemoryCache();
+      expect(
+        getStore().people.find((p) => p.id === targetEmployeeA.id)?.emails[0]?.address,
+      ).toBe('dafydd.verified@notalawfirm.example');
+
+      const validTenantAToken = signJwt({
+        aud: clientId,
+        tid: tenantAEntraTid,
+        iss: `https://login.microsoftonline.com/${tenantAEntraTid}/v2.0`,
+        sub: 'sub-dafydd-valid',
+        oid: '33333333-0000-4000-8000-000000000002',
+        nonce,
+        iat: nowSec - 10,
+        nbf: nowSec - 10,
+        exp: nowSec + 3600,
+        name: 'Dafydd Evans',
+        preferred_username: 'dafydd.verified@notalawfirm.example',
+        roles: [],
+        amr: ['pwd', 'mfa'],
+      });
+      const verifiedTenantAClaims = await verifyEntraJwtSignatureAndClaims({
+        idToken: validTenantAToken,
+        tenantId: tenantAEntraTid,
+        clientId,
+        expectedNonce: nonce,
+      });
+      const validSignInBind = resolveOrProvisionEntraEmployee(verifiedTenantAClaims);
+      expect(validSignInBind.person.id).toBe(targetEmployeeA.id);
+      expect(validSignInBind.person.entraObjectId).toBe(
+        '33333333-0000-4000-8000-000000000002',
+      );
+      clearStoreMemoryCache();
+      expect(
+        getStore().people.find((p) => p.id === targetEmployeeA.id)?.entraObjectId,
+      ).toBe('33333333-0000-4000-8000-000000000002');
+    } finally {
+      clearJwksCache();
+      vi.unstubAllGlobals();
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }

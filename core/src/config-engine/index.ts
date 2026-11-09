@@ -874,6 +874,36 @@ export const TenantConfigurationSchema = z
               .describe(
                 'Whether to accept Authentication Context Class Reference acrs=c1 as satisfying MFA',
               ),
+            emailLinking: z
+              .object({
+                enabled: z
+                  .boolean()
+                  .default(true)
+                  .describe(
+                    'Whether unbound non-privileged employee records may be linked by a verified directory sign-in address on first sign-in. When false, only explicit oid bindings are used.',
+                  ),
+                domains: z
+                  .array(
+                    z
+                      .string()
+                      .regex(
+                        /^[a-z0-9.-]+\.[a-z]{2,}$/,
+                        'Each emailLinking domain must be a valid lower-case domain name (e.g. "firm.co.uk")',
+                      ),
+                  )
+                  .default([])
+                  .describe(
+                    "Allowed lower-case domain names for automatic email linking. An empty array means the tenant's branding.primaryDomain only.",
+                  ),
+              })
+              .strict()
+              .default({
+                enabled: true,
+                domains: [],
+              })
+              .describe(
+                'Controls automatic sign-in linking by verified directory email domain for unbound employee records.',
+              ),
           })
           .strict()
           .default(() => ({
@@ -886,6 +916,10 @@ export const TenantConfigurationSchema = z
             },
             defaultRoleKeys: [...(DEFAULT_RBAC_IDENTITY_MAPPING.defaultRoleKeys ?? [])],
             allowAcrsC1AsMfa: DEFAULT_RBAC_IDENTITY_MAPPING.allowAcrsC1AsMfa ?? false,
+            emailLinking: {
+              enabled: DEFAULT_RBAC_IDENTITY_MAPPING.emailLinking?.enabled ?? true,
+              domains: [...(DEFAULT_RBAC_IDENTITY_MAPPING.emailLinking?.domains ?? [])],
+            },
           })),
       })
       .strict()
@@ -926,6 +960,10 @@ export const TenantConfigurationSchema = z
             ...def.identityMapping,
             defaultRoleKeys: def.identityMapping.defaultRoleKeys ?? [],
             allowAcrsC1AsMfa: def.identityMapping.allowAcrsC1AsMfa ?? false,
+            emailLinking: {
+              enabled: def.identityMapping.emailLinking?.enabled ?? true,
+              domains: [...(def.identityMapping.emailLinking?.domains ?? [])],
+            },
           },
         };
       })
@@ -2491,6 +2529,15 @@ export function loadAndValidateTenantConfig(
         ...((overlayRbac?.identityMapping as
           | Record<string, unknown>
           | undefined) ?? {}),
+        emailLinking: {
+          ...defaultRbac.identityMapping.emailLinking,
+          ...(((baseRbac?.identityMapping as Record<string, unknown> | undefined)
+            ?.emailLinking as Record<string, unknown> | undefined) ?? {}),
+          ...(((overlayRbac?.identityMapping as
+            | Record<string, unknown>
+            | undefined)?.emailLinking as Record<string, unknown> | undefined) ??
+            {}),
+        },
       },
     };
   } else {

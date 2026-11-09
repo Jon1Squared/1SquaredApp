@@ -22,6 +22,7 @@ import {
   resolveAuthoritativeRoles,
   resolvePermissions,
   resolveTenantFromVerifiedToken,
+  TenantConfigurationSchema,
   TenantDocumentRepository,
   validateTenantConfigWithWarnings,
   validateUserOverrideOrRoleMutation,
@@ -73,6 +74,7 @@ import {
   assignEnquiryRecord,
   closeEnquiryRecord,
   createOrUpdateLink,
+  createRecordFromPms,
   deleteLink,
   discussSignOff,
   dismissDuplicateMatch,
@@ -1456,6 +1458,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             tid: '00000000-0000-4000-8000-000000000099',
             sub: 'sub-002',
             name: 'Dafydd Evans',
+            preferred_username: 'dafydd.evans@notalawfirm.example',
             email: 'dafydd.evans@notalawfirm.example',
             roles: ['1Squared.RiskCompliance'],
             amr: ['pwd', 'mfa'],
@@ -6814,6 +6817,1227 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');
       }
+    });
+  });
+  describe('S0-30 (B13, R373): Employee identity binding — person email save protection and verified-domain non-privileged sign-in linking', () => {
+    it('1. requires employee:edit_core for any employee/leaver email change and mfaVerified === true only when adding or changing an address, allows leaver deactivation and secondary address removal without MFA (auditing both), allows contact:edit on non-employees, and ignores reordering/label/case/whitespace edits (R398)', async () => {
+      resetAllDemoData('P-000001');
+      try {
+        const store = getStore();
+        const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+        const targetEmployee = store.people.find((p) => p.id === 'P-000005')!;
+        const adminPerson = store.people.find((p) => p.id === 'P-000004')!;
+        targetEmployee.entraObjectId = '00000000-0000-4000-8000-000000000005';
+
+        // Explicitly ensure feeEarner has contact:edit and lacks employee:edit_core
+        feeEarner.permissionOverrides = {
+          grant: ['contact:edit'],
+          revoke: ['employee:edit_core'],
+        };
+
+        const originalEmailsJson = JSON.stringify(targetEmployee.emails);
+        const originalPrimaryAddr = targetEmployee.emails[0]!.address;
+
+        // 1a. A contact:edit-only actor (fee_earner P-000002) changing an employee's primary email gets FORBIDDEN (code and message), and reloaded store is unchanged
+        const forbiddenRes = savePersonRecord(
+          {
+            firstName: targetEmployee.firstName,
+            surname: targetEmployee.surname,
+            emails: [
+              {
+                ...targetEmployee.emails[0]!,
+                address: 'hijack.attempt@notalawfirm.example',
+              },
+            ],
+          },
+          { id: targetEmployee.id, byId: feeEarner.id, mfaVerified: true },
+        );
+        expect(isActionDenied(forbiddenRes)).toBe(true);
+        expect(forbiddenRes.code).toBe('FORBIDDEN');
+        expect(forbiddenRes.message).toBe(
+          'You do not have permission (employee:edit_core) to change an employee or leaver email address.',
+        );
+        expect(
+          JSON.stringify(
+            getStore().people.find((p) => p.id === targetEmployee.id)!.emails,
+          ),
+        ).toBe(originalEmailsJson);
+
+        // Also denied on a former employee (leaver: isEmployee === false, employment.status === 'Leaver')
+        const leaverPerson = store.people.find((p) => p.id === 'P-000006')!;
+        leaverPerson.isEmployee = false;
+        leaverPerson.employment = {
+          ...leaverPerson.employment!,
+          status: 'Leaver',
+        };
+        const leaverEmailsBefore = JSON.stringify(leaverPerson.emails);
+        const forbiddenLeaverRes = savePersonRecord(
+          {
+            firstName: leaverPerson.firstName,
+            surname: leaverPerson.surname,
+            emails: [
+              {
+                id: 'em-leaver-hijack',
+                address: 'leaver.hijack@notalawfirm.example',
+                typeId: 'email_type.personal',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: leaverPerson.id, byId: feeEarner.id, mfaVerified: true },
+        );
+        expect(isActionDenied(forbiddenLeaverRes)).toBe(true);
+        expect(forbiddenLeaverRes.code).toBe('FORBIDDEN');
+        expect(forbiddenLeaverRes.message).toBe(
+          'You do not have permission (employee:edit_core) to change an employee or leaver email address.',
+        );
+        expect(
+          JSON.stringify(
+            getStore().people.find((p) => p.id === leaverPerson.id)!.emails,
+          ),
+        ).toBe(leaverEmailsBefore);
+
+        // Also denied if attempting to inject a new work email via employmentSubmitted.systems.firmWorkEmail
+        const forbiddenSysEmailRes = savePersonRecord(
+          {
+            firstName: targetEmployee.firstName,
+            surname: targetEmployee.surname,
+          },
+          {
+            id: targetEmployee.id,
+            byId: feeEarner.id,
+            mfaVerified: true,
+            employmentSubmitted: {
+              ...targetEmployee.employment!,
+              systems: {
+                ...targetEmployee.employment!.systems!,
+                firmWorkEmail: 'hijack.sys@notalawfirm.example',
+              },
+            },
+          },
+        );
+        expect(isActionDenied(forbiddenSysEmailRes)).toBe(true);
+        expect(forbiddenSysEmailRes.code).toBe('FORBIDDEN');
+        expect(forbiddenSysEmailRes.message).toBe(
+          'You do not have permission (employee:edit_core) to change an employee or leaver email address.',
+        );
+
+        // 1b. Reordering an employee's emails, changing a label (typeId), or changing case/whitespace/inactive emails is NOT treated as an identity change
+        targetEmployee.emails = [
+          targetEmployee.emails[0]!,
+          {
+            id: 'em-secondary-p5',
+            address: 'sian.alt@notalawfirm.example',
+            typeId: 'email_type.work',
+            isPrimary: false,
+            active: true,
+          },
+        ];
+        const reorderedAndRelabelled = [
+          {
+            ...targetEmployee.emails[1]!,
+            address: '  SIAN.ALT@NOTALAWFIRM.EXAMPLE  ',
+            typeId: 'email_type.other',
+            isPrimary: true,
+          },
+          {
+            ...targetEmployee.emails[0]!,
+            isPrimary: false,
+          },
+          {
+            id: 'em-inactive-old',
+            address: 'historical.inactive@example.org',
+            typeId: 'email_type.personal',
+            isPrimary: false,
+            active: false,
+          },
+        ];
+        const reorderRes = savePersonRecord(
+          {
+            firstName: targetEmployee.firstName,
+            surname: targetEmployee.surname,
+            emails: reorderedAndRelabelled,
+          },
+          {
+            id: targetEmployee.id,
+            byId: feeEarner.id,
+            mfaVerified: false,
+            employmentSubmitted: null,
+          },
+        );
+        expect(isActionDenied(reorderRes)).toBe(false);
+        expect(reorderRes.errors).toBeUndefined();
+        expect(
+          getStore().audit.some(
+            (a) =>
+              a.recordId === targetEmployee.id &&
+              a.field === 'Employee sign-in email',
+          ),
+        ).toBe(false);
+
+        // R384: Saving an existing employee with an employment payload (hasEmploymentPayload === true) still requires employee:edit_core
+        const empPayloadWithoutPermRes = savePersonRecord(
+          {
+            firstName: targetEmployee.firstName,
+            surname: targetEmployee.surname,
+            preferredName: 'UnauthorisedEmpPayload',
+          },
+          { id: targetEmployee.id, byId: feeEarner.id, mfaVerified: true },
+        );
+        expect(isActionDenied(empPayloadWithoutPermRes)).toBe(true);
+        expect(empPayloadWithoutPermRes.code).toBe('FORBIDDEN');
+        expect(empPayloadWithoutPermRes.message).toBe(
+          'You do not have permission (employee:edit_core) to create or edit employment records.',
+        );
+
+        // 1c. A contact:edit actor can still change a non-employee contact's email (positive control)
+        const nonEmployee = store.people.find((p) => !p.isEmployee && !p.employment)!;
+        const contactEmailRes = savePersonRecord(
+          {
+            firstName: nonEmployee.firstName,
+            surname: nonEmployee.surname,
+            emails: [
+              {
+                id: 'em-contact-updated',
+                address: 'updated.contact@client.example',
+                typeId: 'email_type.personal',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: nonEmployee.id, byId: feeEarner.id, mfaVerified: false },
+        );
+        expect(isActionDenied(contactEmailRes)).toBe(false);
+        expect(contactEmailRes.errors).toBeUndefined();
+        expect(
+          getStore().people.find((p) => p.id === nonEmployee.id)?.emails[0]?.address,
+        ).toBe('updated.contact@client.example');
+
+        // 1d. Adding or replacing an address (or changing firmWorkEmail to a new value) without MFA gives MFA_REQUIRED, and reloaded store is unchanged (R398)
+        adminPerson.permissionOverrides = {
+          grant: ['employee:edit_core'],
+          revoke: [],
+        };
+        const targetBeforeNoMfaJson = JSON.stringify(
+          getStore().people.find((p) => p.id === targetEmployee.id)!,
+        );
+        const noMfaReplaceRes = savePersonRecord(
+          {
+            firstName: targetEmployee.firstName,
+            surname: targetEmployee.surname,
+            emails: [
+              {
+                id: targetEmployee.emails[0]!.id,
+                address: 'sian.renamed@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: targetEmployee.id, byId: adminPerson.id, mfaVerified: false },
+        );
+        expect(isActionDenied(noMfaReplaceRes)).toBe(true);
+        expect(noMfaReplaceRes.code).toBe('MFA_REQUIRED');
+        expect(noMfaReplaceRes.message).toBe(
+          'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
+        );
+        clearStoreMemoryCache();
+        expect(
+          JSON.stringify(getStore().people.find((p) => p.id === targetEmployee.id)!),
+        ).toBe(targetBeforeNoMfaJson);
+
+        const reloadedTargetForAdd = getStore().people.find(
+          (p) => p.id === targetEmployee.id,
+        )!;
+        const noMfaAddRes = savePersonRecord(
+          {
+            firstName: reloadedTargetForAdd.firstName,
+            surname: reloadedTargetForAdd.surname,
+            emails: [
+              ...reloadedTargetForAdd.emails,
+              {
+                id: 'em-added-no-mfa',
+                address: 'sian.added@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: false,
+                active: true,
+              },
+            ],
+          },
+          { id: reloadedTargetForAdd.id, byId: adminPerson.id, mfaVerified: false },
+        );
+        expect(isActionDenied(noMfaAddRes)).toBe(true);
+        expect(noMfaAddRes.code).toBe('MFA_REQUIRED');
+        clearStoreMemoryCache();
+        expect(
+          JSON.stringify(getStore().people.find((p) => p.id === targetEmployee.id)!),
+        ).toBe(targetBeforeNoMfaJson);
+
+        const reloadedTargetForFirmWork = getStore().people.find(
+          (p) => p.id === targetEmployee.id,
+        )!;
+        const noMfaFirmWorkChangeRes = savePersonRecord(
+          {
+            firstName: reloadedTargetForFirmWork.firstName,
+            surname: reloadedTargetForFirmWork.surname,
+          },
+          {
+            id: reloadedTargetForFirmWork.id,
+            byId: adminPerson.id,
+            mfaVerified: false,
+            employmentSubmitted: {
+              ...reloadedTargetForFirmWork.employment!,
+              systems: {
+                ...reloadedTargetForFirmWork.employment!.systems!,
+                firmWorkEmail: 'sian.changed-firm@notalawfirm.example',
+              },
+            },
+          },
+        );
+        expect(isActionDenied(noMfaFirmWorkChangeRes)).toBe(true);
+        expect(noMfaFirmWorkChangeRes.code).toBe('MFA_REQUIRED');
+        clearStoreMemoryCache();
+        expect(
+          JSON.stringify(getStore().people.find((p) => p.id === targetEmployee.id)!),
+        ).toBe(targetBeforeNoMfaJson);
+
+        // R398: Removing a secondary active address WITHOUT employee:edit_core still returns FORBIDDEN;
+        // removing it WITH employee:edit_core and NO MFA succeeds and writes the Employee sign-in email audit entry
+        const reloadedFeeEarner = getStore().people.find(
+          (p) => p.id === feeEarner.id,
+        )!;
+        reloadedFeeEarner.permissionOverrides = {
+          grant: ['contact:edit'],
+          revoke: ['employee:edit_core'],
+        };
+        const reloadedAdmin = getStore().people.find(
+          (p) => p.id === adminPerson.id,
+        )!;
+        reloadedAdmin.permissionOverrides = {
+          grant: ['employee:edit_core'],
+          revoke: [],
+        };
+        const targetWithSecondary = getStore().people.find(
+          (p) => p.id === targetEmployee.id,
+        )!;
+        const primaryOnlyEmails = targetWithSecondary.emails.filter(
+          (e) =>
+            e.active !== false &&
+            e.address.trim().toLowerCase() === originalPrimaryAddr.toLowerCase(),
+        );
+        expect(primaryOnlyEmails).toHaveLength(1);
+
+        const removeSecondaryForbiddenRes = savePersonRecord(
+          {
+            firstName: targetWithSecondary.firstName,
+            surname: targetWithSecondary.surname,
+            emails: primaryOnlyEmails,
+          },
+          {
+            id: targetWithSecondary.id,
+            byId: reloadedFeeEarner.id,
+            mfaVerified: false,
+            employmentSubmitted: null,
+          },
+        );
+        expect(isActionDenied(removeSecondaryForbiddenRes)).toBe(true);
+        expect(removeSecondaryForbiddenRes.code).toBe('FORBIDDEN');
+
+        const removeSecondaryWithoutMfaRes = savePersonRecord(
+          {
+            firstName: targetWithSecondary.firstName,
+            surname: targetWithSecondary.surname,
+            emails: primaryOnlyEmails,
+          },
+          {
+            id: targetWithSecondary.id,
+            byId: reloadedAdmin.id,
+            mfaVerified: false,
+          },
+        );
+        expect(isActionDenied(removeSecondaryWithoutMfaRes)).toBe(false);
+        expect(removeSecondaryWithoutMfaRes.errors).toBeUndefined();
+        expect(
+          removeSecondaryWithoutMfaRes.person.emails
+            .filter((e) => e.active !== false)
+            .map((e) => e.address.trim().toLowerCase()),
+        ).toEqual([originalPrimaryAddr.toLowerCase()]);
+        const removeSecondaryAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === targetEmployee.id &&
+            a.action === 'update' &&
+            a.field === 'Employee sign-in email',
+        );
+        expect(removeSecondaryAudit).toBeDefined();
+        expect(removeSecondaryAudit?.oldValue).toContain(
+          originalPrimaryAddr.toLowerCase(),
+        );
+        expect(removeSecondaryAudit?.oldValue).toContain(
+          'sian.alt@notalawfirm.example',
+        );
+        expect(removeSecondaryAudit?.newValue).toBe(
+          originalPrimaryAddr.toLowerCase(),
+        );
+
+        // R398: Marking an active employee as a leaver (without emails in input) with employee:edit_core and NO MFA succeeds:
+        // firm email is deactivated, firmWorkEmail is kept, and the Employee sign-in email audit entry records the change
+        const leaverCandidate = getStore().people.find((p) => p.id === 'P-000007')!;
+        const candidateOriginalFirmWorkEmail =
+          leaverCandidate.employment!.systems!.firmWorkEmail ?? '';
+        expect(candidateOriginalFirmWorkEmail).toBeTruthy();
+        expect(
+          leaverCandidate.emails.some((e) => e.active !== false),
+        ).toBe(true);
+
+        const markLeaverWithoutMfaRes = savePersonRecord(
+          {
+            firstName: leaverCandidate.firstName,
+            surname: leaverCandidate.surname,
+          },
+          {
+            id: leaverCandidate.id,
+            byId: reloadedAdmin.id,
+            mfaVerified: false,
+            worksAtFirm: false,
+          },
+        );
+        expect(isActionDenied(markLeaverWithoutMfaRes)).toBe(false);
+        expect(markLeaverWithoutMfaRes.errors).toBeUndefined();
+        expect(markLeaverWithoutMfaRes.person.isEmployee).toBe(false);
+        expect(markLeaverWithoutMfaRes.person.employment?.status).toBe('Leaver');
+        expect(
+          markLeaverWithoutMfaRes.person.emails.every((e) => e.active === false),
+        ).toBe(true);
+        expect(
+          markLeaverWithoutMfaRes.person.employment?.systems?.firmWorkEmail,
+        ).toBe(candidateOriginalFirmWorkEmail);
+        const leaverEmailAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === leaverCandidate.id &&
+            a.action === 'update' &&
+            a.field === 'Employee sign-in email',
+        );
+        expect(leaverEmailAudit).toBeDefined();
+        expect(leaverEmailAudit?.oldValue).toContain(
+          candidateOriginalFirmWorkEmail.trim().toLowerCase(),
+        );
+        expect(leaverEmailAudit?.newValue).toBeNull();
+
+        // R398: Clearing firmWorkEmail without adding a new address needs employee:edit_core and NO MFA, and is audited
+        const clearFirmWorkWithoutMfaRes = savePersonRecord(
+          {
+            firstName: leaverCandidate.firstName,
+            surname: leaverCandidate.surname,
+          },
+          {
+            id: leaverCandidate.id,
+            byId: reloadedAdmin.id,
+            mfaVerified: false,
+            employmentSubmitted: {
+              ...markLeaverWithoutMfaRes.person.employment!,
+              systems: {
+                ...markLeaverWithoutMfaRes.person.employment!.systems!,
+                firmWorkEmail: '',
+              },
+            },
+          },
+        );
+        expect(isActionDenied(clearFirmWorkWithoutMfaRes)).toBe(false);
+        expect(
+          clearFirmWorkWithoutMfaRes.person.employment?.systems?.firmWorkEmail,
+        ).toBe('');
+
+        // R383: Promoting an existing contact (who already has an active email) to an employee without MFA is denied with MFA_REQUIRED and leaves the reloaded store unchanged
+        const reloadedStoreAfterNoMfa = getStore();
+        const reloadedNonEmployee = reloadedStoreAfterNoMfa.people.find(
+          (p) => p.id === nonEmployee.id,
+        )!;
+        const nonEmployeeBeforePromoteJson = JSON.stringify(reloadedNonEmployee);
+        const promoteWithoutMfaRes = savePersonRecord(
+          {
+            firstName: reloadedNonEmployee.firstName,
+            surname: reloadedNonEmployee.surname,
+            isEmployee: true,
+            employeeRoleId: 'employee_role.solicitor',
+            departmentId: 'DEPT-RE',
+          },
+          { id: reloadedNonEmployee.id, byId: adminPerson.id, mfaVerified: false },
+        );
+        expect(isActionDenied(promoteWithoutMfaRes)).toBe(true);
+        expect(promoteWithoutMfaRes.code).toBe('MFA_REQUIRED');
+        expect(promoteWithoutMfaRes.message).toBe(
+          'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
+        );
+        clearStoreMemoryCache();
+        expect(
+          JSON.stringify(
+            getStore().people.find((p) => p.id === nonEmployee.id)!,
+          ),
+        ).toBe(nonEmployeeBeforePromoteJson);
+
+        // Promoting that contact to an employee WITH MFA succeeds and writes the Employee sign-in email audit entry (including both existing and synthesised firm emails, R393)
+        const promoteWithMfaRes = savePersonRecord(
+          {
+            firstName: reloadedNonEmployee.firstName,
+            surname: reloadedNonEmployee.surname,
+            isEmployee: true,
+            employeeRoleId: 'employee_role.solicitor',
+            departmentId: 'DEPT-RE',
+          },
+          { id: reloadedNonEmployee.id, byId: adminPerson.id, mfaVerified: true },
+        );
+        expect(isActionDenied(promoteWithMfaRes)).toBe(false);
+        expect(promoteWithMfaRes.person.isEmployee).toBe(true);
+        const promoteEmailAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === nonEmployee.id &&
+            a.action === 'update' &&
+            a.field === 'Employee sign-in email',
+        );
+        expect(promoteEmailAudit).toBeDefined();
+        expect(promoteEmailAudit?.oldValue).toBeNull();
+        expect(promoteEmailAudit?.newValue).toContain('updated.contact@client.example');
+        expect(promoteEmailAudit?.newValue).toContain(
+          `${reloadedNonEmployee.firstName.trim().toLowerCase()}.${reloadedNonEmployee.surname.trim().toLowerCase()}@notalawfirm.example`,
+        );
+
+        // R393: Promoting a contact with NO emails to an employee synthesises first.surname@<primaryDomain>:
+        // without MFA -> denied with MFA_REQUIRED and reloaded store unchanged; with MFA -> audit entry includes the synthesised address
+        const createdNoEmailContact = savePersonRecord(
+          {
+            firstName: 'Ceri',
+            surname: 'Noemail',
+            emails: [],
+          },
+          { byId: feeEarner.id, mfaVerified: false },
+        );
+        expect(isActionDenied(createdNoEmailContact)).toBe(false);
+        const noEmailContactId = createdNoEmailContact.person.id;
+        expect(createdNoEmailContact.person.emails).toEqual([]);
+        const noEmailContactBeforeJson = JSON.stringify(
+          getStore().people.find((p) => p.id === noEmailContactId)!,
+        );
+
+        const promoteNoEmailsWithoutMfaRes = savePersonRecord(
+          {
+            firstName: 'Ceri',
+            surname: 'Noemail',
+            isEmployee: true,
+            employeeRoleId: 'employee_role.solicitor',
+            departmentId: 'DEPT-RE',
+          },
+          { id: noEmailContactId, byId: adminPerson.id, mfaVerified: false },
+        );
+        expect(isActionDenied(promoteNoEmailsWithoutMfaRes)).toBe(true);
+        expect(promoteNoEmailsWithoutMfaRes.code).toBe('MFA_REQUIRED');
+        expect(promoteNoEmailsWithoutMfaRes.message).toBe(
+          'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
+        );
+        clearStoreMemoryCache();
+        expect(
+          JSON.stringify(getStore().people.find((p) => p.id === noEmailContactId)!),
+        ).toBe(noEmailContactBeforeJson);
+        expect(
+          getStore().audit.some(
+            (a) =>
+              a.recordId === noEmailContactId &&
+              a.field === 'Employee sign-in email',
+          ),
+        ).toBe(false);
+
+        const promoteNoEmailsWithMfaRes = savePersonRecord(
+          {
+            firstName: 'Ceri',
+            surname: 'Noemail',
+            isEmployee: true,
+            employeeRoleId: 'employee_role.solicitor',
+            departmentId: 'DEPT-RE',
+          },
+          { id: noEmailContactId, byId: adminPerson.id, mfaVerified: true },
+        );
+        expect(isActionDenied(promoteNoEmailsWithMfaRes)).toBe(false);
+        expect(promoteNoEmailsWithMfaRes.person.isEmployee).toBe(true);
+        const synthesisedEmailAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === noEmailContactId &&
+            a.action === 'update' &&
+            a.field === 'Employee sign-in email',
+        );
+        expect(synthesisedEmailAudit).toBeDefined();
+        expect(synthesisedEmailAudit?.oldValue).toBeNull();
+        expect(synthesisedEmailAudit?.newValue).toBe(
+          'ceri.noemail@notalawfirm.example',
+        );
+
+        // Also verify via savePersonAction with a non-MFA session
+        setTestEntraSessionOverride({
+          personId: adminPerson.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: adminPerson.id,
+          email: 'catrin.williams@notalawfirm.example',
+          displayName: 'Catrin Williams',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: false,
+          amr: ['pwd'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const actionNoMfaRes = await savePersonAction(
+          {
+            firstName: targetEmployee.firstName,
+            surname: targetEmployee.surname,
+            emails: [
+              {
+                id: targetEmployee.emails[0]!.id,
+                address: 'sian.renamed@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: targetEmployee.id },
+        );
+        expect(isActionDenied(actionNoMfaRes)).toBe(true);
+        expect(actionNoMfaRes.code).toBe('MFA_REQUIRED');
+        expect(actionNoMfaRes.message).toBe(
+          'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
+        );
+
+        // 1e. With employee:edit_core and MFA, the change is allowed, writes the dedicated audit entry, and keeps existing entraObjectId
+        const currentTargetEmp = getStore().people.find((p) => p.id === targetEmployee.id)!;
+        currentTargetEmp.entraObjectId = '00000000-0000-4000-8000-000000000005';
+        setTestEntraSessionOverride({
+          personId: adminPerson.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: adminPerson.id,
+          email: 'catrin.williams@notalawfirm.example',
+          displayName: 'Catrin Williams',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const allowedRes = await savePersonAction(
+          {
+            firstName: targetEmployee.firstName,
+            surname: targetEmployee.surname,
+            emails: [
+              {
+                id: targetEmployee.emails[0]!.id,
+                address: 'sian.renamed@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: targetEmployee.id },
+        );
+        expect(isActionDenied(allowedRes)).toBe(false);
+        expect(allowedRes.errors).toBeUndefined();
+        expect(allowedRes.person.emails[0]?.address).toBe(
+          'sian.renamed@notalawfirm.example',
+        );
+        expect(allowedRes.person.entraObjectId).toBe(
+          '00000000-0000-4000-8000-000000000005',
+        );
+        const emailAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === targetEmployee.id &&
+            a.action === 'update' &&
+            a.field === 'Employee sign-in email',
+        );
+        expect(emailAudit).toBeDefined();
+        expect(emailAudit?.oldValue).toContain(originalPrimaryAddr.toLowerCase());
+        expect(emailAudit?.newValue).toBe('sian.renamed@notalawfirm.example');
+
+        // R383 & R394: Creating an employee from PMS requires mfaVerified === true (fails closed without MFA even when no actor session is active) and writes the Employee sign-in email audit entry when MFA is verified
+        getStore().pmsLinks = getStore().pmsLinks.filter(
+          (l) => !(l.entityType === 'employee' && l.pmsCode === 'FE001'),
+        );
+        saveStore(getStore());
+        setTestEntraSessionOverride(undefined);
+        const pmsEmpNoMfaRes = await createRecordFromPms(
+          'employee',
+          'FE001',
+          adminPerson.id,
+          { mfaVerified: false },
+        );
+        expect(pmsEmpNoMfaRes.ok).toBe(false);
+        expect(pmsEmpNoMfaRes.code).toBe('MFA_REQUIRED');
+
+        setTestEntraSessionOverride({
+          personId: adminPerson.id,
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000004',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: adminPerson.id,
+          email: 'catrin.williams@notalawfirm.example',
+          displayName: 'Catrin Williams',
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+        const pmsEmpRes = await createRecordFromPmsAction('employee', 'FE001');
+        expect(pmsEmpRes.ok).toBe(true);
+        expect(pmsEmpRes.createdId).toBeDefined();
+        const pmsEmpEmailAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === pmsEmpRes.createdId &&
+            a.action === 'update' &&
+            a.field === 'Employee sign-in email',
+        );
+        expect(pmsEmpEmailAudit).toBeDefined();
+        expect(pmsEmpEmailAudit?.oldValue).toBeNull();
+        expect(pmsEmpEmailAudit?.newValue).toBeTruthy();
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('2. links only non-privileged single-match employees in allowed linking domains on sign-in, writes an entra-link audit entry without logging PII, refuses privileged and ambiguous links without provisioning, and blocks R373 end-to-end takeover', () => {
+      resetAllDemoData('P-000001');
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const store = getStore();
+        // Clear synthetic test OIDs so personas start unbound as in demo/onboarding
+        for (const p of store.people) {
+          delete p.entraObjectId;
+        }
+
+        const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+        const feeEarnerEmail = feeEarner.emails[0]!.address;
+
+        // 2a. Unverified email claim alone (no preferred_username/upn and no xms_edov, or string xms_edov: "true") does NOT link, and does not store the unverified email on the provisioned record (R387, R389)
+        const unverifiedEmailAttempt = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000201',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-unverified-201',
+          name: 'Unverified Email Caller',
+          email: feeEarnerEmail,
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(unverifiedEmailAttempt.person.id).not.toBe(feeEarner.id);
+        expect(unverifiedEmailAttempt.person.emails).toEqual([]);
+        expect(
+          getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
+        ).toBeUndefined();
+
+        const stringEdovAttempt = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000202',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-string-edov-202',
+          name: 'String Edov Caller',
+          email: feeEarnerEmail,
+          xms_edov: 'true' as unknown as boolean,
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(stringEdovAttempt.person.id).not.toBe(feeEarner.id);
+        expect(stringEdovAttempt.person.emails).toEqual([]);
+        expect(
+          getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
+        ).toBeUndefined();
+
+        // 2b. Sign-in with preferred_username in the tenant's linking domain binds ordinary unbound employee P-000002 and writes an entra-link audit entry
+        const linkedOrd = resolveOrProvisionEntraEmployee(
+          {
+            oid: '11111111-0000-4000-8000-000000000002',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-dafydd-002',
+            name: 'Dafydd Evans',
+            preferred_username: feeEarnerEmail,
+            email: feeEarnerEmail,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          },
+          { correlationId: 'corr-req-test-002' },
+        );
+        expect(linkedOrd.person.id).toBe(feeEarner.id);
+        expect(linkedOrd.person.entraObjectId).toBe(
+          '11111111-0000-4000-8000-000000000002',
+        );
+        expect(
+          getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
+        ).toBe('11111111-0000-4000-8000-000000000002');
+        const linkAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === feeEarner.id &&
+            a.action === 'entra-link' &&
+            a.field === 'Entra ID Email Link',
+        );
+        expect(linkAudit).toBeDefined();
+        expect(linkAudit?.newValue).not.toContain(feeEarnerEmail);
+        expect(linkAudit?.newValue).not.toContain(
+          '11111111-0000-4000-8000-000000000002',
+        );
+        const signInAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === feeEarner.id &&
+            a.action === 'update' &&
+            a.field === 'Entra ID OIDC Sign-In',
+        );
+        expect(signInAudit).toBeDefined();
+        expect(signInAudit?.newValue).toContain('correlationId=corr-req-test-002');
+        expect(signInAudit?.newValue).not.toContain('oid=');
+        // Verify server logs contain only personId, correlationId, and tenantId — never the email or oid
+        const loggedCalls = infoSpy.mock.calls.map((c) => String(c[0]));
+        const boundLog = loggedCalls.find((s) =>
+          s.includes('ENTRA_EMAIL_LINK_BOUND'),
+        );
+        expect(boundLog).toBeDefined();
+        const parsedLog = JSON.parse(boundLog!);
+        expect(parsedLog.personId).toBe(feeEarner.id);
+        expect(parsedLog.tenantId).toBe('not-a-law-firm');
+        expect(parsedLog.correlationId).toBe('corr-req-test-002');
+        expect(boundLog).not.toContain(feeEarnerEmail);
+        expect(boundLog).not.toContain('11111111-0000-4000-8000-000000000002');
+
+        // Also verify verified email claim (xms_edov: true) when preferred_username/upn is absent binds an ordinary unbound employee (P-000009 Finance), and unsafe correlationId options are sanitised (R399)
+        const financeUser = getStore().people.find((p) => p.id === 'P-000009')!;
+        const financeEmail = financeUser.emails[0]!.address;
+        const linkedViaVerifiedEmail = resolveOrProvisionEntraEmployee(
+          {
+            oid: '11111111-0000-4000-8000-000000000009',
+            tid: '11111111-2222-3333-4444-000000000009',
+            sub: 'sub-gethin-009',
+            name: 'Gethin Powell',
+            email: financeEmail,
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          },
+          { correlationId: 'x; roles=admin; mfa=true' },
+        );
+        expect(linkedViaVerifiedEmail.person.id).toBe(financeUser.id);
+        expect(linkedViaVerifiedEmail.person.entraObjectId).toBe(
+          '11111111-0000-4000-8000-000000000009',
+        );
+        const financeSignInAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === financeUser.id &&
+            a.action === 'update' &&
+            a.field === 'Entra ID OIDC Sign-In',
+        );
+        expect(financeSignInAudit?.newValue).toMatch(
+          /correlationId=corr-entra-signin-[0-9a-f-]{36}$/i,
+        );
+        expect(financeSignInAudit?.newValue).not.toContain('roles=admin');
+
+        // 2c. Sign-in with an email outside the linking domains doesn't bind
+        const secretary = getStore().people.find((p) => p.id === 'P-000010')!;
+        secretary.emails = [
+          {
+            id: 'em-sec-ext',
+            address: 'nia.edwards@external-domain.example',
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        const outsideDomainSignIn = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000010',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-nia-010',
+          name: 'Nia Edwards',
+          preferred_username: 'nia.edwards@external-domain.example',
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(outsideDomainSignIn.person.id).not.toBe(secretary.id);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000010')?.entraObjectId,
+        ).toBeUndefined();
+
+        // 2d. R382 & R396: Sign-in matching a privileged persona (P-000004 System Administrator, and an admin-role persona) by email refuses to link AND refuses to provision a duplicate, leaving store.people.length unchanged, no record with the token's oid, and a persisted entra-link refusal audit entry across clearStoreMemoryCache()
+        const adminPerson = getStore().people.find((p) => p.id === 'P-000004')!;
+        const adminEmail = adminPerson.emails[0]!.address;
+        const peopleCountBeforePrivRefusal = getStore().people.length;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '11111111-0000-4000-8000-000000000004',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-admin-004',
+            name: 'Catrin Williams',
+            preferred_username: adminEmail,
+            email: adminEmail,
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        clearStoreMemoryCache();
+        expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000004')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000004',
+          ),
+        ).toBe(false);
+        const privRefusalAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === 'P-000004' &&
+            a.action === 'entra-link' &&
+            a.field === 'Entra ID Email Link Refused',
+        );
+        expect(privRefusalAudit).toBeDefined();
+        expect(privRefusalAudit?.newValue).toContain('P-000004');
+        expect(privRefusalAudit?.newValue).toContain('correlationId=');
+        expect(privRefusalAudit?.newValue).not.toContain(adminEmail);
+        expect(privRefusalAudit?.newValue).not.toContain(
+          '11111111-0000-4000-8000-000000000004',
+        );
+
+        const managingPartner = getStore().people.find((p) => p.id === 'P-000038')!;
+        managingPartner.roles = ['admin'];
+        saveStore(getStore());
+        const mpEmail = managingPartner.emails[0]!.address;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '11111111-0000-4000-8000-000000000038',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-mp-038',
+            name: 'Gethin Lloyd',
+            preferred_username: mpEmail,
+            email: mpEmail,
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        clearStoreMemoryCache();
+        expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000038')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000038',
+          ),
+        ).toBe(false);
+
+        // 2e. Two unbound employees with the same address: no binding, no duplicate provisioned, and ambiguity is persisted as entra-link without the address or oid
+        const empA = getStore().people.find((p) => p.id === 'P-000006')!;
+        const empB = getStore().people.find((p) => p.id === 'P-000007')!;
+        // Make both non-privileged fee earners with the same work email
+        empA.roles = ['fee_earner'];
+        empA.employeeRoleId = 'employee_role.solicitor';
+        empB.roles = ['fee_earner'];
+        empB.employeeRoleId = 'employee_role.solicitor';
+        const sharedAddr = 'shared.inbox@notalawfirm.example';
+        empA.emails = [
+          {
+            id: 'em-dup-a',
+            address: sharedAddr,
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        empB.emails = [
+          {
+            id: 'em-dup-b',
+            address: sharedAddr,
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        saveStore(getStore());
+        const peopleCountBeforeAmbigRefusal = getStore().people.length;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '11111111-0000-4000-8000-000000000067',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-dup-067',
+            name: 'Duplicate Email User',
+            preferred_username: sharedAddr,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        clearStoreMemoryCache();
+        expect(getStore().people.length).toBe(peopleCountBeforeAmbigRefusal);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000006')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.find((p) => p.id === 'P-000007')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000067',
+          ),
+        ).toBe(false);
+        const ambigAudit = getStore().audit.find(
+          (a) =>
+            a.action === 'entra-link' &&
+            a.field === 'Entra ID Email Link Ambiguous',
+        );
+        expect(ambigAudit).toBeDefined();
+        expect(ambigAudit?.newValue).toContain('correlationId=');
+        expect(ambigAudit?.newValue).not.toContain(sharedAddr);
+        expect(ambigAudit?.newValue).not.toContain(
+          '11111111-0000-4000-8000-000000000067',
+        );
+
+        // 2f. emailLinking.enabled: false disables email binding while existing oid bindings still work
+        const unboundIntake = getStore().people.find((p) => p.id === 'P-000008')!;
+        unboundIntake.roles = ['intake'];
+        unboundIntake.employeeRoleId = 'employee_role.enquiries_coordinator';
+        const intakeEmail = unboundIntake.emails[0]!.address;
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              emailLinking: {
+                enabled: false,
+                domains: [],
+              },
+            },
+          },
+          'P-000004',
+          { mfaVerified: true },
+        );
+        const disabledEmailLinkAttempt = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000008',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-intake-008',
+          name: 'Carys Hughes',
+          preferred_username: intakeEmail,
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(disabledEmailLinkAttempt.person.id).not.toBe(unboundIntake.id);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000008')?.entraObjectId,
+        ).toBeUndefined();
+
+        // Existing oid binding on feeEarner (P-000002) still resolves P-000002 even when emailLinking.enabled is false
+        const existingOidSignIn = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000002',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-dafydd-002',
+          name: 'Dafydd Evans',
+          preferred_username: 'renamed.upn@other.example',
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(existingOidSignIn.person.id).toBe(feeEarner.id);
+
+        // Re-enable emailLinking for the end-to-end R373 attack test
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              emailLinking: {
+                enabled: true,
+                domains: [],
+              },
+            },
+          },
+          'P-000004',
+          { mfaVerified: true },
+        );
+
+        // 2g. End-to-end R373 attack:
+        // Step 1: Fee earner P-000002 tries to edit admin P-000004's email -> denied with FORBIDDEN
+        const currentAdmin = getStore().people.find((p) => p.id === 'P-000004')!;
+        const attackerEditAttempt = savePersonRecord(
+          {
+            firstName: currentAdmin.firstName,
+            surname: currentAdmin.surname,
+            emails: [
+              {
+                id: 'em-attacker-controlled',
+                address: 'second.account@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: currentAdmin.id, byId: feeEarner.id, mfaVerified: true },
+        );
+        expect(isActionDenied(attackerEditAttempt)).toBe(true);
+        expect(attackerEditAttempt.code).toBe('FORBIDDEN');
+        expect(attackerEditAttempt.message).toBe(
+          'You do not have permission (employee:edit_core) to change an employee or leaver email address.',
+        );
+
+        // Step 2: Even if P-000004's email is set directly in the store to the attacker's address, signing in as that address is refused (throws) and neither binds P-000004 nor provisions a duplicate
+        currentAdmin.emails = [
+          {
+            id: 'em-attacker-direct',
+            address: 'second.account@notalawfirm.example',
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        delete currentAdmin.entraObjectId;
+
+        const peopleCountBeforeAttackerSignIn = getStore().people.length;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '99999999-0000-4000-8000-999999999999',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-attacker-999',
+            name: 'Attacker Second Account',
+            preferred_username: 'second.account@notalawfirm.example',
+            email: 'second.account@notalawfirm.example',
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        expect(getStore().people.length).toBe(peopleCountBeforeAttackerSignIn);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000004')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '99999999-0000-4000-8000-999999999999',
+          ),
+        ).toBe(false);
+      } finally {
+        infoSpy.mockRestore();
+        warnSpy.mockRestore();
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('3. validates rbac.identityMapping.emailLinking in TenantConfigurationSchema and updateTenantRbacConfig', () => {
+      const validCfg = structuredClone(notALawFirmBaseConfig) as Record<
+        string,
+        unknown
+      >;
+      validCfg.rbac = {
+        ...createDefaultRbacConfig(),
+        identityMapping: {
+          ...createDefaultRbacConfig().identityMapping,
+          emailLinking: {
+            enabled: true,
+            domains: ['notalawfirm.example', 'subsidiary.co.uk'],
+          },
+        },
+      };
+      const parsedValid = TenantConfigurationSchema.safeParse(validCfg);
+      expect(parsedValid.success).toBe(true);
+      if (parsedValid.success) {
+        expect(parsedValid.data.rbac.identityMapping.emailLinking).toEqual({
+          enabled: true,
+          domains: ['notalawfirm.example', 'subsidiary.co.uk'],
+        });
+      }
+
+      // Rejects a non-string domain or uppercase/invalid domain in TenantConfigurationSchema
+      const invalidNonStringCfg = structuredClone(validCfg);
+      (
+        (invalidNonStringCfg.rbac as Record<string, unknown>)
+          .identityMapping as Record<string, unknown>
+      ).emailLinking = {
+        enabled: true,
+        domains: [12345],
+      };
+      expect(
+        TenantConfigurationSchema.safeParse(invalidNonStringCfg).success,
+      ).toBe(false);
+
+      const invalidUppercaseCfg = structuredClone(validCfg);
+      (
+        (invalidUppercaseCfg.rbac as Record<string, unknown>)
+          .identityMapping as Record<string, unknown>
+      ).emailLinking = {
+        enabled: true,
+        domains: ['UpperCaseDomain.com'],
+      };
+      expect(
+        TenantConfigurationSchema.safeParse(invalidUppercaseCfg).success,
+      ).toBe(false);
+
+      // Also rejects invalid domain in updateTenantRbacConfig service
+      const badServiceUpdate = updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            emailLinking: {
+              enabled: true,
+              domains: ['not_a_valid_domain'],
+            },
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(badServiceUpdate.ok).toBe(false);
+      expect(badServiceUpdate.error).toContain('emailLinking.domains');
+
+      // R386: Rejects non-boolean emailLinking.enabled ("false" or null) in updateTenantRbacConfig and leaves stored configuration unchanged
+      const configBeforeBadEnabled = JSON.stringify(getDefaultTenantRbacConfig());
+      const stringEnabledUpdate = updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            emailLinking: {
+              enabled: 'false' as unknown as boolean,
+              domains: [],
+            },
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(stringEnabledUpdate.ok).toBe(false);
+      expect(stringEnabledUpdate.error).toBe(
+        'emailLinking.enabled must be a boolean.',
+      );
+      expect(JSON.stringify(getDefaultTenantRbacConfig())).toBe(
+        configBeforeBadEnabled,
+      );
+
+      const nullEnabledUpdate = updateTenantRbacConfig(
+        {
+          identityMapping: {
+            ...getDefaultTenantRbacConfig().identityMapping,
+            emailLinking: {
+              enabled: null as unknown as boolean,
+              domains: [],
+            },
+          },
+        },
+        'P-000004',
+        { mfaVerified: true },
+      );
+      expect(nullEnabledUpdate.ok).toBe(false);
+      expect(nullEnabledUpdate.error).toBe(
+        'emailLinking.enabled must be a boolean.',
+      );
+      expect(JSON.stringify(getDefaultTenantRbacConfig())).toBe(
+        configBeforeBadEnabled,
+      );
     });
   });
 });

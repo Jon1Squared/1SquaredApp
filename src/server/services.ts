@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
+import { resolveRequestCorrelationId } from './correlationId';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import {
   prepareMergedEntityDocumentsInStore,
@@ -7,7 +8,7 @@ import {
   resolveTenantContextForStoreUser,
 } from './documentGenerationServices';
 import { attentionList } from '@/domain/attention';
-import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
+import { buildActionDenied, isActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { diffRecords } from '@/domain/audit';
 import { validateCustomFields } from '@/domain/customFields';
 import {
@@ -1447,6 +1448,7 @@ export function savePersonRecord(
   opts: {
     id?: string;
     byId: string;
+    mfaVerified?: boolean;
     customFieldsSubmitted?: Record<string, unknown>;
     flagPossibleDuplicate?: boolean;
     matchedDuplicateIds?: string[];
@@ -1472,11 +1474,31 @@ export function savePersonRecord(
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const existing = opts.id ? store.people.find((p) => p.id === opts.id) ?? null : null;
+  const deny = (
+    code: 'FORBIDDEN' | 'MFA_REQUIRED',
+    message: string,
+    key = 'permission',
+  ) => ({
+    ...buildActionDenied(code, message),
+    person: existing as Person,
+    errors: { [key]: message },
+  });
+  // Promoting a synthetic enquiry caller (`id: "ENQ-..."`) creates a new Person linked via
+  // `createdFromEnquiryId`, provided the referenced enquiry actually exists in this tenant's store;
+  // any unknown or tampered `opts.id` (including a tampered `ENQ-...` ID) is rejected as not found.
+  const existingEnquiryForPromotion =
+    opts.id && opts.id.startsWith('ENQ-')
+      ? store.enquiries.find((e) => e.id === opts.id) ?? null
+      : null;
+  if (opts.id && !existing && !existingEnquiryForPromotion) {
+    return deny('FORBIDDEN', 'Person record not found.', 'id');
+  }
   const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
   const permSet = resolvePersonPermissionSet(actingUser, {
     allPeople: store.people,
     teams: store.teams,
     targetPersonId: existing?.id,
+    mfaVerified: opts.mfaVerified,
   });
   const userPerms = new Set([
     ...resolveEmployeePermissions(actingUser, store.people, store.teams, {
@@ -1500,6 +1522,7 @@ export function savePersonRecord(
     'supportsIds',
     'showsWorkOfId',
     'demo',
+    'entraObjectId',
   ] as const;
   const attemptedSecurityField = PERSON_SECURITY_FIELDS.find((key) => {
     if (input[key] === undefined) return false;
@@ -1511,12 +1534,10 @@ export function savePersonRecord(
     return true;
   });
   if (attemptedSecurityField) {
-    const msg = `Security field "${attemptedSecurityField}" cannot be set or modified through person save. Use the dedicated RBAC administration actions.`;
-    return {
-      ...buildActionDenied('FORBIDDEN', msg),
-      person: existing as Person,
-      errors: { permission: msg },
-    };
+    return deny(
+      'FORBIDDEN',
+      `Security field "${attemptedSecurityField}" cannot be set or modified through person save. Use the dedicated RBAC administration actions.`,
+    );
   }
 
   if (!input.firstName?.trim() || !input.surname?.trim()) {
@@ -1536,111 +1557,17 @@ export function savePersonRecord(
   const rawEmpInput: Partial<EmploymentRecord> | null =
     opts.employmentSubmitted ?? input.employment ?? null;
 
-  const isLegacyEmployeeFieldChange =
-    (input.isEmployee !== undefined &&
-      Boolean(input.isEmployee) !== Boolean(existing?.isEmployee)) ||
-    (opts.worksAtFirm !== undefined &&
-      Boolean(opts.worksAtFirm) !== Boolean(existing?.employment && existing.employment.status !== 'Leaver')) ||
-    (opts.worksAtFirm === false && Boolean(existing?.employment || existing?.isEmployee)) ||
-    (input.employeeRoleId !== undefined &&
-      (input.employeeRoleId ?? null) !== (existing?.employeeRoleId ?? null)) ||
-    (input.departmentId !== undefined &&
-      (input.departmentId ?? null) !== (existing?.departmentId ?? null)) ||
-    (input.employment !== undefined &&
-      JSON.stringify(input.employment ?? null) !== JSON.stringify(existing?.employment ?? null));
-
-  const requiresEmployeeEditCore =
-    Boolean(rawEmpInput) ||
-    hasEmploymentPayload ||
-    isLegacyEmployeeFieldChange;
-
-  if (requiresEmployeeEditCore) {
-    if (!userPerms.has('employee:edit_core')) {
-      const msg =
-        'You do not have permission (employee:edit_core) to create or edit employment records.';
-      return {
-        ...buildActionDenied('FORBIDDEN', msg),
-        person: existing as Person,
-        errors: {
-          permission: msg,
-        },
-      };
-    }
-  } else if (!opts.internalSystemStep) {
-    const requiredContactKey = existing ? 'contact:edit' : 'contact:create';
-    if (!userPerms.has(requiredContactKey)) {
-      const msg = existing
-        ? 'You do not have permission (contact:edit) to edit contact records.'
-        : 'You do not have permission (contact:create) to create contact records.';
-      return {
-        ...buildActionDenied('FORBIDDEN', msg),
-        person: existing as Person,
-        errors: {
-          permission: msg,
-        },
-      };
-    }
-  }
-
-  // Enforce API-level permission checks on employment & sensitive data modifications
-  if (rawEmpInput) {
-    if (!userPerms.has('employee:edit_core')) {
-      const msg =
-        'You do not have permission (employee:edit_core) to create or edit employment records.';
-      return {
-        ...buildActionDenied('FORBIDDEN', msg),
-        person: existing as Person,
-        errors: {
-          permission: msg,
-        },
-      };
-    }
-    if (
-      (rawEmpInput.contract !== undefined ||
-        rawEmpInput.rightToWork !== undefined ||
-        rawEmpInput.emergencyContacts !== undefined) &&
-      !userPerms.has('employee:hr_restricted')
-    ) {
-      const msg =
-        'You do not have permission (employee:hr_restricted) to edit HR restricted fields (contract, right to work, emergency contacts).';
-      return {
-        ...buildActionDenied('FORBIDDEN', msg),
-        person: existing as Person,
-        errors: {
-          permission: msg,
-        },
-      };
-    }
-    if (rawEmpInput.payroll !== undefined && !userPerms.has('employee:payroll')) {
-      const msg =
-        'You do not have permission (employee:payroll) to edit payroll and benefits fields.';
-      return {
-        ...buildActionDenied('FORBIDDEN', msg),
-        person: existing as Person,
-        errors: {
-          permission: msg,
-        },
-      };
-    }
-  }
-
-  if (opts.sensitiveSubmitted !== undefined && opts.sensitiveSubmitted !== null) {
-    if (!userPerms.has('employee:sensitive')) {
-      const msg =
-        'You do not have permission (employee:sensitive) to edit sensitive employee information.';
-      return {
-        ...buildActionDenied('FORBIDDEN', msg),
-        person: existing as Person,
-        errors: {
-          permission: msg,
-        },
-      };
-    }
-  }
-
   const effectiveDob =
     input.dateOfBirth !== undefined ? input.dateOfBirth : existing?.dateOfBirth ?? null;
-  const targetPersonId = existing?.id ?? nextId(store, 'P');
+  // Pure candidate ID: only commit `nextId(store, 'P')` after all permission, MFA, and validation gates pass.
+  const targetPersonId =
+    existing?.id ?? `P-${String((store.counters.P ?? 0) + 1).padStart(6, '0')}`;
+
+  let workingEmails = input.emails;
+  let workingPhones = input.phones;
+  let workingRelationshipRoleIds = input.relationshipRoleIds;
+  let missingEmployeeRoleType = false;
+  let empErrors: Record<string, string> = {};
 
   // Build or merge the EmploymentRecord when the person works at the firm (or is a leaver with employment history)
   let nextEmployment: EmploymentRecord | null = existing?.employment
@@ -1679,10 +1606,7 @@ export function savePersonRecord(
         : null;
 
     if (input.isEmployee && !rawEmpInput && !input.employeeRoleId && !existing?.employeeRoleId && !existing?.employment?.roleType) {
-      return {
-        person: existing as Person,
-        errors: { employeeRoleId: 'An employee must have a role type.' },
-      };
+      missingEmployeeRoleType = true;
     }
 
     const resolvedDept =
@@ -1801,16 +1725,13 @@ export function savePersonRecord(
     // Only enforce full employment field validation when employmentSubmitted was explicitly provided
     // (or when creating/editing via the full employee form)
     if (rawEmpInput) {
-      const empErrors = validateEmploymentRecord(candidateEmp, {
+      empErrors = validateEmploymentRecord(candidateEmp, {
         personId: targetPersonId,
         dateOfBirth: effectiveDob,
         allPeople: store.people,
         orgStructure,
         requireContractStartDate: Boolean(rawEmpInput.contract),
       });
-      if (Object.keys(empErrors).length > 0) {
-        return { person: existing as Person, errors: empErrors };
-      }
     }
 
     nextEmployment = applyEffectiveDatedEmploymentHistory(
@@ -1823,18 +1744,18 @@ export function savePersonRecord(
     // If unchecked and status wasn't already Leaver, transition to Leaver
     const leavingRes = applyLeaverEffects(
       {
-        emails: input.emails ?? existing.emails ?? [],
-        phones: input.phones ?? existing.phones ?? [],
-        relationshipRoleIds: input.relationshipRoleIds ?? existing.relationshipRoleIds ?? [],
+        emails: workingEmails ?? existing.emails ?? [],
+        phones: workingPhones ?? existing.phones ?? [],
+        relationshipRoleIds: workingRelationshipRoleIds ?? existing.relationshipRoleIds ?? [],
       },
       existing.employment,
       today,
       opts.keepAsContactOnLeave ?? true,
       resolveConfiguredFirmPrimaryDomain(),
     );
-    input.emails = leavingRes.emails;
-    input.phones = leavingRes.phones;
-    input.relationshipRoleIds = leavingRes.relationshipRoleIds;
+    workingEmails = leavingRes.emails;
+    workingPhones = leavingRes.phones;
+    workingRelationshipRoleIds = leavingRes.relationshipRoleIds;
     nextEmployment = leavingRes.employment;
   }
 
@@ -1844,18 +1765,18 @@ export function savePersonRecord(
       nextEmployment.contract?.leavingDate || nextEmployment.effectiveTo || today;
     const leavingRes = applyLeaverEffects(
       {
-        emails: input.emails ?? existing?.emails ?? [],
-        phones: input.phones ?? existing?.phones ?? [],
-        relationshipRoleIds: input.relationshipRoleIds ?? existing?.relationshipRoleIds ?? [],
+        emails: workingEmails ?? existing?.emails ?? [],
+        phones: workingPhones ?? existing?.phones ?? [],
+        relationshipRoleIds: workingRelationshipRoleIds ?? existing?.relationshipRoleIds ?? [],
       },
       nextEmployment,
       leavingDate,
       opts.keepAsContactOnLeave ?? nextEmployment.contract?.keepAsContactOnLeave ?? true,
       resolveConfiguredFirmPrimaryDomain(),
     );
-    input.emails = leavingRes.emails;
-    input.phones = leavingRes.phones;
-    input.relationshipRoleIds = leavingRes.relationshipRoleIds;
+    workingEmails = leavingRes.emails;
+    workingPhones = leavingRes.phones;
+    workingRelationshipRoleIds = leavingRes.relationshipRoleIds;
     nextEmployment = leavingRes.employment;
   }
 
@@ -1866,91 +1787,25 @@ export function savePersonRecord(
     existing?.customFields ?? {},
     store.values,
   );
-  if (Object.keys(cfValidation.errors).length > 0) {
-    return { person: existing as Person, errors: cfValidation.errors };
-  }
 
-  // Handle conversion path 1: Contact or client becomes an employee
+  // Handle conversion path 1: Contact or client becomes an employee (pure metadata first; store side effects run after gates pass)
   const wasWorkingAtFirm = isWorkingAtFirm(existing);
   const nowWorkingAtFirm = Boolean(nextEmployment && nextEmployment.status !== 'Leaver');
+  const openMattersOnHire =
+    !wasWorkingAtFirm && nowWorkingAtFirm && nextEmployment
+      ? findOpenMattersWherePersonIsParty(targetPersonId, store.matters)
+      : [];
   if (!wasWorkingAtFirm && nowWorkingAtFirm && nextEmployment) {
-    const openMatters = findOpenMattersWherePersonIsParty(targetPersonId, store.matters);
     nextEmployment.conflictCheckOnHire = {
       checkedAt: now,
-      openMatterIds: openMatters.map((m) => m.id),
-      flaggedToRisk: openMatters.length > 0,
-      informationBarrierConsidered: openMatters.length > 0,
+      openMatterIds: openMattersOnHire.map((m) => m.id),
+      flaggedToRisk: openMattersOnHire.length > 0,
+      informationBarrierConsidered: openMattersOnHire.length > 0,
       riskNotes:
-        openMatters.length > 0
-          ? `Person is a party on ${openMatters.length} open matter(s) (${openMatters.map((m) => m.matterNumber).join(', ')}). Flagged to Risk & Compliance to consider an information barrier.`
+        openMattersOnHire.length > 0
+          ? `Person is a party on ${openMattersOnHire.length} open matter(s) (${openMattersOnHire.map((m) => m.matterNumber).join(', ')}). Flagged to Risk & Compliance to consider an information barrier.`
           : 'No open matter conflicts detected on hire.',
     };
-
-    if (openMatters.length > 0) {
-      // Flag to Risk & Compliance so an information barrier can be considered
-      const riskOfficerId =
-        store.people.find(
-          (p) =>
-            isWorkingAtFirm(p) &&
-            (p.roles?.includes('risk_compliance') ||
-              p.employeeRoleId === 'employee_role.risk_and_compliance'),
-        )?.id ?? opts.byId;
-      store.notifications.unshift({
-        id: nextId(store, 'NTF'),
-        recipientId: riskOfficerId,
-        kind: 'task_assigned',
-        title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
-        detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMatters.map((m) => m.matterNumber).join(', ')}.`,
-        href: `/people/${targetPersonId}`,
-        recordId: targetPersonId,
-        createdAt: now,
-        read: false,
-        byId: opts.byId,
-      });
-
-      writeAudit(store, {
-        recordType: 'person',
-        recordId: targetPersonId,
-        action: 'status-change',
-        field: 'Conflict check on hire (Risk flag)',
-        oldValue: 'External contact / client',
-        newValue: nextEmployment.conflictCheckOnHire.riskNotes,
-        byId: opts.byId,
-        at: now,
-      });
-
-      // Also if the person is a client on any of those open matters, mark them as staff matters with restricted access
-      for (const m of openMatters) {
-        if (m.clientId === targetPersonId || m.additionalClientIds?.includes(targetPersonId)) {
-          const prevMatter = structuredClone(m);
-          m.isStaffMatter = true;
-          const allowed = new Set<string>([
-            ...(m.restrictedAccessUserIds ?? []),
-            ...(m.responsiblePartnerId ? [m.responsiblePartnerId] : []),
-            ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
-            ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
-            ...(m.teamMemberIds ?? []),
-          ]);
-          m.restrictedAccessUserIds = Array.from(allowed);
-          touchMatter(m, opts.byId);
-          saveStore(store);
-          const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
-          try {
-            void syncMatterLifecycleOnSaveSync({
-              matter: m,
-              previousMatter: prevMatter,
-              userId: opts.byId,
-              correlationId: syncCorrelationId,
-              store,
-            }).catch((err) => {
-              logDocumentLifecycleSyncError(err, syncCorrelationId);
-            });
-          } catch (err) {
-            logDocumentLifecycleSyncError(err, syncCorrelationId);
-          }
-        }
-      }
-    }
   }
 
   const defaultStatus = valueBySystemKey(store.values, 'person_record_status', 'active')!.id;
@@ -2009,8 +1864,8 @@ export function savePersonRecord(
     dateOfBirth: effectiveDob,
     otherNames: input.otherNames ?? existing?.otherNames ?? [],
     jobTitle: contactJobTitle,
-    emails: input.emails ?? existing?.emails ?? [],
-    phones: input.phones ?? existing?.phones ?? [],
+    emails: (workingEmails ?? existing?.emails ?? []).map((e) => ({ ...e })),
+    phones: (workingPhones ?? existing?.phones ?? []).map((p) => ({ ...p })),
     preferredContactMethodId: input.preferredContactMethodId ?? existing?.preferredContactMethodId ?? null,
     preferredLanguageId:
       input.preferredLanguageId ?? existing?.preferredLanguageId ?? vid('language', 'English'),
@@ -2029,7 +1884,7 @@ export function savePersonRecord(
       input.relationshipStandingId !== undefined
         ? input.relationshipStandingId
         : existing?.relationshipStandingId ?? null,
-    relationshipRoleIds: input.relationshipRoleIds ?? existing?.relationshipRoleIds ?? [],
+    relationshipRoleIds: [...(workingRelationshipRoleIds ?? existing?.relationshipRoleIds ?? [])],
     originId: input.originId !== undefined ? input.originId : existing?.originId ?? null,
     firstKnownAt: input.firstKnownAt !== undefined ? input.firstKnownAt : existing?.firstKnownAt ?? today,
     engagementLevelId:
@@ -2099,6 +1954,32 @@ export function savePersonRecord(
   };
 
   if (person.employment) {
+    if (
+      person.employment.systems &&
+      input.emails !== undefined &&
+      rawEmpInput?.systems?.firmWorkEmail === undefined
+    ) {
+      const currentFirmEmail = (person.employment.systems.firmWorkEmail ?? '')
+        .trim()
+        .toLowerCase();
+      const stillHasOldFirmEmail =
+        Boolean(currentFirmEmail) &&
+        person.emails.some(
+          (e) =>
+            e.active !== false &&
+            e.address.trim().toLowerCase() === currentFirmEmail,
+        );
+      if (!stillHasOldFirmEmail) {
+        const replacementPrimary =
+          person.emails.find((e) => e.active !== false && e.isPrimary) ??
+          person.emails.find((e) => e.active !== false) ??
+          null;
+        person.employment.systems = {
+          ...person.employment.systems,
+          firmWorkEmail: replacementPrimary?.address.trim() ?? '',
+        };
+      }
+    }
     person = syncPersonWorkContactFlags(
       person,
       orgStructure,
@@ -2109,6 +1990,235 @@ export function savePersonRecord(
   if (person.emails.length > 0 && !person.emails.some((e) => e.active !== false && e.isPrimary)) {
     const firstActive = person.emails.find((e) => e.active !== false) ?? person.emails[0];
     firstActive.isPrimary = true;
+  }
+
+  // S0-30 (B13, R393, R398): Evaluate employee email identity changes from the FINAL synced `person`
+  // (`person.emails` plus `person.employment.systems.firmWorkEmail`, including any address synthesised
+  // by `createDefaultEmploymentRecord` / `syncPersonWorkContactFlags`) compared with the stored `existing` record,
+  // before any store mutation occurs. `employee:edit_core` and audit apply to any difference; MFA is required
+  // only when a sign-in address is added or changed to a new value (not when removing or deactivating one).
+  const normaliseActivePersonEmails = (
+    emails: Person['emails'] | undefined,
+  ): string[] => {
+    if (!Array.isArray(emails)) return [];
+    const set = new Set<string>();
+    for (const em of emails) {
+      if (em.active === false) continue;
+      const addr = (em.address ?? '').trim().toLowerCase();
+      if (addr) set.add(addr);
+    }
+    return Array.from(set).sort();
+  };
+  const isExistingEmployeeOrLeaver = Boolean(
+    existing && (existing.isEmployee || existing.employment),
+  );
+  const isFinalEmployeeOrLeaver = Boolean(
+    isExistingEmployeeOrLeaver || person.isEmployee || person.employment,
+  );
+  const prevActiveEmails = isExistingEmployeeOrLeaver
+    ? normaliseActivePersonEmails(existing!.emails)
+    : [];
+  const nextActiveEmails = isFinalEmployeeOrLeaver
+    ? normaliseActivePersonEmails(person.emails)
+    : [];
+  const prevFirmWorkEmail = isExistingEmployeeOrLeaver
+    ? (existing!.employment?.systems?.firmWorkEmail ?? '').trim().toLowerCase()
+    : '';
+  const nextFirmWorkEmail = isFinalEmployeeOrLeaver
+    ? (person.employment?.systems?.firmWorkEmail ?? '').trim().toLowerCase()
+    : '';
+  const isFirmWorkEmailIdentityChange =
+    isFinalEmployeeOrLeaver && nextFirmWorkEmail !== prevFirmWorkEmail;
+  const isEmployeeEmailIdentityChange =
+    isFinalEmployeeOrLeaver &&
+    (JSON.stringify(prevActiveEmails) !== JSON.stringify(nextActiveEmails) ||
+      isFirmWorkEmailIdentityChange);
+  const prevActiveEmailSet = new Set(prevActiveEmails);
+  const addedEmployeeEmails = isFinalEmployeeOrLeaver
+    ? Array.from(
+        new Set([
+          ...nextActiveEmails.filter((addr) => !prevActiveEmailSet.has(addr)),
+          ...(isFirmWorkEmailIdentityChange && nextFirmWorkEmail
+            ? [nextFirmWorkEmail]
+            : []),
+        ]),
+      ).sort()
+    : [];
+
+  if (isEmployeeEmailIdentityChange) {
+    if (!userPerms.has('employee:edit_core')) {
+      return deny(
+        'FORBIDDEN',
+        'You do not have permission (employee:edit_core) to change an employee or leaver email address.',
+      );
+    }
+    if (addedEmployeeEmails.length > 0) {
+      const effectiveMfaVerified = opts.mfaVerified ?? permSet.mfaVerified;
+      if (effectiveMfaVerified !== true) {
+        return deny(
+          'MFA_REQUIRED',
+          'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
+          'mfa',
+        );
+      }
+    }
+  }
+
+  const isLegacyEmployeeFieldChange =
+    (input.isEmployee !== undefined &&
+      Boolean(input.isEmployee) !== Boolean(existing?.isEmployee)) ||
+    (opts.worksAtFirm !== undefined &&
+      Boolean(opts.worksAtFirm) !== Boolean(existing?.employment && existing.employment.status !== 'Leaver')) ||
+    (opts.worksAtFirm === false && Boolean(existing?.employment || existing?.isEmployee)) ||
+    (input.employeeRoleId !== undefined &&
+      (input.employeeRoleId ?? null) !== (existing?.employeeRoleId ?? null)) ||
+    (input.departmentId !== undefined &&
+      (input.departmentId ?? null) !== (existing?.departmentId ?? null)) ||
+    (input.employment !== undefined &&
+      JSON.stringify(input.employment ?? null) !== JSON.stringify(existing?.employment ?? null));
+
+  const requiresEmployeeEditCore =
+    Boolean(rawEmpInput) ||
+    hasEmploymentPayload ||
+    isLegacyEmployeeFieldChange;
+
+  if (requiresEmployeeEditCore) {
+    if (!userPerms.has('employee:edit_core')) {
+      return deny(
+        'FORBIDDEN',
+        'You do not have permission (employee:edit_core) to create or edit employment records.',
+      );
+    }
+  } else if (!opts.internalSystemStep) {
+    const requiredContactKey = existing ? 'contact:edit' : 'contact:create';
+    if (!userPerms.has(requiredContactKey)) {
+      return deny(
+        'FORBIDDEN',
+        existing
+          ? 'You do not have permission (contact:edit) to edit contact records.'
+          : 'You do not have permission (contact:create) to create contact records.',
+      );
+    }
+  }
+
+  // Enforce API-level permission checks on employment & sensitive data modifications
+  if (rawEmpInput) {
+    if (!userPerms.has('employee:edit_core')) {
+      return deny(
+        'FORBIDDEN',
+        'You do not have permission (employee:edit_core) to create or edit employment records.',
+      );
+    }
+    if (
+      (rawEmpInput.contract !== undefined ||
+        rawEmpInput.rightToWork !== undefined ||
+        rawEmpInput.emergencyContacts !== undefined) &&
+      !userPerms.has('employee:hr_restricted')
+    ) {
+      return deny(
+        'FORBIDDEN',
+        'You do not have permission (employee:hr_restricted) to edit HR restricted fields (contract, right to work, emergency contacts).',
+      );
+    }
+    if (rawEmpInput.payroll !== undefined && !userPerms.has('employee:payroll')) {
+      return deny(
+        'FORBIDDEN',
+        'You do not have permission (employee:payroll) to edit payroll and benefits fields.',
+      );
+    }
+  }
+
+  if (opts.sensitiveSubmitted !== undefined && opts.sensitiveSubmitted !== null) {
+    if (!userPerms.has('employee:sensitive')) {
+      return deny(
+        'FORBIDDEN',
+        'You do not have permission (employee:sensitive) to edit sensitive employee information.',
+      );
+    }
+  }
+
+  if (missingEmployeeRoleType) {
+    return {
+      person: existing as Person,
+      errors: { employeeRoleId: 'An employee must have a role type.' },
+    };
+  }
+  if (Object.keys(empErrors).length > 0) {
+    return { person: existing as Person, errors: empErrors };
+  }
+  if (Object.keys(cfValidation.errors).length > 0) {
+    return { person: existing as Person, errors: cfValidation.errors };
+  }
+
+  // All permission, MFA, and validation gates passed: commit counter and store side effects.
+  if (!existing) {
+    nextId(store, 'P');
+  }
+
+  if (openMattersOnHire.length > 0 && person.employment?.conflictCheckOnHire) {
+    // Flag to Risk & Compliance so an information barrier can be considered
+    const riskOfficerId =
+      store.people.find(
+        (p) =>
+          isWorkingAtFirm(p) &&
+          (p.roles?.includes('risk_compliance') ||
+            p.employeeRoleId === 'employee_role.risk_and_compliance'),
+      )?.id ?? opts.byId;
+    store.notifications.unshift({
+      id: nextId(store, 'NTF'),
+      recipientId: riskOfficerId,
+      kind: 'task_assigned',
+      title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
+      detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMattersOnHire.map((m) => m.matterNumber).join(', ')}.`,
+      href: `/people/${targetPersonId}`,
+      recordId: targetPersonId,
+      createdAt: now,
+      read: false,
+      byId: opts.byId,
+    });
+
+    writeAudit(store, {
+      recordType: 'person',
+      recordId: targetPersonId,
+      action: 'status-change',
+      field: 'Conflict check on hire (Risk flag)',
+      oldValue: 'External contact / client',
+      newValue: person.employment.conflictCheckOnHire.riskNotes,
+      byId: opts.byId,
+      at: now,
+    });
+
+    // Also if the person is a client on any of those open matters, mark them as staff matters with restricted access
+    for (const m of openMattersOnHire) {
+      if (m.clientId === targetPersonId || m.additionalClientIds?.includes(targetPersonId)) {
+        const prevMatter = structuredClone(m);
+        m.isStaffMatter = true;
+        const allowed = new Set<string>([
+          ...(m.restrictedAccessUserIds ?? []),
+          ...(m.responsiblePartnerId ? [m.responsiblePartnerId] : []),
+          ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
+          ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
+          ...(m.teamMemberIds ?? []),
+        ]);
+        m.restrictedAccessUserIds = Array.from(allowed);
+        touchMatter(m, opts.byId);
+        saveStore(store);
+        const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
+        try {
+          void syncMatterLifecycleOnSaveSync({
+            matter: m,
+            previousMatter: prevMatter,
+            userId: opts.byId,
+            correlationId: syncCorrelationId,
+            store,
+          }).catch((err) => {
+            logDocumentLifecycleSyncError(err, syncCorrelationId);
+          });
+        } catch (err) {
+          logDocumentLifecycleSyncError(err, syncCorrelationId);
+        }
+      }
+    }
   }
 
   // Audit payroll changes with user and timestamp
@@ -2178,6 +2288,15 @@ export function savePersonRecord(
     }
   }
 
+  const auditOldActiveEmails =
+    isFirmWorkEmailIdentityChange && prevFirmWorkEmail
+      ? Array.from(new Set([...prevActiveEmails, prevFirmWorkEmail])).sort()
+      : prevActiveEmails;
+  const auditNewActiveEmails =
+    isFirmWorkEmailIdentityChange && nextFirmWorkEmail
+      ? Array.from(new Set([...nextActiveEmails, nextFirmWorkEmail])).sort()
+      : nextActiveEmails;
+
   const ctx = formatContext(store);
   if (!existing) {
     store.people.push(person);
@@ -2191,6 +2310,18 @@ export function savePersonRecord(
       byId: opts.byId,
       at: now,
     });
+    if (isEmployeeEmailIdentityChange) {
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: person.id,
+        action: 'update',
+        field: 'Employee sign-in email',
+        oldValue: auditOldActiveEmails.join(', ') || null,
+        newValue: auditNewActiveEmails.join(', ') || null,
+        byId: opts.byId,
+        at: now,
+      });
+    }
   } else {
     const idx = store.people.findIndex((p) => p.id === existing.id);
     const changes = diffRecords(
@@ -2201,6 +2332,18 @@ export function savePersonRecord(
       store.customFields,
     );
     store.people[idx] = person;
+    if (isEmployeeEmailIdentityChange) {
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: person.id,
+        action: 'update',
+        field: 'Employee sign-in email',
+        oldValue: auditOldActiveEmails.join(', ') || null,
+        newValue: auditNewActiveEmails.join(', ') || null,
+        byId: opts.byId,
+        at: now,
+      });
+    }
     for (const ch of changes) {
       writeAudit(store, {
         recordType: 'person',
@@ -9310,13 +9453,16 @@ export async function createRecordFromPms(
   entityType: PmsEntityType,
   pmsCode: string,
   byId: string,
+  opts: { mfaVerified: boolean },
 ): Promise<{ ok: boolean; createdId?: string; error?: string } & Partial<Omit<ActionDenied, 'ok'>>> {
   const store = getStore();
   const pms = getPmsSource();
   const actor = store.people.find((p) => p.id === byId) ?? null;
+  const effectiveMfaVerified = opts.mfaVerified === true;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: store.people,
     teams: store.teams,
+    mfaVerified: effectiveMfaVerified,
   });
 
   if (!actorPerms.permissions.has('admin:access')) {
@@ -9328,10 +9474,7 @@ export async function createRecordFromPms(
       error: msg,
     };
   }
-  if (
-    getActiveActorSession() &&
-    actorPerms.mfaPendingPermissions.has('admin:access')
-  ) {
+  if (actorPerms.mfaPendingPermissions.has('admin:access')) {
     const msg =
       'MFA_REQUIRED: Multi-factor authentication (MFA) is required for administrative permission "admin:access".';
     return {
@@ -9401,8 +9544,15 @@ export async function createRecordFromPms(
         ],
         recordStatusId: valueBySystemKey(store.values, 'person_record_status', 'active')!.id,
       },
-      { byId },
+      { byId, mfaVerified: actorPerms.mfaVerified },
     );
+    if (isActionDenied(res)) {
+      return {
+        ...buildActionDenied(res.code, res.message),
+        ok: false,
+        error: res.message,
+      };
+    }
     if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
 
     linkPmsRecord('employee', res.person.id, pmsCode, byId);
@@ -9523,7 +9673,7 @@ export async function createRecordFromPms(
       pmsClient?.client_type === 'Individual' ? 'person' : 'organisation';
     let clientId = findOneSquaredIdForPmsCode(store.pmsLinks, clientEntityType, pm.client_code);
     if (!clientId) {
-      const createdClient = await createRecordFromPms(clientEntityType, pm.client_code, byId);
+      const createdClient = await createRecordFromPms(clientEntityType, pm.client_code, byId, opts);
       if (!createdClient.ok || !createdClient.createdId) {
         return {
           ok: false,
@@ -9540,7 +9690,7 @@ export async function createRecordFromPms(
       pm.responsible_partner_id,
     );
     if (!partnerId && actorPerms.permissions.has('employee:edit_core')) {
-      const createdFe = await createRecordFromPms('employee', pm.responsible_partner_id, byId);
+      const createdFe = await createRecordFromPms('employee', pm.responsible_partner_id, byId, opts);
       partnerId = createdFe.createdId ?? byId;
     }
     if (!partnerId) {
@@ -9549,7 +9699,7 @@ export async function createRecordFromPms(
 
     let leadId = findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', pm.fee_earner_id);
     if (!leadId && actorPerms.permissions.has('employee:edit_core')) {
-      const createdLead = await createRecordFromPms('employee', pm.fee_earner_id, byId);
+      const createdLead = await createRecordFromPms('employee', pm.fee_earner_id, byId, opts);
       leadId = createdLead.createdId ?? partnerId;
     }
     if (!leadId) {
@@ -10227,6 +10377,45 @@ export function updateTenantRbacConfig(
             ok: false,
             error: `Entra app role "${appRole}" maps to unknown role key "${rk}".`,
           };
+        }
+      }
+    }
+    if ('emailLinking' in patch.identityMapping && patch.identityMapping.emailLinking !== undefined) {
+      if (
+        typeof patch.identityMapping.emailLinking !== 'object' ||
+        patch.identityMapping.emailLinking === null
+      ) {
+        return {
+          ok: false,
+          error: 'emailLinking must be an object.',
+        };
+      }
+      if (
+        'enabled' in patch.identityMapping.emailLinking &&
+        typeof patch.identityMapping.emailLinking.enabled !== 'boolean'
+      ) {
+        return {
+          ok: false,
+          error: 'emailLinking.enabled must be a boolean.',
+        };
+      }
+      if ('domains' in patch.identityMapping.emailLinking) {
+        if (!Array.isArray(patch.identityMapping.emailLinking.domains)) {
+          return {
+            ok: false,
+            error: 'emailLinking.domains must be an array of lower-case domain names.',
+          };
+        }
+        for (const domain of patch.identityMapping.emailLinking.domains) {
+          if (
+            typeof domain !== 'string' ||
+            !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)
+          ) {
+            return {
+              ok: false,
+              error: `Invalid domain "${String(domain)}" in emailLinking.domains; each domain must be a lower-case domain name.`,
+            };
+          }
         }
       }
     }
@@ -12279,45 +12468,116 @@ export function syncMatterCostsRatesFromPms(
 
 export function resolveOrProvisionEntraEmployee(
   claims: EntraIdRawTokenClaims & Record<string, unknown>,
+  options?: { correlationId?: string },
 ): {
   person: Person;
   verifiedToken: VerifiedOidcTokenClaims;
   rbacConfig: RbacConfiguration;
 } {
+  const activeTenantConfig = getActiveTenantConfiguration();
+  const activeTenantId = activeTenantConfig.tenantId;
+  const correlationId = resolveRequestCorrelationId(
+    options?.correlationId ??
+      (getActiveActorSession() as { correlationId?: string } | null)
+        ?.correlationId,
+    'corr-entra-signin',
+  );
   const store = getStore();
-  const rbacConfig = getDefaultTenantRbacConfig();
-  const { person: matchedPerson, verifiedToken } = resolvePersonForEntraClaims({
+  const rbacConfig = getDefaultTenantRbacConfig(activeTenantId);
+  const {
+    person: matchedPerson,
+    matchedByEmailOnly,
+    ambiguousEmailMatchPersonIds,
+    refusedPrivilegedEmailLinkPersonId,
+    verifiedToken,
+  } = resolvePersonForEntraClaims({
     claims,
     people: store.people,
     teams: store.teams,
+    tenantId: activeTenantId,
     rbacConfig,
+    primaryDomain: activeTenantConfig.branding.primaryDomain,
   });
 
   const now = new Date().toISOString();
   const oid = claims.oid?.trim() || verifiedToken.sub;
   const claimEmail = (
-    claims.email ||
     claims.preferred_username ||
     claims.upn ||
+    (claims.xms_edov === true ? claims.email : '') ||
     ''
   ).trim();
   const authorityMode = rbacConfig.identityMapping?.authorityMode ?? 'hybrid';
 
+  if (refusedPrivilegedEmailLinkPersonId) {
+    writeAudit(store, {
+      recordType: 'person',
+      recordId: refusedPrivilegedEmailLinkPersonId,
+      action: 'entra-link',
+      field: 'Entra ID Email Link Refused',
+      oldValue: 'unlinked',
+      newValue: `Refused automatic email link for privileged employee ${refusedPrivilegedEmailLinkPersonId} (correlationId=${correlationId})`,
+      byId: 'system',
+      at: now,
+    });
+    console.warn(
+      JSON.stringify({
+        event: 'ENTRA_EMAIL_LINK_PRIVILEGED_REFUSED',
+        tenantId: activeTenantId,
+        correlationId,
+        personId: refusedPrivilegedEmailLinkPersonId,
+      }),
+    );
+    saveStore(store);
+    throw new Error('Your account needs to be linked by an administrator.');
+  }
+
+  if (ambiguousEmailMatchPersonIds && ambiguousEmailMatchPersonIds.length > 1) {
+    writeAudit(store, {
+      recordType: 'person',
+      recordId: ambiguousEmailMatchPersonIds[0]!,
+      action: 'entra-link',
+      field: 'Entra ID Email Link Ambiguous',
+      oldValue: 'unlinked',
+      newValue: `Refused automatic email link across ${ambiguousEmailMatchPersonIds.length} unbound employees (${ambiguousEmailMatchPersonIds.join(', ')}; correlationId=${correlationId})`,
+      byId: 'system',
+      at: now,
+    });
+    console.warn(
+      JSON.stringify({
+        event: 'ENTRA_EMAIL_LINK_AMBIGUOUS',
+        tenantId: activeTenantId,
+        correlationId,
+        candidateCount: ambiguousEmailMatchPersonIds.length,
+      }),
+    );
+    saveStore(store);
+    throw new Error('Your account needs to be linked by an administrator.');
+  }
+
   if (matchedPerson) {
     const prevOid = matchedPerson.entraObjectId?.trim() || null;
-    const matchedByEmailOnly = !prevOid && Boolean(oid);
-    if (matchedByEmailOnly && oid) {
+    const isFirstEmailLink = Boolean(matchedByEmailOnly && !prevOid && oid);
+    if (isFirstEmailLink && oid) {
       matchedPerson.entraObjectId = oid;
       writeAudit(store, {
         recordType: 'person',
         recordId: matchedPerson.id,
-        action: 'update',
+        action: 'entra-link',
         field: 'Entra ID Email Link',
         oldValue: 'unlinked',
-        newValue: `Linked email ${claimEmail || 'unknown'} to Entra oid=${oid}`,
+        newValue: `Linked employee ${matchedPerson.id} on first verified-domain sign-in`,
         byId: matchedPerson.id,
         at: now,
       });
+      console.info(
+        JSON.stringify({
+          event: 'ENTRA_EMAIL_LINK_BOUND',
+          tenantId: activeTenantId,
+          correlationId,
+          personId: matchedPerson.id,
+        }),
+      );
     }
     if (authorityMode === 'token_only') {
       matchedPerson.roles = [...verifiedToken.roles];
@@ -12338,8 +12598,8 @@ export function resolveOrProvisionEntraEmployee(
       recordId: matchedPerson.id,
       action: 'update',
       field: 'Entra ID OIDC Sign-In',
-      oldValue: prevOid ? `oid=${prevOid}` : 'unlinked',
-      newValue: `oid=${oid}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}`,
+      oldValue: prevOid ? 'bound' : 'unlinked',
+      newValue: `personId=${matchedPerson.id}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
       byId: matchedPerson.id,
       at: now,
     });
@@ -12450,7 +12710,7 @@ export function resolveOrProvisionEntraEmployee(
     action: 'create',
     field: 'Entra ID OIDC Provisioned Employee',
     oldValue: null,
-    newValue: `oid=${oid}; roles=${mappedRoles.join(',')}; mfa=${verifiedToken.mfaVerified}`,
+    newValue: `personId=${newEmployee.id}; roles=${mappedRoles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
     byId: newEmployee.id,
     at: now,
   });

@@ -50,6 +50,7 @@ import {
   canUserViewFinance as domainCanUserViewFinance,
 } from '@/domain/pms';
 import {
+  isPrivilegedPersonForEmailLinking,
   resolvePersonForEntraClaims as domainResolvePersonForEntraClaims,
   resolvePersonPermissionSet as domainResolvePersonPermissionSet,
   getActiveActorSession,
@@ -291,26 +292,32 @@ export function canPersonAccessMatter(
   });
 }
 
+export { isPrivilegedPersonForEmailLinking };
+
 export function resolvePersonForEntraClaims(params: {
   claims: EntraIdRawTokenClaims;
   people: readonly Person[];
   teams?: readonly Team[];
   tenantId?: string;
   rbacConfig?: RbacConfiguration;
+  primaryDomain?: string;
 }): {
   person: Person | null;
   matchedByEmailOnly?: boolean;
+  ambiguousEmailMatchPersonIds?: string[];
+  refusedPrivilegedEmailLinkPersonId?: string;
   verifiedToken: VerifiedOidcTokenClaims;
   permissions: ResolvedPermissionSet;
 } {
-  const activeTenantId =
-    params.tenantId?.trim() || getServerTenantConfiguration().tenantId;
+  const serverConfig = getServerTenantConfiguration();
+  const activeTenantId = params.tenantId?.trim() || serverConfig.tenantId;
   const rbacConfig =
     params.rbacConfig ?? getDefaultTenantRbacConfig(activeTenantId);
   return domainResolvePersonForEntraClaims({
     ...params,
     tenantId: activeTenantId,
     rbacConfig,
+    primaryDomain: params.primaryDomain ?? serverConfig.branding.primaryDomain,
   });
 }
 

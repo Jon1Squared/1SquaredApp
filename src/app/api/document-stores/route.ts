@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { normaliseDocumentStoreError } from '@platform/core';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { guardedRoute } from '@/server/authorize';
+import { resolveRequestCorrelationId } from '@/server/correlationId';
 import {
   applyAdminTemplateAdditionsToOpenMatters,
   getDocumentStoresAdminDashboard,
@@ -39,23 +40,10 @@ function logDocumentStoreRouteError(
   );
 }
 
-const VALID_CORRELATION_ID_RE = /^[a-zA-Z0-9._-]{1,64}$/;
-
-function resolveSafeCorrelationId(
-  headerValue: string | null,
-  fallbackPrefix: string,
-): string {
-  const trimmed = headerValue?.trim() ?? '';
-  if (VALID_CORRELATION_ID_RE.test(trimmed)) {
-    return trimmed;
-  }
-  return `${fallbackPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 export const GET = guardedRoute(
   'GET /api/document-stores',
   async (request: NextRequest) => {
-    const correlationId = resolveSafeCorrelationId(
+    const correlationId = resolveRequestCorrelationId(
       request.headers.get('x-correlation-id'),
       'corr-doc-stores-get',
     );
@@ -126,7 +114,7 @@ export const GET = guardedRoute(
 export const POST = guardedRoute(
   'POST /api/document-stores',
   async (request: NextRequest) => {
-    const correlationId = resolveSafeCorrelationId(
+    const correlationId = resolveRequestCorrelationId(
       request.headers.get('x-correlation-id'),
       'corr-doc-stores-post',
     );

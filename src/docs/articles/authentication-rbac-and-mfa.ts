@@ -6,7 +6,7 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How Microsoft Entra ID OIDC sign-in and sign-out work in 1Squared, how role-based access control (RBAC) and Entra identity mapping are configured, and which administrative actions require multi-factor authentication (MFA).',
-  updated: '2026-11-08',
+  updated: '2026-11-09',
   body: `
 1Squared authenticates every user through **Microsoft Entra ID (OpenID Connect with PKCE)** and evaluates access on every server action and API route through the central **Role-Based Access Control (RBAC)** engine in \`@platform/core\`.
 
@@ -27,8 +27,20 @@ Every server action in \`src/app/actions.ts\` and every API route handler under 
 When a user signs in with Microsoft Entra ID, 1Squared resolves their employee record in the following order:
 
 1. **Entra Object ID (\`oid\`)**: Matches the immutable \`entraObjectId\` bound to the employee’s Person record.
-2. **First-Time Work Email Link**: If no employee record has that \`oid\`, 1Squared matches an active employee with the same primary work email **only if that employee does not already have an \`entraObjectId\` set**, binds the \`oid\`, and writes an \`Entra ID Email Link\` audit entry.
-3. **Zero-Privilege Default Provisioning**: If no existing employee matches, a new employee record is provisioned with the roles configured in \`rbac.identityMapping.defaultRoleKeys\` (which defaults to \`[]\`, granting no administrative privileges until roles are assigned).
+2. **Verified-Domain First-Time Work Email Link (\`rbac.identityMapping.emailLinking\`, S0-30)**: If no employee record has that \`oid\` and \`rbac.identityMapping.emailLinking.enabled\` is \`true\` (default), 1Squared links by email only when **all** of the following conditions hold:
+   - **Verified identifier in an allowed linking domain**: 1Squared prefers the directory sign-in name (\`preferred_username\` or \`upn\`) over \`email\`, and only accepts \`email\` when the token marks it as domain-verified (\`xms_edov === true\`). The address’s domain must belong to \`rbac.identityMapping.emailLinking.domains\` (or the tenant’s \`branding.primaryDomain\` when \`domains\` is \`[]\`).
+   - **Single unbound employee match**: Exactly one active employee without an existing \`entraObjectId\` matches the normalised active email address. If more than one unbound employee shares the address, none is bound, no duplicate employee is provisioned, an \`Entra ID Email Link Ambiguous\` audit entry (\`action: 'entra-link'\`) is recorded with the matching person IDs and \`correlationId\` only (never logging the email address or \`oid\`), and sign-in is denied with \`"Your account needs to be linked by an administrator."\`.
+   - **Non-privileged target only**: Automatic email linking never binds an employee whose resolved roles or permissions include any permission with \`requiresMfa: true\` or \`sensitivity: 'critical'\` (such as \`admin\`, System Administrator, Managing Partner, Partner, or Risk & Compliance). When a sign-in matches an unbound privileged employee by email, 1Squared refuses the link without provisioning a duplicate record, records an \`Entra ID Email Link Refused\` audit entry (\`action: 'entra-link'\`) with \`personId\` and \`correlationId\` only, and denies sign-in with \`"Your account needs to be linked by an administrator."\`. Privileged employees must be bound explicitly by an administrator via \`updatePersonPermissionOverrides\` (**Admin → RBAC & Entra ID**, requiring \`rbac:manage_user_overrides\` and MFA) or during demo provisioning via \`seed:demo --entra-map\`.
+   - **Distinct Audit Action**: When an eligible employee is linked on first sign-in, 1Squared binds their \`entraObjectId\` and records an audit entry with \`action: 'entra-link'\` and field \`Entra ID Email Link\`. Server logs record only \`personId\`, \`correlationId\`, and \`tenantId\`.
+3. **Zero-Privilege Default Provisioning**: If no existing employee matches, a new employee record is provisioned using only verified token identifiers (\`preferred_username\`, \`upn\`, or \`email\` when \`xms_edov === true\`) and the roles configured in \`rbac.identityMapping.defaultRoleKeys\` (which defaults to \`[]\`, granting no administrative privileges until roles are assigned).
+
+### Setting or changing an employee’s sign-in email (S0-30)
+
+Adding, changing, or removing any active email address (\`person.emails\` or \`person.employment.systems.firmWorkEmail\` after employment defaults and work-contact sync, including addresses synthesised on new or promoted employees) on a record that is, was, or will be an employee or leaver (including creating a new employee, promoting an existing contact to an employee, marking a leaver, or creating an employee from PMS via \`createRecordFromPms\`) is treated as an **identity change** in \`savePersonRecord\` and \`savePersonAction\`:
+- Every employee or leaver email change requires \`employee:edit_core\` (users holding only \`contact:edit\` receive \`ActionDenied\` with \`FORBIDDEN\`).
+- **Multi-factor authentication (\`mfaVerified === true\`) is required when adding or changing a sign-in address to a new value** (including creating or promoting an employee, replacing an address, or setting a new \`firmWorkEmail\`), returning \`ActionDenied\` (\`MFA_REQUIRED\`) with no partial changes written when MFA is missing. Removing or deactivating an address (such as marking an employee as a leaver, removing a secondary address, or clearing \`firmWorkEmail\`) does not require MFA, while still requiring \`employee:edit_core\`.
+- Normalised active addresses (trimmed, lower-case, \`active !== false\`) are compared, so reordering addresses or changing an email type label does not trigger an identity change.
+- Allowed changes (both additions and removals) write a dedicated audit entry with field \`Employee sign-in email\` showing the previous and new active addresses, while preserving any existing \`entraObjectId\` binding.
 
 ### Authority modes (\`hybrid\` vs \`token_only\`)
 
@@ -57,7 +69,7 @@ In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_over
 
 1. **No Self-Modification**: No user—including a System Administrator—can modify their own roles or permission overrides, or add themselves as a team lead (\`leadIds\`) in **Admin → Teams** (\`saveTeamAction\` / \`saveTeamRecord\`, which enforces \`SELF_MODIFICATION_FORBIDDEN\` because team leadership grants relationship permissions such as \`employee:edit_core\`).
 2. **No Granting Unheld Permissions**: A user cannot grant a permission or assign a role containing a permission that the acting user does not themselves hold.
-3. **Dedicated RBAC Actions Only**: Security and role fields (\`roles\`, \`permissionOverrides\`, \`appRole\`, \`employeePermissions\`, \`documentPermissions\`, \`supportsIds\`, \`showsWorkOfId\`, and \`demo\`) can only be changed through the dedicated RBAC administration screens and actions (\`updateEmployeeRoleSetting\`, \`updateEmployeeRolesAndSupports\`, and \`updatePersonPermissionOverrides\`). Any attempt to set or change these fields through the general person save form (\`savePersonAction\` / \`savePersonRecord\`) is rejected with \`ActionDenied\`, and existing values (including \`entraObjectId\`) are preserved.
+3. **Dedicated RBAC Actions Only**: Security and role fields (\`roles\`, \`permissionOverrides\`, \`appRole\`, \`employeePermissions\`, \`documentPermissions\`, \`supportsIds\`, \`showsWorkOfId\`, \`demo\`, and \`entraObjectId\`) can only be changed through the dedicated RBAC administration screens and actions (\`updateEmployeeRoleSetting\`, \`updateEmployeeRolesAndSupports\`, and \`updatePersonPermissionOverrides\`). Any attempt to set or change these fields through the general person save form (\`savePersonAction\` / \`savePersonRecord\`) is rejected with \`ActionDenied\`, and existing values (including \`entraObjectId\`) are preserved.
 4. **Before/After Audit Trail**: Every change to employee roles, \`appRole\`, \`permissionOverrides\`, or tenant RBAC configuration writes a structured before/after JSON audit entry.
 
 ## 4. Multi-factor authentication (MFA) enforcement
@@ -77,6 +89,7 @@ Even if a user holds an administrative or partner role, **MFA verification (\`mf
 - Resetting or clearing non-live environment data (\`admin:data_reset\`, restricted to \`admin\` only with MFA)
 - Modifying tenant RBAC roles or Entra ID mappings (\`rbac:manage_config\`)
 - Changing an employee’s roles or permission overrides (\`rbac:manage_user_overrides\`)
+- Adding or changing an employee’s or leaver’s sign-in email address to a new value (\`employee:edit_core\` with \`mfaVerified === true\` in \`savePersonAction\` / \`savePersonRecord\`; removing or deactivating an address still requires \`employee:edit_core\` and is audited, without requiring MFA)
 - Viewing or editing payroll and sensitive HR records (\`employee:payroll\`, \`employee:sensitive\`)
 - Accessing staff or restricted matters (\`matter:restricted:access\`), or lifting a staff/ethical-wall restriction on a matter (\`liftMatterRestriction\`, requiring \`matter:restriction:lift\`, \`mfaVerified === true\`, and a mandatory audit reason)
 - Approving document templates or configuring SharePoint stores (\`document_template:approve\`, \`document_template:configure\`, \`document_store:configure\`)

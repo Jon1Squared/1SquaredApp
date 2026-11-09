@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { guardedRoute } from '@/server/authorize';
+import { resolveRequestCorrelationId } from '@/server/correlationId';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -43,8 +44,15 @@ export const GET = guardedRoute(
         expectedNonce: pkce.nonce,
       });
 
+      const requestCorrelationId = resolveRequestCorrelationId(
+        request.headers.get('x-correlation-id') ??
+          request.headers.get('x-request-id'),
+        'corr-rte',
+      );
       const { person, verifiedToken, rbacConfig } =
-        resolveOrProvisionEntraEmployee(rawClaims);
+        resolveOrProvisionEntraEmployee(rawClaims, {
+          correlationId: requestCorrelationId,
+        });
 
       const sessionPayload = buildEntraSessionPayload({
         personId: person.id,

@@ -185,7 +185,7 @@ export async function savePersonAction(
     } | null;
   },
 ) {
-  return guardedAction('savePersonAction', ({ personId: byId }) => {
+  return guardedAction('savePersonAction', ({ personId: byId, tenantContext }) => {
     const PERSON_SECURITY_FIELDS = [
       'roles',
       'permissionOverrides',
@@ -195,6 +195,7 @@ export async function savePersonAction(
       'supportsIds',
       'showsWorkOfId',
       'demo',
+      'entraObjectId',
     ] as const;
     const forbiddenField = PERSON_SECURITY_FIELDS.find(
       (key) => payload[key] !== undefined,
@@ -210,6 +211,7 @@ export async function savePersonAction(
     const res = savePersonRecord(payload, {
       id: opts?.id,
       byId,
+      mfaVerified: tenantContext.mfaVerified,
       customFieldsSubmitted: opts?.customFieldsSubmitted,
       flagPossibleDuplicate: opts?.flagPossibleDuplicate,
       matchedDuplicateIds: opts?.matchedDuplicateIds,
@@ -797,8 +799,8 @@ export async function rerunAutomaticPmsMatchingAction() {
 }
 
 export async function createRecordFromPmsAction(entityType: PmsEntityType, pmsCode: string) {
-  return guardedAction('createRecordFromPmsAction', async ({ personId: byId }) => {
-    const res = await createRecordFromPms(entityType, pmsCode, byId);
+  return guardedAction('createRecordFromPmsAction', async ({ personId: byId, mfaVerified }) => {
+    const res = await createRecordFromPms(entityType, pmsCode, byId, { mfaVerified });
     revalidateAll();
     return res;
   });

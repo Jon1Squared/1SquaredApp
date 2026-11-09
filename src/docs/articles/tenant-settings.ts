@@ -76,7 +76,9 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 | \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules (\`requireApproval\` controls whether \`submitTemplateVersionForApproval\` requires a separate approval step or activates clean template versions directly on submit without a separate approver check, recording \`Document Template Activated (approval not required)\` in the audit trail; \`allowSelfApproval\` controls whether a builder may approve their own submitted version), and usage reporting |
 | \`documentGeneration.usage.retentionMonths\` | \`24\` | Reserved (S0-19) | Reserved for automated document usage event retention pruning |
 | \`documentGeneration.customDocumentTypes\` | \`[]\` | Reserved (backlog, F20) | Reserved for tenant-configured custom document classification types in document generation |
-| \`rbac.*\` | Built-in roles | Active | Role definitions, department grants, relationship grants, and Entra ID identity mapping |
+| \`rbac.*\` | Built-in roles | Active | Role definitions, department grants, relationship grants, and Entra ID identity mapping (\`authorityMode\`, \`entraGroupToRoleKey\`, \`entraAppRoleToRoleKey\`, \`defaultRoleKeys\`, \`allowAcrsC1AsMfa\`, and \`emailLinking\`) |
+| \`rbac.identityMapping.emailLinking.enabled\` | \`true\` | Active | Controls whether first-time Entra sign-in can link an unbound non-privileged employee record by verified domain email; when \`false\`, only explicit \`entraObjectId\` (\`oid\`) bindings are used |
+| \`rbac.identityMapping.emailLinking.domains\` | \`[]\` | Active | Lower-case domain names permitted for first-time email linking on sign-in; an empty array (\`[]\`) means the tenant's \`branding.primaryDomain\` only |
 | \`documentStores\` | Optional | Active | External SharePoint Online document stores |
 | \`documentRouting\` | Optional | Active | Ordered rules mapping matters to a document store, library, and base path |
 | \`matterFolderNameTemplate\` | \`"{matterNumber} - {matterDescription}"\` | Active | Template for naming each matter root folder |

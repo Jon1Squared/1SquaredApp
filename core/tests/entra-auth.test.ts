@@ -21,6 +21,7 @@ import {
   resetAllDemoData,
   saveHomePagesConfig,
 } from '../../src/server/services';
+import { getStore } from '../../src/server/store';
 import { switchUserAction } from '../../src/app/actions';
 import { GET as callbackGet } from '../../src/app/api/auth/callback/microsoft-entra-id/route';
 import { GET as logoutGet } from '../../src/app/api/auth/logout/route';
@@ -412,6 +413,138 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     const verifiedSession = verifySignedEntraSessionCookie(sessionCookieVal);
     expect(verifiedSession).not.toBeNull();
     expect(verifiedSession?.oid).toBe('00000000-0000-4000-8000-000000000222');
+  });
+
+  it('validates x-correlation-id and x-request-id headers in the OIDC callback route, replacing unsafe or over-long values while keeping valid ones (R399)', async () => {
+    resetAllDemoData('P-000001');
+    try {
+      const invokeCallbackWithHeaders = async (
+        extraHeaders: Record<string, string>,
+      ) => {
+        const { signedCookieValue } = createPkceChallenge('/matters');
+        const [encodedPart] = signedCookieValue.split('.');
+        const pkceDecoded = JSON.parse(
+          Buffer.from(encodedPart, 'base64url').toString('utf8'),
+        ) as {
+          state: string;
+          nonce: string;
+          codeVerifier: string;
+          returnTo: string;
+        };
+        const validIdToken = signTestJwt(
+          { alg: 'RS256', kid: TEST_KID, typ: 'JWT' },
+          makeValidPayload({ nonce: pkceDecoded.nonce }),
+        );
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url.includes('/oauth2/v2.0/token')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  id_token: validIdToken,
+                  access_token: 'opaque-access-token',
+                }),
+              };
+            }
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({ keys: [publicJwk] }),
+            };
+          }),
+        );
+        const req = new NextRequest(
+          `https://app.notalawfirm.example/api/auth/callback/microsoft-entra-id?code=auth-code-r399&state=${encodeURIComponent(pkceDecoded.state)}`,
+          {
+            headers: {
+              cookie: `${ENTRA_PKCE_COOKIE}=${signedCookieValue}`,
+              ...extraHeaders,
+            },
+          },
+        );
+        return callbackGet(req);
+      };
+
+      const latestSignInAudit = () =>
+        getStore().audit.find(
+          (a) =>
+            a.field === 'Entra ID OIDC Sign-In' ||
+            a.field === 'Entra ID OIDC Provisioned Employee',
+        );
+
+      // 1. Header containing ';' (audit field spoofing attempt) is replaced by a generated UUID and excluded from audit text
+      const semicolonInjected = 'x; roles=admin; mfa=true';
+      const semicolonRes = await invokeCallbackWithHeaders({
+        'x-correlation-id': semicolonInjected,
+      });
+      expect(semicolonRes.status).toBe(307);
+      const semicolonAudit = latestSignInAudit();
+      expect(semicolonAudit).toBeDefined();
+      expect(semicolonAudit?.newValue).toMatch(
+        /correlationId=corr-rte-[0-9a-f-]{36}$/i,
+      );
+      expect(semicolonAudit?.newValue).not.toContain(semicolonInjected);
+      expect(semicolonAudit?.newValue).not.toContain('roles=admin; mfa=true');
+
+      // 2. Header containing a space is replaced by a generated UUID and excluded from audit text
+      const spaceInjected = 'bad corr id with spaces';
+      const spaceRes = await invokeCallbackWithHeaders({
+        'x-correlation-id': spaceInjected,
+      });
+      expect(spaceRes.status).toBe(307);
+      const spaceAudit = latestSignInAudit();
+      expect(spaceAudit?.newValue).toMatch(
+        /correlationId=corr-rte-[0-9a-f-]{36}$/i,
+      );
+      expect(spaceAudit?.newValue).not.toContain(spaceInjected);
+
+      // 3. Header longer than 128 characters (and unsafe x-request-id fallback) is replaced by a generated UUID
+      const overlongHeader = 'a'.repeat(129);
+      const overlongRes = await invokeCallbackWithHeaders({
+        'x-correlation-id': overlongHeader,
+      });
+      expect(overlongRes.status).toBe(307);
+      const overlongAudit = latestSignInAudit();
+      expect(overlongAudit?.newValue).toMatch(
+        /correlationId=corr-rte-[0-9a-f-]{36}$/i,
+      );
+      expect(overlongAudit?.newValue).not.toContain(overlongHeader);
+
+      const unsafeRequestId = 'req-id; injected=true';
+      const unsafeReqIdRes = await invokeCallbackWithHeaders({
+        'x-request-id': unsafeRequestId,
+      });
+      expect(unsafeReqIdRes.status).toBe(307);
+      const unsafeReqIdAudit = latestSignInAudit();
+      expect(unsafeReqIdAudit?.newValue).toMatch(
+        /correlationId=corr-rte-[0-9a-f-]{36}$/i,
+      );
+      expect(unsafeReqIdAudit?.newValue).not.toContain(unsafeRequestId);
+
+      // 4. Valid headers matching ^[A-Za-z0-9._:-]{1,128}$ (both x-correlation-id and 128-char x-request-id) are kept
+      const validHeader = 'client-corr_01:ok-2';
+      const validRes = await invokeCallbackWithHeaders({
+        'x-correlation-id': validHeader,
+      });
+      expect(validRes.status).toBe(307);
+      const validAudit = latestSignInAudit();
+      expect(validAudit?.newValue).toContain(`correlationId=${validHeader}`);
+
+      const maxLenValidHeader = 'v'.repeat(128);
+      const maxLenRes = await invokeCallbackWithHeaders({
+        'x-request-id': maxLenValidHeader,
+      });
+      expect(maxLenRes.status).toBe(307);
+      const maxLenAudit = latestSignInAudit();
+      expect(maxLenAudit?.newValue).toContain(
+        `correlationId=${maxLenValidHeader}`,
+      );
+    } finally {
+      resetAllDemoData('P-000001');
+    }
   });
 
   it('rejects a tampered session cookie and throws in production when AUTH_SECRET is missing (R56, R59)', () => {

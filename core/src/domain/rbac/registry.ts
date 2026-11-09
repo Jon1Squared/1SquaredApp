@@ -1043,6 +1043,10 @@ export const DEFAULT_RBAC_IDENTITY_MAPPING: RbacIdentityMappingConfig = {
   requireMfaForAdminPermissions: true,
   defaultRoleKeys: [],
   allowAcrsC1AsMfa: false,
+  emailLinking: {
+    enabled: true,
+    domains: [],
+  },
 };
 
 export function createDefaultRbacConfig(): RbacConfiguration {
@@ -1074,6 +1078,10 @@ export function createDefaultRbacConfig(): RbacConfiguration {
         DEFAULT_RBAC_IDENTITY_MAPPING.requireMfaForAdminPermissions,
       defaultRoleKeys: [...(DEFAULT_RBAC_IDENTITY_MAPPING.defaultRoleKeys ?? [])],
       allowAcrsC1AsMfa: DEFAULT_RBAC_IDENTITY_MAPPING.allowAcrsC1AsMfa ?? false,
+      emailLinking: {
+        enabled: DEFAULT_RBAC_IDENTITY_MAPPING.emailLinking?.enabled ?? true,
+        domains: [...(DEFAULT_RBAC_IDENTITY_MAPPING.emailLinking?.domains ?? [])],
+      },
     },
   };
 }

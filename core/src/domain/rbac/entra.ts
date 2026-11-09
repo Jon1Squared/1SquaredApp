@@ -22,6 +22,8 @@ export interface EntraIdRawTokenClaims {
   readonly preferred_username?: string;
   readonly upn?: string;
   readonly email?: string;
+  /** Entra ID email domain owner verification marker (`xms_edov`). */
+  readonly xms_edov?: boolean;
   readonly name?: string;
   /** Entra Enterprise Application App Roles (`roles` claim, e.g. `["1Squared.Partner"]`). */
   readonly roles?: readonly string[];
