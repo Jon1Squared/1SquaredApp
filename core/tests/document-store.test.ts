@@ -182,7 +182,7 @@ function makeGenericStores(prefix = 'alpha'): DocumentStoreConfig[] {
         entraTenantId: `entra-${prefix}-001`,
         credentialMode: 'client_certificate',
         clientId: `app-${prefix}-001`,
-        certificateKeyVaultSecretRef: `kv://kv-${prefix}-test/sp-provisioning-cert`,
+        certificateKeyVaultSecretRef: `kv://kv-firm-${prefix}-test/sp-provisioning-cert`,
         delegatedPermissionScope: 'Files.ReadWrite.All',
       },
       sharepoint: {
@@ -2790,7 +2790,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         let stateUntouchedDuringTokenAcquisition = false;
         const spProvider = new SharePointDocumentStoreProvider({
           tenantContext: r89Ctx,
-          storeConfig: makeGenericStores('alpha')[0]!,
+          storeConfig: {
+            ...makeGenericStores('alpha')[0]!,
+            auth: {
+              ...makeGenericStores('alpha')[0]!.auth,
+              certificateKeyVaultSecretRef:
+                'kv://kv-notalawfirm-test/sp-provisioning-cert',
+            },
+          },
           tokenService: new DocumentStoreTokenService({
             cache: new TenantScopedEncryptedTokenCache(),
             appTokenHandler: async () => {
@@ -2841,7 +2848,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const liveTokenService = new DocumentStoreTokenService({
           cache: new TenantScopedEncryptedTokenCache(),
         });
-        const liveAuthCfg = makeGenericStores('alpha')[0]!.auth;
+        const liveAuthCfg = {
+          ...makeGenericStores('alpha')[0]!.auth,
+          certificateKeyVaultSecretRef:
+            'kv://kv-firm-live-test-live/sp-provisioning-cert',
+        };
         for (const nonDevEnv of ['live', 'training', undefined] as const) {
           const baseNonDevCtx = resolveTenantFromVerifiedToken({
             verifiedToken: {

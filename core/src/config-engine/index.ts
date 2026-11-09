@@ -36,6 +36,7 @@ import {
   DEFAULT_RBAC_RELATIONSHIP_GRANTS,
 } from '../domain/rbac/registry';
 import { RESERVED_UNSUPPORTED_DOCUMENT_STORE_PROVIDERS } from '../integrations/document-stores/index';
+import { assertTenantOwnsKeyVaultSecretRef } from '../tenancy/keyVaultSecrets';
 
 export const ALL_HOME_ROLE_KEYS: readonly HomeRoleKey[] = ALL_BUILTIN_ROLE_KEYS;
 
@@ -1882,6 +1883,34 @@ export const TenantConfigurationSchema = z
         },
       })
       .describe('Key dates and limitation module configuration'),
+    keyVault: z
+      .object({
+        vaultName: z
+          .string()
+          .regex(
+            /^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$/,
+            'keyVault.vaultName must be a valid 3-24 character Azure Key Vault name',
+          )
+          .optional()
+          .describe(
+            'Deployed per-tenant Azure Key Vault name (output keyVaultName from core/infra/modules/tenant.bicep)',
+          ),
+        vaultUri: z
+          .string()
+          .regex(
+            /^https:\/\/[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]\.vault\.azure\.net\/?$/i,
+            'keyVault.vaultUri must be formatted as https://<vault>.vault.azure.net/',
+          )
+          .optional()
+          .describe(
+            'Deployed per-tenant Azure Key Vault URI (output keyVaultUri from core/infra/modules/tenant.bicep)',
+          ),
+      })
+      .strict()
+      .optional()
+      .describe(
+        'Optional per-tenant Azure Key Vault deployment outputs bound from tenant.bicep (R413)',
+      ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -1892,6 +1921,64 @@ export const TenantConfigurationSchema = z
         message:
           'featureFlags.enableDemoMode cannot be true when environment is "live".',
       });
+    }
+
+    // 0. Validate per-tenant Key Vault secret-reference ownership (ADR 0024 AG3, R411, R413)
+    const configVaultContext = {
+      tenantId: cfg.tenantId,
+      environment: cfg.environment,
+      keyVaultSecretPrefix: `kv-${cfg.tenantId}-${cfg.environment}`,
+      configuredKeyVault: cfg.keyVault,
+    };
+    const secretRefChecks: Array<{
+      path: Array<string | number>;
+      ref: string | undefined;
+    }> = [
+      {
+        path: ['integrations', 'pmsConnectionSecretVaultRef'],
+        ref: cfg.integrations.pmsConnectionSecretVaultRef,
+      },
+      {
+        path: ['integrations', 'companiesHouseApiKeyVaultRef'],
+        ref: cfg.integrations.companiesHouseApiKeyVaultRef,
+      },
+    ];
+    for (let i = 0; i < (cfg.documentStores ?? []).length; i++) {
+      secretRefChecks.push({
+        path: ['documentStores', i, 'auth', 'certificateKeyVaultSecretRef'],
+        ref: cfg.documentStores![i]!.auth.certificateKeyVaultSecretRef,
+      });
+    }
+    if (cfg.keyVault?.vaultName && cfg.keyVault?.vaultUri) {
+      const uriVault = cfg.keyVault.vaultUri
+        .trim()
+        .replace(/^https:\/\//i, '')
+        .split('.')[0]
+        ?.toLowerCase();
+      if (uriVault !== cfg.keyVault.vaultName.trim().toLowerCase()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['keyVault', 'vaultUri'],
+          message:
+            'keyVault.vaultName and keyVault.vaultUri must refer to the same Azure Key Vault.',
+        });
+      }
+    }
+    for (const check of secretRefChecks) {
+      if (!check.ref || (!cfg.keyVault?.vaultName && !cfg.keyVault?.vaultUri)) continue;
+      try {
+        assertTenantOwnsKeyVaultSecretRef(
+          configVaultContext,
+          check.ref,
+          cfg.keyVault,
+        );
+      } catch (err) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: check.path,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // 1. Validate documentStores
@@ -2591,6 +2678,19 @@ export function loadAndValidateTenantConfig(
     merged.keyDates = {
       ...(baseKeyDates ?? {}),
       ...(overlayKeyDates ?? {}),
+    };
+  }
+
+  const baseKeyVault = baseConfig.keyVault as
+    | Record<string, unknown>
+    | undefined;
+  const overlayKeyVault = environmentOverlay.keyVault as
+    | Record<string, unknown>
+    | undefined;
+  if (baseKeyVault || overlayKeyVault) {
+    merged.keyVault = {
+      ...(baseKeyVault ?? {}),
+      ...(overlayKeyVault ?? {}),
     };
   }
 

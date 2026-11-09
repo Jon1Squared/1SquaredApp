@@ -20,9 +20,13 @@ import type {
   DocumentStoreErrorReason,
   ProvisioningAccessContext,
   TenantContext,
+  TenantKeyVaultConfig,
   UserAccessContext,
 } from '../../api/index';
-import { buildTenantCacheKey } from '../../tenancy/index';
+import {
+  assertTenantOwnsKeyVaultSecretRef,
+  buildTenantCacheKey,
+} from '../../tenancy/index';
 
 export const FORBIDDEN_BROAD_SHAREPOINT_PERMISSIONS = Object.freeze([
   'Files.Read.All',
@@ -467,6 +471,7 @@ export class DocumentStoreTokenService {
     storeId: string;
     authConfig: DocumentStoreAuthConfig;
     scope?: string;
+    configuredKeyVault?: TenantKeyVaultConfig;
   }): Promise<string> {
     const { accessContext, storeId, authConfig } = params;
     if (!accessContext || accessContext.kind !== 'user') {
@@ -494,6 +499,14 @@ export class DocumentStoreTokenService {
       params.scope ??
       authConfig.delegatedPermissionScope ??
       'Files.ReadWrite.All';
+
+    if (authConfig.certificateKeyVaultSecretRef) {
+      assertTenantOwnsKeyVaultSecretRef(
+        accessContext.tenantContext,
+        authConfig.certificateKeyVaultSecretRef,
+        params.configuredKeyVault,
+      );
+    }
 
     const cached = this.cache.getUserToken({
       ctx: accessContext.tenantContext,
@@ -612,6 +625,7 @@ export class DocumentStoreTokenService {
     storeId: string;
     authConfig: DocumentStoreAuthConfig;
     scope?: string;
+    configuredKeyVault?: TenantKeyVaultConfig;
   }): Promise<string> {
     const { accessContext, storeId, authConfig } = params;
     if (!accessContext || accessContext.kind !== 'provisioning') {
@@ -622,6 +636,14 @@ export class DocumentStoreTokenService {
     }
 
     const scope = params.scope ?? 'https://graph.microsoft.com/.default';
+
+    if (authConfig.certificateKeyVaultSecretRef) {
+      assertTenantOwnsKeyVaultSecretRef(
+        accessContext.tenantContext,
+        authConfig.certificateKeyVaultSecretRef,
+        params.configuredKeyVault,
+      );
+    }
 
     const cached = this.cache.getAppToken({
       ctx: accessContext.tenantContext,

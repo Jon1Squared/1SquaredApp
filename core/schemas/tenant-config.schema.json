@@ -1056,6 +1056,23 @@
     "keyDates": {
       "$ref": "./keyDates.config.schema.json",
       "description": "Key dates and limitation module configuration"
+    },
+    "keyVault": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-tenant Azure Key Vault deployment outputs bound from tenant.bicep (R413)",
+      "properties": {
+        "vaultName": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$",
+          "description": "Deployed per-tenant Azure Key Vault name (output keyVaultName from core/infra/modules/tenant.bicep)"
+        },
+        "vaultUri": {
+          "type": "string",
+          "pattern": "^https://[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]\\.vault\\.azure\\.net/?$",
+          "description": "Deployed per-tenant Azure Key Vault URI (output keyVaultUri from core/infra/modules/tenant.bicep)"
+        }
+      }
     }
   }
 }

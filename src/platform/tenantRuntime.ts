@@ -666,7 +666,7 @@ export function resolveCurrentTenantContext(
   actor?: VerifiedSessionActorInput | null,
   configOverride?: Pick<
     TenantConfiguration,
-    'tenantId' | 'hostingMode' | 'environment' | 'branding'
+    'tenantId' | 'hostingMode' | 'environment' | 'branding' | 'keyVault'
   >,
 ): TenantContext {
   const actorId = (actor?.id ?? actor?.sub ?? '').trim();
@@ -717,6 +717,12 @@ export function resolveCurrentTenantContext(
     environment: cfg.environment,
     correlationId: resolveRequestCorrelationId(actor.correlationId, 'req'),
     untrustedRequestTenantOverride: actor.untrustedRequestTenantOverride,
+    configuredKeyVault: cfg.keyVault
+      ? {
+          vaultName: cfg.keyVault.vaultName,
+          vaultUri: cfg.keyVault.vaultUri,
+        }
+      : undefined,
   });
 }
 
