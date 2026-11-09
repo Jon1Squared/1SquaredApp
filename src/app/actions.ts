@@ -134,7 +134,10 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import { buildActionDenied } from '@/domain/actionResult';
-import { resolveCurrentTenantContext } from '@/platform/tenantRuntime';
+import {
+  getActiveTenantConfiguration,
+  resolveCurrentTenantContext,
+} from '@/platform/tenantRuntime';
 import { guardedAction } from '@/server/authorize';
 import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
 import { getStore } from '@/server/store';
@@ -498,9 +501,12 @@ export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
 export async function resetDemoDataAction() {
   return guardedAction('resetDemoDataAction', ({ personId: byId }) => {
     if (!isDataResetAllowedEnvironment()) {
+      const env = getActiveTenantConfiguration().environment;
       return buildActionDenied(
         'FORBIDDEN',
-        'Demo data reset is disabled in the live environment.',
+        env === 'live'
+          ? 'Demo data reset is disabled in the live environment.'
+          : 'Demo data reset is disabled when enableDemoMode is false.',
       );
     }
     resetAllDemoData(byId);
@@ -512,9 +518,12 @@ export async function resetDemoDataAction() {
 export async function clearAllDataAction() {
   return guardedAction('clearAllDataAction', ({ personId: byId }) => {
     if (!isDataResetAllowedEnvironment()) {
+      const env = getActiveTenantConfiguration().environment;
       return buildActionDenied(
         'FORBIDDEN',
-        'Clearing all data is disabled in the live environment.',
+        env === 'live'
+          ? 'Clearing all data is disabled in the live environment.'
+          : 'Clearing all data is disabled when enableDemoMode is false.',
       );
     }
     clearAllDataToCleanDeployment(byId);

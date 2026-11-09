@@ -4,6 +4,20 @@
  * Dates are ISO strings (date-only fields use YYYY-MM-DD).
  */
 
+import type { RbacConfiguration } from '@platform/core';
+import type { AttentionItem } from './attention';
+import type { LeaverOwnedRecordItem } from './employment';
+import type { LeftRailVisibility } from './homeConfig';
+import type {
+  KeyDate,
+  KeyDateCalendarSync,
+  KeyDateNotApplicable,
+  KeyDatePermission,
+  KeyDateReminderState,
+  KeyDatesConfig,
+} from './keyDates.types';
+import type { SearchDoc } from './search';
+
 export type RecordType = 'person' | 'organisation';
 /** All primary record types across pillars. */
 export type AnyRecordType = RecordType | 'matter' | 'enquiry' | 'task';
@@ -130,9 +144,9 @@ export interface Phone {
 
 // ------------------------------------------------------------------ Organisation Structure Reference Tables
 export interface OrgLegalEntity {
-  id: string; // e.g. 'LE-PV-LLP'
-  name: string; // e.g. 'Pembroke Vaughan LLP'
-  code: string; // e.g. 'PVLLP'
+  id: string; // e.g. 'LE-DEFAULT'
+  name: string; // Legal entity display name
+  code: string; // Short entity code
   isDefault?: boolean;
   active: boolean;
 }
@@ -896,7 +910,7 @@ export type ConflictCheckRecordInput = Omit<
 export interface Matter extends RecordBase {
   recordType: 'matter';
   // CORE-001..008 Identification
-  matterNumber: string; // e.g. PEN001-0004
+  matterNumber: string; // e.g. ABC001-0001
   title: string; // CORE-002
   shortDescription: string; // CORE-003
   clientId: string; // CORE-004 (P-xxxxxx or O-xxxxxx)
@@ -993,7 +1007,7 @@ export interface Matter extends RecordBase {
 
 // ------------------------------------------------------------------ Teams
 export interface Team {
-  id: string; // TM-000001
+  id: string; // Team record identifier
   name: string;
   description: string;
   memberIds: string[]; // Employee P-xxxxxx ids
@@ -1695,7 +1709,7 @@ export interface MatterCostsSnapshot {
  */
 export interface MatterCostsConfig {
   clientProfileCode: string; // e.g. 'BASE-STANDARD'
-  clientProfileName: string; // e.g. 'Pembroke Vaughan LLP'
+  clientProfileName: string; // Tenant profile display name
   sectionTitle: string; // default 'Matter Costs'
   rateSourceMode: RateTableSourceMode; // 'app_table' | 'pms_when_linked' | 'pms_only'
   pmsLinkActive: boolean; // Whether a live/imported PMS rate link is enabled
@@ -1707,6 +1721,86 @@ export interface MatterCostsConfig {
   disbursementPresets: DisbursementPresetItem[];
   updatedAt: string;
   updatedById: string;
+}
+
+export interface AppFinanceCapabilities {
+  canViewFirm: boolean;
+  canViewMatter: boolean;
+  canCreditControl: boolean;
+}
+
+export interface AppSnapshot {
+  firm: {
+    name: string;
+    shortName: string;
+    offices: string[];
+  };
+  tenantId: string;
+  firmPrimaryDomain: string;
+  enableAiMatterExtraction: boolean;
+  aiProviderChoice: 'disabled' | 'azure_openai_uk' | 'anthropic';
+  enableMatterCostsGovernance: boolean;
+  enablePmsLiveRateSync: boolean;
+  currentUser: Person;
+  currentUserId: string;
+  currentUserRole: AppRole;
+  currentUserRoles: HomeRoleKey[];
+  currentUserEmployeePermissions: EmployeePermission[];
+  currentUserPermissions: PermissionKey[];
+  currentUserKeyDatePermissions: KeyDatePermission[];
+  canTakeByTaskId: Record<string, boolean>;
+  canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
+  canReopenByEnquiryId: Record<string, boolean>;
+  canSignOffCostsByMatterId: Record<string, boolean>;
+  signOffEstimateGbpByMatterId: Record<string, number>;
+  suggestedMatterGovernanceAssignees: {
+    riskReviewerId: string | null;
+    practiceManagerId: string | null;
+  };
+  appRoleByPersonId: Record<string, AppRole>;
+  rolesByPersonId: Record<string, HomeRoleKey[]>;
+  permissionsByPersonId: Record<string, PermissionKey[]>;
+  keyDatesConfig: KeyDatesConfig;
+  keyDates: KeyDate[];
+  keyDateNotApplicable: KeyDateNotApplicable[];
+  keyDateReminderStates: KeyDateReminderState[];
+  keyDateCalendarSyncs: KeyDateCalendarSync[];
+  rbacConfig: RbacConfiguration;
+  orgStructure: OrgStructureCatalogue;
+  matterPartyTaxonomy: MatterPartyTaxonomy;
+  matterPartyMigrationReport?: MatterPartyMigrationReport;
+  employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord>;
+  employeeMigrationReport?: EmployeeMigrationReport;
+  leaverOwnedRecords: LeaverOwnedRecordItem[];
+  activeViewingRole: HomeRoleKey;
+  leftRailVisibility: LeftRailVisibility;
+  effectiveWorkPerson: Person;
+  homePagesConfig: HomePagesConfig;
+  signOffs: SignOffItem[];
+  finance: AppFinanceCapabilities;
+  employees: Person[];
+  lists: ChoiceList[];
+  values: ChoiceValue[];
+  customFields: CustomFieldDefinition[];
+  people: Person[];
+  organisations: Organisation[];
+  links: PersonOrganisationLink[];
+  matters: Matter[];
+  teams: Team[];
+  tasks: Task[];
+  enquiries: Enquiry[];
+  quotes: Quote[];
+  notifications: NotificationItem[];
+  enquirySettings: EnquirySettings;
+  taskSettings: TaskSettings;
+  matterCostsConfig: MatterCostsConfig;
+  taskBadgeCount: number;
+  notes: Note[];
+  audit: AuditEntry[];
+  mergeHistory: MergeHistory[];
+  searchIndex: SearchDoc[];
+  attention: AttentionItem[];
+  recentIds: string[];
 }
 
 

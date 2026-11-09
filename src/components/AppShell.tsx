@@ -540,19 +540,7 @@ export function AppShell({
               </Suspense>
             </label>
 
-            {activeViewingRole === 'enquiries_coordinator' ? null : activeViewingRole === 'finance' ? (
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={() => {
-                  showToast('Billing run workspace opened for 5 unbilled matters (£34,140.00 WIP).');
-                  if (pathname !== '/') router.push('/');
-                }}
-              >
-                <Plus size={16} strokeWidth={2.4} aria-hidden="true" />
-                <span>Start billing run</span>
-              </button>
-            ) : activeViewingRole === 'risk_compliance' ? (
+            {activeViewingRole === 'enquiries_coordinator' || activeViewingRole === 'finance' ? null : activeViewingRole === 'risk_compliance' ? (
               <button
                 type="button"
                 className="btn btn--primary"

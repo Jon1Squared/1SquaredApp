@@ -720,7 +720,17 @@ export function buildFieldResolutionContextForRecord(params: {
     phone?: string;
     email?: string;
     website?: string;
-    address?: string;
+    complaintsPartnerName?: string;
+    address?:
+      | string
+      | {
+          line1?: string;
+          line2?: string;
+          town?: string;
+          county?: string;
+          postcode?: string;
+          country?: string;
+        };
   };
 }): FieldResolutionContext {
   const {
@@ -811,20 +821,16 @@ export function buildFieldResolutionContextForRecord(params: {
         departmentName:
           resolveChoiceLabel(values, feeEarnerPerson.departmentId) ||
           'Legal Practice',
-        officeName: 'London — Lincoln’s Inn Fields',
-        officeAddress: {
-          line1: '42 Lincoln’s Inn Fields',
-          city: 'London',
-          postcode: 'WC2A 3PE',
-          country: 'United Kingdom',
-        },
+        officeName: '',
+        officeAddress: undefined,
         supervisorName: supervisorPerson
           ? personDisplayName(supervisorPerson)
-          : 'Victoria Pembroke',
-        supervisorJobTitle:
-          supervisorPerson?.employment?.jobTitle ||
-          supervisorPerson?.jobTitle ||
-          'Partner',
+          : '',
+        supervisorJobTitle: supervisorPerson
+          ? supervisorPerson.employment?.jobTitle ||
+            supervisorPerson.jobTitle ||
+            ''
+          : '',
       }
     : null;
 
@@ -843,7 +849,7 @@ export function buildFieldResolutionContextForRecord(params: {
         departmentName:
           resolveChoiceLabel(values, currentUser.departmentId) ||
           'Legal Practice',
-        officeName: 'London — Lincoln’s Inn Fields',
+        officeName: '',
       }
     : null;
 
@@ -961,22 +967,17 @@ export function buildFieldResolutionContextForRecord(params: {
     financial: financialData,
     feeEarner: feeEarnerData,
     firm: {
-      registeredName: firm?.legalName ?? firm?.name ?? 'Pembroke Vaughan LLP',
-      tradingName: firm?.name ?? 'Pembroke Vaughan',
+      registeredName: firm?.legalName ?? firm?.name ?? '',
+      tradingName: firm?.name ?? '',
       regulatorName: 'Solicitors Regulation Authority',
-      regulatorNumber: firm?.sraNumber ?? 'SRA-612048',
-      companyNumber: firm?.companyNumber ?? 'OC391042',
-      vatNumber: firm?.vatNumber ?? 'GB 942 1104 22',
-      headOfficeAddress: {
-        line1: '42 Lincoln’s Inn Fields',
-        city: 'London',
-        postcode: 'WC2A 3PE',
-        country: 'United Kingdom',
-      },
-      mainPhone: firm?.phone ?? '+44 20 7946 0800',
+      regulatorNumber: firm?.sraNumber ?? '',
+      companyNumber: firm?.companyNumber ?? '',
+      vatNumber: firm?.vatNumber ?? '',
+      headOfficeAddress: firm?.address,
+      mainPhone: firm?.phone ?? '',
       mainEmail: firm?.email ?? '',
       website: firm?.website ?? '',
-      complaintsPartnerName: 'Marcus Vaughan',
+      complaintsPartnerName: firm?.complaintsPartnerName ?? '',
     },
     user: userData,
     recipientParty: selectedRecipient

@@ -6,8 +6,8 @@ import { useRouter } from 'next/navigation';
 import { ChevronDown } from 'lucide-react';
 import { saveOrganisationAction } from '@/app/actions';
 import {
-  DEMO_COMPANIES_HOUSE_RECORDS,
-  searchCompaniesHouseDemo,
+  COMPANIES_HOUSE_NOT_CONFIGURED_MESSAGE,
+  lookupCompaniesHouse,
   type CompaniesHouseCompanyRecord,
 } from '@/domain/companiesHouse';
 import { findOrganisationDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
@@ -317,13 +317,8 @@ export function OrganisationFormClient({
     return () => document.removeEventListener('mousedown', handleOutside);
   }, [chDropdownOpen]);
 
-  const chResults = useMemo(() => {
-    const q = legalName.trim();
-    if (q.length >= 2) {
-      return searchCompaniesHouseDemo(q);
-    }
-    return DEMO_COMPANIES_HOUSE_RECORDS;
-  }, [legalName]);
+  const chLookup = useMemo(() => lookupCompaniesHouse(legalName.trim()), [legalName]);
+  const chResults = chLookup.records;
 
   const handleSelectCompaniesHouseRecord = (rec: CompaniesHouseCompanyRecord) => {
     setLegalName(rec.companyName);
@@ -882,9 +877,23 @@ export function OrganisationFormClient({
                             color: 'var(--text-muted)',
                           }}
                         >
-                          <span>Companies House Registry (Demo)</span>
-                          <span>Click to auto-complete 6 fields</span>
+                          <span>Companies House</span>
+                          <span>{chLookup.configured ? 'Click to auto-complete 6 fields' : 'Manual entry'}</span>
                         </div>
+                        {!chLookup.configured ? (
+                          <div
+                            style={{
+                              padding: '10px 12px',
+                              fontSize: 13,
+                              color: 'var(--text-secondary)',
+                            }}
+                          >
+                            <strong>{chLookup.message ?? COMPANIES_HOUSE_NOT_CONFIGURED_MESSAGE}</strong>
+                            <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                              Enter the company details manually in the fields below.
+                            </div>
+                          </div>
+                        ) : null}
                         {chResults.map((rec) => (
                           <button
                             key={rec.companyNumber}

@@ -13,10 +13,13 @@ import { aboutDocs } from './articles/about-documentation';
 import { aiMatterExtractionArticle } from './articles/ai-matter-extraction';
 import { authenticationRbacAndMfaArticle } from './articles/authentication-rbac-and-mfa';
 import { dataAdministrationAndRetentionArticle } from './articles/data-administration-and-retention';
+import { demoEnvironmentArticle } from './articles/demo-environment';
 import { deploymentAndSecurityArticle } from './articles/deployment-and-security';
 import { developmentProcessArticle } from './articles/development-process';
 import { documentGenerationArticle } from './articles/document-generation';
 import { duplicateChecks } from './articles/duplicate-checks';
+import { financeDataAndPermissionsArticle } from './articles/finance-data-and-permissions';
+import { homeAndProfileScreensArticle } from './articles/home-and-profile-screens';
 import { keyDatesAdministrationArticle } from './articles/key-dates-administration';
 import { keyDatesCalendarSyncArticle } from './articles/key-dates-calendar-sync';
 import { keyDatesExceptionsArticle } from './articles/key-dates-exceptions';
@@ -62,13 +65,16 @@ export type DocSectionKey = (typeof DOC_SECTIONS)[number]['key'];
 
 export const ARTICLES: DocArticle[] = [
   aboutDocs,
+  homeAndProfileScreensArticle,
   matterOpeningAndRiskArticle,
   aiMatterExtractionArticle,
   mattersEnquiriesTasksNavigationArticle,
   signOffQueueArticle,
   deploymentAndSecurityArticle,
+  demoEnvironmentArticle,
   tenantSettingsArticle,
   authenticationRbacAndMfaArticle,
+  financeDataAndPermissionsArticle,
   dataAdministrationAndRetentionArticle,
   developmentProcessArticle,
   keyDatesOverviewArticle,

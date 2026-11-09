@@ -56,7 +56,7 @@ describe('tenantRuntime — TenantConfiguration cache and immutability (R249, R2
     const testConfig = getActiveTenantConfiguration();
     expect(testConfig.environment).toBe('test');
     expect(testConfig.integrations.pmsConnectionSecretVaultRef).toBe(
-      'kv://kv-not-a-law-firm-test/pms-connection-string',
+      'kv://kv-notalawfirm-test/pms-connection-string',
     );
 
     const countBeforeChange = getTenantConfigValidationCountForTesting();
@@ -67,7 +67,7 @@ describe('tenantRuntime — TenantConfiguration cache and immutability (R249, R2
     expect(devConfig).not.toBe(testConfig);
     expect(devConfig.environment).toBe('dev');
     expect(devConfig.integrations.pmsConnectionSecretVaultRef).toBe(
-      'kv://kv-not-a-law-firm-dev/pms-connection-string',
+      'kv://kv-notalawfirm-dev/pms-connection-string',
     );
     expect(countAfterChange).toBe(countBeforeChange + 1);
   });

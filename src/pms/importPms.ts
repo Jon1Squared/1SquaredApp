@@ -14,7 +14,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { isValidPmsAsAtDate } from '../domain/pms';
 import { excelSerialToIsoDate, openXlsxWorkbook, parseMoney } from './xlsxReader';
+
+type XlsxWorkbook = ReturnType<typeof openXlsxWorkbook>;
 
 export const DEFAULT_XLSX_PATH = path.join(
   process.cwd(),
@@ -24,7 +27,77 @@ export const DEFAULT_XLSX_PATH = path.join(
 );
 export const DEFAULT_PMS_DB_PATH = path.join(process.cwd(), 'data', 'pms', 'pms-demo.sqlite');
 
-export const PMS_AS_AT_DATE = '2026-10-16';
+const MONTH_NAME_TO_NUMBER: Record<string, string> = {
+  january: '01',
+  february: '02',
+  march: '03',
+  april: '04',
+  may: '05',
+  june: '06',
+  july: '07',
+  august: '08',
+  september: '09',
+  october: '10',
+  november: '11',
+  december: '12',
+};
+
+export interface WorkbookReadmeLike {
+  sheetNames: string[];
+  getSheetMatrix: (name: string) => Array<{ rowNumber: number; cells: Record<string, string> }>;
+}
+
+export function extractAsAtDateFromWorkbook(wb: WorkbookReadmeLike): string | null {
+  if (!wb.sheetNames.includes('README')) return null;
+  const rows = wb.getSheetMatrix('README');
+  for (const row of rows) {
+    const label = (row.cells.A ?? '').trim().toLowerCase();
+    if (!label.startsWith('as-at date') && !label.startsWith('as at date')) {
+      continue;
+    }
+    const raw = (row.cells.B ?? '').trim();
+    if (!raw) continue;
+    const isoMatch = raw.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (isoMatch && isValidPmsAsAtDate(isoMatch[1])) {
+      return isoMatch[1];
+    }
+    const ukMatch = raw.match(
+      /\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b/i,
+    );
+    if (ukMatch) {
+      const day = ukMatch[1]!.padStart(2, '0');
+      const month = MONTH_NAME_TO_NUMBER[ukMatch[2]!.toLowerCase()];
+      const year = ukMatch[3]!;
+      const candidate = `${year}-${month}-${day}`;
+      if (isValidPmsAsAtDate(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+export function parseImportPmsCliArgs(args: readonly string[]): { asAtDate?: string } {
+  let asAtDate: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--as-at') {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith('--') || next.trim().length === 0) {
+        throw new Error('Missing value for --as-at. Provide a valid YYYY-MM-DD date.');
+      }
+      asAtDate = next.trim();
+      i++;
+    } else if (arg.startsWith('--as-at=')) {
+      const val = arg.slice('--as-at='.length).trim();
+      if (val.length === 0) {
+        throw new Error('Empty value for --as-at=. Provide a valid YYYY-MM-DD date.');
+      }
+      asAtDate = val;
+    }
+  }
+  return asAtDate !== undefined ? { asAtDate } : {};
+}
 
 export function resolveWorkbookPath(customPath?: string): string {
   if (customPath && fs.existsSync(customPath)) return customPath;
@@ -548,6 +621,7 @@ export interface ImportSummary {
 export function buildPmsDatabaseFromWorkbook(options?: {
   workbookPath?: string;
   dbPath?: string;
+  asAtDate?: string;
   importedAt?: string;
 }): ImportSummary {
   const workbookPath = resolveWorkbookPath(options?.workbookPath);
@@ -559,6 +633,18 @@ export function buildPmsDatabaseFromWorkbook(options?: {
   }
 
   const wb = openXlsxWorkbook(workbookPath);
+  const hasExplicitAsAt =
+    options !== undefined &&
+    Object.prototype.hasOwnProperty.call(options, 'asAtDate') &&
+    options.asAtDate !== undefined;
+  const asAtDate = (
+    hasExplicitAsAt ? (options.asAtDate ?? '') : (extractAsAtDateFromWorkbook(wb) ?? '')
+  ).trim();
+  if (!isValidPmsAsAtDate(asAtDate)) {
+    throw new Error(
+      `Invalid or missing PMS extract as-at date "${asAtDate}". Provide a valid YYYY-MM-DD via --as-at or in the workbook README sheet.`,
+    );
+  }
 
   const feeEarnersRows = wb.getSheetRows('fee_earners');
   const clientsRows = wb.getSheetRows('clients');
@@ -575,11 +661,11 @@ export function buildPmsDatabaseFromWorkbook(options?: {
     db.exec(SCHEMA_SQL);
     db.exec('BEGIN TRANSACTION;');
 
-    const importedAt = options?.importedAt ?? `${PMS_AS_AT_DATE}T09:00:00.000Z`;
+    const importedAt = options?.importedAt ?? `${asAtDate}T09:00:00.000Z`;
     const insertExtractInfo = db.prepare(
       `INSERT INTO extract_info (as_at_date, imported_at, source_file) VALUES (?, ?, ?)`,
     );
-    insertExtractInfo.run(PMS_AS_AT_DATE, importedAt, path.basename(workbookPath));
+    insertExtractInfo.run(asAtDate, importedAt, path.basename(workbookPath));
 
     // Track primary keys for clear foreign-key error reporting
     const feeEarnerIds = new Set<string>();
@@ -644,7 +730,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         parseInt(r.credit_terms_days, 10) || 0,
         parseMoney(r.credit_limit),
         Number(r.rate_discount_pct || 0),
-        excelSerialToIsoDate(r.date_opened) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.date_opened) ?? asAtDate,
         r.sector ?? '',
         r.crm_match_on ?? '',
         r.status ?? 'Active',
@@ -692,7 +778,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         parseMoney(r.fixed_fee_amount),
         parseMoney(r.fee_estimate),
         Number(r.estimate_alert_pct || 0.75),
-        excelSerialToIsoDate(r.date_opened) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.date_opened) ?? asAtDate,
         excelSerialToIsoDate(r.date_closed),
         r.status ?? 'Open',
         r.billing_frequency ?? '',
@@ -729,7 +815,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
       insEstimate.run(
         id,
         r.matter_code,
-        excelSerialToIsoDate(r.date_given) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.date_given) ?? asAtDate,
         r.estimate_type,
         parseMoney(r.fees_estimate),
         parseMoney(r.disbursements_estimate),
@@ -781,8 +867,8 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         invNo,
         r.matter_code,
         r.client_code,
-        excelSerialToIsoDate(r.invoice_date) ?? PMS_AS_AT_DATE,
-        excelSerialToIsoDate(r.due_date) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.invoice_date) ?? asAtDate,
+        excelSerialToIsoDate(r.due_date) ?? asAtDate,
         r.invoice_type,
         excelSerialToIsoDate(r.period_from),
         excelSerialToIsoDate(r.period_to),
@@ -836,7 +922,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         id,
         r.matter_code,
         r.fee_earner_id,
-        excelSerialToIsoDate(r.date) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.date) ?? asAtDate,
         r.activity,
         r.narrative,
         parseInt(r.minutes, 10) || 0,
@@ -883,7 +969,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
       insDisb.run(
         id,
         r.matter_code,
-        excelSerialToIsoDate(r.date) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.date) ?? asAtDate,
         r.type,
         r.supplier,
         r.description,
@@ -934,7 +1020,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         r.invoice_number,
         r.matter_code,
         r.client_code,
-        excelSerialToIsoDate(r.receipt_date) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.receipt_date) ?? asAtDate,
         parseMoney(r.amount),
         r.method,
         r.reference,
@@ -969,7 +1055,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
         id,
         r.matter_code,
         r.client_code,
-        excelSerialToIsoDate(r.date) ?? PMS_AS_AT_DATE,
+        excelSerialToIsoDate(r.date) ?? asAtDate,
         r.type,
         r.description,
         parseMoney(r.amount),
@@ -981,7 +1067,7 @@ export function buildPmsDatabaseFromWorkbook(options?: {
 
     return {
       dbPath,
-      asAtDate: PMS_AS_AT_DATE,
+      asAtDate,
       importedAt,
       counts: {
         fee_earners: feeEarnersRows.length,

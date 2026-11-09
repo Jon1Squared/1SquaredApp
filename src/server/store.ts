@@ -20,7 +20,9 @@ import {
   resolveConfiguredFirmPrimaryDomain,
   setRuntimeRbacConfigOverride,
 } from './rbacRuntime';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import {
+  getActiveTenantConfiguration,
+} from '@/platform/tenantRuntime';
 import type { KeyDate } from '@/domain/keyDates.types';
 import type {
   AuditEntry,
@@ -120,12 +122,19 @@ export interface FirmStore {
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data');
-const SEED_DATA_FILE = path.join(DATA_DIR, 'seed-not-a-law-firm.json');
 const RUNTIME_DATA_FILE = path.join(DATA_DIR, 'runtime-store.json');
 
+export function resolveRuntimeStoreFilePath(): string {
+  const overridePath = process.env.ONESQUARED_RUNTIME_STORE_PATH?.trim();
+  if (overridePath) {
+    return path.resolve(/*turbopackIgnore: true*/ process.cwd(), overridePath);
+  }
+  return RUNTIME_DATA_FILE;
+}
+
 function resolveReadableStorePath(): string | null {
-  if (fs.existsSync(RUNTIME_DATA_FILE)) return RUNTIME_DATA_FILE;
-  if (fs.existsSync(SEED_DATA_FILE)) return SEED_DATA_FILE;
+  const runtimePath = resolveRuntimeStoreFilePath();
+  if (fs.existsSync(runtimePath)) return runtimePath;
   return null;
 }
 
@@ -228,12 +237,12 @@ function buildInitialPmsLinks(
   people: Person[],
   matters: Matter[],
   existingLinks: PmsLink[] = [],
+  nowIso: string = new Date().toISOString(),
 ): PmsLink[] {
   const pms = getPmsSource();
   const pmsClients = pms.listClients();
   const pmsFeeEarners = pms.listFeeEarners();
   const pmsMatters = pms.listMatters();
-  const nowIso = new Date().toISOString();
 
   const seededMatterLinks = buildInitialSeedMatterPmsLinks(
     matters,
@@ -254,10 +263,19 @@ function buildInitialPmsLinks(
   );
 }
 
-export function createSeedStore(today: Date = new Date()): FirmStore {
+export function createSeedStore(
+  today: Date = new Date(),
+  options?: { includeSyntheticEntraOids?: boolean },
+): FirmStore {
   const seedLists = buildSeedLists();
-  const demo = buildDemoData(today);
-  const pmsLinks = buildInitialPmsLinks(demo.organisations, demo.people, demo.matters);
+  const demo = buildDemoData(today, options);
+  const pmsLinks = buildInitialPmsLinks(
+    demo.organisations,
+    demo.people,
+    demo.matters,
+    [],
+    today.toISOString(),
+  );
   const tenantCfg = getActiveTenantConfiguration();
   const orgStructure = buildDefaultOrgStructure({
     legalName: tenantCfg.displayName,
@@ -320,13 +338,13 @@ export function createSeedStore(today: Date = new Date()): FirmStore {
     audit: demo.audit,
     mergeHistory: [],
     recentlyViewed: demo.recentlyViewed,
-    counters: { ...demo.counters, PMSL: pmsLinks.length, KD: 4 },
+    counters: { ...demo.counters, PMSL: pmsLinks.length, KD: 5 },
     keyDates: buildSeedKeyDates(partyMigration.matters, demo.teams, today),
     keyDateNotApplicable: [],
     keyDateReminderStates: [],
     keyDateCalendarSyncs: [],
   };
-  migrateFirmBrandingToNotALawFirm(store);
+  syncStoreFirmIdAndHomeRoles(store);
   return store;
 }
 
@@ -341,10 +359,17 @@ function buildSeedKeyDates(
   const m0 = matters[0]!;
   const m1 = matters[1] ?? m0;
   const m2 = matters[2] ?? m0;
+  const m4 = matters[4] ?? m0;
+  const m6 = matters[6] ?? m0;
   const m0LeadId = m0.leadFeeEarnerId || m0.responsiblePartnerId || m0.createdById;
   const m0PartnerId = m0.responsiblePartnerId || m0.leadFeeEarnerId || m0.createdById;
   const m1LeadId = m1.leadFeeEarnerId || m1.responsiblePartnerId || m1.createdById;
   const m2LeadId = m2.leadFeeEarnerId || m2.responsiblePartnerId || m2.createdById;
+  const m2PartnerId = m2.responsiblePartnerId || m2.leadFeeEarnerId || m2.createdById;
+  const m4LeadId = m4.leadFeeEarnerId || m4.responsiblePartnerId || m4.createdById;
+  const m4PartnerId = m4.responsiblePartnerId || m4.leadFeeEarnerId || m4.createdById;
+  const m6LeadId = m6.leadFeeEarnerId || m6.responsiblePartnerId || m6.createdById;
+  const m6PartnerId = m6.responsiblePartnerId || m6.leadFeeEarnerId || m6.createdById;
   const addDaysIso = (d: number) => {
     const dt = new Date(today.getTime());
     dt.setUTCDate(dt.getUTCDate() + d);
@@ -451,12 +476,78 @@ function buildSeedKeyDates(
         required: false,
         proposedById: m2LeadId,
         proposedAt: nowIso,
-        verifiedById: m2LeadId,
+        verifiedById: m2PartnerId,
         verifiedAt: nowIso,
       },
       createdById: m2LeadId,
       createdAt: nowIso,
-      updatedById: m2LeadId,
+      updatedById: m2PartnerId,
+      updatedAt: nowIso,
+      version: 1,
+    },
+    {
+      id: 'KD-000004',
+      matterId: m4.id,
+      keyDateTypeId: 'court_deadline',
+      category: 'court_deadline',
+      title: 'Adjudicator Decision Deadline (28-day statutory period)',
+      dueDate: addDaysIso(9),
+      dueTime: '17:00',
+      isCritical: true,
+      status: 'confirmed',
+      source: 'manual',
+      teamId:
+        teams.find((t) => m4.leadFeeEarnerId && t.memberIds.includes(m4.leadFeeEarnerId))?.id ??
+        defaultTeamId,
+      responsiblePersonIds: Array.from(
+        new Set(
+          [m4.leadFeeEarnerId, m4.responsiblePartnerId].filter((x): x is string => Boolean(x)),
+        ),
+      ),
+      verification: {
+        required: true,
+        proposedById: m4LeadId,
+        proposedAt: nowIso,
+        verifiedById: m4PartnerId,
+        verifiedAt: nowIso,
+      },
+      notes: 'Statutory 28-day adjudication decision deadline from Referral Notice.',
+      createdById: m4LeadId,
+      createdAt: nowIso,
+      updatedById: m4PartnerId,
+      updatedAt: nowIso,
+      version: 1,
+    },
+    {
+      id: 'KD-000005',
+      matterId: m6.id,
+      keyDateTypeId: 'court_deadline',
+      category: 'court_deadline',
+      title: 'Employment Tribunal Preliminary Hearing (Bristol ET)',
+      dueDate: addDaysIso(12),
+      dueTime: '10:00',
+      isCritical: true,
+      status: 'confirmed',
+      source: 'manual',
+      teamId:
+        teams.find((t) => m6.leadFeeEarnerId && t.memberIds.includes(m6.leadFeeEarnerId))?.id ??
+        defaultTeamId,
+      responsiblePersonIds: Array.from(
+        new Set(
+          [m6.leadFeeEarnerId, m6.responsiblePartnerId].filter((x): x is string => Boolean(x)),
+        ),
+      ),
+      verification: {
+        required: true,
+        proposedById: m6LeadId,
+        proposedAt: nowIso,
+        verifiedById: m6PartnerId,
+        verifiedAt: nowIso,
+      },
+      notes: 'Listed before Employment Judge for case management directions.',
+      createdById: m6LeadId,
+      createdAt: nowIso,
+      updatedById: m6PartnerId,
       updatedAt: nowIso,
       version: 1,
     },
@@ -500,7 +591,11 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
 
   return {
     firmId: resolveActiveFirmId(),
-    firm: FIRM,
+    firm: {
+      name: tenantCfg.displayName,
+      shortName: tenantCfg.displayName.replace(/\s+LLP$/i, '').trim() || tenantCfg.displayName,
+      offices: orgStructure.offices.map((o) => o.name),
+    },
     isCleanDeployment: true,
     lists: seedLists.lists,
     values: partyMigration.values,
@@ -580,17 +675,6 @@ async function trySyncToFirestore(store: FirmStore): Promise<void> {
   }
 }
 
-function isStoreDemoModeEnabled(): boolean {
-  if (process.env.NODE_ENV === 'production') {
-    return false;
-  }
-  const activeTenantConfig = getActiveTenantConfiguration();
-  if (activeTenantConfig.environment === 'live') {
-    return false;
-  }
-  return Boolean(activeTenantConfig.featureFlags?.enableDemoMode);
-}
-
 function hasInvalidSupervisingPartner(person: Person, allPeople: Person[]): boolean {
   const supId = person.employment?.supervisingPartnerId;
   if (!supId) return false;
@@ -622,7 +706,7 @@ function syncStoreHomePageRoles(store: FirmStore): boolean {
   return false;
 }
 
-function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
+function syncStoreFirmIdAndHomeRoles(store: FirmStore): boolean {
   let changed = false;
   const activeFirmId = resolveActiveFirmId();
   if (store.firmId !== activeFirmId) {
@@ -632,84 +716,14 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
   if (syncStoreHomePageRoles(store)) {
     changed = true;
   }
-  if (!isStoreDemoModeEnabled() || store.isCleanDeployment) {
-    return changed;
-  }
-  const tenantCfg = getActiveTenantConfiguration();
-  const targetDomain = resolveConfiguredFirmPrimaryDomain(tenantCfg);
-  if (!store.firm || store.firm.name !== FIRM.name || store.firm.shortName !== FIRM.shortName) {
-    store.firm = { ...FIRM };
-    changed = true;
-  }
-  if (store.orgStructure && Array.isArray(store.orgStructure.legalEntities)) {
-    const defaultEntities = buildDefaultOrgStructure({
-      legalName: tenantCfg.displayName,
-    }).legalEntities;
-    for (const defLe of defaultEntities) {
-      const existingLe = store.orgStructure.legalEntities.find((le) => le.id === defLe.id);
-      if (existingLe && existingLe.name.includes('Pembroke Vaughan')) {
-        existingLe.name = defLe.name;
-        existingLe.code = defLe.code;
-        changed = true;
-      }
-    }
-  }
-  if (Array.isArray(store.people)) {
-    for (const p of store.people) {
-      if (Array.isArray(p.emails)) {
-        for (const em of p.emails) {
-          if (em.address.toLowerCase().includes('@pembrokevaughan.example')) {
-            em.address = em.address.replace(
-              /@pembrokevaughan\.example/gi,
-              `@${targetDomain}`,
-            );
-            changed = true;
-          }
-        }
-        // Deduplicate emails if migration collapsed an existing + newly added email
-        const seen = new Set<string>();
-        p.emails = p.emails.filter((em) => {
-          const lower = em.address.toLowerCase();
-          if (seen.has(lower)) return false;
-          seen.add(lower);
-          return true;
-        });
-      }
-      if (p.employment?.systems?.firmWorkEmail?.toLowerCase().includes('@pembrokevaughan')) {
-        p.employment.systems.firmWorkEmail = p.employment.systems.firmWorkEmail.replace(
-          /@pembrokevaughan\.example/gi,
-          `@${targetDomain}`,
-        );
-        changed = true;
-      }
-    }
-  }
-  if (store.homePagesConfig && Array.isArray(store.homePagesConfig.roles)) {
-    for (const r of store.homePagesConfig.roles) {
-      if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.example')) {
-        r.demoUserEmail = r.demoUserEmail.replace(
-          /@pembrokevaughan\.example/gi,
-          `@${targetDomain}`,
-        );
-        changed = true;
-      }
-    }
-  }
-  if (
-    store.matterCostsConfig &&
-    (store.matterCostsConfig.clientProfileCode === 'BASE-STANDARD' ||
-      store.matterCostsConfig.clientProfileName.includes('Pembroke Vaughan') ||
-      store.matterCostsConfig.clientProfileName.includes('Standard Base Platform'))
-  ) {
-    store.matterCostsConfig.clientProfileCode = tenantCfg.tenantId;
-    store.matterCostsConfig.clientProfileName = `${tenantCfg.displayName} — Client Configuration (${tenantCfg.branding.primaryDomain})`;
-    changed = true;
-  }
   return changed;
 }
 
 export function getStore(): FirmStore {
-  const isTestEnv = Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
+  const isTestEnv = Boolean(
+    (process.env.VITEST || process.env.NODE_ENV === 'test') &&
+      !process.env.ONESQUARED_RUNTIME_STORE_PATH,
+  );
   const activeStorePath = resolveReadableStorePath();
   if (!isTestEnv && activeStorePath) {
     try {
@@ -840,206 +854,27 @@ export function getStore(): FirmStore {
     try {
       const raw = fs.readFileSync(activeStorePath, 'utf8');
       const parsed = JSON.parse(raw) as FirmStore;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new SyntaxError('Root JSON value must be an object.');
+      }
       let migrated = false;
       const seedLists = buildSeedLists();
 
-      if (!parsed.isCleanDeployment) {
-        const demo = buildDemoData(new Date());
-
-        if (!Array.isArray(parsed.matters) || parsed.matters.length === 0) {
-          parsed.matters = demo.matters;
-          parsed.counters = { ...parsed.counters, M: demo.counters.M };
-          migrated = true;
-        }
-
-        if (!Array.isArray(parsed.teams) || parsed.teams.length === 0) {
-          parsed.teams = demo.teams;
-          parsed.counters = { ...parsed.counters, TM: demo.counters.TM };
-          migrated = true;
-        }
-
-        if (!Array.isArray(parsed.enquiries) || parsed.enquiries.length === 0) {
-          parsed.enquiries = demo.enquiries;
-          parsed.counters = { ...parsed.counters, ENQ: demo.counters.ENQ };
-          migrated = true;
-        }
-
-        // Ensure PMS-aligned demo organisations, people, and matters are present
-        for (const demoOrg of demo.organisations) {
-          const existingOrg = parsed.organisations.find((x) => x.id === demoOrg.id);
-          if (!existingOrg) {
-            parsed.organisations.push(demoOrg);
-            migrated = true;
-          } else if (existingOrg.companyNumber !== demoOrg.companyNumber && demoOrg.id <= 'O-000007') {
-            existingOrg.companyNumber = demoOrg.companyNumber;
-            existingOrg.legalName = demoOrg.legalName;
-            existingOrg.otherNames = demoOrg.otherNames;
-            migrated = true;
-          }
-        }
-
-        for (const p of demo.people) {
-          const existingPerson = parsed.people.find(
-            (x) =>
-              x.id === p.id ||
-              (p.emails[0] &&
-                x.emails.some((e) => e.address.toLowerCase() === p.emails[0].address.toLowerCase())),
-          );
-          if (!existingPerson) {
-            parsed.people.push(p);
-            parsed.counters.P = Math.max(parsed.counters.P ?? 0, demo.counters.P);
-            migrated = true;
-          } else {
-            // Ensure PMS matching emails and role/demo metadata exist on seeded employees
-            for (const em of p.emails) {
-              if (!existingPerson.emails.some((e) => e.address.toLowerCase() === em.address.toLowerCase())) {
-                existingPerson.emails.push(em);
-                migrated = true;
-              }
-            }
-            if (p.roles && (!existingPerson.roles || existingPerson.roles.length === 0)) {
-              existingPerson.roles = p.roles;
-              migrated = true;
-            }
-            if (p.demo !== undefined && existingPerson.demo !== p.demo) {
-              existingPerson.demo = p.demo;
-              existingPerson.showsWorkOfId = p.showsWorkOfId ?? null;
-              migrated = true;
-            }
-            if (p.supportsIds && (!existingPerson.supportsIds || existingPerson.supportsIds.length === 0)) {
-              existingPerson.supportsIds = p.supportsIds;
-              migrated = true;
-            }
-          }
-        }
-
-        // Sync team memberships for newly added employees/demo users
-        for (const demoTeam of demo.teams) {
-          const existingTeam = parsed.teams.find((t) => t.id === demoTeam.id || t.name === demoTeam.name);
-          if (existingTeam) {
-            for (const memberId of demoTeam.memberIds) {
-              if (!existingTeam.memberIds.includes(memberId)) {
-                existingTeam.memberIds.push(memberId);
-                migrated = true;
-              }
-            }
-            for (const leadId of demoTeam.leadIds) {
-              if (!existingTeam.leadIds.includes(leadId)) {
-                existingTeam.leadIds.push(leadId);
-                migrated = true;
-              }
-            }
-          }
-        }
-
-        const validTaxonomyIds = new Set<string>([
-          ...seedLists.values.map((v) => v.id),
-          ...(Array.isArray(parsed.values) ? parsed.values.map((v) => v.id) : []),
-        ]);
-
-        for (const m of demo.matters) {
-          const existingMatter = parsed.matters.find(
-            (x) => x.id === m.id || x.matterNumber === m.matterNumber,
-          );
-          if (!existingMatter) {
-            parsed.matters.push(m);
-            parsed.counters.M = Math.max(parsed.counters.M ?? 0, demo.counters.M);
-            migrated = true;
-          } else if (m.fieldValues && Object.keys(m.fieldValues).length > 0) {
-            existingMatter.fieldValues = {
-              ...existingMatter.fieldValues,
-              ...m.fieldValues,
-            };
-            migrated = true;
-          }
-        }
-
-        for (const enq of demo.enquiries) {
-          const existingEnq = parsed.enquiries.find((x) => x.id === enq.id);
-          if (!existingEnq) {
-            parsed.enquiries.push(enq);
-            parsed.counters.ENQ = Math.max(parsed.counters.ENQ ?? 0, demo.counters.ENQ);
-            migrated = true;
-          } else if (enq.id === 'ENQ-000009' && existingEnq.keyDate !== enq.keyDate) {
-            existingEnq.keyDate = enq.keyDate;
-            migrated = true;
-          }
-        }
-
-        if (!Array.isArray(parsed.quotes) || parsed.quotes.length === 0) {
-          parsed.quotes = demo.quotes;
-          parsed.counters = { ...parsed.counters, QTE: demo.counters.QTE };
-          migrated = true;
-        } else {
-          for (const q of demo.quotes) {
-            const existingQuote = parsed.quotes.find(
-              (x) => x.id === q.id || x.reference === q.reference,
-            );
-            if (!existingQuote) {
-              parsed.quotes.push(q);
-              parsed.counters.QTE = Math.max(parsed.counters.QTE ?? 0, demo.counters.QTE);
-              migrated = true;
-            }
-          }
-        }
-
-        const { repairedCount } = repairOrphanTaxonomyIds(parsed, demo, validTaxonomyIds);
-        if (repairedCount > 0) {
-          migrated = true;
-          let tenantId = 'unknown';
-          try {
-            tenantId = resolveActiveFirmId();
-          } catch {
-            // Fall back if tenant configuration is unavailable
-          }
-          console.info(
-            JSON.stringify({
-              level: 'info',
-              event: 'store.orphan_taxonomy_ids_repaired',
-              tenantId,
-              repairedCount,
-            }),
-          );
-        }
-
-        if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
-          parsed.tasks = demo.tasks;
-          parsed.counters = { ...parsed.counters, TSK: demo.counters.TSK };
-          migrated = true;
-        } else {
-          for (const t of demo.tasks) {
-            if (!parsed.tasks.some((x) => x.id === t.id)) {
-              parsed.tasks.push(t);
-              parsed.counters.TSK = Math.max(parsed.counters.TSK ?? 0, demo.counters.TSK);
-              migrated = true;
-            }
-          }
-        }
-
-        if (!Array.isArray(parsed.notifications)) {
-          parsed.notifications = demo.notifications;
-          parsed.counters = { ...parsed.counters, NTF: demo.counters.NTF };
-          migrated = true;
-        }
-
-        if (!Array.isArray(parsed.signOffs) || parsed.signOffs.length === 0) {
-          parsed.signOffs = demo.signOffs;
-          parsed.counters = { ...parsed.counters, SO: demo.signOffs.length };
-          migrated = true;
-        }
-
-        const refreshedPmsLinks = buildInitialPmsLinks(
-          parsed.organisations,
-          parsed.people,
-          parsed.matters,
-          Array.isArray(parsed.pmsLinks) ? parsed.pmsLinks : [],
-        );
-        if (!Array.isArray(parsed.pmsLinks) || refreshedPmsLinks.length !== parsed.pmsLinks.length) {
-          parsed.pmsLinks = refreshedPmsLinks;
-          parsed.counters = { ...parsed.counters, PMSL: parsed.pmsLinks.length };
-          migrated = true;
-        }
-      }
+      if (!Array.isArray(parsed.organisations)) parsed.organisations = [];
+      if (!Array.isArray(parsed.people)) parsed.people = [];
+      if (!Array.isArray(parsed.links)) parsed.links = [];
+      if (!Array.isArray(parsed.matters)) parsed.matters = [];
+      if (!Array.isArray(parsed.teams)) parsed.teams = [];
+      if (!Array.isArray(parsed.tasks)) parsed.tasks = [];
+      if (!Array.isArray(parsed.enquiries)) parsed.enquiries = [];
+      if (!Array.isArray(parsed.quotes)) parsed.quotes = [];
+      if (!Array.isArray(parsed.notifications)) parsed.notifications = [];
+      if (!Array.isArray(parsed.signOffs)) parsed.signOffs = [];
+      if (!Array.isArray(parsed.pmsLinks)) parsed.pmsLinks = [];
+      if (!Array.isArray(parsed.notes)) parsed.notes = [];
+      if (!Array.isArray(parsed.audit)) parsed.audit = [];
+      if (!Array.isArray(parsed.mergeHistory)) parsed.mergeHistory = [];
+      if (!parsed.counters) parsed.counters = {};
 
       if (!parsed.enquirySettings) {
         parsed.enquirySettings = { ...DEFAULT_ENQUIRY_SETTINGS };
@@ -1168,7 +1003,7 @@ export function getStore(): FirmStore {
       }
 
       if (!Array.isArray(parsed.keyDates)) {
-        parsed.keyDates = buildSeedKeyDates(parsed.matters, parsed.teams, new Date());
+        parsed.keyDates = [];
         migrated = true;
       }
       if (!Array.isArray(parsed.keyDateNotApplicable)) {
@@ -1184,7 +1019,7 @@ export function getStore(): FirmStore {
         migrated = true;
       }
 
-      if (migrateFirmBrandingToNotALawFirm(parsed)) {
+      if (syncStoreFirmIdAndHomeRoles(parsed)) {
         migrated = true;
       }
 
@@ -1202,8 +1037,22 @@ export function getStore(): FirmStore {
         // ignore stat errors
       }
       return global.__oneSquaredStore;
-    } catch {
-      // recreate if corrupted
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        throw new Error(
+          `Refusing to load corrupted runtime store file at ${activeStorePath}: not valid JSON.`,
+        );
+      }
+      const code =
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        typeof (err as { code?: unknown }).code === 'string'
+          ? (err as { code: string }).code
+          : 'UNKNOWN_ERROR';
+      throw new Error(
+        `Failed to load runtime store file at ${activeStorePath} (code: ${code}).`,
+      );
     }
   }
   if (isTestEnv && global.__oneSquaredLastSavedStoreJson) {
@@ -1216,7 +1065,7 @@ export function getStore(): FirmStore {
       // fall through to fresh seed store
     }
   }
-  const fresh = createSeedStore(new Date());
+  const fresh = createCleanDeploymentStore(new Date());
   saveStore(fresh);
   return fresh;
 }
@@ -1224,14 +1073,30 @@ export function getStore(): FirmStore {
 export function saveStore(store: FirmStore): void {
   global.__oneSquaredStore = store;
   setRuntimeRbacConfigOverride(store.rbacConfigOverride);
-  if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+  if (
+    (process.env.VITEST || process.env.NODE_ENV === 'test') &&
+    !process.env.ONESQUARED_RUNTIME_STORE_PATH
+  ) {
     global.__oneSquaredLastSavedStoreJson = JSON.stringify(store);
     return;
   }
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(RUNTIME_DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
-    global.__oneSquaredStoreMtimeMs = fs.statSync(RUNTIME_DATA_FILE).mtimeMs;
+    const targetPath = resolveRuntimeStoreFilePath();
+    const targetDir = path.dirname(targetPath);
+    if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+    const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
+      fs.renameSync(tmpPath, targetPath);
+    } catch (writeErr) {
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {
+        // ignore cleanup errors
+      }
+      throw writeErr;
+    }
+    global.__oneSquaredStoreMtimeMs = fs.statSync(targetPath).mtimeMs;
   } catch {
     // ignore read-only fs errors in serverless environments
   }
@@ -1241,7 +1106,9 @@ export function saveStore(store: FirmStore): void {
 }
 
 export function resetStore(): FirmStore {
-  const fresh = createSeedStore(new Date());
+  const includeSyntheticEntraOids =
+    getActiveTenantConfiguration().environment === 'test';
+  const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
   saveStore(fresh);
   return fresh;
 }

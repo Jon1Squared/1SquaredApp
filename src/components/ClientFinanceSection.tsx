@@ -4,7 +4,13 @@ import React, { useTransition } from 'react';
 import Link from 'next/link';
 import { createRecordFromPmsAction } from '@/app/actions';
 import { formatDate } from '@/domain/dates';
-import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
+import {
+  formatGbp,
+  formatPmsAsAtLabel,
+  formatWholePct,
+  isValidPmsAsAtDate,
+  PMS_AS_AT_UNAVAILABLE_LABEL,
+} from '@/domain/pms';
 import type { AppRole } from '@/domain/types';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { StatusPill } from './SearchBox';
@@ -27,7 +33,9 @@ export function ClientFinanceSection({
   const [pending, startTransition] = useTransition();
 
   const isAdmin = currentUserRole === 'admin';
+  const hasValidAsAt = isValidPmsAsAtDate(pmsView.extractInfo.asAtDate);
   const asAtLabel = formatPmsAsAtLabel(pmsView.extractInfo.asAtDate);
+  const asAtStatusText = hasValidAsAt ? `as at ${asAtLabel}` : PMS_AS_AT_UNAVAILABLE_LABEL;
 
   const bundle = pmsView.clientBundle;
   const fin = bundle?.summary ?? null;
@@ -52,7 +60,7 @@ export function ClientFinanceSection({
           <div className="profile-section__header">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span className="section-label">PMS Client Finance</span>
-              <StatusPill label={`PMS · as at ${asAtLabel}`} tone="neutral" />
+              <StatusPill label={`PMS · ${asAtStatusText}`} tone="neutral" />
             </div>
           </div>
 
@@ -82,7 +90,7 @@ export function ClientFinanceSection({
           </div>
         </section>
 
-        {/* Even if a parent holding company is not directly linked (though Severn Holdings plc IS linked), render group view if subsidiaries exist */}
+        {/* Even if a parent holding company is not directly linked, render group view if subsidiaries exist */}
         {groupView && <GroupFinanceCard groupView={groupView} asAtLabel={asAtLabel} />}
       </div>
     );
@@ -126,7 +134,7 @@ export function ClientFinanceSection({
         )}
       </div>
 
-      {/* Group view for parent organisation with subsidiaries (e.g. Severn Holdings plc) */}
+      {/* Group view for parent organisation with subsidiaries */}
       {recordType === 'organisation' && groupView && (
         <GroupFinanceCard groupView={groupView} asAtLabel={asAtLabel} />
       )}

@@ -6,7 +6,7 @@ export const developmentProcessArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared designs, tests, audits (including independent Claude Code verification on develop), and releases software safely across isolated branches and deployment rings.',
-  updated: '2026-11-06',
+  updated: '2026-11-09',
   body: `
 For a law firm, a software update cannot be a leap of faith. 1Squared is engineered around a **Zero-Trust, Architecture-First Software Development Lifecycle (SDLC)** where every change passes through **six independent quality and security gates** before reaching live production.
 
@@ -45,7 +45,8 @@ Before a single line of production code is written, every change is classified u
 ### Gate 2: Isolated feature branches & 100% synthetic test data
 - **Branch Isolation**: All development takes place on isolated branches (\`feat/*\`, \`fix/*\` and \`chore/*\`), with roadmap slices on \`s0-NN-short-name\` branches as set out in \`docs/roadmap/stage-0-plan.md\`. Each slice is one Pull Request to \`develop\` and updates the backlog (\`docs/roadmap/feature-list.md\`) in the same Pull Request. Direct pushes to \`develop\` or \`main\` are blocked.
 - **11 Immutable Architecture Rules**: Enforced via \`AGENTS.md\` and \`CLAUDE.md\`—prohibiting client-specific code in the core, requiring all data access to use a token-derived \`TenantContext\`, banning secrets in code or config, and requiring every change to create or update the relevant pages in **Help & documentation** in the same Pull Request (Rule 11).
-- **Zero Real Client Data in Dev/Test**: Engineers never develop or test with real client PII. All development uses purpose-built synthetic law firm fixtures (*Not A Law Firm LLP* and *Pembroke Vaughan*).
+- **Zero Real Client Data in Dev/Test**: Engineers never develop or test with real client PII. All development uses purpose-built synthetic law firm fixtures (*Not A Law Firm LLP* and *Pembroke Vaughan*) confined to \`data/\` and \`src/seed/\`. In Platform CI, \`scripts/verify-invented-fixtures.mjs\` verifies that seed fixtures use only RFC 2606 domains and Ofcom drama telephone numbers, while \`scripts/verify-no-demo-literals.mjs\` scans git-tracked product code under \`src/components/\` and \`src/domain/\` to ensure no demo firm names, seed person/organisation names, matter numbers, record IDs, or fake \`"Sanctions & PEP: Clear"\` statuses appear in product code.
+- **Local Development Store & Seeding (\`npm run seed:demo\` and \`ONESQUARED_RUNTIME_STORE_PATH\`)**: Product code (\`getStore()\`) never auto-seeds demo records when \`data/runtime-store.json\` (or the path set in \`ONESQUARED_RUNTIME_STORE_PATH\`) is absent; a fresh checkout starts with a clean empty deployment store (\`createCleanDeploymentStore\`). In local development (\`PLATFORM_ENVIRONMENT=dev\`), \`client-not-a-law-firm/config/environments/dev.json\` sets \`featureFlags.enableDemoMode: true\`. Engineers populate their local store either by running \`PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm PLATFORM_ENVIRONMENT=dev npm run seed:demo\` (passing \`--force\` to overwrite an existing store) or from **Administration → Demo data** (**Load demo dataset**).
 
 ### Gate 3: Automated Platform CI & adversarial two-tenant isolation tests
 Every push and Pull Request triggers the automated **Platform CI** workflow (\`.github/workflows/ci.yml\`):

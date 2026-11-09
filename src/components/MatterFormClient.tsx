@@ -150,7 +150,6 @@ import { useToast } from './Toast';
 interface MatterFormClientProps {
   existing?: Matter | null;
   isReopenedDraft?: boolean;
-  initialScenario?: string | null;
   initialClientId?: string | null;
   initialSubcategoryName?: string | null;
   initialEnquiry?: Enquiry | null;
@@ -191,14 +190,6 @@ type OptionalTabKey =
   | 'matter_facts'
   | 'compliance'
   | 'custom_fields';
-
-type DemoPresetKey =
-  | 'empty'
-  | 'fast_path'
-  | 'partly_complete'
-  | 'reopened_draft'
-  | 'referred_submitted'
-  | 'reviewer_view';
 
 function rolePillTone(
   role: ConflictPartyRole,
@@ -261,7 +252,6 @@ function nextClientItemId(prefix: string): string {
 export function MatterFormClient({
   existing,
   isReopenedDraft = false,
-  initialScenario = null,
   initialClientId,
   initialSubcategoryName,
   initialEnquiry,
@@ -361,27 +351,6 @@ export function MatterFormClient({
         .filter((v) => v.listKey === 'work_type' && !v.parentId && v.active)
         .sort((a, b) => a.sortOrder - b.sortOrder),
     [values],
-  );
-
-  const realEstatePa = useMemo(
-    () =>
-      practiceAreas.find((p) => p.label === 'Real Estate & Property') ??
-      practiceAreas[0],
-    [practiceAreas],
-  );
-
-  const landlordTenantSub = useMemo(
-    () =>
-      values.find(
-        (v) =>
-          v.listKey === 'work_type' &&
-          v.parentId === realEstatePa?.id &&
-          v.label.toLowerCase().includes('landlord'),
-      ) ??
-      values.find(
-        (v) => v.listKey === 'work_type' && v.parentId === realEstatePa?.id && v.active,
-      ),
-    [values, realEstatePa],
   );
 
   const isEditingExistingMatter = Boolean(
@@ -622,7 +591,7 @@ export function MatterFormClient({
   useEffect(() => {
     if (prevUserIdRef.current !== currentUser.id) {
       prevUserIdRef.current = currentUser.id;
-      if (!existing && !initialScenario && !initialEnquiry && !initialQuote) {
+      if (!existing && !initialEnquiry && !initialQuote) {
         queueMicrotask(() => {
           setPracticeAreaId(userMatterDefaults.practiceAreaId);
           setWorkTypeSubcategoryId('');
@@ -635,7 +604,6 @@ export function MatterFormClient({
   }, [
     currentUser.id,
     existing,
-    initialScenario,
     initialEnquiry,
     initialQuote,
     userMatterDefaults,
@@ -1709,19 +1677,6 @@ export function MatterFormClient({
   });
 
   const stageSteps = useMemo(() => {
-    const isTribunal =
-      existing?.matterNumber === 'BRI001-0003' ||
-      subcategoryLabel.toLowerCase().includes('tribunal');
-    if (isTribunal) {
-      return [
-        { name: 'Intake', meta: 'Done 14 Aug' },
-        { name: 'ET3 response', meta: 'Filed 2 Sep' },
-        { name: 'Case management', meta: 'Done 30 Sep' },
-        { name: 'Drafting & negotiation', meta: 'Current' },
-        { name: 'Final hearing', meta: 'Listed Mar 2027' },
-        { name: 'Close', meta: '—' },
-      ];
-    }
     return [
       { name: 'Intake', meta: 'Done' },
       { name: 'Matter opening', meta: 'Completed' },
@@ -1730,7 +1685,7 @@ export function MatterFormClient({
       { name: 'Execution / completion', meta: 'Upcoming' },
       { name: 'Close', meta: '—' },
     ];
-  }, [existing?.matterNumber, subcategoryLabel]);
+  }, []);
 
   // Matter facts state (Client ref, Claim value, Responsible office, Source of work)
   const [clientReference, setClientReference] = useState<string>(
@@ -1739,7 +1694,7 @@ export function MatterFormClient({
   const [claimValue, setClaimValue] = useState<string>(() => {
     const savedClaim = ((existing?.fieldValues?.['claimValue'] as string) ?? '').trim();
     if (savedClaim) return savedClaim;
-    if (existing?.matterSizeId && existing.matterNumber !== 'BRI001-0003') {
+    if (existing?.matterSizeId) {
       return resolveLabel(values, existing.matterSizeId);
     }
     return '';
@@ -1747,14 +1702,11 @@ export function MatterFormClient({
   const [responsibleOffice, setResponsibleOffice] = useState<string>(() => {
     const savedOffice = ((existing?.fieldValues?.['responsibleOffice'] as string) ?? '').trim();
     if (savedOffice) return savedOffice;
-    return existing?.matterNumber === 'BRI001-0003' ? 'Bristol' : 'Cardiff';
+    return '';
   });
   const [sourceOfWork, setSourceOfWork] = useState<string>(() => {
     const savedSource = ((existing?.fieldValues?.['sourceOfWork'] as string) ?? '').trim();
     if (savedSource) return savedSource;
-    if (existing?.matterNumber === 'BRI001-0003') {
-      return 'Existing client — cross-referral from Corporate';
-    }
     if (existing?.referrerTypeId) {
       return resolveLabel(values, existing.referrerTypeId) || 'Existing client';
     }
@@ -1767,7 +1719,7 @@ export function MatterFormClient({
   // Draft / Referred / Reviewer mode states
   const [reopenedDraftBanner, setReopenedDraftBanner] = useState<string | null>(
     isReopenedDraft
-      ? existing?.conflictCheckRecord?.savedDraftAtDisplay || '22 Oct 2026, 17:45'
+      ? existing?.conflictCheckRecord?.savedDraftAtDisplay || formatDateTime(new Date().toISOString())
       : null,
   );
   const [workflowState, setWorkflowState] = useState<
@@ -1786,7 +1738,6 @@ export function MatterFormClient({
   );
   const [newCommentText, setNewCommentText] = useState('');
   const [saving, setSaving] = useState(false);
-  const [activePreset, setActivePreset] = useState<DemoPresetKey>('empty');
 
   // AI Document & Email Extraction state
   const [aiPanelOpen, setAiPanelOpen] = useState<boolean>(false);
@@ -3619,68 +3570,6 @@ export function MatterFormClient({
     }
   }
 
-  // Quick-add demo parties in Section 2 (Part 2.5)
-  function handleQuickAddDemoParty(
-    which: 'coastline' | 'morgan_price' | 'harbourline',
-  ) {
-    if (which === 'coastline') {
-      if (otherParties.some((p) => p.name.toLowerCase().includes('coastline outdoor'))) {
-        showToast('Coastline Outdoor Ltd is already on this matter.');
-        return;
-      }
-      handleAddParty({
-        id: 'party-coastline',
-        name: 'Coastline Outdoor Ltd',
-        entityType: 'organisation',
-        relationshipCode: 'OP',
-        capacityCodes: ['CAP_TENANT'],
-        connectedToPartyId: null,
-        identifiers: { companyNumber: '08419203', registeredTown: 'Cardiff' },
-        linkedRecordId: 'O-000014',
-        subtitle: 'Co. no. 08419203 · Cardiff',
-      });
-      return;
-    }
-    if (which === 'morgan_price') {
-      if (otherParties.some((p) => p.name.toLowerCase().includes('morgan price'))) {
-        showToast('Morgan Price Solicitors is already on this matter.');
-        return;
-      }
-      const coastlineParty = otherParties.find((p) =>
-        p.name.toLowerCase().includes('coastline outdoor'),
-      );
-      handleAddParty({
-        id: 'party-morgan-price',
-        name: 'Morgan Price Solicitors',
-        entityType: 'organisation',
-        relationshipCode: 'CO',
-        capacityCodes: ['CAP_SOLICITOR'],
-        connectedToPartyId: coastlineParty?.id ?? null,
-        identifiers: { registeredTown: 'Cardiff' },
-        linkedRecordId: 'O-000008',
-        subtitle: 'Cardiff',
-      });
-      return;
-    }
-    if (which === 'harbourline') {
-      if (otherParties.some((p) => p.name.toLowerCase().includes('harbourline'))) {
-        showToast('Harbourline Housing Association is already on this matter.');
-        return;
-      }
-      handleAddParty({
-        id: 'party-harbourline',
-        name: 'Harbourline Housing Association',
-        entityType: 'organisation',
-        relationshipCode: 'TP',
-        capacityCodes: ['CAP_LANDLORD'],
-        connectedToPartyId: null,
-        identifiers: { companyNumber: 'DEMO-RS0002', registeredTown: 'Cardiff' },
-        linkedRecordId: 'O-000002',
-        subtitle: 'Co. no. DEMO-RS0002 · Cardiff',
-      });
-    }
-  }
-
   // Removing a party that other parties are connected to warns the user and clears those links (Part 2.3)
   function handleRemoveParty(partyId: string) {
     const target = otherParties.find((p) => p.id === partyId);
@@ -3972,261 +3861,6 @@ export function MatterFormClient({
     declarationConfirmed,
     isReferredOutcome,
   ]);
-
-  // Demo scenario preset switcher (Part 2.5)
-  function applyDemoPreset(preset: DemoPresetKey) {
-    setActivePreset(preset);
-    if (preset === 'empty') {
-      setClientId('');
-      setInstructingContactId(null);
-      setClientCapacityCodes([]);
-      setJointClientCapacityCodes({});
-      setInstructingContactCapacityCodes(['CAP_REPRESENTATIVE', 'CAP_DECISION_MAKER']);
-      setPracticeAreaId(userMatterDefaults.practiceAreaId);
-      setWorkTypeSubcategoryId('');
-      setResponsiblePartnerId(userMatterDefaults.responsiblePartnerId);
-      setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId);
-      setSupervisingPartnerId(userMatterDefaults.responsiblePartnerId);
-      setTitle('');
-      setRiskAnswers({});
-      setRiskFollowUps({});
-      setCustomKeyDates([]);
-      setOtherParties([]);
-      setMatches([]);
-      setHasRunSearch(false);
-      setLastRunAtDisplay(null);
-      setPartiesChangedSinceSearch(false);
-      setDeclarationConfirmed(false);
-      setReviewerMessage('');
-      setReopenedDraftBanner(null);
-      setWorkflowState('editing');
-      setIsReviewerMode(false);
-      return;
-    }
-
-    setClientId('O-000001');
-    setInstructingContactId('P-000011');
-    setClientCapacityCodes(['CAP_LANDLORD']);
-    setInstructingContactCapacityCodes(['CAP_REPRESENTATIVE', 'CAP_DECISION_MAKER']);
-    if (realEstatePa) setPracticeAreaId(realEstatePa.id);
-    if (landlordTenantSub) setWorkTypeSubcategoryId(landlordTenantSub.id);
-    const presetPartnerId = userMatterDefaults.responsiblePartnerId || currentUser.id;
-    const presetPartnerPerson = people.find((p) => p.id === presetPartnerId) ?? currentUser;
-    const presetPartnerName = personDisplayName(presetPartnerPerson);
-    setResponsiblePartnerId(presetPartnerId);
-    setLeadFeeEarnerId(userMatterDefaults.leadFeeEarnerId || currentUser.id);
-
-    setTitle('Lease renewal — Unit 7, Cardiff Bay Retail Park');
-
-    const pCoastline: ConflictCheckParty = {
-      id: 'party-coastline',
-      name: 'Coastline Outdoor Ltd',
-      entityType: 'organisation',
-      role: 'Opponent',
-      relationshipCode: 'OP',
-      capacityCodes: ['CAP_TENANT'],
-      connectedToPartyId: null,
-      identifiers: { companyNumber: '08419203', registeredTown: 'Cardiff' },
-      alignment: 'adverse',
-      linkedRecordId: 'O-000014',
-      subtitle: 'Co. no. 08419203 · Cardiff',
-    };
-    const pMorganPrice: ConflictCheckParty = {
-      id: 'party-morgan-price',
-      name: 'Morgan Price Solicitors',
-      entityType: 'organisation',
-      role: 'Opposing solicitor',
-      relationshipCode: 'CO',
-      capacityCodes: ['CAP_SOLICITOR'],
-      connectedToPartyId: 'party-coastline',
-      identifiers: { registeredTown: 'Cardiff' },
-      alignment: 'adverse',
-      linkedRecordId: 'O-000008',
-      subtitle: 'Cardiff',
-    };
-    const pHarbourline: ConflictCheckParty = {
-      id: 'party-harbourline',
-      name: 'Harbourline Housing Association',
-      entityType: 'organisation',
-      role: 'Other party',
-      relationshipCode: 'TP',
-      capacityCodes: ['CAP_LANDLORD'],
-      connectedToPartyId: null,
-      identifiers: { companyNumber: 'DEMO-RS0002', registeredTown: 'Cardiff' },
-      alignment: 'third_party',
-      linkedRecordId: 'O-000002',
-      subtitle: 'Co. no. DEMO-RS0002 · Cardiff',
-    };
-
-    const mCoastline: ConflictCheckMatch = {
-      id: 'match-coastline',
-      partyId: 'party-coastline',
-      partyName: 'Coastline Outdoor Ltd',
-      matchedRecordId: 'O-000014',
-      matchedRecordName: 'Coastline Outdoor Ltd',
-      matchedRecordType: 'organisation',
-      strength: 'Exact',
-      whereFound: 'Opposing party (Tenant) on PEN001-0004 · Open',
-      matterId: 'M-000001',
-      matterNumber: 'PEN001-0004',
-      responsiblePartnerId: presetPartnerId,
-      responsiblePartnerName: presetPartnerName,
-      dateLabel: '17 Sep 2026',
-      matchedOn: 'Exact legal name, company number (08419203) & Cardiff address',
-      disposition: 'same_no_conflict',
-      note: 'Same tenant as on Unit 4 lease (PEN001-0004); acting for the same landlord client (Penarth Estates Ltd) on the same side.',
-    };
-
-    const mMorganPrice: ConflictCheckMatch = {
-      id: 'match-morgan-price',
-      partyId: 'party-morgan-price',
-      partyName: 'Morgan Price Solicitors',
-      matchedRecordId: 'O-000008',
-      matchedRecordName: 'Morgan Price Solicitors',
-      matchedRecordType: 'organisation',
-      strength: 'Exact',
-      whereFound: 'Connected to other side (Solicitor) on PEN001-0004 · Open',
-      matterId: 'M-000001',
-      matterNumber: 'PEN001-0004',
-      responsiblePartnerId: presetPartnerId,
-      responsiblePartnerName: presetPartnerName,
-      dateLabel: '17 Sep 2026',
-      matchedOn: 'Exact firm name & Cardiff office address',
-      disposition: 'same_no_conflict',
-      note: 'Opposing solicitor acting for the tenant on PEN001-0004; counterparty adviser only, no conflict.',
-    };
-
-    const mHarbourline: ConflictCheckMatch = {
-      id: 'match-harbourline',
-      partyId: 'party-harbourline',
-      partyName: 'Harbourline Housing Association',
-      matchedRecordId: 'O-000002',
-      matchedRecordName: 'Harbourline Housing Association',
-      matchedRecordType: 'organisation',
-      strength: 'Exact',
-      whereFound: 'Client on HAR001-0003 · Open',
-      matterId: 'M-000005',
-      matterNumber: 'HAR001-0003',
-      responsiblePartnerId: presetPartnerId,
-      responsiblePartnerName: presetPartnerName,
-      dateLabel: '24 Jul 2026',
-      matchedOn: `Exact legal name & active client record (responsible partner ${presetPartnerName})`,
-      disposition: 'potential_conflict',
-      note: `Existing client on HAR001-0003 (responsible partner ${presetPartnerName}). Harbourline holds a neighbouring estate road easement at Cardiff Bay Retail Park.`,
-      reviewerDecision: 'approve_with_conditions',
-      reviewerConditionType: 'consent_obtained',
-      reviewerNote:
-        'Unrelated subject matter to HAR001-0003; written informed consent obtained from both Penarth Estates Ltd and Harbourline Housing Association.',
-      reviewedById: currentUser.id,
-      reviewedByName: personDisplayName(currentUser),
-      reviewedAt: '22 Oct 2026, 17:50',
-    };
-
-    if (preset === 'fast_path') {
-      setOtherParties([pCoastline]);
-      setMatches([mCoastline]);
-      setHasRunSearch(true);
-      setLastRunAtDisplay('22 Oct 2026, 17:42');
-      setLastRunByName(personDisplayName(currentUser));
-      setPartiesChangedSinceSearch(false);
-      setDeclarationConfirmed(true);
-      setReviewerMessage('');
-      setReopenedDraftBanner(null);
-      setWorkflowState('editing');
-      setIsReviewerMode(false);
-      setSearchRuns([
-        {
-          id: 'run-fast-1',
-          runAtDisplay: '22 Oct 2026, 17:42',
-          runById: currentUser.id,
-          runByName: personDisplayName(currentUser),
-          searchTerms: ['Penarth Estates Ltd', 'Alun Davies', 'Coastline Outdoor Ltd'],
-          partiesCount: 3,
-          matchesCount: 1,
-          potentialConflictsCount: 0,
-        },
-      ]);
-      return;
-    }
-
-    // 3-party states: partly_complete, reopened_draft, referred_submitted, reviewer_view
-    setOtherParties([pCoastline, pMorganPrice, pHarbourline]);
-    setHasRunSearch(true);
-    setLastRunAtDisplay('22 Oct 2026, 17:42');
-    setLastRunByName(personDisplayName(currentUser));
-    setPartiesChangedSinceSearch(false);
-    setSearchRuns([
-      {
-        id: 'run-full-1',
-        runAtDisplay: '22 Oct 2026, 17:42',
-        runById: currentUser.id,
-        runByName: personDisplayName(currentUser),
-        searchTerms: [
-          'Penarth Estates Ltd',
-          'Alun Davies',
-          'Coastline Outdoor Ltd',
-          'Morgan Price Solicitors',
-          'Harbourline Housing Association',
-        ],
-        partiesCount: 5,
-        matchesCount: 3,
-        potentialConflictsCount: 1,
-      },
-    ]);
-
-    if (preset === 'partly_complete') {
-      setMatches([
-        mCoastline,
-        mMorganPrice,
-        { ...mHarbourline, disposition: null, note: '' },
-      ]);
-      setDeclarationConfirmed(false);
-      setReviewerMessage('');
-      setReopenedDraftBanner(null);
-      setWorkflowState('editing');
-      setIsReviewerMode(false);
-    } else if (preset === 'reopened_draft') {
-      setMatches([mCoastline, mMorganPrice, mHarbourline]);
-      setDeclarationConfirmed(false);
-      setReviewerMessage(
-        'Harbourline is named only in relation to the shared estate road accessway. Please advise if we can clear on an unrelated-matter basis.',
-      );
-      setReopenedDraftBanner('22 Oct 2026, 17:45');
-      setWorkflowState('editing');
-      setIsReviewerMode(false);
-    } else if (preset === 'referred_submitted') {
-      setMatches([mCoastline, mMorganPrice, mHarbourline]);
-      setDeclarationConfirmed(true);
-      setReviewerMessage(
-        'Harbourline is named only in relation to the shared estate road accessway. Please advise if we can clear on an unrelated-matter basis.',
-      );
-      setReopenedDraftBanner(null);
-      setWorkflowState('referred_readonly');
-      setIsReviewerMode(false);
-    } else if (preset === 'reviewer_view') {
-      setMatches([mCoastline, mMorganPrice, mHarbourline]);
-      setDeclarationConfirmed(true);
-      setReviewerMessage(
-        'Harbourline is named only in relation to the shared estate road accessway. Please advise if we can clear on an unrelated-matter basis.',
-      );
-      setReopenedDraftBanner(null);
-      setWorkflowState('referred_readonly');
-      setIsReviewerMode(true);
-    }
-  }
-
-  // Apply URL scenario if passed
-  useEffect(() => {
-    if (!initialScenario) return;
-    queueMicrotask(() => {
-      if (initialScenario === 'fast') applyDemoPreset('fast_path');
-      else if (initialScenario === 'results') applyDemoPreset('partly_complete');
-      else if (initialScenario === 'draft') applyDemoPreset('reopened_draft');
-      else if (initialScenario === 'referred') applyDemoPreset('referred_submitted');
-      else if (initialScenario === 'reviewer') applyDemoPreset('reviewer_view');
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialScenario]);
 
   // Build snapshot object for saving
   function buildConflictRecordSnapshot(
@@ -5124,7 +4758,7 @@ export function MatterFormClient({
         currentUser.employment?.jobTitle ||
         currentUser.jobTitle ||
         (isReviewerMode ? 'Risk & Compliance' : 'Fee earner'),
-      atDisplay: '22 Oct 2026, 17:49',
+      atDisplay: formatDateTime(new Date().toISOString()),
       text: newCommentText.trim(),
     };
     setComments((prev) => [...prev, added]);
@@ -5409,7 +5043,7 @@ export function MatterFormClient({
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <Lock size={16} style={{ flexShrink: 0 }} />
                 <span>
-                  <strong>Submitted and referred to Risk &amp; Compliance</strong> (22 Oct 2026, 17:46).
+                  <strong>Submitted and referred to Risk &amp; Compliance</strong>.
                   Matter status is <strong>Pending conflict review</strong> and a task has been assigned
                   to the Risk team. Snapshot is locked read-only.
                 </span>
@@ -8524,12 +8158,11 @@ export function MatterFormClient({
                     type="text"
                     list="nm-claim-value-options"
                     className="field-input"
-                    placeholder="e.g. £68,000 or Medium (£5k–£25k)"
+                    placeholder="e.g. Medium (£5k–£25k)"
                     value={claimValue}
                     onChange={(e) => setClaimValue(e.target.value)}
                   />
                   <datalist id="nm-claim-value-options">
-                    <option value="£68,000" />
                     <option value="Small (£1k–£5k)" />
                     <option value="Medium (£5k–£25k)" />
                     <option value="Large (£25k–£100k)" />
@@ -8547,16 +8180,20 @@ export function MatterFormClient({
                     type="text"
                     list="nm-office-options"
                     className="field-input"
-                    placeholder="e.g. Bristol or Cardiff"
+                    placeholder={
+                      orgStructure.offices[0]?.name
+                        ? `e.g. ${orgStructure.offices[0].name}`
+                        : 'Office name'
+                    }
                     value={responsibleOffice}
                     onChange={(e) => setResponsibleOffice(e.target.value)}
                   />
                   <datalist id="nm-office-options">
-                    <option value="Bristol" />
-                    <option value="Cardiff" />
-                    <option value="Swansea" />
-                    <option value="London" />
-                    <option value="Newport" />
+                    {orgStructure.offices
+                      .filter((o) => o.active !== false)
+                      .map((o) => (
+                        <option key={o.id} value={o.name} />
+                      ))}
                   </datalist>
                 </div>
 
@@ -10297,7 +9934,7 @@ export function MatterFormClient({
                       fontWeight: 600,
                     }}
                   >
-                    Last run {lastRunAtDisplay || '22 Oct 2026, 17:42'} by{' '}
+                    Last run {lastRunAtDisplay || '—'} by{' '}
                     {lastRunByName || personDisplayName(currentUser) || 'Fee earner'}
                   </div>
                 ) : null}
@@ -10525,7 +10162,7 @@ export function MatterFormClient({
                                   disabled={isReadOnlyFeeEarner}
                                   placeholder={
                                     m.disposition === 'same_no_conflict'
-                                      ? 'Explain why there is no conflict (e.g. acting on the same side on PEN001-0004)…'
+                                      ? 'Explain why there is no conflict (e.g. acting on the same side on ABC123-0001)…'
                                       : 'Explain the potential conflict and why it is being referred to Risk…'
                                   }
                                   value={m.note}
@@ -11225,7 +10862,7 @@ export function MatterFormClient({
                       <input
                         type="text"
                         className="field-input"
-                        placeholder="e.g. £68,000 or Medium (£5k–£25k)"
+                        placeholder="e.g. Medium (£5k–£25k)"
                         value={claimValue}
                         onChange={(e) => setClaimValue(e.target.value)}
                       />
@@ -11235,7 +10872,11 @@ export function MatterFormClient({
                       <input
                         type="text"
                         className="field-input"
-                        placeholder="e.g. Bristol or Cardiff"
+                        placeholder={
+                          orgStructure.offices[0]?.name
+                            ? `e.g. ${orgStructure.offices[0].name}`
+                            : 'Office name'
+                        }
                         value={responsibleOffice}
                         onChange={(e) => setResponsibleOffice(e.target.value)}
                       />
@@ -11860,7 +11501,7 @@ export function MatterFormClient({
                       id="client-lookup-org"
                       type="text"
                       className="field-input"
-                      placeholder="e.g. Penarth Estates Ltd"
+                      placeholder="e.g. Acme Holdings Ltd"
                       value={clientSearchOrg}
                       onChange={(e) => setClientSearchOrg(e.target.value)}
                     />

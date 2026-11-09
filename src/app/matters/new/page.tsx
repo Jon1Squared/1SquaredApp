@@ -16,7 +16,6 @@ export default async function NewMatterPage({
     quoteId?: string;
     instructingContactId?: string;
     draftId?: string;
-    scenario?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -37,7 +36,6 @@ export default async function NewMatterPage({
       <MatterFormClient
         existing={draftMatter}
         isReopenedDraft={Boolean(draftMatter)}
-        initialScenario={params.scenario ?? null}
         initialClientId={params.clientId ?? null}
         initialSubcategoryName={params.subcategory ?? null}
         initialEnquiry={initialEnquiry}

@@ -6,7 +6,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How non-live demo data reset and clean-deployment clear operations are protected by admin-only MFA permissions and audited, and how unconverted enquiry retention anonymisation is enforced.',
-  updated: '2026-11-07',
+  updated: '2026-11-08',
   body: `
 1Squared separates destructive environment data administration from routine firm configuration and enforces strict retention eligibility rules before personal data on closed enquiries can be anonymised.
 
@@ -14,7 +14,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
 
 The **Admin → Demo data** tools (**Load demo dataset** and **Clear all data**) are restricted by three independent controls:
 
-1. **Non-live environments only**: Both \`resetDemoDataAction\` and \`clearAllDataAction\` check \`isDataResetAllowedEnvironment()\`. They are refused whenever the active tenant configuration has \`environment: 'live'\`, or when \`NODE_ENV === 'production'\` outside \`dev\`, \`test\`, or \`training\`.
+1. **Non-live demo-enabled environments only**: Both \`resetDemoDataAction\` and \`clearAllDataAction\` check \`isDataResetAllowedEnvironment()\`, which delegates to \`isNonLiveDemoEnvironment()\`. They are allowed only when the tenant \`environment\` is \`dev\`, \`test\`, \`training\`, or \`demo\` (never \`live\`) **and** \`featureFlags.enableDemoMode\` is \`true\`. Eligibility is decided strictly by tenant configuration rather than \`NODE_ENV\` (see [Demo environment](/docs/demo-environment)).
 2. **System Administrator with MFA (\`admin:data_reset\`)**: Both actions require the \`admin:data_reset\` permission (\`requiresMfa: true\`), which is granted **exclusively to the built-in \`admin\` role** (and not to \`managing_partner\` or \`partner\`). An administrator signed in without multi-factor authentication receives \`MFA_REQUIRED\`.
 3. **Post-reset audit trail**: Before resetting or clearing the store, 1Squared captures the acting administrator’s person ID and display name, then writes a \`data-reset\` or \`data-cleared\` audit entry into the newly initialised store. After clearing all data, the browser signs out cleanly via \`/api/auth/logout\` so stale session references cannot persist.
 

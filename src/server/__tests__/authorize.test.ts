@@ -197,23 +197,41 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
     ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
   });
 
-  it('6. gap and enforcedBy: "service" policies still require sign-in, and otherwise behave exactly as before, including thrown errors', async () => {
-    // Unauthenticated calls to gap and enforcedBy: 'service' throw UNAUTHENTICATED without calling fn
+  it('6. enforcedBy: "service" policies still require sign-in and pass return values and thrown errors through unchanged, while S0-10 finance credit-control actions enforce finance:credit_control', async () => {
+    // Unauthenticated calls to enforcedBy: 'service' throw UNAUTHENTICATED without calling fn
     setTestEntraSessionOverride(undefined);
-    const gapFn = vi.fn(() => 'gap-result');
-    await expect(guardedAction('requestMatterBillAction', gapFn)).rejects.toThrow(
-      /UNAUTHENTICATED/i,
-    );
-    expect(gapFn).not.toHaveBeenCalled();
-
     const serviceFn = vi.fn(() => 'service-result');
     await expect(guardedAction('saveMatterAction', serviceFn)).rejects.toThrow(
       /UNAUTHENTICATED/i,
     );
     expect(serviceFn).not.toHaveBeenCalled();
 
-    // Authenticated calls pass return values and thrown errors through unchanged
+    // Unauthenticated calls to enforcedBy: 'action' return ActionDenied UNAUTHENTICATED
+    const billFn = vi.fn(() => ({ customShape: 42 }));
+    const unauthBillRes = await guardedAction('requestMatterBillAction', billFn);
+    expect(billFn).not.toHaveBeenCalled();
+    expect(isActionDenied(unauthBillRes)).toBe(true);
+    if (isActionDenied(unauthBillRes)) {
+      expect(unauthBillRes.code).toBe('UNAUTHENTICATED');
+    }
+
+    // Authenticated fee_earner (P-000002) lacks finance:credit_control -> ActionDenied FORBIDDEN
     setTestEntraSessionOverride(makeSession());
+    const deniedBillRes = await guardedAction('requestMatterBillAction', billFn);
+    expect(billFn).not.toHaveBeenCalled();
+    expect(isActionDenied(deniedBillRes)).toBe(true);
+    if (isActionDenied(deniedBillRes)) {
+      expect(deniedBillRes.code).toBe('FORBIDDEN');
+    }
+
+    // Authenticated partner (P-000001) holds finance:credit_control -> allowed
+    setTestEntraSessionOverride(
+      makeSession({
+        personId: 'P-000001',
+        sub: 'P-000001',
+        mappedRoles: ['partner'],
+      }),
+    );
     const okRes = await guardedAction('requestMatterBillAction', () => ({
       customShape: 42,
     }));

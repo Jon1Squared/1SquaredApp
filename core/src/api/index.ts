@@ -8,7 +8,7 @@ export const CORE_VERSION = '1.1.0';
 export const CORE_API_VERSION = '1.1.0';
 
 export type HostingMode = 'single_tenant' | 'multi_tenant';
-export type PlatformEnvironment = 'dev' | 'test' | 'training' | 'live';
+export type PlatformEnvironment = 'dev' | 'test' | 'training' | 'demo' | 'live';
 
 export type HomeRoleKey =
   | 'fee_earner'

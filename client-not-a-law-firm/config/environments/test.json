@@ -2,8 +2,8 @@
   "environment": "test",
   "hostingMode": "multi_tenant",
   "integrations": {
-    "pmsConnectionSecretVaultRef": "kv://kv-not-a-law-firm-test/pms-connection-string",
-    "companiesHouseApiKeyVaultRef": "kv://kv-not-a-law-firm-test/companies-house-api-key",
+    "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-test/pms-connection-string",
+    "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-test/companies-house-api-key",
     "aiProviderChoice": "anthropic"
   }
 }

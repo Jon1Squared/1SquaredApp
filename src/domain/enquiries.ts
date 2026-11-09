@@ -220,7 +220,7 @@ export function hasQuickConflictCheckInputs(input: {
 /**
  * Compare two names (person or organisation) after full normalisation.
  * Requires at least one token >= 3 chars. A single-token query against a multi-token person name
- * (e.g. surname "Jones" alone vs "Sam Jones") does NOT match as a full name match.
+ * (e.g. surname alone vs full name) does NOT match as a full name match.
  */
 export function namesLikelyMatch(
   query: string | null | undefined,
@@ -1773,7 +1773,7 @@ export function getAvailableEnquiryActions(
 
 /**
  * Format a conflict hit's display label so the record ID appears once, never duplicated
- * as "Lisa Kendall (P-000026) (P-000026)".
+ * with a repeated trailing record ID suffix.
  */
 export function formatConflictAlertLabel(hit: { recordLabel: string; recordId: string }): string {
   const suffix = `(${hit.recordId})`;
@@ -1831,7 +1831,7 @@ export function extractEnquiryFormInitialState(
     lastName: enquiry?.lastName ?? '',
     callingOnBehalfOf: enquiry?.callingOnBehalfOf ?? '',
     sourceId: enquiry?.sourceId ?? '',
-    privacyNoticeGiven: enquiry?.privacyNoticeGiven ?? true,
+    privacyNoticeGiven: enquiry?.privacyNoticeGiven ?? false,
     linkedPersonId: enquiry?.linkedPersonId ?? null,
     linkedOrganisationId: enquiry?.linkedOrganisationId ?? null,
     phone: enquiry?.phone ?? '',
@@ -2202,6 +2202,192 @@ export function mergePeopleWithEnquiries(
   return [...people, ...extra];
 }
 
+export interface EnquiryDashboardMetrics {
+  currentMonthKey: string;
+  todayIso: string;
+  monthEnquiries: Enquiry[];
+  monthReceivedCount: number;
+  monthConvertedCount: number;
+  monthConversionPct: number;
+  monthOpenCount: number;
+  monthInContactCount: number;
+  monthUnassignedCount: number;
+  monthDeclinedCount: number;
+  monthReferredCount: number;
+  monthNoResponseCount: number;
+  callbacksDueTodayCount: number;
+  overdueCallbacksCount: number;
+  slaEvaluatedCount: number;
+  slaMetCount: number;
+  slaMetPct: number | null;
+  overdueSlaCount: number;
+}
 
+const londonDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Europe/London',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
 
+/**
+ * Formats an ISO timestamp or date string into a `YYYY-MM-DD` calendar date in `Europe/London` (R360).
+ * Date-only strings (`YYYY-MM-DD`) are returned unchanged.
+ */
+export function formatLondonDateIso(isoOrDate: string): string {
+  const trimmed = isoOrDate.trim();
+  if (!trimmed) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return trimmed.slice(0, 10);
+  return londonDateFormatter.format(parsed);
+}
+
+export function isDueTimestampOverdue(dueIso: string, nowIso: string, todayIso: string): boolean {
+  const trimmed = dueIso.trim();
+  if (!trimmed) return false;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return trimmed < todayIso;
+  }
+  const dueMs = new Date(trimmed).getTime();
+  const nowMs = new Date(nowIso).getTime();
+  if (!Number.isNaN(dueMs) && !Number.isNaN(nowMs)) {
+    return dueMs < nowMs;
+  }
+  return trimmed < nowIso;
+}
+
+export interface PracticeAreaAndTeamEnquiryScope {
+  enquiries: Enquiry[];
+  hasScope: boolean;
+}
+
+/**
+ * Pure helper to filter enquiries to a user's team practice areas and teams (R361).
+ * - Uses only the `practiceAreaIds` and `teamIds` supplied (never supervised matters or firm-wide fallback).
+ * - When both `practiceAreaIds` and `teamIds` are empty, returns `{ enquiries: [], hasScope: false }`.
+ * - When either set is non-empty, returns `{ hasScope: true, enquiries }` containing enquiries whose
+ *   `practiceAreaId` is in `practiceAreaIds` or whose `assignedTeamId` is in `teamIds`.
+ */
+export function filterEnquiriesForPracticeAreasAndTeams(
+  enquiries: readonly Enquiry[],
+  practiceAreaIds: Iterable<string>,
+  teamIds: Iterable<string>,
+): PracticeAreaAndTeamEnquiryScope {
+  const paSet = new Set(Array.from(practiceAreaIds).filter(Boolean));
+  const tmSet = new Set(Array.from(teamIds).filter(Boolean));
+  if (paSet.size === 0 && tmSet.size === 0) {
+    return { enquiries: [], hasScope: false };
+  }
+  const filtered = enquiries.filter(
+    (e) =>
+      (Boolean(e.practiceAreaId) && paSet.has(e.practiceAreaId)) ||
+      (e.assignedTeamId !== null && Boolean(e.assignedTeamId) && tmSet.has(e.assignedTeamId)),
+  );
+  return { enquiries: filtered, hasScope: true };
+}
+
+/**
+ * Pure helper for Home dashboard enquiry KPIs and panels (R324, R342, R343, R360):
+ * - Formats `receivedAt` and `firstContactDueAt` in `Europe/London` (`formatLondonDateIso`) for
+ *   `currentMonthKey` (`YYYY-MM`) and `todayIso` (`YYYY-MM-DD`) calendar bucketing.
+ * - Compares `firstContactDueAt` against the real `nowIso` instant for overdue and SLA checks.
+ * - Filters `callbacksDueTodayCount` to uncontacted open enquiries (`contactLog.length === 0`)
+ *   whose callback/due date in `Europe/London` equals `todayIso`.
+ * - Computes `slaMetPct` only over enquiries that have been contacted (`contactLog.length > 0`,
+ *   comparing the earliest `contactLog[].at` against `firstContactDueAt`) or are already overdue.
+ */
+export function computeEnquiryDashboardMetrics(
+  enquiries: readonly Enquiry[],
+  nowIso: string,
+  options?: { todayIso?: string; currentMonthKey?: string },
+): EnquiryDashboardMetrics {
+  const todayIso = options?.todayIso ?? formatLondonDateIso(nowIso);
+  const currentMonthKey = options?.currentMonthKey ?? todayIso.slice(0, 7);
+
+  const monthEnquiries = enquiries.filter(
+    (e) => Boolean(e.receivedAt) && formatLondonDateIso(e.receivedAt).slice(0, 7) === currentMonthKey,
+  );
+  const monthReceivedCount = monthEnquiries.length;
+  const monthConvertedCount = monthEnquiries.filter((e) => e.status === 'Converted').length;
+  const monthConversionPct =
+    monthReceivedCount > 0 ? Math.round((monthConvertedCount / monthReceivedCount) * 100) : 0;
+  const monthOpenCount = monthEnquiries.filter((e) => isEnquiryOpen(e)).length;
+  const monthInContactCount = monthEnquiries.filter((e) => e.status === 'In contact').length;
+  const monthUnassignedCount = monthEnquiries.filter(
+    (e) => isEnquiryOpen(e) && !e.assignedToId,
+  ).length;
+  const monthDeclinedCount = monthEnquiries.filter((e) => e.status === 'Declined').length;
+  const monthReferredCount = monthEnquiries.filter((e) => e.status === 'Referred out').length;
+  const monthNoResponseCount = monthEnquiries.filter((e) => e.status === 'No response').length;
+
+  const callbacksDueTodayCount = enquiries.filter((e) => {
+    if (!isEnquiryOpen(e) || e.contactLog.length > 0) return false;
+    const firstDueDay = e.firstContactDueAt ? formatLondonDateIso(e.firstContactDueAt) : null;
+    const nextActionDay = e.nextActionDate ? formatLondonDateIso(e.nextActionDate) : null;
+    return firstDueDay === todayIso || nextActionDay === todayIso;
+  }).length;
+
+  const overdueCallbacksCount = enquiries.filter((e) => {
+    if (!isEnquiryOpen(e)) return false;
+    const firstDueOverdue =
+      Boolean(e.firstContactDueAt) &&
+      isDueTimestampOverdue(e.firstContactDueAt!, nowIso, todayIso) &&
+      e.contactLog.length === 0;
+    const nextActionOverdue =
+      Boolean(e.nextActionDate) && formatLondonDateIso(e.nextActionDate!) < todayIso;
+    return firstDueOverdue || nextActionOverdue;
+  }).length;
+
+  let slaEvaluatedCount = 0;
+  let slaMetCount = 0;
+  let overdueSlaCount = 0;
+
+  for (const e of enquiries) {
+    if (!e.firstContactDueAt) continue;
+    const firstContactAt = e.contactLog.reduce<string | null>(
+      (earliest, entry) =>
+        entry.at && (!earliest || entry.at < earliest) ? entry.at : earliest,
+      null,
+    );
+    const hasContact = Boolean(firstContactAt);
+    const isOverdue =
+      !hasContact && isDueTimestampOverdue(e.firstContactDueAt, nowIso, todayIso);
+
+    if (isEnquiryOpen(e) && isOverdue) {
+      overdueSlaCount += 1;
+    }
+
+    if (hasContact || isOverdue) {
+      slaEvaluatedCount += 1;
+      if (hasContact && firstContactAt! <= e.firstContactDueAt) {
+        slaMetCount += 1;
+      }
+    }
+  }
+
+  const slaMetPct =
+    slaEvaluatedCount > 0 ? Math.round((slaMetCount / slaEvaluatedCount) * 100) : null;
+
+  return {
+    currentMonthKey,
+    todayIso,
+    monthEnquiries,
+    monthReceivedCount,
+    monthConvertedCount,
+    monthConversionPct,
+    monthOpenCount,
+    monthInContactCount,
+    monthUnassignedCount,
+    monthDeclinedCount,
+    monthReferredCount,
+    monthNoResponseCount,
+    callbacksDueTodayCount,
+    overdueCallbacksCount,
+    slaEvaluatedCount,
+    slaMetCount,
+    slaMetPct,
+    overdueSlaCount,
+  };
+}
 

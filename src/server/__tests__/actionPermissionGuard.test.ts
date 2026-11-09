@@ -368,10 +368,10 @@ describe('S0-02: server action and API route permission guard (ADR 0025)', () =>
     const gapEntries = [
       ...Object.entries(ACTION_PERMISSIONS),
       ...Object.entries(ROUTE_PERMISSIONS),
-    ].filter(([, policy]) => policy.kind === 'gap');
+    ].filter(([, policy]) => (policy as { kind: string }).kind === 'gap');
 
     expect(gapEntries.length).toBe(MAX_KNOWN_GAPS);
-    expect(MAX_KNOWN_GAPS).toBe(3);
+    expect(MAX_KNOWN_GAPS).toBe(0);
   });
 
   it('catches an unlisted action, a mismatched guardedAction name, a 3rd policyOverride argument, an unregistered permission key, a missing reason, or a gap count breach on fixture strings', () => {

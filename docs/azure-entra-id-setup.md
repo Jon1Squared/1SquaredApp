@@ -127,14 +127,14 @@ Per Platform Architecture Standard Rule 5, **never** store client secrets in cod
    - If using a Client Secret during initial setup: Click **+ New client secret**, copy the **Value** immediately, and store it in your tenant/environment Azure Key Vault (`kv-<tenantSlug>-<environment>`, provisioned by [`core/infra/main.bicep`](../core/infra/main.bicep)):
      ```powershell
      az keyvault secret set `
-       --vault-name "kv-not-a-law-firm-dev" `
+       --vault-name "kv-notalawfirm-dev" `
        --name "entra-oidc-client-secret" `
        --value "<paste-secret-value>"
      ```
 2. Configure the runtime environment variables in your Azure App Service / Container App (referencing Key Vault via `@Microsoft.KeyVault(SecretUri=...)`):
    - `ENTRA_TENANT_ID`: `<Directory (tenant) GUID>`
    - `ENTRA_CLIENT_ID`: `<Application (client) GUID>`
-   - `ENTRA_CLIENT_SECRET`: `@Microsoft.KeyVault(VaultName=kv-not-a-law-firm-dev;SecretName=entra-oidc-client-secret)`
+   - `ENTRA_CLIENT_SECRET`: `@Microsoft.KeyVault(VaultName=kv-notalawfirm-dev;SecretName=entra-oidc-client-secret)`
    - `PLATFORM_ENVIRONMENT`: `dev` (or `test` | `training` | `live`)
    - `PLATFORM_HOSTING_MODE`: `single_tenant` or `multi_tenant`
 

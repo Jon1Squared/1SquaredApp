@@ -9,6 +9,7 @@
   'dev'
   'test'
   'training'
+  'demo'
   'live'
 ])
 param environment string = 'dev'

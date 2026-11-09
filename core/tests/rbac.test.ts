@@ -78,7 +78,9 @@ import {
   dismissDuplicateMatch,
   executeMerge,
   getAppSnapshot,
+  getClientPmsViewBundle,
   getEmployeeDetailsForUser,
+  getMatterPmsViewBundle,
   linkPmsRecord,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
@@ -113,7 +115,19 @@ import {
   flushDocumentLifecycleSyncForTesting,
   retryMatterDocumentProvisioning,
 } from '../../src/server/documentStoreServices';
-import { clearStoreMemoryCache, getStore } from '../../src/server/store';
+import {
+  getFirmFinance,
+  getMatterFinanceRows,
+  getMyFinanceFigures,
+} from '../../src/server/financeServices';
+import {
+  buildFeeEarnerWeeklyTime,
+  buildFirmFinanceRollups,
+  canUserViewFinance,
+} from '../../src/domain/pms';
+import { getPmsSource } from '../../src/pms/pmsSource';
+import { attentionList } from '../../src/domain/attention';
+import { clearStoreMemoryCache, getStore, resetStore } from '../../src/server/store';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -134,10 +148,13 @@ import {
   createRecordFromPmsAction,
   deleteMatterPartyCapacityAction,
   deleteMatterPartyRelationshipAction,
+  flagMatterWriteOffAction,
   linkPmsRecordAction,
   prepareEnquiryConversionAction,
   prepareQuoteConversionAction,
+  recordInvoiceCreditControlActionAction,
   reorderChoiceValueAction,
+  requestMatterBillAction,
   reorderCustomFieldAction,
   reorderMatterPartyRelationshipAction,
   rerunAutomaticPmsMatchingAction,
@@ -1283,6 +1300,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('enforces R52, R53, R54, R55, R60, R61, R62, R63, R70 and R71 security invariants', async () => {
+      resetStore();
       resetAllDemoData('P-000001');
 
       // R52: resolveOrProvisionEntraEmployee with roles: [] creates a person without admin and without admin:access
@@ -2329,18 +2347,45 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(isActionDenied(liveReset)).toBe(true);
           if (isActionDenied(liveReset)) {
             expect(liveReset.code).toBe('FORBIDDEN');
+            expect(liveReset.message).toBe(
+              'Demo data reset is disabled in the live environment.',
+            );
           }
           const liveClear = await clearAllDataAction();
           expect(isActionDenied(liveClear)).toBe(true);
           if (isActionDenied(liveClear)) {
             expect(liveClear.code).toBe('FORBIDDEN');
+            expect(liveClear.message).toBe(
+              'Clearing all data is disabled in the live environment.',
+            );
           }
         } finally {
           process.env.PLATFORM_ENVIRONMENT = prevEnv;
           setActiveTenantConfigForTesting(null);
         }
 
-        // Admin with MFA in test environment succeeds and writes data-reset / data-cleared audit entries with actor name & ID
+        // Non-live environment with enableDemoMode=false is also denied with its own reason
+        const flagOffReset = await resetDemoDataAction();
+        expect(isActionDenied(flagOffReset)).toBe(true);
+        if (isActionDenied(flagOffReset)) {
+          expect(flagOffReset.code).toBe('FORBIDDEN');
+          expect(flagOffReset.message).toBe(
+            'Demo data reset is disabled when enableDemoMode is false.',
+          );
+        }
+        const flagOffClear = await clearAllDataAction();
+        expect(isActionDenied(flagOffClear)).toBe(true);
+        if (isActionDenied(flagOffClear)) {
+          expect(flagOffClear.code).toBe('FORBIDDEN');
+          expect(flagOffClear.message).toBe(
+            'Clearing all data is disabled when enableDemoMode is false.',
+          );
+        }
+
+        // Admin with MFA in test environment with enableDemoMode=true succeeds and writes data-reset / data-cleared audit entries with actor name & ID
+        setActiveTenantConfigForTesting(null, {
+          featureFlags: { enableDemoMode: true },
+        });
         const okReset = await resetDemoDataAction();
         expect(isActionDenied(okReset)).toBe(false);
         const storeAfterReset = getStore();
@@ -5870,6 +5915,901 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           }),
         );
         expect(orgEditRedirect).toContain(`/organisations/${sOrg.id}/edit`);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        resetAllDemoData('P-000001');
+      }
+    });
+  });
+
+  describe('Slice S0-10: Finance data delivery and credit-control permission gating (ADR 0029)', () => {
+    const REMOVED_SNAPSHOT_FINANCE_KEYS = [
+      'canViewFinance',
+      'pmsExtractInfo',
+      'pmsLinks',
+      'pmsSummaryByMatterId',
+      'pmsSummaryByClientId',
+      'allMatterFins',
+      'allClientFins',
+      'allFeeEarnerPerformance',
+      'myFeeEarnerFigures',
+      'myWeeklyTime',
+      'pmsAgedDebt',
+      'pmsInvoices',
+      'pmsMonthlyFeesBilled',
+      'pmsCashReceived',
+      'pmsDepartmentFinancials',
+      'pmsAllDisbursements',
+      'pmsClientAccountByMatterCode',
+    ] as const;
+
+    it('1. getAppSnapshot for any role contains none of the removed finance fields and exposes capabilities only', () => {
+      resetAllDemoData('P-000001');
+      const roleTestUsers = [
+        {
+          id: 'P-000001',
+          expected: { canViewFirm: true, canViewMatter: true, canCreditControl: true },
+        },
+        {
+          id: 'P-000002',
+          expected: { canViewFirm: false, canViewMatter: true, canCreditControl: false },
+        },
+        {
+          id: 'P-000004',
+          expected: { canViewFirm: true, canViewMatter: true, canCreditControl: true },
+        },
+        {
+          id: 'P-000006',
+          expected: { canViewFirm: false, canViewMatter: true, canCreditControl: false },
+        },
+        {
+          id: 'P-000009',
+          expected: { canViewFirm: true, canViewMatter: true, canCreditControl: true },
+        },
+        {
+          id: 'P-000010',
+          expected: { canViewFirm: false, canViewMatter: false, canCreditControl: false },
+        },
+      ];
+
+      for (const { id, expected } of roleTestUsers) {
+        const snap = getAppSnapshot(id);
+        for (const removedKey of REMOVED_SNAPSHOT_FINANCE_KEYS) {
+          expect(
+            removedKey in (snap as unknown as Record<string, unknown>),
+            `Expected ${removedKey} to be absent from getAppSnapshot(${id})`,
+          ).toBe(false);
+        }
+        expect(snap.finance).toEqual(expected);
+      }
+
+      // Verify leftRailVisibility does not widen finance capabilities for a risk/compliance user without finance permissions
+      const store = getStore();
+      const riskPerson = store.people.find((p) => p.id === 'P-000003')!;
+      riskPerson.permissionOverrides = {
+        grant: ['risk:view'],
+        revoke: ['finance:view', 'finance:view_matter', 'finance:credit_control'],
+      };
+      const riskSnap = getAppSnapshot('P-000003');
+      expect(riskSnap.finance).toEqual({
+        canViewFirm: false,
+        canViewMatter: false,
+        canCreditControl: false,
+      });
+    });
+
+    it('2. canUserViewFinance(null) is false and attentionList hides PMS financial alerts by default or without capability', () => {
+      resetAllDemoData('P-000001');
+      const snap = getAppSnapshot('P-000001');
+      expect(canUserViewFinance(null, snap.teams, snap.values)).toBe(false);
+      expect(canUserViewFinance(undefined, snap.teams, snap.values)).toBe(false);
+
+      const rowsRes = getMatterFinanceRows('P-000001');
+      expect(isActionDenied(rowsRes)).toBe(false);
+      if (isActionDenied(rowsRes)) return;
+
+      const allRecords = [...snap.people, ...snap.organisations];
+      const today = new Date('2026-10-16T10:00:00Z');
+      const itemsDefault = attentionList(allRecords, snap.values, today, {
+        tasks: snap.tasks,
+        enquiries: snap.enquiries,
+        teams: snap.teams,
+        matters: snap.matters,
+        pmsSummaryByMatterId: rowsRes.pmsSummaryByMatterId,
+      });
+      expect(itemsDefault.some((i) => i.kind.startsWith('pms_'))).toBe(false);
+
+      // Support staff / enquiries coordinator snapshot attention list has no PMS financial alerts
+      const supportSnap = getAppSnapshot('P-000010');
+      expect(
+        supportSnap.attention.some((i) => i.kind.startsWith('pms_')),
+      ).toBe(false);
+    });
+
+    it('3. each finance loader returns FORBIDDEN when its permission key is removed and returns data when granted, and fee earner gets FORBIDDEN from getFirmFinance', () => {
+      resetAllDemoData('P-000001');
+      try {
+        const store = getStore();
+        const partner = store.people.find((p) => p.id === 'P-000001')!;
+
+        // Positive controls with partner (holds finance:view_matter and finance:view)
+        const okRows = getMatterFinanceRows('P-000001');
+        expect(isActionDenied(okRows)).toBe(false);
+        if (!isActionDenied(okRows)) {
+          expect(okRows.allMatterFins.length).toBeGreaterThan(0);
+        }
+
+        const okMine = getMyFinanceFigures('P-000001');
+        expect(isActionDenied(okMine)).toBe(false);
+        if (!isActionDenied(okMine)) {
+          expect(okMine.myFeeEarnerFigures).not.toBeNull();
+        }
+
+        const okFirm = getFirmFinance('P-000001');
+        expect(isActionDenied(okFirm)).toBe(false);
+        if (!isActionDenied(okFirm)) {
+          expect(okFirm.allFeeEarnerPerformance.length).toBeGreaterThan(0);
+        }
+
+        const okMatterBundle = getMatterPmsViewBundle('M-000001', 'P-000001');
+        expect(isActionDenied(okMatterBundle)).toBe(false);
+
+        const okClientBundle = getClientPmsViewBundle('organisation', 'O-000001', 'P-000001');
+        expect(isActionDenied(okClientBundle)).toBe(false);
+
+        // Revoke finance:view_matter on partner and assert FORBIDDEN on the 4 matter-level loaders
+        partner.permissionOverrides = {
+          grant: [],
+          revoke: ['finance:view_matter'],
+        };
+
+        const deniedRows = getMatterFinanceRows('P-000001');
+        expect(isActionDenied(deniedRows)).toBe(true);
+        if (isActionDenied(deniedRows)) {
+          expect(deniedRows.code).toBe('FORBIDDEN');
+          expect(deniedRows.message).toContain('finance:view_matter');
+        }
+
+        const deniedMine = getMyFinanceFigures('P-000001');
+        expect(isActionDenied(deniedMine)).toBe(true);
+        if (isActionDenied(deniedMine)) {
+          expect(deniedMine.code).toBe('FORBIDDEN');
+          expect(deniedMine.message).toContain('finance:view_matter');
+        }
+
+        const deniedMatterBundle = getMatterPmsViewBundle('M-000001', 'P-000001');
+        expect(isActionDenied(deniedMatterBundle)).toBe(true);
+        if (isActionDenied(deniedMatterBundle)) {
+          expect(deniedMatterBundle.code).toBe('FORBIDDEN');
+          expect(deniedMatterBundle.message).toContain('finance:view_matter');
+        }
+
+        const deniedClientBundle = getClientPmsViewBundle('organisation', 'O-000001', 'P-000001');
+        expect(isActionDenied(deniedClientBundle)).toBe(true);
+        if (isActionDenied(deniedClientBundle)) {
+          expect(deniedClientBundle.code).toBe('FORBIDDEN');
+          expect(deniedClientBundle.message).toContain('finance:view_matter');
+        }
+
+        // Revoke finance:view on partner and assert FORBIDDEN on getFirmFinance
+        partner.permissionOverrides = {
+          grant: [],
+          revoke: ['finance:view'],
+        };
+        const deniedFirm = getFirmFinance('P-000001');
+        expect(isActionDenied(deniedFirm)).toBe(true);
+        if (isActionDenied(deniedFirm)) {
+          expect(deniedFirm.code).toBe('FORBIDDEN');
+          expect(deniedFirm.message).toContain('finance:view');
+        }
+
+        partner.permissionOverrides = undefined;
+
+        // Fee earner (P-000002, holds finance:view_matter only) gets own figures and matter rows, and FORBIDDEN from getFirmFinance
+        const feRows = getMatterFinanceRows('P-000002');
+        expect(isActionDenied(feRows)).toBe(false);
+        if (!isActionDenied(feRows)) {
+          expect(feRows.allMatterFins.length).toBeGreaterThan(0);
+        }
+
+        const feMine = getMyFinanceFigures('P-000002');
+        expect(isActionDenied(feMine)).toBe(false);
+        if (!isActionDenied(feMine)) {
+          expect(feMine.myFeeEarnerFigures?.fee_earner_id).toBe('FE005');
+          expect(feMine.myWeeklyTime?.feeEarnerId).toBe('FE005');
+        }
+
+        const feFirm = getFirmFinance('P-000002');
+        expect(isActionDenied(feFirm)).toBe(true);
+        if (isActionDenied(feFirm)) {
+          expect(feFirm.code).toBe('FORBIDDEN');
+          expect(feFirm.message).toContain('finance:view');
+        }
+
+        // R314: Unlinked PMS matters fail closed on all 4 matter-level loaders, while getFirmFinance includes them, and allUnlinkedPmsMatters requires finance:manage_links
+        const pms = getPmsSource();
+        const linkedMatterCodes = new Set(
+          store.pmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
+        );
+        const unlinkedMatterCodes = pms
+          .listMatters()
+          .map((m) => m.matter_code)
+          .filter((c) => !linkedMatterCodes.has(c));
+        expect(unlinkedMatterCodes.length).toBe(9);
+        expect(unlinkedMatterCodes).toContain('BRI001-0002');
+        expect(unlinkedMatterCodes).toContain('SEV001-0002');
+
+        if (!isActionDenied(feRows)) {
+          for (const unlinkedCode of unlinkedMatterCodes) {
+            expect(feRows.allMatterFins.some((m) => m.matter_code === unlinkedCode)).toBe(
+              false,
+            );
+            expect(feRows.pmsAgedDebt.some((i) => i.matter_code === unlinkedCode)).toBe(
+              false,
+            );
+            expect(feRows.pmsInvoices.some((i) => i.matter_code === unlinkedCode)).toBe(
+              false,
+            );
+            expect(
+              feRows.pmsAllDisbursements.some((d) => d.matter_code === unlinkedCode),
+            ).toBe(false);
+            expect(unlinkedCode in feRows.pmsClientAccountByMatterCode).toBe(false);
+          }
+        }
+
+        // Unlink PEN001-0001 (M-000001, where FE005 has 7.0h Oct time and £3,010 unbilled WIP across Sept+Oct) and verify getMyFinanceFigures excludes it
+        const penLinkIdx = store.pmsLinks.findIndex(
+          (l) => l.entityType === 'matter' && l.pmsCode === 'PEN001-0001',
+        );
+        expect(penLinkIdx).toBeGreaterThanOrEqual(0);
+        const [removedPenLink] = store.pmsLinks.splice(penLinkIdx, 1);
+        const feMineWithoutPen = getMyFinanceFigures('P-000002');
+        store.pmsLinks.splice(penLinkIdx, 0, removedPenLink!);
+        expect(isActionDenied(feMineWithoutPen)).toBe(false);
+        if (!isActionDenied(feMine) && !isActionDenied(feMineWithoutPen)) {
+          expect(
+            Math.round(
+              ((feMine.myFeeEarnerFigures?.chargeable_hours_this_month ?? 0) -
+                (feMineWithoutPen.myFeeEarnerFigures?.chargeable_hours_this_month ?? 0)) *
+                10,
+            ) / 10,
+          ).toBe(7.0);
+          expect(
+            Math.round(
+              ((feMine.myFeeEarnerFigures?.unbilled_wip ?? 0) -
+                (feMineWithoutPen.myFeeEarnerFigures?.unbilled_wip ?? 0)) *
+                100,
+            ) / 100,
+          ).toBe(3010);
+        }
+
+        // getClientPmsViewBundle for O-000005 (SEV001) excludes unlinked SEV001-0002 for a finance:view_matter user
+        const feClientBundle = getClientPmsViewBundle(
+          'organisation',
+          'O-000005',
+          'P-000002',
+        );
+        expect(isActionDenied(feClientBundle)).toBe(false);
+        if (!isActionDenied(feClientBundle)) {
+          expect(
+            feClientBundle.clientBundle?.matters.map((m) => m.matter_code),
+          ).toEqual(['SEV001-0001']);
+          expect(
+            feClientBundle.clientBundle?.invoices.some(
+              (inv) => inv.matter_code === 'SEV001-0002',
+            ),
+          ).toBe(false);
+        }
+
+        // getMatterPmsViewBundle on unlinked M-000002: allUnlinkedPmsMatters is empty without finance:manage_links and populated with finance:manage_links
+        const feMatterBundle = getMatterPmsViewBundle('M-000002', 'P-000002');
+        expect(isActionDenied(feMatterBundle)).toBe(false);
+        if (!isActionDenied(feMatterBundle)) {
+          expect(feMatterBundle.matterBundle).toBeNull();
+          expect(feMatterBundle.allUnlinkedPmsMatters).toEqual([]);
+          expect(feMatterBundle.unlinkedPmsMattersForClient).toEqual([]);
+        }
+        const partnerMatterBundle = getMatterPmsViewBundle('M-000002', 'P-000001');
+        expect(isActionDenied(partnerMatterBundle)).toBe(false);
+        if (!isActionDenied(partnerMatterBundle)) {
+          expect(partnerMatterBundle.allUnlinkedPmsMatters).toEqual([]);
+          expect(partnerMatterBundle.unlinkedPmsMattersForClient).toEqual([]);
+        }
+        const adminMatterBundle = getMatterPmsViewBundle('M-000002', 'P-000004');
+        expect(isActionDenied(adminMatterBundle)).toBe(false);
+        if (!isActionDenied(adminMatterBundle)) {
+          expect(adminMatterBundle.allUnlinkedPmsMatters.length).toBe(9);
+        }
+
+        // getFirmFinance (finance:view) includes unlinked PMS rows in firm totals (£181,673.48)
+        if (!isActionDenied(okFirm)) {
+          expect(okFirm.pmsMonthlyFeesBilled.yearToDateTotal).toBe(181673.48);
+        }
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('4. restricted matters (1 staff matter and 1 ethical-wall matter in PMS) are excluded from every firm, client, and fee-earner rollup total with exact row-sum deltas', () => {
+      resetAllDemoData('P-000001');
+      try {
+        const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+        const round1 = (n: number) => Math.round((n + Number.EPSILON) * 10) / 10;
+        const store = getStore();
+        const pms = getPmsSource();
+        const extractInfo = pms.getExtractInfo();
+
+        // BAY001-0001 (M-000014, Bay Cafés Ltd): mark as staff matter restricted to P-000001
+        // (has billed=2750, wip=0, paid=0, debt=3300, overdueDebt=3300 in 90+ bucket)
+        const staffMatter = store.matters.find((m) => m.matterNumber === 'BAY001-0001')!;
+        staffMatter.isStaffMatter = true;
+        staffMatter.restrictedAccessUserIds = ['P-000001'];
+        staffMatter.leadFeeEarnerId = 'P-000001';
+        staffMatter.responsiblePartnerId = 'P-000001';
+        staffMatter.supervisingPartnerId = 'P-000001';
+        staffMatter.teamMemberIds = [];
+
+        // BRI001-0003 (M-000010, Acquisition of Afon Care Homes Ltd, Brightwater Care Group Ltd):
+        // mark as ethical-wall matter restricted to P-000001 and P-000004 (has billed=41842, wip=11057, paid=29793, debt=22637.40 in Not yet due, octHours=41.5 including 24.1h / £8,194 WIP by FE002 P-000004)
+        const wallMatter = store.matters.find(
+          (m) => m.matterNumber === 'BRI001-0003' && m.title.includes('Afon Care'),
+        )!;
+        wallMatter.hasEthicalWall = true;
+        wallMatter.restrictedAccessUserIds = ['P-000001', 'P-000004'];
+        wallMatter.leadFeeEarnerId = 'P-000001';
+        wallMatter.responsiblePartnerId = 'P-000001';
+        wallMatter.supervisingPartnerId = 'P-000001';
+        wallMatter.teamMemberIds = [];
+
+        // Allow-listed user: P-000001 (Partner, holds finance:view & finance:view_matter, and is on both allow-lists)
+        // Outsider user: P-000009 (Gethin Powell, Finance Manager, holds finance:view & finance:view_matter, on neither allow-list)
+        const allowFirm = getFirmFinance('P-000001');
+        const outsiderFirm = getFirmFinance('P-000009');
+        expect(isActionDenied(allowFirm)).toBe(false);
+        expect(isActionDenied(outsiderFirm)).toBe(false);
+        if (isActionDenied(allowFirm) || isActionDenied(outsiderFirm)) return;
+
+        // 0. Assert allowFirm equals buildFirmFinanceRollups(rows, new Set())
+        const baselineRollups = buildFirmFinanceRollups(
+          {
+            asAtDate: extractInfo.asAtDate,
+            feeEarners: pms.listFeeEarners(),
+            clients: pms.listClients(),
+            matterFinancials: pms.getAllMatterFinancials(),
+            invoices: pms.listAllInvoiceBalances(),
+            timeEntries: pms.listAllTimeEntries(),
+            payments: pms.listAllPayments(),
+          },
+          new Set(),
+        );
+        expect(allowFirm.pmsMonthlyFeesBilled).toEqual(
+          baselineRollups.pmsMonthlyFeesBilled,
+        );
+        expect(allowFirm.pmsCashReceived).toEqual(baselineRollups.pmsCashReceived);
+        expect(allowFirm.pmsDepartmentFinancials).toEqual(
+          baselineRollups.pmsDepartmentFinancials,
+        );
+        expect(allowFirm.allFeeEarnerPerformance).toEqual(
+          baselineRollups.allFeeEarnerPerformance,
+        );
+        expect(allowFirm.allClientFins).toEqual(baselineRollups.allClientFins);
+
+        // Summed rows of the staff matter (BAY001-0001) and walled matter (BRI001-0003):
+        // Fees billed: 2750 + 41842 = 44592
+        // Unbilled WIP: 0 + 11057 = 11057
+        // Outstanding debt: 3300 + 22637.40 = 25937.40
+        // Overdue debt: 3300 + 0 = 3300
+        // Current-month (Oct) chargeable hours: 0 + 41.5 = 41.5
+        // Previous-month (Sep) cash receipts: 0 + 29793 = 29793 (1 receipt)
+
+        // 1. Monthly fees billed: allowed - outsider === 44592
+        expect(
+          round2(
+            allowFirm.pmsMonthlyFeesBilled.yearToDateTotal -
+              outsiderFirm.pmsMonthlyFeesBilled.yearToDateTotal,
+          ),
+        ).toBe(44592);
+
+        // 2. Cash received: allowed - outsider equals exact payments on restricted matters
+        expect(
+          round2(
+            allowFirm.pmsCashReceived.previousMonthTotal -
+              outsiderFirm.pmsCashReceived.previousMonthTotal,
+          ),
+        ).toBe(29793);
+        expect(
+          allowFirm.pmsCashReceived.previousMonthReceiptCount -
+            outsiderFirm.pmsCashReceived.previousMonthReceiptCount,
+        ).toBe(1);
+
+        // 3. Fee-earner performance: chargeable hours, current-month hours, time value, and WIP deltas
+        const allowTotalMonthHours = round1(
+          allowFirm.allFeeEarnerPerformance.reduce(
+            (s, f) => s + f.chargeable_hours_this_month,
+            0,
+          ),
+        );
+        const outsiderTotalMonthHours = round1(
+          outsiderFirm.allFeeEarnerPerformance.reduce(
+            (s, f) => s + f.chargeable_hours_this_month,
+            0,
+          ),
+        );
+        expect(round1(allowTotalMonthHours - outsiderTotalMonthHours)).toBe(41.5);
+
+        const allowTotalWip = round2(
+          allowFirm.allFeeEarnerPerformance.reduce((s, f) => s + f.unbilled_wip, 0),
+        );
+        const outsiderTotalWip = round2(
+          outsiderFirm.allFeeEarnerPerformance.reduce((s, f) => s + f.unbilled_wip, 0),
+        );
+        expect(round2(allowTotalWip - outsiderTotalWip)).toBe(11057);
+
+        // 4. Department financials & firmTotal: exact deltas for billed, WIP, debt, overdueDebt, and currentMonthHours
+        expect(
+          round2(
+            allowFirm.pmsDepartmentFinancials.firmTotal.billedThisYear -
+              outsiderFirm.pmsDepartmentFinancials.firmTotal.billedThisYear,
+          ),
+        ).toBe(44592);
+        expect(
+          round2(
+            allowFirm.pmsDepartmentFinancials.firmTotal.unbilledWip -
+              outsiderFirm.pmsDepartmentFinancials.firmTotal.unbilledWip,
+          ),
+        ).toBe(11057);
+        expect(
+          round2(
+            allowFirm.pmsDepartmentFinancials.firmTotal.outstandingDebt -
+              outsiderFirm.pmsDepartmentFinancials.firmTotal.outstandingDebt,
+          ),
+        ).toBe(25937.4);
+        expect(
+          round2(
+            allowFirm.pmsDepartmentFinancials.firmTotal.overdueDebt -
+              outsiderFirm.pmsDepartmentFinancials.firmTotal.overdueDebt,
+          ),
+        ).toBe(3300);
+        expect(
+          round1(
+            allowFirm.pmsDepartmentFinancials.firmTotal.currentMonthHours -
+              outsiderFirm.pmsDepartmentFinancials.firmTotal.currentMonthHours,
+          ),
+        ).toBe(41.5);
+
+        const allowPropDept = allowFirm.pmsDepartmentFinancials.departments.find(
+          (d) => d.practiceArea === 'Real Estate & Property',
+        )!;
+        const outsiderPropDept = outsiderFirm.pmsDepartmentFinancials.departments.find(
+          (d) => d.practiceArea === 'Real Estate & Property',
+        )!;
+        expect(round2(allowPropDept.overdueDebt - outsiderPropDept.overdueDebt)).toBe(
+          3300,
+        );
+
+        const allowCorpDept = allowFirm.pmsDepartmentFinancials.departments.find(
+          (d) => d.practiceArea === 'Corporate & Commercial',
+        )!;
+        const outsiderCorpDept = outsiderFirm.pmsDepartmentFinancials.departments.find(
+          (d) => d.practiceArea === 'Corporate & Commercial',
+        )!;
+        expect(
+          round1(allowCorpDept.currentMonthHours - outsiderCorpDept.currentMonthHours),
+        ).toBe(41.5);
+
+        // 5. Client financials (allClientFins): exact aged buckets and per-client cash (total_paid)
+        const allowBay = allowFirm.allClientFins.find((c) => c.client_code === 'BAY001')!;
+        const outsiderBay = outsiderFirm.allClientFins.find(
+          (c) => c.client_code === 'BAY001',
+        )!;
+        expect(round2(allowBay.fees_billed - outsiderBay.fees_billed)).toBe(2750);
+        expect(round2(allowBay.unbilled_wip - outsiderBay.unbilled_wip)).toBe(0);
+        expect(round2(allowBay.total_paid - outsiderBay.total_paid)).toBe(0);
+        expect(round2(allowBay.outstanding_debt - outsiderBay.outstanding_debt)).toBe(
+          3300,
+        );
+        expect(round2(allowBay.aged_not_yet_due - outsiderBay.aged_not_yet_due)).toBe(0);
+        expect(round2(allowBay.aged_1_30 - outsiderBay.aged_1_30)).toBe(0);
+        expect(round2(allowBay.aged_31_60 - outsiderBay.aged_31_60)).toBe(0);
+        expect(round2(allowBay.aged_61_90 - outsiderBay.aged_61_90)).toBe(0);
+        expect(round2(allowBay.aged_90_plus - outsiderBay.aged_90_plus)).toBe(3300);
+
+        const allowBri = allowFirm.allClientFins.find((c) => c.client_code === 'BRI001')!;
+        const outsiderBri = outsiderFirm.allClientFins.find(
+          (c) => c.client_code === 'BRI001',
+        )!;
+        expect(round2(allowBri.fees_billed - outsiderBri.fees_billed)).toBe(41842);
+        expect(round2(allowBri.unbilled_wip - outsiderBri.unbilled_wip)).toBe(11057);
+        expect(round2(allowBri.total_paid - outsiderBri.total_paid)).toBe(29793);
+        expect(round2(allowBri.outstanding_debt - outsiderBri.outstanding_debt)).toBe(
+          22637.4,
+        );
+        expect(round2(allowBri.aged_not_yet_due - outsiderBri.aged_not_yet_due)).toBe(
+          22637.4,
+        );
+        expect(round2(allowBri.aged_1_30 - outsiderBri.aged_1_30)).toBe(0);
+
+        // 6. Organisation profile client bundles (Bay Cafés Ltd and Brightwater Care Group Ltd)
+        const allowBayOrgView = getClientPmsViewBundle(
+          'organisation',
+          staffMatter.clientId,
+          'P-000001',
+        );
+        const outsiderBayOrgView = getClientPmsViewBundle(
+          'organisation',
+          staffMatter.clientId,
+          'P-000009',
+        );
+        expect(isActionDenied(allowBayOrgView)).toBe(false);
+        expect(isActionDenied(outsiderBayOrgView)).toBe(false);
+        if (isActionDenied(allowBayOrgView) || isActionDenied(outsiderBayOrgView)) return;
+        expect(
+          round2(
+            allowBayOrgView.clientBundle!.summary.fees_billed -
+              outsiderBayOrgView.clientBundle!.summary.fees_billed,
+          ),
+        ).toBe(2750);
+        expect(
+          round2(
+            allowBayOrgView.clientBundle!.summary.aged_90_plus -
+              outsiderBayOrgView.clientBundle!.summary.aged_90_plus,
+          ),
+        ).toBe(3300);
+
+        const allowBriOrgView = getClientPmsViewBundle(
+          'organisation',
+          wallMatter.clientId,
+          'P-000001',
+        );
+        const outsiderBriOrgView = getClientPmsViewBundle(
+          'organisation',
+          wallMatter.clientId,
+          'P-000009',
+        );
+        expect(isActionDenied(allowBriOrgView)).toBe(false);
+        expect(isActionDenied(outsiderBriOrgView)).toBe(false);
+        if (isActionDenied(allowBriOrgView) || isActionDenied(outsiderBriOrgView)) return;
+        expect(
+          round2(
+            allowBriOrgView.clientBundle!.summary.total_paid -
+              outsiderBriOrgView.clientBundle!.summary.total_paid,
+          ),
+        ).toBe(29793);
+        expect(
+          round2(
+            allowBriOrgView.clientBundle!.summary.aged_not_yet_due -
+              outsiderBriOrgView.clientBundle!.summary.aged_not_yet_due,
+          ),
+        ).toBe(22637.4);
+
+        // 7. getMyFinanceFigures and buildFeeEarnerWeeklyTime exclusion for FE002 (P-000038, Gethin Lloyd)
+        const fe002Person = store.people.find((p) => p.id === 'P-000038')!;
+        fe002Person.roles = ['partner', 'fee_earner'];
+        wallMatter.restrictedAccessUserIds = ['P-000001', 'P-000038'];
+        const allowMy = getMyFinanceFigures('P-000038');
+        wallMatter.leadFeeEarnerId = 'P-000001';
+        wallMatter.restrictedAccessUserIds = ['P-000001'];
+        const outsiderMy = getMyFinanceFigures('P-000038');
+        expect(isActionDenied(allowMy)).toBe(false);
+        expect(isActionDenied(outsiderMy)).toBe(false);
+        if (!isActionDenied(allowMy) && !isActionDenied(outsiderMy)) {
+          expect(
+            round1(
+              (allowMy.myFeeEarnerFigures?.chargeable_hours_this_month ?? 0) -
+                (outsiderMy.myFeeEarnerFigures?.chargeable_hours_this_month ?? 0),
+            ),
+          ).toBe(24.1);
+          expect(
+            round2(
+              (allowMy.myFeeEarnerFigures?.unbilled_wip ?? 0) -
+                (outsiderMy.myFeeEarnerFigures?.unbilled_wip ?? 0),
+            ),
+          ).toBe(8194);
+          expect(
+            round1(
+              (allowMy.myWeeklyTime?.weekTotalHours ?? 0) -
+                (outsiderMy.myWeeklyTime?.weekTotalHours ?? 0),
+            ),
+          ).toBe(9.8);
+          expect(
+            round1(
+              (allowMy.myWeeklyTime?.monthToDateHours ?? 0) -
+                (outsiderMy.myWeeklyTime?.monthToDateHours ?? 0),
+            ),
+          ).toBe(24.1);
+          expect(
+            round2(
+              (allowMy.myWeeklyTime?.myUnbilledWip ?? 0) -
+                (outsiderMy.myWeeklyTime?.myUnbilledWip ?? 0),
+            ),
+          ).toBe(8194);
+        }
+
+        // Direct buildFeeEarnerWeeklyTime check for FE002 with and without BRI001-0003 excluded
+        const fe2 = pms.listFeeEarners().find((fe) => fe.fee_earner_id === 'FE002')!;
+        const allTe = pms.listAllTimeEntries();
+        const weekAllowed = buildFeeEarnerWeeklyTime({
+          feeEarner: fe2,
+          timeEntries: allTe,
+          asAtDate: extractInfo.asAtDate,
+        })!;
+        const weekOutsider = buildFeeEarnerWeeklyTime({
+          feeEarner: fe2,
+          timeEntries: allTe.filter((t) => t.matter_code !== 'BRI001-0003'),
+          asAtDate: extractInfo.asAtDate,
+        })!;
+        expect(round1(weekAllowed.weekTotalHours - weekOutsider.weekTotalHours)).toBe(9.8);
+        expect(
+          round1(weekAllowed.monthToDateHours - weekOutsider.monthToDateHours),
+        ).toBe(24.1);
+        expect(round2(weekAllowed.myUnbilledWip - weekOutsider.myUnbilledWip)).toBe(8194);
+
+        // 8. getMatterFinanceRows(actor, [restrictedMatter.id]) for an outsider returns FORBIDDEN
+        const deniedRestrictedRows = getMatterFinanceRows('P-000009', [staffMatter.id]);
+        expect(isActionDenied(deniedRestrictedRows)).toBe(true);
+        if (isActionDenied(deniedRestrictedRows)) {
+          expect(deniedRestrictedRows.code).toBe('FORBIDDEN');
+          expect(deniedRestrictedRows.message).toBe('Matter not found or access denied.');
+        }
+        const deniedWallRows = getMatterFinanceRows('P-000009', [wallMatter.id]);
+        expect(isActionDenied(deniedWallRows)).toBe(true);
+        if (isActionDenied(deniedWallRows)) {
+          expect(deniedWallRows.code).toBe('FORBIDDEN');
+          expect(deniedWallRows.message).toBe('Matter not found or access denied.');
+        }
+      } finally {
+        resetAllDemoData('P-000001');
+      }
+    });
+
+    it('5. the three credit-control actions are denied without finance:credit_control, denied on an inaccessible matter, and allowed otherwise', async () => {
+      resetAllDemoData('P-000001');
+      try {
+        const store = getStore();
+        const partner = store.people.find((p) => p.id === 'P-000001')!;
+
+        setTestEntraSessionOverride({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '00000000-0000-4000-8000-000000000099',
+          sub: '00000000-0000-4000-8000-000000000001',
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: [],
+          mappedRoles: ['partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        });
+
+        // 1. Positive control: partner with finance:credit_control and access to HAR001-0003 (M-000013) succeeds
+        const okBill = await requestMatterBillAction('HAR001-0003');
+        expect(isActionDenied(okBill)).toBe(false);
+        if (!isActionDenied(okBill)) {
+          expect(okBill.ok).toBe(true);
+        }
+
+        const okWriteOff = await flagMatterWriteOffAction('HAR001-0003', 450);
+        expect(isActionDenied(okWriteOff)).toBe(false);
+        if (!isActionDenied(okWriteOff)) {
+          expect(okWriteOff.ok).toBe(true);
+        }
+
+        const okCc = await recordInvoiceCreditControlActionAction({
+          invoiceNumber: 'PV/2026/0040',
+          matterCode: 'HAR001-0003',
+          clientCode: 'HAR001',
+          actionType: 'log_call',
+          note: 'Spoke to AP team',
+        });
+        expect(isActionDenied(okCc)).toBe(false);
+        if (!isActionDenied(okCc)) {
+          expect(okCc.ok).toBe(true);
+        }
+
+        // 2. R315: Mismatched clientCode or invoiceNumber from another matter returns FORBIDDEN and writes no note or task
+        const notesBeforeR315 = store.notes.length;
+        const tasksBeforeR315 = store.tasks.length;
+        const mismatchedClientCc = await recordInvoiceCreditControlActionAction({
+          invoiceNumber: 'PV/2026/0040',
+          matterCode: 'HAR001-0003',
+          clientCode: 'SEV001',
+          actionType: 'log_call',
+          note: 'Attempted cross-client chase note',
+        });
+        expect(isActionDenied(mismatchedClientCc)).toBe(true);
+        if (isActionDenied(mismatchedClientCc)) {
+          expect(mismatchedClientCc.code).toBe('FORBIDDEN');
+          expect(mismatchedClientCc.message).toMatch(/Client code does not match/i);
+        }
+        expect(store.notes.length).toBe(notesBeforeR315);
+        expect(store.tasks.length).toBe(tasksBeforeR315);
+
+        const wrongMatterInvoiceCc = await recordInvoiceCreditControlActionAction({
+          invoiceNumber: 'PV/2026/0021', // belongs to BAY001-0001, not HAR001-0003
+          matterCode: 'HAR001-0003',
+          clientCode: 'HAR001',
+          actionType: 'log_call',
+          note: 'Attempted cross-matter invoice chase',
+        });
+        expect(isActionDenied(wrongMatterInvoiceCc)).toBe(true);
+        if (isActionDenied(wrongMatterInvoiceCc)) {
+          expect(wrongMatterInvoiceCc.code).toBe('FORBIDDEN');
+          expect(wrongMatterInvoiceCc.message).toMatch(
+            /Invoice does not belong to the specified matter/i,
+          );
+        }
+        expect(store.notes.length).toBe(notesBeforeR315);
+        expect(store.tasks.length).toBe(tasksBeforeR315);
+
+        // 2b. R337: An unlinked PMS code whose text equals the matterNumber of an accessible 1Squared matter returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note, and invalid amountGbp values are rejected
+        const harLinkIdx = store.pmsLinks.findIndex(
+          (l) => l.entityType === 'matter' && l.pmsCode === 'HAR001-0003',
+        );
+        expect(harLinkIdx).toBeGreaterThanOrEqual(0);
+        const [removedHarLink] = store.pmsLinks.splice(harLinkIdx, 1);
+        const signOffsBeforeR337 = (store.signOffs ?? []).length;
+        try {
+          const unlinkedBill = await requestMatterBillAction('HAR001-0003');
+          expect(isActionDenied(unlinkedBill)).toBe(true);
+          if (isActionDenied(unlinkedBill)) {
+            expect(unlinkedBill.code).toBe('FORBIDDEN');
+            expect(unlinkedBill.message).toBe('Matter not found or access denied.');
+          }
+
+          const unlinkedWriteOff = await flagMatterWriteOffAction('HAR001-0003', 450);
+          expect(isActionDenied(unlinkedWriteOff)).toBe(true);
+          if (isActionDenied(unlinkedWriteOff)) {
+            expect(unlinkedWriteOff.code).toBe('FORBIDDEN');
+            expect(unlinkedWriteOff.message).toBe('Matter not found or access denied.');
+          }
+
+          const unlinkedCc = await recordInvoiceCreditControlActionAction({
+            invoiceNumber: 'PV/2026/0040',
+            matterCode: 'HAR001-0003',
+            clientCode: 'HAR001',
+            actionType: 'log_call',
+            note: 'Should fail on unlinked matter',
+          });
+          expect(isActionDenied(unlinkedCc)).toBe(true);
+          if (isActionDenied(unlinkedCc)) {
+            expect(unlinkedCc.code).toBe('FORBIDDEN');
+            expect(unlinkedCc.message).toBe('Matter not found or access denied.');
+          }
+
+          expect(store.tasks.length).toBe(tasksBeforeR315);
+          expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+          expect(store.notes.length).toBe(notesBeforeR315);
+        } finally {
+          store.pmsLinks.splice(harLinkIdx, 0, removedHarLink!);
+        }
+
+        for (const invalidAmount of [0, -100, Number.NaN, Number.POSITIVE_INFINITY]) {
+          const badAmtRes = await flagMatterWriteOffAction('HAR001-0003', invalidAmount);
+          expect(isActionDenied(badAmtRes)).toBe(true);
+          if (isActionDenied(badAmtRes)) {
+            expect(badAmtRes.code).toBe('FORBIDDEN');
+            expect(badAmtRes.message).toMatch(/finite number greater than 0/i);
+          }
+        }
+        expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+
+        // 2c. R372: A linked matter code whose PMS matter is missing from the PMS database returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note
+        store.pmsLinks.push({
+          id: 'PMSL-R372-MISSING-PMS',
+          entityType: 'matter',
+          onesquaredId: 'M-000001',
+          pmsCode: 'MISSING999-0001',
+          matchedBy: 'manual',
+          matchedAt: '2026-10-16T09:00:00Z',
+          matchedByUserId: 'P-000004',
+        });
+        try {
+          const missingPmsBill = await requestMatterBillAction('MISSING999-0001');
+          expect(isActionDenied(missingPmsBill)).toBe(true);
+          if (isActionDenied(missingPmsBill)) {
+            expect(missingPmsBill.code).toBe('FORBIDDEN');
+            expect(missingPmsBill.message).toBe('Matter not found or access denied.');
+          }
+
+          const missingPmsWriteOff = await flagMatterWriteOffAction('MISSING999-0001', 450);
+          expect(isActionDenied(missingPmsWriteOff)).toBe(true);
+          if (isActionDenied(missingPmsWriteOff)) {
+            expect(missingPmsWriteOff.code).toBe('FORBIDDEN');
+            expect(missingPmsWriteOff.message).toBe('Matter not found or access denied.');
+          }
+
+          const missingPmsCc = await recordInvoiceCreditControlActionAction({
+            invoiceNumber: 'PV/2026/0040',
+            matterCode: 'MISSING999-0001',
+            clientCode: 'PEN001',
+            actionType: 'log_call',
+            note: 'Should fail when PMS matter does not exist',
+          });
+          expect(isActionDenied(missingPmsCc)).toBe(true);
+          if (isActionDenied(missingPmsCc)) {
+            expect(missingPmsCc.code).toBe('FORBIDDEN');
+            expect(missingPmsCc.message).toBe('Matter not found or access denied.');
+          }
+
+          expect(store.tasks.length).toBe(tasksBeforeR315);
+          expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+          expect(store.notes.length).toBe(notesBeforeR315);
+        } finally {
+          const idx = store.pmsLinks.findIndex((l) => l.id === 'PMSL-R372-MISSING-PMS');
+          if (idx >= 0) store.pmsLinks.splice(idx, 1);
+        }
+
+        // 3. Revoke finance:credit_control on partner: all 3 actions return FORBIDDEN mentioning finance:credit_control
+        partner.permissionOverrides = {
+          grant: [],
+          revoke: ['finance:credit_control'],
+        };
+
+        const noPermBill = await requestMatterBillAction('HAR001-0003');
+        expect(isActionDenied(noPermBill)).toBe(true);
+        if (isActionDenied(noPermBill)) {
+          expect(noPermBill.code).toBe('FORBIDDEN');
+          expect(noPermBill.message).toContain('finance:credit_control');
+        }
+
+        const noPermWriteOff = await flagMatterWriteOffAction('HAR001-0003', 450);
+        expect(isActionDenied(noPermWriteOff)).toBe(true);
+        if (isActionDenied(noPermWriteOff)) {
+          expect(noPermWriteOff.code).toBe('FORBIDDEN');
+          expect(noPermWriteOff.message).toContain('finance:credit_control');
+        }
+
+        const noPermCc = await recordInvoiceCreditControlActionAction({
+          invoiceNumber: 'PV/2026/0040',
+          matterCode: 'HAR001-0003',
+          clientCode: 'HAR001',
+          actionType: 'log_call',
+        });
+        expect(isActionDenied(noPermCc)).toBe(true);
+        if (isActionDenied(noPermCc)) {
+          expect(noPermCc.code).toBe('FORBIDDEN');
+          expect(noPermCc.message).toContain('finance:credit_control');
+        }
+
+        // 3. Restore finance:credit_control, but restrict HAR001-0003 (M-000013) to P-000004 only: all 3 actions return FORBIDDEN
+        partner.permissionOverrides = undefined;
+        const targetMatter = store.matters.find((m) => m.matterNumber === 'HAR001-0003')!;
+        targetMatter.isStaffMatter = true;
+        targetMatter.restrictedAccessUserIds = ['P-000004'];
+        targetMatter.leadFeeEarnerId = 'P-000004';
+        targetMatter.responsiblePartnerId = 'P-000004';
+        targetMatter.supervisingPartnerId = 'P-000004';
+        targetMatter.teamMemberIds = [];
+
+        const restrictedBill = await requestMatterBillAction('HAR001-0003');
+        expect(isActionDenied(restrictedBill)).toBe(true);
+        if (isActionDenied(restrictedBill)) {
+          expect(restrictedBill.code).toBe('FORBIDDEN');
+          expect(restrictedBill.message).toMatch(/access denied/i);
+        }
+
+        const restrictedWriteOff = await flagMatterWriteOffAction('HAR001-0003', 450);
+        expect(isActionDenied(restrictedWriteOff)).toBe(true);
+        if (isActionDenied(restrictedWriteOff)) {
+          expect(restrictedWriteOff.code).toBe('FORBIDDEN');
+          expect(restrictedWriteOff.message).toMatch(/access denied/i);
+        }
+
+        const restrictedCc = await recordInvoiceCreditControlActionAction({
+          invoiceNumber: 'PV/2026/0040',
+          matterCode: 'HAR001-0003',
+          clientCode: 'HAR001',
+          actionType: 'escalate',
+        });
+        expect(isActionDenied(restrictedCc)).toBe(true);
+        if (isActionDenied(restrictedCc)) {
+          expect(restrictedCc.code).toBe('FORBIDDEN');
+          expect(restrictedCc.message).toMatch(/access denied/i);
+        }
       } finally {
         setTestEntraSessionOverride(undefined);
         resetAllDemoData('P-000001');

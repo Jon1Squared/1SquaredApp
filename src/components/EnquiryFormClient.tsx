@@ -114,33 +114,6 @@ interface Props {
   tenantId: string;
 }
 
-const DEMO_POSTCODE_ADDRESSES: Record<
-  string,
-  { line1: string; line2: string; town: string; county: string }[]
-> = {
-  CF101AA: [
-    { line1: '12 Park Place', line2: '', town: 'Cardiff', county: 'South Glamorgan' },
-    { line1: '14 Park Place', line2: 'Suite 2', town: 'Cardiff', county: 'South Glamorgan' },
-  ],
-  CF105FQ: [
-    {
-      line1: '3 Bute Dock Chambers',
-      line2: 'Mount Stuart Square',
-      town: 'Cardiff',
-      county: 'South Glamorgan',
-    },
-  ],
-  CF119HS: [
-    { line1: '18 Cathedral View', line2: 'Pontcanna', town: 'Cardiff', county: 'South Glamorgan' },
-  ],
-  CF641TQ: [
-    { line1: 'Marina House, 14 Ferry Road', line2: '', town: 'Penarth', county: 'Vale of Glamorgan' },
-  ],
-  BS16DZ: [
-    { line1: 'Severn House, 1 Temple Quay', line2: '', town: 'Bristol', county: 'Bristol' },
-  ],
-};
-
 export function EnquiryFormClient({
   mode = 'new',
   enquiry,
@@ -1421,14 +1394,9 @@ export function EnquiryFormClient({
     );
   }, [urgencies]);
 
-  const takenByPerson = people.find((p) => p.id === takenByPersonId);
-  const takenByDisplay = personDisplayName(
-    takenByPerson ?? {
-      firstName: 'Siân',
-      surname: 'Llewellyn',
-      preferredName: '',
-    },
-  );
+  const currentUserPerson = people.find((p) => p.id === currentUserId);
+  const takenByPerson = people.find((p) => p.id === takenByPersonId) ?? currentUserPerson;
+  const takenByDisplay = takenByPerson ? personDisplayName(takenByPerson) : 'Not recorded';
 
   const getLocalDateAndTimeStrings = (dateObj: Date) => {
     const yyyy = dateObj.getFullYear();
@@ -1497,14 +1465,10 @@ export function EnquiryFormClient({
     });
   }, [employees, modalEmployeeQuery, values]);
 
-  const lastSavedByPerson = people.find((p) => p.id === lastSavedById);
-  const lastSavedByDisplay = personDisplayName(
-    lastSavedByPerson ?? {
-      firstName: 'Siân',
-      surname: 'Llewellyn',
-      preferredName: '',
-    },
-  );
+  const lastSavedByPerson = people.find((p) => p.id === lastSavedById) ?? currentUserPerson;
+  const lastSavedByDisplay = lastSavedByPerson
+    ? personDisplayName(lastSavedByPerson)
+    : 'Not recorded';
 
   const assignedPerson = enquiry?.assignedToId
     ? people.find((p) => p.id === enquiry.assignedToId)

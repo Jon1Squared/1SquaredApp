@@ -1,5 +1,11 @@
 import { HomeClient } from '@/components/HomeClient';
+import { isActionDenied } from '@/domain/actionResult';
 import { getEntraSession } from '@/server/entraAuth';
+import {
+  getFirmFinance,
+  getMatterFinanceRows,
+  getMyFinanceFigures,
+} from '@/server/financeServices';
 import { getAppSnapshot, withPageActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
@@ -17,45 +23,66 @@ export default async function HomePage({
     const snap = getAppSnapshot(actor.personId);
     const resolvedParams = searchParams ? await searchParams : {};
 
-  // Allow left-rail Finance / Risk shortcuts or Admin Preview links to override the displayed role view
-  const requestedRole = resolvedParams.previewRole || resolvedParams.view;
-  const activeRoleKey =
-    requestedRole && snap.homePagesConfig.roles.some((r) => r.key === requestedRole)
-      ? requestedRole
-      : snap.activeViewingRole;
+    const matterFinanceRes = snap.finance.canViewMatter
+      ? getMatterFinanceRows(actor.personId)
+      : null;
+    const matterFinance =
+      matterFinanceRes && !isActionDenied(matterFinanceRes) ? matterFinanceRes : undefined;
 
-  return (
-    <HomeClient
-      currentUser={snap.currentUser}
-      effectiveWorkPerson={snap.effectiveWorkPerson}
-      activeRoleKey={activeRoleKey}
-      homePagesConfig={snap.homePagesConfig}
-      searchIndex={snap.searchIndex}
-      signOffs={snap.signOffs}
-      people={snap.people}
-      organisations={snap.organisations}
-      matters={snap.matters}
-      enquiries={snap.enquiries}
-      tasks={snap.tasks}
-      teams={snap.teams}
-      values={snap.values}
-      pmsLinks={snap.pmsLinks}
-      pmsAsAtDate={snap.pmsExtractInfo.asAtDate}
-      pmsSummaryByMatterId={snap.pmsSummaryByMatterId}
-      pmsSummaryByClientId={snap.pmsSummaryByClientId}
-      allMatterFins={snap.allMatterFins}
-      allClientFins={snap.allClientFins}
-      allFeeEarnerPerformance={snap.allFeeEarnerPerformance}
-      myFeeEarnerFigures={snap.myFeeEarnerFigures}
-      myWeeklyTime={snap.myWeeklyTime}
-      pmsAgedDebt={snap.pmsAgedDebt}
-      pmsInvoices={snap.pmsInvoices}
-      pmsMonthlyFeesBilled={snap.pmsMonthlyFeesBilled}
-      pmsCashReceived={snap.pmsCashReceived}
-      pmsDepartmentFinancials={snap.pmsDepartmentFinancials}
-      pmsAllDisbursements={snap.pmsAllDisbursements}
-      pmsClientAccountByMatterCode={snap.pmsClientAccountByMatterCode}
-    />
-  );
+    const myFinanceRes = snap.finance.canViewMatter
+      ? getMyFinanceFigures(actor.personId)
+      : null;
+    const myFinance =
+      myFinanceRes && !isActionDenied(myFinanceRes) ? myFinanceRes : undefined;
+
+    const firmFinanceRes = snap.finance.canViewFirm
+      ? getFirmFinance(actor.personId)
+      : null;
+    const firmFinance =
+      firmFinanceRes && !isActionDenied(firmFinanceRes) ? firmFinanceRes : undefined;
+
+    // Allow left-rail Finance / Risk shortcuts or Admin Preview links to override the displayed role view
+    const requestedRole = resolvedParams.previewRole || resolvedParams.view;
+    const activeRoleKey =
+      requestedRole && snap.homePagesConfig.roles.some((r) => r.key === requestedRole)
+        ? requestedRole
+        : snap.activeViewingRole;
+
+    return (
+      <HomeClient
+        currentUser={snap.currentUser}
+        effectiveWorkPerson={snap.effectiveWorkPerson}
+        activeRoleKey={activeRoleKey}
+        homePagesConfig={snap.homePagesConfig}
+        searchIndex={snap.searchIndex}
+        signOffs={snap.signOffs}
+        people={snap.people}
+        organisations={snap.organisations}
+        matters={snap.matters}
+        enquiries={snap.enquiries}
+        tasks={snap.tasks}
+        teams={snap.teams}
+        values={snap.values}
+        finance={snap.finance}
+        pmsLinks={matterFinance?.pmsLinks}
+        pmsAsAtDate={
+          matterFinance?.pmsExtractInfo.asAtDate ?? firmFinance?.pmsExtractInfo.asAtDate
+        }
+        pmsSummaryByMatterId={matterFinance?.pmsSummaryByMatterId}
+        pmsSummaryByClientId={firmFinance?.pmsSummaryByClientId}
+        allMatterFins={matterFinance?.allMatterFins}
+        allClientFins={firmFinance?.allClientFins}
+        allFeeEarnerPerformance={firmFinance?.allFeeEarnerPerformance}
+        myFeeEarnerFigures={myFinance?.myFeeEarnerFigures}
+        myWeeklyTime={myFinance?.myWeeklyTime}
+        pmsAgedDebt={matterFinance?.pmsAgedDebt}
+        pmsInvoices={matterFinance?.pmsInvoices}
+        pmsMonthlyFeesBilled={firmFinance?.pmsMonthlyFeesBilled}
+        pmsCashReceived={firmFinance?.pmsCashReceived}
+        pmsDepartmentFinancials={firmFinance?.pmsDepartmentFinancials}
+        pmsAllDisbursements={matterFinance?.pmsAllDisbursements}
+        pmsClientAccountByMatterCode={matterFinance?.pmsClientAccountByMatterCode}
+      />
+    );
   });
 }

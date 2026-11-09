@@ -3,7 +3,7 @@
  * permission helpers, and grouping for My Tasks / Team Tasks / Created by me.
  */
 import { toIsoDate } from './dates';
-import { resolveLabel } from './lists';
+import { resolveLabel, valueBySystemKey } from './lists';
 import {
   IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY,
   resolvePersonAuthoritativeRoles,
@@ -300,4 +300,26 @@ export function resolveRoutedTeam(
     activeTeams.find((t) => t.name.toLowerCase().includes('intake')) ??
     null;
   return { team: intake, isFallbackIntake: true };
+}
+
+/**
+ * Returns true when a task is a compliance or matter-opening task, resolving
+ * `task_type` values strictly by `systemKey` (`conflict_check`,
+ * `complete_matter_opening`) via `valueBySystemKey` (R352, R372).
+ */
+export function isComplianceOrOnboardingTask(
+  task: Pick<Task, 'taskTypeId'>,
+  values: ChoiceValue[] = [],
+): boolean {
+  if (!task.taskTypeId) return false;
+  const conflictCheckTypeId = valueBySystemKey(values, 'task_type', 'conflict_check')?.id;
+  const completeOpeningTypeId = valueBySystemKey(
+    values,
+    'task_type',
+    'complete_matter_opening',
+  )?.id;
+  return (
+    (conflictCheckTypeId !== undefined && task.taskTypeId === conflictCheckTypeId) ||
+    (completeOpeningTypeId !== undefined && task.taskTypeId === completeOpeningTypeId)
+  );
 }

@@ -141,6 +141,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
           urgencyId: urgentUrgencyId,
           summary: 'Unfair dismissal advice',
           notes: 'Caller dismissed after 4 years of service, wants representation.',
+          privacyNoticeGiven: true,
         },
         { id: draft.id, byId: 'P-000018', asDraft: false },
       );
@@ -587,6 +588,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         practiceAreaId,
         summary: 'Leasehold extension advice',
         notes: 'Caller owns flat with 78 years remaining on lease.',
+        privacyNoticeGiven: true,
       },
       { byId: 'P-000018', asDraft: false },
     );
@@ -617,6 +619,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         practiceAreaId,
         summary: 'Boundary wall dispute',
         notes: 'Wants neighbour dispute representation.',
+        privacyNoticeGiven: true,
       },
       { byId: 'P-000018', asDraft: false },
     ).enquiry!;
@@ -648,6 +651,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         practiceAreaId,
         summary: 'Criminal defence enquiry',
         notes: 'Outside firm practice areas.',
+        privacyNoticeGiven: true,
       },
       { byId: 'P-000018', asDraft: false },
     ).enquiry!;
@@ -679,6 +683,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         practiceAreaId,
         summary: 'Residential purchase quote',
         notes: 'Left message requesting conveyancing quote.',
+        privacyNoticeGiven: true,
       },
       { byId: 'P-000018', asDraft: false },
     ).enquiry!;
@@ -824,6 +829,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         practiceAreaId,
         summary: 'Commercial lease review',
         notes: 'Caller requested urgent review of heads of terms.',
+        privacyNoticeGiven: true,
         customFields: {},
       },
       { byId: 'P-000018', asDraft: false },
@@ -845,6 +851,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         practiceAreaId,
         summary: 'Commercial lease review',
         notes: 'Caller requested urgent review of heads of terms.',
+        privacyNoticeGiven: true,
         customFields: {
           [mandatoryCallerField.id]: 'CMP-2026-Q4',
           [optionalDetailsField.id]: true,
