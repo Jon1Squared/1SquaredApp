@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   computeEnquiryDashboardMetrics,
   extractEnquiryFormInitialState,
+  filterEnquiriesForPracticeAreasAndTeams,
+  formatLondonDateIso,
   validateEnquiryInput,
 } from '../enquiries';
+import { saveEnquiryRecord } from '../../server/services';
+import { getStore } from '../../server/store';
 import type { Enquiry } from '../types';
 
 function makeEnquiry(overrides: Partial<Enquiry>): Enquiry {
@@ -198,7 +202,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     expect(metrics.slaMetPct).toBe(100);
   });
 
-  it('starts a new enquiry form with privacyNoticeGiven = false ("No") and rejects saving a non-draft enquiry without privacyNoticeGiven (R347)', () => {
+  it('starts a new enquiry form with privacyNoticeGiven = false ("No") and validateEnquiryInput rejects missing privacyNoticeGiven (R347)', () => {
     const initialForm = extractEnquiryFormInitialState(null);
     expect(initialForm.privacyNoticeGiven).toBe(false);
 
@@ -215,5 +219,156 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     expect(validationErrors.privacyNoticeGiven).toBe(
       'Please confirm the privacy notice was read or sent to the caller.',
     );
+  });
+
+  it('uses Europe/London calendar dates for month/today bucketing while comparing firstContactDueAt against the real nowIso instant during BST (R360)', () => {
+    // 2026-07-01T23:30:00Z is 00:30 BST on 2026-07-02 in Europe/London
+    const nowIso = '2026-07-01T23:30:00Z';
+    expect(formatLondonDateIso(nowIso)).toBe('2026-07-02');
+
+    // 1. Received at 2026-06-30T23:30:00Z (00:30 BST on 1 July) -> falls in July (2026-07)
+    //    Due at 2026-07-02T08:00:00Z (09:00 BST on 2 July) -> due today in London, NOT overdue at 00:30 BST
+    const bstEnquiry = makeEnquiry({
+      id: 'ENQ-BST-JULY',
+      receivedAt: '2026-06-30T23:30:00Z',
+      status: 'Assigned',
+      firstContactDueAt: '2026-07-02T08:00:00Z',
+      contactLog: [],
+    });
+
+    const metrics = computeEnquiryDashboardMetrics([bstEnquiry], nowIso);
+    expect(metrics.todayIso).toBe('2026-07-02');
+    expect(metrics.currentMonthKey).toBe('2026-07');
+    expect(metrics.monthReceivedCount).toBe(1);
+    expect(metrics.monthEnquiries.map((e) => e.id)).toEqual(['ENQ-BST-JULY']);
+    expect(metrics.callbacksDueTodayCount).toBe(1);
+    expect(metrics.overdueCallbacksCount).toBe(0);
+    expect(metrics.overdueSlaCount).toBe(0);
+    expect(metrics.slaEvaluatedCount).toBe(0);
+    expect(metrics.slaMetPct).toBeNull();
+  });
+
+  it('filterEnquiriesForPracticeAreasAndTeams scopes enquiries to practiceAreaIds and teamIds without falling back to all enquiries when both are empty (R361)', () => {
+    const enqProperty = makeEnquiry({
+      id: 'ENQ-PA-PROP',
+      practiceAreaId: 'work_type.real_estate_and_property',
+      assignedTeamId: 'TM-PROP',
+    });
+    const enqCorporateOnPropTeam = makeEnquiry({
+      id: 'ENQ-CORP-ON-PROP-TEAM',
+      practiceAreaId: 'work_type.corporate_and_commercial',
+      assignedTeamId: 'TM-PROP',
+    });
+    const enqDisputes = makeEnquiry({
+      id: 'ENQ-PA-DISP',
+      practiceAreaId: 'work_type.dispute_resolution_and_litigation',
+      assignedTeamId: 'TM-DISP',
+    });
+    const all = [enqProperty, enqCorporateOnPropTeam, enqDisputes];
+
+    // (a) User with no practice areas or teams -> empty list and hasScope === false
+    const noScope = filterEnquiriesForPracticeAreasAndTeams(all, [], []);
+    expect(noScope.hasScope).toBe(false);
+    expect(noScope.enquiries).toEqual([]);
+
+    // (b) User with teams only (no team practice areas) -> matches enquiries assigned to those teams
+    const teamOnlyScope = filterEnquiriesForPracticeAreasAndTeams(all, [], ['TM-PROP']);
+    expect(teamOnlyScope.hasScope).toBe(true);
+    expect(teamOnlyScope.enquiries.map((e) => e.id)).toEqual([
+      'ENQ-PA-PROP',
+      'ENQ-CORP-ON-PROP-TEAM',
+    ]);
+
+    // (c) User with practice areas only -> matches enquiries in those practice areas
+    const paOnlyScope = filterEnquiriesForPracticeAreasAndTeams(
+      all,
+      ['work_type.dispute_resolution_and_litigation'],
+      [],
+    );
+    expect(paOnlyScope.hasScope).toBe(true);
+    expect(paOnlyScope.enquiries.map((e) => e.id)).toEqual(['ENQ-PA-DISP']);
+
+    // (d) Enquiry assigned to the user's team in another practice area is included alongside practice-area matches
+    const combinedScope = filterEnquiriesForPracticeAreasAndTeams(
+      all,
+      ['work_type.real_estate_and_property'],
+      ['TM-PROP'],
+    );
+    expect(combinedScope.hasScope).toBe(true);
+    expect(combinedScope.enquiries.map((e) => e.id)).toEqual([
+      'ENQ-PA-PROP',
+      'ENQ-CORP-ON-PROP-TEAM',
+    ]);
+  });
+
+  it('saveEnquiryRecord rejects non-draft saves without privacyNoticeGiven and allows draft saves to store privacyNoticeGiven = false (R362)', () => {
+    const store = getStore();
+    const channelId =
+      store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ??
+      'enquiry_channel.phone';
+    const practiceAreaId =
+      store.values.find((v) => v.listKey === 'work_type' && !v.parentId && v.active)?.id ??
+      'work_type.real_estate_and_property';
+    const urgencyId =
+      store.values.find((v) => v.listKey === 'enquiry_urgency' && v.label === 'Standard')?.id ??
+      'enquiry_urgency.standard';
+
+    // 1. Non-draft save with privacyNoticeGiven omitted is rejected on the server
+    const omittedNonDraft = saveEnquiryRecord(
+      {
+        channelId,
+        firstName: 'Elin',
+        lastName: 'Bryn',
+        phone: '01632 960222',
+        practiceAreaId,
+        summary: 'Residential purchase enquiry',
+        notes: 'Caller enquiring about conveyancing fees.',
+        urgencyId,
+      },
+      { byId: 'P-000018', asDraft: false },
+    );
+    expect(omittedNonDraft.enquiry).toBeUndefined();
+    expect(omittedNonDraft.errors?.privacyNoticeGiven).toBe(
+      'Please confirm the privacy notice was read or sent to the caller.',
+    );
+
+    // 2. Non-draft save with privacyNoticeGiven: false is rejected on the server
+    const falseNonDraft = saveEnquiryRecord(
+      {
+        channelId,
+        firstName: 'Elin',
+        lastName: 'Bryn',
+        phone: '01632 960222',
+        practiceAreaId,
+        summary: 'Residential purchase enquiry',
+        notes: 'Caller enquiring about conveyancing fees.',
+        urgencyId,
+        privacyNoticeGiven: false,
+      },
+      { byId: 'P-000018', asDraft: false },
+    );
+    expect(falseNonDraft.enquiry).toBeUndefined();
+    expect(falseNonDraft.errors?.privacyNoticeGiven).toBe(
+      'Please confirm the privacy notice was read or sent to the caller.',
+    );
+
+    // 3. Draft save with privacyNoticeGiven omitted succeeds and stores privacyNoticeGiven: false
+    const draftSaved = saveEnquiryRecord(
+      {
+        channelId,
+        firstName: 'Elin',
+        lastName: 'Bryn',
+        phone: '01632 960222',
+        practiceAreaId,
+        summary: 'Draft residential purchase enquiry',
+        notes: 'Draft notes.',
+        urgencyId,
+      },
+      { byId: 'P-000018', asDraft: true },
+    );
+    expect(draftSaved.errors).toBeUndefined();
+    expect(draftSaved.enquiry).toBeDefined();
+    expect(draftSaved.enquiry?.status).toBe('Draft');
+    expect(draftSaved.enquiry?.privacyNoticeGiven).toBe(false);
   });
 });

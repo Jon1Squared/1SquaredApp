@@ -25,12 +25,17 @@ import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/dupli
 import {
   computeEnquiryDashboardMetrics,
   enquiryDisplayName,
+  filterEnquiriesForPracticeAreasAndTeams,
+  formatLondonDateIso,
   isEnquiryOpen,
 } from '@/domain/enquiries';
 import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
-import { isHighOrCriticalRiskRating } from '@/domain/matterOpeningRecord';
+import {
+  isHighOrCriticalRiskRating,
+  isMatterConflictCheckAwaitingDecision,
+} from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
@@ -242,17 +247,7 @@ export function HomeClient({
 
   const nowDate = useMemo(() => new Date(), []);
   const nowIso = useMemo(() => nowDate.toISOString(), [nowDate]);
-  const todayIso = useMemo(
-    () =>
-      new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Europe/London',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(nowDate),
-    [nowDate],
-  );
-  const localNowIso = useMemo(() => `${todayIso}${nowIso.slice(10)}`, [todayIso, nowIso]);
+  const todayIso = useMemo(() => formatLondonDateIso(nowIso), [nowIso]);
   const tomorrowIso = useMemo(() => {
     const d = new Date(`${todayIso}T12:00:00Z`);
     d.setUTCDate(d.getUTCDate() + 1);
@@ -280,7 +275,6 @@ export function HomeClient({
     [pmsAsAtDate],
   );
   const currentMonthKey = useMemo(() => todayIso.slice(0, 7), [todayIso]);
-  const currentYearLabel = useMemo(() => todayIso.slice(0, 4), [todayIso]);
   const currentMonthShort = useMemo(() => {
     const d = new Date(`${todayIso}T12:00:00Z`);
     return Number.isNaN(d.getTime())
@@ -294,7 +288,7 @@ export function HomeClient({
       : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   }, [todayIso]);
 
-  // PMS financial period labels derived strictly from pmsAsAtDate (R319, R344)
+  // PMS financial period labels derived strictly from pmsAsAtDate (R319, R344, R372)
   const pmsMonthKey = useMemo(
     () => (isValidPmsAsAtDate(pmsAsAtDate) ? pmsAsAtDate.slice(0, 7) : ''),
     [pmsAsAtDate],
@@ -304,10 +298,10 @@ export function HomeClient({
     [pmsAsAtDate],
   );
   const pmsMonthShort = useMemo(() => {
-    if (!isValidPmsAsAtDate(pmsAsAtDate)) return 'Month';
+    if (!isValidPmsAsAtDate(pmsAsAtDate)) return '—';
     const d = new Date(`${pmsAsAtDate}T12:00:00Z`);
     return Number.isNaN(d.getTime())
-      ? 'Month'
+      ? '—'
       : d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
   }, [pmsAsAtDate]);
   const pmsMonthYearLabel = useMemo(() => {
@@ -319,8 +313,8 @@ export function HomeClient({
   }, [pmsAsAtDate]);
 
   const enquiryMetrics = useMemo(
-    () => computeEnquiryDashboardMetrics(enquiries, localNowIso),
-    [enquiries, localNowIso],
+    () => computeEnquiryDashboardMetrics(enquiries, nowIso, { todayIso, currentMonthKey }),
+    [enquiries, nowIso, todayIso, currentMonthKey],
   );
 
   const personById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
@@ -362,7 +356,10 @@ export function HomeClient({
       teams.filter(
         (t) =>
           t.active &&
-          (t.memberIds.includes(effectiveWorkPerson.id) || t.memberIds.includes(currentUser.id)),
+          (t.memberIds.includes(effectiveWorkPerson.id) ||
+            t.memberIds.includes(currentUser.id) ||
+            t.leadIds.includes(effectiveWorkPerson.id) ||
+            t.leadIds.includes(currentUser.id)),
       ),
     [teams, effectiveWorkPerson.id, currentUser.id],
   );
@@ -411,31 +408,23 @@ export function HomeClient({
     );
   }, [matters, effectiveWorkPerson.id]);
 
-  // Practice-area / department enquiries for Partner (R343)
+  // Practice-area / department enquiries for Partner (R343, R361)
   const myPracticeAreaIds = useMemo(
-    () =>
-      new Set(
-        [
-          ...myTeams.flatMap((t) => t.practiceAreaIds),
-          ...supervisedMatters.map((m) => m.practiceAreaId),
-        ].filter(Boolean),
-      ),
-    [myTeams, supervisedMatters],
+    () => new Set(myTeams.flatMap((t) => t.practiceAreaIds).filter(Boolean)),
+    [myTeams],
   );
-  const partnerPracticeAreaEnquiries = useMemo(
-    () =>
-      myPracticeAreaIds.size > 0
-        ? enquiries.filter(
-            (e) =>
-              myPracticeAreaIds.has(e.practiceAreaId) ||
-              (e.assignedTeamId !== null && myTeamIds.has(e.assignedTeamId)),
-          )
-        : enquiries,
+  const partnerEnquiryScope = useMemo(
+    () => filterEnquiriesForPracticeAreasAndTeams(enquiries, myPracticeAreaIds, myTeamIds),
     [enquiries, myPracticeAreaIds, myTeamIds],
   );
+  const partnerPracticeAreaEnquiries = partnerEnquiryScope.enquiries;
   const partnerEnquiryMetrics = useMemo(
-    () => computeEnquiryDashboardMetrics(partnerPracticeAreaEnquiries, localNowIso),
-    [partnerPracticeAreaEnquiries, localNowIso],
+    () =>
+      computeEnquiryDashboardMetrics(partnerPracticeAreaEnquiries, nowIso, {
+        todayIso,
+        currentMonthKey,
+      }),
+    [partnerPracticeAreaEnquiries, nowIso, todayIso, currentMonthKey],
   );
 
   // Pending sign-offs
@@ -805,10 +794,13 @@ export function HomeClient({
             <div className="kpi-label">
               <span>Dept enquiries ({currentMonthShort})</span>
             </div>
-            <div className="kpi-value">{partnerEnquiryMetrics.monthReceivedCount}</div>
+            <div className="kpi-value">
+              {partnerEnquiryScope.hasScope ? partnerEnquiryMetrics.monthReceivedCount : '—'}
+            </div>
             <div className="kpi-sub">
-              {partnerEnquiryMetrics.monthConvertedCount} converted ·{' '}
-              {partnerEnquiryMetrics.monthUnassignedCount} unassigned
+              {partnerEnquiryScope.hasScope
+                ? `${partnerEnquiryMetrics.monthConvertedCount} converted · ${partnerEnquiryMetrics.monthUnassignedCount} unassigned`
+                : 'No practice area set'}
             </div>
           </div>
         );
@@ -1058,8 +1050,8 @@ export function HomeClient({
           </div>
         );
       case 'rc_conflicts_pending': {
-        const referredCount = matters.filter(
-          (m) => m.conflictCheckRecord?.status === 'Referred',
+        const referredCount = matters.filter((m) =>
+          isMatterConflictCheckAwaitingDecision(m),
         ).length;
         return (
           <div key={cardId} className="kpi-card">
@@ -1882,7 +1874,7 @@ export function HomeClient({
               <div className="panel-title-group">
                 <h2 className="panel-title">My active matters — at a glance</h2>
                 <span className="panel-subtitle">
-                  1Squared Matters + PMS financials · as at {formattedAsAt}
+                  1Squared Matters + {pmsAsAtCaption}
                 </span>
               </div>
               <div className="panel-actions">
@@ -2699,7 +2691,7 @@ export function HomeClient({
                 <h2 className="panel-title">Unbilled disbursements on team matters</h2>
                 <span className="mono-code">PMS · read-only</span>
               </div>
-              <span className="panel-subtitle">As at {formattedAsAt}</span>
+              <span className="panel-subtitle">{pmsAsAtCaption}</span>
             </div>
             <div className="panel-body">
               {teamDisbs.length === 0 ? (
@@ -3035,7 +3027,9 @@ export function HomeClient({
                     const paLabel = resolveLabel(values, e.practiceAreaId) || 'General';
                     const assignee = e.assignedToId ? personById.get(e.assignedToId) : null;
                     const isOverdue =
-                      e.firstContactDueAt && e.firstContactDueAt.slice(0, 10) < todayIso;
+                      Boolean(e.firstContactDueAt) &&
+                      e.contactLog.length === 0 &&
+                      formatLondonDateIso(e.firstContactDueAt!) < todayIso;
                     return (
                       <li key={e.id} className="worklist-row">
                         <div className="worklist-main">
@@ -3681,7 +3675,7 @@ export function HomeClient({
                 <h2 className="panel-title">Unbilled WIP &amp; overdue debt on my matters</h2>
                 <span className="mono-code">PMS · read-only</span>
               </div>
-              <span className="panel-subtitle">Supervised portfolio · as at {formattedAsAt}</span>
+              <span className="panel-subtitle">Supervised portfolio · {pmsAsAtCaption}</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
               {portfolioFinRows.length === 0 ? (
@@ -3800,35 +3794,39 @@ export function HomeClient({
               <span className="panel-subtitle">{currentMonthYearLabel}</span>
             </div>
             <div className="panel-body padded">
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(4, 1fr)',
-                  gap: 8,
-                  textAlign: 'center',
-                }}
-              >
-                <div className="legend-item">
-                  <div className="lbl">Received</div>
-                  <div className="val">{partnerEnquiryMetrics.monthReceivedCount}</div>
-                </div>
-                <div className="legend-item">
-                  <div className="lbl">Converted</div>
-                  <div className="val" style={{ color: 'var(--green-text)' }}>
-                    {partnerEnquiryMetrics.monthConvertedCount}
+              {!partnerEnquiryScope.hasScope ? (
+                <div className="muted">No practice area set</div>
+              ) : (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: 8,
+                    textAlign: 'center',
+                  }}
+                >
+                  <div className="legend-item">
+                    <div className="lbl">Received</div>
+                    <div className="val">{partnerEnquiryMetrics.monthReceivedCount}</div>
+                  </div>
+                  <div className="legend-item">
+                    <div className="lbl">Converted</div>
+                    <div className="val" style={{ color: 'var(--green-text)' }}>
+                      {partnerEnquiryMetrics.monthConvertedCount}
+                    </div>
+                  </div>
+                  <div className="legend-item">
+                    <div className="lbl">In contact</div>
+                    <div className="val">{partnerEnquiryMetrics.monthInContactCount}</div>
+                  </div>
+                  <div className="legend-item">
+                    <div className="lbl">Unassigned</div>
+                    <div className="val" style={{ color: 'var(--amber-text)' }}>
+                      {partnerEnquiryMetrics.monthUnassignedCount}
+                    </div>
                   </div>
                 </div>
-                <div className="legend-item">
-                  <div className="lbl">In contact</div>
-                  <div className="val">{partnerEnquiryMetrics.monthInContactCount}</div>
-                </div>
-                <div className="legend-item">
-                  <div className="lbl">Unassigned</div>
-                  <div className="val" style={{ color: 'var(--amber-text)' }}>
-                    {partnerEnquiryMetrics.monthUnassignedCount}
-                  </div>
-                </div>
-              </div>
+              )}
             </div>
           </section>
         );
@@ -3892,7 +3890,7 @@ export function HomeClient({
               </div>
               <span className="panel-subtitle">
                 {formatGbp(totalBandDebt)} across {pmsAgedDebt.length} unpaid / part-paid bill
-                {pmsAgedDebt.length === 1 ? '' : 's'} · as at {formattedAsAt}
+                {pmsAgedDebt.length === 1 ? '' : 's'} · {pmsAsAtCaption}
               </span>
             </div>
             <div className="panel-body padded">
@@ -4432,10 +4430,8 @@ export function HomeClient({
       // 32. conflict_checks_awaiting_decision (06 Risk & Compliance)
       // ================================================================
       case 'conflict_checks_awaiting_decision': {
-        const referredMatters = matters.filter(
-          (m) =>
-            m.conflictCheckRecord?.status === 'Referred' ||
-            m.conflictDecision?.outcome === 'Potential conflict',
+        const referredMatters = matters.filter((m) =>
+          isMatterConflictCheckAwaitingDecision(m),
         );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
@@ -4877,7 +4873,7 @@ export function HomeClient({
                 <h2 className="panel-title">Fee earner utilisation &amp; billing</h2>
                 <span className="mono-code">PMS `v_fee_earner_performance`</span>
               </div>
-              <span className="panel-subtitle">As at {formattedAsAt}</span>
+              <span className="panel-subtitle">{pmsAsAtCaption}</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
               {allFeeEarnerPerformance.length === 0 ? (

@@ -5,11 +5,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/g;
-const MATTER_CODE_RE = /\b[A-Z]{3}\d{3}-\d{4}\b/g;
-const PMS_CODE_RE = /\b(?:FE\d{3}|[A-Z]{3}\d{3}(?!-\d{4}\b))\b/g;
+const MATTER_CODE_RE = /\b(?<!#)[A-Z]{3}\d{3}-\d{4}\b/g;
+const PMS_CODE_RE =
+  /\b(?<!#)(?:FE\d{3}|(?:PEN|BAY|SEV|SJO|CAM|CWM|PEM|TAF|VAL|HAR)\d{3}(?!-\d{4}\b))\b/g;
 const PMS_HARDCODED_MONTH_RE = /['"`]20\d\d-\d\d['"`]/g;
 const FAKE_SANCTIONS_CLEAR_RE =
-  /(?:Sanctions\s*(?:&(?:amp;)?|and)\s*PEP|PEP\s*(?:&(?:amp;)?|and)\s*Sanctions)[\s\S]{0,160}?['"`>:](?:[\s\u00A0]|&nbsp;)*(?:all(?:[\s\u00A0]|&nbsp;)+)?clear(?:[\s\u00A0]|&nbsp;)*['"`<]/gi;
+  /(?:Sanctions\s*(?:&(?:amp;)?|and|\/|\+)\s*PEP|PEP\s*(?:&(?:amp;)?|and|\/|\+)\s*Sanctions)[\s\S]{0,160}?['"`>:\u2013\u2014-](?:[\s\u00A0]|&nbsp;)*(?:all(?:[\s\u00A0]|&nbsp;)+)?clear(?:ed)?\b(?:(?:[\s\u00A0]|&nbsp;)*['"`<])?/gi;
 
 /**
  * Loads PMS client codes and fee-earner codes from `data/pms/pms-demo.sqlite`.

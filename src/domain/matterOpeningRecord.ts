@@ -722,6 +722,26 @@ export function isHighOrCriticalRiskRating(
 }
 
 /**
+ * Returns true when a matter's conflict check is currently awaiting MLRO/COLP
+ * review (`conflictCheckRecord.status === 'Referred'`, or when
+ * `conflictCheckRecord` is absent, `conflictStatusPillFromLegacy(matter.conflictCheckStatus) === 'Referred'`
+ * combined with `!matter.conflictDecision`) (R345, R351, R365, R367).
+ */
+export function isMatterConflictCheckAwaitingDecision(matter: {
+  conflictCheckStatus?: string | null;
+  conflictCheckRecord?: Matter['conflictCheckRecord'] | null;
+  conflictDecision?: Partial<NonNullable<Matter['conflictDecision']>> | null;
+}): boolean {
+  if (matter.conflictCheckRecord) {
+    return matter.conflictCheckRecord.status === 'Referred';
+  }
+  return (
+    !matter.conflictDecision &&
+    conflictStatusPillFromLegacy(matter.conflictCheckStatus ?? undefined) === 'Referred'
+  );
+}
+
+/**
  * Resolves the `risk_rating` ChoiceValue ID matching a calculated `RiskLevel`.
  */
 export function resolveRiskRatingIdForLevel(

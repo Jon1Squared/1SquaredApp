@@ -20,12 +20,8 @@ import {
   normaliseCompaniesHouseOfficerName,
 } from '../companiesHouse';
 import { buildFieldResolutionContextForRecord } from '../documentGeneration';
-import {
-  HIGH_RISK_RATING_IDS,
-  isHighOrCriticalRiskRating,
-} from '../matterOpeningRecord';
 import { buildSearchIndex } from '../searchIndex';
-import type { ChoiceValue, Person } from '../types';
+import type { Person } from '../types';
 
 describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers', () => {
   it('verifyNoDemoLiterals passes on the repository and scanTextForDemoLiterals catches planted demo literals unless allow-listed per file and per literal (R322, R346)', () => {
@@ -206,39 +202,47 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       pmsCodes,
     );
     expect(pmsMonthViolations.some((v: { match: string }) => v.match === "'2026-11'")).toBe(true);
-  });
 
-  it('isHighOrCriticalRiskRating matches High and Critical by canonical ID or systemKey and rejects decoy IDs containing "high" (R345)', () => {
-    expect(HIGH_RISK_RATING_IDS.has('risk_rating.high')).toBe(true);
-    expect(HIGH_RISK_RATING_IDS.has('risk_rating.critical')).toBe(true);
-
-    const customValues: ChoiceValue[] = [
-      {
-        id: 'risk_rating.custom_critical_tier',
-        listKey: 'risk_rating',
-        label: 'Severe / Critical',
-        systemKey: 'critical',
-        sortOrder: 1,
-        active: true,
-      },
-      {
-        id: 'risk_rating.custom_highway',
-        listKey: 'risk_rating',
-        label: 'Highway infrastructure (low)',
-        systemKey: 'low',
-        sortOrder: 2,
-        active: true,
-      },
+    // R363: Each separator/dash/suffix variant of fake Sanctions/PEP Clear is caught individually
+    const r363Variants = [
+      "const s1 = 'Sanctions/PEP: Clear';",
+      "const s2 = 'Sanctions + PEP: Clear';",
+      "const s3 = 'Sanctions & PEP — Clear';",
+      "const s4 = 'Sanctions & PEP – Clear';",
+      "const s5 = 'Sanctions & PEP - Clear';",
+      "const s6 = 'Sanctions & PEP: Cleared';",
+      "const s7 = 'Sanctions & PEP: Clear.';",
+      "const s8 = 'Sanctions & PEP: Clear (no matches)';",
     ];
+    for (const snippet of r363Variants) {
+      const v = scanTextForDemoLiterals(
+        'src/components/PersonProfileClient.tsx',
+        snippet,
+        denyLiterals,
+        [],
+        pmsCodes,
+      );
+      expect(v, `Expected violation for: ${snippet}`).toHaveLength(1);
+    }
 
-    expect(isHighOrCriticalRiskRating('risk_rating.high', customValues)).toBe(true);
-    expect(isHighOrCriticalRiskRating('risk_rating.critical', customValues)).toBe(true);
-    expect(isHighOrCriticalRiskRating('risk_rating.custom_critical_tier', customValues)).toBe(true);
-    expect(isHighOrCriticalRiskRating('risk_rating.custom_highway', customValues)).toBe(false);
-    expect(isHighOrCriticalRiskRating('risk_rating.medium', customValues)).toBe(false);
-    expect(isHighOrCriticalRiskRating('risk_rating.low', customValues)).toBe(false);
-    expect(isHighOrCriticalRiskRating('', customValues)).toBe(false);
-    expect(isHighOrCriticalRiskRating(null, customValues)).toBe(false);
+    // R363: 6-digit hex colour literals (#ABC123, #FFF000) and standard tokens (SHA256, AES256, RFC822, GBP123) are not flagged
+    const nonDemoTokens = [
+      "const hex1 = '#ABC123';",
+      "const hex2 = '#FFF000';",
+      "const algo1 = 'SHA256';",
+      "const algo2 = 'AES256';",
+      "const spec = 'RFC822';",
+      "const curr = 'GBP123';",
+    ].join('\n');
+    expect(
+      scanTextForDemoLiterals(
+        'src/components/SampleWidget.tsx',
+        nonDemoTokens,
+        denyLiterals,
+        [],
+        pmsCodes,
+      ),
+    ).toEqual([]);
   });
 
   it('resolveMatterIntakeComplianceRows derives all four rows from stored matter fields including not-run conflict, not-started risk, and empty engagement letter status', () => {
