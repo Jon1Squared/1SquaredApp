@@ -169,6 +169,7 @@ import {
   getActiveTenantConfiguration,
   getExtensionHostLoadErrors,
   getPlatformExtensionHost,
+  isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -411,31 +412,11 @@ export async function getCurrentUserId(): Promise<string> {
 }
 
 export function isDemoModeEnabled(): boolean {
-  if (process.env.NODE_ENV === 'production') {
-    return false;
-  }
-  const activeTenantConfig = getActiveTenantConfiguration();
-  if (activeTenantConfig.environment === 'live') {
-    return false;
-  }
-  return Boolean(activeTenantConfig.featureFlags?.enableDemoMode);
+  return isNonLiveDemoEnvironment();
 }
 
 export function isDataResetAllowedEnvironment(): boolean {
-  const activeTenantConfig = getActiveTenantConfiguration();
-  const env = activeTenantConfig.environment;
-  if (env === 'live') {
-    return false;
-  }
-  if (
-    process.env.NODE_ENV === 'production' &&
-    env !== 'dev' &&
-    env !== 'test' &&
-    env !== 'training'
-  ) {
-    return false;
-  }
-  return true;
+  return isNonLiveDemoEnvironment();
 }
 
 export async function switchUserInDemoMode(targetUserId: string): Promise<{

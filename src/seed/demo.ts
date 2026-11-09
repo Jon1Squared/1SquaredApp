@@ -3,9 +3,12 @@
  * All names, companies and numbers are fictional. Phone numbers use Ofcom drama ranges.
  * Every date is relative to `today`.
  */
-import { addDays, calculateFirstContactDue, toIsoDate } from '@/domain/dates';
+import { calculateFirstContactDue } from '@/domain/dates';
 import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import {
+  getActiveTenantConfiguration,
+  isNonLiveDemoEnvironment,
+} from '@/platform/tenantRuntime';
 import type {
   Address,
   AuditEntry,
@@ -99,11 +102,19 @@ export interface DemoData {
   counters: Record<string, number>;
 }
 
-export function buildDemoData(today: Date = new Date()): DemoData {
-  const day = (offset: number) => toIsoDate(addDays(today, offset));
+export function buildDemoData(
+  today: Date = new Date(),
+  options?: { includeSyntheticEntraOids?: boolean },
+): DemoData {
+  const addUtcDays = (base: Date, days: number): Date => {
+    const d = new Date(base.getTime());
+    d.setUTCDate(d.getUTCDate() + days);
+    return d;
+  };
+  const day = (offset: number) => addUtcDays(today, offset).toISOString().slice(0, 10);
   const ts = (offset: number, hour = 10) => {
-    const d = addDays(today, offset);
-    d.setHours(hour, 0, 0, 0);
+    const d = addUtcDays(today, offset);
+    d.setUTCHours(hour, 0, 0, 0);
     return d.toISOString();
   };
   const v = vid;
@@ -187,26 +198,16 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     departmentId: null,
   });
 
-  const includeSyntheticEntraOids = (() => {
-    if (process.env.NODE_ENV === 'production') {
-      return false;
-    }
-    try {
-      const cfg = getActiveTenantConfiguration();
-      if (cfg.environment === 'live') {
+  const includeSyntheticEntraOids =
+    options?.includeSyntheticEntraOids ??
+    (() => {
+      try {
+        const cfg = getActiveTenantConfiguration();
+        return isNonLiveDemoEnvironment(cfg);
+      } catch {
         return false;
       }
-      if (cfg.featureFlags?.enableDemoMode === true) {
-        return true;
-      }
-      if (cfg.featureFlags?.enableDemoMode === false) {
-        return false;
-      }
-      return process.env.NODE_ENV === 'test';
-    } catch {
-      return process.env.NODE_ENV === 'test';
-    }
-  })();
+    })();
 
   const people: Person[] = [];
   const addPerson = (id: string, createdOffset: number, fields: Partial<Person>) => {
@@ -782,6 +783,11 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     relationshipRoleIds: [role('Client contact')],
     relationshipStandingId: v('relationship_standing', 'Key Account'),
     engagementLevelId: v('engagement_level', 'Engaged'),
+    verificationStatusId: v('verification_status', 'Verified'),
+    verifiedAt: day(-90),
+    verificationMethodId: v('verification_method', 'Electronic ID check'),
+    verificationReviewerId: 'P-000003',
+    firstKnownAt: day(-690),
     lastInteractionAt: day(-2),
     marketingConsentId: v('marketing_consent', 'Consented'),
     interests: 'Golf; prefers early-morning calls.',
@@ -807,6 +813,11 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     phones: [phone('029 2018 0521', 'Direct')],
     relationshipRoleIds: [role('Client contact')],
     engagementLevelId: v('engagement_level', 'Advocate'),
+    verificationStatusId: v('verification_status', 'Verified'),
+    verifiedAt: day(-120),
+    verificationMethodId: v('verification_method', 'Electronic ID check'),
+    verificationReviewerId: 'P-000003',
+    firstKnownAt: day(-670),
     lastInteractionAt: day(-6),
   });
 
@@ -819,6 +830,11 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     phones: [phone('029 2018 0522', 'Direct'), phone('07700 900724', 'Mobile')],
     relationshipRoleIds: [role('Client contact')],
     preferredLanguageId: v('language', 'Welsh'),
+    verificationStatusId: v('verification_status', 'Verified'),
+    verifiedAt: day(-120),
+    verificationMethodId: v('verification_method', 'Electronic ID check'),
+    verificationReviewerId: 'P-000003',
+    firstKnownAt: day(-660),
     lastInteractionAt: day(-6),
   });
 
@@ -831,6 +847,11 @@ export function buildDemoData(today: Date = new Date()): DemoData {
     phones: [phone('0117 496 0731', 'Direct')],
     relationshipRoleIds: [role('Client contact')],
     relationshipOwnerId: 'P-000005',
+    verificationStatusId: v('verification_status', 'Verified'),
+    verifiedAt: day(-75),
+    verificationMethodId: v('verification_method', 'Electronic ID check'),
+    verificationReviewerId: 'P-000003',
+    firstKnownAt: day(-380),
     lastInteractionAt: day(-2),
   });
 
@@ -1184,6 +1205,50 @@ export function buildDemoData(today: Date = new Date()): DemoData {
           ? fields.conflictClearedById
           : 'P-000003',
       conflictNotes: fields.conflictNotes ?? '',
+      conflictDecision:
+        fields.conflictDecision !== undefined
+          ? fields.conflictDecision
+          : (fields.conflictCheckStatus ?? 'Clear') === 'Clear'
+            ? {
+                outcome: 'Cleared',
+                summary: fields.conflictNotes || 'Conflict search completed and cleared.',
+                decidedById:
+                  fields.conflictClearedById !== undefined && fields.conflictClearedById !== null
+                    ? fields.conflictClearedById
+                    : 'P-000003',
+                decidedByName: 'Risk & Compliance',
+                decidedAt: fields.conflictCheckDate ?? day(createdOffset),
+                sourceRecordId: id,
+                matchesCount: 0,
+                searchedSources: [
+                  'people',
+                  'organisations',
+                  'links',
+                  'matters',
+                  'enquiries',
+                ],
+              }
+            : (fields.conflictCheckStatus ?? '').toLowerCase().includes('potential')
+              ? {
+                  outcome: 'Potential conflict',
+                  summary: fields.conflictNotes || 'Referred for partner / COLP review.',
+                  decidedById:
+                    fields.conflictClearedById !== undefined && fields.conflictClearedById !== null
+                      ? fields.conflictClearedById
+                      : 'P-000003',
+                  decidedByName: 'Risk & Compliance',
+                  decidedAt: fields.conflictCheckDate ?? day(createdOffset),
+                  sourceRecordId: id,
+                  matchesCount: 1,
+                  searchedSources: [
+                    'people',
+                    'organisations',
+                    'links',
+                    'matters',
+                    'enquiries',
+                  ],
+                }
+              : undefined,
       amlStatus: fields.amlStatus ?? 'Verified',
       amlCompletedAt: fields.amlCompletedAt ?? day(createdOffset + 1),
       sourceOfFundsVerified: fields.sourceOfFundsVerified ?? 'Yes',

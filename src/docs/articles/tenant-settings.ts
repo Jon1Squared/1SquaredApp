@@ -8,7 +8,7 @@ export const tenantSettingsArticle: DocArticle = {
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
   updated: '2026-11-08',
   body: `
-Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
+Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
 ## Active and reserved settings
 
@@ -22,10 +22,10 @@ Every leaf property in the tenant configuration schema is either actively read a
 | \`tenantId\` | Required | Active | Immutable tenant slug validated against authenticated token claims |
 | \`displayName\` | Required | Active | Tenant display name shown across the workspace and generated documents |
 | \`hostingMode\` | \`"multi_tenant"\` | Active | \`single_tenant\` (Model A) or \`multi_tenant\` (Model B) |
-| \`environment\` | \`"dev"\` | Active | \`dev\`, \`test\`, \`training\`, or \`live\` |
+| \`environment\` | \`"dev"\` | Active | \`dev\`, \`test\`, \`training\`, \`demo\`, or \`live\` |
 | \`branding.primaryDomain\` | Required | Active | Verified primary email/UPN domain for the tenant |
-| \`branding.accentColorHex\` | \`"#1f6feb"\` | Reserved (S0-11b) | Reserved for tenant branding theme rendering |
-| \`branding.logoAssetKey\` | \`"default-logo.svg"\` | Reserved (S0-11b) | Reserved for tenant firm logo rendering |
+| \`branding.accentColorHex\` | \`"#1f6feb"\` | Reserved (backlog, F21) | Reserved for tenant branding theme rendering; the demo tenant uses the standard platform theme |
+| \`branding.logoAssetKey\` | \`"default-logo.svg"\` | Reserved (backlog, F21) | Reserved for tenant firm logo rendering; the demo tenant uses the standard platform logo |
 | \`firm.contactEmail\` | \`""\` | Active | Public firm contact email for document headers and footers |
 | \`firm.website\` | \`""\` | Active | Public firm website URL or hostname for document headers and footers |
 | \`conflictReview.assigneeTeamKey\` | \`null\` | Active | Team ID or code receiving referred conflict review tasks |
@@ -38,7 +38,7 @@ Every leaf property in the tenant configuration schema is either actively read a
 | \`featureFlags.enableMatterCostsGovernance\` | \`true\` | Active | Gates the Rates & matter costs administration tab, partner cost sign-off UI, \`saveMatterCostsConfigAction\` (\`admin:access\`), \`signOffMatterCostsAction\` (\`matter:costs:sign_off\`), and matter costs opening governance hooks. \`AdminClient\` defaults its \`enableMatterCostsGovernance\` prop to \`false\` when omitted so UI controls fail closed unless explicitly enabled by the server snapshot. **Warning:** setting \`enableMatterCostsGovernance\` to \`false\` also skips the \`beforeMatterOpen\` partner cost sign-off check when opening a matter |
 | \`featureFlags.enablePmsLiveRateSync\` | \`true\` | Active | Gates the Pull / Sync Rates from PMS action (\`syncMatterCostsRatesFromPmsAction\`, requiring \`admin:access\`) and button. \`AdminClient\` defaults its \`enablePmsLiveRateSync\` prop to \`false\` when omitted |
 | \`featureFlags.enableAiMatterExtraction\` | \`false\` | Active | Gates \`/api/matters/extract\` (\`matter:create\`) and the AI matter extraction panel (together with \`integrations.aiProviderChoice === "anthropic"\`) |
-| \`featureFlags.enableDemoMode\` | \`false\` | Active | Enables persona switching in non-live environments; always forced off in \`live\` |
+| \`featureFlags.enableDemoMode\` | \`false\` | Active | Enables demo mode, persona switching, sample document seeding, and data reset in non-live environments (\`dev\`, \`test\`, \`training\`, \`demo\`) regardless of \`NODE_ENV\`; rejected in \`live\` (see [Demo environment](/docs/demo-environment)) |
 
 ### Matter costs configuration (tenant level)
 

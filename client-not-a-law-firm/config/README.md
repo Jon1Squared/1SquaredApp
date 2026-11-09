@@ -5,25 +5,26 @@ This directory holds the schema-validated tenant configuration for the invented 
 - `base.json`: base tenant configuration validated against `core/schemas/tenant-config.schema.json`.
 - `environments/dev.json`: development environment overlay.
 - `environments/test.json`: automated test environment overlay.
+- `environments/demo.json`: standalone demo environment overlay (`environment: "demo"`, `featureFlags.enableDemoMode: true`).
 
-## Feature Flags & Active Tenant Settings (S0-06, S0-12)
+## Feature Flags & Active Tenant Settings (S0-06, S0-12, S0-11b)
 
 | Setting | `base.json` value | Schema default | Runtime behaviour |
 |---|---|---|---|
 | `featureFlags.enableMatterCostsGovernance` | `true` | `true` | Gates the Administration **Rates & matter costs** tab, the matter form partner cost sign-off UI, `saveMatterCostsConfigAction`, `signOffMatterCostsAction`, and the `beforeMatterCostsCalculate` / `beforeMatterOpen` governance hooks |
 | `featureFlags.enablePmsLiveRateSync` | `true` | `true` | Gates the **Pull / Sync Rates from PMS** button and `syncMatterCostsRatesFromPmsAction` |
 | `featureFlags.enableAiMatterExtraction` | `true` | `false` | Gates `POST /api/matters/extract` and the AI extraction panel (requires `integrations.aiProviderChoice === "anthropic"`) |
-| `featureFlags.enableDemoMode` | `false` (`true` in `dev.json` / `test.json`) | `false` | Enables Demo Mode persona switching in non-live environments |
+| `featureFlags.enableDemoMode` | `false` (`false` in `base.json`, `dev.json` and `test.json`; `true` in `environments/demo.json`) | `false` | Enables Demo Mode, the persona switcher, sample document seeding, and data reset when `environment` is non-live (`dev`, `test`, `training`, or `demo`) |
 | `integrations.aiProviderChoice` | `"anthropic"` | `"disabled"` | Selects the AI model provider (`"anthropic"`, `"azure_openai_uk"`, or `"disabled"`) |
 
 ## Reserved Tenant Settings (`x-reserved`)
 
-Settings that are validated by `core/schemas/tenant-config.schema.json` for backward compatibility (Rule 7) and reserved for upcoming Stage 0 slices are marked with `"x-reserved": { "for": "S0-...", "reason": "..." }` in the JSON schema and logged once at startup as a structured `info` notice (`event: "tenant_config.reserved_settings"`):
+Settings that are validated by `core/schemas/tenant-config.schema.json` for backward compatibility (Rule 7) and reserved for upcoming Stage 0 or backlog slices are marked with `"x-reserved": { "for": "...", "reason": "..." }` in the JSON schema and logged once at startup as a structured `info` notice (`event: "tenant_config.reserved_settings"`):
 
 | Setting | Target slice | Reason |
 |---|---|---|
-| `branding.accentColorHex` | `S0-11b` | Reserved for tenant branding theme rendering |
-| `branding.logoAssetKey` | `S0-11b` | Reserved for tenant firm logo rendering |
+| `branding.accentColorHex` | `backlog` (F21) | Reserved for tenant branding theme rendering; the demo tenant uses the standard platform theme |
+| `branding.logoAssetKey` | `backlog` (F21) | Reserved for tenant firm logo rendering; the demo tenant uses the standard platform logo |
 | `matterCosts.*` (`rateSourceMode`, `allowMatterRateOverrides`, `partnerSignOffThresholdGbp`, `rateCards`, `disbursementPresets`) | `S0-23` | Reserved for unifying tenant-level and runtime-store matter costs configuration |
 | `integrations.pmsConnectionSecretVaultRef` | `S0-18` | Reserved for live tenant-scoped PMS database connection secret resolution |
 | `integrations.companiesHouseApiKeyVaultRef` | `S0-18` | Reserved for live Companies House API integration |
@@ -53,6 +54,7 @@ Extraction runs **only** when `featureFlags.enableAiMatterExtraction === true` *
 | `base.json` | `true` | `"anthropic"` | Anthropic commercial API (`ANTHROPIC_API_KEY`) |
 | `environments/dev.json` | `true` (inherited) | `"anthropic"` | Anthropic commercial API (`ANTHROPIC_API_KEY`) |
 | `environments/test.json` | `true` (inherited) | `"anthropic"` | Anthropic commercial API (`ANTHROPIC_API_KEY`) |
+| `environments/demo.json` | `true` (inherited) | `"anthropic"` | Anthropic commercial API (`ANTHROPIC_API_KEY`) |
 
 ### Data Flow Record (Platform Architecture Standard Section 10)
 

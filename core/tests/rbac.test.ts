@@ -2357,7 +2357,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           setActiveTenantConfigForTesting(null);
         }
 
-        // Admin with MFA in test environment succeeds and writes data-reset / data-cleared audit entries with actor name & ID
+        // Non-live environment with enableDemoMode=false is also denied
+        const flagOffReset = await resetDemoDataAction();
+        expect(isActionDenied(flagOffReset)).toBe(true);
+        if (isActionDenied(flagOffReset)) {
+          expect(flagOffReset.code).toBe('FORBIDDEN');
+        }
+        const flagOffClear = await clearAllDataAction();
+        expect(isActionDenied(flagOffClear)).toBe(true);
+        if (isActionDenied(flagOffClear)) {
+          expect(flagOffClear.code).toBe('FORBIDDEN');
+        }
+
+        // Admin with MFA in test environment with enableDemoMode=true succeeds and writes data-reset / data-cleared audit entries with actor name & ID
+        setActiveTenantConfigForTesting(null, {
+          featureFlags: { enableDemoMode: true },
+        });
         const okReset = await resetDemoDataAction();
         expect(isActionDenied(okReset)).toBe(false);
         const storeAfterReset = getStore();

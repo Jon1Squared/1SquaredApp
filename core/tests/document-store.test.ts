@@ -3067,10 +3067,40 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         });
         expect(deptOnlyRoute.renderedBasePath).toBe('RE');
 
-        // R20: Sample document seeding is skipped when enableDemoMode is false
+        // R20: Sample document seeding runs when enableDemoMode is true in non-live, and is skipped when enableDemoMode is false
         const cfgSnapshot = store.documentStoreConfigOverride;
         const tenantRuntime = await import('@/platform/tenantRuntime');
         try {
+          tenantRuntime.setActiveTenantConfigForTesting(null, {
+            featureFlags: { enableDemoMode: true },
+          });
+          const m4 = store.matters.find((m) => m.id === 'M-000004')!;
+          m4.owningDepartmentId = targetMatterA.owningDepartmentId;
+          m4.owningTeamId = targetMatterA.owningTeamId;
+          const provM4 = await asEmployee('P-000001', () =>
+            ensureMatterDocumentStoreProvisioned(
+              m4.id,
+              'P-000001',
+            ),
+          );
+          const locM4 = provM4.locations[0]!;
+          const partM4 = mockBackend.getDrivePartitionOrThrow(
+            locM4.tenantId,
+            locM4.providerSiteId,
+            locM4.providerDriveId,
+          );
+          const m4FolderIds = new Set<string>([
+            locM4.providerFolderItemId,
+            ...Object.values(locM4.folderItemMap ?? {}),
+          ]);
+          const filesInM4 = Array.from(partM4.items.values()).filter(
+            (item) =>
+              item.itemType === 'file' &&
+              item.parentItemId !== null &&
+              m4FolderIds.has(item.parentItemId),
+          );
+          expect(filesInM4.length).toBeGreaterThan(0);
+
           tenantRuntime.setActiveTenantConfigForTesting(null, {
             featureFlags: { enableDemoMode: false },
           });

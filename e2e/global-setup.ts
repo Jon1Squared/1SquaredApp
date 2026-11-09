@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { E2E_TEST_AUTH_SECRET } from '../playwright.config';
+import { resetRuntimeStoreFromCommittedSeed } from '../src/seed/seedFileLoader.mjs';
 import type { EntraSessionPayload } from '../src/server/entraAuth';
 
 /**
@@ -172,11 +173,9 @@ export function storageStatePathFor(stateKey: string): string {
 
 export default async function globalSetup(): Promise<void> {
   const rootDir = process.cwd();
-  const seedFile = path.join(rootDir, 'data', 'seed-not-a-law-firm.json');
-  const runtimeFile = path.join(rootDir, 'data', 'runtime-store.json');
 
-  // Reset runtime store from seed data before the test run
-  fs.copyFileSync(seedFile, runtimeFile);
+  // Reset runtime store from seed data before the test run via the shared seed loader
+  resetRuntimeStoreFromCommittedSeed({ rootDir });
 
   fs.mkdirSync(AUTH_DIR, { recursive: true });
 

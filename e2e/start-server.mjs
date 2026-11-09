@@ -1,14 +1,12 @@
 import { execSync, spawn } from 'node:child_process';
-import fs from 'node:fs';
 import path from 'node:path';
+import { resetRuntimeStoreFromCommittedSeed } from '../src/seed/seedFileLoader.mjs';
 
 const rootDir = process.cwd();
-const seedFile = path.join(rootDir, 'data', 'seed-not-a-law-firm.json');
-const runtimeFile = path.join(rootDir, 'data', 'runtime-store.json');
 const port = process.env.PLAYWRIGHT_PORT || '3100';
 
-// 1. Reset runtime store from seed data before starting the server
-fs.copyFileSync(seedFile, runtimeFile);
+// 1. Reset runtime store from seed data before starting the server via the shared seed loader
+resetRuntimeStoreFromCommittedSeed({ rootDir });
 
 // 2. Always run a fresh production build with PLATFORM_ENVIRONMENT=test unless E2E_SKIP_BUILD=1 is set
 if (process.env.E2E_SKIP_BUILD !== '1') {

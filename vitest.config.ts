@@ -17,6 +17,7 @@ export default defineConfig({
     environment: 'node',
     fileParallelism: false,
     testTimeout: 15000,
+    setupFiles: ['./src/test/vitest.setup.ts'],
     include: ['src/**/*.test.ts', 'core/tests/**/*.test.ts'],
     env: {
       PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
