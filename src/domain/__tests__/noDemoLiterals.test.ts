@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BasicMergeEngine,
+  buildValidDocxArchive,
   CORE_FIELD_CATALOGUE,
   resolveCatalogueValues,
 } from '@platform/core';
@@ -11,9 +13,15 @@ import {
 import { resolveMatterIntakeComplianceRows } from '../../components/MatterProfileClient';
 import { resolveOrganisationComplianceDisplay } from '../../components/OrganisationProfileClient';
 import { resolvePersonComplianceDisplay } from '../../components/PersonProfileClient';
+import {
+  COMPANIES_HOUSE_NOT_CONFIGURED_MESSAGE,
+  lookupCompaniesHouse,
+  normaliseCompaniesHouseOfficerName,
+} from '../companiesHouse';
 import { buildFieldResolutionContextForRecord } from '../documentGeneration';
+import { computeEnquiryDashboardMetrics } from '../enquiries';
 import { buildSearchIndex } from '../searchIndex';
-import type { Person } from '../types';
+import type { Enquiry, Person } from '../types';
 
 describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers', () => {
   it('verifyNoDemoLiterals passes on the repository and scanTextForDemoLiterals catches planted demo literals unless allow-listed', () => {
@@ -65,6 +73,33 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       ],
     );
     expect(allowListed).toEqual([]);
+
+    // R322: real JSX form (Sanctions &amp; PEP ... >Clear<), PEN001-0001, FE005, and naming resolvePersonComplianceDisplay nearby all fail
+    const jsxAndPmsPlanted = [
+      'export const code = "PEN001-0001";',
+      'export const fe = "FE005";',
+      'export const view = () => { const _ = resolvePersonComplianceDisplay; return <div><span>Sanctions &amp; PEP</span><span>Clear</span></div>; };',
+    ].join('\n');
+    const r322Violations = scanTextForDemoLiterals(
+      'src/components/PersonProfileClient.tsx',
+      jsxAndPmsPlanted,
+      denyLiterals,
+      [],
+    );
+    expect(r322Violations.map((v: { match: string }) => v.match)).toContain('PEN001-0001');
+    expect(r322Violations.map((v: { match: string }) => v.match)).toContain('FE005');
+    expect(r322Violations.map((v: { match: string }) => v.match)).toContain(
+      'Sanctions & PEP: Clear',
+    );
+
+    // R322: '20\d\d-\d\d' in src/domain/pms.ts fails
+    const pmsMonthViolations = scanTextForDemoLiterals(
+      'src/domain/pms.ts',
+      "const fixed = '2026-11';",
+      denyLiterals,
+      [],
+    );
+    expect(pmsMonthViolations.some((v: { match: string }) => v.match === "'2026-11'")).toBe(true);
   });
 
   it('resolveMatterIntakeComplianceRows derives all four rows from stored matter fields including not-run conflict, not-started risk, and empty engagement letter status', () => {
@@ -219,7 +254,7 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
     expect(employeeEntry?.subtitle).not.toContain('Not A Law Firm');
   });
 
-  it('buildFieldResolutionContextForRecord with empty firm settings leaves firm merge fields undefined rather than falling back to Pembroke Vaughan', () => {
+  it('buildFieldResolutionContextForRecord with empty firm settings leaves firm merge fields undefined rather than falling back to Pembroke Vaughan and reports them in missingRequiredFields', async () => {
     const ctx = buildFieldResolutionContextForRecord({
       tenantId: 'tenant-clean',
       people: [],
@@ -237,18 +272,186 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
     expect(ctx.firm?.complaintsPartnerName).toBe('');
     expect(ctx.firm?.headOfficeAddress).toBeUndefined();
 
-    const { values: resolved } = resolveCatalogueValues(ctx, CORE_FIELD_CATALOGUE, {
-      id: 'P-100100',
-      tenantId: 'tenant-clean',
-      roles: ['partner'],
-    });
-    expect(resolved['firm.registered_name']).toBeUndefined();
-    expect(resolved['firm.trading_name']).toBeUndefined();
-    expect(resolved['firm.regulator_number']).toBeUndefined();
-    expect(resolved['firm.company_number']).toBeUndefined();
-    expect(resolved['firm.vat_number']).toBeUndefined();
-    expect(resolved['firm.head_office_address']).toBeUndefined();
-    expect(resolved['firm.complaints_partner_name']).toBeUndefined();
+    const { values: resolved } = resolveCatalogueValues(
+      ctx,
+      CORE_FIELD_CATALOGUE,
+      {
+        id: 'P-100100',
+        tenantId: 'tenant-clean',
+        roles: ['partner'],
+      },
+    );
+    expect(resolved['firm.registeredName']).toBeUndefined();
+    expect(resolved['firm.tradingName']).toBeUndefined();
+    expect(resolved['firm.regulatorNumber']).toBeUndefined();
+    expect(resolved['firm.companyNumber']).toBeUndefined();
+    expect(resolved['firm.vatNumber']).toBeUndefined();
+    expect(resolved['firm.headOfficeAddress']).toBeUndefined();
+    expect(resolved['firm.complaintsPartnerName']).toBeUndefined();
     expect(JSON.stringify(resolved)).not.toContain('Pembroke Vaughan');
+
+    const engine = new BasicMergeEngine();
+    const docxBytes = buildValidDocxArchive({
+      paragraphs: [
+        { text: 'Firm: {{ firm.registeredName }}' },
+        { text: 'Address: {{ firm.headOfficeAddress }}' },
+        { text: 'Complaints Partner: {{ firm.complaintsPartnerName }}' },
+      ],
+    });
+    const rendered = await engine.render({
+      docxBytes,
+      resolvedValues: resolved,
+      mappings: {
+        'firm.registeredName': {
+          placeholder: 'firm.registeredName',
+          sourceType: 'catalogue',
+          catalogueKey: 'firm.registeredName',
+          required: true,
+        },
+        'firm.headOfficeAddress': {
+          placeholder: 'firm.headOfficeAddress',
+          sourceType: 'catalogue',
+          catalogueKey: 'firm.headOfficeAddress',
+          required: true,
+        },
+        'firm.complaintsPartnerName': {
+          placeholder: 'firm.complaintsPartnerName',
+          sourceType: 'catalogue',
+          catalogueKey: 'firm.complaintsPartnerName',
+          required: true,
+        },
+      },
+    });
+    expect(rendered.missingRequiredFields).toEqual([
+      'firm.registeredName',
+      'firm.headOfficeAddress',
+      'firm.complaintsPartnerName',
+    ]);
+  });
+
+  it('computeEnquiryDashboardMetrics filters monthly enquiries by receivedAt, filters callbacks due today, and excludes uncontacted not-yet-due enquiries from SLA met % (R324)', () => {
+    const baseEnq = (overrides: Partial<Enquiry>): Enquiry =>
+      ({
+        id: 'ENQ-1',
+        reference: 'ENQ-1',
+        receivedAt: '2026-11-05T10:00:00Z',
+        takenById: 'P-1',
+        channelId: 'enquiry_channel.phone',
+        firstName: 'Alex',
+        lastName: 'Morgan',
+        callingOnBehalfOf: '',
+        linkedOrganisationId: null,
+        email: '',
+        phone: '',
+        preferredContactMethodId: null,
+        bestTimeToCall: '',
+        address: null,
+        practiceAreaId: 'work_type.real_estate_and_property',
+        workTypeSubcategoryId: null,
+        summary: 'Test',
+        notes: '',
+        otherPartiesNamed: '',
+        urgencyId: 'enquiry_urgency.standard',
+        keyDate: null,
+        keyDateLabel: '',
+        sourceId: null,
+        referrerPersonId: null,
+        privacyNoticeGiven: true,
+        linkedPersonId: null,
+        assignedTeamId: null,
+        assignedToId: 'P-1',
+        status: 'Assigned',
+        firstContactDueAt: '2026-11-10T17:30:00Z',
+        nextActionDate: null,
+        closeReasonId: null,
+        referredToOrganisationId: null,
+        convertedMatterId: null,
+        contactLog: [],
+        createdById: 'P-1',
+        createdAt: '2026-11-05T10:00:00Z',
+        updatedById: 'P-1',
+        updatedAt: '2026-11-05T10:00:00Z',
+        ...overrides,
+      }) as Enquiry;
+
+    const enquiries: Enquiry[] = [
+      // 1. Oct enquiry (Converted) — excluded from Nov monthly counts; contacted within SLA
+      baseEnq({
+        id: 'ENQ-OCT',
+        receivedAt: '2026-10-12T09:00:00Z',
+        status: 'Converted',
+        firstContactDueAt: '2026-10-12T17:30:00Z',
+        contactLog: [
+          {
+            id: 'CL-1',
+            at: '2026-10-12T11:00:00Z',
+            byId: 'P-1',
+            method: 'Call',
+            outcome: 'Spoke',
+            note: 'Spoke to client',
+          },
+        ],
+      }),
+      // 2. Nov enquiry due today (uncontacted, not yet overdue at 12:00) — excluded from SLA denominator
+      baseEnq({
+        id: 'ENQ-DUE-TODAY',
+        receivedAt: '2026-11-09T09:00:00Z',
+        status: 'Assigned',
+        assignedToId: null,
+        firstContactDueAt: '2026-11-09T17:30:00Z',
+        contactLog: [],
+      }),
+      // 3. Nov enquiry overdue and uncontacted — counts in SLA denominator as missed
+      baseEnq({
+        id: 'ENQ-OVERDUE',
+        receivedAt: '2026-11-04T09:00:00Z',
+        status: 'Assigned',
+        firstContactDueAt: '2026-11-05T17:30:00Z',
+        contactLog: [],
+      }),
+      // 4. Nov enquiry converted and contacted on time — counts in Nov converted and SLA met
+      baseEnq({
+        id: 'ENQ-NOV-CONV',
+        receivedAt: '2026-11-06T09:00:00Z',
+        status: 'Converted',
+        firstContactDueAt: '2026-11-06T17:30:00Z',
+        contactLog: [
+          {
+            id: 'CL-2',
+            at: '2026-11-06T10:30:00Z',
+            byId: 'P-1',
+            method: 'Call',
+            outcome: 'Spoke',
+            note: 'Converted',
+          },
+        ],
+      }),
+    ];
+
+    const metrics = computeEnquiryDashboardMetrics(enquiries, '2026-11-09T12:00:00Z');
+    expect(metrics.monthReceivedCount).toBe(3);
+    expect(metrics.monthConvertedCount).toBe(1);
+    expect(metrics.monthConversionPct).toBe(33);
+    expect(metrics.monthOpenCount).toBe(2);
+    expect(metrics.monthUnassignedCount).toBe(1);
+    expect(metrics.callbacksDueTodayCount).toBe(1);
+    expect(metrics.overdueCallbacksCount).toBe(1);
+    // SLA evaluated over ENQ-OCT (met), ENQ-OVERDUE (missed), ENQ-NOV-CONV (met); ENQ-DUE-TODAY is not yet due and uncontacted so excluded
+    expect(metrics.slaEvaluatedCount).toBe(3);
+    expect(metrics.slaMetCount).toBe(2);
+    expect(metrics.slaMetPct).toBe(67);
+    expect(metrics.overdueSlaCount).toBe(1);
+  });
+
+  it('lookupCompaniesHouse returns unconfigured empty result without fabricated companies and normaliseCompaniesHouseOfficerName formats officer names (R335)', () => {
+    const res = lookupCompaniesHouse('Pembroke');
+    expect(res).toEqual({
+      configured: false,
+      records: [],
+      message: COMPANIES_HOUSE_NOT_CONFIGURED_MESSAGE,
+    });
+    expect(normaliseCompaniesHouseOfficerName('MORGAN, Rhian Elin')).toBe(
+      'Rhian Elin Morgan',
+    );
   });
 });

@@ -592,7 +592,11 @@ export function MatterProfileClient({
       100,
       Math.round(((currentStageIdx + 0.48) / stageSteps.length) * 100),
     );
-    const clientAcct = matter.retainerMoniesOnAccountGbp ?? 0;
+    const clientAcct = pmsFin.client_account_balance ?? matter.retainerMoniesOnAccountGbp ?? 0;
+    const footerParts = [
+      billingBasisLabel || pmsFin.billing_basis || null,
+      `Client account £${clientAcct.toLocaleString('en-GB')}`,
+    ].filter(Boolean);
 
     return {
       budget,
@@ -606,7 +610,7 @@ export function MatterProfileClient({
       remainingBudget,
       budgetUsedPct,
       matterProgressPct,
-      footerText: `${billingBasisLabel || 'Hourly, capped estimate'} · Billed monthly · Billing party: client · Client account £${clientAcct.toLocaleString('en-GB')}`,
+      footerText: footerParts.join(' · '),
     };
   }, [
     canViewFinance,
@@ -996,14 +1000,6 @@ export function MatterProfileClient({
     showToast('Note added');
     router.refresh();
   }
-
-  const riskTone: 'alert' | 'positive' | 'warning' =
-    shortRiskLabel.toLowerCase().includes('high') ||
-    shortRiskLabel.toLowerCase().includes('conflict')
-      ? 'alert'
-      : shortRiskLabel.toLowerCase().includes('low')
-        ? 'positive'
-        : 'warning';
 
   return (
     <div className="page-list matter-profile-page">

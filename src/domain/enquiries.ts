@@ -2202,6 +2202,118 @@ export function mergePeopleWithEnquiries(
   return [...people, ...extra];
 }
 
+export interface EnquiryDashboardMetrics {
+  currentMonthKey: string;
+  todayIso: string;
+  monthEnquiries: Enquiry[];
+  monthReceivedCount: number;
+  monthConvertedCount: number;
+  monthConversionPct: number;
+  monthOpenCount: number;
+  monthUnassignedCount: number;
+  monthDeclinedCount: number;
+  monthReferredCount: number;
+  monthNoResponseCount: number;
+  callbacksDueTodayCount: number;
+  overdueCallbacksCount: number;
+  slaEvaluatedCount: number;
+  slaMetCount: number;
+  slaMetPct: number | null;
+  overdueSlaCount: number;
+}
 
+/**
+ * Pure helper for Home dashboard enquiry KPIs and panels (R324):
+ * - Filters monthly figures by `receivedAt` in `nowIso`'s YYYY-MM.
+ * - Filters `callbacksDueTodayCount` to open enquiries whose callback/due date equals `todayIso`.
+ * - Computes `slaMetPct` only over enquiries that have been contacted (`contactLog.length > 0`)
+ *   or are already overdue (`firstContactDueAt < nowIso` or `firstContactDueAt.slice(0, 10) < todayIso`).
+ */
+export function computeEnquiryDashboardMetrics(
+  enquiries: readonly Enquiry[],
+  nowIso: string,
+): EnquiryDashboardMetrics {
+  const currentMonthKey = nowIso.slice(0, 7);
+  const todayIso = nowIso.slice(0, 10);
 
+  const monthEnquiries = enquiries.filter(
+    (e) => Boolean(e.receivedAt) && e.receivedAt.slice(0, 7) === currentMonthKey,
+  );
+  const monthReceivedCount = monthEnquiries.length;
+  const monthConvertedCount = monthEnquiries.filter((e) => e.status === 'Converted').length;
+  const monthConversionPct =
+    monthReceivedCount > 0 ? Math.round((monthConvertedCount / monthReceivedCount) * 100) : 0;
+  const monthOpenCount = monthEnquiries.filter((e) => isEnquiryOpen(e)).length;
+  const monthUnassignedCount = monthEnquiries.filter(
+    (e) => isEnquiryOpen(e) && !e.assignedToId,
+  ).length;
+  const monthDeclinedCount = monthEnquiries.filter((e) => e.status === 'Declined').length;
+  const monthReferredCount = monthEnquiries.filter((e) => e.status === 'Referred out').length;
+  const monthNoResponseCount = monthEnquiries.filter((e) => e.status === 'No response').length;
+
+  const callbacksDueTodayCount = enquiries.filter((e) => {
+    if (!isEnquiryOpen(e)) return false;
+    const firstDueDay = e.firstContactDueAt ? e.firstContactDueAt.slice(0, 10) : null;
+    const nextActionDay = e.nextActionDate ? e.nextActionDate.slice(0, 10) : null;
+    return firstDueDay === todayIso || nextActionDay === todayIso;
+  }).length;
+
+  const overdueCallbacksCount = enquiries.filter((e) => {
+    if (!isEnquiryOpen(e)) return false;
+    const firstDueOverdue =
+      Boolean(e.firstContactDueAt) &&
+      e.firstContactDueAt!.slice(0, 10) < todayIso &&
+      e.contactLog.length === 0;
+    const nextActionOverdue =
+      Boolean(e.nextActionDate) && e.nextActionDate!.slice(0, 10) < todayIso;
+    return firstDueOverdue || nextActionOverdue;
+  }).length;
+
+  let slaEvaluatedCount = 0;
+  let slaMetCount = 0;
+  let overdueSlaCount = 0;
+
+  for (const e of enquiries) {
+    if (!e.firstContactDueAt) continue;
+    const firstContactAt = e.contactLog[0]?.at ?? null;
+    const hasContact = Boolean(firstContactAt);
+    const isOverdue =
+      !hasContact &&
+      (e.firstContactDueAt < nowIso || e.firstContactDueAt.slice(0, 10) < todayIso);
+
+    if (isEnquiryOpen(e) && isOverdue) {
+      overdueSlaCount += 1;
+    }
+
+    if (hasContact || isOverdue) {
+      slaEvaluatedCount += 1;
+      if (hasContact && firstContactAt! <= e.firstContactDueAt) {
+        slaMetCount += 1;
+      }
+    }
+  }
+
+  const slaMetPct =
+    slaEvaluatedCount > 0 ? Math.round((slaMetCount / slaEvaluatedCount) * 100) : null;
+
+  return {
+    currentMonthKey,
+    todayIso,
+    monthEnquiries,
+    monthReceivedCount,
+    monthConvertedCount,
+    monthConversionPct,
+    monthOpenCount,
+    monthUnassignedCount,
+    monthDeclinedCount,
+    monthReferredCount,
+    monthNoResponseCount,
+    callbacksDueTodayCount,
+    overdueCallbacksCount,
+    slaEvaluatedCount,
+    slaMetCount,
+    slaMetPct,
+    overdueSlaCount,
+  };
+}
 

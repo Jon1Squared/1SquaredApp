@@ -4,8 +4,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/;
+const MATTER_CODE_RE = /\b[A-Z]{3}\d{3}-\d{4}\b/;
+const PMS_CODE_RE = /\b(?:FE0(?:0[1-9]|1[0-8])|CLI00(?:0[1-9]|1[0-2]))\b/;
+const PMS_HARDCODED_MONTH_RE = /['"`]20\d\d-\d\d['"`]/;
 const FAKE_SANCTIONS_CLEAR_RE =
-  /Sanctions\s*&\s*PEP(?![\s\S]{0,160}resolvePersonComplianceDisplay|[\s\S]{0,160}resolveOrganisationComplianceDisplay)[\s\S]{0,160}?['"`]Clear['"`]/;
+  /Sanctions\s*&(?:amp;)?\s*PEP[\s\S]{0,160}?['"`>]Clear['"`<]/;
 
 /**
  * Builds the deny list of demo literals from `data/seed-not-a-law-firm.json` and `src/seed/demo.ts`.
@@ -15,6 +18,15 @@ export function buildDemoLiteralsDenyList(rootDir = process.cwd()) {
     'Not A Law Firm LLP',
     'Not A Law Firm',
     'Pembroke Vaughan',
+    'Victoria Pembroke',
+    'Marcus Vaughan',
+    '42 Lincoln',
+    'SRA-612048',
+    'OC391042',
+    'GB 942 1104 22',
+    '7946 0800',
+    'Assign to Dafydd',
+    '2026-10',
   ]);
 
   const seedJsonPath = path.resolve(rootDir, 'data/seed-not-a-law-firm.json');
@@ -134,6 +146,38 @@ export function scanTextForDemoLiterals(
         match: idMatch[0],
         reason: `seed record ID "${idMatch[0]}"`,
       });
+    }
+
+    const matterCodeMatch = line.match(MATTER_CODE_RE);
+    if (matterCodeMatch && !isAllowListed(allowList, file, matterCodeMatch[0])) {
+      violations.push({
+        file,
+        line: lineNo,
+        match: matterCodeMatch[0],
+        reason: `matter code "${matterCodeMatch[0]}"`,
+      });
+    }
+
+    const pmsCodeMatch = line.match(PMS_CODE_RE);
+    if (pmsCodeMatch && !isAllowListed(allowList, file, pmsCodeMatch[0])) {
+      violations.push({
+        file,
+        line: lineNo,
+        match: pmsCodeMatch[0],
+        reason: `PMS demo code "${pmsCodeMatch[0]}"`,
+      });
+    }
+
+    if (file.replace(/\\/g, '/').endsWith('src/domain/pms.ts')) {
+      const monthMatch = line.match(PMS_HARDCODED_MONTH_RE);
+      if (monthMatch && !isAllowListed(allowList, file, monthMatch[0])) {
+        violations.push({
+          file,
+          line: lineNo,
+          match: monthMatch[0],
+          reason: `hard-coded month literal ${monthMatch[0]} in pms.ts`,
+        });
+      }
     }
   }
 

@@ -22,13 +22,21 @@ import {
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate } from '@/domain/dates';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
-import { enquiryDisplayName, isEnquiryOpen } from '@/domain/enquiries';
+import {
+  computeEnquiryDashboardMetrics,
+  enquiryDisplayName,
+  isEnquiryOpen,
+} from '@/domain/enquiries';
 import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
-import { findOneSquaredIdForPmsCode, formatGbp } from '@/domain/pms';
+import {
+  findOneSquaredIdForPmsCode,
+  formatGbp,
+  formatPmsAsAtLabel,
+} from '@/domain/pms';
 import type { SearchDoc } from '@/domain/search';
 import { isTaskOpen } from '@/domain/tasks';
 import type {
@@ -212,13 +220,13 @@ export function HomeClient({
   const [qOnBehalf, setQOnBehalf] = useState('');
   const [qPhone, setQPhone] = useState('');
   const [qEmail, setQEmail] = useState('');
-  const [qChannelId, setQChannelId] = useState('enquiry_channel.phone');
-  const [qPracticeAreaId, setQPracticeAreaId] = useState('work_type.real_estate_and_property');
-  const [qUrgencyId, setQUrgencyId] = useState('enquiry_urgency.urgent');
+  const [qChannelId, setQChannelId] = useState('');
+  const [qPracticeAreaId, setQPracticeAreaId] = useState('');
+  const [qUrgencyId, setQUrgencyId] = useState('');
   const [qBestTime, setQBestTime] = useState('');
   const [qSummary, setQSummary] = useState('');
   const [qOtherParties, setQOtherParties] = useState('');
-  const [qPrivacyGiven, setQPrivacyGiven] = useState(true);
+  const [qPrivacyGiven, setQPrivacyGiven] = useState(false);
   const [qLinkExistingId, setQLinkExistingId] = useState<string | null>(null);
 
   const roleConfig: RoleHomeConfig = useMemo(() => {
@@ -229,7 +237,8 @@ export function HomeClient({
     );
   }, [homePagesConfig.roles, activeRoleKey]);
 
-  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const nowIso = useMemo(() => new Date().toISOString(), []);
+  const todayIso = useMemo(() => nowIso.slice(0, 10), [nowIso]);
   const tomorrowIso = useMemo(() => {
     const d = new Date(`${todayIso}T12:00:00Z`);
     d.setUTCDate(d.getUTCDate() + 1);
@@ -245,10 +254,13 @@ export function HomeClient({
     d.setUTCDate(d.getUTCDate() + 14);
     return d.toISOString().slice(0, 10);
   }, [todayIso]);
-  const effectiveAsAtIso = pmsAsAtDate || todayIso;
   const formattedAsAt = useMemo(
-    () => formatDate(effectiveAsAtIso) || todayIso,
-    [effectiveAsAtIso, todayIso],
+    () => (pmsAsAtDate ? formatDate(pmsAsAtDate) || pmsAsAtDate : '—'),
+    [pmsAsAtDate],
+  );
+  const pmsAsAtCaption = useMemo(
+    () => (pmsAsAtDate ? formatPmsAsAtLabel(pmsAsAtDate) : 'PMS as at —'),
+    [pmsAsAtDate],
   );
   const currentMonthKey = useMemo(() => todayIso.slice(0, 7), [todayIso]);
   const currentYearLabel = useMemo(() => todayIso.slice(0, 4), [todayIso]);
@@ -264,6 +276,32 @@ export function HomeClient({
       ? todayIso.slice(0, 7)
       : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   }, [todayIso]);
+
+  // PMS financial period labels derived strictly from pmsAsAtDate (R319)
+  const pmsMonthKey = useMemo(() => (pmsAsAtDate ? pmsAsAtDate.slice(0, 7) : ''), [pmsAsAtDate]);
+  const pmsYearLabel = useMemo(
+    () => (pmsAsAtDate ? pmsAsAtDate.slice(0, 4) : currentYearLabel),
+    [pmsAsAtDate, currentYearLabel],
+  );
+  const pmsMonthShort = useMemo(() => {
+    if (!pmsAsAtDate) return 'Month';
+    const d = new Date(`${pmsAsAtDate.slice(0, 10)}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? 'Month'
+      : d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
+  }, [pmsAsAtDate]);
+  const pmsMonthYearLabel = useMemo(() => {
+    if (!pmsAsAtDate) return 'Current period';
+    const d = new Date(`${pmsAsAtDate.slice(0, 10)}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? pmsAsAtDate.slice(0, 7)
+      : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }, [pmsAsAtDate]);
+
+  const enquiryMetrics = useMemo(
+    () => computeEnquiryDashboardMetrics(enquiries, nowIso),
+    [enquiries, nowIso],
+  );
 
   const personById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
   const orgById = useMemo(() => new Map(organisations.map((o) => [o.id, o])), [organisations]);
@@ -297,15 +335,6 @@ export function HomeClient({
     }
     return [];
   }, [effectiveWorkPerson.supportsIds, currentUser.supportsIds]);
-
-  const supportedNamesLabel = useMemo(() => {
-    return supportedFeeEarnerIds
-      .map((id) => {
-        const p = personById.get(id);
-        return p ? `${personDisplayName(p)} (${p.jobTitle.split(',')[0]})` : id;
-      })
-      .join(' & ');
-  }, [supportedFeeEarnerIds, personById]);
 
   // User's teams
   const myTeams = useMemo(
@@ -453,8 +482,8 @@ export function HomeClient({
     router.refresh();
   }
 
-  async function handleTakeEnquiry(enq: Enquiry, targetAssigneeId?: string) {
-    const assigneeId = targetAssigneeId ?? effectiveWorkPerson.id;
+  async function handleTakeEnquiry(enq: Enquiry) {
+    const assigneeId = effectiveWorkPerson.id;
     await assignEnquiryAction(enq.id, assigneeId, enq.assignedTeamId);
     const assignee = personById.get(assigneeId);
     showToast(
@@ -539,9 +568,13 @@ export function HomeClient({
     setQOnBehalf('');
     setQPhone('');
     setQEmail('');
+    setQChannelId('');
+    setQPracticeAreaId('');
+    setQUrgencyId('');
     setQBestTime('');
     setQSummary('');
     setQOtherParties('');
+    setQPrivacyGiven(false);
     setQLinkExistingId(null);
     router.refresh();
   }
@@ -629,7 +662,7 @@ export function HomeClient({
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Chargeable hrs ({currentMonthShort})</span>
+              <span>Chargeable hrs ({pmsMonthShort})</span>
               <span className="mono-code">PMS</span>
             </div>
             <div className="kpi-value">{hasFigures ? `${mtd.toFixed(1)} h` : '–'}</div>
@@ -637,8 +670,8 @@ export function HomeClient({
               {!hasFigures
                 ? 'No time data available'
                 : target && target > 0
-                  ? `${ytd.toFixed(1)} h YTD of ${target.toLocaleString('en-GB')} h annual target`
-                  : `${ytd.toFixed(1)} h YTD`}
+                  ? `${ytd.toFixed(1)} h YTD of ${target.toLocaleString('en-GB')} h · ${pmsAsAtCaption}`
+                  : `${ytd.toFixed(1)} h YTD · ${pmsAsAtCaption}`}
             </div>
           </div>
         );
@@ -725,9 +758,10 @@ export function HomeClient({
             <div className="kpi-label">
               <span>Dept enquiries ({currentMonthShort})</span>
             </div>
-            <div className="kpi-value">{enquiries.length}</div>
+            <div className="kpi-value">{enquiryMetrics.monthReceivedCount}</div>
             <div className="kpi-sub">
-              {convertedEnqsCount} converted · {unassignedEnqsCount} unassigned
+              {enquiryMetrics.monthConvertedCount} converted · {enquiryMetrics.monthUnassignedCount}{' '}
+              unassigned
             </div>
           </div>
         );
@@ -817,23 +851,17 @@ export function HomeClient({
 
       // 04 Enquiries Coordinator
       case 'ec_callbacks_due': {
-        const overdueCallbacks = enquiries.filter(
-          (e) =>
-            isEnquiryOpen(e) &&
-            e.firstContactDueAt &&
-            e.firstContactDueAt.slice(0, 10) < todayIso,
-        ).length;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Callbacks due today</span>
-              {overdueCallbacks > 0 ? (
-                <StatusPill label={`${overdueCallbacks} overdue`} tone="alert" />
+              {enquiryMetrics.overdueCallbacksCount > 0 ? (
+                <StatusPill label={`${enquiryMetrics.overdueCallbacksCount} overdue`} tone="alert" />
               ) : null}
             </div>
-            <div className="kpi-value">{openEnqsCount}</div>
+            <div className="kpi-value">{enquiryMetrics.callbacksDueTodayCount}</div>
             <div className="kpi-sub">
-              {openEnqsCount} open enquir{openEnqsCount === 1 ? 'y' : 'ies'}
+              {openEnqsCount} open enquir{openEnqsCount === 1 ? 'y' : 'ies'} total
             </div>
           </div>
         );
@@ -871,9 +899,9 @@ export function HomeClient({
               <span>Converted ({currentMonthShort})</span>
             </div>
             <div className="kpi-value">
-              {convertedEnqsCount} of {enquiries.length}
+              {enquiryMetrics.monthConvertedCount} of {enquiryMetrics.monthReceivedCount}
             </div>
-            <div className="kpi-sub">{openEnqsCount} open</div>
+            <div className="kpi-sub">{enquiryMetrics.monthOpenCount} open this month</div>
           </div>
         );
       case 'ec_no_response': {
@@ -979,7 +1007,7 @@ export function HomeClient({
               <span>AML / ID checks pending</span>
             </div>
             <div className="kpi-value">–</div>
-            <div className="kpi-sub">No pending AML or ID checks</div>
+            <div className="kpi-sub">Not yet available</div>
           </div>
         );
       case 'rc_conflicts_pending': {
@@ -1049,16 +1077,16 @@ export function HomeClient({
       // 07 Managing Partner / Admin
       case 'mp_fees_ytd': {
         const currentMonthFeesVal =
-          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === currentMonthKey)?.feesNet ?? 0;
+          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === pmsMonthKey)?.feesNet ?? 0;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Fees billed YTD ({currentYearLabel})</span>
+              <span>Fees billed YTD ({pmsYearLabel})</span>
               <span className="mono-code">PMS</span>
             </div>
             <div className="kpi-value">{formatGbp(pmsMonthlyFeesBilled.yearToDateTotal)}</div>
             <div className="kpi-sub">
-              {formatGbp(currentMonthFeesVal)} billed in {currentMonthShort} · net of credit notes
+              {formatGbp(currentMonthFeesVal)} billed in {pmsMonthShort} · {pmsAsAtCaption}
             </div>
           </div>
         );
@@ -1067,13 +1095,14 @@ export function HomeClient({
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Cash received ({currentMonthShort})</span>
+              <span>Cash received ({pmsMonthShort})</span>
+              <span className="mono-code">PMS</span>
             </div>
             <div className="kpi-value">{formatGbp(pmsCashReceived.currentMonthTotal)}</div>
             <div className="kpi-sub">
               {pmsCashReceived.currentMonthReceiptCount} receipt
               {pmsCashReceived.currentMonthReceiptCount === 1 ? '' : 's'} · Prev month{' '}
-              {formatGbp(pmsCashReceived.previousMonthTotal)}
+              {formatGbp(pmsCashReceived.previousMonthTotal)} · {pmsAsAtCaption}
             </div>
           </div>
         );
@@ -1728,7 +1757,11 @@ export function HomeClient({
                               label={
                                 e.status === 'In contact'
                                   ? 'In contact · Ready to convert'
-                                  : `${urgLabel} · Due ${e.bestTimeToCall || '17:30 today'}`
+                                  : e.bestTimeToCall
+                                    ? `${urgLabel} · Best time ${e.bestTimeToCall}`
+                                    : e.firstContactDueAt
+                                      ? `${urgLabel} · Due ${formatDate(e.firstContactDueAt)}`
+                                      : urgLabel
                               }
                               tone={
                                 e.status === 'In contact'
@@ -1957,14 +1990,14 @@ export function HomeClient({
       case 'my_time_and_wip': {
         const wt = myWeeklyTime;
         const fePerf = myFeeEarnerFigures;
-        const dailyPace = wt?.dailyPaceHours ?? 5.2;
-        const weeklyPace = wt?.weeklyPaceHours ?? 26;
+        const dailyPace = wt?.dailyPaceHours && wt.dailyPaceHours > 0 ? wt.dailyPaceHours : null;
+        const weeklyPace =
+          wt?.weeklyPaceHours && wt.weeklyPaceHours > 0 ? wt.weeklyPaceHours : null;
         const weekTotal = wt?.weekTotalHours ?? 0;
         const ytdHours = fePerf?.chargeable_hours ?? 0;
         const targetHours = fePerf?.annual_target_hours ?? null;
         const billedValue = fePerf?.billed_value ?? 0;
         const myWip = wt?.myUnbilledWip ?? fePerf?.unbilled_wip ?? 0;
-        const readyToBill = 0;
         const weekdays =
           wt?.weekdays ?? [
             { dayLabel: 'Mon', date: 'mon', hours: 0 },
@@ -1973,13 +2006,15 @@ export function HomeClient({
             { dayLabel: 'Thu', date: 'thu', hours: 0 },
             { dayLabel: 'Fri', date: 'fri', hours: 0 },
           ];
+        const maxDayHours = Math.max(...weekdays.map((d) => d.hours), 1);
 
-        const weekPct = Math.min(Math.max((weekTotal / weeklyPace) * 100, 0), 100);
+        const weekPct =
+          weeklyPace !== null ? Math.min(Math.max((weekTotal / weeklyPace) * 100, 0), 100) : 0;
         const wipK = `£${(myWip / 1000).toFixed(1)}k`;
-        const readyK = `£${(readyToBill / 1000).toFixed(1)}k`;
+        const readyLabel = '–';
         const billedK = `£${(billedValue / 1000).toFixed(1)}k`;
         const billedFormatted = `£${Math.round(billedValue).toLocaleString('en-GB')}`;
-        const readyWipPct = myWip > 0 ? Math.min(Math.max((readyToBill / myWip) * 100, 6), 100) : 0;
+        const readyWipPct = 0;
         const ytdTargetRatio =
           targetHours !== null && targetHours > 0 && ytdHours > 0
             ? Math.min(Math.max(ytdHours / targetHours, 0.06), 1)
@@ -2031,17 +2066,26 @@ export function HomeClient({
               <div className="tw-card-b__strip">
                 <div className="tw-card-b__left">
                   <div className="tw-ring-large">
-                    {renderRing(64, 5.5, weekTotal / weeklyPace, '#45645a')}
+                    {renderRing(
+                      64,
+                      5.5,
+                      weeklyPace !== null ? weekTotal / weeklyPace : 0,
+                      '#45645a',
+                    )}
                     <div className="tw-ring-large__label">
                       <span className="tw-ring-large__hrs">{weekTotal.toFixed(1)}h</span>
-                      <span className="tw-ring-large__sub">of {weeklyPace}h</span>
+                      {weeklyPace !== null ? (
+                        <span className="tw-ring-large__sub">of {weeklyPace}h</span>
+                      ) : null}
                     </div>
                   </div>
 
                   <div className="tw-week-chart tw-week-chart--compact">
                     <div className="tw-week-chart__plot">
                       {weekdays.map((d) => {
-                        const barPct = Math.min(Math.max((d.hours / dailyPace) * 100, 6), 100);
+                        const denom = dailyPace ?? maxDayHours;
+                        const barPct =
+                          d.hours > 0 ? Math.min(Math.max((d.hours / denom) * 100, 6), 100) : 6;
                         return (
                           <div
                             key={d.date}
@@ -2078,7 +2122,7 @@ export function HomeClient({
                   </div>
                   <div className="tw-card-b__legend">
                     <span className="tw-card-b__dot" aria-hidden="true" />
-                    <span>{readyK} ready to bill</span>
+                    <span>{readyLabel} ready to bill</span>
                   </div>
                 </div>
               </div>
@@ -2100,21 +2144,27 @@ export function HomeClient({
               <div>
                 <div>
                   <span className="tw-card-a__hours-num">{weekTotal.toFixed(1)}h</span>
-                  <span className="tw-card-a__hours-pace">/ {weeklyPace}h</span>
+                  {weeklyPace !== null ? (
+                    <span className="tw-card-a__hours-pace">/ {weeklyPace}h</span>
+                  ) : null}
                 </div>
-                <div className="tw-bar-track">
-                  <div
-                    className="tw-bar-fill"
-                    style={{ width: `${weekPct}%`, background: '#45645a' }}
-                  />
-                </div>
-                <div className="tw-card-a__caption">This week</div>
+                {weeklyPace !== null ? (
+                  <div className="tw-bar-track">
+                    <div
+                      className="tw-bar-fill"
+                      style={{ width: `${weekPct}%`, background: '#45645a' }}
+                    />
+                  </div>
+                ) : null}
+                <div className="tw-card-a__caption">This week · {pmsAsAtCaption}</div>
               </div>
 
               <div className="tw-week-chart">
                 <div className="tw-week-chart__plot">
                   {weekdays.map((d) => {
-                    const barPct = Math.min(Math.max((d.hours / dailyPace) * 100, 6), 100);
+                    const denom = dailyPace ?? maxDayHours;
+                    const barPct =
+                      d.hours > 0 ? Math.min(Math.max((d.hours / denom) * 100, 6), 100) : 6;
                     return (
                       <div
                         key={d.date}
@@ -2143,10 +2193,10 @@ export function HomeClient({
               </div>
 
               <div className="tw-metric">
-                {renderRing(44, 5, readyToBill / Math.max(myWip, 1), '#9e6730')}
+                {renderRing(44, 5, 0, '#9e6730')}
                 <div>
                   <div className="tw-metric__value">{wipK}</div>
-                  <div className="tw-metric__sub">WIP · {readyK} ready</div>
+                  <div className="tw-metric__sub">WIP · {readyLabel} ready</div>
                 </div>
               </div>
             </div>
@@ -2768,6 +2818,7 @@ export function HomeClient({
                       value={qChannelId}
                       onChange={(e) => setQChannelId(e.target.value)}
                     >
+                      <option value="">Select channel…</option>
                       <option value="enquiry_channel.phone">Phone</option>
                       <option value="enquiry_channel.email">Email</option>
                       <option value="enquiry_channel.web_form">Web form</option>
@@ -2784,6 +2835,7 @@ export function HomeClient({
                       value={qPracticeAreaId}
                       onChange={(e) => setQPracticeAreaId(e.target.value)}
                     >
+                      <option value="">Select practice area…</option>
                       <option value="work_type.real_estate_and_property">
                         Real Estate &amp; Property → Real Estate team
                       </option>
@@ -2810,8 +2862,9 @@ export function HomeClient({
                       value={qUrgencyId}
                       onChange={(e) => setQUrgencyId(e.target.value)}
                     >
+                      <option value="">Select urgency…</option>
                       <option value="enquiry_urgency.urgent">
-                        Urgent — end of same working day (17:30 today)
+                        Urgent — end of same working day
                       </option>
                       <option value="enquiry_urgency.emergency">
                         Emergency — within 2 working hours
@@ -3136,13 +3189,13 @@ export function HomeClient({
       // 17. todays_outcomes_and_conversion (04 Enquiries Coordinator)
       // ================================================================
       case 'todays_outcomes_and_conversion': {
-        const totalEnqs = enquiries.length;
-        const convCount = enquiries.filter((e) => e.status === 'Converted').length;
-        const convPct = totalEnqs > 0 ? Math.round((convCount / totalEnqs) * 100) : 0;
-        const openCount = enquiries.filter((e) => isEnquiryOpen(e)).length;
-        const declinedCount = enquiries.filter((e) => e.status === 'Declined').length;
-        const referredCount = enquiries.filter((e) => e.status === 'Referred out').length;
-        const noRespCount = enquiries.filter((e) => e.status === 'No response').length;
+        const totalEnqs = enquiryMetrics.monthReceivedCount;
+        const convCount = enquiryMetrics.monthConvertedCount;
+        const convPct = enquiryMetrics.monthConversionPct;
+        const openCount = enquiryMetrics.monthOpenCount;
+        const declinedCount = enquiryMetrics.monthDeclinedCount;
+        const referredCount = enquiryMetrics.monthReferredCount;
+        const noRespCount = enquiryMetrics.monthNoResponseCount;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -4254,17 +4307,18 @@ export function HomeClient({
       case 'cash_collection_vs_target': {
         const octCash = pmsCashReceived.currentMonthTotal;
         const currentMonthFees =
-          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === currentMonthKey)?.feesNet ?? 0;
-        const currentMonthInvoicesCount = pmsInvoices.filter((inv) =>
-          inv.invoice_date.startsWith(currentMonthKey),
+          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === pmsMonthKey)?.feesNet ?? 0;
+        const currentMonthInvoicesCount = pmsInvoices.filter(
+          (inv) => Boolean(pmsMonthKey) && inv.invoice_date.startsWith(pmsMonthKey),
         ).length;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
-                <h2 className="panel-title">Cash collection &amp; billing — {currentMonthYearLabel}</h2>
+                <h2 className="panel-title">Cash collection &amp; billing — {pmsMonthYearLabel}</h2>
                 <span className="mono-code">PMS `payments` + `invoices`</span>
               </div>
+              <span className="panel-subtitle">{pmsAsAtCaption}</span>
             </div>
             <div className="panel-body padded">
               <div style={{ marginBottom: 12 }}>
@@ -4292,7 +4346,7 @@ export function HomeClient({
                 }}
               >
                 <div className="legend-item">
-                  <div className="lbl">Fees billed in {currentMonthShort} (ex VAT)</div>
+                  <div className="lbl">Fees billed in {pmsMonthShort} (ex VAT)</div>
                   <div className="val">{formatGbp(currentMonthFees)}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     {currentMonthInvoicesCount} invoice{currentMonthInvoicesCount === 1 ? '' : 's'} issued
@@ -4302,7 +4356,7 @@ export function HomeClient({
                   <div className="lbl">Fees billed YTD (ex VAT)</div>
                   <div className="val">{formatGbp(pmsMonthlyFeesBilled.yearToDateTotal)}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {currentYearLabel} year to date
+                    {pmsYearLabel} year to date · {pmsAsAtCaption}
                   </div>
                 </div>
               </div>
@@ -4320,14 +4374,11 @@ export function HomeClient({
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">AML &amp; Customer Due Diligence queue</h2>
-                <StatusPill label="0 pending" tone="positive" />
               </div>
               <span className="panel-subtitle">MLR 2017 · ID&amp;V, SoF &amp; SoW checks</span>
             </div>
             <div className="panel-body">
-              <div className="panel-body padded muted">
-                No pending AML or Customer Due Diligence checks.
-              </div>
+              <div className="panel-body padded muted">Not yet available</div>
             </div>
           </section>
         );
@@ -4393,18 +4444,52 @@ export function HomeClient({
       // 33. high_risk_matters_and_pep_register (06 Risk & Compliance)
       // ================================================================
       case 'high_risk_matters_and_pep_register': {
+        const highRiskMatters = matters.filter(
+          (m) =>
+            m.matterStatusId !== 'matter_status.closed' &&
+            m.riskRatingId?.toLowerCase().includes('high'),
+        );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">High-risk matters, PEPs &amp; sanctions watch</h2>
-                <StatusPill label="0 matters" tone="neutral" />
+                <StatusPill
+                  label={`${highRiskMatters.length} high-risk matter${highRiskMatters.length === 1 ? '' : 's'}`}
+                  tone={highRiskMatters.length > 0 ? 'warning' : 'neutral'}
+                />
               </div>
+              <span className="panel-subtitle">PEP &amp; sanctions watch: Not yet available</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
-              <div className="panel-body padded muted">
-                No high-risk matters, PEPs or sanctions alerts recorded.
-              </div>
+              {highRiskMatters.length === 0 ? (
+                <div className="panel-body padded muted">
+                  No high-risk open matters recorded. PEP and sanctions screening is not yet available.
+                </div>
+              ) : (
+                <ul className="worklist">
+                  {highRiskMatters.map((m) => {
+                    const riskLabel = resolveLabel(values, m.riskRatingId) || 'High risk';
+                    return (
+                      <li key={m.id} className="worklist-row">
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <StatusPill label={riskLabel} tone="warning" />
+                            <Link href={`/matters/${m.id}`}>
+                              {m.matterNumber} — {m.title}
+                            </Link>
+                          </div>
+                        </div>
+                        <div className="worklist-right">
+                          <Link href={`/matters/${m.id}`} className="btn btn--secondary btn--sm">
+                            Open matter
+                          </Link>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           </section>
         );
@@ -4547,24 +4632,24 @@ export function HomeClient({
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
-                <h2 className="panel-title">Firm financial pulse — {currentYearLabel} year to date</h2>
+                <h2 className="panel-title">Firm financial pulse — {pmsYearLabel} year to date</h2>
                 <span className="mono-code">
                   PMS `invoices`, `payments`, `v_matter_financials`
                 </span>
               </div>
               <span className="panel-subtitle">
-                Net of credit notes · ex VAT · as at {formattedAsAt}
+                Net of credit notes · ex VAT · {pmsAsAtCaption}
               </span>
             </div>
             <div className="panel-body padded">
               <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-                Monthly fees billed ({currentYearLabel}) · Total YTD:{' '}
+                Monthly fees billed ({pmsYearLabel}) · Total YTD:{' '}
                 <strong>{formatGbp(pmsMonthlyFeesBilled.yearToDateTotal)}</strong>
               </div>
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(10, 1fr)',
+                  gridTemplateColumns: `repeat(${Math.max(months.length, 1)}, 1fr)`,
                   gap: 6,
                   alignItems: 'end',
                   height: 110,
@@ -4577,7 +4662,7 @@ export function HomeClient({
                     m.feesNet > 0 ? Math.max(Math.round((m.feesNet / maxMonth) * 74), 8) : 3;
                   const shortVal =
                     m.feesNet > 0 ? `£${(m.feesNet / 1000).toFixed(1)}k` : '—';
-                  const isCurrent = m.monthKey === currentMonthKey;
+                  const isCurrent = m.monthKey === pmsMonthKey;
                   return (
                     <div key={m.monthKey} style={{ textAlign: 'center' }}>
                       <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{shortVal}</div>
@@ -4601,7 +4686,7 @@ export function HomeClient({
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(10, 1fr)',
+                  gridTemplateColumns: `repeat(${Math.max(months.length, 1)}, 1fr)`,
                   gap: 6,
                   fontSize: 11,
                   color: 'var(--text-muted)',
@@ -4613,7 +4698,7 @@ export function HomeClient({
                   <div
                     key={m.monthKey}
                     style={
-                      m.monthKey === currentMonthKey
+                      m.monthKey === pmsMonthKey
                         ? { fontWeight: 700, color: 'var(--text-primary)' }
                         : undefined
                     }
@@ -4681,7 +4766,7 @@ export function HomeClient({
                   PMS `v_matter_financials` + `v_fee_earner_performance`
                 </span>
               </div>
-              <span className="panel-subtitle">{currentYearLabel} YTD · as at {formattedAsAt}</span>
+              <span className="panel-subtitle">{pmsYearLabel} YTD · {pmsAsAtCaption}</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
               <table className="data-table">
@@ -4693,7 +4778,7 @@ export function HomeClient({
                     <th className="num">Unbilled WIP</th>
                     <th className="num">Outstanding debt</th>
                     <th className="num">Overdue debt</th>
-                    <th className="num">{currentMonthShort} hrs</th>
+                    <th className="num">{pmsMonthShort} hrs</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4800,28 +4885,12 @@ export function HomeClient({
       // 40. enquiries_conversion_and_pipeline (07 Managing Partner)
       // ================================================================
       case 'enquiries_conversion_and_pipeline': {
-        const totalEnqs = enquiries.length;
-        const convCount = enquiries.filter((e) => e.status === 'Converted').length;
-        const convPct = totalEnqs > 0 ? Math.round((convCount / totalEnqs) * 100) : 0;
-        const enquiriesWithDue = enquiries.filter((e) => Boolean(e.firstContactDueAt));
-        const slaMetCount = enquiriesWithDue.filter((e) => {
-          const firstContactAt = e.contactLog[0]?.at;
-          if (firstContactAt && e.firstContactDueAt) {
-            return firstContactAt <= e.firstContactDueAt;
-          }
-          return e.firstContactDueAt ? e.firstContactDueAt.slice(0, 10) >= todayIso : false;
-        }).length;
+        const totalEnqs = enquiryMetrics.monthReceivedCount;
+        const convCount = enquiryMetrics.monthConvertedCount;
+        const convPct = enquiryMetrics.monthConversionPct;
         const slaMetPct =
-          enquiriesWithDue.length > 0
-            ? `${Math.round((slaMetCount / enquiriesWithDue.length) * 100)}%`
-            : '—';
-        const overdueSlaCount = enquiries.filter(
-          (e) =>
-            isEnquiryOpen(e) &&
-            e.firstContactDueAt &&
-            e.firstContactDueAt.slice(0, 10) < todayIso &&
-            e.contactLog.length === 0,
-        ).length;
+          enquiryMetrics.slaMetPct !== null ? `${enquiryMetrics.slaMetPct}%` : '—';
+        const overdueSlaCount = enquiryMetrics.overdueSlaCount;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -4950,13 +5019,10 @@ export function HomeClient({
                 <h2 className="panel-title">
                   Exceptions — financial, compliance &amp; operational
                 </h2>
-                <StatusPill label="0 items" tone="positive" />
               </div>
             </div>
             <div className="panel-body">
-              <div className="panel-body padded muted">
-                No financial, compliance or operational exceptions flagged.
-              </div>
+              <div className="panel-body padded muted">Not yet available</div>
             </div>
           </section>
         );

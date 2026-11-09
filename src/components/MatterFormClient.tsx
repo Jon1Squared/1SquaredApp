@@ -150,7 +150,6 @@ import { useToast } from './Toast';
 interface MatterFormClientProps {
   existing?: Matter | null;
   isReopenedDraft?: boolean;
-  initialScenario?: string | null;
   initialClientId?: string | null;
   initialSubcategoryName?: string | null;
   initialEnquiry?: Enquiry | null;
@@ -253,7 +252,6 @@ function nextClientItemId(prefix: string): string {
 export function MatterFormClient({
   existing,
   isReopenedDraft = false,
-  initialScenario = null,
   initialClientId,
   initialSubcategoryName,
   initialEnquiry,
@@ -593,7 +591,7 @@ export function MatterFormClient({
   useEffect(() => {
     if (prevUserIdRef.current !== currentUser.id) {
       prevUserIdRef.current = currentUser.id;
-      if (!existing && !initialScenario && !initialEnquiry && !initialQuote) {
+      if (!existing && !initialEnquiry && !initialQuote) {
         queueMicrotask(() => {
           setPracticeAreaId(userMatterDefaults.practiceAreaId);
           setWorkTypeSubcategoryId('');
@@ -606,7 +604,6 @@ export function MatterFormClient({
   }, [
     currentUser.id,
     existing,
-    initialScenario,
     initialEnquiry,
     initialQuote,
     userMatterDefaults,
@@ -8161,12 +8158,11 @@ export function MatterFormClient({
                     type="text"
                     list="nm-claim-value-options"
                     className="field-input"
-                    placeholder="e.g. £68,000 or Medium (£5k–£25k)"
+                    placeholder="e.g. Medium (£5k–£25k)"
                     value={claimValue}
                     onChange={(e) => setClaimValue(e.target.value)}
                   />
                   <datalist id="nm-claim-value-options">
-                    <option value="£68,000" />
                     <option value="Small (£1k–£5k)" />
                     <option value="Medium (£5k–£25k)" />
                     <option value="Large (£25k–£100k)" />
@@ -8184,16 +8180,20 @@ export function MatterFormClient({
                     type="text"
                     list="nm-office-options"
                     className="field-input"
-                    placeholder="e.g. Bristol or Cardiff"
+                    placeholder={
+                      orgStructure.offices[0]?.name
+                        ? `e.g. ${orgStructure.offices[0].name}`
+                        : 'Office name'
+                    }
                     value={responsibleOffice}
                     onChange={(e) => setResponsibleOffice(e.target.value)}
                   />
                   <datalist id="nm-office-options">
-                    <option value="Bristol" />
-                    <option value="Cardiff" />
-                    <option value="Swansea" />
-                    <option value="London" />
-                    <option value="Newport" />
+                    {orgStructure.offices
+                      .filter((o) => o.active !== false)
+                      .map((o) => (
+                        <option key={o.id} value={o.name} />
+                      ))}
                   </datalist>
                 </div>
 
@@ -10862,7 +10862,7 @@ export function MatterFormClient({
                       <input
                         type="text"
                         className="field-input"
-                        placeholder="e.g. £68,000 or Medium (£5k–£25k)"
+                        placeholder="e.g. Medium (£5k–£25k)"
                         value={claimValue}
                         onChange={(e) => setClaimValue(e.target.value)}
                       />
@@ -10872,7 +10872,11 @@ export function MatterFormClient({
                       <input
                         type="text"
                         className="field-input"
-                        placeholder="e.g. Bristol or Cardiff"
+                        placeholder={
+                          orgStructure.offices[0]?.name
+                            ? `e.g. ${orgStructure.offices[0].name}`
+                            : 'Office name'
+                        }
                         value={responsibleOffice}
                         onChange={(e) => setResponsibleOffice(e.target.value)}
                       />

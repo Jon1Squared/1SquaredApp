@@ -6,23 +6,24 @@ export const homeAndProfileScreensArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How role-based Home panels, matter intake and compliance cards, and person and organisation compliance displays derive their values from stored records and show honest empty states when a module or screening integration is not yet connected.',
-  updated: '2026-11-08',
+  updated: '2026-11-09',
   body: `
 1Squared displays only stored, tenant-scoped records and practice management system (PMS) figures on every workspace screen. Product screens never fall back to invented client names, hard-coded figures, or fabricated compliance statuses.
 
 ## 1. Role-based Home panels and empty states
 
-Each role’s Home page renders a configurable set of panels (\`data-panel-id\`). Every panel follows one of two patterns:
+Each role’s Home page renders a configurable set of panels (\`data-panel-id\` from \`src/domain/homeConfig.ts\`). Every panel follows one of two patterns:
 
 1. **Data-driven panels** compute their rows and summary metrics from the signed-in user’s accessible matters, enquiries, quotes, tasks, key dates, sign-offs, and (where permitted by \`finance:view_matter\` or \`finance:view\`) PMS financial records. Examples include:
-   - **Intake & Conversion Funnel**: counts visible enquiries by stage (received, routed, quoted, and converted to a matter) and calculates the conversion percentage from those counts.
-   - **My Key Dates**, **Team Key Dates** and **Limitation & Key Dates Watchlist**: list open key dates on accessible matters ordered by due date.
-   - **Compliance & AML Queue** and **PEP & High-Risk Client Register**: list people, organisations, and matters whose stored verification, AML status, PEP flag (\`isPep\`), or risk rating requires attention.
-   - **High-Risk Matters Register**: lists accessible matters whose stored risk assessment or risk rating is **High**.
-   - **Enquiry Response SLA & Callback Queue**: calculates the SLA-met percentage from enquiries with a recorded \`firstContactAt\` timestamp against \`slaDueAt\`, or shows \`—\` when no enquiries have been contacted yet.
-   - **Unbilled Disbursements**: lists unbilled disbursements from the PMS across accessible matters (gated on \`finance:view_matter\`).
+   - **\`todays_outcomes_and_conversion\`** and **\`enquiries_and_conversion_by_practice_area\`**: count visible enquiries received in the current month (\`receivedAt\`, \`computeEnquiryDashboardMetrics\`) by status (\`Converted\`, \`Declined\`, \`Referred out\`, \`No response\`, and open) and calculate the conversion percentage from those counts.
+   - **\`key_dates_and_deadlines\`** and **\`upcoming_completions_and_filings\`**: list upcoming key dates and milestones on accessible matters ordered by due date.
+   - **\`conflict_checks_awaiting_decision\`**: lists accessible matters whose \`conflictCheckRecord.status\` is \`Referred\` or whose \`conflictDecision.outcome\` is \`Potential conflict\`.
+   - **\`high_risk_matters_and_pep_register\`** (and the **\`rc_high_risk_matters\`** headline card): list open matters whose stored \`riskRatingId\` is **High**, while noting that PEP and sanctions watch screening is not yet available.
+   - **\`enquiries_conversion_and_pipeline\`** and **\`callback_sla_queue\`**: \`computeEnquiryDashboardMetrics\` calculates the first-contact SLA-met percentage over enquiries that have been contacted (\`contactLog[0].at <= firstContactDueAt\`) or are already overdue (\`firstContactDueAt < nowIso\`), so uncontacted enquiries that are not yet due do not inflate the SLA percentage, and shows \`—\` when no enquiries have been evaluated yet.
+   - **\`disbursements_and_invoices_to_log\`** and **\`disbursements_awaiting_billing\`**: list unbilled disbursements from the PMS across accessible matters (gated on \`finance:view_matter\` or \`finance:view\`).
+   - **PMS period labels**: all PMS financial panels and headline cards (\`fe_hours_month\`, \`my_time_and_wip\`, \`mp_fees_ytd\`, \`mp_cash_month\`, \`cash_collection_vs_target\`, \`firm_financial_pulse\`, \`performance_by_department\`) derive their month and year labels from the PMS extract \`asAtDate\` and display \`PMS as at <date>\` (\`formatPmsAsAtLabel\`).
 
-2. **Empty-state panels for upcoming modules**: Where a register or workflow is scheduled for a later roadmap stage — such as the central undertakings register, complaints register, breach and incident register, supervisory file reviews, reconciliations, regulatory returns, or live calendar sync — the panel remains in the layout and renders an honest empty state (for example, *"Undertakings register not yet available"* or *"No complaints recorded"*) rather than invented rows.
+2. **Empty-state panels for upcoming modules**: Where a register or workflow is scheduled for a later roadmap stage — **\`aml_and_cdd_queue\`** (and **\`rc_aml_pending\`**), **\`documents_and_correspondence_queue\`** (and **\`ls_letters_docs\`**), **\`undertakings_and_file_reviews\`**, **\`complaints_incidents_and_breaches\`** (and **\`rc_sra_breaches\`**), and **\`firm_risk_and_exceptions_register\`** — the panel remains in the layout and renders a neutral empty state (*"Not yet available"* or *"No open undertakings or scheduled periodic file reviews"*) with no positive status badge rather than invented rows or a fake *"0 pending"* / *"0 items"* badge.
 
 Action buttons on Home and profile screens only appear when they perform a real server action or navigation (such as opening a record, recording a task, or downloading a CSV export). Prototype toast-only buttons are not shown.
 

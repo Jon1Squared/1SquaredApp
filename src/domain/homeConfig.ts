@@ -66,7 +66,7 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
     name: 'My time & WIP',
     sourceLabel: 'PMS `time_entries` + `v_fee_earner_performance` · read-only',
     category: 'Tasks, enquiries & daily work',
-    description: 'Read-only chargeable hours recorded in PMS this week, October vs target, and unbilled WIP.',
+    description: 'Read-only chargeable hours recorded in PMS this week, current month vs target, and unbilled WIP.',
   },
   {
     id: 'key_dates_and_deadlines',
@@ -122,14 +122,14 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
   {
     id: 'todays_outcomes_and_conversion',
     name: "This month's outcomes & conversion",
-    sourceLabel: '1Squared Enquiries · October 2026',
+    sourceLabel: '1Squared Enquiries · current month',
     category: 'Intake & conversion',
     description: 'Received, converted, in-progress, declined, and non-responsive enquiries.',
   },
   {
     id: 'referral_sources_this_month',
     name: 'Enquiry channels & referral sources',
-    sourceLabel: '1Squared Enquiries + Referrer contacts · October 2026',
+    sourceLabel: '1Squared Enquiries + Referrer contacts · current month',
     category: 'Intake & conversion',
     description: 'Breakdown of enquiry origins and named referrers this month.',
   },
@@ -191,7 +191,7 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
     name: 'Team workload & utilisation',
     sourceLabel: 'PMS `v_fee_earner_performance` + 1Squared open task/matter counts',
     category: 'Partner oversight',
-    description: 'Fee earner open matters, tasks, October hours, YTD target %, and unbilled WIP.',
+    description: 'Fee earner open matters, tasks, current-month hours, YTD target %, and unbilled WIP.',
   },
   {
     id: 'wip_ready_to_bill_and_aged_debt',
@@ -203,7 +203,7 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
   {
     id: 'enquiries_and_conversion_by_practice_area',
     name: 'Enquiries & conversion — my practice area',
-    sourceLabel: '1Squared Enquiries · October 2026',
+    sourceLabel: '1Squared Enquiries · current month',
     category: 'Partner oversight',
     description: 'Practice area intake funnel, conversion rate, and unassigned enquiry alert.',
   },
@@ -219,7 +219,7 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
   {
     id: 'aged_debt_by_age_band',
     name: 'Aged debt by band — firm-wide',
-    sourceLabel: 'PMS `v_invoice_balances` · £49,130.22 across 11 unpaid / part-paid bills',
+    sourceLabel: 'PMS `v_invoice_balances` · unpaid and part-paid bills',
     category: 'Finance & credit control',
     description: 'Stacked breakdown of firm-wide debt across Not yet due, 1–30d, 31–60d, 61–90d, and 90+d.',
   },
@@ -247,16 +247,16 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
   {
     id: 'disbursements_awaiting_billing',
     name: 'Unbilled disbursements — awaiting billing',
-    sourceLabel: 'PMS `disbursements` · £1,182.00 net (£1,416.00 inc VAT)',
+    sourceLabel: 'PMS `disbursements` · unbilled supplier items',
     category: 'Finance & credit control',
     description: 'Unbilled supplier disbursements incurred on client matters.',
   },
   {
     id: 'cash_collection_vs_target',
-    name: 'Cash collection & billing — October 2026',
+    name: 'Cash collection & billing — current month',
     sourceLabel: 'PMS `payments` + `invoices` · month-to-date',
     category: 'Finance & credit control',
-    description: 'October cash receipts, fees billed, and credit notes issued vs target.',
+    description: 'Current-month cash receipts, fees billed, and credit notes issued vs target.',
   },
 
   // Risk & compliance
@@ -306,29 +306,29 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
   // Firm-wide executive
   {
     id: 'firm_financial_pulse',
-    name: 'Firm financial pulse — 2026 year to date',
+    name: 'Firm financial pulse — year to date',
     sourceLabel: 'PMS `invoices`, `payments`, `v_matter_financials` · net of credit notes · ex VAT',
     category: 'Firm-wide executive',
-    description: 'Monthly fees billed Jan–Oct 2026 plus lockup (WIP + debt) and collection rate.',
+    description: 'Monthly fees billed year to date plus lockup (WIP + debt) and collection rate.',
   },
   {
     id: 'performance_by_department',
     name: 'Performance by practice area',
-    sourceLabel: 'PMS `v_matter_financials` + `v_fee_earner_performance` · 2026 YTD',
+    sourceLabel: 'PMS `v_matter_financials` + `v_fee_earner_performance` · YTD',
     category: 'Firm-wide executive',
-    description: 'Open matters, billed YTD, unbilled WIP, outstanding/overdue debt, and October hours by department.',
+    description: 'Open matters, billed YTD, unbilled WIP, outstanding/overdue debt, and current-month hours by department.',
   },
   {
     id: 'utilisation_and_realisation_by_grade',
     name: 'Fee earner utilisation & billing',
-    sourceLabel: 'PMS `v_fee_earner_performance` · annual target 1,200 chargeable hrs',
+    sourceLabel: 'PMS `v_fee_earner_performance` · chargeable hours & billing',
     category: 'Firm-wide executive',
     description: 'Firm-wide fee earner chargeable hours, % of annual target, billed value, WIP, and write-offs.',
   },
   {
     id: 'enquiries_conversion_and_pipeline',
     name: 'New business — enquiries, conversion & SLA health',
-    sourceLabel: '1Squared Enquiries · October 2026',
+    sourceLabel: '1Squared Enquiries · current month',
     category: 'Firm-wide executive',
     description: 'Firm-wide intake volume, conversion rate, SLA compliance, and top referral sources.',
   },
@@ -353,7 +353,7 @@ export const HEADLINE_CARD_DEFINITIONS: HeadlineCardDefinition[] = [
   { id: 'fe_tasks_due', label: 'Tasks due / overdue', source: '1Squared', defaultRoles: ['fee_earner'] },
   { id: 'fe_enquiries_contact', label: 'Enquiries to contact', source: '1Squared', defaultRoles: ['fee_earner'] },
   { id: 'fe_active_matters', label: 'My active matters', source: '1Squared', defaultRoles: ['fee_earner'] },
-  { id: 'fe_hours_month', label: 'Chargeable hrs (Oct)', source: 'PMS', defaultRoles: ['fee_earner'] },
+  { id: 'fe_hours_month', label: 'Chargeable hrs (month)', source: 'PMS', defaultRoles: ['fee_earner'] },
   { id: 'fe_unbilled_wip', label: 'My unbilled WIP', source: 'PMS', defaultRoles: ['fee_earner'] },
 
   // Partner (02)
@@ -361,7 +361,7 @@ export const HEADLINE_CARD_DEFINITIONS: HeadlineCardDefinition[] = [
   { id: 'pt_team_wip', label: 'Team unbilled WIP', source: 'PMS', defaultRoles: ['partner'] },
   { id: 'pt_overdue_debt', label: 'Overdue client debt', source: 'PMS', defaultRoles: ['partner'] },
   { id: 'pt_sign_offs', label: 'Sign-offs waiting', source: '1Squared', defaultRoles: ['partner'] },
-  { id: 'pt_enquiries_month', label: 'Dept enquiries (Oct)', source: '1Squared', defaultRoles: ['partner'] },
+  { id: 'pt_enquiries_month', label: 'Dept enquiries (month)', source: '1Squared', defaultRoles: ['partner'] },
 
   // Legal Secretary (03)
   { id: 'ls_tasks_queue', label: 'Tasks in my queue', source: '1Squared', defaultRoles: ['legal_secretary'] },
@@ -374,7 +374,7 @@ export const HEADLINE_CARD_DEFINITIONS: HeadlineCardDefinition[] = [
   { id: 'ec_callbacks_due', label: 'Callbacks due today', source: '1Squared', defaultRoles: ['enquiries_coordinator'] },
   { id: 'ec_unassigned', label: 'Unassigned enquiries', source: '1Squared', defaultRoles: ['enquiries_coordinator'] },
   { id: 'ec_awaiting_fe', label: 'Awaiting fee earner contact', source: '1Squared', defaultRoles: ['enquiries_coordinator'] },
-  { id: 'ec_converted_month', label: 'Converted in October', source: '1Squared', defaultRoles: ['enquiries_coordinator'] },
+  { id: 'ec_converted_month', label: 'Converted this month', source: '1Squared', defaultRoles: ['enquiries_coordinator'] },
   { id: 'ec_no_response', label: '3+ attempts — no response', source: '1Squared', defaultRoles: ['enquiries_coordinator'] },
 
   // Finance / Credit Control (05)
@@ -392,8 +392,8 @@ export const HEADLINE_CARD_DEFINITIONS: HeadlineCardDefinition[] = [
   { id: 'rc_sra_breaches', label: 'Open SRA breaches / complaints', source: '1Squared', defaultRoles: ['risk_compliance'] },
 
   // Managing Partner (07)
-  { id: 'mp_fees_ytd', label: 'Fees billed YTD (2026)', source: 'PMS', defaultRoles: ['managing_partner', 'admin'] },
-  { id: 'mp_cash_month', label: 'Cash received (Oct)', source: 'PMS', defaultRoles: ['managing_partner', 'admin'] },
+  { id: 'mp_fees_ytd', label: 'Fees billed YTD', source: 'PMS', defaultRoles: ['managing_partner', 'admin'] },
+  { id: 'mp_cash_month', label: 'Cash received (month)', source: 'PMS', defaultRoles: ['managing_partner', 'admin'] },
   { id: 'mp_firm_wip', label: 'Firm unbilled WIP', source: 'PMS', defaultRoles: ['managing_partner', 'admin'] },
   { id: 'mp_total_debt', label: 'Total client debt', source: 'PMS', defaultRoles: ['managing_partner', 'admin'] },
   { id: 'mp_open_matters', label: 'Open matters & conversion', source: 'Both', defaultRoles: ['managing_partner', 'admin'] },
@@ -701,7 +701,7 @@ export function syncHomeRolesWithEmployeeRoles(
 }
 
 export function createDefaultHomePagesConfig(
-  now = '2026-10-16T09:00:00Z',
+  now: string,
   primaryDomain?: string,
 ): HomePagesConfig {
   return {
