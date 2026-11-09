@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
+import { resolveRequestCorrelationId } from './correlationId';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import {
   prepareMergedEntityDocumentsInStore,
@@ -12428,45 +12429,116 @@ export function syncMatterCostsRatesFromPms(
 
 export function resolveOrProvisionEntraEmployee(
   claims: EntraIdRawTokenClaims & Record<string, unknown>,
+  options?: { correlationId?: string },
 ): {
   person: Person;
   verifiedToken: VerifiedOidcTokenClaims;
   rbacConfig: RbacConfiguration;
 } {
+  const activeTenantConfig = getActiveTenantConfiguration();
+  const activeTenantId = activeTenantConfig.tenantId;
+  const correlationId = resolveRequestCorrelationId(
+    options?.correlationId ??
+      (getActiveActorSession() as { correlationId?: string } | null)
+        ?.correlationId,
+    'corr-entra-signin',
+  );
   const store = getStore();
-  const rbacConfig = getDefaultTenantRbacConfig();
-  const { person: matchedPerson, verifiedToken } = resolvePersonForEntraClaims({
+  const rbacConfig = getDefaultTenantRbacConfig(activeTenantId);
+  const {
+    person: matchedPerson,
+    matchedByEmailOnly,
+    ambiguousEmailMatchPersonIds,
+    refusedPrivilegedEmailLinkPersonId,
+    verifiedToken,
+  } = resolvePersonForEntraClaims({
     claims,
     people: store.people,
     teams: store.teams,
+    tenantId: activeTenantId,
     rbacConfig,
+    primaryDomain: activeTenantConfig.branding.primaryDomain,
   });
 
   const now = new Date().toISOString();
   const oid = claims.oid?.trim() || verifiedToken.sub;
   const claimEmail = (
-    claims.email ||
     claims.preferred_username ||
     claims.upn ||
+    (claims.xms_edov === true ? claims.email : '') ||
     ''
   ).trim();
   const authorityMode = rbacConfig.identityMapping?.authorityMode ?? 'hybrid';
 
+  if (refusedPrivilegedEmailLinkPersonId) {
+    writeAudit(store, {
+      recordType: 'person',
+      recordId: refusedPrivilegedEmailLinkPersonId,
+      action: 'entra-link',
+      field: 'Entra ID Email Link Refused',
+      oldValue: 'unlinked',
+      newValue: `Refused automatic email link for privileged employee ${refusedPrivilegedEmailLinkPersonId} (correlationId=${correlationId})`,
+      byId: 'system',
+      at: now,
+    });
+    console.warn(
+      JSON.stringify({
+        event: 'ENTRA_EMAIL_LINK_PRIVILEGED_REFUSED',
+        tenantId: activeTenantId,
+        correlationId,
+        personId: refusedPrivilegedEmailLinkPersonId,
+      }),
+    );
+    saveStore(store);
+    throw new Error('Your account needs to be linked by an administrator.');
+  }
+
+  if (ambiguousEmailMatchPersonIds && ambiguousEmailMatchPersonIds.length > 1) {
+    writeAudit(store, {
+      recordType: 'person',
+      recordId: ambiguousEmailMatchPersonIds[0]!,
+      action: 'entra-link',
+      field: 'Entra ID Email Link Ambiguous',
+      oldValue: 'unlinked',
+      newValue: `Refused automatic email link across ${ambiguousEmailMatchPersonIds.length} unbound employees (${ambiguousEmailMatchPersonIds.join(', ')}; correlationId=${correlationId})`,
+      byId: 'system',
+      at: now,
+    });
+    console.warn(
+      JSON.stringify({
+        event: 'ENTRA_EMAIL_LINK_AMBIGUOUS',
+        tenantId: activeTenantId,
+        correlationId,
+        candidateCount: ambiguousEmailMatchPersonIds.length,
+      }),
+    );
+    saveStore(store);
+    throw new Error('Your account needs to be linked by an administrator.');
+  }
+
   if (matchedPerson) {
     const prevOid = matchedPerson.entraObjectId?.trim() || null;
-    const matchedByEmailOnly = !prevOid && Boolean(oid);
-    if (matchedByEmailOnly && oid) {
+    const isFirstEmailLink = Boolean(matchedByEmailOnly && !prevOid && oid);
+    if (isFirstEmailLink && oid) {
       matchedPerson.entraObjectId = oid;
       writeAudit(store, {
         recordType: 'person',
         recordId: matchedPerson.id,
-        action: 'update',
+        action: 'entra-link',
         field: 'Entra ID Email Link',
         oldValue: 'unlinked',
-        newValue: `Linked email ${claimEmail || 'unknown'} to Entra oid=${oid}`,
+        newValue: `Linked employee ${matchedPerson.id} on first verified-domain sign-in`,
         byId: matchedPerson.id,
         at: now,
       });
+      console.info(
+        JSON.stringify({
+          event: 'ENTRA_EMAIL_LINK_BOUND',
+          tenantId: activeTenantId,
+          correlationId,
+          personId: matchedPerson.id,
+        }),
+      );
     }
     if (authorityMode === 'token_only') {
       matchedPerson.roles = [...verifiedToken.roles];
@@ -12487,8 +12559,8 @@ export function resolveOrProvisionEntraEmployee(
       recordId: matchedPerson.id,
       action: 'update',
       field: 'Entra ID OIDC Sign-In',
-      oldValue: prevOid ? `oid=${prevOid}` : 'unlinked',
-      newValue: `oid=${oid}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}`,
+      oldValue: prevOid ? 'bound' : 'unlinked',
+      newValue: `personId=${matchedPerson.id}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
       byId: matchedPerson.id,
       at: now,
     });
@@ -12599,7 +12671,7 @@ export function resolveOrProvisionEntraEmployee(
     action: 'create',
     field: 'Entra ID OIDC Provisioned Employee',
     oldValue: null,
-    newValue: `oid=${oid}; roles=${mappedRoles.join(',')}; mfa=${verifiedToken.mfaVerified}`,
+    newValue: `personId=${newEmployee.id}; roles=${mappedRoles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
     byId: newEmployee.id,
     at: now,
   });

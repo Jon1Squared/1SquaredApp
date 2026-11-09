@@ -579,6 +579,61 @@ export function canPersonAccessMatter(
   });
 }
 
+export function isPrivilegedPersonForEmailLinking(
+  person: Person,
+  options: {
+    allPeople: readonly Person[];
+    teams: readonly Team[];
+    tenantId: string;
+    rbacConfig: RbacConfiguration;
+  },
+): boolean {
+  const storeRbacConfig: RbacConfiguration = {
+    ...options.rbacConfig,
+    identityMapping: {
+      ...options.rbacConfig.identityMapping,
+      authorityMode: 'store_only',
+    },
+  };
+  const storedPermSet = resolvePersonPermissionSet(person, {
+    allPeople: options.allPeople,
+    teams: options.teams,
+    tenantId: options.tenantId,
+    config: { rbac: storeRbacConfig },
+    mfaVerified: true,
+  });
+  const activePermSet = resolvePersonPermissionSet(person, {
+    allPeople: options.allPeople,
+    teams: options.teams,
+    tenantId: options.tenantId,
+    config: { rbac: options.rbacConfig },
+    mfaVerified: true,
+  });
+  const combinedPermissions = new Set<PermissionKey>([
+    ...storedPermSet.permissions,
+    ...activePermSet.permissions,
+  ]);
+  for (const permKey of combinedPermissions) {
+    const entry = getPermissionRegistryEntry(permKey);
+    if (entry && (entry.requiresMfa || entry.sensitivity === 'critical')) {
+      return true;
+    }
+  }
+  const storedRoles = resolvePersonAuthoritativeRoles(
+    person,
+    options.teams,
+    Object.keys(options.rbacConfig.roles ?? {}),
+  );
+  if (
+    storedRoles.includes('admin') ||
+    person.appRole === 'admin' ||
+    person.employeeRoleId === 'employee_role.system_administrator'
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Matches a Microsoft Entra ID v2.0 JWT claim set (`oid`, `preferred_username`, `upn`, `email`, `roles`, `groups`, `amr`)
  * to an active employee `Person` in the tenant store and resolves their `VerifiedOidcTokenClaims` + `ResolvedPermissionSet`.
@@ -589,9 +644,12 @@ export function resolvePersonForEntraClaims(params: {
   teams?: readonly Team[];
   tenantId?: string;
   rbacConfig?: RbacConfiguration;
+  primaryDomain?: string;
 }): {
   person: Person | null;
   matchedByEmailOnly?: boolean;
+  ambiguousEmailMatchPersonIds?: string[];
+  refusedPrivilegedEmailLinkPersonId?: string;
   verifiedToken: VerifiedOidcTokenClaims;
   permissions: ResolvedPermissionSet;
 } {
@@ -609,36 +667,100 @@ export function resolvePersonForEntraClaims(params: {
   } = params;
 
   const oid = claims.oid?.trim();
-  const claimEmail = (
-    claims.email ||
-    claims.preferred_username ||
-    claims.upn ||
-    ''
-  )
-    .trim()
-    .toLowerCase();
+  const emailLinking = rbacConfig.identityMapping?.emailLinking;
+  const emailLinkingEnabled = emailLinking?.enabled ?? true;
+  const configuredLinkingDomains = emailLinking?.domains ?? [];
 
   const activeEmployees = people.filter((p) => p.isEmployee && !p.mergedIntoId);
 
   let matchedPerson: Person | null = null;
   let matchedByEmailOnly = false;
+  let ambiguousEmailMatchPersonIds: string[] | undefined;
+  let refusedPrivilegedEmailLinkPersonId: string | undefined;
+
   if (oid) {
     matchedPerson =
       activeEmployees.find((p) => p.entraObjectId?.trim() === oid) ?? null;
   }
-  // Link by email only when no `entraObjectId` is set on the employee record yet (R61)
-  if (!matchedPerson && claimEmail) {
-    matchedPerson =
-      activeEmployees.find(
+
+  // S0-30: Link by email only when no `entraObjectId` is set on the employee record yet,
+  // emailLinking is enabled, the claim comes from a verified directory sign-in name (or verified email)
+  // in an allowed linking domain, matches a single unbound employee, and that employee is not privileged.
+  if (!matchedPerson && emailLinkingEnabled) {
+    const normalizedConfiguredDomains = configuredLinkingDomains
+      .map((d) => String(d).trim().toLowerCase())
+      .filter(Boolean);
+    const normalizedPrimaryDomain = (params.primaryDomain ?? '')
+      .trim()
+      .toLowerCase();
+    const allowedLinkingDomains = new Set<string>(
+      normalizedConfiguredDomains.length > 0
+        ? normalizedConfiguredDomains
+        : normalizedPrimaryDomain
+          ? [normalizedPrimaryDomain]
+          : [],
+    );
+
+    const extractEmailDomain = (addr: string): string => {
+      const trimmed = addr.trim().toLowerCase();
+      const atIdx = trimmed.lastIndexOf('@');
+      if (atIdx <= 0 || atIdx === trimmed.length - 1) return '';
+      return trimmed.slice(atIdx + 1);
+    };
+
+    const preferredUsernameAddress = (claims.preferred_username || '')
+      .trim()
+      .toLowerCase();
+    const upnAddress = (claims.upn || '').trim().toLowerCase();
+    const rawEmailAddress = (claims.email || '').trim().toLowerCase();
+    const isEmailClaimVerified = claims.xms_edov === true;
+
+    const orderedCandidateClaims = Array.from(
+      new Set(
+        [
+          preferredUsernameAddress,
+          upnAddress,
+          ...(isEmailClaimVerified ? [rawEmailAddress] : []),
+        ].filter(Boolean),
+      ),
+    );
+
+    for (const candidateLinkingEmail of orderedCandidateClaims) {
+      const candidateDomain = extractEmailDomain(candidateLinkingEmail);
+      if (!allowedLinkingDomains.has(candidateDomain)) {
+        continue;
+      }
+      const matchingUnboundEmployees = activeEmployees.filter(
         (p) =>
           !p.entraObjectId?.trim() &&
           p.emails.some(
             (e) =>
-              e.active !== false && e.address.trim().toLowerCase() === claimEmail,
+              e.active !== false &&
+              e.address.trim().toLowerCase() === candidateLinkingEmail,
           ),
-      ) ?? null;
-    if (matchedPerson) {
-      matchedByEmailOnly = true;
+      );
+      if (matchingUnboundEmployees.length === 0) {
+        continue;
+      }
+      if (matchingUnboundEmployees.length > 1) {
+        ambiguousEmailMatchPersonIds = matchingUnboundEmployees.map((p) => p.id);
+      } else {
+        const candidate = matchingUnboundEmployees[0]!;
+        if (
+          isPrivilegedPersonForEmailLinking(candidate, {
+            allPeople: people,
+            teams,
+            tenantId: activeTenantId,
+            rbacConfig,
+          })
+        ) {
+          refusedPrivilegedEmailLinkPersonId = candidate.id;
+        } else {
+          matchedPerson = candidate;
+          matchedByEmailOnly = true;
+        }
+      }
+      break;
     }
   }
 
@@ -669,7 +791,18 @@ export function resolvePersonForEntraClaims(params: {
         },
       },
     });
-    return { person: null, matchedByEmailOnly: false, verifiedToken, permissions };
+    return {
+      person: null,
+      matchedByEmailOnly: false,
+      ...(ambiguousEmailMatchPersonIds
+        ? { ambiguousEmailMatchPersonIds }
+        : {}),
+      ...(refusedPrivilegedEmailLinkPersonId
+        ? { refusedPrivilegedEmailLinkPersonId }
+        : {}),
+      verifiedToken,
+      permissions,
+    };
   }
 
   const storedRoles = resolvePersonAuthoritativeRoles(

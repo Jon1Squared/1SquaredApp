@@ -7512,5 +7512,362 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
+    it('2. links only non-privileged single-match employees in allowed linking domains on sign-in, writes an entra-link audit entry without logging PII, refuses privileged and ambiguous links without provisioning, and blocks R373 end-to-end takeover', () => {
+      resetAllDemoData('P-000001');
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const store = getStore();
+        // Clear synthetic test OIDs so personas start unbound as in demo/onboarding
+        for (const p of store.people) {
+          delete p.entraObjectId;
+        }
+
+        const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+        const feeEarnerEmail = feeEarner.emails[0]!.address;
+
+        // 2a. Unverified email claim alone (no preferred_username/upn and no xms_edov, or string xms_edov: "true") does NOT link, and does not store the unverified email on the provisioned record (R387, R389)
+        const unverifiedEmailAttempt = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000201',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-unverified-201',
+          name: 'Unverified Email Caller',
+          email: feeEarnerEmail,
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(unverifiedEmailAttempt.person.id).not.toBe(feeEarner.id);
+        expect(unverifiedEmailAttempt.person.emails).toEqual([]);
+        expect(
+          getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
+        ).toBeUndefined();
+
+        const stringEdovAttempt = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000202',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-string-edov-202',
+          name: 'String Edov Caller',
+          email: feeEarnerEmail,
+          xms_edov: 'true' as unknown as boolean,
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(stringEdovAttempt.person.id).not.toBe(feeEarner.id);
+        expect(stringEdovAttempt.person.emails).toEqual([]);
+        expect(
+          getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
+        ).toBeUndefined();
+
+        // 2b. Sign-in with preferred_username in the tenant's linking domain binds ordinary unbound employee P-000002 and writes an entra-link audit entry
+        const linkedOrd = resolveOrProvisionEntraEmployee(
+          {
+            oid: '11111111-0000-4000-8000-000000000002',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-dafydd-002',
+            name: 'Dafydd Evans',
+            preferred_username: feeEarnerEmail,
+            email: feeEarnerEmail,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          },
+          { correlationId: 'corr-req-test-002' },
+        );
+        expect(linkedOrd.person.id).toBe(feeEarner.id);
+        expect(linkedOrd.person.entraObjectId).toBe(
+          '11111111-0000-4000-8000-000000000002',
+        );
+        expect(
+          getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
+        ).toBe('11111111-0000-4000-8000-000000000002');
+        const linkAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === feeEarner.id &&
+            a.action === 'entra-link' &&
+            a.field === 'Entra ID Email Link',
+        );
+        expect(linkAudit).toBeDefined();
+        expect(linkAudit?.newValue).not.toContain(feeEarnerEmail);
+        expect(linkAudit?.newValue).not.toContain(
+          '11111111-0000-4000-8000-000000000002',
+        );
+        const signInAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === feeEarner.id &&
+            a.action === 'update' &&
+            a.field === 'Entra ID OIDC Sign-In',
+        );
+        expect(signInAudit).toBeDefined();
+        expect(signInAudit?.newValue).toContain('correlationId=corr-req-test-002');
+        expect(signInAudit?.newValue).not.toContain('oid=');
+        // Verify server logs contain only personId, correlationId, and tenantId — never the email or oid
+        const loggedCalls = infoSpy.mock.calls.map((c) => String(c[0]));
+        const boundLog = loggedCalls.find((s) =>
+          s.includes('ENTRA_EMAIL_LINK_BOUND'),
+        );
+        expect(boundLog).toBeDefined();
+        const parsedLog = JSON.parse(boundLog!);
+        expect(parsedLog.personId).toBe(feeEarner.id);
+        expect(parsedLog.tenantId).toBe('not-a-law-firm');
+        expect(parsedLog.correlationId).toBe('corr-req-test-002');
+        expect(boundLog).not.toContain(feeEarnerEmail);
+        expect(boundLog).not.toContain('11111111-0000-4000-8000-000000000002');
+
+        // Also verify verified email claim (xms_edov: true) when preferred_username/upn is absent binds an ordinary unbound employee (P-000009 Finance), and unsafe correlationId options are sanitised (R399)
+        const financeUser = getStore().people.find((p) => p.id === 'P-000009')!;
+        const financeEmail = financeUser.emails[0]!.address;
+        const linkedViaVerifiedEmail = resolveOrProvisionEntraEmployee(
+          {
+            oid: '11111111-0000-4000-8000-000000000009',
+            tid: '11111111-2222-3333-4444-000000000009',
+            sub: 'sub-gethin-009',
+            name: 'Gethin Powell',
+            email: financeEmail,
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          },
+          { correlationId: 'x; roles=admin; mfa=true' },
+        );
+        expect(linkedViaVerifiedEmail.person.id).toBe(financeUser.id);
+        expect(linkedViaVerifiedEmail.person.entraObjectId).toBe(
+          '11111111-0000-4000-8000-000000000009',
+        );
+        const financeSignInAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === financeUser.id &&
+            a.action === 'update' &&
+            a.field === 'Entra ID OIDC Sign-In',
+        );
+        expect(financeSignInAudit?.newValue).toMatch(
+          /correlationId=corr-entra-signin-[0-9a-f-]{36}$/i,
+        );
+        expect(financeSignInAudit?.newValue).not.toContain('roles=admin');
+
+        // 2c. Sign-in with an email outside the linking domains doesn't bind
+        const secretary = getStore().people.find((p) => p.id === 'P-000010')!;
+        secretary.emails = [
+          {
+            id: 'em-sec-ext',
+            address: 'nia.edwards@external-domain.example',
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        const outsideDomainSignIn = resolveOrProvisionEntraEmployee({
+          oid: '11111111-0000-4000-8000-000000000010',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: 'sub-nia-010',
+          name: 'Nia Edwards',
+          preferred_username: 'nia.edwards@external-domain.example',
+          roles: [],
+          amr: ['pwd', 'mfa'],
+        });
+        expect(outsideDomainSignIn.person.id).not.toBe(secretary.id);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000010')?.entraObjectId,
+        ).toBeUndefined();
+
+        // 2d. R382 & R396: Sign-in matching a privileged persona (P-000004 System Administrator, and an admin-role persona) by email refuses to link AND refuses to provision a duplicate, leaving store.people.length unchanged, no record with the token's oid, and a persisted entra-link refusal audit entry across clearStoreMemoryCache()
+        const adminPerson = getStore().people.find((p) => p.id === 'P-000004')!;
+        const adminEmail = adminPerson.emails[0]!.address;
+        const peopleCountBeforePrivRefusal = getStore().people.length;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '11111111-0000-4000-8000-000000000004',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-admin-004',
+            name: 'Catrin Williams',
+            preferred_username: adminEmail,
+            email: adminEmail,
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        clearStoreMemoryCache();
+        expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000004')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000004',
+          ),
+        ).toBe(false);
+        const privRefusalAudit = getStore().audit.find(
+          (a) =>
+            a.recordId === 'P-000004' &&
+            a.action === 'entra-link' &&
+            a.field === 'Entra ID Email Link Refused',
+        );
+        expect(privRefusalAudit).toBeDefined();
+        expect(privRefusalAudit?.newValue).toContain('P-000004');
+        expect(privRefusalAudit?.newValue).toContain('correlationId=');
+        expect(privRefusalAudit?.newValue).not.toContain(adminEmail);
+        expect(privRefusalAudit?.newValue).not.toContain(
+          '11111111-0000-4000-8000-000000000004',
+        );
+
+        const managingPartner = getStore().people.find((p) => p.id === 'P-000038')!;
+        managingPartner.roles = ['admin'];
+        saveStore(getStore());
+        const mpEmail = managingPartner.emails[0]!.address;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '11111111-0000-4000-8000-000000000038',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-mp-038',
+            name: 'Gethin Lloyd',
+            preferred_username: mpEmail,
+            email: mpEmail,
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        clearStoreMemoryCache();
+        expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000038')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000038',
+          ),
+        ).toBe(false);
+
+        // 2e. Two unbound employees with the same address: no binding, no duplicate provisioned, and ambiguity is persisted as entra-link without the address or oid
+        const empA = getStore().people.find((p) => p.id === 'P-000006')!;
+        const empB = getStore().people.find((p) => p.id === 'P-000007')!;
+        // Make both non-privileged fee earners with the same work email
+        empA.roles = ['fee_earner'];
+        empA.employeeRoleId = 'employee_role.solicitor';
+        empB.roles = ['fee_earner'];
+        empB.employeeRoleId = 'employee_role.solicitor';
+        const sharedAddr = 'shared.inbox@notalawfirm.example';
+        empA.emails = [
+          {
+            id: 'em-dup-a',
+            address: sharedAddr,
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        empB.emails = [
+          {
+            id: 'em-dup-b',
+            address: sharedAddr,
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        saveStore(getStore());
+        const peopleCountBeforeAmbigRefusal = getStore().people.length;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '11111111-0000-4000-8000-000000000067',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-dup-067',
+            name: 'Duplicate Email User',
+            preferred_username: sharedAddr,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        clearStoreMemoryCache();
+        expect(getStore().people.length).toBe(peopleCountBeforeAmbigRefusal);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000006')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.find((p) => p.id === 'P-000007')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000067',
+          ),
+        ).toBe(false);
+        const ambigAudit = getStore().audit.find(
+          (a) =>
+            a.action === 'entra-link' &&
+            a.field === 'Entra ID Email Link Ambiguous',
+        );
+        expect(ambigAudit).toBeDefined();
+        expect(ambigAudit?.newValue).toContain('correlationId=');
+        expect(ambigAudit?.newValue).not.toContain(sharedAddr);
+        expect(ambigAudit?.newValue).not.toContain(
+          '11111111-0000-4000-8000-000000000067',
+        );
+
+        // 2g. End-to-end R373 attack:
+        // Step 1: Fee earner P-000002 tries to edit admin P-000004's email -> denied with FORBIDDEN
+        const currentAdmin = getStore().people.find((p) => p.id === 'P-000004')!;
+        const attackerEditAttempt = savePersonRecord(
+          {
+            firstName: currentAdmin.firstName,
+            surname: currentAdmin.surname,
+            emails: [
+              {
+                id: 'em-attacker-controlled',
+                address: 'second.account@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { id: currentAdmin.id, byId: feeEarner.id, mfaVerified: true },
+        );
+        expect(isActionDenied(attackerEditAttempt)).toBe(true);
+        expect(attackerEditAttempt.code).toBe('FORBIDDEN');
+        expect(attackerEditAttempt.message).toBe(
+          'You do not have permission (employee:edit_core) to change an employee or leaver email address.',
+        );
+
+        // Step 2: Even if P-000004's email is set directly in the store to the attacker's address, signing in as that address is refused (throws) and neither binds P-000004 nor provisions a duplicate
+        currentAdmin.emails = [
+          {
+            id: 'em-attacker-direct',
+            address: 'second.account@notalawfirm.example',
+            typeId: 'email_type.work',
+            isPrimary: true,
+            active: true,
+          },
+        ];
+        delete currentAdmin.entraObjectId;
+
+        const peopleCountBeforeAttackerSignIn = getStore().people.length;
+        expect(() =>
+          resolveOrProvisionEntraEmployee({
+            oid: '99999999-0000-4000-8000-999999999999',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'sub-attacker-999',
+            name: 'Attacker Second Account',
+            preferred_username: 'second.account@notalawfirm.example',
+            email: 'second.account@notalawfirm.example',
+            xms_edov: true,
+            roles: [],
+            amr: ['pwd', 'mfa'],
+          }),
+        ).toThrow('Your account needs to be linked by an administrator.');
+        expect(getStore().people.length).toBe(peopleCountBeforeAttackerSignIn);
+        expect(
+          getStore().people.find((p) => p.id === 'P-000004')?.entraObjectId,
+        ).toBeUndefined();
+        expect(
+          getStore().people.some(
+            (p) => p.entraObjectId === '99999999-0000-4000-8000-999999999999',
+          ),
+        ).toBe(false);
+      } finally {
+        infoSpy.mockRestore();
+        warnSpy.mockRestore();
+        resetAllDemoData('P-000001');
+      }
+    });
+
   });
 });

@@ -1439,7 +1439,8 @@ export type AuditAction =
   | 'matter-imported-open'
   | 'data-reset'
   | 'data-cleared'
-  | 'conflict-decision';
+  | 'conflict-decision'
+  | 'entra-link';
 
 export interface AuditEntry {
   id: string;

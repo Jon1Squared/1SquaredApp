@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { AuthorisationError } from '@/domain/rbac';
 import {
@@ -6,19 +5,10 @@ import {
   searchAddresses,
 } from '@/server/addressLookupService';
 import { guardedRoute } from '@/server/authorize';
+import { resolveRequestCorrelationId } from '@/server/correlationId';
 import { withAuthenticatedActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
-
-const SAFE_CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
-
-function resolveSafeCorrelationId(headerValue: string | null): string {
-  const trimmed = headerValue?.trim() ?? '';
-  if (SAFE_CORRELATION_ID_PATTERN.test(trimmed)) {
-    return trimmed;
-  }
-  return `corr-addr-${crypto.randomUUID()}`;
-}
 
 export const GET = guardedRoute(
   'GET /api/address-lookup',
@@ -27,8 +17,9 @@ export const GET = guardedRoute(
       return await withAuthenticatedActor(async (actor) => {
         const logContext = {
           tenantId: actor.tenantId,
-          correlationId: resolveSafeCorrelationId(
+          correlationId: resolveRequestCorrelationId(
             req.headers.get('x-correlation-id'),
+            'corr-addr',
           ),
         };
 

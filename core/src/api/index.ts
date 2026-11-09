@@ -157,6 +157,11 @@ export interface RbacRelationshipGrantRule {
   description?: string;
 }
 
+export interface RbacEmailLinkingConfig {
+  enabled: boolean;
+  domains: string[];
+}
+
 export interface RbacIdentityMappingConfig {
   authorityMode: 'token_only' | 'hybrid' | 'store_only';
   entraGroupToRoleKey: Record<string, string[]>;
@@ -164,6 +169,7 @@ export interface RbacIdentityMappingConfig {
   requireMfaForAdminPermissions: boolean;
   defaultRoleKeys?: string[];
   allowAcrsC1AsMfa?: boolean;
+  emailLinking?: RbacEmailLinkingConfig;
 }
 
 export interface RbacConfiguration {
