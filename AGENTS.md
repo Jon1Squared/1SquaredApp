@@ -12,7 +12,7 @@ Reference documents (read before any architecture decision or review; not loaded
 ## Roadmap and stages
 
 Read these first in every session, before planning or writing code:
-- `docs/roadmap/feature-list.md`: the master backlog. IDs (1–45, F1–F18, P1–P12, B1–B12, E1–E9, Q1–Q2) are stable; never renumber them, and new items take the next free number in their series.
+- `docs/roadmap/feature-list.md`: the master backlog. IDs (1–45, F1–F18, P1–P13, B1–B13, E1–E9, Q1–Q2) are stable; never renumber them, and new items take the next free number in their series.
 - The current stage plan: `docs/roadmap/stage-0-plan.md` (detailed slice plans are in `docs/roadmap/slices/`). Work only on slices in that plan, and respect each slice's dependencies.
 
 Rules:

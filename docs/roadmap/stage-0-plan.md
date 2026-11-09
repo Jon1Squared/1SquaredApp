@@ -62,10 +62,10 @@ Each of these gets a decision record in `docs/decisions/` before the slices that
 |---|---|---|---|---|
 | D1 | Hosting platform. The standard confirms Azure Container Apps, but `main.bicep` provisions a Linux App Service. | **Container Apps**, as the standard says. Replace the App Service resources in Bicep. Use Container Apps jobs for scheduled work (D6) and a separate container app for the PDF converter. Shared platform resources and per-tenant resources become separate Bicep modules. [ADR 0024](../decisions/0024-azure-container-apps-hosting.md). | Decided | S0-13 |
 | D2 | Permission enforcement pattern | One helper (for example `authorize(actor, permission, resource?)`) used by every server action and route, plus a registry mapping each action to its permission. A guard test enumerates exports and fails on any undeclared action. Start the guard with a baseline list of known gaps that can only shrink. [ADR 0025](../decisions/0025-permission-enforcement-pattern.md), building on ADR 0010. | Decided | S0-02 |
-| D3 | Persistence and migration | Postgres database per tenant (already confirmed). One repository per module behind the tenant-scoped data layer. Because there is no live client data yet, cut over module by module with a one-off import from the JSON store, rather than dual-writing. Draft: [ADR 0028](../decisions/0028-tenant-database-and-repositories.md). | Proposed | S0-14 |
+| D3 | Persistence and migration | Postgres database per tenant (already confirmed). One repository per module behind the tenant-scoped data layer. Because there is no live client data yet, cut over module by module with a one-off import from the JSON store, rather than dual-writing. Revised 9 Nov 2026: shared hosted server with a platform-managed key (recorded exception to standard 8.5; dedicated server for any tenant needing its own key), Postgres role per tenant, migrations run as a job, the services layer becomes `async`, audit log moves with key dates, operations spanning modules move together, single-tenant restore runbook, in-memory simulation deleted. [ADR 0028](../decisions/0028-tenant-database-and-repositories.md). | Accepted | S0-14 |
 | D4 | Finance data delivery | Take finance out of the app snapshot. Load it on demand through gated endpoints, so it never reaches someone without permission. Draft: [ADR 0029](../decisions/0029-finance-data-delivery.md). | Proposed | S0-10 |
 | D5 | Demo mode | **A separate demo tenant** loaded from seed data. Product components never check whether demo data is present. Unbuilt features show an honest empty state or are hidden. Until S0-17 the demo tenant is a separate non-live deployment. [ADR 0026](../decisions/0026-separate-demo-tenant.md). | Decided | S0-11a, S0-11b |
-| D6 | Scheduler | Container Apps jobs on a timer (follows D1), running a tenant-aware job runner that iterates tenants and refuses to run a job without a tenant context, as the standard requires. Draft: [ADR 0030](../decisions/0030-tenant-aware-scheduler.md). | Proposed | S0-19 |
+| D6 | Scheduler | Container Apps jobs on a timer (follows D1), running a tenant-aware job runner that iterates tenants and refuses to run a job without a tenant context, as the standard requires. Revised 9 Nov 2026: a tenant registry in core, a `guardedJob` wrapper with job-only permissions, a recorded exception to rule 4 limited to the job entry point, `job_runs` idempotency, hourly runs acting once per local day, two-tenant job tests, and jobs move only after their data is in Postgres. [ADR 0030](../decisions/0030-tenant-aware-scheduler.md). | Accepted | S0-19 |
 | D7 | Registers engine design | Register types defined as configuration (fields, states, owner, due dates, approval rules, reminder schedule). One core implementation for records, lifecycle, approvals (no self-approval, approver rules), reminders through the scheduler, and audit. Extension points for client-specific steps. Key dates stay separate for now and may move onto the engine later. | Proposed | S0-24 |
 | D8 | Contact personas (Q1) | One person record, linked in different capacities; the capacity is chosen on each matter, and the conflict search follows all of them. | Proposed | S0-21 |
 | D9 | Email delivery | **One `EmailSender` interface in the core, with adapters chosen per tenant in configuration** (credentials as Key Vault references): a dev catcher such as Mailpit for dev and test; Microsoft Graph sending app-only from a 1Squared.co.uk shared mailbox, restricted to that mailbox with Exchange Online RBAC for Applications, for the demo tenant and pilots; Azure Communication Services Email later for the hosted service; and Graph from the firm’s own mailbox for client-hosted installations. Non-live and demo tenants only send to an allow-list of recipients. Teams delivery later. [ADR 0027](../decisions/0027-email-sender-interface.md). | Decided | S0-26 |
@@ -101,6 +101,7 @@ Do these first, in this order (S0-27 sits between S0-02 and S0-03). S0-01 should
 | S0-11a | Remove demo content from product code (D5), one branch with one commit per area: Home, matter profile, person and organisation profiles, search and domain, and the CI check. Remove fake compliance statuses and the hard-coded firm name; add a CI check for demo literals. | P6 | L | – |
 | S0-11b | Demo tenant (ADR 0026): a seed command that loads demo data into a tenant, and a non-live demo deployment with demo mode and the email allow-list, so demos keep working. Becomes a tenant in the shared deployment after S0-17. | P6 | M | S0-11a; Manual: demo Entra app registration (with test users per role) and Azure deployment (section 8); email allow-list arrives with S0-26 |
 | S0-12 | Tenant settings: apply or remove each of the seven ignored settings; add a test that every schema key is used at runtime or marked reserved. | P7 | S | S0-06 |
+| S0-30 | Employee identity binding (B13, [slice plan](slices/s0-30-employee-identity-binding.md)): changing an employee’s email needs `employee:edit_core` and MFA and is audited; sign-in links by email only within the tenant’s linking domains (new additive `rbac.identityMapping.emailLinking` settings), never to a privileged persona or an ambiguous address; two-tenant and role tests; help. Must land before the demo deployment and any real tenant’s onboarding. | B13, P1, P8 | M | S0-03 |
 
 **Checkpoint A:** re-run the status review for the 0A rows and update `feature-list.md`.
 
@@ -109,12 +110,13 @@ Do these first, in this order (S0-27 sits between S0-02 and S0-03). S0-01 should
 | Slice | Work | Backlog IDs | Size | Depends on |
 |---|---|---|---|---|
 | S0-13 | Infrastructure (D1, ADR 0024): split `main.bicep` into shared platform and per-tenant modules; replace App Service with a Container Apps environment and app; add the database, Log Analytics and Application Insights, and the PDF converter as an internal container app; cost tags per tenant. Keep the existing VNet and Key Vault design. Second pull request (S0-13b): telemetry from the app with correlation and tenant IDs and no personal data (standard 13). | P12 | L | Manual: Azure access |
-| S0-14 | Replace the in-memory Postgres simulation with a real per-tenant database and migration runner. Migrations are tracked per tenant and reversible. Decision record D3. | P2 | L | S0-13 |
-| S0-15 | Move key dates onto `TenantKeyDateRepository` at runtime. The repository already exists, so this proves the pattern for the other modules. | P2, P8 | M | S0-14 |
+| S0-14 | Replace the in-memory Postgres simulation with a real per-tenant database and migration runner (the simulation is deleted). Migrations are tracked per tenant and reversible, and run as a `migrate` job before a release takes traffic. Add `TenantScopedRepository` with a Postgres role per tenant, the CI Postgres service, and the single-tenant restore runbook. Decision record D3. | P2 | L | S0-13 |
+| S0-15 | Move key dates onto `TenantKeyDateRepository` at runtime, and move the audit log with them, so every later module writes its audit entries in the same transaction as its data (ADR 0028). The repository already exists, so this proves the pattern for the other modules. | P2, P8 | M | S0-14 |
 | S0-16 | Move people, organisations, links and notes; then matters and parties (matter numbers from a sequence, which also fixes B6). | P2, P8 | L | S0-15 |
 | S0-17 | Move enquiries, quotes, tasks, notifications and sign-offs; then HR and employment; then lists, org structure, custom fields and the audit log. Document generation and document store metadata move off the JSON store too. | P2, P8 | L | S0-16 |
 | S0-18 | PMS data per tenant, using `pmsConnectionSecretVaultRef`, with a two-tenant test. | P3 | M | S0-14 |
-| S0-19 | Tenant-aware scheduler on Container Apps jobs (D6). Move the daily key date reminder check and retention anonymisation onto it. | P9 | M | S0-13, S0-14 |
+| S0-19 | Tenant-aware scheduler on Container Apps jobs (D6): the tenant registry, `guardedJob`, job-only permissions, `job_runs` and two-tenant job tests. Move the daily key date reminder check onto it. | P9 | M | S0-13, S0-14, S0-15 |
+| S0-19b | Move enquiry retention anonymisation onto the scheduler, inside `guardedJob`, with the retention check always applied (B3). | P9 | S | S0-17, S0-19 |
 | S0-20 | Retire the JSON store: keep it only for dev and demo seeding; remove Firestore sync; supersede ADR 0001. | P2 | S | S0-17 |
 
 **Checkpoint B:** run the full two-tenant test suite; re-run the status review.
@@ -147,15 +149,15 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 | 30 Rates and charging | S0-04, S0-23, S0-28 |
 | 31 Registers engine | S0-24 |
 | 32 Search and notifications | S0-11a, S0-25, S0-26, S0-29 |
-| P1 Permission checks | S0-02 to S0-07, S0-10 |
+| P1 Permission checks | S0-02 to S0-07, S0-10, S0-30 |
 | P2 Off the transitional store | S0-14 to S0-17, S0-20 |
 | P3 PMS per tenant | S0-18 |
 | P4 Finance exposure | S0-10 |
 | P5 Secrets | S0-01 (plus the deferred key rotation) |
 | P6 Demo content | S0-11a, S0-11b |
 | P7 Ignored settings | S0-06, S0-12 |
-| P8 Two-tenant tests | S0-03, S0-15 to S0-18, S0-21, S0-24, S0-25, S0-28 |
-| P9 Scheduler | S0-19 |
+| P8 Two-tenant tests | S0-03, S0-15 to S0-18, S0-21, S0-24, S0-25, S0-28, S0-30 |
+| P9 Scheduler | S0-19, S0-19b |
 | P10 Test coverage | S0-27, and tests in every slice |
 | P11 Help articles | Every slice |
 | P12 Infrastructure | S0-13 |
@@ -166,6 +168,7 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 | B8, B9 | S0-05 |
 | B11, B12 | S0-03 |
 | B10 | S0-06 |
+| B13 | S0-30 |
 
 ## 5b. Work packages
 
@@ -176,7 +179,8 @@ To cut the number of hand-offs, slices are built and reviewed in five work packa
 | WP1 Safety foundations | S0-01 review fixes (R229–R235), S0-02, S0-27, S0-08 | Now | Nothing |
 | WP2 Lock-down and bug fixes | S0-03, S0-04, S0-05, S0-06, S0-07, S0-09, S0-12 | After WP1 merges | Nothing |
 | WP3 Finance and demo | S0-10, S0-11a, S0-11b | After WP2 | D4 accepted; demo Entra app (manual) |
-| WP4 Make it solid (0B) | S0-13 to S0-20 | After D3 and D6 are accepted | Azure subscription access (manual) |
+| WP3a Identity binding fix | S0-30, on its own branch from `develop` | Now, alongside the WP3 fixes | Nothing |
+| WP4 Make it solid (0B) | S0-13 to S0-20, including S0-19b | After D3 and D6 are accepted | Azure subscription access (manual) |
 | WP5 Make it shared (0C) | S0-21 to S0-26, S0-28, S0-29 | After WP4 | D7, D8, D10, D11; Teams app, mailbox and CFA/DBA caps (manual) |
 
 Rules:
@@ -239,3 +243,6 @@ These need a person with the right admin access. Claude Code should list them in
 | 6 Nov 2026 | Work packages (section 5b): five packages, one review each; S0-11a moved to WP3. Draft ADRs 0028 (D3), 0029 (D4) and 0030 (D6) added as Proposed. |
 | 7 Nov 2026 | D12 decided: ADR 0031 accepted (`integrations.aiProviderChoice` gains `anthropic`, default remains `disabled`; extraction runs only when `enableAiMatterExtraction` is true and `aiProviderChoice === 'anthropic'`; `azure_openai_uk` stays reserved). |
 | 8 Nov 2026 | D4 decided: ADR 0029 accepted. S0-11a delivered as one branch (`s0-11a-remove-demo-content`) with one commit per area (Home, matter profile, person and organisation profiles, search and domain, and the CI check) rather than one pull request per area. |
+| 9 Nov 2026 | Added B13 (employee sign-in can be taken over: email edits need only `contact:edit`, and sign-in links by email to any unbound employee) and slice S0-30 to fix it, as package WP3a, built from `develop` alongside the WP3 fixes and landing before the demo deployment. Found in the WP3 second retest (R373); predates WP3. Backlog ID list in `CLAUDE.md`, `AGENTS.md` and `feature-list.md` updated for P13 (added in S0-11a) and B13, with the owner’s approval. |
+| 9 Nov 2026 | ADRs 0028 (D3) and 0030 (D6) revised after review; still Proposed. Owner decisions: shared hosted Postgres server with a platform-managed key, recorded as an exception to standard 8.5, with a dedicated server for any tenant needing its own key; the audit log moves with key dates in S0-15; S0-19 depends on S0-15, and anonymisation moves in a new S0-19b after S0-17; the in-memory Postgres simulation is deleted in S0-14. |
+| 9 Nov 2026 | D3 and D6 decided: ADRs 0028 and 0030 accepted as revised. WP4 can start once Azure subscription access is in place. |
