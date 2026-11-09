@@ -9666,7 +9666,7 @@
     "migratedAt": "2026-11-08T09:00:00.000Z",
     "deactivatedLegacyRolesCount": 14,
     "migratedMatterPartiesCount": 15,
-    "migratedConflictPartiesCount": 0,
+    "migratedConflictPartiesCount": 2,
     "countsByMapping": {
       "Instructing client": {
         "legacyRole": "Instructing client",
@@ -18610,7 +18610,7 @@
           "primary": "2026-10-29",
           "secondary": "2026-11-06"
         },
-        "RE01-16": "2026-11-13",
+        "RE01-16": "2026-11-22",
         "RE01-17": "2026-12-06",
         "RE01-18": "2027-01-05",
         "clientCapacityCodes": [
@@ -19216,6 +19216,84 @@
           "CAP_REPRESENTATIVE",
           "CAP_DECISION_MAKER"
         ]
+      },
+      "conflictCheckRecord": {
+        "status": "Referred",
+        "outcomeLabel": "Referred to risk for review",
+        "declarationConfirmed": true,
+        "reviewerMessage": "Coastline Outdoor Ltd occupies an adjacent strip on the boundary and is a counterparty on PEN001-0004. COLP (Bethan Rees) reviewing information barrier / consent requirements.",
+        "lastRunAtDisplay": "2026-11-06",
+        "lastRunById": "P-000002",
+        "lastRunByName": "Dafydd Evans",
+        "savedDraftAtDisplay": null,
+        "submittedAtDisplay": "2026-11-06",
+        "submittedById": "P-000002",
+        "submittedByName": "Dafydd Evans",
+        "approvedAtDisplay": null,
+        "approvedById": null,
+        "approvedByName": null,
+        "parties": [
+          {
+            "id": "CCP-TYG-1",
+            "name": "Tŷ Glas Developments Ltd",
+            "entityType": "organisation",
+            "role": "Client",
+            "linkedRecordId": "O-000013",
+            "isClientFixed": true,
+            "relationshipCode": "CL",
+            "capacityCodes": [
+              "CAP_BUYER_ACQUIRER"
+            ],
+            "needsCapacityPrompt": false,
+            "alignment": "aligned"
+          },
+          {
+            "id": "CCP-TYG-2",
+            "name": "Coastline Outdoor Ltd",
+            "entityType": "organisation",
+            "role": "Other side / counterparty",
+            "linkedRecordId": "O-000015",
+            "relationshipCode": "CP",
+            "capacityCodes": [],
+            "needsCapacityPrompt": true,
+            "alignment": "adverse"
+          }
+        ],
+        "matches": [
+          {
+            "id": "CCM-TYG-1",
+            "partyId": "CCP-TYG-2",
+            "partyName": "Coastline Outdoor Ltd",
+            "matchedRecordId": "O-000015",
+            "matchedRecordName": "Coastline Outdoor Ltd",
+            "matchedRecordType": "organisation",
+            "strength": "Exact",
+            "whereFound": "Counterparty on active matter PEN001-0004",
+            "matterId": "M-000001",
+            "matterNumber": "PEN001-0004",
+            "responsiblePartnerId": "P-000001",
+            "responsiblePartnerName": "Gareth Vaughan",
+            "dateLabel": "2026-10-04",
+            "disposition": "potential_conflict",
+            "note": "Adjacent occupier on development boundary; referred to COLP for information barrier review."
+          }
+        ],
+        "runs": [
+          {
+            "id": "CCR-TYG-1",
+            "runAtDisplay": "2026-11-06",
+            "runById": "P-000002",
+            "runByName": "Dafydd Evans",
+            "searchTerms": [
+              "Tŷ Glas Developments Ltd",
+              "Coastline Outdoor Ltd"
+            ],
+            "partiesCount": 2,
+            "matchesCount": 1,
+            "potentialConflictsCount": 1
+          }
+        ],
+        "comments": []
       }
     },
     {

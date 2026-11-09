@@ -34,8 +34,11 @@ import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
+  computeMatterOpeningChecklistProgress,
+  isComplianceOrOnboardingTask,
   isHighOrCriticalRiskRating,
   isMatterConflictCheckAwaitingDecision,
+  isMatterOpeningInProgress,
 } from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
@@ -846,14 +849,7 @@ export function HomeClient({
               <span>Matter openings in progress</span>
             </div>
             <div className="kpi-value">
-              {
-                matters.filter(
-                  (m) =>
-                    m.matterStatusId === 'matter_status.opening' ||
-                    m.matterStatusId === 'matter_status.prospective_enquiry' ||
-                    m.matterStatusId === 'matter_status.cmi_incomplete',
-                ).length
-              }
+              {matters.filter((m) => isMatterOpeningInProgress(m, values)).length}
             </div>
             <div className="kpi-sub">AML, engagement letter &amp; retainer checks</div>
           </div>
@@ -2501,12 +2497,7 @@ export function HomeClient({
       // 10. matter_openings_in_progress
       // ================================================================
       case 'matter_openings_in_progress': {
-        const openingMatters = matters.filter(
-          (m) =>
-            m.matterStatusId === 'matter_status.opening' ||
-            m.matterStatusId === 'matter_status.prospective_enquiry' ||
-            m.matterStatusId === 'matter_status.cmi_incomplete',
-        );
+        const openingMatters = matters.filter((m) => isMatterOpeningInProgress(m, values));
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -2525,24 +2516,8 @@ export function HomeClient({
               ) : (
                 <ul className="worklist">
                   {openingMatters.map((m) => {
-                    const conflictDone =
-                      m.conflictDecision?.outcome === 'Cleared' ||
-                      m.conflictCheckRecord?.status === 'Cleared' ||
-                      m.conflictCheckRecord?.status === 'Approved' ||
-                      m.conflictCheckStatus === 'Cleared' ||
-                      m.conflictCheckStatus === 'Clear';
-                    const amlDone =
-                      m.amlStatus === 'Completed' ||
-                      m.amlStatus === 'Verified' ||
-                      m.amlStatus === 'Cleared';
-                    const engDone =
-                      m.engagementLetterStatus === 'Signed' ||
-                      m.engagementLetterStatus === 'Signed & returned';
-                    const retainerDone =
-                      m.retainerMoniesOnAccountGbp !== null && m.retainerMoniesOnAccountGbp > 0;
-                    const completedSteps = [conflictDone, amlDone, engDone, retainerDone].filter(
-                      Boolean,
-                    ).length;
+                    const { conflictDone, amlDone, engDone, retainerDone, completedSteps } =
+                      computeMatterOpeningChecklistProgress(m);
                     const clientOrg = orgById.get(m.clientId);
                     const clientPer = personById.get(m.clientId);
                     const clientLabel = clientOrg
@@ -4605,12 +4580,7 @@ export function HomeClient({
               (t) =>
                 isTaskOpen(t) &&
                 t.assignedTeamId === tm.id &&
-                (t.taskTypeId === 'task_type.compliance' ||
-                  t.taskTypeId === 'task_type.conflict_check' ||
-                  t.taskTypeId === 'task_type.complete_matter_opening' ||
-                  t.title.toLowerCase().includes('aml') ||
-                  t.title.toLowerCase().includes('cdd') ||
-                  t.title.toLowerCase().includes('conflict')),
+                isComplianceOrOnboardingTask(t, values),
             );
             const overdue = teamTasks.filter((t) => t.dueAt < todayIso).length;
             const dueThisWeek = teamTasks.filter(

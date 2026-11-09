@@ -67,7 +67,7 @@ describe('tenantRuntime — TenantConfiguration cache and immutability (R249, R2
     expect(devConfig).not.toBe(testConfig);
     expect(devConfig.environment).toBe('dev');
     expect(devConfig.integrations.pmsConnectionSecretVaultRef).toBe(
-      'kv://kv-not-a-law-firm-dev/pms-connection-string',
+      'kv://kv-notalawfirm-dev/pms-connection-string',
     );
     expect(countAfterChange).toBe(countBeforeChange + 1);
   });

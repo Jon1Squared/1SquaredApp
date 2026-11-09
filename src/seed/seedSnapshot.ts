@@ -4,7 +4,7 @@ import { createSeedStore, type FirmStore } from '@/server/store';
 import {
   COMMITTED_SEED_STORE_REL_PATH,
   DEFAULT_RUNTIME_STORE_REL_PATH,
-  loadCommittedSeedStore,
+  loadCommittedSeedStore as loadCommittedSeedStoreMjs,
   loadCommittedSeedStoreRaw,
   resetRuntimeStoreFromCommittedSeed,
   resolveCommittedSeedStorePath,
@@ -14,11 +14,14 @@ import {
 export {
   COMMITTED_SEED_STORE_REL_PATH,
   DEFAULT_RUNTIME_STORE_REL_PATH,
-  loadCommittedSeedStore,
   loadCommittedSeedStoreRaw,
   resetRuntimeStoreFromCommittedSeed,
   resolveCommittedSeedStorePath,
 };
+
+export function loadCommittedSeedStore(rootDir: string = process.cwd()): FirmStore {
+  return loadCommittedSeedStoreMjs(rootDir) as FirmStore;
+}
 
 export function resolveRuntimeStorePath(
   rootDir: string = process.cwd(),

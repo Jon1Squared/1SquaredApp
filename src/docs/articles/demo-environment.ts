@@ -16,7 +16,7 @@ In accordance with Platform Architecture Standard Rule 6, the exact same product
 
 - **Allowed environments**: \`dev\`, \`test\`, \`training\`, and \`demo\` when \`featureFlags.enableDemoMode\` is \`true\` (enabled in \`client-not-a-law-firm/config/environments/demo.json\` and \`dev.json\`).
 - **Never allowed in \`live\`**: The core configuration validator rejects \`featureFlags.enableDemoMode: true\` when \`environment === "live"\`, and \`isNonLiveDemoEnvironment()\` always returns \`false\` for \`live\` regardless of the build mode.
-- **No auto-seeding or demo branding rewrite in product code**: \`getStore()\` never back-fills missing collections from \`buildDemoData\`, never overwrites \`store.firm\` or email domains (\`syncStoreFirmIdAndHomeRoles\` syncs only \`firmId\` and Home roles), and never creates a demo store when no runtime store file exists. If no runtime store file exists at \`data/runtime-store.json\` (or \`ONESQUARED_RUNTIME_STORE_PATH\`), \`getStore()\` initialises a clean empty deployment store (\`createCleanDeploymentStore\`).
+- **No auto-seeding or demo branding rewrite in product code**: \`getStore()\` never back-fills missing collections from \`buildDemoData\`, never overwrites \`store.firm\` or email domains (\`syncStoreFirmIdAndHomeRoles\` syncs only \`firmId\` and Home roles), and never creates a demo store when no runtime store file exists. If no runtime store file exists at \`data/runtime-store.json\` (or \`ONESQUARED_RUNTIME_STORE_PATH\`), \`getStore()\` initialises a clean empty deployment store (\`createCleanDeploymentStore\`), and if an existing store file is corrupted it refuses to load rather than overwriting it.
 
 ## 2. Persona switching
 
@@ -39,6 +39,6 @@ Demo data enters a non-live tenant store through two controlled paths only:
 2. **In-app data reset (\`resetDemoDataAction\`)**:
    - Available under **Administration → Demo data** (\`/admin/demo-data\`, **Load demo dataset**) only when \`isDataResetAllowedEnvironment()\` is \`true\` (non-live environment with \`featureFlags.enableDemoMode: true\`).
    - Requires the \`admin:data_reset\` permission (\`admin\` role only) with verified multi-factor authentication (\`mfaVerified === true\`).
-   - Calls \`resetAllDemoData\`, which restores the seeded dataset with fresh relative dates, preserves each person’s existing \`entraObjectId\` from the pre-reset store (so \`--entra-map\` bindings survive the reset), and writes a \`data-reset\` audit entry recording the acting administrator.
+   - Calls \`resetAllDemoData\`, which restores the seeded dataset with fresh relative dates (\`includeSyntheticEntraOids: false\` outside \`PLATFORM_ENVIRONMENT === 'test'\`), preserves \`entraObjectId\` bindings only when the pre-reset store was itself a seeded store (\`!prevStore.isCleanDeployment\`) and both the person ID and primary email match the seeded persona (so \`--entra-map\` bindings survive a reset without binding a user provisioned after **Clear all data** to a seeded persona), and writes a \`data-reset\` audit entry recording the acting administrator.
 `.trim(),
 };

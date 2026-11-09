@@ -1,5 +1,5 @@
 import { formatDate, formatDateTime } from './dates';
-import { resolveLabel } from './lists';
+import { resolveLabel, valueBySystemKey } from './lists';
 import { personDisplayName } from './names';
 import type {
   ChoiceValue,
@@ -10,6 +10,7 @@ import type {
   Organisation,
   Person,
   Quote,
+  Task,
 } from './types';
 
 export type RiskLevel = 'Low' | 'Medium' | 'High';
@@ -738,6 +739,97 @@ export function isMatterConflictCheckAwaitingDecision(matter: {
   return (
     !matter.conflictDecision &&
     conflictStatusPillFromLegacy(matter.conflictCheckStatus ?? undefined) === 'Referred'
+  );
+}
+
+/**
+ * Returns true when a matter is in the opening/onboarding stage, resolved by
+ * `matter_status` systemKey (`prospective` or `cmi_incomplete`) via
+ * `valueBySystemKey` (R352).
+ */
+export function isMatterOpeningInProgress(
+  matter: Pick<Matter, 'matterStatusId'>,
+  values: ChoiceValue[] = [],
+): boolean {
+  if (!matter.matterStatusId) return false;
+  const prospectiveId =
+    valueBySystemKey(values, 'matter_status', 'prospective')?.id ??
+    'matter_status.prospective_enquiry';
+  const cmiIncompleteId =
+    valueBySystemKey(values, 'matter_status', 'cmi_incomplete')?.id ??
+    'matter_status.cmi_incomplete';
+  return (
+    matter.matterStatusId === prospectiveId ||
+    matter.matterStatusId === cmiIncompleteId
+  );
+}
+
+/**
+ * Computes completion progress across the four matter onboarding checklist steps
+ * (Conflict check, AML/CDD, Engagement letter, Retainer) (R352).
+ */
+export function computeMatterOpeningChecklistProgress(
+  matter: Pick<
+    Matter,
+    | 'conflictDecision'
+    | 'conflictCheckRecord'
+    | 'conflictCheckStatus'
+    | 'amlStatus'
+    | 'engagementLetterStatus'
+    | 'retainerMoniesOnAccountGbp'
+  >,
+): {
+  conflictDone: boolean;
+  amlDone: boolean;
+  engDone: boolean;
+  retainerDone: boolean;
+  completedSteps: number;
+} {
+  const conflictDone =
+    matter.conflictCheckRecord?.status === 'Cleared' ||
+    matter.conflictCheckRecord?.status === 'Approved' ||
+    matter.conflictCheckStatus === 'Cleared' ||
+    matter.conflictCheckStatus === 'Clear' ||
+    (!matter.conflictCheckRecord && matter.conflictDecision?.outcome === 'Cleared');
+  const amlDone =
+    matter.amlStatus === 'Completed' ||
+    matter.amlStatus === 'Verified' ||
+    matter.amlStatus === 'Cleared';
+  const engDone =
+    matter.engagementLetterStatus === 'Signed' ||
+    matter.engagementLetterStatus === 'Signed & returned';
+  const retainerDone =
+    matter.retainerMoniesOnAccountGbp !== null && matter.retainerMoniesOnAccountGbp > 0;
+  const completedSteps = [conflictDone, amlDone, engDone, retainerDone].filter(Boolean).length;
+  return { conflictDone, amlDone, engDone, retainerDone, completedSteps };
+}
+
+/**
+ * Returns true when a task is a compliance or matter-opening task, resolving
+ * `task_type` values by `systemKey` (`conflict_check`, `complete_matter_opening`)
+ * via `valueBySystemKey` (R352).
+ */
+export function isComplianceOrOnboardingTask(
+  task: Pick<Task, 'taskTypeId' | 'title'>,
+  values: ChoiceValue[] = [],
+): boolean {
+  const conflictCheckTypeId =
+    valueBySystemKey(values, 'task_type', 'conflict_check')?.id ??
+    'task_type.conflict_check';
+  const completeOpeningTypeId =
+    valueBySystemKey(values, 'task_type', 'complete_matter_opening')?.id ??
+    'task_type.complete_matter_opening';
+  if (
+    task.taskTypeId === conflictCheckTypeId ||
+    task.taskTypeId === completeOpeningTypeId
+  ) {
+    return true;
+  }
+  const titleLower = (task.title ?? '').toLowerCase();
+  return (
+    titleLower.includes('aml') ||
+    titleLower.includes('cdd') ||
+    titleLower.includes('conflict')
   );
 }
 

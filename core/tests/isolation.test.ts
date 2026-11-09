@@ -5155,9 +5155,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'risk-r184@notalawfirm.example',
       );
 
-      // 1. resolveMatterConflictCheckRecord for M-000006 ('Potential conflict — escalated') returns status: 'Referred' and null approvedById
+      // 1. resolveMatterConflictCheckRecord for M-000006 (and legacy 'Potential conflict — escalated' with no conflictCheckRecord) returns status: 'Referred' and null approvedById
       const resolvedM6Record = resolveMatterConflictCheckRecord(
-        fixtureM6,
+        { ...fixtureM6, conflictCheckRecord: undefined },
         store.people,
         store.organisations,
       );
@@ -5398,12 +5398,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'risk-r185@notalawfirm.example',
       );
 
-      // 1. Legacy matter M-000006: Save 1 with no saveMode, conflictCheckRecord: null, and conflictCheckStatus: 'Clear' keeps stored record Referred and conflictCheckStatus as 'Pending conflict review'; Save 2 (submit_cleared) is refused with errors.conflict
+      // 1. Legacy matter M-000006: simulate a legacy record without conflictCheckRecord; Save 1 with no saveMode, conflictCheckRecord: null, and conflictCheckStatus: 'Clear' keeps stored record Referred and conflictCheckStatus as 'Pending conflict review'; Save 2 (submit_cleared) is refused with errors.conflict
       const fixtureM6 = store.matters.find((m) => m.id === 'M-000006')!;
-      expect(fixtureM6.conflictCheckRecord).toBeFalsy();
+      expect(fixtureM6.conflictCheckRecord?.status).toBe('Referred');
       expect(fixtureM6.conflictCheckStatus).toBe(
         'Potential conflict — escalated',
       );
+      delete fixtureM6.conflictCheckRecord;
 
       const m6Save1Res = await runWithActiveActorSession(
         feeEarnerSession,

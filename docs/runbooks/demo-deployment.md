@@ -127,7 +127,7 @@ The demo environment can be reset to its clean initial seed state in two ways:
 1. **In-App Demo Data Administration (requires `admin:data_reset` and MFA):**
    - Sign in as the Admin persona (`P-000004`, Huw Pritchard) with MFA verified.
    - Navigate to **Administration → Demo data** (`/admin/demo-data`).
-   - Click **Load demo dataset** (`resetDemoDataAction`), which calls `resetAllDemoData` to restore the seeded **Not A Law Firm LLP** dataset with fresh relative dates, preserves each person's existing `entraObjectId` from the pre-reset store (so `--entra-map` bindings survive the reset), and records a `data-reset` audit entry.
+   - Click **Load demo dataset** (`resetDemoDataAction`), which calls `resetAllDemoData` to restore the seeded **Not A Law Firm LLP** dataset with fresh relative dates (`includeSyntheticEntraOids: false` outside `PLATFORM_ENVIRONMENT === 'test'`), preserves `entraObjectId` bindings only when the pre-reset store was itself a seeded store (`!prevStore.isCleanDeployment`) and both the person ID and primary email match the seeded persona (so `--entra-map` bindings survive the reset without binding a user provisioned after **Clear all data** to a seeded persona), and records a `data-reset` audit entry.
 2. **CLI Re-Seed (with `--force`):**
    ```bash
    PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm \

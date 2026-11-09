@@ -1,8 +1,6 @@
 import path from 'node:path';
 import { defineConfig } from 'vitest/config';
 
-process.env.TZ = 'UTC';
-
 export default defineConfig({
   resolve: {
     alias: {
@@ -22,7 +20,6 @@ export default defineConfig({
     setupFiles: ['./src/test/vitest.setup.ts'],
     include: ['src/**/*.test.ts', 'core/tests/**/*.test.ts'],
     env: {
-      TZ: 'UTC',
       PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
       PLATFORM_ENVIRONMENT: 'test',
     },

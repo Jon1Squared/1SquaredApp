@@ -854,6 +854,9 @@ export function getStore(): FirmStore {
     try {
       const raw = fs.readFileSync(activeStorePath, 'utf8');
       const parsed = JSON.parse(raw) as FirmStore;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Root JSON value must be an object.');
+      }
       let migrated = false;
       const seedLists = buildSeedLists();
 
@@ -1034,8 +1037,10 @@ export function getStore(): FirmStore {
         // ignore stat errors
       }
       return global.__oneSquaredStore;
-    } catch {
-      // recreate if corrupted
+    } catch (err) {
+      throw new Error(
+        `Refusing to load corrupted runtime store file at ${activeStorePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
   if (isTestEnv && global.__oneSquaredLastSavedStoreJson) {
@@ -1078,7 +1083,8 @@ export function saveStore(store: FirmStore): void {
 }
 
 export function resetStore(): FirmStore {
-  const fresh = createSeedStore(new Date());
+  const includeSyntheticEntraOids = process.env.PLATFORM_ENVIRONMENT === 'test';
+  const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
   saveStore(fresh);
   return fresh;
 }

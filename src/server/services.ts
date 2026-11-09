@@ -73,7 +73,7 @@ import {
   valueBySystemKey,
 } from '@/domain/lists';
 import { isEmployeeOrLeaverRecord, planMerge } from '@/domain/merge';
-import { personDisplayName, recordDisplayName } from '@/domain/names';
+import { personDisplayName, primaryEmail, recordDisplayName } from '@/domain/names';
 import {
   buildClientFinancialsFromRows,
   computeAutomaticPmsLinks,
@@ -6402,15 +6402,22 @@ export function resetAllDemoData(byId: string): void {
   const prevStore = getStore();
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
   const actorName = actor ? personDisplayName(actor) : byId;
-  const prevEntraByPersonId = new Map<string, string | null | undefined>();
-  for (const p of prevStore.people) {
-    prevEntraByPersonId.set(p.id, p.entraObjectId);
+  const prevSeededEntraByIdAndEmail = new Map<string, string | null | undefined>();
+  if (!prevStore.isCleanDeployment) {
+    for (const p of prevStore.people) {
+      const email = primaryEmail(p).trim().toLowerCase();
+      if (email) {
+        prevSeededEntraByIdAndEmail.set(`${p.id}::${email}`, p.entraObjectId);
+      }
+    }
   }
   const fresh = resetStore();
-  if (prevEntraByPersonId.size > 0) {
+  if (prevSeededEntraByIdAndEmail.size > 0) {
     for (const p of fresh.people) {
-      if (prevEntraByPersonId.has(p.id)) {
-        const prevOid = prevEntraByPersonId.get(p.id);
+      const email = primaryEmail(p).trim().toLowerCase();
+      const key = `${p.id}::${email}`;
+      if (email && prevSeededEntraByIdAndEmail.has(key)) {
+        const prevOid = prevSeededEntraByIdAndEmail.get(key);
         if (prevOid === undefined) {
           delete p.entraObjectId;
         } else {

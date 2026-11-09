@@ -3,6 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  computeMatterOpeningChecklistProgress,
+  isComplianceOrOnboardingTask,
+  isMatterConflictCheckAwaitingDecision,
+  isMatterOpeningInProgress,
+} from '@/domain/matterOpeningRecord';
+import {
   getActiveTenantRawBaseConfig,
   isNonLiveDemoEnvironment,
   setActiveTenantConfigForTesting,
@@ -13,6 +19,7 @@ import {
   loadCommittedSeedStoreRaw,
 } from '@/seed/seedSnapshot';
 import {
+  clearAllDataToCleanDeployment,
   isDataResetAllowedEnvironment,
   isDemoModeEnabled,
   resetAllDemoData,
@@ -429,6 +436,273 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     for (const kd of committed.keyDates!) {
       expect(kd.verification?.proposedById).toBeDefined();
       expect(kd.verification?.verifiedById).not.toBe(kd.verification?.proposedById);
+    }
+  });
+
+  it('11. clearAllDataToCleanDeployment followed by provisioning a user as P-000004 and resetAllDemoData does not bind that user to the seeded admin persona or leave 00000000- object IDs (R336)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r336-reset-'));
+    const storePath = path.join(tmpDir, 'runtime-store.json');
+
+    vi.stubEnv('PLATFORM_ENVIRONMENT', 'demo');
+    try {
+      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
+      saveStore(loadCommittedSeedStore());
+      clearStoreMemoryCache();
+
+      // Step 1: Clear all data to a clean deployment
+      clearAllDataToCleanDeployment('P-000004');
+      const cleared = getStore();
+      expect(cleared.isCleanDeployment).toBe(true);
+      expect(cleared.people).toHaveLength(0);
+
+      // Step 2: Provision a real Entra user who happens to receive ID P-000004 in the clean deployment
+      cleared.people.push({
+        id: 'P-000004',
+        recordType: 'person',
+        createdAt: '2026-10-16T09:00:00Z',
+        createdById: 'P-000004',
+        updatedAt: '2026-10-16T09:00:00Z',
+        updatedById: 'P-000004',
+        tags: [],
+        firstName: 'Provisioned',
+        surname: 'Visitor',
+        emails: [
+          {
+            id: 'EM-PROV-1',
+            address: 'provisioned.visitor@notalawfirm.co.uk',
+            typeId: null,
+            isPrimary: true,
+          },
+        ],
+        phones: [],
+        addresses: [],
+        personTypeIds: [],
+        isStaff: true,
+        entraObjectId: '99999999-8888-4777-8666-555555555504',
+        entraUpn: 'provisioned.visitor@notalawfirm.co.uk',
+      } as unknown as (typeof cleared.people)[number]);
+      saveStore(cleared);
+      clearStoreMemoryCache();
+
+      // Step 3: Also test when isCleanDeployment was flipped to false but P-000004 is still a different person (different email)
+      resetAllDemoData('P-000004');
+
+      const afterReset = getStore();
+      const p4 = afterReset.people.find((p) => p.id === 'P-000004');
+      expect(p4).toBeDefined();
+      expect(p4?.firstName).toBe('Huw');
+      expect(p4?.surname).toBe('Pritchard');
+      expect(p4?.entraObjectId).toBeUndefined();
+
+      // Ensure no person received the provisioned user's object ID or any synthetic 00000000- object ID
+      const withProvisionedOid = afterReset.people.filter(
+        (p) => p.entraObjectId === '99999999-8888-4777-8666-555555555504',
+      );
+      expect(withProvisionedOid).toHaveLength(0);
+
+      const withSyntheticOid = afterReset.people.filter((p) =>
+        p.entraObjectId?.startsWith('00000000-'),
+      );
+      expect(withSyntheticOid).toHaveLength(0);
+
+      // Step 4: Even in a non-clean store (!isCleanDeployment), an OID on P-000004 with a non-matching email is never copied onto Huw Pritchard
+      const nonCleanMutated = getStore();
+      const targetP4 = nonCleanMutated.people.find((p) => p.id === 'P-000004')!;
+      targetP4.emails = [
+        {
+          id: 'EM-PROV-2',
+          address: 'someone.else@notalawfirm.co.uk',
+          typeId: null,
+          isPrimary: true,
+        },
+      ];
+      targetP4.entraObjectId = '88888888-7777-4666-8555-444444444404';
+      saveStore(nonCleanMutated);
+      clearStoreMemoryCache();
+
+      resetAllDemoData('P-000004');
+      const afterSecondReset = getStore();
+      expect(afterSecondReset.people.find((p) => p.id === 'P-000004')?.entraObjectId).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('12. isMatterConflictCheckAwaitingDecision counts only matters with conflictCheckRecord.status === Referred and ignores a cleared matter whose conversion snapshot had Potential conflict (R351)', () => {
+    const committed = loadCommittedSeedStore();
+    const m6 = committed.matters.find((m) => m.id === 'M-000006');
+    expect(m6).toBeDefined();
+    expect(m6?.conflictCheckRecord?.status).toBe('Referred');
+    expect(isMatterConflictCheckAwaitingDecision(m6!)).toBe(true);
+
+    // A matter converted with conflictDecision.outcome === 'Potential conflict' and later cleared in conflictCheckRecord is NOT awaiting decision
+    const clearedAfterConversion = {
+      conflictDecision: {
+        outcome: 'Potential conflict' as const,
+        summary: 'Initial conversion warning',
+        decidedById: 'P-000002',
+        decidedByName: 'Dafydd Evans',
+        decidedAt: '2026-10-10',
+        sourceRecordId: 'ENQ-000001',
+        matchesCount: 1,
+      },
+      conflictCheckRecord: {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '2026-10-12',
+        lastRunById: 'P-000003',
+        lastRunByName: 'Bethan Rees',
+        parties: [],
+        matches: [],
+        runs: [],
+        comments: [],
+      },
+    };
+    expect(isMatterConflictCheckAwaitingDecision(clearedAfterConversion)).toBe(false);
+
+    // A matter with conflictDecision.outcome === 'Potential conflict' and no conflictCheckRecord is NOT counted
+    expect(
+      isMatterConflictCheckAwaitingDecision({
+        conflictDecision: clearedAfterConversion.conflictDecision,
+        conflictCheckRecord: null,
+      }),
+    ).toBe(false);
+
+    // A matter with conflictCheckRecord.status === 'Referred' IS counted
+    expect(
+      isMatterConflictCheckAwaitingDecision({
+        conflictDecision: undefined,
+        conflictCheckRecord: {
+          ...clearedAfterConversion.conflictCheckRecord,
+          status: 'Referred',
+          outcomeLabel: 'Referred to risk for review',
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('13. isMatterOpeningInProgress, computeMatterOpeningChecklistProgress, and isComplianceOrOnboardingTask resolve statuses and task types by systemKey via valueBySystemKey (R352)', () => {
+    const committed = loadCommittedSeedStore();
+    const values = committed.values;
+
+    // Seeded M-000006 and M-000008 (Prospective / Enquiry) are in-progress openings
+    const m6 = committed.matters.find((m) => m.id === 'M-000006')!;
+    const m8 = committed.matters.find((m) => m.id === 'M-000008')!;
+    const m1 = committed.matters.find((m) => m.id === 'M-000001')!;
+    expect(isMatterOpeningInProgress(m6, values)).toBe(true);
+    expect(isMatterOpeningInProgress(m8, values)).toBe(true);
+    expect(isMatterOpeningInProgress(m1, values)).toBe(false);
+
+    // Custom ChoiceValue IDs with systemKey 'prospective' and 'cmi_incomplete' resolve via valueBySystemKey
+    const customValues = [
+      {
+        id: 'matter_status.custom_intake_stage',
+        listKey: 'matter_status' as const,
+        label: 'Initial Intake',
+        systemKey: 'prospective',
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: 'matter_status.custom_onboarding_hold',
+        listKey: 'matter_status' as const,
+        label: 'Onboarding Pending',
+        systemKey: 'cmi_incomplete',
+        sortOrder: 2,
+        active: true,
+      },
+      {
+        id: 'task_type.custom_conflict_verification',
+        listKey: 'task_type' as const,
+        label: 'Verify Conflicts',
+        systemKey: 'conflict_check',
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: 'task_type.custom_onboarding_pack',
+        listKey: 'task_type' as const,
+        label: 'Complete Onboarding Pack',
+        systemKey: 'complete_matter_opening',
+        sortOrder: 2,
+        active: true,
+      },
+    ];
+
+    expect(
+      isMatterOpeningInProgress({ matterStatusId: 'matter_status.custom_intake_stage' }, customValues),
+    ).toBe(true);
+    expect(
+      isMatterOpeningInProgress(
+        { matterStatusId: 'matter_status.custom_onboarding_hold' },
+        customValues,
+      ),
+    ).toBe(true);
+    expect(
+      isMatterOpeningInProgress({ matterStatusId: 'matter_status.active_work' }, customValues),
+    ).toBe(false);
+
+    const progress = computeMatterOpeningChecklistProgress(m8);
+    expect(progress.conflictDone).toBe(true);
+    expect(progress.amlDone).toBe(false);
+    expect(progress.engDone).toBe(false);
+    expect(progress.retainerDone).toBe(false);
+    expect(progress.completedSteps).toBe(1);
+
+    expect(
+      isComplianceOrOnboardingTask(
+        { taskTypeId: 'task_type.custom_conflict_verification', title: 'Review party list' },
+        customValues,
+      ),
+    ).toBe(true);
+    expect(
+      isComplianceOrOnboardingTask(
+        { taskTypeId: 'task_type.custom_onboarding_pack', title: 'Send welcome pack' },
+        customValues,
+      ),
+    ).toBe(true);
+    expect(
+      isComplianceOrOnboardingTask(
+        { taskTypeId: 'task_type.general', title: 'Draft witness statement' },
+        customValues,
+      ),
+    ).toBe(false);
+  });
+
+  it('14. buildCommittedSeedStoreSnapshot under TZ=America/New_York matches data/seed-not-a-law-firm.json without global vitest TZ forcing (R356)', () => {
+    const prevTz = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      const rebuiltUnderNewYork = buildCommittedSeedStoreSnapshot();
+      const committed = loadCommittedSeedStore();
+      expect(rebuiltUnderNewYork).toEqual(committed);
+    } finally {
+      if (prevTz === undefined) {
+        delete process.env.TZ;
+      } else {
+        process.env.TZ = prevTz;
+      }
+    }
+  });
+
+  it('15. getStore() refuses a corrupted runtime store file rather than overwriting it with a clean store (R357)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r357-corrupt-'));
+    const storePath = path.join(tmpDir, 'runtime-store.json');
+
+    try {
+      fs.writeFileSync(storePath, '{ corrupted json payload', 'utf8');
+      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
+      clearStoreMemoryCache();
+
+      expect(() => getStore()).toThrow(/Refusing to load corrupted runtime store file/);
+      expect(fs.readFileSync(storePath, 'utf8')).toBe('{ corrupted json payload');
+    } finally {
+      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });
