@@ -3,108 +3,89 @@
 | | |
 |---|---|
 | Backlog | P9, P7 (`[x-reserved:S0-19]` `documentGeneration.usage.retentionMonths`), P8, item 8 (Key dates and limitation), F8 (`timeZone`) |
-| Decision | [ADR 0030: Tenant-Aware Scheduler on Container Apps Jobs](../../decisions/0030-tenant-aware-scheduler.md) (D6, revised and accepted 9 November 2026 — Owner Decisions 7 and 8) |
+| Decision | [ADR 0030: Tenant-Aware Scheduler](../../decisions/0030-tenant-aware-scheduler.md) (D6, accepted 9 November 2026 — Owner Decisions 7 and 8) |
 | Stage plan | `docs/roadmap/stage-0-plan.md`, phase 0B (WP4 Checkpoint 4c) |
 | Branch | `s0-19-scheduler`, from `s0-18-pms-per-tenant` (or `develop` if Checkpoint 4b has merged), targeting `develop` |
-| Change class | Core platform capability & security boundary (`core/schemas/`, `core/src/tenancy/`, `core/src/domain/rbac/registry.ts`, `src/server/authorize.ts`, `src/server/actionPermissions.ts`, `scripts/run-job.mjs`, `core/infra/`). |
+| Change class | Core platform capability & security boundary (`core/schemas/`, `core/src/tenancy/`, `core/src/domain/rbac/registry.ts`, `src/server/authorize.ts`, `src/server/actionPermissions.ts`, `scripts/run-job.ts` -> `dist/jobs/run-job.mjs`, `core/infra/modules/platform.bicep`). |
 | Size | M |
-| Depends on | S0-13 (Container Apps job Bicep resources), S0-14 (`TenantScopedRepository` & real Postgres), S0-15 (`TenantKeyDateRepository` & `audit_entries`), S0-17 (`tasks` & `notifications` in Postgres so reminder runs are 100% transactional). |
-| Blocking manual tasks | Azure subscription access (`docs/roadmap/stage-0-plan.md` §8) to trigger and observe scheduled Container Apps job executions in Azure; local and CI CLI + Postgres execution is unblocked. |
+| Depends on | S0-13 (Container Apps job Bicep + `Microsoft.Insights/scheduledQueryRules` failure alert), S0-13b (`dist/jobs/run-job.mjs` bundler & telemetry), S0-14 (`tenantRegistry.ts`, `TenantScopedRepository` with `SET LOCAL ROLE`, `migrate`), S0-15 (`TenantKeyDateRepository` & `audit_entries`), S0-17a (`tasks` & `notifications` in Postgres). |
+| Blocking manual tasks | Azure subscription access (`docs/roadmap/stage-0-plan.md` §8) to observe live scheduled Container Apps job triggers and Azure Monitor alert firing in Azure; local and CI execution is unblocked. |
 | Baseline | `develop` at `52390b9` |
 
 ## What exists today
 
 Checked against `develop` (`52390b9`):
 
-1. **No scheduler, tenant registry, `guardedJob`, or `job_runs` table (`P9`):**
-   - `package.json:6-18` has no `job` script and `scripts/run-job.mjs` does not exist.
-   - Key-date reminder checks (`runKeyDateReminderSchedulerRecord`, `src/server/services.ts:13684`, exposed via `runKeyDateReminderSchedulerAction` in `src/app/actions.ts:1540` with policy `keydate:configure` + MFA in `src/server/actionPermissions.ts:685`) can only be triggered manually via the UI button.
-   - `executeUsageRetentionPurgeJob` (`core/src/domain/document-generation/usageService.ts:450`) exists in core, while `documentGeneration.usage.retentionMonths` in `core/schemas/tenant-config.schema.json:585` (`core/src/config-engine/index.ts:873`, `core/tests/tenant-config-usage.test.ts:624`) is marked `[x-reserved:S0-19]` waiting for the S0-19 scheduler to invoke it!
-2. **RBAC permission grant-all trap for job-only permissions (`core/src/domain/rbac/registry.ts:641`, `src/server/documentStoreServices.ts:244`):**
-   - `DEFAULT_RBAC_ROLES.admin.permissions` (`core/src/domain/rbac/registry.ts:641`) spreads `[...ALL_PERMISSION_KEYS]`, and `src/server/documentStoreServices.ts:244` grants `ALL_PERMISSION_KEYS` to `admin` actors when building SharePoint actor contexts.
-   - ADR 0030 §3 (`docs/decisions/0030-tenant-aware-scheduler.md:45-53`) mandates that **job-only permissions are granted to no role — not even `admin`** — so no interactive user or server action can ever hold or self-grant a job-only permission.
-3. **Tenant `timeZone` setting not yet in schema (`ADR 0030 §5`, `F8`):**
-   - `core/schemas/tenant-config.schema.json` does not yet have a `timeZone` property; `src/domain/enquiries.ts` (`formatLondonDateIso`) currently hard-codes `'Europe/London'`.
+1. **Manual-only reminder execution & reserved usage purge (`P9`, `P7`):**
+   - Key-date reminder checks (`runKeyDateReminderSchedulerRecord` at `src/server/services.ts:13684`, invoked by `runKeyDateReminderSchedulerAction` at `src/app/actions.ts:1555` with policy `keydate:configure` at `src/server/actionPermissions.ts:301`) run only when clicked manually in `KeyDatesDiaryWorkspace.tsx`.
+   - `executeUsageRetentionPurgeJob` (`core/src/domain/document-generation/usageService.ts:450`) exists in core while `documentGeneration.usage.retentionMonths` (`core/schemas/tenant-config.schema.json:553`, `core/src/config-engine/index.ts:279`, `core/tests/tenant-config-usage.test.ts:621`) is marked `[x-reserved:S0-19]`.
+   - *(Note: `core/schemas/tenant-registry.schema.json`, `core/src/tenancy/tenantRegistry.ts`, and `scripts/run-job.ts` -> `dist/jobs/run-job.mjs` with `migrate` are added in `S0-13b` and `S0-14` per `R403` / `R404`.)*
+2. **RBAC grant-all trap for job-only permissions (`core/src/domain/rbac/registry.ts:641`, `src/server/documentStoreServices.ts:244`):**
+   - `DEFAULT_RBAC_ROLES.admin.permissions` (`:641`) and `src/server/documentStoreServices.ts:244` spread `ALL_PERMISSION_KEYS`. ADR 0030 §3 (`:63-65`) requires job-only permissions to be granted to **no role — not even `admin`**.
+3. **Tenant `timeZone` setting (`ADR 0030 §§2, 4`, `F8`):**
+   - `core/schemas/tenant-config.schema.json` does not yet declare top-level `timeZone` (default `'Europe/London'`).
 
 ## Files and changes
 
-Follows ADR 0030 §§1–8 verbatim:
+Follows ADR 0030 §§1–8 verbatim (`R401`, `R403`, `R404`, `R412`, `R413`):
 
-1. **Tenant registry schema & loader (`core/schemas/tenant-registry.schema.json` — new, `core/src/tenancy/tenantRegistry.ts` — new, `client-not-a-law-firm/config/tenant-registry.json` / env config):**
-   - JSON Schema + Zod validator for the environment's active tenant registry (`environment`, `tenants[]` with `tenantId` matching `^[a-z0-9][a-z0-9-]{1,62}$`, `packageDir` / config ref, `enabled: boolean`, optional `dedicatedPostgresHost`).
-   - Works identically in **Model A** (registry contains the single firm tenant) and **Model B** (registry lists all active hosted tenants in that environment), refusing disabled or malformed entries.
-2. **Additive `timeZone` tenant configuration (`core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `core/src/api/index.ts`):**
-   - Add additive `timeZone` (`type: "string"`, `default: "Europe/London"`, description: IANA time zone for tenant local-day calculations and scheduling) to `tenant-config.schema.json`, validated in `core/src/config-engine/index.ts` via `Intl.DateTimeFormat(undefined, { timeZone })` so invalid zone strings fail config validation immediately (Rule 7).
-   - Activate `[x-reserved:S0-19]` on `documentGeneration.usage.retentionMonths` (`tenant-config.schema.json:585`, `core/src/config-engine/index.ts:873`, `core/tests/tenant-config-usage.test.ts:624`) by wiring the scheduled `usage-retention-purge` job alongside `key-date-reminders`.
-3. **Job-only permissions in RBAC (`core/src/api/index.ts`, `core/src/domain/rbac/registry.ts`, `src/server/documentStoreServices.ts`, `src/server/services.ts`):**
-   - Add `jobOnly?: boolean` to `PermissionRegistryEntry` (`core/src/api/index.ts`).
-   - Register:
-     - `'keydate:run_reminders'` (`module: 'key_dates'`, `sensitivity: 'critical'`, `jobOnly: true`)
-     - `'document_generation:purge_usage'` (`module: 'document_generation'`, `sensitivity: 'critical'`, `jobOnly: true`)
+1. **Additive `timeZone` tenant config & `retentionMonths` activation (`core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `core/tests/tenant-config-usage.test.ts`):**
+   - Add additive `timeZone` (`type: "string"`, `default: "Europe/London"`, validated via `Intl.DateTimeFormat(undefined, { timeZone })`, matching `tenantRegistry.ts` from `S0-14`, Rule 7).
+   - Activate `[x-reserved:S0-19]` on `documentGeneration.usage.retentionMonths` (`tenant-config.schema.json:553`, `config-engine/index.ts:279`, `tenant-config-usage.test.ts:621`) by scheduling `usage-retention-purge`.
+2. **Job-only permissions in RBAC — including `tenant:migrate` (`core/src/api/index.ts`, `core/src/domain/rbac/registry.ts`, `src/server/documentStoreServices.ts`, `src/server/services.ts`, `R403`, `R412`):**
+   - Add `jobOnly?: boolean` to `PermissionRegistryEntry` and register **three** job-only permissions:
+     - **`'tenant:migrate'`** (`module: 'tenancy'`, `sensitivity: 'critical'`, `jobOnly: true` — ADR 0030 `:93`, `R403`, `R412`)
+     - **`'keydate:run_reminders'`** (`module: 'key_dates'`, `sensitivity: 'critical'`, `jobOnly: true`)
+     - **`'document_generation:purge_usage'`** (`module: 'document_generation'`, `sensitivity: 'critical'`, `jobOnly: true`)
    - Export `ALL_USER_PERMISSION_KEYS` (`PERMISSION_REGISTRY.filter((e) => !e.jobOnly).map((e) => e.key)`) and `ALL_JOB_ONLY_PERMISSION_KEYS`.
-   - Update `DEFAULT_RBAC_ROLES.admin.permissions` (`core/src/domain/rbac/registry.ts:641`) and `src/server/documentStoreServices.ts:244` to use `ALL_USER_PERMISSION_KEYS` instead of `ALL_PERMISSION_KEYS`, and update `updateTenantRbacConfig` / `updatePersonPermissionOverrides` (`src/server/services.ts:10201, 10300`) and `resolvePersonPermissionSet` to **reject any attempt to assign a `jobOnly: true` permission to a role or person** (`FORBIDDEN`).
-4. **`guardedJob(jobKey, handler)` & `JOB_PERMISSIONS` (`src/server/authorize.ts`, `src/server/actionPermissions.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`):**
-   - Add `JOB_PERMISSIONS` in `src/server/actionPermissions.ts` mapping each `RegisteredJobKey` (`'key-date-reminders'`, `'usage-retention-purge'`) to its required `jobOnly: true` permission (`'keydate:run_reminders'`, `'document_generation:purge_usage'`).
-   - Extend `src/server/__tests__/actionPermissionGuard.test.ts` so every registered job in `JOB_REGISTRY` must have an explicit `JOB_PERMISSIONS` entry referencing a `jobOnly: true` permission, keeping **`MAX_KNOWN_GAPS = 0`**.
-   - Implement `guardedJob(jobKey, tenantEntry, opts, handler)` in `src/server/authorize.ts`:
-     - Validates the caller came from the job runner with a registered active tenant (`tenantRegistry.assertRegisteredActiveTenant`), mints a job-scoped `TenantContext` (`actorSub: 'system:job:' + jobKey`, `actorRoles: []`, `jobPermissions: [policy.permission]`, fresh `correlationId` via `resolveRequestCorrelationId`), enforces `policy.permission` against `jobPermissions` (never user roles), enforces a **per-tenant timeout** (default 120s via `AbortController` + Postgres `SET LOCAL statement_timeout`), emits PII-free start/finish/failure telemetry (`S0-13b`), and isolates errors per tenant so one tenant failing never aborts other tenants in the loop (exiting non-zero after completing the sweep if any tenant failed, ADR 0030 §6).
-5. **`job_runs` migration & `TenantJobRunRepository` (`core/src/tenancy/migrations/index.ts`, `core/src/tenancy/jobRunRepository.ts`):**
-   - Add expand migration **`0014_scheduler_job_runs_expand`** (`kind: 'expand'`, `requiresAppliedVersion: '0013'`, with reversible `DROP TABLE IF EXISTS job_runs;` `downSql`):
-     - `job_runs`: `tenant_id TEXT NOT NULL`, `id TEXT NOT NULL`, `job_key TEXT NOT NULL`, `local_date TEXT NOT NULL` (`YYYY-MM-DD` in tenant `timeZone`), `status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed'))`, `started_at TIMESTAMPTZ NOT NULL`, `finished_at TIMESTAMPTZ NULL`, `correlation_id TEXT NOT NULL`, `error_code TEXT NULL`, `summary_json JSONB NOT NULL DEFAULT '{}'::jsonb` (numeric counts only — zero PII), `PRIMARY KEY (tenant_id, id)`, plus partial unique index `CREATE UNIQUE INDEX idx_job_runs_succeeded_once_per_day ON job_runs (tenant_id, job_key, local_date) WHERE status = 'succeeded';` and index on `(tenant_id, job_key, local_date, started_at DESC)`.
-   - **Idempotency & advisory locking (Owner Decision 7, ADR 0030 §§4–5):**
-     - Acquires a non-blocking per-`(jobKey, tenantId)` Postgres advisory lock (`pg_try_advisory_lock(hashtext('onesquared_job:' || jobKey || ':' || tenantId))`) so overlapping hourly containers never double-run the same tenant.
-     - Computes `localDate` in `tenantConfig.timeZone` (default `'Europe/London'`, handling GMT/BST 23-hour and 25-hour days cleanly via `Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })`) and checks optional target window hour (e.g. `>= 06:00` local time).
-     - **Only `status = 'succeeded'` blocks a repeat** for `(tenant_id, job_key, local_date)`. If a prior run on the same `local_date` recorded `status = 'failed'` (or stale crashed `'running'`), the next hourly tick retries cleanly!
-6. **CLI entry point `scripts/run-job.mjs` & Bicep schedule activation (`scripts/run-job.mjs`, `package.json`, `core/infra/modules/platform.bicep`):**
-   - Add `"job": "tsx --conditions react-server scripts/run-job.mjs"` in `package.json` (`npm run job -- <jobKey>`, supporting `migrate`, `key-date-reminders`, and `usage-retention-purge`).
-   - **Rule 4 recorded exception (Owner Decision 7, ADR 0030 §2):** `scripts/run-job.mjs` is the **sole file** permitted to iterate `loadActiveTenantRegistry()` and pass a registry-validated tenant into `guardedJob` without an interactive user OIDC token. Every downstream service and `TenantScopedRepository` still receives a strict `TenantContext` and executes `SET ROLE`.
-   - Move the daily key-date reminder check (`runKeyDateReminderForTenant`) onto `guardedJob('key-date-reminders', ...)` while **keeping the interactive `"Run daily reminder check"` button** (`runKeyDateReminderSchedulerAction`, gated on `keydate:configure` + MFA) working through the shared core reminder service.
-   - Enable the `key-date-reminders` and `usage-retention-purge` hourly schedule defaults (`0 * * * *`) in `core/infra/modules/platform.bicep`.
+   - Switch `DEFAULT_RBAC_ROLES.admin.permissions` (`registry.ts:641`) and `documentStoreServices.ts:244` to `ALL_USER_PERMISSION_KEYS`, and reject assigning any `jobOnly: true` permission in `updatePersonPermissionOverrides` (`services.ts:10201`), `updateTenantRbacConfig` (`:10300`), and `resolvePersonPermissionSet` (`FORBIDDEN`).
+3. **`guardedJob(jobKey, handler)`, `system:<jobKey>` actor & `JOB_PERMISSIONS` (`src/server/authorize.ts`, `src/server/actionPermissions.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`, `R403`, `R412`):**
+   - Add `JOB_PERMISSIONS` in `src/server/actionPermissions.ts` mapping `'migrate'` -> `'tenant:migrate'`, `'key-date-reminders'` -> `'keydate:run_reminders'`, and `'usage-retention-purge'` -> `'document_generation:purge_usage'`. Extend `actionPermissionGuard.test.ts` so every registered job must declare a `jobOnly: true` policy (`MAX_KNOWN_GAPS = 0`).
+   - Implement `guardedJob(jobKey, tenantEntry, opts, handler)` inside `runTenantBackgroundJob`:
+     - Refuses missing, disabled, or unregistered tenants (`TENANCY_UNREGISTERED_JOB_TENANT`), mints a job `TenantContext` with **`actorSub: 'system:' + jobKey`** (for example `'system:migrate'`, `'system:key-date-reminders'`, `'system:usage-retention-purge'` — exact ADR 0030 `:61` format, `R412`), `actorRoles: []`, `jobPermissions: [policy.permission]`, and fresh `correlationId` via `resolveRequestCorrelationId(null)`.
+     - Enforces `policy.permission` against `jobPermissions`, applies a per-tenant timeout (default `120s` via `AbortController` + `SET LOCAL statement_timeout`), emits PII-free telemetry (`job.tenant.started`, `job.tenant.succeeded`, `job.tenant.failed` — feeding S0-13's `Microsoft.Insights/scheduledQueryRules` alert rule, `R412`), and isolates per-tenant failures so remaining tenants continue before exiting non-zero.
+   - Wrap `S0-14`'s `migrate` runner per tenant inside `guardedJob('migrate', ...)` (`R403`, `R412`).
+4. **`job_runs` migration, `pg_try_advisory_xact_lock`, and manual-run recording (`core/src/tenancy/migrations/index.ts`, `core/src/tenancy/jobRunRepository.ts`, `R401`, `R412`):**
+   - Add expand migration **`0013_scheduler_job_runs_expand`** (`kind: 'expand'`, `requiresAppliedVersion: '0012'`, `CORE_REQUIRED_SCHEMA_VERSION = '0013'`, reversible `DROP TABLE IF EXISTS job_runs;`):
+     - `job_runs`: `tenant_id TEXT NOT NULL`, `id TEXT NOT NULL`, `job_key TEXT NOT NULL`, `local_date TEXT NOT NULL` (`YYYY-MM-DD` in `tenantConfig.timeZone`), `trigger_source TEXT NOT NULL CHECK (trigger_source IN ('scheduled', 'manual'))`, `triggered_by_id TEXT NOT NULL` (`'system:' || job_key` or `actor.personId`), `status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed'))`, `started_at TIMESTAMPTZ NOT NULL`, `finished_at TIMESTAMPTZ NULL`, `correlation_id TEXT NOT NULL`, `error_code TEXT NULL`, `summary_json JSONB NOT NULL DEFAULT '{}'::jsonb` (counts only — zero PII), `PRIMARY KEY (tenant_id, id)`, partial unique index `idx_job_runs_scheduled_once_per_day ON job_runs (tenant_id, job_key, local_date) WHERE status = 'succeeded' AND trigger_source = 'scheduled'`, and lookup index on `(tenant_id, job_key, local_date, status)`.
+   - **Transaction-scoped lock & local-day idempotency (`R401`, ADR 0030 §4):**
+     - Inside `withTenantTransaction` (`SET LOCAL ROLE` first), acquires **`pg_try_advisory_xact_lock(hashtext('onesquared_job:' || jobKey || ':' || tenantId))`** (`R401` — transaction-scoped, safe over PgBouncer `TRANSACTION` pooling).
+     - Evaluates `localDate` and local hour in `tenantConfig.timeZone` (default `'Europe/London'`, default run hour **`02:00`** per ADR 0030 `:83`). For scheduled ticks, any existing `status = 'succeeded'` row (scheduled **or** manual) for `(tenant_id, job_key, local_date)` skips the repeat; `status = 'failed'` allows retry on the next hourly tick!
+   - **Manual `"Run daily reminder check"` button (`runKeyDateReminderSchedulerAction` at `src/app/actions.ts:1555`, policy at `src/server/actionPermissions.ts:301`, `R412`):**
+     - Calls the **exact same shared reminder job function** for the signed-in user's tenant (behind `keydate:configure`, recording `actor.personId` on user-triggered audit entries and **`trigger_source = 'manual'` in `job_runs`** per ADR 0030 `:80, :92`).
+5. **Bundled CLI & Bicep schedule/alert wiring (`scripts/run-job.ts` -> `dist/jobs/run-job.mjs`, `package.json`, `core/infra/modules/platform.bicep`, `R404`, `R412`):**
+   - Add `"job": "tsx --conditions react-server scripts/run-job.ts"` in `package.json` (`npm run job -- <jobKey>` locally, ADR 0030 `:115`) while `scripts/build-jobs.mjs` bundles `dist/jobs/run-job.mjs` (`['node', 'dist/jobs/run-job.mjs', '<jobKey>']` in Container Apps).
+   - Enable `enableSchedulerJobs`, `enableKeyDateRemindersJob`, and `enableUsageRetentionPurgeJob` (`0 * * * *`) in `core/infra/modules/platform.bicep` and verify the `Microsoft.Insights/scheduledQueryRules` alert covers all registered job keys (`R412`).
 
 ## Tests
 
-- **Unit & RBAC tests (`core/tests/scheduler.test.ts` — new, `core/tests/rbac.test.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`):**
-  - Assert **no built-in role (`admin` included) holds `keydate:run_reminders` or `document_generation:purge_usage`**, and attempting to grant either via `updateTenantRbacConfig` or `updatePersonPermissionOverrides` is rejected with `FORBIDDEN`.
-  - Assert an interactive user (including `admin` with `mfaVerified: true`) cannot invoke a `guardedJob` handler or satisfy a `jobOnly` permission check, while the interactive `runKeyDateReminderSchedulerAction` button still works with `keydate:configure` + MFA and fails with `FORBIDDEN` when `keydate:configure` is revoked.
-  - **`job_runs` idempotency & retry:** (a) first hourly tick on `2026-06-15` runs and records `status = 'succeeded'`, (b) second hourly tick on the same `local_date` skips with zero duplicate reminders/tasks, (c) simulated transient failure records `status = 'failed'` and the next hourly tick **retries and succeeds**, (d) GMT->BST (`2026-03-29`) and BST->GMT (`2026-10-25`) transitions run exactly once per local day, and a tenant configured with `timeZone: 'America/New_York'` evaluates its local day independently of a `'Europe/London'` tenant.
-  - **Advisory lock & per-tenant timeout:** concurrent `run-job` invocations for the same `(jobKey, tenantId)` skip/serialise via `pg_try_advisory_lock`; a hanging tenant times out cleanly while the second tenant in the registry still runs and succeeds.
-  - **Zero PII in logs/telemetry:** assert `job_runs.summary_json` and emitted telemetry contain only `tenantId`, `correlationId`, `jobKey`, `localDate`, `durationMs`, and numeric counts — never client names, matter titles, or email addresses.
-- **Contract tests:**
-  - `0014_scheduler_job_runs_expand` `upSql` -> `downSql` -> `upSql` round-trip.
-  - `core/tests/tenant-config-usage.test.ts` passes for new `timeZone` and newly activated `documentGeneration.usage.retentionMonths` (`'S0-19'` removed from `RESERVED_FOR_SLICE`).
-  - `actionPermissionGuard.test.ts` passes with `MAX_KNOWN_GAPS = 0`.
-- **Two-tenant isolation tests (`core/tests/isolation.test.ts`, Rule 9 & Owner Decision 7):**
-  - Separate real databases (`pg_tenant_a_test`, `pg_tenant_b_test`) with per-tenant `SET ROLE`:
-    - **Positive control & cross-tenant isolation:** running `npm run job -- key-date-reminders` and `usage-retention-purge` across `[tenant-a, tenant-b]` raises tasks/notifications and purges expired usage events strictly inside each tenant's own database, using each tenant's own `timeZone` and `retentionMonths` config, with zero cross-tenant task, notification, audit, or `job_runs` rows.
-    - **Unregistered / disabled / forged tenant rejection:** passing an unlisted or `enabled: false` tenant ID to `guardedJob` fails closed (`TENANCY_UNREGISTERED_JOB_TENANT` / `TENANCY_FORGERY_DETECTED`, asserting both `code` and `message`).
-- **E2E tests:**
-  - All 9 Playwright role journeys pass (`npm run e2e`).
+- **Unit, RBAC & `R412` tests (`core/tests/scheduler.test.ts` — new, `core/tests/rbac.test.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`, `core/tests/infra-bicep-contract.test.ts`):**
+  - Assert **no role (`admin` included) holds `tenant:migrate`, `keydate:run_reminders`, or `document_generation:purge_usage`**, RBAC overrides cannot grant them (`FORBIDDEN`), and `migrate` runs inside `guardedJob` requiring `tenant:migrate` (`R403`, `R412`).
+  - Assert scheduled audit entries and `job_runs.triggered_by_id` record **`system:key-date-reminders` / `system:usage-retention-purge`** (`R412`).
+  - **Manual button -> `job_runs` test (`R412`):** invoking `runKeyDateReminderSchedulerAction` (`keydate:configure`) executes the shared job logic, writes a `job_runs` row (`trigger_source: 'manual'`, `status: 'succeeded'`), and causes a subsequent scheduled hourly tick on the same `local_date` to skip cleanly without duplicate reminders.
+  - **`job_runs` idempotency, retry after failure, GMT/BST (`02:00` local hour across `2026-03-29` & `2026-10-25`), `pg_try_advisory_xact_lock` over PgBouncer (`R401`), per-tenant timeout isolation, zero-PII telemetry, and Bicep alert rule contract test (`R412`).**
+- **Contract, two-tenant isolation & E2E tests:** `0013` `upSql` -> `downSql` -> `upSql`; `tenant-config-usage.test.ts` covers `timeZone` and `documentGeneration.usage.retentionMonths`; two-tenant PgBouncer job isolation (`core/tests/isolation.test.ts`) across `[tenant-a, tenant-b]` + unregistered/forged tenant rejection; `docker run --rm <image> node dist/jobs/run-job.mjs --list` (`R404`); `npm run e2e` passes.
 
 ## Help and documentation (rule 11)
 
-- **`src/docs/articles/key-dates-reminders-and-escalations.ts` and `src/docs/articles/key-dates-administration.ts`:** Document automated hourly/once-per-local-day reminder execution alongside the manual `"Run daily reminder check"` button (`keydate:configure` + MFA).
-- **`src/docs/articles/deployment-and-security.ts`, `src/docs/articles/authentication-rbac-and-mfa.ts`, and `src/docs/articles/tenant-settings.ts`:** Document Container Apps scheduled jobs, `guardedJob`, job-only permissions, the narrow Rule 4 entry-point exception in `scripts/run-job.mjs`, `timeZone` (default `Europe/London`), and `documentGeneration.usage.retentionMonths`.
-- **`docs/rbac-reference.md` and `docs/release-notes.md`:** Document `jobOnly` permissions (`keydate:run_reminders`, `document_generation:purge_usage`) and `S0-19`.
-- **`docs/roadmap/feature-list.md`:** Update item **8** (remove `"Reminder job is started by hand (no scheduler)"`), **F8** (`timeZone` setting now exists), **P7** (`documentGeneration.usage.retentionMonths` active), **P8**, and **P9** (`Partly built` until `S0-19b` adds enquiry retention anonymisation).
+- **`src/docs/articles/key-dates-reminders.ts`, `src/docs/articles/key-dates-administration.ts`, `src/docs/articles/deployment-and-security.ts`, `src/docs/articles/authentication-rbac-and-mfa.ts`, and `src/docs/articles/tenant-settings.ts`:** Document hourly/once-per-local-day (`02:00` default) scheduled jobs, manual `"Run daily reminder check"` recording in `job_runs`, `guardedJob` (`system:<jobKey>`), `jobOnly` permissions (`tenant:migrate`, `keydate:run_reminders`, `document_generation:purge_usage`), the narrow Rule 4 exception in `run-job`, `timeZone`, `documentGeneration.usage.retentionMonths`, and Application Insights job failure alerts.
+- **`docs/rbac-reference.md`, `docs/release-notes.md`, and `docs/roadmap/feature-list.md`:** Update item **8**, **F8**, **P7**, **P8**, and **P9** (`Partly built` until `S0-19b`).
 
 ## Acceptance criteria
 
-- Tenant registry schema + `core/src/tenancy/tenantRegistry.ts`, `timeZone` tenant config (default `Europe/London`), `job_runs` migration (`0014`), `guardedJob`, `JOB_PERMISSIONS` (`MAX_KNOWN_GAPS = 0`), job-only permissions (`keydate:run_reminders`, `document_generation:purge_usage` — granted to no role, not even `admin`), and `npm run job -- <jobKey>` (`scripts/run-job.mjs`) are all live and tested.
-- Jobs check hourly and act at most once per tenant local day (`status = 'succeeded'` blocks repeat; `'failed'` retries on next tick), under per-tenant timeouts and per-`(job, tenant)` advisory locks, with zero PII in logs or `job_runs`.
-- Manual `"Run daily reminder check"` button remains working behind `keydate:configure` + MFA.
-- All unit, RBAC, config-usage, reversible-migration, two-tenant job isolation, and e2e tests pass (`npm run ci`).
+- `guardedJob` (`system:<jobKey>`), `JOB_PERMISSIONS` (`MAX_KNOWN_GAPS = 0`), job-only permissions (`tenant:migrate`, `keydate:run_reminders`, `document_generation:purge_usage` — granted to no role), `job_runs` (`0013`) with `pg_try_advisory_xact_lock`, manual-run `job_runs` recording, `timeZone`, `usage-retention-purge`, bundled `dist/jobs/run-job.mjs`, and Bicep job failure alerts are all live and tested (`npm run ci`).
 
 ## Manual blockers
 
-- **Azure subscription access (`docs/roadmap/stage-0-plan.md` §8):** Observing live Azure Container Apps cron job triggers and Azure Monitor job failure alerts waits on subscription access.
+- **Azure subscription access (`docs/roadmap/stage-0-plan.md` §8):** Live observation of Azure Container Apps cron executions and Azure Monitor alert notifications waits on subscription access.
 
 ## Rollback
 
-- Disable the Container Apps job schedule (or revert `s0-19-scheduler`) and run `downSql` for `0014_scheduler_job_runs_expand` if rolling back `job_runs`; manual `"Run daily reminder check"` continues to work throughout. Remove `timeZone` from any tenant config file before reverting the schema if set.
+- Disable the Container Apps job schedule (or revert `s0-19-scheduler`) and run `downSql` for `0013_scheduler_job_runs_expand` if rolling back schema; remove `timeZone` from tenant configs first if set.
 
 ## Pull request description must state
 
-- **Change class:** Core scheduler infrastructure, RBAC job-only permission model, additive `timeZone` tenant configuration, and `key-date-reminders` / `usage-retention-purge` jobs.
-- **Recorded exception to Rule 4 (ADR 0030 §2):** `scripts/run-job.mjs` resolves target tenants from the environment's validated tenant registry rather than an interactive user's OIDC token; this exception is strictly confined to `scripts/run-job.mjs` + `guardedJob`, and every downstream repository call still requires a valid `TenantContext` and runs `SET ROLE`.
-- **Both hosting models:** Identical `scripts/run-job.mjs` Container Apps job runs in Model A (single-entry tenant registry for the client firm) and Model B (iterating all active hosted tenants with isolated timeouts, advisory locks, and per-tenant `SET ROLE`).
-- **Migration and rollback:** Runs `0014_scheduler_job_runs_expand` via `migrate` job before enabling scheduled jobs; reversible via `downSql` and disabling the job schedule.
+- **Change class:** Core scheduler (`guardedJob`, `job_runs`, `dist/jobs/run-job.mjs`), RBAC job-only permissions (`tenant:migrate`, `keydate:run_reminders`, `document_generation:purge_usage`), and additive `timeZone` config.
+- **Justified scope beyond the stage-plan summary row (`R413`):** Explicitly notes (1) additive `timeZone` tenant configuration (required by ADR 0030 §§2, 4 `:44, :81-84` for DST-safe local-day scheduling) and (2) wiring `usage-retention-purge` (activating `documentGeneration.usage.retentionMonths`, reserved for `S0-19` in `S0-12`).
+- **Recorded exception to Rule 4 (ADR 0030 §3):** Confined strictly to `scripts/run-job.ts` (`dist/jobs/run-job.mjs`) and `guardedJob`; every downstream repository call still requires a valid `TenantContext` and runs `SET LOCAL ROLE`.
+- **Both hosting models & rollback:** Identical bundled job image runs in Model A and Model B over PgBouncer (`6432`, `migrate` on `5432`); reversible via `downSql` (`0013`) and schedule toggle.

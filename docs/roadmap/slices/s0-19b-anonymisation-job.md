@@ -3,12 +3,12 @@
 | | |
 |---|---|
 | Backlog | P9, P8, B3 (non-regression), item 23 (Archiving, retention and destruction) |
-| Decision | [ADR 0030: Tenant-Aware Scheduler on Container Apps Jobs](../../decisions/0030-tenant-aware-scheduler.md) (D6, revised and accepted 9 November 2026 — Owner Decisions 7 and 8) |
+| Decision | [ADR 0030: Tenant-Aware Scheduler](../../decisions/0030-tenant-aware-scheduler.md) (D6, accepted 9 November 2026 — Owner Decisions 7 and 8) |
 | Stage plan | `docs/roadmap/stage-0-plan.md`, phase 0B (WP4 Checkpoint 4c) |
 | Branch | `s0-19b-anonymisation-job`, from `s0-19-scheduler`, targeting `develop` |
-| Change class | Core feature / scheduled retention job (`core/src/domain/rbac/registry.ts`, `src/server/actionPermissions.ts`, `src/server/services.ts`, `scripts/run-job.mjs`, `core/infra/modules/platform.bicep`). |
+| Change class | Core feature / scheduled retention job (`core/src/domain/rbac/registry.ts`, `src/server/actionPermissions.ts`, `src/server/services.ts`, `scripts/run-job.ts` -> `dist/jobs/run-job.mjs`, `core/infra/modules/platform.bicep`). |
 | Size | S |
-| Depends on | S0-17 (`enquiries` and `enquiry_settings` in PostgreSQL — specifically `S0-17a`), S0-19 (`tenantRegistry`, `guardedJob`, `job_runs`, `scripts/run-job.mjs`). |
+| Depends on | S0-17a (`enquiries` and `enquiry_settings` in PostgreSQL), S0-19 (`guardedJob`, `job_runs` `0013`, `pg_try_advisory_xact_lock`, bundled `dist/jobs/run-job.mjs`, job failure alert rule). |
 | Blocking manual tasks | Azure subscription access (`docs/roadmap/stage-0-plan.md` §8) to observe live Azure Container Apps scheduled execution; local and CI execution is unblocked. |
 | Baseline | `develop` at `52390b9` |
 
@@ -16,71 +16,58 @@
 
 Checked against `develop` (`52390b9`):
 
-1. **Interactive enquiry retention anonymisation (`src/server/services.ts:8731-8807`, `src/domain/enquiries.ts:1553-1563`, `src/app/actions.ts:747-753`):**
-   - `anonymiseExpiredEnquiries(byId, specificEnquiryId?)` (hardened in `S0-03` to fix `B3`) requires `enquiry:anonymise`, loads `retentionMonths` from `enquirySettings`, and **always** evaluates `isReadyForRetentionAnonymisation(enquiry, retentionMonths, now)` (`src/domain/enquiries.ts:1553-1563` — refusing `Converted` enquiries, open enquiries, already-anonymised enquiries, and any closed enquiry within the retention cutoff) for both single-enquiry and bulk calls, wiping personal details (`firstName`, `lastName`, `email`, `phone`, `postcode`, address lines, `callingOnBehalfOf`, `otherPartiesNamed`, `summary`, `notes`, `contactLog` notes, `conflictSnapshot` personal inputs) and recording an `anonymise` audit entry.
-   - However, it can only be run manually by an administrator/compliance user clicking the single-enquiry or bulk anonymise button in the UI (`P9`, `docs/roadmap/feature-list.md:59, 122`).
-2. **Scheduler infrastructure ready from S0-19:**
-   - `tenantRegistry`, `guardedJob`, `JOB_PERMISSIONS`, `job_runs` (`0014`), and `scripts/run-job.mjs` are all built in `S0-19`, and `core/infra/modules/platform.bicep` (from `S0-13`) already declares the parameterised `enquiry-retention-anonymise` Container Apps job resource.
+1. **Interactive enquiry retention anonymisation (`src/server/services.ts:8924-8970`, `src/domain/enquiries.ts:1553-1563`, `src/app/actions.ts:747-753`, `R414`):**
+   - `anonymiseExpiredEnquiries(byId, specificEnquiryId?)` (`src/server/services.ts:8924-8970`, hardened in `S0-03` to fix `B3`) requires `enquiry:anonymise`, loads `retentionMonths` from `enquirySettings`, and **always** evaluates `isReadyForRetentionAnonymisation(enq, months, now)` (`src/domain/enquiries.ts:1553-1563` — refusing `Converted` enquiries, open enquiries, already-anonymised enquiries, and any closed enquiry within the retention cutoff) for both single-enquiry and bulk calls, wiping personal details and writing an audit entry (`:8956-8965`) with zero personal data.
+   - However, it runs only when triggered manually via `anonymiseExpiredEnquiriesAction` (`src/app/actions.ts:747-753`, `P9`).
+2. **Scheduler infrastructure ready from S0-13, S0-13b, S0-14 and S0-19:**
+   - `tenantRegistry.ts`, `guardedJob` (`system:<jobKey>`), `JOB_PERMISSIONS`, `job_runs` (`0013`), `pg_try_advisory_xact_lock`, `dist/jobs/run-job.mjs`, and the `Microsoft.Insights/scheduledQueryRules` failure/timeout alert rule are all in place, and `core/infra/modules/platform.bicep` already declares the parameterised `enquiry-retention-anonymise` job resource (`['node', 'dist/jobs/run-job.mjs', 'enquiry-retention-anonymise']`).
 
 ## Files and changes
 
 1. **Job-only permission `enquiry:run_retention_anonymise` (`core/src/domain/rbac/registry.ts`, `src/server/actionPermissions.ts`):**
    - Register `'enquiry:run_retention_anonymise'` in `PERMISSION_REGISTRY` (`module: 'enquiries'`, `sensitivity: 'critical'`, `jobOnly: true`), automatically excluded from `ALL_USER_PERMISSION_KEYS` and every user role (`admin` included).
    - Add `'enquiry-retention-anonymise': { permission: 'enquiry:run_retention_anonymise' }` to `JOB_PERMISSIONS` in `src/server/actionPermissions.ts`, keeping `MAX_KNOWN_GAPS = 0` in `src/server/__tests__/actionPermissionGuard.test.ts`.
-2. **Shared transactional anonymisation core + scheduled job (`src/server/services.ts`, `scripts/run-job.mjs`, `core/infra/modules/platform.bicep`):**
-   - Extract the shared core execution helper `anonymiseEligibleEnquiriesInTransaction(ctx, actorLabel, opts?: { specificEnquiryId?: string; now?: Date })` running inside `withTenantTransaction(ctx, ...)` on `TenantIntakeAndWorkflowRepository` + `TenantAuditRepository`:
+2. **Shared transactional anonymisation job & manual-run `job_runs` recording (`src/server/services.ts`, `scripts/run-job.ts` -> `dist/jobs/run-job.mjs`, `core/infra/modules/platform.bicep`, `R404`, `R412`):**
+   - Extract the shared execution helper `runEnquiryRetentionAnonymisationForTenant(ctx, opts: { triggerSource: 'scheduled' | 'manual'; actorId: string; specificEnquiryId?: string; now?: Date })` running inside `withTenantTransaction(ctx, ...)` (`SET LOCAL ROLE` first, guarded by `pg_try_advisory_xact_lock` for bulk runs) on `TenantIntakeAndWorkflowRepository` + `TenantAuditRepository` + `TenantJobRunRepository`:
      - Reads `retentionMonths` from the tenant's `enquiry_settings` row in PostgreSQL (`Math.max(1, retentionMonths)`).
      - **Unconditionally enforces `isReadyForRetentionAnonymisation(enq, retentionMonths, now)` (`B3`)** on every candidate row — never trusting pre-filtered IDs or skipping the cutoff check.
-     - Updates eligible `enquiries` rows (`anonymised_at`, scrubbed personal fields) and inserts per-enquiry `audit_entries` (`action: 'anonymise'`, `byId: 'system:job:enquiry-retention-anonymise'` for scheduled runs or `actor.personId` for manual runs, containing **zero scrubbed personal data** in `oldValue`/`newValue`/`snapshot`) in the **same PostgreSQL transaction**.
-   - Wire **both** paths to this helper:
-     1. **Scheduled job (`enquiry-retention-anonymise` in `scripts/run-job.mjs`):** runs via `guardedJob('enquiry-retention-anonymise', ...)` (`npm run job -- enquiry-retention-anonymise`), checking hourly (`0 * * * *`) and executing once per tenant local day (`tenantConfig.timeZone`), recording only `{ evaluatedCount, anonymisedCount }` in `job_runs.summary_json` (zero PII).
-     2. **Manual UI buttons (`anonymiseExpiredEnquiriesAction` in `src/app/actions.ts:747`):** remain intact behind `enquiry:anonymise` for single-enquiry and immediate bulk runs, so admins can still trigger anonymisation on demand and existing `S0-03` workflows do not change.
-   - Enable `enableEnquiryAnonymisationJob` by default in `core/infra/modules/platform.bicep`.
+     - Updates eligible `enquiries` rows (`anonymised_at`, scrubbed personal fields) and inserts per-enquiry `audit_entries` (`byId: 'system:enquiry-retention-anonymise'` for scheduled runs per ADR 0030 `:61` or `actor.personId` for manual runs, containing **zero personal data** in `oldValue`/`newValue`/`snapshot`) in the **same PostgreSQL transaction**.
+   - Wire **both** paths to this shared job code (`ADR 0030 :80, :90-92`, `R412`):
+     1. **Scheduled job (`enquiry-retention-anonymise` in `scripts/run-job.ts` -> `dist/jobs/run-job.mjs`):** runs via `guardedJob('enquiry-retention-anonymise', ...)` (`npm run job -- enquiry-retention-anonymise` locally / `node dist/jobs/run-job.mjs enquiry-retention-anonymise` in Container Apps, `R404`), checking hourly (`0 * * * *`) and executing once per tenant local day after `02:00` local time (`tenantConfig.timeZone`), recording `trigger_source: 'scheduled'`, `triggered_by_id: 'system:enquiry-retention-anonymise'`, and `{ evaluatedCount, anonymisedCount }` in `job_runs.summary_json` (zero PII).
+     2. **Manual UI buttons (`anonymiseExpiredEnquiriesAction` at `src/app/actions.ts:747`, gated on `enquiry:anonymise`):** invoke the **same** `runEnquiryRetentionAnonymisationForTenant` helper for single-enquiry (`specificEnquiryId`) and bulk runs, **recording each manual execution in `job_runs`** (`trigger_source: 'manual'`, `triggered_by_id: actor.personId`, `summary_json: { evaluatedCount, anonymisedCount, scope: specificEnquiryId ? 'single' : 'bulk' }`, `R412`).
+   - Enable `enableEnquiryAnonymisationJob` (`true`) in `core/infra/modules/platform.bicep` and verify the `Microsoft.Insights/scheduledQueryRules` failure/timeout alert covers `enquiry-retention-anonymise` (`R412`).
 
 ## Tests
 
-- **Unit, `B3` retention & RBAC tests (`core/tests/enquiry-anonymisation-job.test.ts` — new, `core/tests/rbac.test.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`):**
-  - Assert no role (`admin` included) holds `enquiry:run_retention_anonymise`, and interactive users cannot invoke the `guardedJob` handler or grant `enquiry:run_retention_anonymise` via RBAC overrides.
-  - **`B3` retention enforcement in scheduled & manual modes:** seed (a) a closed unconverted enquiry older than `retentionMonths` -> **anonymised** and audited in the same transaction, (b) a closed unconverted enquiry 1 day inside `retentionMonths` -> **untouched**, (c) a `Converted` enquiry older than `retentionMonths` -> **untouched**, (d) an open (`New` / `In progress`) enquiry older than `retentionMonths` -> **untouched**, and (e) an already-anonymised enquiry -> **skipped cleanly**.
-  - **`job_runs` idempotency, retry & zero PII:** second hourly tick on the same `local_date` skips (`status = 'succeeded'`); a simulated DB error rolls back both the enquiry update and `audit_entries` row, records `status = 'failed'`, and succeeds on the next hourly retry; neither `job_runs`, `audit_entries`, nor telemetry contains any scrubbed personal data from the enquiry.
-  - **Manual buttons preserved:** `anonymiseExpiredEnquiriesAction(specificId)` and bulk `anonymiseExpiredEnquiriesAction()` still work with `enquiry:anonymise` and fail with `FORBIDDEN` when `enquiry:anonymise` is revoked.
-- **Contract tests:**
-  - `actionPermissionGuard.test.ts` passes with `MAX_KNOWN_GAPS = 0`; Bicep contract test (`core/tests/infra-bicep-contract.test.ts`) confirms the `enquiry-retention-anonymise` job schedule (`0 * * * *`) compiles and lints cleanly.
-- **Two-tenant isolation tests (`core/tests/isolation.test.ts`, Rule 9 & Owner Decision 7):**
-  - Separate real databases (`pg_tenant_a_test` configured with `retentionMonths: 6`, `pg_tenant_b_test` configured with `retentionMonths: 24`) with per-tenant `SET ROLE`:
-    - Seed identical 12-month-old closed unconverted enquiries in both Tenant A and Tenant B, and run `npm run job -- enquiry-retention-anonymise`:
-      - **Positive control (Tenant A):** Tenant A's 12-month-old enquiry is anonymised (`> 6` months), audited in `pg_tenant_a_test`, and recorded in Tenant A's `job_runs`.
-      - **Cross-tenant isolation (Tenant B):** verified via a fresh connection to `pg_tenant_b_test`, Tenant B's 12-month-old enquiry (`< 24` months) retains its intact fields, and Tenant B's `job_runs` records `anonymisedCount: 0` independently.
-    - **Forged claim & tampered ID:** forged `tenantId` on `anonymiseExpiredEnquiriesAction` or `guardedJob` fails with `TENANCY_FORGERY_DETECTED` / `TENANCY_UNREGISTERED_JOB_TENANT`; Tenant A passing Tenant B's `specificEnquiryId` to `anonymiseExpiredEnquiries` anonymises `0` records (`NOT_FOUND` / zero rows matched) and leaves `pg_tenant_b_test` untouched.
-- **E2E tests:**
+- **Unit, `B3` retention, RBAC & `R412` manual-run tests (`core/tests/enquiry-anonymisation-job.test.ts` — new, `core/tests/rbac.test.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`):**
+  - Assert no role (`admin` included) holds `enquiry:run_retention_anonymise`, interactive users cannot call `guardedJob`, and scheduled audit entries record **`byId: 'system:enquiry-retention-anonymise'`** (`R412`).
+  - **`B3` retention enforcement in scheduled & manual modes:** seed (a) closed unconverted enquiry past `retentionMonths` -> **anonymised** + audited in same transaction, (b) closed unconverted enquiry 1 day inside `retentionMonths` -> **untouched**, (c) `Converted` enquiry past `retentionMonths` -> **untouched**, (d) open enquiry past `retentionMonths` -> **untouched**, (e) already-anonymised enquiry -> **skipped**.
+  - **Manual buttons record in `job_runs` (`R412`):** both single-enquiry `anonymiseExpiredEnquiriesAction(specificId)` and bulk `anonymiseExpiredEnquiriesAction()` (gated on `enquiry:anonymise`) run the shared job code and write `trigger_source = 'manual'` rows in `job_runs` (with a bulk manual `'succeeded'` run satisfying that `local_date`'s scheduled check, while a single-enquiry manual run does not suppress the daily bulk sweep for remaining expired enquiries).
+  - **`job_runs` idempotency, retry after failure, `pg_try_advisory_xact_lock`, and zero PII** in `job_runs`, `audit_entries`, and telemetry.
+- **Contract, two-tenant isolation & E2E tests:**
+  - `actionPermissionGuard.test.ts` (`MAX_KNOWN_GAPS = 0`) and `infra-bicep-contract.test.ts` (cron schedule + alert coverage).
+  - Two-tenant PgBouncer job isolation (`core/tests/isolation.test.ts`): `pg_tenant_a_test` (`retentionMonths: 6`) vs `pg_tenant_b_test` (`retentionMonths: 24`) seeded with 12-month-old closed unconverted enquiries -> Tenant A anonymises (`1`), Tenant B leaves intact (`0`), plus forged-claim / unregistered-tenant / tampered-`specificEnquiryId` checks.
   - All 9 Playwright role journeys pass (`npm run e2e`).
 
 ## Help and documentation (rule 11)
 
-- **`src/docs/articles/data-administration-and-retention.ts`:** Document automated daily scheduled enquiry retention anonymisation (`enquiry-retention-anonymise`, respecting each tenant's configured `retentionMonths` and `timeZone`) alongside the manual single-enquiry and bulk anonymise controls (`enquiry:anonymise`).
-- **`docs/rbac-reference.md` and `docs/release-notes.md`:** Add job-only permission `enquiry:run_retention_anonymise` and record `S0-19b`.
-- **`docs/roadmap/feature-list.md`:**
-  - Move **P9** (`Background job scheduler`) to **`Completed`**!
-  - Update item **23** (`Archiving, retention and destruction` — remove `"A scheduler"` from `"What's missing"` and record scheduled enquiry retention anonymisation in `"What exists"`) and **P8** (two-tenant job isolation for enquiry retention anonymisation).
+- **`src/docs/articles/data-administration-and-retention.ts`, `docs/rbac-reference.md`, `docs/release-notes.md`, and `docs/roadmap/feature-list.md`:** Document automated daily `enquiry-retention-anonymise` (`system:enquiry-retention-anonymise`) and manual-button `job_runs` recording; move **P9** (`Background job scheduler`) to **`Completed`** and update item **23** and **P8**.
 
 ## Acceptance criteria
 
-- `enquiry:run_retention_anonymise` is registered as `jobOnly: true` (granted to no user role) and wired in `JOB_PERMISSIONS` (`MAX_KNOWN_GAPS = 0`).
-- `npm run job -- enquiry-retention-anonymise` runs through `guardedJob`, always applies `isReadyForRetentionAnonymisation` (`B3`), writes enquiry updates and `audit_entries` in one PostgreSQL transaction, records non-PII counts in `job_runs`, and acts once per tenant local day.
-- Manual single-enquiry and bulk anonymisation buttons continue to work behind `enquiry:anonymise`.
-- Two-tenant job isolation tests and full `npm run ci` pass.
+- `enquiry:run_retention_anonymise` (`jobOnly: true`) is enforced via `guardedJob` (`MAX_KNOWN_GAPS = 0`), running via bundled `dist/jobs/run-job.mjs enquiry-retention-anonymise` (`R404`) as actor `system:enquiry-retention-anonymise` (`R412`).
+- Both scheduled and manual (`anonymiseExpiredEnquiriesAction`) runs execute the shared `B3`-enforced transaction and record non-PII summaries in `job_runs` (`R412`), with two-tenant isolation tests and full `npm run ci` passing.
 
 ## Manual blockers
 
-- **Azure subscription access (`docs/roadmap/stage-0-plan.md` §8):** Live observation of the scheduled `enquiry-retention-anonymise` Container Apps job in Azure waits on subscription access.
+- **Azure subscription access (`docs/roadmap/stage-0-plan.md` §8):** Live observation of the scheduled Container Apps job and alert rule in Azure waits on subscription access.
 
 ## Rollback
 
-- No database schema migration is added in `S0-19b` (uses `enquiries` from `0009` and `job_runs` from `0014`). Rolling back disables `enableEnquiryAnonymisationJob` or reverts `s0-19b-anonymisation-job`; manual anonymisation buttons remain unaffected. *(Note: already-anonymised personal data is irreversibly scrubbed by design.)*
+- No schema migration in `S0-19b` (uses `enquiries` from `0009` and `job_runs` from `0013`). Disable `enableEnquiryAnonymisationJob` or revert `s0-19b-anonymisation-job`; manual buttons continue working. *(Already-anonymised PII is irreversibly scrubbed by design.)*
 
 ## Pull request description must state
 
-- **Change class:** Core scheduled retention job & RBAC job-only permission (`core/src/domain/rbac/registry.ts`, `src/server/`, `scripts/run-job.mjs`, `core/infra/modules/platform.bicep`).
-- **Rule 4 exception scope:** Uses S0-19's `scripts/run-job.mjs` + `guardedJob` entry point (ADR 0030 §2); all database reads/writes execute through `TenantScopedRepository` with `SET ROLE`.
-- **Both hosting models:** Runs per-tenant in both Model A (single firm tenant) and Model B (each hosted tenant evaluated against its own `enquiry_settings.retentionMonths`, `timeZone`, and isolated Postgres database).
-- **Migration and rollback:** No schema migration; rollback disables the job schedule or reverts the commit.
+- **Change class:** Core scheduled retention job & RBAC job-only permission (`core/src/domain/rbac/registry.ts`, `src/server/`, `scripts/run-job.ts`, `core/infra/modules/platform.bicep`).
+- **Rule 4 exception scope:** Uses `S0-19`'s `run-job` + `guardedJob` (`system:enquiry-retention-anonymise`, ADR 0030 §3); all DB access uses `TenantScopedRepository` (`SET LOCAL ROLE`).
+- **Both hosting models & rollback:** Runs per-tenant in Model A and Model B over PgBouncer; no schema migration, reversible via schedule toggle or `git revert`.

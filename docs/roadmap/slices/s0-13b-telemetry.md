@@ -1,15 +1,15 @@
-# S0-13b: Application Insights telemetry and container runtime hardening
+# S0-13b: Application Insights telemetry, bundled job entry points and container runtime hardening
 
 | | |
 |---|---|
 | Backlog | P12, P8 |
-| Decision | [ADR 0024: Host the Application on Azure Container Apps](../../decisions/0024-azure-container-apps-hosting.md) (D1, accepted 6 November 2026); Platform Architecture Standard §13 (Observability) and Rule 5 (zero personal data or client content in logs/telemetry) |
+| Decision | [ADR 0024: Host the Application on Azure Container Apps](../../decisions/0024-azure-container-apps-hosting.md) (D1, accepted 6 November 2026); [ADR 0030](../../decisions/0030-tenant-aware-scheduler.md) §1 (container job entry point); Platform Architecture Standard §13 (Observability) and Rule 5 |
 | Stage plan | `docs/roadmap/stage-0-plan.md`, phase 0B (`S0-13` second pull request `S0-13b`, WP4 Checkpoint 4a) |
 | Branch | `s0-13b-telemetry`, from `s0-13-container-apps-infrastructure`, targeting `develop` |
-| Change class | Core feature / observability & container runtime (`core/src/observability/`, `src/platform/`, `src/server/`, `Dockerfile`). |
+| Change class | Core feature / observability, Key Vault reference guard, job bundling & container runtime (`core/src/observability/`, `core/src/tenancy/keyVaultSecrets.ts`, `src/platform/`, `src/server/`, `scripts/build-jobs.mjs`, `Dockerfile`). |
 | Size | M |
-| Depends on | S0-13 (Application Insights resource & `APPLICATIONINSIGHTS_CONNECTION_STRING` output), S0-30 (`resolveRequestCorrelationId` in `src/server/correlationId.ts`, merged). |
-| Blocking manual tasks | Azure subscription access (`docs/roadmap/stage-0-plan.md` §8) to verify live ingestion and alert rules in Azure Application Insights. |
+| Depends on | S0-13 (Application Insights resource, Private Endpoint Key Vault `keyVaultUri` outputs, Container Apps & job Bicep), S0-30 (`resolveRequestCorrelationId` in `src/server/correlationId.ts`, merged). |
+| Blocking manual tasks | Azure subscription access (`docs/roadmap/stage-0-plan.md` §8) to verify live ingestion and alert rules in Azure Application Insights and push images to ACR. |
 | Baseline | `develop` at `52390b9` (stacked on `s0-13-container-apps-infrastructure`) |
 
 ## What exists today
@@ -17,88 +17,82 @@
 Checked against `develop` (`52390b9`):
 
 1. **No Application Insights / OpenTelemetry SDK or telemetry pipeline:**
-   - `package.json:19-39` has no Application Insights or OpenTelemetry exporter, and `src/instrumentation.ts` does not exist.
-   - Structured `JSON.stringify` `console.info` / `console.warn` / `console.error` calls are scattered across `src/platform/tenantRuntime.ts:588, 681`, `src/server/authorize.ts:60`, `src/server/services.ts:593, 4705, 6123`, `src/server/documentGenerationServices.ts:145`, and `src/app/api/matters/extract/route.ts` without a shared telemetry emitter or central PII scrubbing filter.
-2. **Correlation ID helper exists (`src/server/correlationId.ts:1-20`, added in S0-30), but two legacy callers bypass it:**
-   - `resolveRequestCorrelationId(requestHeaders)` (`src/server/correlationId.ts:10-20`) validates incoming `x-correlation-id` against `SAFE_CORRELATION_ID_PATTERN` (`/^[A-Za-z0-9._:-]{1,128}$/`) and mints a fresh `randomUUID()` otherwise.
-   - However, `src/platform/tenantRuntime.ts:676` (`req-${Date.now()}`) and `src/server/documentGenerationServices.ts:151` (`corr-blob-key-fallback-${Date.now()}`) still synthesise ad-hoc timestamp correlation IDs instead of using `resolveRequestCorrelationId` or a UUID correlation ID, and `src/server/authorize.ts:170, 274` mints `corr-act-${randomUUID()}` / `corr-rte-${randomUUID()}` without reading request headers via `resolveRequestCorrelationId`.
+   - `package.json:19-39` has no Application Insights or OpenTelemetry package, and `src/instrumentation.ts` does not exist.
+   - Ad-hoc `console.info` / `console.warn` / `console.error` calls exist in `src/platform/tenantRuntime.ts:588, 681`, `src/server/authorize.ts:60`, `src/server/services.ts:593, 4705, 6123`, `src/server/documentGenerationServices.ts:145`, and `src/app/api/matters/extract/route.ts` without a shared telemetry emitter or central PII deny-list scrubber.
+2. **Correlation ID helper exists (`src/server/correlationId.ts:1-20`), with legacy timestamp callers:**
+   - `resolveRequestCorrelationId(requestHeaders)` (`src/server/correlationId.ts:10-20`) validates incoming `x-correlation-id` against `SAFE_CORRELATION_ID_PATTERN` (`/^[A-Za-z0-9._:-]{1,128}$/`) and mints a UUID otherwise.
+   - `src/platform/tenantRuntime.ts:676` (`req-${Date.now()}`) and `src/server/documentGenerationServices.ts:151` (`corr-blob-key-fallback-${Date.now()}`) still synthesise timestamp IDs, and `src/server/authorize.ts:170, 274` mints `corr-act-${randomUUID()}` / `corr-rte-${randomUUID()}` without reading request headers through `resolveRequestCorrelationId`.
 3. **Production environment fallback (`P12` / `R371`):**
-   - `getActiveTenantConfiguration()` in `src/platform/tenantRuntime.ts:533-540` falls back to `'dev'` whenever `process.env.PLATFORM_ENVIRONMENT` is unset (`?? 'dev'`), even when `process.env.NODE_ENV === 'production'`. Row `P12` (`docs/roadmap/feature-list.md:125`) explicitly requires refusing the `'dev'` fallback when `NODE_ENV=production`.
-4. **Key Vault tenant resolution & Container image (`ADR 0024` Consequences `:56, 59`):**
-   - No `Dockerfile` or `.dockerignore` exists at the repository root for building the shared Container Apps web & job image.
-   - `resolveTenantKeyVaultSecretUri` / per-tenant Key Vault secret resolution has not yet been isolated behind a core helper with the ADR 0024 AG3 two-tenant test proving a request for Tenant A never resolves a secret from Tenant B's Key Vault.
+   - `getActiveTenantConfiguration()` in `src/platform/tenantRuntime.ts:533-540` defaults to `'dev'` when `process.env.PLATFORM_ENVIRONMENT` is unset, even under `NODE_ENV === 'production'`.
+4. **Key Vault tenant boundary (`ADR 0024` AG3, `core/src/integrations/document-stores/tokenCache.ts:544, 616`, `core/infra/main.bicep:62`):**
+   - `DocumentStoreTokenService` (`tokenCache.ts:539-548, 610-650`) already passes `authConfig.certificateKeyVaultSecretRef` (`kv://<vault>/<secret>`) at runtime without verifying that `<vault>` belongs to `accessContext.tenantContext`'s own Key Vault, and `core/src/tenancy/index.ts:120` derives `kv-${tenantId}-${environment}` without accounting for Bicep's 24-character Key Vault truncation (`take('kv-${sanitizedSlug}-${environment}', 24)`, `core/infra/main.bicep:62`).
+5. **Container image & compiled job entry points (`R404`):**
+   - Neither `Dockerfile` / `.dockerignore` nor a bundler step for CLI jobs exists; `tsx` (`package.json:36`) is a `devDependency` and Next.js `output: 'standalone'` omits `scripts/`.
 
 ## Files and changes
 
-1. **`core/src/observability/telemetry.ts` (new, exported via `core/src/index.ts`):**
-   - Provides a platform-owned, dependency-light telemetry emitter and processor (`PlatformTelemetryRecorder`, `emitPlatformTelemetryEvent`, `emitPlatformTelemetryException`, `sanitizeTelemetryProperties`) supporting:
-     - Optional Application Insights export when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set (and opt-in in Model A per `docs/architecture-standard.md:119`; silent/no-op network export when unset in `dev`/`test`).
-     - Mandatory `tenantId` and `correlationId` tags on every emitted event, metric, dependency span, and exception (refusing or flagging events missing either field).
-     - **Recursive personal-data & client-content deny-list scrubber (Standard §13, Rule 5):** strips any key matching a case-insensitive deny-list (and nested object/array entries or URL query strings) before anything reaches logs or Application Insights, including: `email`, `upn`, `preferred_username`, `entraObjectId`, `oid`, `sub`, `firstName`, `lastName`, `surname`, `preferredName`, `otherNames`, `displayName`, `name`, `phone`, `phones`, `mobile`, `address`, `addresses`, `line1`, `line2`, `postcode`, `dateOfBirth`, `dob`, `niNumber`, `nationalInsuranceNumber`, `passportNumber`, `bankAccount`, `accountNumber`, `sortCode`, `salary`, `payroll`, `sensitive`, `notes`, `summary`, `description`, `scope`, `assumptions`, `body`, `bodyHtml`, `bodyText`, `prompt`, `documentText`, `extractedText`, `matterTitle`, `title`, `legalName`, `sql`, `parameters`, `values`, `authorization`, `cookie`, `set-cookie`, `secret`, `token`, `apiKey`, `password`. Also scrubs email-like patterns and bearer/cookie tokens in free-text error messages so client content or SQL parameters never leak via thrown `Error.message` strings.
+1. **OpenTelemetry / Application Insights emitter (`package.json`, `core/src/observability/telemetry.ts` — new, exported via `core/src/index.ts`, R413):**
+   - Add **`@azure/monitor-opentelemetry`** and **`@opentelemetry/api`** to `dependencies` in `package.json`.
+   - Implement `PlatformTelemetryRecorder`, `emitTenantTelemetryEvent`, `emitTenantTelemetryException`, `emitPlatformStartupTelemetry`, and `sanitizeTelemetryProperties`:
+     - Exports to Azure Application Insights when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set (opt-in in Model A per `docs/architecture-standard.md:119`; zero network calls when unset in `dev`/`test`).
+     - **Tenant-scoped vs start-up events (R413):** `emitTenantTelemetryEvent` / `emitTenantTelemetryException` require non-empty `tenantId` and `correlationId` (throwing/refusing if `tenantId` is missing). Process start-up and shutdown lifecycle events before any request exists go exclusively through `emitPlatformStartupTelemetry`, which sets `scope: 'platform_startup'`, `tenantId: hostingMode === 'single_tenant' ? configuredTenantId : 'platform'`, and a UUID `correlationId` from `resolveRequestCorrelationId(null)`.
+     - **Recursive personal-data & client-content deny-list scrubber (Standard §13, Rule 5):** strips keys matching a case-insensitive deny-list across nested objects/arrays (`email`, `upn`, `preferred_username`, `entraObjectId`, `oid`, `sub`, `firstName`, `lastName`, `surname`, `preferredName`, `otherNames`, `displayName`, `name`, `phone`, `phones`, `mobile`, `address`, `addresses`, `line1`, `line2`, `postcode`, `dateOfBirth`, `dob`, `niNumber`, `nationalInsuranceNumber`, `passportNumber`, `bankAccount`, `accountNumber`, `sortCode`, `salary`, `payroll`, `sensitive`, `notes`, `summary`, `description`, `scope` on record payloads, `assumptions`, `body`, `bodyHtml`, `bodyText`, `prompt`, `documentText`, `extractedText`, `matterTitle`, `title`, `legalName`, `sql`, `parameters`, `values`, `authorization`, `cookie`, `set-cookie`, `secret`, `token`, `apiKey`, `password`) and redacts email-like patterns and bearer/cookie tokens in `Error.message` strings.
 2. **`src/server/telemetry.ts` and `src/instrumentation.ts` (new):**
-   - Wires the Next.js server runtime (`register()` in `src/instrumentation.ts`) to initialise the Application Insights / OpenTelemetry exporter when `APPLICATIONINSIGHTS_CONNECTION_STRING` is configured.
-   - Provides `recordRequestTelemetry` / `recordServerErrorTelemetry` helpers for `src/server/authorize.ts` (`guardedAction`, `guardedRoute`, and `guardedJob` in S0-19) that **read request correlation IDs exclusively through `resolveRequestCorrelationId`** (`src/server/correlationId.ts:10-20`, passing `await headers()` in Next.js request scope and falling back to `resolveRequestCorrelationId(null)` outside HTTP request scope).
+   - `register()` in `src/instrumentation.ts` initialises `@azure/monitor-opentelemetry` when `APPLICATIONINSIGHTS_CONNECTION_STRING` is present and emits a single sanitised start-up event via `emitPlatformStartupTelemetry`.
+   - Request/action/route helpers resolve correlation IDs **exclusively through `resolveRequestCorrelationId`** (`src/server/correlationId.ts:10-20`, reading Next.js `await headers()` in request scope and `resolveRequestCorrelationId(null)` outside HTTP scope).
 3. **Correlation ID & production `PLATFORM_ENVIRONMENT` hardening (`src/platform/tenantRuntime.ts`, `src/server/authorize.ts`, `src/server/documentGenerationServices.ts`):**
-   - Update `src/server/authorize.ts:170, 274` to obtain `correlationId` via `resolveRequestCorrelationId` (from Next.js `headers()` when available) and emit structured telemetry via `src/server/telemetry.ts` on action/route execution, authorisation denial, and unhandled errors.
-   - Replace ad-hoc `req-${Date.now()}` in `src/platform/tenantRuntime.ts:676` and `corr-blob-key-fallback-${Date.now()}` in `src/server/documentGenerationServices.ts:151` with `resolveRequestCorrelationId` / UUID correlation IDs and route their logs through the sanitised telemetry helper.
-   - **`P12` / `R371` fail-closed environment check (`src/platform/tenantRuntime.ts:531-544`):** extract `resolveConfiguredEnvironment()` so that when `process.env.NODE_ENV === 'production'` and `process.env.PLATFORM_ENVIRONMENT` is missing, blank, or invalid, it throws `TENANT_CONFIG_ERROR: PLATFORM_ENVIRONMENT must be explicitly set in production` instead of silently defaulting to `'dev'`. Also require explicit `PLATFORM_HOSTING_MODE` or validate it strictly. (Update `npm run build` / `e2e/start-server.mjs` / `playwright.config.ts` check if any production-mode script omits `PLATFORM_ENVIRONMENT` — `.github/workflows/ci.yml:76, 87` and `scripts/verify-ci.mjs` already set `PLATFORM_ENVIRONMENT` explicitly.)
-4. **Per-tenant Key Vault secret resolver (`core/src/tenancy/keyVaultSecrets.ts` — new, exported via `@platform/core`):**
-   - Resolves a tenant's Key Vault URI (`https://kv-<sanitizedTenantId>-<environment>.vault.azure.net/`) and secret identifier strictly from `TenantContext` (`tenantId`) + validated `TenantConfiguration` (`integrations.pmsConnectionSecretVaultRef`, etc.), rejecting any vault URI or secret reference belonging to a different tenant (`TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED`) so in hosted multi-tenant mode (where the shared Managed Identity has `Key Vault Secrets User` on each tenant vault per ADR 0024 AG3) Tenant A can never resolve a secret from Tenant B's vault.
-5. **Container image build (`Dockerfile`, `.dockerignore`, `next.config.ts`, `.github/workflows/ci.yml`):**
-   - Configure `next.config.ts` (`output: 'standalone'`) or a multi-stage Node 24 Alpine/bookworm-slim `Dockerfile` + `.dockerignore` running as non-root user (`node`), capable of serving both the Next.js web app (`PORT=3000`) and Container Apps jobs (`node scripts/run-job.mjs <jobKey>`), baking zero `.env*` files, secrets, or local `data/runtime-store.json` into the image.
-   - Add a `docker build` smoke verification step in `.github/workflows/ci.yml` (and conditional check in `scripts/verify-ci.mjs` when Docker is available; publishing to ACR gated on Azure registry configuration).
-   - Add `APPLICATIONINSIGHTS_CONNECTION_STRING=""` (empty non-secret placeholder with Model A opt-in comment) to `.env.example`.
+   - Update `src/server/authorize.ts:170, 274`, `src/platform/tenantRuntime.ts:676`, and `src/server/documentGenerationServices.ts:151` to obtain correlation IDs via `resolveRequestCorrelationId` and emit sanitised telemetry.
+   - **`P12` / `R371` fail-closed environment check (`src/platform/tenantRuntime.ts:531-544`):** when `process.env.NODE_ENV === 'production'` and `process.env.PLATFORM_ENVIRONMENT` is missing, blank, or invalid, throw `TENANT_CONFIG_ERROR: PLATFORM_ENVIRONMENT must be explicitly set in production` instead of defaulting to `'dev'`.
+4. **Configured Key Vault URI guard (`core/src/tenancy/keyVaultSecrets.ts`, `core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `core/src/integrations/document-stores/tokenCache.ts`, R411, R413):**
+   - Add additive optional `keyVault?: { vaultUri?: string; vaultName?: string }` to `core/schemas/tenant-config.schema.json` (populated from `tenant.bicep`'s `keyVaultUri` / `keyVaultName` deployment outputs so 24-character truncated Azure Key Vault names at `core/infra/main.bicep:62` are taken from configuration/deployment output rather than re-derived, R413; exercised in `core/tests/tenant-config-usage.test.ts`).
+   - Limit `core/src/tenancy/keyVaultSecrets.ts` strictly to what live runtime callers and ADR 0024 AG3 need (zero dead/test-only helpers, R411): `assertTenantOwnsKeyVaultSecretRef(ctx, secretRef, configuredVault)` parses `kv://<vault>/<secret>` (or `https://<vault>.vault.azure.net/secrets/<secret>`) and throws `TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED` unless `<vault>` matches the calling `TenantContext`'s configured Key Vault (`configuredVault` or `ctx.keyVaultSecretPrefix`).
+   - **Live runtime callers wired in S0-13b:**
+     1. `DocumentStoreTokenService.acquireDelegatedUserToken` (`core/src/integrations/document-stores/tokenCache.ts:539-548`) and `acquireProvisioningToken` (`:610-650`), checking `authConfig.certificateKeyVaultSecretRef` against `accessContext.tenantContext` before invoking `oboExchangeHandler` or `appTokenHandler`.
+     2. `validateTenantConfig` (`core/src/config-engine/index.ts:1923-1933`), verifying every configured `kv://` reference in a tenant package matches that tenant's configured vault.
+5. **Container image & bundled job/import entry points (`Dockerfile`, `.dockerignore`, `next.config.ts`, `scripts/build-jobs.mjs`, `scripts/run-job.ts`, `.github/workflows/ci.yml`, R404):**
+   - Add `esbuild` (`devDependencies`) and `scripts/build-jobs.mjs` (`npm run build:jobs`, invoked automatically from `npm run build`) compiling `scripts/run-job.ts` (initially supporting `--list`, extended with `migrate` in S0-14 and scheduled jobs in S0-19/S0-19b) into self-contained Node 24 ESM bundle **`dist/jobs/run-job.mjs`** (and `dist/jobs/import-store.mjs` once added in S0-14), requiring zero `tsx` or TypeScript sources in the runtime image.
+   - Add `output: 'standalone'` in `next.config.ts` and a multi-stage Node 24 `Dockerfile` + `.dockerignore` running as non-root user (`node`) that copies `.next/standalone`, `.next/static`, `public`, `dist/jobs/`, `core/schemas/`, and tenant config directories, baking zero `.env*` files, secrets, or `data/runtime-store.json`.
+   - Add a `docker build` + **`docker run --rm <image> node dist/jobs/run-job.mjs --list`** verification step in `.github/workflows/ci.yml` (R404).
+   - Add `APPLICATIONINSIGHTS_CONNECTION_STRING=""` placeholder to `.env.example`.
 
 ## Tests
 
-- **Unit tests (`core/tests/telemetry.test.ts` and `src/server/__tests__/telemetry.test.ts` — new):**
-  - Every emitted event, dependency span, and exception carries both `tenantId` and `correlationId`.
-  - Correlation IDs on `guardedAction` and `guardedRoute` are read exclusively via `resolveRequestCorrelationId`: valid `x-correlation-id` header is preserved; malformed/oversized/injection header (`"bad id\n..."`) is rejected and replaced with a UUID; missing header mints a UUID.
-  - Every field on the personal-data & client-content deny-list (top-level, nested objects, arrays, Error messages containing email addresses or SQL parameter dumps) is stripped/redacted before reaching the telemetry sink or log output, while safe operational fields (`event`, `action`, `code`, `durationMs`, `statusCode`, `recordType`, `recordId`) are preserved (positive control).
-  - When `APPLICATIONINSIGHTS_CONNECTION_STRING` is unset (or telemetry opt-out is configured in Model A), zero network calls are attempted and the application runs normally.
-  - `getActiveTenantConfiguration()` under `NODE_ENV=production` with `PLATFORM_ENVIRONMENT` unset throws `TENANT_CONFIG_ERROR` (`R371`), and succeeds when `PLATFORM_ENVIRONMENT=live` or `test` is explicitly set (positive control).
-- **Contract tests:**
-  - `Dockerfile` / `.dockerignore` contract test verifying `.env*`, `.git`, `node_modules`, and `data/runtime-store.json` are excluded in `.dockerignore` and the container runs as non-root on Node 24.
+- **Unit tests (`core/tests/telemetry.test.ts` & `src/server/__tests__/telemetry.test.ts` — new):**
+  - Request/action/route events carry `tenantId` and `correlationId` resolved strictly via `resolveRequestCorrelationId` (valid header preserved; malformed header replaced with UUID); missing `tenantId` on `emitTenantTelemetryEvent` throws; `emitPlatformStartupTelemetry` tags start-up events cleanly without a user request.
+  - Deny-list fields (top-level, nested, arrays, emails/tokens in `Error.message`) are stripped while safe operational fields survive (positive control).
+  - Unset `APPLICATIONINSIGHTS_CONNECTION_STRING` performs zero network calls.
+  - `getActiveTenantConfiguration()` under `NODE_ENV=production` with `PLATFORM_ENVIRONMENT` unset throws `TENANT_CONFIG_ERROR` (`R371`), and succeeds when explicitly set (positive control).
+- **Container & contract tests:**
+  - `Dockerfile` / `.dockerignore` contract test + CI `docker build` running `node dist/jobs/run-job.mjs --list` inside the built image (R404).
+  - `core/tests/tenant-config-usage.test.ts` exercises optional `keyVault.vaultUri` / `keyVault.vaultName` (including a >24-char slug truncated vault name, R413).
 - **Two-tenant isolation tests (`core/tests/isolation.test.ts`, Rule 9 & ADR 0024 AG3):**
-  - **Telemetry tenant isolation:** concurrent `AsyncLocalStorage` requests for Tenant A and Tenant B emit telemetry events stamped with their own `tenantId` and `correlationId` with zero cross-request bleed; a forged tenant claim on `guardedAction`/`guardedRoute` is rejected with `TENANCY_FORGERY_DETECTED` (or `UNAUTHENTICATED`), emits a denial event with zero PII, and a valid Tenant A call in the same test succeeds (positive control).
-  - **Key Vault secret resolution isolation (ADR 0024 AG3):** Tenant A context attempting to resolve a secret URI or `VaultRef` pointing at Tenant B's Key Vault (`kv-tenantb-...`) fails closed with `TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED`; forged tenant claim fails with `TENANCY_FORGERY_DETECTED`; Tenant A resolving its own vault reference succeeds (positive control).
-- **Guard & E2E tests:**
-  - `src/server/__tests__/actionPermissionGuard.test.ts` passes with `MAX_KNOWN_GAPS = 0`.
-  - `npm run e2e` (9 Playwright role journey tests, running against production `next start` with `PLATFORM_ENVIRONMENT=test`) passes.
+  - **Telemetry isolation:** concurrent Tenant A and Tenant B requests emit isolated `tenantId` + `correlationId` tags; forged `tenantId` fails with `TENANCY_FORGERY_DETECTED` and zero PII logged; valid Tenant A call succeeds (positive control).
+  - **Key Vault secret-reference isolation (AG3 via `DocumentStoreTokenService`):** Tenant A calling `acquireDelegatedUserToken` / `acquireProvisioningToken` with a `certificateKeyVaultSecretRef` pointing at Tenant B's Key Vault (`kv://kv-tenantb-test/...`, including 24-char truncated vault names) fails closed with `TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED`; forged tenant claim fails with `TENANCY_FORGERY_DETECTED`; Tenant A using its own configured vault succeeds (positive control).
+- **Guard & E2E tests:** `actionPermissionGuard.test.ts` (`MAX_KNOWN_GAPS = 0`) and `npm run e2e` (9 journeys) pass.
 
 ## Help and documentation (rule 11)
 
-- **`src/docs/articles/deployment-and-security.ts`:**
-  - Document Application Insights observability (`tenantId` + `correlationId` on every event, recursive PII/client-content deny-list, Model A opt-in telemetry ownership per Standard §13), per-tenant Key Vault URI isolation, and mandatory explicit `PLATFORM_ENVIRONMENT` in production builds.
-- **`src/docs/articles/tenant-settings.ts` and `docs/deployment-and-security-architecture-guide.md`:**
-  - Document `APPLICATIONINSIGHTS_CONNECTION_STRING` (optional/client-owned in Model A) and production `PLATFORM_ENVIRONMENT` enforcement.
-- **`docs/release-notes.md`:**
-  - Record Application Insights telemetry, PII deny-list scrubbing, container `Dockerfile`, AG3 Key Vault isolation test, and production `PLATFORM_ENVIRONMENT` fail-closed enforcement (`S0-13b`).
-- **`docs/roadmap/feature-list.md`:**
-  - Update row **P12** (`Infrastructure gaps`, recording completion of all repo-side infrastructure, container, telemetry, and `R371` items; note Azure live deployment verification blocker if subscription access is still pending) and row **P8** (`Two-tenant tests`, adding telemetry and Key Vault isolation tests).
+- **`src/docs/articles/deployment-and-security.ts`, `src/docs/articles/tenant-settings.ts`, and `docs/deployment-and-security-architecture-guide.md`:** Document `@azure/monitor-opentelemetry` telemetry (`tenantId`, `correlationId`, start-up events, PII deny-list, Model A opt-in), `keyVault.vaultUri` deployment output binding, `dist/jobs/run-job.mjs` bundling, and mandatory production `PLATFORM_ENVIRONMENT`.
+- **`docs/release-notes.md` and `docs/roadmap/feature-list.md`:** Record `S0-13b` and update **P12** and **P8**.
 
 ## Acceptance criteria
 
-- Application Insights telemetry is emitted for requests, actions, jobs, and errors with `tenantId` and `correlationId` on every event.
-- Correlation IDs are resolved exclusively through `resolveRequestCorrelationId` (`src/server/correlationId.ts`).
-- All personal data, client matter content, secrets, and SQL parameters on the deny-list are stripped before export or logging, proven by automated tests.
+- `@azure/monitor-opentelemetry` emits sanitised telemetry with `tenantId` and `correlationId` (via `resolveRequestCorrelationId`), handling start-up events via `emitPlatformStartupTelemetry` and scrubbing all deny-list fields.
 - `NODE_ENV=production` without an explicit valid `PLATFORM_ENVIRONMENT` fails closed (`R371`).
-- Two-tenant Key Vault secret-resolution and telemetry isolation tests pass in `core/tests/isolation.test.ts`.
-- `Dockerfile` builds cleanly in CI, `npm run ci` passes, and Help, release notes, and `feature-list.md` are updated.
+- `DocumentStoreTokenService` and config validation enforce per-tenant Key Vault ownership via `keyVaultSecrets.ts` using configured/output vault names (`R411`, `R413`), proven by two-tenant isolation tests.
+- `Dockerfile` compiles and runs `node dist/jobs/run-job.mjs --list` in CI (`R404`), and `npm run ci` passes.
 
 ## Manual blockers
 
-- **Azure subscription access (`docs/roadmap/stage-0-plan.md` §8):** Verifying live Application Insights ingestion, KQL dashboards, and Azure Monitor alert delivery against a real workspace waits on Azure subscription access.
-- **Azure Container Registry (`ACR`) push:** Pushing built images to ACR waits on Azure subscription provisioning; `docker build` verification runs in CI without Azure credentials.
+- **Azure subscription access (`docs/roadmap/stage-0-plan.md` §8):** Live Application Insights ingestion/alert verification and ACR push wait on subscription access.
 
 ## Rollback
 
-- No database schema or stored data changes.
-- Unsetting `APPLICATIONINSIGHTS_CONNECTION_STRING` immediately disables external telemetry export without redeploying; reverting the `s0-13b-telemetry` merge commit cleanly restores pre-telemetry behaviour (ensure `PLATFORM_ENVIRONMENT` remains set in any production environment, as CI already does).
+- No database changes. Unsetting `APPLICATIONINSIGHTS_CONNECTION_STRING` disables telemetry export immediately; `git revert` cleanly reverts `s0-13b-telemetry` (remove optional `keyVault` from any config first if added).
 
 ## Pull request description must state
 
-- **Change class:** Core observability & runtime hardening (`core/src/observability/`, `core/src/tenancy/keyVaultSecrets.ts`, `src/platform/tenantRuntime.ts`, `src/server/authorize.ts`, `Dockerfile`).
-- **Both hosting models:** In Model B (hosted), `APPLICATIONINSIGHTS_CONNECTION_STRING` sends PII-scrubbed operational telemetry stamped with `tenantId` and `correlationId` to 1Squared's UK Log Analytics workspace. In Model A (single-tenant client Azure), telemetry is opt-in and directed to the firm's own Application Insights resource (or disabled altogether when `APPLICATIONINSIGHTS_CONNECTION_STRING` is unset).
-- **Migration and rollback:** No database migration. Rollback is unsetting `APPLICATIONINSIGHTS_CONNECTION_STRING` or `git revert`.
-- **Manual blockers:** Live Application Insights alert verification and ACR image push wait on Azure subscription access (`stage-0-plan.md` §8).
+- **Change class:** Core observability, Key Vault boundary check, job bundling, and container packaging (`core/src/observability/`, `core/src/tenancy/keyVaultSecrets.ts`, `src/platform/`, `src/server/`, `Dockerfile`).
+- **Both hosting models:** Model B exports PII-scrubbed telemetry stamped with `tenantId` and `correlationId` to 1Squared's UK Log Analytics workspace; Model A telemetry is opt-in to the client's workspace or disabled when unset. Both run the identical standalone container image (`dist/jobs/run-job.mjs` for jobs).
+- **Migration and rollback:** No database migration; unset `APPLICATIONINSIGHTS_CONNECTION_STRING` or `git revert`.
+- **Manual blockers:** Live Application Insights alert verification and ACR push wait on Azure subscription access (`stage-0-plan.md` §8).
