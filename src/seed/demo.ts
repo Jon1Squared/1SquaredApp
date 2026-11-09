@@ -1675,7 +1675,7 @@ export function buildDemoData(
           matterId: mPenarthLease.id,
           matterNumber: mPenarthLease.matterNumber,
           responsiblePartnerId: 'P-000001',
-          responsiblePartnerName: 'Gareth Vaughan',
+          responsiblePartnerName: 'Rhian Morgan',
           dateLabel: day(-35),
           disposition: 'potential_conflict',
           note: 'Adjacent occupier on development boundary; referred to COLP for information barrier review.',

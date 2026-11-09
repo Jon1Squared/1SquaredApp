@@ -35,7 +35,6 @@ import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
   computeMatterOpeningChecklistProgress,
-  isComplianceOrOnboardingTask,
   isHighOrCriticalRiskRating,
   isMatterConflictCheckAwaitingDecision,
   isMatterOpeningInProgress,
@@ -50,7 +49,7 @@ import {
   PMS_AS_AT_UNAVAILABLE_LABEL,
 } from '@/domain/pms';
 import type { SearchDoc } from '@/domain/search';
-import { isTaskOpen } from '@/domain/tasks';
+import { isComplianceOrOnboardingTask, isTaskOpen } from '@/domain/tasks';
 import type {
   AppFinanceCapabilities,
   AppSnapshot,

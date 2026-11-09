@@ -530,7 +530,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('12. isMatterConflictCheckAwaitingDecision counts only matters with conflictCheckRecord.status === Referred and ignores a cleared matter whose conversion snapshot had Potential conflict (R351)', () => {
+  it('12. isMatterConflictCheckAwaitingDecision counts matters with conflictCheckRecord.status === Referred or legacy escalated status without a decision, and ignores cleared or already-decided matters (R351, R367)', () => {
     const committed = loadCommittedSeedStore();
     const m6 = committed.matters.find((m) => m.id === 'M-000006');
     expect(m6).toBeDefined();
@@ -583,9 +583,36 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
         },
       }),
     ).toBe(true);
+
+    // A legacy matter with conflictCheckStatus === 'Potential conflict — escalated' and no conflictCheckRecord or conflictDecision IS counted (R367)
+    expect(
+      isMatterConflictCheckAwaitingDecision({
+        conflictCheckStatus: 'Potential conflict — escalated',
+        conflictCheckRecord: null,
+        conflictDecision: null,
+      }),
+    ).toBe(true);
+
+    // A legacy matter with conflictCheckStatus === 'Potential conflict — escalated' that already has a conflictDecision is NOT counted
+    expect(
+      isMatterConflictCheckAwaitingDecision({
+        conflictCheckStatus: 'Potential conflict — escalated',
+        conflictCheckRecord: null,
+        conflictDecision: clearedAfterConversion.conflictDecision,
+      }),
+    ).toBe(false);
+
+    // A legacy 'Clear' matter without a conflictCheckRecord is NOT counted (R367)
+    expect(
+      isMatterConflictCheckAwaitingDecision({
+        conflictCheckStatus: 'Clear',
+        conflictCheckRecord: null,
+        conflictDecision: null,
+      }),
+    ).toBe(false);
   });
 
-  it('13. isMatterOpeningInProgress, computeMatterOpeningChecklistProgress, and isComplianceOrOnboardingTask resolve statuses and task types by systemKey via valueBySystemKey (R352)', () => {
+  it('13. isMatterOpeningInProgress, computeMatterOpeningChecklistProgress, and isComplianceOrOnboardingTask resolve statuses and task types strictly by systemKey via valueBySystemKey (R352, R372)', () => {
     const committed = loadCommittedSeedStore();
     const values = committed.values;
 
@@ -645,6 +672,10 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     expect(
       isMatterOpeningInProgress({ matterStatusId: 'matter_status.active_work' }, customValues),
     ).toBe(false);
+    // When systemKey is missing from values, does not fall back to slug IDs (R372)
+    expect(
+      isMatterOpeningInProgress({ matterStatusId: 'matter_status.prospective_enquiry' }, []),
+    ).toBe(false);
 
     const progress = computeMatterOpeningChecklistProgress(m8);
     expect(progress.conflictDone).toBe(true);
@@ -655,51 +686,63 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
 
     expect(
       isComplianceOrOnboardingTask(
-        { taskTypeId: 'task_type.custom_conflict_verification', title: 'Review party list' },
+        { taskTypeId: 'task_type.custom_conflict_verification' },
         customValues,
       ),
     ).toBe(true);
     expect(
       isComplianceOrOnboardingTask(
-        { taskTypeId: 'task_type.custom_onboarding_pack', title: 'Send welcome pack' },
+        { taskTypeId: 'task_type.custom_onboarding_pack' },
         customValues,
       ),
     ).toBe(true);
     expect(
       isComplianceOrOnboardingTask(
-        { taskTypeId: 'task_type.general', title: 'Draft witness statement' },
+        { taskTypeId: 'task_type.general' },
         customValues,
       ),
     ).toBe(false);
+    // When systemKey is missing from values, does not fall back to slug IDs (R372)
+    expect(
+      isComplianceOrOnboardingTask({ taskTypeId: 'task_type.conflict_check' }, []),
+    ).toBe(false);
   });
 
-  it('14. buildCommittedSeedStoreSnapshot under TZ=America/New_York matches data/seed-not-a-law-firm.json without global vitest TZ forcing (R356)', () => {
-    const prevTz = process.env.TZ;
+  it('14. buildCommittedSeedStoreSnapshot under TZ=America/New_York matches data/seed-not-a-law-firm.json without global vitest TZ forcing and restores original timezone (R356, R370)', () => {
+    const originalTz =
+      process.env.TZ ?? (Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
     process.env.TZ = 'America/New_York';
     try {
+      expect(new Date(2026, 0, 1).getTimezoneOffset()).toBe(300);
       const rebuiltUnderNewYork = buildCommittedSeedStoreSnapshot();
       const committed = loadCommittedSeedStore();
       expect(rebuiltUnderNewYork).toEqual(committed);
     } finally {
-      if (prevTz === undefined) {
-        delete process.env.TZ;
-      } else {
-        process.env.TZ = prevTz;
-      }
+      process.env.TZ = originalTz;
     }
   });
 
-  it('15. getStore() refuses a corrupted runtime store file rather than overwriting it with a clean store (R357)', () => {
+  it('15. getStore() refuses a corrupted runtime store file without echoing file content in the error message (R357, R368)', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r357-corrupt-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
+    const corruptedPayload = '{"clientSecretName": "SensitiveClientName';
 
     try {
-      fs.writeFileSync(storePath, '{ corrupted json payload', 'utf8');
+      fs.writeFileSync(storePath, corruptedPayload, 'utf8');
       process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
       clearStoreMemoryCache();
 
-      expect(() => getStore()).toThrow(/Refusing to load corrupted runtime store file/);
-      expect(fs.readFileSync(storePath, 'utf8')).toBe('{ corrupted json payload');
+      let thrownMessage = '';
+      try {
+        getStore();
+      } catch (err) {
+        thrownMessage = err instanceof Error ? err.message : String(err);
+      }
+      expect(thrownMessage).toMatch(
+        /Refusing to load corrupted runtime store file.*not valid JSON/,
+      );
+      expect(thrownMessage).not.toContain('SensitiveClientName');
+      expect(fs.readFileSync(storePath, 'utf8')).toBe(corruptedPayload);
     } finally {
       delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
       fs.rmSync(tmpDir, { recursive: true, force: true });

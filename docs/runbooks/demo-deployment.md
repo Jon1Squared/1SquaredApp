@@ -134,3 +134,18 @@ The demo environment can be reset to its clean initial seed state in two ways:
    PLATFORM_ENVIRONMENT=demo \
    npm run seed:demo -- --force --entra-map data/entra-map.local.json
    ```
+
+## 7. Recovering from a Corrupted Runtime Store File
+
+`saveStore` writes `data/runtime-store.json` atomically via a temporary file (`<targetPath>.tmp-<pid>-<timestamp>`) and `fs.renameSync`. If `data/runtime-store.json` (or `ONESQUARED_RUNTIME_STORE_PATH`) is ever truncated or corrupted on disk, `getStore()` refuses to overwrite it and throws:
+
+```text
+Refusing to load corrupted runtime store file at <path>: not valid JSON.
+```
+
+The error message logs only the file path and generic reason—never any fragment of the file's contents (Rule 5).
+
+To recover:
+1. **Restore from backup:** Replace `data/runtime-store.json` with the most recent known-good backup copy.
+2. **Start with a clean store:** Delete the corrupted `data/runtime-store.json` file; on the next request `getStore()` will initialise a clean empty deployment store (`createCleanDeploymentStore`).
+3. **Re-seed the demo dataset:** Run `npm run seed:demo -- --force` (with `--entra-map` where applicable) as shown in Section 6.2 above to overwrite the corrupted file with a fresh demo store.

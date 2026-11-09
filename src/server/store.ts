@@ -1037,9 +1037,9 @@ export function getStore(): FirmStore {
         // ignore stat errors
       }
       return global.__oneSquaredStore;
-    } catch (err) {
+    } catch {
       throw new Error(
-        `Refusing to load corrupted runtime store file at ${activeStorePath}: ${err instanceof Error ? err.message : String(err)}`,
+        `Refusing to load corrupted runtime store file at ${activeStorePath}: not valid JSON.`,
       );
     }
   }
@@ -1072,7 +1072,9 @@ export function saveStore(store: FirmStore): void {
     const targetPath = resolveRuntimeStoreFilePath();
     const targetDir = path.dirname(targetPath);
     if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
-    fs.writeFileSync(targetPath, JSON.stringify(store, null, 2), 'utf8');
+    const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
+    fs.renameSync(tmpPath, targetPath);
     global.__oneSquaredStoreMtimeMs = fs.statSync(targetPath).mtimeMs;
   } catch {
     // ignore read-only fs errors in serverless environments
@@ -1083,7 +1085,8 @@ export function saveStore(store: FirmStore): void {
 }
 
 export function resetStore(): FirmStore {
-  const includeSyntheticEntraOids = process.env.PLATFORM_ENVIRONMENT === 'test';
+  const includeSyntheticEntraOids =
+    getActiveTenantConfiguration().environment === 'test';
   const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
   saveStore(fresh);
   return fresh;
