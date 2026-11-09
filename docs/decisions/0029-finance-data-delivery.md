@@ -31,6 +31,11 @@ The attention list is called with `canViewFinance: true` hard-coded (`services.t
 4. **Deny by default.** Every `canViewFinance` default becomes `false`, and the hard-coded `true` in the attention list is replaced by the user's real permission.
 5. **Load Home panels by role.** Home finance panels are requested only for roles that hold the relevant permission. Other roles never receive the data.
 
+### Clarification (9 November 2026)
+
+1. **Matter-level loaders fail closed on unlinked PMS rows.** `getMatterFinanceRows`, `getMyFinanceFigures`, `getMatterPmsViewBundle`, and `getClientPmsViewBundle` include only PMS rows whose `matter_code` maps through a `pmsLinks` entry to a 1Squared matter the actor can access (`canPersonAccessMatter`). Unlinked PMS matters are excluded from matter-level loaders so an unlinked staff or ethical-wall matter cannot fail open.
+2. **Firm totals still include unlinked PMS rows.** `getFirmFinance` (`finance:view`) includes unlinked PMS rows in firm-wide roll-ups because those rows belong to the firm's books and `finance:view` holders are firm-level roles, while excluding any PMS rows linked to restricted 1Squared matters the actor cannot access. `allUnlinkedPmsMatters` in `getMatterPmsViewBundle` is returned only to actors holding `finance:manage_links` to populate the link picker.
+
 ## Alternatives Considered
 
 - **Keep the snapshot and filter it per user.** It is smaller as a change, but the data still travels in one large payload, and every new field risks leaking. Rejected.

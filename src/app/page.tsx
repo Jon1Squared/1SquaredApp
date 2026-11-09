@@ -65,7 +65,9 @@ export default async function HomePage({
         values={snap.values}
         finance={snap.finance}
         pmsLinks={matterFinance?.pmsLinks}
-        pmsAsAtDate={matterFinance?.pmsExtractInfo.asAtDate}
+        pmsAsAtDate={
+          matterFinance?.pmsExtractInfo.asAtDate ?? firmFinance?.pmsExtractInfo.asAtDate
+        }
         pmsSummaryByMatterId={matterFinance?.pmsSummaryByMatterId}
         pmsSummaryByClientId={firmFinance?.pmsSummaryByClientId}
         allMatterFins={matterFinance?.allMatterFins}

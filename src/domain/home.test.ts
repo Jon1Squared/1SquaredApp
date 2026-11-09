@@ -400,6 +400,7 @@ describe('Role-based Home pages & configuration', () => {
     const feWeek = buildFeeEarnerWeeklyTime({
       feeEarner: dafyddFe,
       timeEntries,
+      asAtDate: extractInfo.asAtDate,
     })!;
     expect(feWeek).not.toBeNull();
     expect(feWeek.feeEarnerId).toBe(dafyddFe.fee_earner_id);
@@ -409,7 +410,7 @@ describe('Role-based Home pages & configuration', () => {
     const rollups = buildFirmFinanceRollups({
       asAtDate: extractInfo.asAtDate,
       matterFinancials: pms.getAllMatterFinancials(),
-      invoices: pms.getAgedDebt(),
+      invoices: pms.listAllInvoiceBalances(),
       timeEntries,
       payments: pms.listAllPayments(),
       clients: pms.listClients(),
@@ -417,20 +418,26 @@ describe('Role-based Home pages & configuration', () => {
       year: '2026',
     });
 
-    // Check Monthly fees billed Jan-Oct 2026
+    // Check Monthly fees billed Jan-Oct 2026 (exact SQL parity)
     const monthly = rollups.pmsMonthlyFeesBilled;
     expect(monthly.months.length).toBe(10);
-    expect(monthly.yearToDateTotal).toBeGreaterThan(150000);
+    expect(monthly.yearToDateTotal).toBe(181673.48);
 
-    // Check Cash received summary
+    // Check Cash received summary (exact SQL parity)
     const cash = rollups.pmsCashReceived;
-    expect(cash.octoberTotal).toBeGreaterThan(0);
+    expect(cash.currentMonthTotal).toBe(30878.42);
+    expect(cash.currentMonthReceiptCount).toBe(6);
+    expect(cash.previousMonthTotal).toBe(44586.44);
+    expect(cash.previousMonthReceiptCount).toBe(7);
 
-    // Check Department financials
+    // Check Department financials (exact SQL parity)
     const depts = rollups.pmsDepartmentFinancials;
     expect(depts.departments.length).toBe(6);
-    expect(depts.firmTotal.unbilledWip).toBeCloseTo(34140.0, 2);
-    expect(depts.firmTotal.outstandingDebt).toBeCloseTo(49130.22, 2);
+    expect(depts.firmTotal.billedThisYear).toBe(181673.48);
+    expect(depts.firmTotal.unbilledWip).toBe(34140.0);
+    expect(depts.firmTotal.outstandingDebt).toBe(49130.22);
+    expect(depts.firmTotal.overdueDebt).toBe(8781.6);
+    expect(depts.firmTotal.currentMonthHours).toBe(90.3);
   });
 
   it('supports inline Home actions: approve/discuss sign-offs and request bill / flag write-off', () => {

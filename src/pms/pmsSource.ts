@@ -415,6 +415,20 @@ export class DemoDbPmsSource implements PmsSource {
     }
   }
 
+  listAllInvoiceBalances(): PmsInvoiceBalance[] {
+    const db = this.openDb();
+    try {
+      const rows = db
+        .prepare(
+          `SELECT * FROM v_invoice_balances ORDER BY invoice_date DESC, invoice_number DESC`,
+        )
+        .all() as Record<string, unknown>[];
+      return rows.map((r) => this.mapInvoiceBalance(r));
+    } finally {
+      db.close();
+    }
+  }
+
   getAgedDebt(clientCode?: string): PmsInvoiceBalance[] {
     const db = this.openDb();
     try {

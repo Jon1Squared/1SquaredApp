@@ -120,10 +120,10 @@ const EMPTY_MONTHLY_FEES_BILLED: {
 };
 
 const EMPTY_CASH_RECEIVED: PmsCashReceivedSummary = {
-  octoberTotal: 0,
-  octoberReceiptCount: 0,
-  septemberTotal: 0,
-  septemberReceiptCount: 0,
+  currentMonthTotal: 0,
+  currentMonthReceiptCount: 0,
+  previousMonthTotal: 0,
+  previousMonthReceiptCount: 0,
 };
 
 const EMPTY_DEPARTMENT_FINANCIALS: {
@@ -138,7 +138,7 @@ const EMPTY_DEPARTMENT_FINANCIALS: {
     unbilledWip: 0,
     outstandingDebt: 0,
     overdueDebt: 0,
-    octoberHours: 0,
+    currentMonthHours: 0,
   },
 };
 
@@ -1105,10 +1105,10 @@ export function HomeClient({
               <span>Cash received (Oct)</span>
               {hasDemoSeedData ? <StatusPill label="77% of £40k target" tone="positive" /> : null}
             </div>
-            <div className="kpi-value">{formatGbp(pmsCashReceived.octoberTotal)}</div>
+            <div className="kpi-value">{formatGbp(pmsCashReceived.currentMonthTotal)}</div>
             <div className="kpi-sub">
-              {pmsCashReceived.octoberReceiptCount} receipts · Sep was{' '}
-              {formatGbp(pmsCashReceived.septemberTotal)}
+              {pmsCashReceived.currentMonthReceiptCount} receipts · Sep was{' '}
+              {formatGbp(pmsCashReceived.previousMonthTotal)}
             </div>
           </div>
         );
@@ -4687,7 +4687,7 @@ export function HomeClient({
       // 30. cash_collection_vs_target (05 Finance)
       // ================================================================
       case 'cash_collection_vs_target': {
-        const octCash = pmsCashReceived.octoberTotal;
+        const octCash = pmsCashReceived.currentMonthTotal;
         const target = 40000;
         const pct = Math.min(Math.round((octCash / target) * 100), 100);
         const octFees =
@@ -4712,8 +4712,8 @@ export function HomeClient({
                   }}
                 >
                   <span>
-                    Cash receipts in October ({pmsCashReceived.octoberReceiptCount} payment
-                    {pmsCashReceived.octoberReceiptCount === 1 ? '' : 's'})
+                    Cash receipts in October ({pmsCashReceived.currentMonthReceiptCount} payment
+                    {pmsCashReceived.currentMonthReceiptCount === 1 ? '' : 's'})
                   </span>
                   <strong>
                     {formatGbp(octCash)} / £40,000 target ({pct}%)
@@ -5383,7 +5383,7 @@ export function HomeClient({
                 <div className="legend-item">
                   <div className="lbl">Cash collected YTD</div>
                   <div className="val">
-                    {hasDemoSeedData ? '£166,184.42' : formatGbp(pmsCashReceived.octoberTotal)}
+                    {hasDemoSeedData ? '£166,184.42' : formatGbp(pmsCashReceived.currentMonthTotal)}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     {hasDemoSeedData ? '77% collection rate on gross billed' : 'Year to date'}
@@ -5460,7 +5460,7 @@ export function HomeClient({
                           '£0.00'
                         )}
                       </td>
-                      <td className="num">{d.octoberHours.toFixed(1)} h</td>
+                      <td className="num">{d.currentMonthHours.toFixed(1)} h</td>
                     </tr>
                   ))}
                   <tr style={{ background: 'var(--bg-subtle)', fontWeight: 700 }}>
@@ -5470,7 +5470,7 @@ export function HomeClient({
                     <td className="num">{formatGbp(firmTotal.unbilledWip)}</td>
                     <td className="num">{formatGbp(firmTotal.outstandingDebt)}</td>
                     <td className="num">{formatGbp(firmTotal.overdueDebt)}</td>
-                    <td className="num">{firmTotal.octoberHours.toFixed(1)} h</td>
+                    <td className="num">{firmTotal.currentMonthHours.toFixed(1)} h</td>
                   </tr>
                 </tbody>
               </table>

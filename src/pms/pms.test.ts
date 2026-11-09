@@ -132,12 +132,25 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const rollups = buildFirmFinanceRollups({
       asAtDate: source.getExtractInfo().asAtDate,
       matterFinancials: source.getAllMatterFinancials(),
-      invoices: source.getAgedDebt(),
+      invoices: source.listAllInvoiceBalances(),
       timeEntries: source.listAllTimeEntries(),
       payments: source.listAllPayments(),
       clients: source.listClients(),
       feeEarners: source.listFeeEarners(),
     });
+    expect(rollups.pmsMonthlyFeesBilled.yearToDateTotal).toBe(181673.48);
+    expect(rollups.pmsCashReceived).toEqual({
+      currentMonthTotal: 30878.42,
+      currentMonthReceiptCount: 6,
+      previousMonthTotal: 44586.44,
+      previousMonthReceiptCount: 7,
+    });
+    expect(rollups.pmsDepartmentFinancials.firmTotal.billedThisYear).toBe(181673.48);
+    expect(rollups.pmsDepartmentFinancials.firmTotal.unbilledWip).toBe(34140.0);
+    expect(rollups.pmsDepartmentFinancials.firmTotal.outstandingDebt).toBe(49130.22);
+    expect(rollups.pmsDepartmentFinancials.firmTotal.overdueDebt).toBe(8781.6);
+    expect(rollups.pmsDepartmentFinancials.firmTotal.currentMonthHours).toBe(90.3);
+
     const clients = rollups.allClientFins;
     const clientByCode = new Map(clients.map((c) => [c.client_code, c]));
     const clientCheckRows = checkMatrix.filter((r) => r.rowNumber >= 59 && r.rowNumber <= 68);
@@ -163,15 +176,15 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(bay.aged_1_30).toBe(1080.0);
   });
 
-  it('reproduces every row of check_fee_earners via domain rollups', async () => {
-    const { buildFirmFinanceRollups } = await import('@/domain/pms');
+  it('reproduces every row of check_fee_earners via domain rollups and derives November buckets when asAtDate is 2026-11-09', async () => {
+    const { buildFeeEarnerWeeklyTime, buildFirmFinanceRollups } = await import('@/domain/pms');
     const wb = openXlsxWorkbook(resolveWorkbookPath());
     const checkMatrix = wb.getSheetMatrix('check_fee_earners');
     const source = new DemoDbPmsSource();
     const rollups = buildFirmFinanceRollups({
       asAtDate: source.getExtractInfo().asAtDate,
       matterFinancials: source.getAllMatterFinancials(),
-      invoices: source.getAgedDebt(),
+      invoices: source.listAllInvoiceBalances(),
       timeEntries: source.listAllTimeEntries(),
       payments: source.listAllPayments(),
       clients: source.listClients(),
@@ -197,6 +210,81 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       expect(p.annual_target_hours).toBe(Number(row.cells.G));
       expect(p.pct_of_annual_target).toBeCloseTo(Number(row.cells.H), 6);
     }
+
+    // R319: with a PMS as-at of 2026-11-09, the November buckets are filled and labelled "Nov"
+    const baseInvoices = source.listAllInvoiceBalances();
+    const baseTimeEntries = source.listAllTimeEntries();
+    const basePayments = source.listAllPayments();
+    const novInvoice = {
+      ...baseInvoices[0]!,
+      invoice_number: 'PV/2026/0099',
+      matter_code: 'PEN001-0001',
+      client_code: 'PEN001',
+      invoice_date: '2026-11-05',
+      due_date: '2026-12-05',
+      invoice_type: 'Interim',
+      fees_net: 2500,
+      exported_status: 'Posted',
+    };
+    const novPayment = {
+      ...basePayments[0]!,
+      receipt_id: 'R00099',
+      invoice_number: 'PV/2026/0099',
+      matter_code: 'PEN001-0001',
+      client_code: 'PEN001',
+      receipt_date: '2026-11-07',
+      amount: 3000,
+    };
+    const novTimeEntry = {
+      ...baseTimeEntries[0]!,
+      time_id: 'T000999',
+      matter_code: 'PEN001-0001',
+      fee_earner_id: 'FE005',
+      date: '2026-11-09',
+      hours: 3.5,
+      value: 752.5,
+      chargeable: 'Y' as const,
+      billed_status: 'Unbilled' as const,
+    };
+    const novRollups = buildFirmFinanceRollups({
+      asAtDate: '2026-11-09',
+      matterFinancials: source.getAllMatterFinancials(),
+      invoices: [...baseInvoices, novInvoice],
+      timeEntries: [...baseTimeEntries, novTimeEntry],
+      payments: [...basePayments, novPayment],
+      clients: source.listClients(),
+      feeEarners: source.listFeeEarners(),
+    });
+    expect(novRollups.pmsMonthlyFeesBilled.months.length).toBe(11);
+    const novBucket = novRollups.pmsMonthlyFeesBilled.months[10]!;
+    expect(novBucket.monthKey).toBe('2026-11');
+    expect(novBucket.monthShort).toBe('Nov');
+    expect(novBucket.feesNet).toBe(2500);
+    expect(novRollups.pmsMonthlyFeesBilled.yearToDateTotal).toBe(184173.48);
+    expect(novRollups.pmsCashReceived).toEqual({
+      currentMonthTotal: 3000,
+      currentMonthReceiptCount: 1,
+      previousMonthTotal: 30878.42,
+      previousMonthReceiptCount: 6,
+    });
+    expect(novRollups.pmsDepartmentFinancials.firmTotal.currentMonthHours).toBe(3.5);
+
+    const novWeek = buildFeeEarnerWeeklyTime({
+      feeEarner: { fee_earner_id: 'FE005', annual_target_hours: 0 },
+      timeEntries: [...baseTimeEntries, novTimeEntry],
+      asAtDate: '2026-11-09',
+    })!;
+    expect(novWeek.weekdays.map((d) => d.date)).toEqual([
+      '2026-11-09',
+      '2026-11-10',
+      '2026-11-11',
+      '2026-11-12',
+      '2026-11-13',
+    ]);
+    expect(novWeek.weekTotalHours).toBe(3.5);
+    expect(novWeek.monthToDateHours).toBe(3.5);
+    expect(novWeek.dailyPaceHours).toBe(0);
+    expect(novWeek.weeklyPaceHours).toBe(0);
   });
 
   it('automatically links PMS clients and fee earners and preserves manual links', async () => {

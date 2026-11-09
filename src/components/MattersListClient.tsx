@@ -34,7 +34,7 @@ interface MattersListClientProps {
   currentUserId?: string;
   canViewFinance?: boolean;
   pmsSummaryByMatterId?: Record<string, PmsMatterFinancials>;
-  pmsAsAtDate?: string;
+  pmsAsAtDate: string | undefined;
 }
 
 type MattersTab = 'all' | 'mine' | 'Transactional' | 'Contentious' | 'Advisory';
@@ -74,7 +74,7 @@ export function MattersListClient({
   currentUserId = '',
   canViewFinance = false,
   pmsSummaryByMatterId = {},
-  pmsAsAtDate = '2026-10-16',
+  pmsAsAtDate,
 }: MattersListClientProps) {
   const router = useRouter();
 
@@ -620,7 +620,10 @@ export function MattersListClient({
                         checked={showPmsColumns}
                         onChange={(e) => setShowPmsColumns(e.target.checked)}
                       />
-                      <span>Show PMS financials (as at {formatPmsAsAtLabel(pmsAsAtDate)})</span>
+                      <span>
+                        Show PMS financials
+                        {pmsAsAtDate ? ` (as at ${formatPmsAsAtLabel(pmsAsAtDate)})` : ''}
+                      </span>
                     </label>
                   </div>
                 ) : null}

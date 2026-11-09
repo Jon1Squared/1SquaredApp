@@ -70,7 +70,7 @@ export function formatWholePct(fraction: number | null | undefined): string {
 }
 
 /** Format the PMS as-at date label (e.g. "16 Oct 2026"). */
-export function formatPmsAsAtLabel(asAtDate: string = '2026-10-16'): string {
+export function formatPmsAsAtLabel(asAtDate: string): string {
   return formatDate(asAtDate);
 }
 
@@ -625,19 +625,23 @@ export function buildClientFinancialsFromRows(
 export function buildFeeEarnerWeeklyTime(params: {
   feeEarner: Pick<PmsFeeEarner, 'fee_earner_id' | 'annual_target_hours'> | null | undefined;
   timeEntries: readonly PmsTimeEntry[];
+  asAtDate: string;
   hiddenMatterCodes?: ReadonlySet<string>;
   customDailyPace?: number | null;
 }): PmsFeeEarnerWeeklyTime | null {
-  const { feeEarner, timeEntries, hiddenMatterCodes, customDailyPace } = params;
+  const { feeEarner, timeEntries, asAtDate, hiddenMatterCodes, customDailyPace } = params;
   if (!feeEarner) return null;
 
-  const targetHours = Number(feeEarner.annual_target_hours) || 1200;
-  const defaultDailyPace = Math.round((targetHours / (260 - 30)) * 10) / 10;
+  const rawTargetHours = Number(feeEarner.annual_target_hours ?? 0);
+  const targetHours =
+    Number.isFinite(rawTargetHours) && rawTargetHours > 0 ? rawTargetHours : 0;
+  const defaultDailyPace =
+    targetHours > 0 ? Math.round((targetHours / (260 - 30)) * 10) / 10 : 0;
   const dailyPaceHours =
     typeof customDailyPace === 'number' && customDailyPace > 0
       ? customDailyPace
       : defaultDailyPace;
-  const weeklyPaceHours = Math.round(dailyPaceHours * 5 * 10) / 10;
+  const weeklyPaceHours = dailyPaceHours > 0 ? Math.round(dailyPaceHours * 5 * 10) / 10 : 0;
 
   const visibleEntries = timeEntries.filter(
     (t) =>
@@ -646,17 +650,27 @@ export function buildFeeEarnerWeeklyTime(params: {
       t.chargeable === 'Y',
   );
 
-  const weekDaysSpec: { dayLabel: 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri'; date: string }[] = [
-    { dayLabel: 'Mon', date: '2026-10-12' },
-    { dayLabel: 'Tue', date: '2026-10-13' },
-    { dayLabel: 'Wed', date: '2026-10-14' },
-    { dayLabel: 'Thu', date: '2026-10-15' },
-    { dayLabel: 'Fri', date: '2026-10-16' },
+  const parsedAsAt = new Date(`${asAtDate.slice(0, 10)}T00:00:00Z`);
+  const utcDay = parsedAsAt.getUTCDay();
+  const offsetToMonday = utcDay === 0 ? -6 : 1 - utcDay;
+  const mondayMs = parsedAsAt.getTime() + offsetToMonday * 86_400_000;
+  const dayLabels: readonly ('Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri')[] = [
+    'Mon',
+    'Tue',
+    'Wed',
+    'Thu',
+    'Fri',
   ];
+  const weekDaysSpec = dayLabels.map((dayLabel, idx) => ({
+    dayLabel,
+    date: new Date(mondayMs + idx * 86_400_000).toISOString().slice(0, 10),
+  }));
+  const weekStart = weekDaysSpec[0]!.date;
+  const weekEnd = weekDaysSpec[4]!.date;
 
   const hoursByDate = new Map<string, number>();
   for (const t of visibleEntries) {
-    if (t.date >= '2026-10-12' && t.date <= '2026-10-16') {
+    if (t.date >= weekStart && t.date <= weekEnd) {
       hoursByDate.set(t.date, roundMoney2((hoursByDate.get(t.date) ?? 0) + t.hours));
     }
   }
@@ -672,9 +686,10 @@ export function buildFeeEarnerWeeklyTime(params: {
   let unbilledWip = 0;
   const unbilledMatters = new Set<string>();
   let oldestUnbilledDate: string | null = null;
+  const currentYm = asAtDate.slice(0, 7);
 
   for (const t of visibleEntries) {
-    if (t.date >= '2026-10-01' && t.date <= '2026-10-31') {
+    if (t.date.slice(0, 7) === currentYm && t.date <= asAtDate.slice(0, 10)) {
       mtdHours += t.hours;
     }
     if (t.billed_status === 'Unbilled') {
@@ -746,7 +761,13 @@ export function buildFirmFinanceRollups(
     (p) => !hiddenMatterCodes.has(p.matter_code),
   );
 
+  const asAtYear = rows.asAtDate.slice(0, 4);
+  const asAtYearNum = Number(asAtYear) || 0;
+  const asAtMonthNum = Math.min(12, Math.max(1, Number(rows.asAtDate.slice(5, 7)) || 12));
   const currentYm = rows.asAtDate.slice(0, 7);
+  const prevYearNum = asAtMonthNum === 1 ? asAtYearNum - 1 : asAtYearNum;
+  const prevMonthNum = asAtMonthNum === 1 ? 12 : asAtMonthNum - 1;
+  const previousYm = `${String(prevYearNum).padStart(4, '0')}-${String(prevMonthNum).padStart(2, '0')}`;
 
   // 1. Fee-earner performance
   const sortedFeeEarners = [...rows.feeEarners].sort((a, b) =>
@@ -797,8 +818,8 @@ export function buildFirmFinanceRollups(
     buildClientFinancialsFromRows(client, visibleMatters, visibleInvoices),
   );
 
-  // 3. Monthly fees billed (current year by default)
-  const targetYear = rows.year ?? String(new Date().getFullYear());
+  // 3. Monthly fees billed (derived from asAtDate year and month range)
+  const targetYear = rows.year ?? asAtYear;
   const byYm = new Map<string, number>();
   for (const inv of visibleInvoices) {
     if (inv.invoice_date.slice(0, 4) !== targetYear || inv.exported_status === 'Draft') {
@@ -807,7 +828,22 @@ export function buildFirmFinanceRollups(
     const ym = inv.invoice_date.slice(0, 7);
     byYm.set(ym, roundMoney2((byYm.get(ym) ?? 0) + inv.fees_net));
   }
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct'];
+  const allMonthNames = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  const monthNames =
+    targetYear === asAtYear ? allMonthNames.slice(0, asAtMonthNum) : allMonthNames;
   const months: PmsMonthlyFeesBilled[] = monthNames.map((shortName, idx) => {
     const monthKey = `${targetYear}-${String(idx + 1).padStart(2, '0')}`;
     return {
@@ -818,26 +854,26 @@ export function buildFirmFinanceRollups(
   });
   const yearToDateTotal = roundMoney2(months.reduce((acc, m) => acc + m.feesNet, 0));
 
-  // 4. Cash received summary
-  let octoberTotal = 0;
-  let octoberReceiptCount = 0;
-  let septemberTotal = 0;
-  let septemberReceiptCount = 0;
+  // 4. Cash received summary (derived from asAtDate current & previous month)
+  let currentMonthTotal = 0;
+  let currentMonthReceiptCount = 0;
+  let previousMonthTotal = 0;
+  let previousMonthReceiptCount = 0;
   for (const p of visiblePayments) {
     const ym = p.receipt_date.slice(0, 7);
-    if (ym === '2026-10') {
-      octoberTotal += p.amount;
-      octoberReceiptCount += 1;
-    } else if (ym === '2026-09') {
-      septemberTotal += p.amount;
-      septemberReceiptCount += 1;
+    if (ym === currentYm) {
+      currentMonthTotal += p.amount;
+      currentMonthReceiptCount += 1;
+    } else if (ym === previousYm) {
+      previousMonthTotal += p.amount;
+      previousMonthReceiptCount += 1;
     }
   }
   const pmsCashReceived: PmsCashReceivedSummary = {
-    octoberTotal: roundMoney2(octoberTotal),
-    octoberReceiptCount,
-    septemberTotal: roundMoney2(septemberTotal),
-    septemberReceiptCount,
+    currentMonthTotal: roundMoney2(currentMonthTotal),
+    currentMonthReceiptCount,
+    previousMonthTotal: roundMoney2(previousMonthTotal),
+    previousMonthReceiptCount,
   };
 
   // 5. Department financials
@@ -867,13 +903,13 @@ export function buildFirmFinanceRollups(
         )
         .reduce((s, inv) => s + inv.outstanding, 0),
     );
-    const octoberHours = roundMoney2(
+    const currentMonthHours = roundMoney2(
       visibleTimeEntries
         .filter(
           (t) =>
             matterPracticeAreaByCode.get(t.matter_code) === practiceArea &&
             t.chargeable === 'Y' &&
-            t.date.slice(0, 7) === '2026-10',
+            t.date.slice(0, 7) === currentYm,
         )
         .reduce((s, t) => s + t.hours, 0),
     );
@@ -884,7 +920,7 @@ export function buildFirmFinanceRollups(
       unbilledWip,
       outstandingDebt,
       overdueDebt,
-      octoberHours,
+      currentMonthHours,
     });
   }
   departments.sort((a, b) => b.billedThisYear - a.billedThisYear);
@@ -896,7 +932,8 @@ export function buildFirmFinanceRollups(
     unbilledWip: roundMoney2(departments.reduce((s, d) => s + d.unbilledWip, 0)),
     outstandingDebt: roundMoney2(departments.reduce((s, d) => s + d.outstandingDebt, 0)),
     overdueDebt: roundMoney2(departments.reduce((s, d) => s + d.overdueDebt, 0)),
-    octoberHours: Math.round(departments.reduce((s, d) => s + d.octoberHours, 0) * 10) / 10,
+    currentMonthHours:
+      Math.round(departments.reduce((s, d) => s + d.currentMonthHours, 0) * 10) / 10,
   };
 
   return {

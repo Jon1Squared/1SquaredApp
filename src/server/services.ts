@@ -126,7 +126,6 @@ import {
   canUserReopenEnquiry,
   canUserTakeTask,
   canUserVerifyKeyDate,
-  canUserViewFinance,
   canViewerAccessMatterKeyDates,
   filterEmploymentForUser,
   getActiveActorSession,
@@ -305,23 +304,14 @@ import type {
 } from '@/domain/types';
 import { getPmsSource } from '@/pms/pmsSource';
 import type {
-  PmsCashReceivedSummary,
   PmsClient,
-  PmsClientAccountEntry,
   PmsClientFinancials,
   PmsClientFullBundle,
-  PmsDepartmentFinancials,
-  PmsDisbursement,
   PmsExtractInfo,
   PmsFeeEarner,
-  PmsFeeEarnerPerformance,
-  PmsFeeEarnerWeeklyTime,
-  PmsInvoiceBalance,
-  PmsInvoiceDetail,
   PmsMatter,
   PmsMatterFinancials,
   PmsMatterFullBundle,
-  PmsMonthlyFeesBilled,
 } from '@/pms/types';
 import { slug, vid } from '@/seed/lists';
 import {
@@ -659,10 +649,14 @@ function getAppSnapshotInScope(
     store.people,
     store.teams,
   );
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    options?.tokenRoles ??
+    (activeSession?.personId === user.id ? activeSession.tokenRoles : undefined);
   const currentUserPermissions = resolvePersonPermissions(user, {
     allPeople: store.people,
     teams: store.teams,
-    tokenRoles: options?.tokenRoles,
+    tokenRoles: effectiveTokenRoles,
   });
   const rbacConfig = getDefaultTenantRbacConfig();
   const orgStructure =
@@ -691,7 +685,7 @@ function getAppSnapshotInScope(
 
   // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
   const visibility = buildRecordVisibility(store, user, {
-    tokenRoles: options?.tokenRoles,
+    tokenRoles: effectiveTokenRoles,
   });
   const visibleMatters: Matter[] = store.matters.filter(visibility.canViewMatter);
   const hiddenMatterIds = visibility.hiddenMatterIds;
@@ -8895,13 +8889,14 @@ export function getMatterPmsViewBundle(
   const auth = verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { store, actor, hiddenMatterIds, visiblePmsLinks } = auth;
+  const { store, actor, permSet, tokenRoles, visiblePmsLinks } = auth;
   const matter = store.matters.find((m) => m.id === matterId && !m.mergedIntoId);
   if (
     !matter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: store.people,
       teams: store.teams,
+      tokenRoles,
     })
   ) {
     return buildActionDenied(
@@ -8917,23 +8912,27 @@ export function getMatterPmsViewBundle(
 
   const matterBundle = link ? pms.getMatterFullBundle(link.pmsCode) : null;
 
-  const linkedPmsCodes = new Set(
-    store.pmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
-  );
-  const allPmsMatters = pms.listMatters();
-  const allUnlinkedPmsMatters = allPmsMatters.filter((pm) => !linkedPmsCodes.has(pm.matter_code));
-
+  const canManageLinks = permSet.permissions.has('finance:manage_links');
+  let allUnlinkedPmsMatters: PmsMatter[] = [];
   let unlinkedPmsMattersForClient: PmsMatter[] = [];
-  const clientEntityType: PmsEntityType = matter.clientId.startsWith('P-')
-    ? 'person'
-    : 'organisation';
-  const pmsClientCode = findPmsCodeForRecord(visiblePmsLinks, clientEntityType, matter.clientId);
-  if (pmsClientCode) {
-    unlinkedPmsMattersForClient = allUnlinkedPmsMatters.filter(
-      (pm) => pm.client_code === pmsClientCode,
+
+  if (canManageLinks) {
+    const linkedPmsCodes = new Set(
+      store.pmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
     );
+    const allPmsMatters = pms.listMatters();
+    allUnlinkedPmsMatters = allPmsMatters.filter((pm) => !linkedPmsCodes.has(pm.matter_code));
+
+    const clientEntityType: PmsEntityType = matter.clientId.startsWith('P-')
+      ? 'person'
+      : 'organisation';
+    const pmsClientCode = findPmsCodeForRecord(visiblePmsLinks, clientEntityType, matter.clientId);
+    if (pmsClientCode) {
+      unlinkedPmsMattersForClient = allUnlinkedPmsMatters.filter(
+        (pm) => pm.client_code === pmsClientCode,
+      );
+    }
   }
-  void hiddenMatterIds;
 
   return {
     extractInfo,
@@ -8952,7 +8951,7 @@ export function getClientPmsViewBundle(
   const auth = verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { store, hiddenMatterIds, hiddenPmsMatterCodes, visiblePmsLinks } = auth;
+  const { store, hiddenMatterIds, accessibleLinkedPmsMatterCodes, visiblePmsLinks } = auth;
   const targetExists =
     recordType === 'organisation'
       ? store.organisations.some((o) => o.id === recordId && !o.mergedIntoId)
@@ -8972,10 +8971,10 @@ export function getClientPmsViewBundle(
   const allPmsClients = pms.listClients();
   const visibleMatterFins = pms
     .getAllMatterFinancials()
-    .filter((m) => !hiddenPmsMatterCodes.has(m.matter_code));
+    .filter((m) => accessibleLinkedPmsMatterCodes.has(m.matter_code));
   const visibleAgedDebt = pms
     .getAgedDebt()
-    .filter((i) => !hiddenPmsMatterCodes.has(i.matter_code));
+    .filter((i) => accessibleLinkedPmsMatterCodes.has(i.matter_code));
 
   const pmsClient = link
     ? allPmsClients.find((c) => c.client_code === link.pmsCode) ?? null
@@ -10411,7 +10410,7 @@ export function requestMatterBill(
   const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor } = auth;
+  const { store, actor, tokenRoles } = auth;
   const matter = store.matters.find((m) => m.matterNumber === matterCode && !m.mergedIntoId);
   const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode) ?? matter?.id ?? null;
   const targetMatter = linkedId
@@ -10422,6 +10421,7 @@ export function requestMatterBill(
     !canPersonAccessMatter(targetMatter, actor.id, actor, {
       allPeople: store.people,
       teams: store.teams,
+      tokenRoles,
     })
   ) {
     return buildActionDenied(
@@ -10473,7 +10473,7 @@ export function flagMatterWriteOff(
   const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor } = auth;
+  const { store, actor, tokenRoles } = auth;
   const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
   const matter = linkedId
     ? store.matters.find((m) => m.id === linkedId && !m.mergedIntoId)
@@ -10483,6 +10483,7 @@ export function flagMatterWriteOff(
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: store.people,
       teams: store.teams,
+      tokenRoles,
     })
   ) {
     return buildActionDenied(
@@ -10608,7 +10609,7 @@ export function recordInvoiceCreditControlAction(
   const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor } = auth;
+  const { store, actor, tokenRoles } = auth;
   const matterByNumber = store.matters.find(
     (m) => m.matterNumber === input.matterCode && !m.mergedIntoId,
   );
@@ -10616,8 +10617,6 @@ export function recordInvoiceCreditControlAction(
     findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', input.matterCode) ??
     matterByNumber?.id ??
     null;
-  const linkedOrgId = findOneSquaredIdForPmsCode(store.pmsLinks, 'organisation', input.clientCode);
-  const linkedPersonId = findOneSquaredIdForPmsCode(store.pmsLinks, 'person', input.clientCode);
 
   const matter = linkedMatterId
     ? store.matters.find((m) => m.id === linkedMatterId && !m.mergedIntoId)
@@ -10627,6 +10626,7 @@ export function recordInvoiceCreditControlAction(
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: store.people,
       teams: store.teams,
+      tokenRoles,
     })
   ) {
     return buildActionDenied(
@@ -10634,6 +10634,34 @@ export function recordInvoiceCreditControlAction(
       'Matter not found or access denied.',
     );
   }
+
+  const pmsInvoice =
+    getPmsSource()
+      .listAllInvoiceBalances()
+      .find((inv) => inv.invoice_number === input.invoiceNumber) ?? null;
+  if (!pmsInvoice || pmsInvoice.matter_code !== input.matterCode) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Invoice does not belong to the specified matter or was not found.',
+    );
+  }
+  if (input.clientCode && input.clientCode.trim() !== pmsInvoice.client_code) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Client code does not match the invoice record.',
+    );
+  }
+  const invoiceClientCode = pmsInvoice.client_code;
+  const linkedOrgId = findOneSquaredIdForPmsCode(
+    store.pmsLinks,
+    'organisation',
+    invoiceClientCode,
+  );
+  const linkedPersonId = findOneSquaredIdForPmsCode(
+    store.pmsLinks,
+    'person',
+    invoiceClientCode,
+  );
 
   const linkedRecords: TaskLinkedRecord[] = [
     { recordType: 'matter', recordId: matter.id },

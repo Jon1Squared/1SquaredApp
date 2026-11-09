@@ -322,10 +322,10 @@ export interface PmsMonthlyFeesBilled {
 }
 
 export interface PmsCashReceivedSummary {
-  octoberTotal: number;
-  octoberReceiptCount: number;
-  septemberTotal: number;
-  septemberReceiptCount: number;
+  currentMonthTotal: number;
+  currentMonthReceiptCount: number;
+  previousMonthTotal: number;
+  previousMonthReceiptCount: number;
 }
 
 export interface PmsDepartmentFinancials {
@@ -335,7 +335,7 @@ export interface PmsDepartmentFinancials {
   unbilledWip: number;
   outstandingDebt: number;
   overdueDebt: number;
-  octoberHours: number;
+  currentMonthHours: number;
 }
 
 export interface PmsSource {
@@ -348,6 +348,7 @@ export interface PmsSource {
   getMatterWipBreakdown(matterCode: string): PmsMatterWipBreakdown;
   getFeeEstimates(matterCode: string): PmsFeeEstimate[];
   getInvoices(filter?: { matterCode?: string; clientCode?: string }): PmsInvoiceDetail[];
+  listAllInvoiceBalances(): PmsInvoiceBalance[];
   getAgedDebt(clientCode?: string): PmsInvoiceBalance[];
   getDisbursements(matterCode: string): PmsDisbursement[];
   getClientAccountLedger(matterCode: string): PmsClientAccountEntry[];
