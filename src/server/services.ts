@@ -73,7 +73,7 @@ import {
   valueBySystemKey,
 } from '@/domain/lists';
 import { isEmployeeOrLeaverRecord, planMerge } from '@/domain/merge';
-import { personDisplayName, recordDisplayName } from '@/domain/names';
+import { personDisplayName, primaryEmail, recordDisplayName } from '@/domain/names';
 import {
   buildClientFinancialsFromRows,
   computeAutomaticPmsLinks,
@@ -169,6 +169,7 @@ import {
   getActiveTenantConfiguration,
   getExtensionHostLoadErrors,
   getPlatformExtensionHost,
+  isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -411,31 +412,11 @@ export async function getCurrentUserId(): Promise<string> {
 }
 
 export function isDemoModeEnabled(): boolean {
-  if (process.env.NODE_ENV === 'production') {
-    return false;
-  }
-  const activeTenantConfig = getActiveTenantConfiguration();
-  if (activeTenantConfig.environment === 'live') {
-    return false;
-  }
-  return Boolean(activeTenantConfig.featureFlags?.enableDemoMode);
+  return isNonLiveDemoEnvironment();
 }
 
 export function isDataResetAllowedEnvironment(): boolean {
-  const activeTenantConfig = getActiveTenantConfiguration();
-  const env = activeTenantConfig.environment;
-  if (env === 'live') {
-    return false;
-  }
-  if (
-    process.env.NODE_ENV === 'production' &&
-    env !== 'dev' &&
-    env !== 'test' &&
-    env !== 'training'
-  ) {
-    return false;
-  }
-  return true;
+  return isNonLiveDemoEnvironment();
 }
 
 export async function switchUserInDemoMode(targetUserId: string): Promise<{
@@ -6421,7 +6402,30 @@ export function resetAllDemoData(byId: string): void {
   const prevStore = getStore();
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
   const actorName = actor ? personDisplayName(actor) : byId;
+  const prevSeededEntraByIdAndEmail = new Map<string, string | null | undefined>();
+  if (!prevStore.isCleanDeployment) {
+    for (const p of prevStore.people) {
+      const email = primaryEmail(p).trim().toLowerCase();
+      if (email) {
+        prevSeededEntraByIdAndEmail.set(`${p.id}::${email}`, p.entraObjectId);
+      }
+    }
+  }
   const fresh = resetStore();
+  if (prevSeededEntraByIdAndEmail.size > 0) {
+    for (const p of fresh.people) {
+      const email = primaryEmail(p).trim().toLowerCase();
+      const key = `${p.id}::${email}`;
+      if (email && prevSeededEntraByIdAndEmail.has(key)) {
+        const prevOid = prevSeededEntraByIdAndEmail.get(key);
+        if (prevOid === undefined) {
+          delete p.entraObjectId;
+        } else {
+          p.entraObjectId = prevOid;
+        }
+      }
+    }
+  }
   writeAudit(fresh, {
     recordType: 'system',
     recordId: 'demo-data',

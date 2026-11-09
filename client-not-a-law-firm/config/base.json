@@ -68,8 +68,8 @@
     ]
   },
   "integrations": {
-    "pmsConnectionSecretVaultRef": "kv://kv-not-a-law-firm-dev/pms-connection-string",
-    "companiesHouseApiKeyVaultRef": "kv://kv-not-a-law-firm-dev/companies-house-api-key",
+    "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-dev/pms-connection-string",
+    "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-dev/companies-house-api-key",
     "aiProviderChoice": "anthropic",
     "pmsSync": {
       "enabled": true,
@@ -262,7 +262,7 @@
         "entraTenantId": "11111111-2222-3333-4444-555555555555",
         "credentialMode": "client_certificate",
         "clientId": "22222222-3333-4444-5555-666666666666",
-        "certificateKeyVaultSecretRef": "kv://kv-not-a-law-firm-dev/sp-provisioning-cert",
+        "certificateKeyVaultSecretRef": "kv://kv-notalawfirm-dev/sp-provisioning-cert",
         "delegatedPermissionScope": "Sites.Selected"
       },
       "sharepoint": {

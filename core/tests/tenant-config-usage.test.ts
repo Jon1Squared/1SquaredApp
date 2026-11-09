@@ -601,8 +601,8 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
 
   it('marks all unused settings as x-reserved with their target slice in JSON schema and Zod descriptions, including $ref keyDates settings', () => {
     const expectedReservedByPath: Record<string, string> = {
-      'branding.accentColorHex': 'S0-11b',
-      'branding.logoAssetKey': 'S0-11b',
+      'branding.accentColorHex': 'backlog',
+      'branding.logoAssetKey': 'backlog',
       'matterCosts.rateSourceMode': 'S0-23',
       'matterCosts.allowMatterRateOverrides': 'S0-23',
       'matterCosts.partnerSignOffThresholdGbp': 'S0-23',
@@ -891,12 +891,13 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       .readdirSync(environmentsDir)
       .filter((f) => f.endsWith('.json'))
       .sort();
-    expect(overlayFiles).toEqual(['dev.json', 'test.json']);
+    expect(overlayFiles).toEqual(['demo.json', 'dev.json', 'test.json']);
 
     const environments: PlatformEnvironment[] = [
       'dev',
       'test',
       'training',
+      'demo',
       'live',
     ];
     for (const env of environments) {

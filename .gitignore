@@ -48,4 +48,6 @@ next-env.d.ts
 /data/storage/
 /data/pembroke-vaughan.json
 /data/runtime-store.json
+/data/entra-map*.json
+*.entra-map.json
 /src/platform/generated/

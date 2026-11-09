@@ -127,7 +127,7 @@ export function getActiveTenantBaseConfigPath(): string {
 }
 
 export function getActiveTenantEnvironmentOverlayPath(
-  env: 'dev' | 'test' | 'training' | 'live' = 'dev',
+  env: 'dev' | 'test' | 'training' | 'demo' | 'live' = 'dev',
 ): string {
   const folder = resolveTenantPackageDir();
   if (typeof window !== 'undefined' || typeof process.getBuiltinModule !== 'function') {
@@ -201,7 +201,7 @@ export interface PlatformArchitectureSnapshot {
   schemaVersion: string;
   tenantId: string;
   hostingMode: 'single_tenant' | 'multi_tenant';
-  environment: 'dev' | 'test' | 'training' | 'live';
+  environment: 'dev' | 'test' | 'training' | 'demo' | 'live';
   postgresDatabaseName: string;
   postgresHost: string;
   blobContainerName: string;
@@ -531,8 +531,13 @@ export function getPlatformPostgresCluster(): PostgresTenantCluster {
 export function getActiveTenantConfiguration(): TenantConfiguration {
   const packageDir = resolveTenantPackageDir();
   const env =
-    (process.env.PLATFORM_ENVIRONMENT as 'dev' | 'test' | 'training' | 'live' | undefined) ??
-    'dev';
+    (process.env.PLATFORM_ENVIRONMENT as
+      | 'dev'
+      | 'test'
+      | 'training'
+      | 'demo'
+      | 'live'
+      | undefined) ?? 'dev';
   const hostingMode =
     (process.env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
     'multi_tenant';
@@ -595,6 +600,24 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
     value: validated,
   };
   return validated;
+}
+
+/**
+ * Shared configuration-driven helper for non-live demo mode (Rule 6).
+ * Returns true only when the tenant environment is non-live (`dev`, `test`,
+ * `training` or `demo`) AND `featureFlags.enableDemoMode` is enabled.
+ * Never depends on `NODE_ENV`.
+ */
+export function isNonLiveDemoEnvironment(
+  config: {
+    environment: TenantConfiguration['environment'];
+    featureFlags?: { enableDemoMode?: boolean };
+  } = getActiveTenantConfiguration(),
+): boolean {
+  return (
+    config.environment !== 'live' &&
+    Boolean(config.featureFlags?.enableDemoMode)
+  );
 }
 
 export function resolveCurrentTenantContext(

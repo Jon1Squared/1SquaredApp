@@ -1,9 +1,21 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 
-const files = execFileSync('git', ['ls-files', 'data/', 'src/seed/'], {
-  encoding: 'utf8',
-})
+const files = execFileSync(
+  'git',
+  [
+    'ls-files',
+    '--cached',
+    '--others',
+    '--exclude-standard',
+    'data/',
+    'src/seed/',
+    'client-*/config/',
+  ],
+  {
+    encoding: 'utf8',
+  },
+)
   .split(/\r?\n/)
   .filter((f) => f && /\.(json|sql|csv|txt|md|ts)$/i.test(f));
 

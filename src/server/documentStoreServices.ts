@@ -71,6 +71,7 @@ import type { Matter, Person } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
+  isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -678,11 +679,7 @@ async function seedSampleDocumentsForMatterLocation(
 ): Promise<void> {
   if (location.provisioningStatus !== 'provisioned') return;
   const activeCfg = config ?? loadActiveDocumentTenantConfig(store);
-  if (
-    process.env.NODE_ENV === 'production' ||
-    !activeCfg.featureFlags?.enableDemoMode ||
-    activeCfg.environment === 'live'
-  ) {
+  if (!isNonLiveDemoEnvironment(activeCfg)) {
     return;
   }
 

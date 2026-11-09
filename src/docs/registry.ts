@@ -13,6 +13,7 @@ import { aboutDocs } from './articles/about-documentation';
 import { aiMatterExtractionArticle } from './articles/ai-matter-extraction';
 import { authenticationRbacAndMfaArticle } from './articles/authentication-rbac-and-mfa';
 import { dataAdministrationAndRetentionArticle } from './articles/data-administration-and-retention';
+import { demoEnvironmentArticle } from './articles/demo-environment';
 import { deploymentAndSecurityArticle } from './articles/deployment-and-security';
 import { developmentProcessArticle } from './articles/development-process';
 import { documentGenerationArticle } from './articles/document-generation';
@@ -70,6 +71,7 @@ export const ARTICLES: DocArticle[] = [
   mattersEnquiriesTasksNavigationArticle,
   signOffQueueArticle,
   deploymentAndSecurityArticle,
+  demoEnvironmentArticle,
   tenantSettingsArticle,
   authenticationRbacAndMfaArticle,
   financeDataAndPermissionsArticle,

@@ -2,6 +2,16 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-08 — Slice S0-11b (Additive `demo` Environment & Branding Re-reservation)
+
+### Added
+- **Additive `demo` Deployment Environment (`@platform/core-api`, `@platform/core`, `core/schemas/tenant-config.schema.json`, `core/infra/main.bicep`):**
+  - Added `'demo'` to `PlatformEnvironment`, `TenantConfigurationSchema.shape.environment`, `core/schemas/tenant-config.schema.json`, and `core/infra/main.bicep` (`dev | test | training | demo | live`, default `'dev'`).
+
+### Changed
+- **Branding Reservation Metadata (`core/src/config-engine/index.ts`, `core/schemas/tenant-config.schema.json`):**
+  - Updated `branding.accentColorHex` and `branding.logoAssetKey` reservation metadata from `S0-11b` to `backlog` (tracked under backlog item `F21`, as the demo tenant uses the standard platform theme and logo).
+
 ## 2026-11-08 — Slice S0-12 (Tenant Configuration Reserved Settings & Template Approval Gate)
 
 ### Added

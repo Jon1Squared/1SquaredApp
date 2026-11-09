@@ -47,6 +47,7 @@
         "dev",
         "test",
         "training",
+        "demo",
         "live"
       ],
       "default": "dev",
@@ -68,16 +69,16 @@
           "type": "string",
           "default": "#1f6feb",
           "x-reserved": {
-            "for": "S0-11b",
-            "reason": "Reserved for tenant branding theme rendering in S0-11b."
+            "for": "backlog",
+            "reason": "Reserved for backlog F21 tenant branding theme rendering; the demo tenant uses the standard platform theme."
           }
         },
         "logoAssetKey": {
           "type": "string",
           "default": "default-logo.svg",
           "x-reserved": {
-            "for": "S0-11b",
-            "reason": "Reserved for tenant firm logo rendering in S0-11b."
+            "for": "backlog",
+            "reason": "Reserved for backlog F21 tenant firm logo rendering; the demo tenant uses the standard platform logo."
           }
         },
         "contactEmail": {

@@ -559,7 +559,7 @@ export const TenantConfigurationSchema = z
         'Deployment tenancy mode (Model A single_tenant or Model B multi_tenant)',
       ),
     environment: z
-      .enum(['dev', 'test', 'training', 'live'])
+      .enum(['dev', 'test', 'training', 'demo', 'live'])
       .default('dev')
       .describe('Target deployment environment'),
     branding: z
@@ -573,13 +573,13 @@ export const TenantConfigurationSchema = z
           .regex(/^#[0-9a-fA-F]{6}$/)
           .default('#1f6feb')
           .describe(
-            '[x-reserved:S0-11b] Primary brand accent hex colour (reserved for tenant branding theme rendering in S0-11b)',
+            '[x-reserved:backlog] Primary brand accent hex colour (reserved for backlog F21 tenant branding theme rendering; the demo tenant uses the standard platform theme)',
           ),
         logoAssetKey: z
           .string()
           .default('default-logo.svg')
           .describe(
-            '[x-reserved:S0-11b] Tenant-scoped asset key for the firm logo (reserved for tenant firm logo rendering in S0-11b)',
+            '[x-reserved:backlog] Tenant-scoped asset key for the firm logo (reserved for backlog F21 tenant firm logo rendering; the demo tenant uses the standard platform logo)',
           ),
         contactEmail: z
           .string()

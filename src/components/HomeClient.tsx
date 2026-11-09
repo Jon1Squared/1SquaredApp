@@ -34,8 +34,10 @@ import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
+  computeMatterOpeningChecklistProgress,
   isHighOrCriticalRiskRating,
   isMatterConflictCheckAwaitingDecision,
+  isMatterOpeningInProgress,
 } from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
@@ -47,7 +49,7 @@ import {
   PMS_AS_AT_UNAVAILABLE_LABEL,
 } from '@/domain/pms';
 import type { SearchDoc } from '@/domain/search';
-import { isTaskOpen } from '@/domain/tasks';
+import { isComplianceOrOnboardingTask, isTaskOpen } from '@/domain/tasks';
 import type {
   AppFinanceCapabilities,
   AppSnapshot,
@@ -846,7 +848,7 @@ export function HomeClient({
               <span>Matter openings in progress</span>
             </div>
             <div className="kpi-value">
-              {matters.filter((m) => m.matterStatusId === 'matter_status.opening').length}
+              {matters.filter((m) => isMatterOpeningInProgress(m, values)).length}
             </div>
             <div className="kpi-sub">AML, engagement letter &amp; retainer checks</div>
           </div>
@@ -2494,7 +2496,7 @@ export function HomeClient({
       // 10. matter_openings_in_progress
       // ================================================================
       case 'matter_openings_in_progress': {
-        const openingMatters = matters.filter((m) => m.matterStatusId === 'matter_status.opening');
+        const openingMatters = matters.filter((m) => isMatterOpeningInProgress(m, values));
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -2513,21 +2515,8 @@ export function HomeClient({
               ) : (
                 <ul className="worklist">
                   {openingMatters.map((m) => {
-                    const conflictDone =
-                      m.conflictDecision?.outcome === 'Cleared' ||
-                      m.conflictCheckRecord?.status === 'Cleared' ||
-                      m.conflictCheckRecord?.status === 'Approved' ||
-                      m.conflictCheckStatus === 'Cleared';
-                    const amlDone =
-                      m.amlStatus === 'Completed' ||
-                      m.amlStatus === 'Verified' ||
-                      m.amlStatus === 'Cleared';
-                    const engDone = m.engagementLetterStatus === 'Signed';
-                    const retainerDone =
-                      m.retainerMoniesOnAccountGbp !== null && m.retainerMoniesOnAccountGbp > 0;
-                    const completedSteps = [conflictDone, amlDone, engDone, retainerDone].filter(
-                      Boolean,
-                    ).length;
+                    const { conflictDone, amlDone, engDone, retainerDone, completedSteps } =
+                      computeMatterOpeningChecklistProgress(m);
                     const clientOrg = orgById.get(m.clientId);
                     const clientPer = personById.get(m.clientId);
                     const clientLabel = clientOrg
@@ -4462,7 +4451,9 @@ export function HomeClient({
                         </div>
                         <div className="worklist-meta">
                           <span>
-                            {m.conflictCheckRecord?.reviewerMessage || 'Awaiting compliance review'}
+                            {m.conflictCheckRecord?.reviewerMessage ||
+                              m.conflictDecision?.summary ||
+                              'Awaiting compliance review'}
                           </span>
                         </div>
                       </div>
@@ -4588,10 +4579,7 @@ export function HomeClient({
               (t) =>
                 isTaskOpen(t) &&
                 t.assignedTeamId === tm.id &&
-                (t.taskTypeId === 'task_type.compliance' ||
-                  t.title.toLowerCase().includes('aml') ||
-                  t.title.toLowerCase().includes('cdd') ||
-                  t.title.toLowerCase().includes('conflict')),
+                isComplianceOrOnboardingTask(t, values),
             );
             const overdue = teamTasks.filter((t) => t.dueAt < todayIso).length;
             const dueThisWeek = teamTasks.filter(

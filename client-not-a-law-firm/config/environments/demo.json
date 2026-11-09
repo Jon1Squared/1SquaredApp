@@ -1,0 +1,12 @@
+{
+  "environment": "demo",
+  "hostingMode": "multi_tenant",
+  "featureFlags": {
+    "enableDemoMode": true
+  },
+  "integrations": {
+    "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-demo/pms-connection-string",
+    "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-demo/companies-house-api-key",
+    "aiProviderChoice": "anthropic"
+  }
+}
