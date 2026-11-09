@@ -6669,6 +6669,52 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
         expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
 
+        // 2c. R372: A linked matter code whose PMS matter is missing from the PMS database returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note
+        store.pmsLinks.push({
+          id: 'PMSL-R372-MISSING-PMS',
+          entityType: 'matter',
+          onesquaredId: 'M-000001',
+          pmsCode: 'MISSING999-0001',
+          matchedBy: 'manual',
+          matchedAt: '2026-10-16T09:00:00Z',
+          matchedByUserId: 'P-000004',
+        });
+        try {
+          const missingPmsBill = await requestMatterBillAction('MISSING999-0001');
+          expect(isActionDenied(missingPmsBill)).toBe(true);
+          if (isActionDenied(missingPmsBill)) {
+            expect(missingPmsBill.code).toBe('FORBIDDEN');
+            expect(missingPmsBill.message).toBe('Matter not found or access denied.');
+          }
+
+          const missingPmsWriteOff = await flagMatterWriteOffAction('MISSING999-0001', 450);
+          expect(isActionDenied(missingPmsWriteOff)).toBe(true);
+          if (isActionDenied(missingPmsWriteOff)) {
+            expect(missingPmsWriteOff.code).toBe('FORBIDDEN');
+            expect(missingPmsWriteOff.message).toBe('Matter not found or access denied.');
+          }
+
+          const missingPmsCc = await recordInvoiceCreditControlActionAction({
+            invoiceNumber: 'PV/2026/0040',
+            matterCode: 'MISSING999-0001',
+            clientCode: 'PEN001',
+            actionType: 'log_call',
+            note: 'Should fail when PMS matter does not exist',
+          });
+          expect(isActionDenied(missingPmsCc)).toBe(true);
+          if (isActionDenied(missingPmsCc)) {
+            expect(missingPmsCc.code).toBe('FORBIDDEN');
+            expect(missingPmsCc.message).toBe('Matter not found or access denied.');
+          }
+
+          expect(store.tasks.length).toBe(tasksBeforeR315);
+          expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+          expect(store.notes.length).toBe(notesBeforeR315);
+        } finally {
+          const idx = store.pmsLinks.findIndex((l) => l.id === 'PMSL-R372-MISSING-PMS');
+          if (idx >= 0) store.pmsLinks.splice(idx, 1);
+        }
+
         // 3. Revoke finance:credit_control on partner: all 3 actions return FORBIDDEN mentioning finance:credit_control
         partner.permissionOverrides = {
           grant: [],

@@ -178,7 +178,7 @@ export class DemoDbPmsSource implements PmsSource {
       }
       return {
         asAtDate: rawAsAt,
-        importedAt: row?.imported_at ? String(row.imported_at) : new Date().toISOString(),
+        importedAt: row?.imported_at ? String(row.imported_at) : '',
         sourceFile: row?.source_file ? String(row.source_file) : '1Squared_PMS_Demo_Data.xlsx',
       };
     } finally {

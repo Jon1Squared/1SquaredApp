@@ -287,7 +287,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(novWeek.dailyPaceHours).toBe(0);
     expect(novWeek.weeklyPaceHours).toBe(0);
 
-    // R339: Adding a 2025 invoice and a 2025 time entry does not change current-year (2026) billedThisYear, yearToDateTotal, chargeable_hours, or pct_of_annual_target
+    // R339 & R358: Adding a 2025 invoice and a 2025 time entry does not change current-year (2026) billedThisYear, yearToDateTotal, chargeable_hours, pct_of_annual_target, time_value, billed_value, written_off, or client fees_billed
     const inv2025 = {
       ...baseInvoices[0]!,
       invoice_number: 'PV/2025/0999',
@@ -313,6 +313,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       chargeable: 'Y' as const,
       billed_status: 'Billed' as const,
       billed_value: 2580,
+      write_off_value: 350,
     };
     const withPriorYear = buildFirmFinanceRollups({
       asAtDate: source.getExtractInfo().asAtDate,
@@ -331,6 +332,15 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     )!;
     expect(fe005WithPriorYear.chargeable_hours).toBe(fe005Baseline.chargeable_hours);
     expect(fe005WithPriorYear.pct_of_annual_target).toBe(fe005Baseline.pct_of_annual_target);
+    expect(fe005WithPriorYear.time_value).toBe(fe005Baseline.time_value);
+    expect(fe005WithPriorYear.billed_value).toBe(fe005Baseline.billed_value);
+    expect(fe005WithPriorYear.written_off).toBe(fe005Baseline.written_off);
+
+    const pen001Baseline = rollups.allClientFins.find((c) => c.client_code === 'PEN001')!;
+    const pen001WithPriorYear = withPriorYear.allClientFins.find(
+      (c) => c.client_code === 'PEN001',
+    )!;
+    expect(pen001WithPriorYear.fees_billed).toBe(pen001Baseline.fees_billed);
   });
 
   it('handles an extract with no as-at date or a malformed as-at date without throwing or falling back to October (R338)', async () => {
@@ -430,7 +440,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
             expect(firmRes.allClientFins).toEqual([]);
           }
 
-          const matterBundleRes = getMatterPmsViewBundle('M-000001', 'P-000001');
+          const matterBundleRes = getMatterPmsViewBundle('M-000001', 'P-000004');
           expect(isActionDenied(matterBundleRes)).toBe(false);
           if (!isActionDenied(matterBundleRes)) {
             expect(matterBundleRes.extractInfo.asAtDate).toBe('');
@@ -438,6 +448,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
               PMS_AS_AT_UNAVAILABLE_LABEL,
             );
             expect(matterBundleRes.matterBundle).toBeNull();
+            expect(matterBundleRes.allUnlinkedPmsMatters.length).toBeGreaterThan(0);
           }
 
           const clientBundleRes = getClientPmsViewBundle(
@@ -452,11 +463,114 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
               PMS_AS_AT_UNAVAILABLE_LABEL,
             );
             expect(clientBundleRes.clientBundle).toBeNull();
+            expect(Object.keys(clientBundleRes.oneSquaredMatterIdByPmsCode).length).toBeGreaterThan(0);
           }
         } finally {
           getPmsSpy.mockRestore();
         }
       }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('validates README as-at date parsing, buildPmsDatabaseFromWorkbook date validation, and --as-at CLI overrides (R359)', async () => {
+    const {
+      extractAsAtDateFromWorkbook,
+      parseImportPmsCliArgs,
+    } = await import('@/pms/importPms');
+
+    // 1. README parser accepts ISO and "16 October 2026. ..."
+    expect(
+      extractAsAtDateFromWorkbook({
+        sheetNames: ['README'],
+        getSheetMatrix: () => [
+          { rowNumber: 1, cells: { A: 'Field', B: 'Value' } },
+          { rowNumber: 2, cells: { A: 'As-at date', B: '2026-10-16' } },
+        ],
+      }),
+    ).toBe('2026-10-16');
+
+    expect(
+      extractAsAtDateFromWorkbook({
+        sheetNames: ['README'],
+        getSheetMatrix: () => [
+          {
+            rowNumber: 5,
+            cells: {
+              A: 'As-at date',
+              B: '16 October 2026. All age buckets, overdue indicators, and YTD totals are evaluated relative to this date.',
+            },
+          },
+        ],
+      }),
+    ).toBe('2026-10-16');
+
+    // 2. Rejects bad day ("31 February 2026"), missing row, and missing README sheet
+    expect(
+      extractAsAtDateFromWorkbook({
+        sheetNames: ['README'],
+        getSheetMatrix: () => [
+          { rowNumber: 2, cells: { A: 'As-at date', B: '31 February 2026' } },
+        ],
+      }),
+    ).toBeNull();
+
+    expect(
+      extractAsAtDateFromWorkbook({
+        sheetNames: ['README'],
+        getSheetMatrix: () => [
+          { rowNumber: 1, cells: { A: 'Firm name', B: 'Not A Law Firm LLP' } },
+        ],
+      }),
+    ).toBeNull();
+
+    expect(
+      extractAsAtDateFromWorkbook({
+        sheetNames: ['clients'],
+        getSheetMatrix: () => [],
+      }),
+    ).toBeNull();
+
+    // 3. buildPmsDatabaseFromWorkbook throws on bad date or empty explicit override, and --as-at overrides README
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-r359-'));
+    const tmpDbPath = path.join(tmpDir, 'pms-r359.sqlite');
+    try {
+      expect(() =>
+        buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath, asAtDate: '2026-02-30' }),
+      ).toThrow(/Invalid or missing PMS extract as-at date "2026-02-30"/);
+
+      expect(() =>
+        buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath, asAtDate: '' }),
+      ).toThrow(/Invalid or missing PMS extract as-at date ""/);
+
+      const parsedOverride = parseImportPmsCliArgs(['--as-at', '2026-11-30']);
+      expect(parsedOverride).toEqual({ asAtDate: '2026-11-30' });
+      expect(parseImportPmsCliArgs(['--as-at=2026-11-30'])).toEqual({
+        asAtDate: '2026-11-30',
+      });
+
+      const imported = buildPmsDatabaseFromWorkbook({
+        dbPath: tmpDbPath,
+        ...parsedOverride,
+      });
+      expect(imported.asAtDate).toBe('2026-11-30');
+      const customSource = new DemoDbPmsSource(tmpDbPath);
+      expect(customSource.getExtractInfo().asAtDate).toBe('2026-11-30');
+
+      // 4. --as-at with no value or --as-at= fails instead of falling back to README
+      expect(() => parseImportPmsCliArgs(['--as-at'])).toThrow(
+        /Missing value for --as-at/,
+      );
+      expect(() => parseImportPmsCliArgs(['--as-at', '--other-flag'])).toThrow(
+        /Missing value for --as-at/,
+      );
+      expect(() => parseImportPmsCliArgs(['--as-at='])).toThrow(
+        /Empty value for --as-at=/,
+      );
+      expect(() => parseImportPmsCliArgs(['--as-at=   '])).toThrow(
+        /Empty value for --as-at=/,
+      );
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

@@ -8912,22 +8912,6 @@ export function getMatterPmsViewBundle(
   const link =
     visiblePmsLinks.find((l) => l.entityType === 'matter' && l.onesquaredId === matterId) ?? null;
 
-  if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
-    return {
-      extractInfo: {
-        asAtDate: '',
-        sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
-        importedAt: extractInfo.importedAt,
-      },
-      link,
-      matterBundle: null,
-      unlinkedPmsMattersForClient: [],
-      allUnlinkedPmsMatters: [],
-    };
-  }
-
-  const matterBundle = link ? pms.getMatterFullBundle(link.pmsCode) : null;
-
   const canManageLinks = permSet.permissions.has('finance:manage_links');
   let allUnlinkedPmsMatters: PmsMatter[] = [];
   let unlinkedPmsMattersForClient: PmsMatter[] = [];
@@ -8949,6 +8933,22 @@ export function getMatterPmsViewBundle(
       );
     }
   }
+
+  if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
+    return {
+      extractInfo: {
+        asAtDate: '',
+        sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
+        importedAt: extractInfo.importedAt,
+      },
+      link,
+      matterBundle: null,
+      unlinkedPmsMattersForClient,
+      allUnlinkedPmsMatters,
+    };
+  }
+
+  const matterBundle = link ? pms.getMatterFullBundle(link.pmsCode) : null;
 
   return {
     extractInfo,
@@ -8984,6 +8984,13 @@ export function getClientPmsViewBundle(
   const link =
     visiblePmsLinks.find((l) => l.entityType === recordType && l.onesquaredId === recordId) ?? null;
 
+  const oneSquaredMatterIdByPmsCode: Record<string, string> = {};
+  for (const l of visiblePmsLinks) {
+    if (l.entityType === 'matter' && !hiddenMatterIds.has(l.onesquaredId)) {
+      oneSquaredMatterIdByPmsCode[l.pmsCode] = l.onesquaredId;
+    }
+  }
+
   if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
     return {
       extractInfo: {
@@ -8994,7 +9001,7 @@ export function getClientPmsViewBundle(
       link,
       clientBundle: null,
       pmsClient: null,
-      oneSquaredMatterIdByPmsCode: {},
+      oneSquaredMatterIdByPmsCode,
       groupView: null,
     };
   }
@@ -9003,6 +9010,9 @@ export function getClientPmsViewBundle(
   const visibleMatterFins = pms
     .getAllMatterFinancials()
     .filter((m) => accessibleLinkedPmsMatterCodes.has(m.matter_code));
+  const visibleInvoices = pms
+    .listAllInvoiceBalances()
+    .filter((i) => accessibleLinkedPmsMatterCodes.has(i.matter_code));
   const visibleAgedDebt = pms
     .getAgedDebt()
     .filter((i) => accessibleLinkedPmsMatterCodes.has(i.matter_code));
@@ -9018,19 +9028,13 @@ export function getClientPmsViewBundle(
           summary: buildClientFinancialsFromRows(
             pmsClient,
             visibleMatterFins,
-            visibleAgedDebt,
+            visibleInvoices,
+            extractInfo.asAtDate,
           ),
           matters: visibleMatterFins.filter((m) => m.client_code === link.pmsCode),
           invoices: visibleAgedDebt.filter((i) => i.client_code === link.pmsCode),
         }
       : null;
-
-  const oneSquaredMatterIdByPmsCode: Record<string, string> = {};
-  for (const l of visiblePmsLinks) {
-    if (l.entityType === 'matter' && !hiddenMatterIds.has(l.onesquaredId)) {
-      oneSquaredMatterIdByPmsCode[l.pmsCode] = l.onesquaredId;
-    }
-  }
 
   let groupView: PmsGroupFinancials | null = null;
   if (recordType === 'organisation') {
@@ -9050,7 +9054,8 @@ export function getClientPmsViewBundle(
             ? buildClientFinancialsFromRows(
                 companyClient,
                 visibleMatterFins,
-                visibleAgedDebt,
+                visibleInvoices,
+                extractInfo.asAtDate,
               )
             : null;
           return {
@@ -9119,7 +9124,7 @@ export function getPmsAdminSnapshot(byId?: string): PmsAdminSnapshot {
     const nowIso = new Date().toISOString();
     return {
       extractInfo: {
-        asAtDate: nowIso.slice(0, 10),
+        asAtDate: '',
         sourceFile: 'No PMS linked (Clean Client Deployment)',
         importedAt: nowIso,
       },

@@ -42,7 +42,12 @@ const MONTH_NAME_TO_NUMBER: Record<string, string> = {
   december: '12',
 };
 
-export function extractAsAtDateFromWorkbook(wb: XlsxWorkbook): string | null {
+export interface WorkbookReadmeLike {
+  sheetNames: string[];
+  getSheetMatrix: (name: string) => Array<{ rowNumber: number; cells: Record<string, string> }>;
+}
+
+export function extractAsAtDateFromWorkbook(wb: WorkbookReadmeLike): string | null {
   if (!wb.sheetNames.includes('README')) return null;
   const rows = wb.getSheetMatrix('README');
   for (const row of rows) {
@@ -70,6 +75,28 @@ export function extractAsAtDateFromWorkbook(wb: XlsxWorkbook): string | null {
     }
   }
   return null;
+}
+
+export function parseImportPmsCliArgs(args: readonly string[]): { asAtDate?: string } {
+  let asAtDate: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--as-at') {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith('--') || next.trim().length === 0) {
+        throw new Error('Missing value for --as-at. Provide a valid YYYY-MM-DD date.');
+      }
+      asAtDate = next.trim();
+      i++;
+    } else if (arg.startsWith('--as-at=')) {
+      const val = arg.slice('--as-at='.length).trim();
+      if (val.length === 0) {
+        throw new Error('Empty value for --as-at=. Provide a valid YYYY-MM-DD date.');
+      }
+      asAtDate = val;
+    }
+  }
+  return asAtDate !== undefined ? { asAtDate } : {};
 }
 
 export function resolveWorkbookPath(customPath?: string): string {
@@ -606,7 +633,13 @@ export function buildPmsDatabaseFromWorkbook(options?: {
   }
 
   const wb = openXlsxWorkbook(workbookPath);
-  const asAtDate = (options?.asAtDate?.trim() || extractAsAtDateFromWorkbook(wb) || '').trim();
+  const hasExplicitAsAt =
+    options !== undefined &&
+    Object.prototype.hasOwnProperty.call(options, 'asAtDate') &&
+    options.asAtDate !== undefined;
+  const asAtDate = (
+    hasExplicitAsAt ? (options.asAtDate ?? '') : (extractAsAtDateFromWorkbook(wb) ?? '')
+  ).trim();
   if (!isValidPmsAsAtDate(asAtDate)) {
     throw new Error(
       `Invalid or missing PMS extract as-at date "${asAtDate}". Provide a valid YYYY-MM-DD via --as-at or in the workbook README sheet.`,

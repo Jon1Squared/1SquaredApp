@@ -569,6 +569,7 @@ export function buildClientFinancialsFromRows(
   client: PmsClient,
   visibleMatters: readonly PmsMatterFinancials[],
   visibleInvoices: readonly PmsInvoiceBalance[],
+  asAtDate?: string,
 ): PmsClientFinancials {
   const clientMatters = visibleMatters.filter((m) => m.client_code === client.client_code);
   const clientInvoices = visibleInvoices.filter(
@@ -576,7 +577,15 @@ export function buildClientFinancialsFromRows(
   );
 
   const unbilled_wip = sumMoneyPence(clientMatters, (m) => m.unbilled_wip);
-  const fees_billed = sumMoneyPence(clientMatters, (m) => m.fees_billed);
+  const fees_billed = isValidPmsAsAtDate(asAtDate)
+    ? sumMoneyPence(visibleInvoices, (inv) =>
+        inv.client_code === client.client_code &&
+        inv.invoice_date.slice(0, 4) === asAtDate.slice(0, 4) &&
+        inv.invoice_date <= asAtDate.slice(0, 10)
+          ? inv.fees_net
+          : 0,
+      )
+    : sumMoneyPence(clientMatters, (m) => m.fees_billed);
   const disbursements_billed = sumMoneyPence(clientMatters, (m) => m.disbursements_billed);
   const total_invoiced_inc_vat = sumMoneyPence(clientMatters, (m) => m.total_invoiced_inc_vat);
   const total_paid = sumMoneyPence(clientMatters, (m) => m.total_paid);
@@ -806,28 +815,29 @@ export function buildFirmFinanceRollups(
   const prevMonthNum = asAtMonthNum === 1 ? 12 : asAtMonthNum - 1;
   const previousYm = `${String(prevYearNum).padStart(4, '0')}-${String(prevMonthNum).padStart(2, '0')}`;
 
-  // 1. Fee-earner performance (chargeable_hours & pct_of_annual_target scoped to as-at year up to asAtIso, R339)
+  // 1. Fee-earner performance (chargeable_hours, pct_of_annual_target, time_value, billed_value & written_off scoped to as-at year up to asAtIso, R339, R358)
   const sortedFeeEarners = [...rows.feeEarners].sort((a, b) =>
     a.fee_earner_id.localeCompare(b.fee_earner_id),
   );
   const allFeeEarnerPerformance: PmsFeeEarnerPerformance[] = sortedFeeEarners.map((fe) => {
     const feEntries = visibleTimeEntries.filter((t) => t.fee_earner_id === fe.fee_earner_id);
-    const chargeable_hours = sumMoneyPence(feEntries, (t) =>
-      t.chargeable === 'Y' && t.date.slice(0, 4) === asAtYear && t.date <= asAtIso
-        ? t.hours
-        : 0,
+    const feYearEntries = feEntries.filter(
+      (t) => t.date.slice(0, 4) === asAtYear && t.date <= asAtIso,
+    );
+    const chargeable_hours = sumMoneyPence(feYearEntries, (t) =>
+      t.chargeable === 'Y' ? t.hours : 0,
     );
     const chargeable_hours_this_month = sumMoneyPence(feEntries, (t) =>
       t.chargeable === 'Y' && t.date.slice(0, 7) === currentYm && t.date <= asAtIso
         ? t.hours
         : 0,
     );
-    const time_value = sumMoneyPence(feEntries, (t) => t.value);
+    const time_value = sumMoneyPence(feYearEntries, (t) => t.value);
     const unbilled_wip = sumMoneyPence(feEntries, (t) =>
       t.billed_status === 'Unbilled' ? t.value : 0,
     );
-    const billed_value = sumMoneyPence(feEntries, (t) => t.billed_value);
-    const written_off = sumMoneyPence(feEntries, (t) => t.write_off_value);
+    const billed_value = sumMoneyPence(feYearEntries, (t) => t.billed_value);
+    const written_off = sumMoneyPence(feYearEntries, (t) => t.write_off_value);
     const annual_target_hours = Number(fe.annual_target_hours ?? 0);
     const pct_of_annual_target =
       annual_target_hours > 0 ? chargeable_hours / annual_target_hours : 0;
@@ -856,7 +866,7 @@ export function buildFirmFinanceRollups(
     a.client_code.localeCompare(b.client_code),
   );
   const allClientFins: PmsClientFinancials[] = sortedClients.map((client) =>
-    buildClientFinancialsFromRows(client, visibleMatters, visibleInvoices),
+    buildClientFinancialsFromRows(client, visibleMatters, visibleInvoices, asAtIso),
   );
 
   // 3. Monthly fees billed (derived from asAtDate year and month range up to asAtIso, R339)
