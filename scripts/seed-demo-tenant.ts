@@ -191,9 +191,14 @@ export function runSeedDemoTenant(
     if (!fs.existsSync(resolvedMapPath)) {
       throw new Error(`Entra map file not found: ${entraMapPath}`);
     }
-    const rawMap = JSON.parse(
-      fs.readFileSync(resolvedMapPath, 'utf8'),
-    ) as Record<string, string>;
+    let rawMap: Record<string, string>;
+    try {
+      rawMap = JSON.parse(
+        fs.readFileSync(resolvedMapPath, 'utf8'),
+      ) as Record<string, string>;
+    } catch {
+      throw new Error('Entra map file is not valid JSON.');
+    }
     const applied = applyEntraObjectIdMapToStore(seedStore, rawMap);
     mappedEntraPersonas = applied.mappedCount;
   }
@@ -202,7 +207,18 @@ export function runSeedDemoTenant(
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
   }
-  fs.writeFileSync(targetStorePath, JSON.stringify(seedStore, null, 2), 'utf8');
+  const tmpStorePath = `${targetStorePath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tmpStorePath, JSON.stringify(seedStore, null, 2), 'utf8');
+    fs.renameSync(tmpStorePath, targetStorePath);
+  } catch (writeErr) {
+    try {
+      if (fs.existsSync(tmpStorePath)) fs.unlinkSync(tmpStorePath);
+    } catch {
+      // ignore cleanup errors
+    }
+    throw writeErr;
+  }
 
   const result: SeedDemoTenantResult = {
     event: 'seed.demo_tenant_completed',

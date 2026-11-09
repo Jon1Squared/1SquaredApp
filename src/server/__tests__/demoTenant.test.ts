@@ -4,10 +4,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computeMatterOpeningChecklistProgress,
-  isComplianceOrOnboardingTask,
   isMatterConflictCheckAwaitingDecision,
   isMatterOpeningInProgress,
 } from '@/domain/matterOpeningRecord';
+import { isComplianceOrOnboardingTask } from '@/domain/tasks';
 import {
   getActiveTenantRawBaseConfig,
   isNonLiveDemoEnvironment,
@@ -722,12 +722,26 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('15. getStore() refuses a corrupted runtime store file without echoing file content in the error message (R357, R368)', () => {
+  it('15. getStore() and runSeedDemoTenant refuse corrupted JSON files without echoing file content in the error message (R357, R368, R379, R380)', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r357-corrupt-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
-    const corruptedPayload = '{"clientSecretName": "SensitiveClientName';
+    const entraMapPath = path.join(tmpDir, 'entra-map.local.json');
+    // In V8, JSON.parse('{"name": JaneSecret}') throws:
+    //   Unexpected token 'J', "{"name": JaneSecret}" is not valid JSON
+    // which echoes the unquoted token in error.message unless redacted.
+    const corruptedPayload = '{"name": JaneSecret}';
+    const corruptedEntraMapPayload = '{"email": rhian.morgan@notalawfirm.co.uk}';
 
     try {
+      // Confirm V8's native JSON.parse error message does contain the token so this test would fail on unredacted error.message
+      let rawParseMessage = '';
+      try {
+        JSON.parse(corruptedPayload);
+      } catch (parseErr) {
+        rawParseMessage = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      }
+      expect(rawParseMessage).toContain('JaneSecret');
+
       fs.writeFileSync(storePath, corruptedPayload, 'utf8');
       process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
       clearStoreMemoryCache();
@@ -741,8 +755,28 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       expect(thrownMessage).toMatch(
         /Refusing to load corrupted runtime store file.*not valid JSON/,
       );
-      expect(thrownMessage).not.toContain('SensitiveClientName');
+      expect(thrownMessage).not.toContain('JaneSecret');
       expect(fs.readFileSync(storePath, 'utf8')).toBe(corruptedPayload);
+
+      // Also verify runSeedDemoTenant with a malformed --entra-map file reports a fixed message without echoing file content (R379)
+      fs.writeFileSync(entraMapPath, corruptedEntraMapPayload, 'utf8');
+      const seedTargetPath = path.join(tmpDir, 'seeded-store.json');
+      let thrownEntraMapMessage = '';
+      try {
+        runSeedDemoTenant({
+          args: ['--entra-map', entraMapPath],
+          env: {
+            PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+            PLATFORM_ENVIRONMENT: 'demo',
+          },
+          runtimeStorePath: seedTargetPath,
+          logger: () => {},
+        });
+      } catch (err) {
+        thrownEntraMapMessage = err instanceof Error ? err.message : String(err);
+      }
+      expect(thrownEntraMapMessage).toBe('Entra map file is not valid JSON.');
+      expect(thrownEntraMapMessage).not.toContain('rhian.morgan');
     } finally {
       delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
       fs.rmSync(tmpDir, { recursive: true, force: true });

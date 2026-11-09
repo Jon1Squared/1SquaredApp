@@ -799,8 +799,6 @@ export function computeMatterOpeningChecklistProgress(
   return { conflictDone, amlDone, engDone, retainerDone, completedSteps };
 }
 
-export { isComplianceOrOnboardingTask } from './tasks';
-
 /**
  * Resolves the `risk_rating` ChoiceValue ID matching a calculated `RiskLevel`.
  */

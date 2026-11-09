@@ -855,7 +855,7 @@ export function getStore(): FirmStore {
       const raw = fs.readFileSync(activeStorePath, 'utf8');
       const parsed = JSON.parse(raw) as FirmStore;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Root JSON value must be an object.');
+        throw new SyntaxError('Root JSON value must be an object.');
       }
       let migrated = false;
       const seedLists = buildSeedLists();
@@ -1037,9 +1037,21 @@ export function getStore(): FirmStore {
         // ignore stat errors
       }
       return global.__oneSquaredStore;
-    } catch {
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        throw new Error(
+          `Refusing to load corrupted runtime store file at ${activeStorePath}: not valid JSON.`,
+        );
+      }
+      const code =
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        typeof (err as { code?: unknown }).code === 'string'
+          ? (err as { code: string }).code
+          : 'UNKNOWN_ERROR';
       throw new Error(
-        `Refusing to load corrupted runtime store file at ${activeStorePath}: not valid JSON.`,
+        `Failed to load runtime store file at ${activeStorePath} (code: ${code}).`,
       );
     }
   }
@@ -1073,8 +1085,17 @@ export function saveStore(store: FirmStore): void {
     const targetDir = path.dirname(targetPath);
     if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
     const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
-    fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
-    fs.renameSync(tmpPath, targetPath);
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
+      fs.renameSync(tmpPath, targetPath);
+    } catch (writeErr) {
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {
+        // ignore cleanup errors
+      }
+      throw writeErr;
+    }
     global.__oneSquaredStoreMtimeMs = fs.statSync(targetPath).mtimeMs;
   } catch {
     // ignore read-only fs errors in serverless environments
