@@ -1,7 +1,7 @@
 # ADR 0030: Tenant-Aware Scheduler
 
 - **Date:** 2026-11-06 (revised 2026-11-09 after review)
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-09)
 - **Roadmap:** Stage 0 decision D6, slices S0-19 and S0-19b (`docs/roadmap/stage-0-plan.md`); backlog gap P9
 - **Builds on:** [ADR 0024](./0024-azure-container-apps-hosting.md) (Container Apps jobs), [ADR 0025](./0025-permission-enforcement-pattern.md) (permission enforcement), [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases), [ADR 0022](./0022-key-dates-and-limitation-module.md) (key dates)
 

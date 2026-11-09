@@ -1,7 +1,7 @@
 # ADR 0028: Tenant Databases and Repositories
 
 - **Date:** 2026-11-06 (revised 2026-11-09 after review)
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-09)
 - **Roadmap:** Stage 0 decision D3, slices S0-14 to S0-17 and S0-20 (`docs/roadmap/stage-0-plan.md`); backlog gaps P2 and P8
 - **Builds on:** [ADR 0001](./0001-shared-repo-and-transitional-store.md) (transitional store), [ADR 0024](./0024-azure-container-apps-hosting.md) (hosting), [ADR 0030](./0030-tenant-aware-scheduler.md) (jobs)
 
