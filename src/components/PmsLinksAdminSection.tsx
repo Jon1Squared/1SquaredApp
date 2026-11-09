@@ -11,7 +11,11 @@ import {
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate } from '@/domain/dates';
 import { personDisplayName, primaryEmail } from '@/domain/names';
-import { formatPmsAsAtLabel } from '@/domain/pms';
+import {
+  formatPmsAsAtLabel,
+  isValidPmsAsAtDate,
+  PMS_AS_AT_UNAVAILABLE_LABEL,
+} from '@/domain/pms';
 import type { Matter, Organisation, Person, PmsEntityType } from '@/domain/types';
 import type { PmsAdminSnapshot } from '@/server/services';
 import { StatusPill } from './SearchBox';
@@ -175,7 +179,11 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
               Practice Management System (PMS) links
             </h2>
             <StatusPill
-              label={`PMS · as at ${formatPmsAsAtLabel(pmsAdmin.extractInfo.asAtDate)}`}
+              label={
+                isValidPmsAsAtDate(pmsAdmin.extractInfo.asAtDate)
+                  ? `PMS · as at ${formatPmsAsAtLabel(pmsAdmin.extractInfo.asAtDate)}`
+                  : `PMS · ${PMS_AS_AT_UNAVAILABLE_LABEL}`
+              }
               tone="neutral"
             />
           </div>

@@ -1,5 +1,6 @@
 import React from 'react';
 import { notFound } from 'next/navigation';
+import { isActionDenied } from '@/domain/actionResult';
 import {
   getAppSnapshot,
   getMatterKeyDatesSnapshot,
@@ -75,7 +76,11 @@ export default async function MatterProfilePage({
       );
     }
 
-    const pmsView = getMatterPmsViewBundle(matter.id);
+    const pmsViewRes = snap.finance.canViewMatter
+      ? getMatterPmsViewBundle(matter.id, userId)
+      : null;
+    const pmsView =
+      pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined;
     const matterKeyDates = getMatterKeyDatesSnapshot(matter.id, userId);
 
     return (
@@ -101,7 +106,7 @@ export default async function MatterProfilePage({
         userKeyDatePermissions={snap.currentUserKeyDatePermissions}
         canVerifyByKeyDateId={matterKeyDates.canVerifyByKeyDateId}
         canTakeByTaskId={snap.canTakeByTaskId}
-        canViewFinance={snap.canViewFinance}
+        canViewFinance={snap.finance.canViewMatter}
         canLiftRestriction={snap.currentUserPermissions.includes('matter:restriction:lift')}
         pmsView={pmsView}
         notes={snap.notes.filter((n) => n.recordType === 'matter' && n.recordId === matter.id)}

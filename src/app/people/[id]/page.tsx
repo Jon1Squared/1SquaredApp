@@ -1,11 +1,13 @@
 import { notFound, redirect } from 'next/navigation';
 import { PersonProfileClient } from '@/components/PersonProfileClient';
+import { isActionDenied } from '@/domain/actionResult';
 import {
   findCandidateDuplicatesForRecord,
   getAppSnapshot,
   getClientPmsViewBundle,
   recordRecentlyViewed,
   withPageActor,
+  type ClientPmsViewBundle,
 } from '@/server/services';
 import type { Person } from '@/domain/types';
 
@@ -55,14 +57,24 @@ export default async function PersonProfilePage({
     const merges = snap.mergeHistory.filter(
       (m) => m.recordType === 'person' && (m.survivorId === person.id || m.mergedId === person.id),
     );
-    const personPmsView = getClientPmsViewBundle('person', person.id);
-    const primaryOrgLink =
-      snap.links.find((l) => l.personId === person.id && l.isCurrent && l.isPrimaryContact) ??
-      snap.links.find((l) => l.personId === person.id && l.isCurrent);
-    const pmsView =
-      personPmsView.clientBundle || !primaryOrgLink
-        ? personPmsView
-        : getClientPmsViewBundle('organisation', primaryOrgLink.organisationId);
+    let pmsView: ClientPmsViewBundle | undefined;
+    if (snap.finance.canViewMatter) {
+      const personPmsRes = getClientPmsViewBundle('person', person.id, userId);
+      const personPmsView = !isActionDenied(personPmsRes) ? personPmsRes : undefined;
+      const primaryOrgLink =
+        snap.links.find((l) => l.personId === person.id && l.isCurrent && l.isPrimaryContact) ??
+        snap.links.find((l) => l.personId === person.id && l.isCurrent);
+      if (personPmsView?.clientBundle || !primaryOrgLink) {
+        pmsView = personPmsView;
+      } else {
+        const orgPmsRes = getClientPmsViewBundle(
+          'organisation',
+          primaryOrgLink.organisationId,
+          userId,
+        );
+        pmsView = !isActionDenied(orgPmsRes) ? orgPmsRes : personPmsView;
+      }
+    }
 
     return (
       <PersonProfileClient
@@ -77,7 +89,7 @@ export default async function PersonProfilePage({
         currentUserId={snap.currentUserId}
         currentUserRole={snap.currentUserRole}
         canTakeByTaskId={snap.canTakeByTaskId}
-        canViewFinance={snap.canViewFinance}
+        canViewFinance={snap.finance.canViewMatter}
         pmsView={pmsView}
         values={snap.values}
         customFields={snap.customFields}

@@ -32,6 +32,8 @@ import { findOneSquaredIdForPmsCode, formatGbp } from '@/domain/pms';
 import type { SearchDoc } from '@/domain/search';
 import { isTaskOpen } from '@/domain/tasks';
 import type {
+  AppFinanceCapabilities,
+  AppSnapshot,
   ChoiceValue,
   ContactLogMethod,
   ContactLogOutcome,
@@ -63,40 +65,82 @@ import type {
 import { HeroHomeSearch, StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
-export interface HomeClientProps {
-  currentUser: Person;
-  effectiveWorkPerson: Person;
+export type HomeSnapshotBaseProps = Pick<
+  AppSnapshot,
+  | 'currentUser'
+  | 'effectiveWorkPerson'
+  | 'homePagesConfig'
+  | 'searchIndex'
+  | 'signOffs'
+  | 'people'
+  | 'organisations'
+  | 'matters'
+  | 'enquiries'
+  | 'tasks'
+  | 'teams'
+  | 'values'
+>;
+
+export interface HomeClientProps extends HomeSnapshotBaseProps {
   activeRoleKey: string;
-  homePagesConfig: HomePagesConfig;
-  searchIndex: SearchDoc[];
-  signOffs: SignOffItem[];
-  people: Person[];
-  organisations: Organisation[];
-  matters: Matter[];
-  enquiries: Enquiry[];
-  tasks: Task[];
-  teams: Team[];
-  values: ChoiceValue[];
-  pmsLinks: PmsLink[];
-  pmsAsAtDate: string;
-  pmsSummaryByMatterId: Record<string, PmsMatterFinancials>;
-  pmsSummaryByClientId: Record<string, PmsClientFinancials>;
-  allMatterFins: PmsMatterFinancials[];
-  allClientFins: PmsClientFinancials[];
-  allFeeEarnerPerformance: PmsFeeEarnerPerformance[];
-  myFeeEarnerFigures: PmsFeeEarnerPerformance | null;
-  myWeeklyTime: PmsFeeEarnerWeeklyTime | null;
-  pmsAgedDebt: PmsInvoiceBalance[];
-  pmsInvoices: PmsInvoiceDetail[];
-  pmsMonthlyFeesBilled: { months: PmsMonthlyFeesBilled[]; yearToDateTotal: number };
-  pmsCashReceived: PmsCashReceivedSummary;
-  pmsDepartmentFinancials: {
+  finance?: AppFinanceCapabilities;
+  pmsLinks?: PmsLink[];
+  pmsAsAtDate?: string;
+  pmsSummaryByMatterId?: Record<string, PmsMatterFinancials>;
+  pmsSummaryByClientId?: Record<string, PmsClientFinancials>;
+  allMatterFins?: PmsMatterFinancials[];
+  allClientFins?: PmsClientFinancials[];
+  allFeeEarnerPerformance?: PmsFeeEarnerPerformance[];
+  myFeeEarnerFigures?: PmsFeeEarnerPerformance | null;
+  myWeeklyTime?: PmsFeeEarnerWeeklyTime | null;
+  pmsAgedDebt?: PmsInvoiceBalance[];
+  pmsInvoices?: PmsInvoiceDetail[];
+  pmsMonthlyFeesBilled?: { months: PmsMonthlyFeesBilled[]; yearToDateTotal: number };
+  pmsCashReceived?: PmsCashReceivedSummary;
+  pmsDepartmentFinancials?: {
     departments: PmsDepartmentFinancials[];
     firmTotal: PmsDepartmentFinancials;
   };
-  pmsAllDisbursements: PmsDisbursement[];
-  pmsClientAccountByMatterCode: Record<string, PmsClientAccountEntry[]>;
+  pmsAllDisbursements?: PmsDisbursement[];
+  pmsClientAccountByMatterCode?: Record<string, PmsClientAccountEntry[]>;
 }
+
+const DEFAULT_FINANCE_CAPABILITIES: AppFinanceCapabilities = {
+  canViewFirm: false,
+  canViewMatter: false,
+  canCreditControl: false,
+};
+
+const EMPTY_MONTHLY_FEES_BILLED: {
+  months: PmsMonthlyFeesBilled[];
+  yearToDateTotal: number;
+} = {
+  months: [],
+  yearToDateTotal: 0,
+};
+
+const EMPTY_CASH_RECEIVED: PmsCashReceivedSummary = {
+  currentMonthTotal: 0,
+  currentMonthReceiptCount: 0,
+  previousMonthTotal: 0,
+  previousMonthReceiptCount: 0,
+};
+
+const EMPTY_DEPARTMENT_FINANCIALS: {
+  departments: PmsDepartmentFinancials[];
+  firmTotal: PmsDepartmentFinancials;
+} = {
+  departments: [],
+  firmTotal: {
+    practiceArea: 'Firm total',
+    openMatters: 0,
+    billedThisYear: 0,
+    unbilledWip: 0,
+    outstandingDebt: 0,
+    overdueDebt: 0,
+    currentMonthHours: 0,
+  },
+};
 
 export function HomeClient({
   currentUser,
@@ -112,21 +156,22 @@ export function HomeClient({
   tasks,
   teams,
   values,
-  pmsLinks,
-  pmsAsAtDate,
-  pmsSummaryByMatterId,
-  allMatterFins,
-  allClientFins,
-  allFeeEarnerPerformance,
-  myFeeEarnerFigures,
-  myWeeklyTime,
-  pmsAgedDebt,
-  pmsInvoices,
-  pmsMonthlyFeesBilled,
-  pmsCashReceived,
-  pmsDepartmentFinancials,
-  pmsAllDisbursements,
-  pmsClientAccountByMatterCode,
+  finance = DEFAULT_FINANCE_CAPABILITIES,
+  pmsLinks = [],
+  pmsAsAtDate = '2026-10-16',
+  pmsSummaryByMatterId = {},
+  allMatterFins = [],
+  allClientFins = [],
+  allFeeEarnerPerformance = [],
+  myFeeEarnerFigures = null,
+  myWeeklyTime = null,
+  pmsAgedDebt = [],
+  pmsInvoices = [],
+  pmsMonthlyFeesBilled = EMPTY_MONTHLY_FEES_BILLED,
+  pmsCashReceived = EMPTY_CASH_RECEIVED,
+  pmsDepartmentFinancials = EMPTY_DEPARTMENT_FINANCIALS,
+  pmsAllDisbursements = [],
+  pmsClientAccountByMatterCode = {},
 }: HomeClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -1060,10 +1105,10 @@ export function HomeClient({
               <span>Cash received (Oct)</span>
               {hasDemoSeedData ? <StatusPill label="77% of £40k target" tone="positive" /> : null}
             </div>
-            <div className="kpi-value">{formatGbp(pmsCashReceived.octoberTotal)}</div>
+            <div className="kpi-value">{formatGbp(pmsCashReceived.currentMonthTotal)}</div>
             <div className="kpi-sub">
-              {pmsCashReceived.octoberReceiptCount} receipts · Sep was{' '}
-              {formatGbp(pmsCashReceived.septemberTotal)}
+              {pmsCashReceived.currentMonthReceiptCount} receipts · Sep was{' '}
+              {formatGbp(pmsCashReceived.previousMonthTotal)}
             </div>
           </div>
         );
@@ -3447,22 +3492,28 @@ export function HomeClient({
                       </div>
                     </div>
                     <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        onClick={async () => {
-                          await recordInvoiceCreditControlActionAction({
-                            invoiceNumber: 'PV-2026-009',
-                            matterCode: 'BAY001-0001',
-                            clientCode: 'BAY001',
-                            actionType: 'escalate',
-                          });
-                          showToast('Assigned formal credit-control escalation on BAY001-0001.');
-                          router.refresh();
-                        }}
-                      >
-                        Assign chase
-                      </button>
+                      {finance.canCreditControl ? (
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          onClick={async () => {
+                            const res = await recordInvoiceCreditControlActionAction({
+                              invoiceNumber: 'PV-2026-009',
+                              matterCode: 'BAY001-0001',
+                              clientCode: 'BAY001',
+                              actionType: 'escalate',
+                            });
+                            if (isActionDenied(res)) {
+                              showToast(res.message);
+                              return;
+                            }
+                            showToast('Assigned formal credit-control escalation on BAY001-0001.');
+                            router.refresh();
+                          }}
+                        >
+                          Assign chase
+                        </button>
+                      ) : null}
                       <Link
                         href={matterHrefForCode('BAY001-0001')}
                         className="btn btn--primary btn--sm"
@@ -3495,17 +3546,23 @@ export function HomeClient({
                       >
                         Revise estimate
                       </Link>
-                      <button
-                        type="button"
-                        className="btn btn--primary btn--sm"
-                        onClick={async () => {
-                          await requestMatterBillAction('PEN001-0002');
-                          showToast('Requested interim bill on PEN001-0002 (£4,569.00 WIP).');
-                          router.refresh();
-                        }}
-                      >
-                        Approve billing
-                      </button>
+                      {finance.canCreditControl ? (
+                        <button
+                          type="button"
+                          className="btn btn--primary btn--sm"
+                          onClick={async () => {
+                            const res = await requestMatterBillAction('PEN001-0002');
+                            if (isActionDenied(res)) {
+                              showToast(res.message);
+                              return;
+                            }
+                            showToast('Requested interim bill on PEN001-0002 (£4,569.00 WIP).');
+                            router.refresh();
+                          }}
+                        >
+                          Approve billing
+                        </button>
+                      ) : null}
                     </div>
                   </li>
                   <li className="worklist-row">
@@ -3550,17 +3607,23 @@ export function HomeClient({
                       </div>
                     </div>
                     <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--primary btn--sm"
-                        onClick={async () => {
-                          await requestMatterBillAction('HAR001-0003');
-                          showToast('Raised billing task for HAR001-0003 (£6,390.00 WIP).');
-                          router.refresh();
-                        }}
-                      >
-                        Approve interim bill
-                      </button>
+                      {finance.canCreditControl ? (
+                        <button
+                          type="button"
+                          className="btn btn--primary btn--sm"
+                          onClick={async () => {
+                            const res = await requestMatterBillAction('HAR001-0003');
+                            if (isActionDenied(res)) {
+                              showToast(res.message);
+                              return;
+                            }
+                            showToast('Raised billing task for HAR001-0003 (£6,390.00 WIP).');
+                            router.refresh();
+                          }}
+                        >
+                          Approve interim bill
+                        </button>
+                      ) : null}
                     </div>
                   </li>
                 </ul>
@@ -3767,17 +3830,25 @@ export function HomeClient({
                         <StatusPill label="£1,620.00 (18d)" tone="warning" />
                       </td>
                       <td className="num">
-                        <button
-                          type="button"
-                          className="btn btn--secondary btn--sm"
-                          onClick={async () => {
-                            await requestMatterBillAction('HAR001-0003');
-                            showToast('Requested bill on HAR001-0003.');
-                            router.refresh();
-                          }}
-                        >
-                          Request bill
-                        </button>
+                        {finance.canCreditControl ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            onClick={async () => {
+                              const res = await requestMatterBillAction('HAR001-0003');
+                              if (isActionDenied(res)) {
+                                showToast(res.message);
+                                return;
+                              }
+                              showToast('Requested bill on HAR001-0003.');
+                              router.refresh();
+                            }}
+                          >
+                            Request bill
+                          </button>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
                       </td>
                     </tr>
                     <tr>
@@ -3796,17 +3867,25 @@ export function HomeClient({
                         <StatusPill label="£726.00 (32d)" tone="warning" />
                       </td>
                       <td className="num">
-                        <button
-                          type="button"
-                          className="btn btn--secondary btn--sm"
-                          onClick={async () => {
-                            await requestMatterBillAction('PEN001-0002');
-                            showToast('Requested bill on PEN001-0002.');
-                            router.refresh();
-                          }}
-                        >
-                          Request bill
-                        </button>
+                        {finance.canCreditControl ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            onClick={async () => {
+                              const res = await requestMatterBillAction('PEN001-0002');
+                              if (isActionDenied(res)) {
+                                showToast(res.message);
+                                return;
+                              }
+                              showToast('Requested bill on PEN001-0002.');
+                              router.refresh();
+                            }}
+                          >
+                            Request bill
+                          </button>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
                       </td>
                     </tr>
                     <tr>
@@ -3823,17 +3902,25 @@ export function HomeClient({
                       <td className="num">£0.00</td>
                       <td className="num">£0.00 (not due)</td>
                       <td className="num">
-                        <button
-                          type="button"
-                          className="btn btn--secondary btn--sm"
-                          onClick={async () => {
-                            await requestMatterBillAction('PEN001-0001');
-                            showToast('Requested bill on PEN001-0001.');
-                            router.refresh();
-                          }}
-                        >
-                          Request bill
-                        </button>
+                        {finance.canCreditControl ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            onClick={async () => {
+                              const res = await requestMatterBillAction('PEN001-0001');
+                              if (isActionDenied(res)) {
+                                showToast(res.message);
+                                return;
+                              }
+                              showToast('Requested bill on PEN001-0001.');
+                              router.refresh();
+                            }}
+                          >
+                            Request bill
+                          </button>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
                       </td>
                     </tr>
                     <tr>
@@ -3869,22 +3956,30 @@ export function HomeClient({
                         <StatusPill label="£3,300.00 (94d)" tone="alert" />
                       </td>
                       <td className="num">
-                        <button
-                          type="button"
-                          className="btn btn--secondary btn--sm"
-                          onClick={async () => {
-                            await recordInvoiceCreditControlActionAction({
-                              invoiceNumber: 'PV-2026-009',
-                              matterCode: 'BAY001-0001',
-                              clientCode: 'BAY001',
-                              actionType: 'escalate',
-                            });
-                            showToast('Escalated PV-2026-009 (£3,300.00) on BAY001-0001.');
-                            router.refresh();
-                          }}
-                        >
-                          Escalate
-                        </button>
+                        {finance.canCreditControl ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            onClick={async () => {
+                              const res = await recordInvoiceCreditControlActionAction({
+                                invoiceNumber: 'PV-2026-009',
+                                matterCode: 'BAY001-0001',
+                                clientCode: 'BAY001',
+                                actionType: 'escalate',
+                              });
+                              if (isActionDenied(res)) {
+                                showToast(res.message);
+                                return;
+                              }
+                              showToast('Escalated PV-2026-009 (£3,300.00) on BAY001-0001.');
+                              router.refresh();
+                            }}
+                          >
+                            Escalate
+                          </button>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
                       </td>
                     </tr>
                   </tbody>
@@ -4254,51 +4349,63 @@ export function HomeClient({
                             <strong>{formatGbp(inv.outstanding)}</strong>
                           </td>
                           <td className="num">
-                            <div
-                              style={{
-                                display: 'inline-flex',
-                                gap: 4,
-                                justifyContent: 'flex-end',
-                              }}
-                            >
-                              <button
-                                type="button"
-                                className="btn btn--secondary btn--sm"
-                                onClick={async () => {
-                                  await recordInvoiceCreditControlActionAction({
-                                    invoiceNumber: inv.invoice_number,
-                                    matterCode: inv.matter_code,
-                                    clientCode: inv.client_code,
-                                    actionType: 'log_call',
-                                  });
-                                  showToast(`Logged chase call on ${inv.invoice_number}.`);
-                                  router.refresh();
+                            {finance.canCreditControl ? (
+                              <div
+                                style={{
+                                  display: 'inline-flex',
+                                  gap: 4,
+                                  justifyContent: 'flex-end',
                                 }}
                               >
-                                Log call
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn--primary btn--sm"
-                                onClick={async () => {
-                                  await recordInvoiceCreditControlActionAction({
-                                    invoiceNumber: inv.invoice_number,
-                                    matterCode: inv.matter_code,
-                                    clientCode: inv.client_code,
-                                    actionType:
-                                      daysLate >= 90 ? 'escalate' : 'send_reminder',
-                                  });
-                                  showToast(
-                                    daysLate >= 90
-                                      ? `Escalated ${inv.invoice_number} to responsible partner.`
-                                      : `Sent reminder statement for ${inv.invoice_number}.`,
-                                  );
-                                  router.refresh();
-                                }}
-                              >
-                                {daysLate >= 90 ? 'Escalate' : 'Send reminder'}
-                              </button>
-                            </div>
+                                <button
+                                  type="button"
+                                  className="btn btn--secondary btn--sm"
+                                  onClick={async () => {
+                                    const res = await recordInvoiceCreditControlActionAction({
+                                      invoiceNumber: inv.invoice_number,
+                                      matterCode: inv.matter_code,
+                                      clientCode: inv.client_code,
+                                      actionType: 'log_call',
+                                    });
+                                    if (isActionDenied(res)) {
+                                      showToast(res.message);
+                                      return;
+                                    }
+                                    showToast(`Logged chase call on ${inv.invoice_number}.`);
+                                    router.refresh();
+                                  }}
+                                >
+                                  Log call
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn--primary btn--sm"
+                                  onClick={async () => {
+                                    const res = await recordInvoiceCreditControlActionAction({
+                                      invoiceNumber: inv.invoice_number,
+                                      matterCode: inv.matter_code,
+                                      clientCode: inv.client_code,
+                                      actionType:
+                                        daysLate >= 90 ? 'escalate' : 'send_reminder',
+                                    });
+                                    if (isActionDenied(res)) {
+                                      showToast(res.message);
+                                      return;
+                                    }
+                                    showToast(
+                                      daysLate >= 90
+                                        ? `Escalated ${inv.invoice_number} to responsible partner.`
+                                        : `Sent reminder statement for ${inv.invoice_number}.`,
+                                    );
+                                    router.refresh();
+                                  }}
+                                >
+                                  {daysLate >= 90 ? 'Escalate' : 'Send reminder'}
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="muted">—</span>
+                            )}
                           </td>
                         </tr>
                       );
@@ -4397,15 +4504,21 @@ export function HomeClient({
                             )}
                           </td>
                           <td className="num">
-                            {isOverCap ? (
+                            {!finance.canCreditControl ? (
+                              <span className="muted">—</span>
+                            ) : isOverCap ? (
                               <button
                                 type="button"
                                 className="btn btn--secondary btn--sm"
                                 onClick={async () => {
-                                  await flagMatterWriteOffAction(
+                                  const res = await flagMatterWriteOffAction(
                                     m.matter_code,
                                     Math.max(m.time_value_recorded - m.fee_estimate, m.unbilled_wip),
                                   );
+                                  if (isActionDenied(res)) {
+                                    showToast(res.message);
+                                    return;
+                                  }
                                   showToast(
                                     `Flagged ${m.matter_code} for partner write-off decision.`,
                                   );
@@ -4419,7 +4532,11 @@ export function HomeClient({
                                 type="button"
                                 className="btn btn--secondary btn--sm"
                                 onClick={async () => {
-                                  await requestMatterBillAction(m.matter_code);
+                                  const res = await requestMatterBillAction(m.matter_code);
+                                  if (isActionDenied(res)) {
+                                    showToast(res.message);
+                                    return;
+                                  }
                                   showToast(
                                     `Created billing request task for ${m.fee_earner_name} on ${m.matter_code}.`,
                                   );
@@ -4570,7 +4687,7 @@ export function HomeClient({
       // 30. cash_collection_vs_target (05 Finance)
       // ================================================================
       case 'cash_collection_vs_target': {
-        const octCash = pmsCashReceived.octoberTotal;
+        const octCash = pmsCashReceived.currentMonthTotal;
         const target = 40000;
         const pct = Math.min(Math.round((octCash / target) * 100), 100);
         const octFees =
@@ -4595,8 +4712,8 @@ export function HomeClient({
                   }}
                 >
                   <span>
-                    Cash receipts in October ({pmsCashReceived.octoberReceiptCount} payment
-                    {pmsCashReceived.octoberReceiptCount === 1 ? '' : 's'})
+                    Cash receipts in October ({pmsCashReceived.currentMonthReceiptCount} payment
+                    {pmsCashReceived.currentMonthReceiptCount === 1 ? '' : 's'})
                   </span>
                   <strong>
                     {formatGbp(octCash)} / £40,000 target ({pct}%)
@@ -5266,7 +5383,7 @@ export function HomeClient({
                 <div className="legend-item">
                   <div className="lbl">Cash collected YTD</div>
                   <div className="val">
-                    {hasDemoSeedData ? '£166,184.42' : formatGbp(pmsCashReceived.octoberTotal)}
+                    {hasDemoSeedData ? '£166,184.42' : formatGbp(pmsCashReceived.currentMonthTotal)}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     {hasDemoSeedData ? '77% collection rate on gross billed' : 'Year to date'}
@@ -5343,7 +5460,7 @@ export function HomeClient({
                           '£0.00'
                         )}
                       </td>
-                      <td className="num">{d.octoberHours.toFixed(1)} h</td>
+                      <td className="num">{d.currentMonthHours.toFixed(1)} h</td>
                     </tr>
                   ))}
                   <tr style={{ background: 'var(--bg-subtle)', fontWeight: 700 }}>
@@ -5353,7 +5470,7 @@ export function HomeClient({
                     <td className="num">{formatGbp(firmTotal.unbilledWip)}</td>
                     <td className="num">{formatGbp(firmTotal.outstandingDebt)}</td>
                     <td className="num">{formatGbp(firmTotal.overdueDebt)}</td>
-                    <td className="num">{firmTotal.octoberHours.toFixed(1)} h</td>
+                    <td className="num">{firmTotal.currentMonthHours.toFixed(1)} h</td>
                   </tr>
                 </tbody>
               </table>
@@ -5483,8 +5600,8 @@ export function HomeClient({
       // ================================================================
       case 'top_clients_and_concentration': {
         const topClients = [...allClientFins]
-          .filter((c) => c.fees_billed > 0 || c.unbilled_wip > 0)
-          .sort((a, b) => b.fees_billed - a.fees_billed)
+          .filter((c) => c.fees_billed_ytd > 0 || c.unbilled_wip > 0)
+          .sort((a, b) => b.fees_billed_ytd - a.fees_billed_ytd)
           .slice(0, 6);
         const totalBilled = pmsMonthlyFeesBilled.yearToDateTotal || 181673.48;
         return (
@@ -5515,7 +5632,7 @@ export function HomeClient({
                   </thead>
                   <tbody>
                     {topClients.map((c) => {
-                      const sharePct = Math.round((c.fees_billed / totalBilled) * 1000) / 10;
+                      const sharePct = Math.round((c.fees_billed_ytd / totalBilled) * 1000) / 10;
                       const usedPct =
                         c.credit_limit_used_pct !== null
                           ? Math.round(c.credit_limit_used_pct * 1000) / 10
@@ -5528,7 +5645,7 @@ export function HomeClient({
                             </Link>
                           </td>
                           <td className="num">
-                            <strong>{formatGbp(c.fees_billed)}</strong>
+                            <strong>{formatGbp(c.fees_billed_ytd)}</strong>
                           </td>
                           <td className="num">{sharePct.toFixed(1)}%</td>
                           <td className="num">

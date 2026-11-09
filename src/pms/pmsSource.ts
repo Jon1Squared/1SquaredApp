@@ -5,21 +5,18 @@
  */
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { isValidPmsAsAtDate, PMS_AS_AT_UNAVAILABLE_LABEL } from '../domain/pms';
 import {
   buildPmsDatabaseFromWorkbook,
   DEFAULT_PMS_DB_PATH,
-  PMS_AS_AT_DATE,
 } from './importPms';
 import type {
   PmsAgeBucket,
   PmsClient,
   PmsClientAccountEntry,
-  PmsClientFinancials,
-  PmsClientFullBundle,
   PmsDisbursement,
   PmsExtractInfo,
   PmsFeeEarner,
-  PmsFeeEarnerPerformance,
   PmsFeeEstimate,
   PmsInvoiceBalance,
   PmsInvoiceDetail,
@@ -36,11 +33,6 @@ import type {
 
 function round2(n: number): number {
   return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
-}
-
-function num(val: unknown): number {
-  const n = Number(val);
-  return Number.isFinite(n) ? n : 0;
 }
 
 export class DemoDbPmsSource implements PmsSource {
@@ -98,38 +90,6 @@ export class DemoDbPmsSource implements PmsSource {
       max_invoice_days_past_due:
         row.max_invoice_days_past_due !== null && row.max_invoice_days_past_due !== undefined
           ? Number(row.max_invoice_days_past_due)
-          : null,
-    };
-  }
-
-  private mapClientFinancials(row: Record<string, unknown>): PmsClientFinancials {
-    return {
-      client_code: String(row.client_code),
-      client_name: String(row.client_name ?? ''),
-      client_type: String(row.client_type) as PmsClientFinancials['client_type'],
-      company_number: String(row.company_number ?? ''),
-      email: String(row.email ?? ''),
-      client_partner_id: String(row.client_partner_id ?? ''),
-      credit_terms_days: Number(row.credit_terms_days ?? 0),
-      credit_limit: round2(Number(row.credit_limit)),
-      rate_discount_pct: Number(row.rate_discount_pct ?? 0),
-      status: String(row.status ?? 'Active'),
-      unbilled_wip: round2(Number(row.unbilled_wip)),
-      fees_billed: round2(Number(row.fees_billed)),
-      disbursements_billed: round2(Number(row.disbursements_billed)),
-      total_invoiced_inc_vat: round2(Number(row.total_invoiced_inc_vat)),
-      total_paid: round2(Number(row.total_paid)),
-      outstanding_debt: round2(Number(row.outstanding_debt)),
-      unbilled_disbursements: round2(Number(row.unbilled_disbursements)),
-      client_account_balance: round2(Number(row.client_account_balance)),
-      aged_not_yet_due: round2(Number(row.aged_not_yet_due)),
-      aged_1_30: round2(Number(row.aged_1_30)),
-      aged_31_60: round2(Number(row.aged_31_60)),
-      aged_61_90: round2(Number(row.aged_61_90)),
-      aged_90_plus: round2(Number(row.aged_90_plus)),
-      credit_limit_used_pct:
-        row.credit_limit_used_pct !== null && row.credit_limit_used_pct !== undefined
-          ? Number(row.credit_limit_used_pct)
           : null,
     };
   }
@@ -208,9 +168,17 @@ export class DemoDbPmsSource implements PmsSource {
       const row = db
         .prepare(`SELECT as_at_date, imported_at, source_file FROM extract_info LIMIT 1`)
         .get() as Record<string, unknown> | undefined;
+      const rawAsAt = row?.as_at_date ? String(row.as_at_date).trim() : '';
+      if (!isValidPmsAsAtDate(rawAsAt)) {
+        return {
+          asAtDate: '',
+          importedAt: row?.imported_at ? String(row.imported_at) : '',
+          sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
+        };
+      }
       return {
-        asAtDate: row?.as_at_date ? String(row.as_at_date) : PMS_AS_AT_DATE,
-        importedAt: row?.imported_at ? String(row.imported_at) : new Date().toISOString(),
+        asAtDate: rawAsAt,
+        importedAt: row?.imported_at ? String(row.imported_at) : '',
         sourceFile: row?.source_file ? String(row.source_file) : '1Squared_PMS_Demo_Data.xlsx',
       };
     } finally {
@@ -237,30 +205,6 @@ export class DemoDbPmsSource implements PmsSource {
         .prepare(`SELECT * FROM v_matter_financials ORDER BY matter_code ASC`)
         .all() as Record<string, unknown>[];
       return rows.map((r) => this.mapMatterFinancials(r));
-    } finally {
-      db.close();
-    }
-  }
-
-  getClientFinancials(clientCode: string): PmsClientFinancials | null {
-    const db = this.openDb();
-    try {
-      const row = db
-        .prepare(`SELECT * FROM v_client_financials WHERE client_code = ?`)
-        .get(clientCode) as Record<string, unknown> | undefined;
-      return row ? this.mapClientFinancials(row) : null;
-    } finally {
-      db.close();
-    }
-  }
-
-  getAllClientFinancials(): PmsClientFinancials[] {
-    const db = this.openDb();
-    try {
-      const rows = db
-        .prepare(`SELECT * FROM v_client_financials ORDER BY client_code ASC`)
-        .all() as Record<string, unknown>[];
-      return rows.map((r) => this.mapClientFinancials(r));
     } finally {
       db.close();
     }
@@ -300,6 +244,26 @@ export class DemoDbPmsSource implements PmsSource {
         ORDER BY te.date DESC, te.time_id DESC
       `;
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+      return rows.map((r) => this.mapTimeEntry(r));
+    } finally {
+      db.close();
+    }
+  }
+
+  listAllTimeEntries(): PmsTimeEntry[] {
+    const db = this.openDb();
+    try {
+      const rows = db
+        .prepare(`
+          SELECT
+            te.*,
+            (fe.first_name || ' ' || fe.last_name) AS fee_earner_name,
+            fe.initials AS fee_earner_initials
+          FROM time_entries te
+          JOIN fee_earners fe ON fe.fee_earner_id = te.fee_earner_id
+          ORDER BY te.date DESC, te.time_id DESC
+        `)
+        .all() as Record<string, unknown>[];
       return rows.map((r) => this.mapTimeEntry(r));
     } finally {
       db.close();
@@ -459,6 +423,32 @@ export class DemoDbPmsSource implements PmsSource {
     }
   }
 
+  getInvoiceBalance(invoiceNumber: string): PmsInvoiceBalance | null {
+    const db = this.openDb();
+    try {
+      const row = db
+        .prepare(`SELECT * FROM v_invoice_balances WHERE invoice_number = ?`)
+        .get(invoiceNumber) as Record<string, unknown> | undefined;
+      return row ? this.mapInvoiceBalance(row) : null;
+    } finally {
+      db.close();
+    }
+  }
+
+  listAllInvoiceBalances(): PmsInvoiceBalance[] {
+    const db = this.openDb();
+    try {
+      const rows = db
+        .prepare(
+          `SELECT * FROM v_invoice_balances ORDER BY invoice_date DESC, invoice_number DESC`,
+        )
+        .all() as Record<string, unknown>[];
+      return rows.map((r) => this.mapInvoiceBalance(r));
+    } finally {
+      db.close();
+    }
+  }
+
   getAgedDebt(clientCode?: string): PmsInvoiceBalance[] {
     const db = this.openDb();
     try {
@@ -521,31 +511,21 @@ export class DemoDbPmsSource implements PmsSource {
     }
   }
 
-  getFeeEarnerPerformance(feeEarnerId?: string): PmsFeeEarnerPerformance[] {
+  listAllPayments(): PmsPayment[] {
     const db = this.openDb();
     try {
-      const sql = feeEarnerId
-        ? `SELECT * FROM v_fee_earner_performance WHERE fee_earner_id = ? ORDER BY fee_earner_id ASC`
-        : `SELECT * FROM v_fee_earner_performance ORDER BY fee_earner_id ASC`;
-      const rows = (
-        feeEarnerId ? db.prepare(sql).all(feeEarnerId) : db.prepare(sql).all()
-      ) as Record<string, unknown>[];
-      return rows.map((r) => ({
-        fee_earner_id: String(r.fee_earner_id),
-        initials: String(r.initials),
-        name: String(r.name),
-        email: String(r.email),
-        grade: String(r.grade),
-        department: String(r.department),
-        standard_hourly_rate: round2(Number(r.standard_hourly_rate)),
-        chargeable_hours: Number(r.chargeable_hours ?? 0),
-        chargeable_hours_this_month: Number(r.chargeable_hours_this_month ?? 0),
-        time_value: round2(Number(r.time_value)),
-        unbilled_wip: round2(Number(r.unbilled_wip)),
-        billed_value: round2(Number(r.billed_value)),
-        written_off: round2(Number(r.written_off)),
-        annual_target_hours: Number(r.annual_target_hours ?? 0),
-        pct_of_annual_target: Number(r.pct_of_annual_target ?? 0),
+      const rows = db
+        .prepare(`SELECT * FROM payments ORDER BY receipt_date ASC, receipt_id ASC`)
+        .all() as Record<string, unknown>[];
+      return rows.map((p) => ({
+        receipt_id: String(p.receipt_id),
+        invoice_number: String(p.invoice_number),
+        matter_code: String(p.matter_code),
+        client_code: String(p.client_code),
+        receipt_date: String(p.receipt_date),
+        amount: round2(Number(p.amount)),
+        method: String(p.method),
+        reference: String(p.reference),
       }));
     } finally {
       db.close();
@@ -564,19 +544,6 @@ export class DemoDbPmsSource implements PmsSource {
       invoices: this.getInvoices({ matterCode }),
       disbursements: this.getDisbursements(matterCode),
       clientAccount: this.getClientAccountLedger(matterCode),
-    };
-  }
-
-  getClientFullBundle(clientCode: string): PmsClientFullBundle | null {
-    const summary = this.getClientFinancials(clientCode);
-    if (!summary) return null;
-    const allMatters = this.getAllMatterFinancials().filter((m) => m.client_code === clientCode);
-    const invoices = this.getAgedDebt(clientCode);
-    return {
-      extractInfo: this.getExtractInfo(),
-      summary,
-      matters: allMatters,
-      invoices,
     };
   }
 
@@ -658,208 +625,6 @@ export class DemoDbPmsSource implements PmsSource {
         client_reference: String(r.client_reference ?? ''),
         third_party_payer: String(r.third_party_payer ?? ''),
       }));
-    } finally {
-      db.close();
-    }
-  }
-
-  getFeeEarnerWeeklyTime(feeEarnerId: string, customDailyPace?: number | null): import('./types').PmsFeeEarnerWeeklyTime | null {
-    const db = this.openDb();
-    try {
-      const feRow = db
-        .prepare(`SELECT fee_earner_id, annual_target_hours FROM fee_earners WHERE fee_earner_id = ?`)
-        .get(feeEarnerId) as Record<string, unknown> | undefined;
-      if (!feRow) return null;
-
-      const targetHours = num(feRow.annual_target_hours) || 1200;
-      const defaultDailyPace = Math.round((targetHours / (260 - 30)) * 10) / 10; // ~5.2h for 1200h
-      const dailyPaceHours =
-        typeof customDailyPace === 'number' && customDailyPace > 0 ? customDailyPace : defaultDailyPace;
-      const weeklyPaceHours = Math.round(dailyPaceHours * 5 * 10) / 10;
-
-      const weekDaysSpec: { dayLabel: 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri'; date: string }[] = [
-        { dayLabel: 'Mon', date: '2026-10-12' },
-        { dayLabel: 'Tue', date: '2026-10-13' },
-        { dayLabel: 'Wed', date: '2026-10-14' },
-        { dayLabel: 'Thu', date: '2026-10-15' },
-        { dayLabel: 'Fri', date: '2026-10-16' },
-      ];
-
-      const dayRows = db
-        .prepare(
-          `SELECT date, ROUND(SUM(hours), 2) AS hrs
-           FROM time_entries
-           WHERE fee_earner_id = ? AND chargeable = 'Y' AND date >= '2026-10-12' AND date <= '2026-10-16'
-           GROUP BY date`
-        )
-        .all(feeEarnerId) as Record<string, unknown>[];
-
-      const hoursByDate = new Map<string, number>();
-      for (const r of dayRows) {
-        hoursByDate.set(String(r.date), num(r.hrs));
-      }
-
-      const weekdays = weekDaysSpec.map((d) => ({
-        dayLabel: d.dayLabel,
-        date: d.date,
-        hours: hoursByDate.get(d.date) ?? 0,
-      }));
-      const weekTotalHours = Math.round(weekdays.reduce((acc, d) => acc + d.hours, 0) * 10) / 10;
-
-      const mtdRow = db
-        .prepare(
-          `SELECT ROUND(COALESCE(SUM(hours), 0), 2) AS mtd_hours
-           FROM time_entries
-           WHERE fee_earner_id = ? AND chargeable = 'Y' AND date >= '2026-10-01' AND date <= '2026-10-31'`
-        )
-        .get(feeEarnerId) as Record<string, unknown> | undefined;
-
-      const wipRow = db
-        .prepare(
-          `SELECT
-             ROUND(COALESCE(SUM(value), 0), 2) AS unbilled_wip,
-             COUNT(DISTINCT matter_code) AS matter_count,
-             MIN(date) AS oldest_date
-           FROM time_entries
-           WHERE fee_earner_id = ? AND chargeable = 'Y' AND billed_status = 'Unbilled'`
-        )
-        .get(feeEarnerId) as Record<string, unknown> | undefined;
-
-      return {
-        feeEarnerId,
-        weekTotalHours,
-        dailyPaceHours,
-        weeklyPaceHours,
-        weekdays,
-        monthToDateHours: num(mtdRow?.mtd_hours),
-        myUnbilledWip: num(wipRow?.unbilled_wip),
-        myUnbilledMatterCount: num(wipRow?.matter_count),
-        oldestUnbilledDate: wipRow?.oldest_date ? String(wipRow.oldest_date) : null,
-      };
-    } finally {
-      db.close();
-    }
-  }
-
-  getMonthlyFeesBilled(year = '2026'): { months: import('./types').PmsMonthlyFeesBilled[]; yearToDateTotal: number } {
-    const db = this.openDb();
-    try {
-      const rows = db
-        .prepare(
-          `SELECT substr(invoice_date, 1, 7) AS ym, ROUND(COALESCE(SUM(fees_net), 0), 2) AS total_fees
-           FROM invoices
-           WHERE substr(invoice_date, 1, 4) = ? AND status != 'Draft'
-           GROUP BY substr(invoice_date, 1, 7)`
-        )
-        .all(year) as Record<string, unknown>[];
-
-      const byYm = new Map<string, number>();
-      for (const r of rows) {
-        byYm.set(String(r.ym), num(r.total_fees));
-      }
-
-      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct'];
-      const months = monthNames.map((shortName, idx) => {
-        const monthKey = `${year}-${String(idx + 1).padStart(2, '0')}`;
-        return {
-          monthKey,
-          monthShort: shortName,
-          feesNet: byYm.get(monthKey) ?? 0,
-        };
-      });
-      const yearToDateTotal = Math.round(months.reduce((acc, m) => acc + m.feesNet, 0) * 100) / 100;
-      return { months, yearToDateTotal };
-    } finally {
-      db.close();
-    }
-  }
-
-  getCashReceivedSummary(): import('./types').PmsCashReceivedSummary {
-    const db = this.openDb();
-    try {
-      const octRow = db
-        .prepare(
-          `SELECT ROUND(COALESCE(SUM(amount), 0), 2) AS total, COUNT(*) AS cnt
-           FROM payments
-           WHERE substr(receipt_date, 1, 7) = '2026-10'`
-        )
-        .get() as Record<string, unknown> | undefined;
-
-      const sepRow = db
-        .prepare(
-          `SELECT ROUND(COALESCE(SUM(amount), 0), 2) AS total, COUNT(*) AS cnt
-           FROM payments
-           WHERE substr(receipt_date, 1, 7) = '2026-09'`
-        )
-        .get() as Record<string, unknown> | undefined;
-
-      return {
-        octoberTotal: num(octRow?.total),
-        octoberReceiptCount: num(octRow?.cnt),
-        septemberTotal: num(sepRow?.total),
-        septemberReceiptCount: num(sepRow?.cnt),
-      };
-    } finally {
-      db.close();
-    }
-  }
-
-  getDepartmentFinancials(): {
-    departments: import('./types').PmsDepartmentFinancials[];
-    firmTotal: import('./types').PmsDepartmentFinancials;
-  } {
-    const db = this.openDb();
-    try {
-      const deptRows = db
-        .prepare(
-          `SELECT
-             m.practice_area,
-             SUM(CASE WHEN m.status = 'Open' THEN 1 ELSE 0 END) AS open_matters,
-             ROUND(COALESCE(SUM(m.fees_billed), 0), 2) AS billed_this_year,
-             ROUND(COALESCE(SUM(m.unbilled_wip), 0), 2) AS unbilled_wip,
-             ROUND(COALESCE(SUM(m.outstanding_debt), 0), 2) AS outstanding_debt,
-             ROUND(COALESCE((
-               SELECT SUM(inv.outstanding)
-               FROM v_invoice_balances inv
-               JOIN matters mat ON mat.matter_code = inv.matter_code
-               WHERE mat.practice_area = m.practice_area
-                 AND inv.days_past_due > 0
-             ), 0), 2) AS overdue_debt,
-             ROUND(COALESCE((
-               SELECT SUM(t.hours)
-               FROM time_entries t
-               JOIN matters mat ON mat.matter_code = t.matter_code
-               WHERE mat.practice_area = m.practice_area
-                 AND t.chargeable = 'Y'
-                 AND substr(t.date, 1, 7) = '2026-10'
-             ), 0), 2) AS october_hours
-           FROM v_matter_financials m
-           GROUP BY m.practice_area
-           ORDER BY billed_this_year DESC`
-        )
-        .all() as Record<string, unknown>[];
-
-      const departments: import('./types').PmsDepartmentFinancials[] = deptRows.map((r) => ({
-        practiceArea: String(r.practice_area),
-        openMatters: num(r.open_matters),
-        billedThisYear: num(r.billed_this_year),
-        unbilledWip: num(r.unbilled_wip),
-        outstandingDebt: num(r.outstanding_debt),
-        overdueDebt: num(r.overdue_debt),
-        octoberHours: num(r.october_hours),
-      }));
-
-      const firmTotal: import('./types').PmsDepartmentFinancials = {
-        practiceArea: 'Firm total',
-        openMatters: departments.reduce((s, d) => s + d.openMatters, 0),
-        billedThisYear: Math.round(departments.reduce((s, d) => s + d.billedThisYear, 0) * 100) / 100,
-        unbilledWip: Math.round(departments.reduce((s, d) => s + d.unbilledWip, 0) * 100) / 100,
-        outstandingDebt: Math.round(departments.reduce((s, d) => s + d.outstandingDebt, 0) * 100) / 100,
-        overdueDebt: Math.round(departments.reduce((s, d) => s + d.overdueDebt, 0) * 100) / 100,
-        octoberHours: Math.round(departments.reduce((s, d) => s + d.octoberHours, 0) * 10) / 10,
-      };
-
-      return { departments, firmTotal };
     } finally {
       db.close();
     }

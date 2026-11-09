@@ -14,8 +14,7 @@ export type GapSliceId =
   | 'S0-04'
   | 'S0-05'
   | 'S0-06'
-  | 'S0-07'
-  | 'S0-10';
+  | 'S0-07';
 
 export type PolicyPermissionRequirement =
   | PermissionKey
@@ -595,16 +594,19 @@ export const ACTION_PERMISSIONS = {
 
   // S0-10: Finance billing, write-off and credit-control actions (3)
   requestMatterBillAction: {
-    kind: 'gap',
-    slice: 'S0-10',
+    kind: 'permission',
+    key: 'finance:credit_control',
+    enforcedBy: 'action',
   },
   flagMatterWriteOffAction: {
-    kind: 'gap',
-    slice: 'S0-10',
+    kind: 'permission',
+    key: 'finance:credit_control',
+    enforcedBy: 'action',
   },
   recordInvoiceCreditControlActionAction: {
-    kind: 'gap',
-    slice: 'S0-10',
+    kind: 'permission',
+    key: 'finance:credit_control',
+    enforcedBy: 'action',
   },
 } as const satisfies Record<string, ActionPolicy>;
 
@@ -691,4 +693,4 @@ export type RegisteredRouteName = keyof typeof ROUTE_PERMISSIONS;
  * `ROUTE_PERMISSIONS`. Equals the exact S0-02 baseline (54 actions + 1 route = 55)
  * and may only decrease as slices S0-03 to S0-07 and S0-10 close gaps.
  */
-export const MAX_KNOWN_GAPS = 3;
+export const MAX_KNOWN_GAPS = 0;

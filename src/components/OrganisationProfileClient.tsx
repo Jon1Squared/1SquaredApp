@@ -130,7 +130,7 @@ export function OrganisationProfileClient({
   currentUserId = 'P-0001',
   currentUserRole = 'admin',
   canTakeByTaskId,
-  canViewFinance = true,
+  canViewFinance = false,
   pmsView,
   values,
   customFields,
@@ -416,9 +416,11 @@ export function OrganisationProfileClient({
   }, [currentLinks, personById, values, isHarbourline]);
 
   // PMS financial summary
-  const pmsBundle = pmsView?.clientBundle ?? null;
-  const pmsFin = pmsBundle?.summary ?? pmsView?.groupView?.totals ?? null;
-  const pmsClient = pmsView?.pmsClient ?? null;
+  const pmsBundle = canViewFinance ? (pmsView?.clientBundle ?? null) : null;
+  const pmsFin = canViewFinance
+    ? (pmsBundle?.summary ?? pmsView?.groupView?.totals ?? null)
+    : null;
+  const pmsClient = canViewFinance ? (pmsView?.pmsClient ?? null) : null;
   const asAtLabel = pmsView ? formatPmsAsAtLabel(pmsView.extractInfo.asAtDate) : '16 Oct 2026';
 
   const openMattersCount = displayMatters.length;
@@ -615,29 +617,33 @@ export function OrganisationProfileClient({
           <div className="kpi-sub">{distinctBadges || 'No open matters'}</div>
         </div>
 
-        <div className="kpi-card">
-          <div className="kpi-label">
-            <span>UNBILLED WIP</span>
-          </div>
-          <div className="kpi-value">
-            {pmsFin ? formatGbp(pmsFin.unbilled_wip) : '—'}
-          </div>
-          <div className="kpi-sub">
-            {pmsFin
-              ? `Across ${openMattersCount} ${openMattersCount === 1 ? 'matter' : 'matters'}`
-              : 'Not linked to PMS'}
-          </div>
-        </div>
+        {canViewFinance ? (
+          <>
+            <div className="kpi-card">
+              <div className="kpi-label">
+                <span>UNBILLED WIP</span>
+              </div>
+              <div className="kpi-value">
+                {pmsFin ? formatGbp(pmsFin.unbilled_wip) : '—'}
+              </div>
+              <div className="kpi-sub">
+                {pmsFin
+                  ? `Across ${openMattersCount} ${openMattersCount === 1 ? 'matter' : 'matters'}`
+                  : 'Not linked to PMS'}
+              </div>
+            </div>
 
-        <div className="kpi-card">
-          <div className="kpi-label">
-            <span>OUTSTANDING DEBT</span>
-          </div>
-          <div className="kpi-value">
-            {pmsFin ? formatGbp(pmsFin.outstanding_debt) : '—'}
-          </div>
-          <div className="kpi-sub">{outstandingSubText}</div>
-        </div>
+            <div className="kpi-card">
+              <div className="kpi-label">
+                <span>OUTSTANDING DEBT</span>
+              </div>
+              <div className="kpi-value">
+                {pmsFin ? formatGbp(pmsFin.outstanding_debt) : '—'}
+              </div>
+              <div className="kpi-sub">{outstandingSubText}</div>
+            </div>
+          </>
+        ) : null}
 
         <div className="kpi-card">
           <div className="kpi-label">

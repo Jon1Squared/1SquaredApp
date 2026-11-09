@@ -240,6 +240,7 @@ export interface PmsClientFinancials {
   status: string;
   unbilled_wip: number;
   fees_billed: number;
+  fees_billed_ytd: number;
   disbursements_billed: number;
   total_invoiced_inc_vat: number;
   total_paid: number;
@@ -322,10 +323,10 @@ export interface PmsMonthlyFeesBilled {
 }
 
 export interface PmsCashReceivedSummary {
-  octoberTotal: number;
-  octoberReceiptCount: number;
-  septemberTotal: number;
-  septemberReceiptCount: number;
+  currentMonthTotal: number;
+  currentMonthReceiptCount: number;
+  previousMonthTotal: number;
+  previousMonthReceiptCount: number;
 }
 
 export interface PmsDepartmentFinancials {
@@ -335,7 +336,7 @@ export interface PmsDepartmentFinancials {
   unbilledWip: number;
   outstandingDebt: number;
   overdueDebt: number;
-  octoberHours: number;
+  currentMonthHours: number;
 }
 
 export interface PmsSource {
@@ -343,21 +344,17 @@ export interface PmsSource {
   getMatterFinancials(matterCode: string): PmsMatterFinancials | null;
   getAllMatterFinancials(): PmsMatterFinancials[];
   getMatterFullBundle(matterCode: string): PmsMatterFullBundle | null;
-  getClientFinancials(clientCode: string): PmsClientFinancials | null;
-  getAllClientFinancials(): PmsClientFinancials[];
-  getClientFullBundle(clientCode: string): PmsClientFullBundle | null;
   getTimeEntries(matterCode: string, filters?: PmsTimeEntryFilters): PmsTimeEntry[];
+  listAllTimeEntries(): PmsTimeEntry[];
   getMatterWipBreakdown(matterCode: string): PmsMatterWipBreakdown;
   getFeeEstimates(matterCode: string): PmsFeeEstimate[];
   getInvoices(filter?: { matterCode?: string; clientCode?: string }): PmsInvoiceDetail[];
+  getInvoiceBalance(invoiceNumber: string): PmsInvoiceBalance | null;
+  listAllInvoiceBalances(): PmsInvoiceBalance[];
   getAgedDebt(clientCode?: string): PmsInvoiceBalance[];
   getDisbursements(matterCode: string): PmsDisbursement[];
   getClientAccountLedger(matterCode: string): PmsClientAccountEntry[];
-  getFeeEarnerPerformance(feeEarnerId?: string): PmsFeeEarnerPerformance[];
-  getFeeEarnerWeeklyTime(feeEarnerId: string, customDailyPace?: number | null): PmsFeeEarnerWeeklyTime | null;
-  getMonthlyFeesBilled(year?: string): { months: PmsMonthlyFeesBilled[]; yearToDateTotal: number };
-  getCashReceivedSummary(): PmsCashReceivedSummary;
-  getDepartmentFinancials(): { departments: PmsDepartmentFinancials[]; firmTotal: PmsDepartmentFinancials };
+  listAllPayments(): PmsPayment[];
   listFeeEarners(): PmsFeeEarner[];
   listClients(): PmsClient[];
   listMatters(): PmsMatter[];

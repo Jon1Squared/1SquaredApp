@@ -17,6 +17,7 @@ import { deploymentAndSecurityArticle } from './articles/deployment-and-security
 import { developmentProcessArticle } from './articles/development-process';
 import { documentGenerationArticle } from './articles/document-generation';
 import { duplicateChecks } from './articles/duplicate-checks';
+import { financeDataAndPermissionsArticle } from './articles/finance-data-and-permissions';
 import { keyDatesAdministrationArticle } from './articles/key-dates-administration';
 import { keyDatesCalendarSyncArticle } from './articles/key-dates-calendar-sync';
 import { keyDatesExceptionsArticle } from './articles/key-dates-exceptions';
@@ -69,6 +70,7 @@ export const ARTICLES: DocArticle[] = [
   deploymentAndSecurityArticle,
   tenantSettingsArticle,
   authenticationRbacAndMfaArticle,
+  financeDataAndPermissionsArticle,
   dataAdministrationAndRetentionArticle,
   developmentProcessArticle,
   keyDatesOverviewArticle,
