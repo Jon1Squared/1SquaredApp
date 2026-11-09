@@ -1831,7 +1831,7 @@ export function extractEnquiryFormInitialState(
     lastName: enquiry?.lastName ?? '',
     callingOnBehalfOf: enquiry?.callingOnBehalfOf ?? '',
     sourceId: enquiry?.sourceId ?? '',
-    privacyNoticeGiven: enquiry?.privacyNoticeGiven ?? true,
+    privacyNoticeGiven: enquiry?.privacyNoticeGiven ?? false,
     linkedPersonId: enquiry?.linkedPersonId ?? null,
     linkedOrganisationId: enquiry?.linkedOrganisationId ?? null,
     phone: enquiry?.phone ?? '',
@@ -2210,6 +2210,7 @@ export interface EnquiryDashboardMetrics {
   monthConvertedCount: number;
   monthConversionPct: number;
   monthOpenCount: number;
+  monthInContactCount: number;
   monthUnassignedCount: number;
   monthDeclinedCount: number;
   monthReferredCount: number;
@@ -2223,11 +2224,13 @@ export interface EnquiryDashboardMetrics {
 }
 
 /**
- * Pure helper for Home dashboard enquiry KPIs and panels (R324):
+ * Pure helper for Home dashboard enquiry KPIs and panels (R324, R342, R343):
  * - Filters monthly figures by `receivedAt` in `nowIso`'s YYYY-MM.
- * - Filters `callbacksDueTodayCount` to open enquiries whose callback/due date equals `todayIso`.
- * - Computes `slaMetPct` only over enquiries that have been contacted (`contactLog.length > 0`)
- *   or are already overdue (`firstContactDueAt < nowIso` or `firstContactDueAt.slice(0, 10) < todayIso`).
+ * - Filters `callbacksDueTodayCount` to uncontacted open enquiries (`contactLog.length === 0`)
+ *   whose callback/due date equals `todayIso`.
+ * - Computes `slaMetPct` only over enquiries that have been contacted (`contactLog.length > 0`,
+ *   comparing the earliest `contactLog[].at` against `firstContactDueAt`) or are already overdue
+ *   (`firstContactDueAt < nowIso` or `firstContactDueAt.slice(0, 10) < todayIso`).
  */
 export function computeEnquiryDashboardMetrics(
   enquiries: readonly Enquiry[],
@@ -2244,6 +2247,7 @@ export function computeEnquiryDashboardMetrics(
   const monthConversionPct =
     monthReceivedCount > 0 ? Math.round((monthConvertedCount / monthReceivedCount) * 100) : 0;
   const monthOpenCount = monthEnquiries.filter((e) => isEnquiryOpen(e)).length;
+  const monthInContactCount = monthEnquiries.filter((e) => e.status === 'In contact').length;
   const monthUnassignedCount = monthEnquiries.filter(
     (e) => isEnquiryOpen(e) && !e.assignedToId,
   ).length;
@@ -2252,7 +2256,7 @@ export function computeEnquiryDashboardMetrics(
   const monthNoResponseCount = monthEnquiries.filter((e) => e.status === 'No response').length;
 
   const callbacksDueTodayCount = enquiries.filter((e) => {
-    if (!isEnquiryOpen(e)) return false;
+    if (!isEnquiryOpen(e) || e.contactLog.length > 0) return false;
     const firstDueDay = e.firstContactDueAt ? e.firstContactDueAt.slice(0, 10) : null;
     const nextActionDay = e.nextActionDate ? e.nextActionDate.slice(0, 10) : null;
     return firstDueDay === todayIso || nextActionDay === todayIso;
@@ -2275,7 +2279,11 @@ export function computeEnquiryDashboardMetrics(
 
   for (const e of enquiries) {
     if (!e.firstContactDueAt) continue;
-    const firstContactAt = e.contactLog[0]?.at ?? null;
+    const firstContactAt = e.contactLog.reduce<string | null>(
+      (earliest, entry) =>
+        entry.at && (!earliest || entry.at < earliest) ? entry.at : earliest,
+      null,
+    );
     const hasContact = Boolean(firstContactAt);
     const isOverdue =
       !hasContact &&
@@ -2304,6 +2312,7 @@ export function computeEnquiryDashboardMetrics(
     monthConvertedCount,
     monthConversionPct,
     monthOpenCount,
+    monthInContactCount,
     monthUnassignedCount,
     monthDeclinedCount,
     monthReferredCount,

@@ -7482,7 +7482,7 @@ export function saveEnquiryRecord(
     privacyNoticeGiven:
       input.privacyNoticeGiven !== undefined
         ? Boolean(input.privacyNoticeGiven)
-        : existing?.privacyNoticeGiven ?? true,
+        : existing?.privacyNoticeGiven ?? false,
     linkedPersonId:
       input.linkedPersonId !== undefined ? input.linkedPersonId : existing?.linkedPersonId ?? null,
     customFields:

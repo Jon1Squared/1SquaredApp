@@ -3985,7 +3985,7 @@ export function AdminClient({
 
       {/* TAB: DOCUMENT TEMPLATES & USAGE */}
       {tab === 'document-templates' && (
-        <DocumentTemplatesAdminPanel currentUserId={people[0]?.id ?? 'P-0001'} />
+        <DocumentTemplatesAdminPanel currentUserId={currentUserId ?? people[0]?.id ?? ''} />
       )}
 
       {/* TAB: DOCUMENT STORES & DMS */}

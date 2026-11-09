@@ -30,12 +30,15 @@ import {
 import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
+import { isHighOrCriticalRiskRating } from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
   findOneSquaredIdForPmsCode,
   formatGbp,
   formatPmsAsAtLabel,
+  isValidPmsAsAtDate,
+  PMS_AS_AT_UNAVAILABLE_LABEL,
 } from '@/domain/pms';
 import type { SearchDoc } from '@/domain/search';
 import { isTaskOpen } from '@/domain/tasks';
@@ -237,8 +240,19 @@ export function HomeClient({
     );
   }, [homePagesConfig.roles, activeRoleKey]);
 
-  const nowIso = useMemo(() => new Date().toISOString(), []);
-  const todayIso = useMemo(() => nowIso.slice(0, 10), [nowIso]);
+  const nowDate = useMemo(() => new Date(), []);
+  const nowIso = useMemo(() => nowDate.toISOString(), [nowDate]);
+  const todayIso = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/London',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(nowDate),
+    [nowDate],
+  );
+  const localNowIso = useMemo(() => `${todayIso}${nowIso.slice(10)}`, [todayIso, nowIso]);
   const tomorrowIso = useMemo(() => {
     const d = new Date(`${todayIso}T12:00:00Z`);
     d.setUTCDate(d.getUTCDate() + 1);
@@ -255,11 +269,14 @@ export function HomeClient({
     return d.toISOString().slice(0, 10);
   }, [todayIso]);
   const formattedAsAt = useMemo(
-    () => (pmsAsAtDate ? formatDate(pmsAsAtDate) || pmsAsAtDate : '—'),
+    () => (isValidPmsAsAtDate(pmsAsAtDate) ? formatPmsAsAtLabel(pmsAsAtDate) : '—'),
     [pmsAsAtDate],
   );
   const pmsAsAtCaption = useMemo(
-    () => (pmsAsAtDate ? formatPmsAsAtLabel(pmsAsAtDate) : 'PMS as at —'),
+    () =>
+      isValidPmsAsAtDate(pmsAsAtDate)
+        ? `PMS as at ${formatPmsAsAtLabel(pmsAsAtDate)}`
+        : PMS_AS_AT_UNAVAILABLE_LABEL,
     [pmsAsAtDate],
   );
   const currentMonthKey = useMemo(() => todayIso.slice(0, 7), [todayIso]);
@@ -277,30 +294,33 @@ export function HomeClient({
       : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   }, [todayIso]);
 
-  // PMS financial period labels derived strictly from pmsAsAtDate (R319)
-  const pmsMonthKey = useMemo(() => (pmsAsAtDate ? pmsAsAtDate.slice(0, 7) : ''), [pmsAsAtDate]);
+  // PMS financial period labels derived strictly from pmsAsAtDate (R319, R344)
+  const pmsMonthKey = useMemo(
+    () => (isValidPmsAsAtDate(pmsAsAtDate) ? pmsAsAtDate.slice(0, 7) : ''),
+    [pmsAsAtDate],
+  );
   const pmsYearLabel = useMemo(
-    () => (pmsAsAtDate ? pmsAsAtDate.slice(0, 4) : currentYearLabel),
-    [pmsAsAtDate, currentYearLabel],
+    () => (isValidPmsAsAtDate(pmsAsAtDate) ? pmsAsAtDate.slice(0, 4) : '—'),
+    [pmsAsAtDate],
   );
   const pmsMonthShort = useMemo(() => {
-    if (!pmsAsAtDate) return 'Month';
-    const d = new Date(`${pmsAsAtDate.slice(0, 10)}T12:00:00Z`);
+    if (!isValidPmsAsAtDate(pmsAsAtDate)) return 'Month';
+    const d = new Date(`${pmsAsAtDate}T12:00:00Z`);
     return Number.isNaN(d.getTime())
       ? 'Month'
       : d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
   }, [pmsAsAtDate]);
   const pmsMonthYearLabel = useMemo(() => {
-    if (!pmsAsAtDate) return 'Current period';
-    const d = new Date(`${pmsAsAtDate.slice(0, 10)}T12:00:00Z`);
+    if (!isValidPmsAsAtDate(pmsAsAtDate)) return PMS_AS_AT_UNAVAILABLE_LABEL;
+    const d = new Date(`${pmsAsAtDate}T12:00:00Z`);
     return Number.isNaN(d.getTime())
-      ? pmsAsAtDate.slice(0, 7)
+      ? PMS_AS_AT_UNAVAILABLE_LABEL
       : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   }, [pmsAsAtDate]);
 
   const enquiryMetrics = useMemo(
-    () => computeEnquiryDashboardMetrics(enquiries, nowIso),
-    [enquiries, nowIso],
+    () => computeEnquiryDashboardMetrics(enquiries, localNowIso),
+    [enquiries, localNowIso],
   );
 
   const personById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
@@ -390,6 +410,33 @@ export function HomeClient({
         (m.supervisingPartnerId === partnerId || m.responsiblePartnerId === partnerId),
     );
   }, [matters, effectiveWorkPerson.id]);
+
+  // Practice-area / department enquiries for Partner (R343)
+  const myPracticeAreaIds = useMemo(
+    () =>
+      new Set(
+        [
+          ...myTeams.flatMap((t) => t.practiceAreaIds),
+          ...supervisedMatters.map((m) => m.practiceAreaId),
+        ].filter(Boolean),
+      ),
+    [myTeams, supervisedMatters],
+  );
+  const partnerPracticeAreaEnquiries = useMemo(
+    () =>
+      myPracticeAreaIds.size > 0
+        ? enquiries.filter(
+            (e) =>
+              myPracticeAreaIds.has(e.practiceAreaId) ||
+              (e.assignedTeamId !== null && myTeamIds.has(e.assignedTeamId)),
+          )
+        : enquiries,
+    [enquiries, myPracticeAreaIds, myTeamIds],
+  );
+  const partnerEnquiryMetrics = useMemo(
+    () => computeEnquiryDashboardMetrics(partnerPracticeAreaEnquiries, localNowIso),
+    [partnerPracticeAreaEnquiries, localNowIso],
+  );
 
   // Pending sign-offs
   const pendingSignOffs = useMemo(
@@ -758,10 +805,10 @@ export function HomeClient({
             <div className="kpi-label">
               <span>Dept enquiries ({currentMonthShort})</span>
             </div>
-            <div className="kpi-value">{enquiryMetrics.monthReceivedCount}</div>
+            <div className="kpi-value">{partnerEnquiryMetrics.monthReceivedCount}</div>
             <div className="kpi-sub">
-              {enquiryMetrics.monthConvertedCount} converted · {enquiryMetrics.monthUnassignedCount}{' '}
-              unassigned
+              {partnerEnquiryMetrics.monthConvertedCount} converted ·{' '}
+              {partnerEnquiryMetrics.monthUnassignedCount} unassigned
             </div>
           </div>
         );
@@ -1035,7 +1082,7 @@ export function HomeClient({
         const highRiskCount = matters.filter(
           (m) =>
             m.matterStatusId !== 'matter_status.closed' &&
-            m.riskRatingId?.toLowerCase().includes('high'),
+            isHighOrCriticalRiskRating(m.riskRatingId, values),
         ).length;
         return (
           <div key={cardId} className="kpi-card">
@@ -3243,7 +3290,7 @@ export function HomeClient({
       // ================================================================
       case 'referral_sources_this_month': {
         const channelRowsMap = new Map<string, { label: string; count: number; converted: number }>();
-        for (const e of enquiries) {
+        for (const e of enquiryMetrics.monthEnquiries) {
           const chLabel = resolveLabel(values, e.channelId) || 'Unspecified';
           const entry = channelRowsMap.get(chLabel) ?? { label: chLabel, count: 0, converted: 0 };
           entry.count += 1;
@@ -3341,9 +3388,8 @@ export function HomeClient({
         }
         for (const m of supervisedMatters) {
           if (seenCodes.has(m.matterNumber)) continue;
-          const riskLabel = resolveLabel(values, m.riskRatingId);
           const amlLabel = m.amlStatus;
-          if (riskLabel === 'High' && amlLabel !== 'Verified') {
+          if (isHighOrCriticalRiskRating(m.riskRatingId, values) && amlLabel !== 'Verified') {
             const clientObj = orgById.get(m.clientId) ?? personById.get(m.clientId);
             const clientName = clientObj
               ? 'legalName' in clientObj
@@ -3546,7 +3592,7 @@ export function HomeClient({
                       <th>Grade · Rate</th>
                       <th className="num">Open matters</th>
                       <th className="num">Open tasks</th>
-                      <th className="num">{currentMonthShort} hrs</th>
+                      <th className="num">{pmsMonthShort} hrs</th>
                       <th>YTD hrs vs target</th>
                       <th className="num">Unbilled WIP</th>
                     </tr>
@@ -3749,7 +3795,7 @@ export function HomeClient({
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
-                <h2 className="panel-title">Enquiries &amp; conversion</h2>
+                <h2 className="panel-title">Enquiries &amp; conversion — my practice area</h2>
               </div>
               <span className="panel-subtitle">{currentMonthYearLabel}</span>
             </div>
@@ -3764,24 +3810,22 @@ export function HomeClient({
               >
                 <div className="legend-item">
                   <div className="lbl">Received</div>
-                  <div className="val">{enquiries.length}</div>
+                  <div className="val">{partnerEnquiryMetrics.monthReceivedCount}</div>
                 </div>
                 <div className="legend-item">
                   <div className="lbl">Converted</div>
                   <div className="val" style={{ color: 'var(--green-text)' }}>
-                    {enquiries.filter((e) => e.status === 'Converted').length}
+                    {partnerEnquiryMetrics.monthConvertedCount}
                   </div>
                 </div>
                 <div className="legend-item">
                   <div className="lbl">In contact</div>
-                  <div className="val">
-                    {enquiries.filter((e) => e.status === 'In contact').length}
-                  </div>
+                  <div className="val">{partnerEnquiryMetrics.monthInContactCount}</div>
                 </div>
                 <div className="legend-item">
                   <div className="lbl">Unassigned</div>
                   <div className="val" style={{ color: 'var(--amber-text)' }}>
-                    {enquiries.filter((e) => isEnquiryOpen(e) && !e.assignedToId).length}
+                    {partnerEnquiryMetrics.monthUnassignedCount}
                   </div>
                 </div>
               </div>
@@ -4165,7 +4209,7 @@ export function HomeClient({
                                 tone={pct >= 75 ? 'warning' : 'positive'}
                               />
                             ) : (
-                              <StatusPill label="On track" tone="positive" />
+                              <span className="muted">No estimate</span>
                             )}
                           </td>
                           <td className="num">
@@ -4305,7 +4349,7 @@ export function HomeClient({
       // 30. cash_collection_vs_target (05 Finance)
       // ================================================================
       case 'cash_collection_vs_target': {
-        const octCash = pmsCashReceived.currentMonthTotal;
+        const currentMonthCash = pmsCashReceived.currentMonthTotal;
         const currentMonthFees =
           pmsMonthlyFeesBilled.months.find((m) => m.monthKey === pmsMonthKey)?.feesNet ?? 0;
         const currentMonthInvoicesCount = pmsInvoices.filter(
@@ -4334,7 +4378,7 @@ export function HomeClient({
                     Cash receipts ({pmsCashReceived.currentMonthReceiptCount} payment
                     {pmsCashReceived.currentMonthReceiptCount === 1 ? '' : 's'})
                   </span>
-                  <strong>{formatGbp(octCash)} · No target configured</strong>
+                  <strong>{formatGbp(currentMonthCash)} · No target configured</strong>
                 </div>
               </div>
               <div
@@ -4447,7 +4491,7 @@ export function HomeClient({
         const highRiskMatters = matters.filter(
           (m) =>
             m.matterStatusId !== 'matter_status.closed' &&
-            m.riskRatingId?.toLowerCase().includes('high'),
+            isHighOrCriticalRiskRating(m.riskRatingId, values),
         );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
@@ -4846,7 +4890,7 @@ export function HomeClient({
                     <tr>
                       <th>Fee earner</th>
                       <th>Department · Grade</th>
-                      <th className="num">{currentMonthShort} hrs</th>
+                      <th className="num">{pmsMonthShort} hrs</th>
                       <th className="num">YTD hrs</th>
                       <th className="num">% target</th>
                       <th className="num">Billed value</th>

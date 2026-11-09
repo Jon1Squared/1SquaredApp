@@ -1,17 +1,44 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
-const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/;
-const MATTER_CODE_RE = /\b[A-Z]{3}\d{3}-\d{4}\b/;
-const PMS_CODE_RE = /\b(?:FE0(?:0[1-9]|1[0-8])|CLI00(?:0[1-9]|1[0-2]))\b/;
-const PMS_HARDCODED_MONTH_RE = /['"`]20\d\d-\d\d['"`]/;
+const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/g;
+const MATTER_CODE_RE = /\b[A-Z]{3}\d{3}-\d{4}\b/g;
+const PMS_CODE_RE = /\b(?:FE\d{3}|[A-Z]{3}\d{3}(?!-\d{4}\b))\b/g;
+const PMS_HARDCODED_MONTH_RE = /['"`]20\d\d-\d\d['"`]/g;
 const FAKE_SANCTIONS_CLEAR_RE =
-  /Sanctions\s*&(?:amp;)?\s*PEP[\s\S]{0,160}?['"`>]Clear['"`<]/;
+  /(?:Sanctions\s*(?:&(?:amp;)?|and)\s*PEP|PEP\s*(?:&(?:amp;)?|and)\s*Sanctions)[\s\S]{0,160}?['"`>:](?:[\s\u00A0]|&nbsp;)*(?:all(?:[\s\u00A0]|&nbsp;)+)?clear(?:[\s\u00A0]|&nbsp;)*['"`<]/gi;
 
 /**
- * Builds the deny list of demo literals from `data/seed-not-a-law-firm.json` and `src/seed/demo.ts`.
+ * Loads PMS client codes and fee-earner codes from `data/pms/pms-demo.sqlite`.
+ */
+export function loadPmsDemoCodes(rootDir = process.cwd()) {
+  const codes = new Set();
+  const sqlitePath = path.resolve(rootDir, 'data/pms/pms-demo.sqlite');
+  if (fs.existsSync(sqlitePath)) {
+    const db = new DatabaseSync(sqlitePath, { readOnly: true });
+    try {
+      for (const row of db.prepare('SELECT client_code FROM clients').all()) {
+        if (typeof row.client_code === 'string' && row.client_code.trim()) {
+          codes.add(row.client_code.trim());
+        }
+      }
+      for (const row of db.prepare('SELECT fee_earner_id FROM fee_earners').all()) {
+        if (typeof row.fee_earner_id === 'string' && row.fee_earner_id.trim()) {
+          codes.add(row.fee_earner_id.trim());
+        }
+      }
+    } finally {
+      db.close();
+    }
+  }
+  return codes;
+}
+
+/**
+ * Builds the deny list of demo literals from `data/seed-not-a-law-firm.json`, `src/seed/demo.ts`, and `data/pms/pms-demo.sqlite`.
  */
 export function buildDemoLiteralsDenyList(rootDir = process.cwd()) {
   const literals = new Set([
@@ -98,12 +125,20 @@ export function loadDemoLiteralsAllowList(rootDir = process.cwd()) {
 }
 
 function isAllowListed(allowList, file, literal) {
+  if (!literal || literal === 'Sanctions & PEP: Clear' || literal === '*') {
+    return false;
+  }
   const normalizedFile = file.replace(/\\/g, '/');
   return allowList.some(
     (entry) =>
       entry &&
       typeof entry.file === 'string' &&
+      entry.file.trim().length > 0 &&
       entry.file.replace(/\\/g, '/') === normalizedFile &&
+      typeof entry.literal === 'string' &&
+      entry.literal.trim().length > 0 &&
+      entry.literal !== 'Sanctions & PEP: Clear' &&
+      entry.literal !== '*' &&
       entry.literal === literal &&
       typeof entry.reason === 'string' &&
       entry.reason.trim().length > 0,
@@ -111,13 +146,14 @@ function isAllowListed(allowList, file, literal) {
 }
 
 /**
- * Scans a single file's text for denied demo literals, record IDs, and fake Sanctions & PEP Clear status.
+ * Scans a single file's text for denied demo literals, record IDs, matter/PMS codes, and fake Sanctions & PEP Clear status.
  */
 export function scanTextForDemoLiterals(
   file,
   text,
   denyLiterals,
   allowList = [],
+  pmsCodes = loadPmsDemoCodes(),
 ) {
   const violations = [];
   const lines = text.split(/\r?\n/);
@@ -125,75 +161,73 @@ export function scanTextForDemoLiterals(
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineNo = i + 1;
+    const reportedOnLine = new Set();
+
+    const recordViolation = (match, reason) => {
+      if (reportedOnLine.has(match)) return;
+      reportedOnLine.add(match);
+      violations.push({
+        file,
+        line: lineNo,
+        match,
+        reason,
+      });
+    };
 
     for (const lit of denyLiterals) {
       if (line.includes(lit) && !isAllowListed(allowList, file, lit)) {
-        violations.push({
-          file,
-          line: lineNo,
-          match: lit,
-          reason: `demo literal "${lit}"`,
-        });
-        break;
+        // Avoid substring match when a shorter literal is part of an already-reported longer literal on the same line
+        if ([...reportedOnLine].some((prev) => prev.includes(lit))) {
+          continue;
+        }
+        recordViolation(lit, `demo literal "${lit}"`);
       }
     }
 
-    const idMatch = line.match(RECORD_ID_RE);
-    if (idMatch && !isAllowListed(allowList, file, idMatch[0])) {
-      violations.push({
-        file,
-        line: lineNo,
-        match: idMatch[0],
-        reason: `seed record ID "${idMatch[0]}"`,
-      });
+    for (const idMatch of line.matchAll(RECORD_ID_RE)) {
+      const token = idMatch[0];
+      if (!isAllowListed(allowList, file, token)) {
+        recordViolation(token, `seed record ID "${token}"`);
+      }
     }
 
-    const matterCodeMatch = line.match(MATTER_CODE_RE);
-    if (matterCodeMatch && !isAllowListed(allowList, file, matterCodeMatch[0])) {
-      violations.push({
-        file,
-        line: lineNo,
-        match: matterCodeMatch[0],
-        reason: `matter code "${matterCodeMatch[0]}"`,
-      });
+    for (const matterCodeMatch of line.matchAll(MATTER_CODE_RE)) {
+      const token = matterCodeMatch[0];
+      if (!isAllowListed(allowList, file, token)) {
+        recordViolation(token, `matter code "${token}"`);
+      }
     }
 
-    const pmsCodeMatch = line.match(PMS_CODE_RE);
-    if (pmsCodeMatch && !isAllowListed(allowList, file, pmsCodeMatch[0])) {
-      violations.push({
-        file,
-        line: lineNo,
-        match: pmsCodeMatch[0],
-        reason: `PMS demo code "${pmsCodeMatch[0]}"`,
-      });
+    for (const pmsCodeMatch of line.matchAll(PMS_CODE_RE)) {
+      const token = pmsCodeMatch[0];
+      if (!isAllowListed(allowList, file, token)) {
+        const label = pmsCodes.has(token) ? `PMS demo code "${token}"` : `PMS-style code "${token}"`;
+        recordViolation(token, label);
+      }
     }
 
     if (file.replace(/\\/g, '/').endsWith('src/domain/pms.ts')) {
-      const monthMatch = line.match(PMS_HARDCODED_MONTH_RE);
-      if (monthMatch && !isAllowListed(allowList, file, monthMatch[0])) {
-        violations.push({
-          file,
-          line: lineNo,
-          match: monthMatch[0],
-          reason: `hard-coded month literal ${monthMatch[0]} in pms.ts`,
-        });
+      for (const monthMatch of line.matchAll(PMS_HARDCODED_MONTH_RE)) {
+        const token = monthMatch[0];
+        if (!isAllowListed(allowList, file, token)) {
+          recordViolation(token, `hard-coded month literal ${token} in pms.ts`);
+        }
       }
     }
   }
 
-  const sanctionsMatch = text.match(FAKE_SANCTIONS_CLEAR_RE);
-  if (
-    sanctionsMatch &&
-    !isAllowListed(allowList, file, 'Sanctions & PEP: Clear')
-  ) {
-    const prefix = text.slice(0, sanctionsMatch.index ?? 0);
-    const lineNo = prefix.split(/\r?\n/).length;
-    violations.push({
-      file,
-      line: lineNo,
-      match: 'Sanctions & PEP: Clear',
-      reason: '"Sanctions & PEP" next to "Clear"',
-    });
+  for (const sanctionsMatch of text.matchAll(FAKE_SANCTIONS_CLEAR_RE)) {
+    const matchedSnippet = sanctionsMatch[0].trim();
+    if (!isAllowListed(allowList, file, matchedSnippet)) {
+      const prefix = text.slice(0, sanctionsMatch.index ?? 0);
+      const lineNo = prefix.split(/\r?\n/).length;
+      violations.push({
+        file,
+        line: lineNo,
+        match: matchedSnippet,
+        reason: `"Sanctions/PEP" next to "Clear": ${matchedSnippet}`,
+      });
+    }
   }
 
   return violations;
@@ -205,6 +239,7 @@ export function scanTextForDemoLiterals(
 export function verifyNoDemoLiterals(rootDir = process.cwd()) {
   const denyLiterals = buildDemoLiteralsDenyList(rootDir);
   const allowList = loadDemoLiteralsAllowList(rootDir);
+  const pmsCodes = loadPmsDemoCodes(rootDir);
 
   const trackedFiles = execFileSync(
     'git',
@@ -230,7 +265,7 @@ export function verifyNoDemoLiterals(rootDir = process.cwd()) {
     if (!fs.existsSync(fullPath)) continue;
     const text = fs.readFileSync(fullPath, 'utf8');
     violations.push(
-      ...scanTextForDemoLiterals(relFile, text, denyLiterals, allowList),
+      ...scanTextForDemoLiterals(relFile, text, denyLiterals, allowList, pmsCodes),
     );
   }
 

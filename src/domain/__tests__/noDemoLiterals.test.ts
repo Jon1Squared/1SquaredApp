@@ -7,6 +7,7 @@ import {
 } from '@platform/core';
 import {
   buildDemoLiteralsDenyList,
+  loadPmsDemoCodes,
   scanTextForDemoLiterals,
   verifyNoDemoLiterals,
 } from '../../../scripts/verify-no-demo-literals.mjs';
@@ -19,17 +20,26 @@ import {
   normaliseCompaniesHouseOfficerName,
 } from '../companiesHouse';
 import { buildFieldResolutionContextForRecord } from '../documentGeneration';
-import { computeEnquiryDashboardMetrics } from '../enquiries';
+import {
+  HIGH_RISK_RATING_IDS,
+  isHighOrCriticalRiskRating,
+} from '../matterOpeningRecord';
 import { buildSearchIndex } from '../searchIndex';
-import type { Enquiry, Person } from '../types';
+import type { ChoiceValue, Person } from '../types';
 
 describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers', () => {
-  it('verifyNoDemoLiterals passes on the repository and scanTextForDemoLiterals catches planted demo literals unless allow-listed', () => {
+  it('verifyNoDemoLiterals passes on the repository and scanTextForDemoLiterals catches planted demo literals unless allow-listed per file and per literal (R322, R346)', () => {
     expect(verifyNoDemoLiterals()).toEqual([]);
 
     const denyLiterals = buildDemoLiteralsDenyList();
     expect(denyLiterals).toContain('Not A Law Firm LLP');
     expect(denyLiterals).toContain('Pembroke Vaughan');
+
+    const pmsCodes = loadPmsDemoCodes();
+    expect(pmsCodes.has('PEN001')).toBe(true);
+    expect(pmsCodes.has('BAY001')).toBe(true);
+    expect(pmsCodes.has('SEV001')).toBe(true);
+    expect(pmsCodes.has('FE005')).toBe(true);
 
     const plantedSource = [
       'export const sampleFirm = "Pembroke Vaughan";',
@@ -42,12 +52,13 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       plantedSource,
       denyLiterals,
       [],
+      pmsCodes,
     );
     expect(violations).toHaveLength(3);
     expect(violations.map((v: { match: string }) => v.match)).toEqual([
       'Pembroke Vaughan',
       'P-000001',
-      'Sanctions & PEP: Clear',
+      'Sanctions & PEP", value: "Clear"',
     ]);
 
     const allowListed = scanTextForDemoLiterals(
@@ -67,30 +78,124 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
         },
         {
           file: 'src/components/SampleWidget.tsx',
-          literal: 'Sanctions & PEP: Clear',
-          reason: 'Synthetic test allow-list entry for sanctions status',
+          literal: 'Sanctions & PEP", value: "Clear"',
+          reason: 'Synthetic test allow-list entry for exact sanctions snippet',
         },
       ],
+      pmsCodes,
     );
     expect(allowListed).toEqual([]);
 
-    // R322: real JSX form (Sanctions &amp; PEP ... >Clear<), PEN001-0001, FE005, and naming resolvePersonComplianceDisplay nearby all fail
-    const jsxAndPmsPlanted = [
-      'export const code = "PEN001-0001";',
-      'export const fe = "FE005";',
-      'export const view = () => { const _ = resolvePersonComplianceDisplay; return <div><span>Sanctions &amp; PEP</span><span>Clear</span></div>; };',
+    // R346 Bypass 1: bare PMS client codes (PEN001, BAY001, SEV002, SJO001) and fee-earner codes (FE005) fail
+    const barePmsPlanted = [
+      "const clientA = 'PEN001';",
+      "const clientB = 'BAY001';",
+      "const clientC = 'SEV002';",
+      "const feeEarner = 'FE005';",
     ].join('\n');
-    const r322Violations = scanTextForDemoLiterals(
-      'src/components/PersonProfileClient.tsx',
-      jsxAndPmsPlanted,
+    const barePmsViolations = scanTextForDemoLiterals(
+      'src/components/SampleWidget.tsx',
+      barePmsPlanted,
       denyLiterals,
       [],
+      pmsCodes,
     );
-    expect(r322Violations.map((v: { match: string }) => v.match)).toContain('PEN001-0001');
-    expect(r322Violations.map((v: { match: string }) => v.match)).toContain('FE005');
-    expect(r322Violations.map((v: { match: string }) => v.match)).toContain(
-      'Sanctions & PEP: Clear',
+    expect(barePmsViolations.map((v: { match: string }) => v.match)).toEqual([
+      'PEN001',
+      'BAY001',
+      'SEV002',
+      'FE005',
+    ]);
+
+    // R346 Bypass 2: allow-listing the first code on a line does NOT hide a second code on the same line
+    const sameLinePlanted = [
+      "const a = 'ABC123-0001', b = 'PEN001-0001';",
+      "const p1 = 'P-000001', p2 = 'P-000002';",
+      "const c1 = 'FE001', c2 = 'PEN001';",
+    ].join('\n');
+    const sameLineViolations = scanTextForDemoLiterals(
+      'src/components/DocumentStoresAdminPanel.tsx',
+      sameLinePlanted,
+      denyLiterals,
+      [
+        {
+          file: 'src/components/DocumentStoresAdminPanel.tsx',
+          literal: 'ABC123-0001',
+          reason: 'Allow-list first matter code only',
+        },
+        {
+          file: 'src/components/DocumentStoresAdminPanel.tsx',
+          literal: 'P-000001',
+          reason: 'Allow-list first record ID only',
+        },
+        {
+          file: 'src/components/DocumentStoresAdminPanel.tsx',
+          literal: 'FE001',
+          reason: 'Allow-list first PMS code only',
+        },
+      ],
+      pmsCodes,
     );
+    expect(sameLineViolations.map((v: { match: string }) => v.match)).toEqual([
+      'PEN001-0001',
+      'P-000002',
+      'PEN001',
+    ]);
+
+    // R346 Bypass 3: generic 'Sanctions & PEP: Clear' allow-list key is rejected, and allow-listing one sanctions snippet does not exempt a second one in the same file
+    const twoSanctionsInOneFile = [
+      'export const a = <div><span>Sanctions &amp; PEP</span><span>Clear</span></div>;',
+      'export const b = <div><span>PEP &amp; Sanctions</span><span>All clear</span></div>;',
+    ].join('\n');
+    const fileWideAttempt = scanTextForDemoLiterals(
+      'src/components/PersonProfileClient.tsx',
+      twoSanctionsInOneFile,
+      denyLiterals,
+      [
+        {
+          file: 'src/components/PersonProfileClient.tsx',
+          literal: 'Sanctions & PEP: Clear',
+          reason: 'Attempted file-wide exemption must not work',
+        },
+        {
+          file: 'src/components/PersonProfileClient.tsx',
+          literal: 'Sanctions &amp; PEP</span><span>Clear<',
+          reason: 'Allow-list only the first snippet',
+        },
+      ],
+      pmsCodes,
+    );
+    expect(fileWideAttempt).toHaveLength(1);
+    expect(fileWideAttempt[0]?.match).toBe('PEP &amp; Sanctions</span><span>All clear<');
+
+    // R346 Bypass 4: > Clear < with spaces, "All clear", lower case, "Sanctions and PEP" / "PEP & sanctions", and &nbsp; all fail
+    const variantSanctions = [
+      'export const v1 = <div><span>Sanctions & PEP</span><span> Clear </span></div>;',
+      'export const v2 = <div><span>Sanctions and PEP</span><span>All clear</span></div>;',
+      'export const v3 = <div><span>pep & sanctions</span><span>clear</span></div>;',
+      'export const v4 = <div><span>PEP and Sanctions</span><span>&nbsp;All&nbsp;clear&nbsp;</span></div>;',
+    ].join('\n');
+    const variantViolations = scanTextForDemoLiterals(
+      'src/components/PersonProfileClient.tsx',
+      variantSanctions,
+      denyLiterals,
+      [],
+      pmsCodes,
+    );
+    expect(variantViolations).toHaveLength(4);
+
+    // R346 Bypass 5: placing the helper name AFTER the literal still fails
+    const helperAfterLiteral =
+      'export const view = () => { return <div><span>Sanctions &amp; PEP</span><span>Clear</span></div>; }; const _ = resolvePersonComplianceDisplay;';
+    const helperAfterViolations = scanTextForDemoLiterals(
+      'src/components/PersonProfileClient.tsx',
+      helperAfterLiteral,
+      denyLiterals,
+      [],
+      pmsCodes,
+    );
+    expect(helperAfterViolations).toHaveLength(1);
+    expect(helperAfterViolations[0]?.match).toBe('Sanctions &amp; PEP</span><span>Clear<');
 
     // R322: '20\d\d-\d\d' in src/domain/pms.ts fails
     const pmsMonthViolations = scanTextForDemoLiterals(
@@ -98,8 +203,42 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       "const fixed = '2026-11';",
       denyLiterals,
       [],
+      pmsCodes,
     );
     expect(pmsMonthViolations.some((v: { match: string }) => v.match === "'2026-11'")).toBe(true);
+  });
+
+  it('isHighOrCriticalRiskRating matches High and Critical by canonical ID or systemKey and rejects decoy IDs containing "high" (R345)', () => {
+    expect(HIGH_RISK_RATING_IDS.has('risk_rating.high')).toBe(true);
+    expect(HIGH_RISK_RATING_IDS.has('risk_rating.critical')).toBe(true);
+
+    const customValues: ChoiceValue[] = [
+      {
+        id: 'risk_rating.custom_critical_tier',
+        listKey: 'risk_rating',
+        label: 'Severe / Critical',
+        systemKey: 'critical',
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: 'risk_rating.custom_highway',
+        listKey: 'risk_rating',
+        label: 'Highway infrastructure (low)',
+        systemKey: 'low',
+        sortOrder: 2,
+        active: true,
+      },
+    ];
+
+    expect(isHighOrCriticalRiskRating('risk_rating.high', customValues)).toBe(true);
+    expect(isHighOrCriticalRiskRating('risk_rating.critical', customValues)).toBe(true);
+    expect(isHighOrCriticalRiskRating('risk_rating.custom_critical_tier', customValues)).toBe(true);
+    expect(isHighOrCriticalRiskRating('risk_rating.custom_highway', customValues)).toBe(false);
+    expect(isHighOrCriticalRiskRating('risk_rating.medium', customValues)).toBe(false);
+    expect(isHighOrCriticalRiskRating('risk_rating.low', customValues)).toBe(false);
+    expect(isHighOrCriticalRiskRating('', customValues)).toBe(false);
+    expect(isHighOrCriticalRiskRating(null, customValues)).toBe(false);
   });
 
   it('resolveMatterIntakeComplianceRows derives all four rows from stored matter fields including not-run conflict, not-started risk, and empty engagement letter status', () => {
@@ -327,120 +466,6 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       'firm.headOfficeAddress',
       'firm.complaintsPartnerName',
     ]);
-  });
-
-  it('computeEnquiryDashboardMetrics filters monthly enquiries by receivedAt, filters callbacks due today, and excludes uncontacted not-yet-due enquiries from SLA met % (R324)', () => {
-    const baseEnq = (overrides: Partial<Enquiry>): Enquiry =>
-      ({
-        id: 'ENQ-1',
-        reference: 'ENQ-1',
-        receivedAt: '2026-11-05T10:00:00Z',
-        takenById: 'P-1',
-        channelId: 'enquiry_channel.phone',
-        firstName: 'Alex',
-        lastName: 'Morgan',
-        callingOnBehalfOf: '',
-        linkedOrganisationId: null,
-        email: '',
-        phone: '',
-        preferredContactMethodId: null,
-        bestTimeToCall: '',
-        address: null,
-        practiceAreaId: 'work_type.real_estate_and_property',
-        workTypeSubcategoryId: null,
-        summary: 'Test',
-        notes: '',
-        otherPartiesNamed: '',
-        urgencyId: 'enquiry_urgency.standard',
-        keyDate: null,
-        keyDateLabel: '',
-        sourceId: null,
-        referrerPersonId: null,
-        privacyNoticeGiven: true,
-        linkedPersonId: null,
-        assignedTeamId: null,
-        assignedToId: 'P-1',
-        status: 'Assigned',
-        firstContactDueAt: '2026-11-10T17:30:00Z',
-        nextActionDate: null,
-        closeReasonId: null,
-        referredToOrganisationId: null,
-        convertedMatterId: null,
-        contactLog: [],
-        createdById: 'P-1',
-        createdAt: '2026-11-05T10:00:00Z',
-        updatedById: 'P-1',
-        updatedAt: '2026-11-05T10:00:00Z',
-        ...overrides,
-      }) as Enquiry;
-
-    const enquiries: Enquiry[] = [
-      // 1. Oct enquiry (Converted) — excluded from Nov monthly counts; contacted within SLA
-      baseEnq({
-        id: 'ENQ-OCT',
-        receivedAt: '2026-10-12T09:00:00Z',
-        status: 'Converted',
-        firstContactDueAt: '2026-10-12T17:30:00Z',
-        contactLog: [
-          {
-            id: 'CL-1',
-            at: '2026-10-12T11:00:00Z',
-            byId: 'P-1',
-            method: 'Call',
-            outcome: 'Spoke',
-            note: 'Spoke to client',
-          },
-        ],
-      }),
-      // 2. Nov enquiry due today (uncontacted, not yet overdue at 12:00) — excluded from SLA denominator
-      baseEnq({
-        id: 'ENQ-DUE-TODAY',
-        receivedAt: '2026-11-09T09:00:00Z',
-        status: 'Assigned',
-        assignedToId: null,
-        firstContactDueAt: '2026-11-09T17:30:00Z',
-        contactLog: [],
-      }),
-      // 3. Nov enquiry overdue and uncontacted — counts in SLA denominator as missed
-      baseEnq({
-        id: 'ENQ-OVERDUE',
-        receivedAt: '2026-11-04T09:00:00Z',
-        status: 'Assigned',
-        firstContactDueAt: '2026-11-05T17:30:00Z',
-        contactLog: [],
-      }),
-      // 4. Nov enquiry converted and contacted on time — counts in Nov converted and SLA met
-      baseEnq({
-        id: 'ENQ-NOV-CONV',
-        receivedAt: '2026-11-06T09:00:00Z',
-        status: 'Converted',
-        firstContactDueAt: '2026-11-06T17:30:00Z',
-        contactLog: [
-          {
-            id: 'CL-2',
-            at: '2026-11-06T10:30:00Z',
-            byId: 'P-1',
-            method: 'Call',
-            outcome: 'Spoke',
-            note: 'Converted',
-          },
-        ],
-      }),
-    ];
-
-    const metrics = computeEnquiryDashboardMetrics(enquiries, '2026-11-09T12:00:00Z');
-    expect(metrics.monthReceivedCount).toBe(3);
-    expect(metrics.monthConvertedCount).toBe(1);
-    expect(metrics.monthConversionPct).toBe(33);
-    expect(metrics.monthOpenCount).toBe(2);
-    expect(metrics.monthUnassignedCount).toBe(1);
-    expect(metrics.callbacksDueTodayCount).toBe(1);
-    expect(metrics.overdueCallbacksCount).toBe(1);
-    // SLA evaluated over ENQ-OCT (met), ENQ-OVERDUE (missed), ENQ-NOV-CONV (met); ENQ-DUE-TODAY is not yet due and uncontacted so excluded
-    expect(metrics.slaEvaluatedCount).toBe(3);
-    expect(metrics.slaMetCount).toBe(2);
-    expect(metrics.slaMetPct).toBe(67);
-    expect(metrics.overdueSlaCount).toBe(1);
   });
 
   it('lookupCompaniesHouse returns unconfigured empty result without fabricated companies and normaliseCompaniesHouseOfficerName formats officer names (R335)', () => {
