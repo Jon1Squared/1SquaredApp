@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAndValidateTenantConfig } from '@platform/core';
 import type { PlatformEnvironment } from '@platform/core-api';
+import { isPrivilegedPersonForEmailLinking } from '../src/domain/rbac';
 import {
   applyEntraObjectIdMapToStore,
   loadCommittedSeedStore,
@@ -17,6 +18,7 @@ export interface SeedDemoTenantOptions {
   rootDir?: string;
   runtimeStorePath?: string;
   logger?: (jsonLine: string) => void;
+  warnLogger?: (jsonLine: string) => void;
 }
 
 export interface SeedDemoTenantResult {
@@ -24,6 +26,7 @@ export interface SeedDemoTenantResult {
   tenantId: string;
   environment: string;
   mappedEntraPersonas: number;
+  unboundPrivilegedPersonas: number;
   counts: {
     people: number;
     organisations: number;
@@ -71,6 +74,7 @@ export function runSeedDemoTenant(
   const env = options.env ?? process.env;
   const rootDir = options.rootDir ?? process.cwd();
   const log = options.logger ?? ((line: string) => console.info(line));
+  const warn = options.warnLogger ?? ((line: string) => console.warn(line));
 
   const writeSnapshot = args.includes('--write-snapshot');
   const force = args.includes('--force');
@@ -151,6 +155,7 @@ export function runSeedDemoTenant(
       tenantId: tenantConfig.tenantId,
       environment: tenantConfig.environment,
       mappedEntraPersonas: 0,
+      unboundPrivilegedPersonas: 0,
       counts: summarizeCounts(store),
     };
     log(JSON.stringify(result));
@@ -203,6 +208,19 @@ export function runSeedDemoTenant(
     mappedEntraPersonas = applied.mappedCount;
   }
 
+  const unboundPrivilegedPersonas = seedStore.people.filter(
+    (person) =>
+      person.isEmployee &&
+      !person.mergedIntoId &&
+      !person.entraObjectId?.trim() &&
+      isPrivilegedPersonForEmailLinking(person, {
+        allPeople: seedStore.people,
+        teams: seedStore.teams ?? [],
+        tenantId: tenantConfig.tenantId,
+        rbacConfig: tenantConfig.rbac,
+      }),
+  ).length;
+
   const targetDir = path.dirname(targetStorePath);
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
@@ -220,11 +238,26 @@ export function runSeedDemoTenant(
     throw writeErr;
   }
 
+  if (unboundPrivilegedPersonas > 0) {
+    warn(
+      JSON.stringify({
+        event: 'seed.demo_tenant_unbound_privileged_warning',
+        tenantId: tenantConfig.tenantId,
+        environment: tenantConfig.environment,
+        unboundPrivilegedPersonas,
+        warning: entraMapPath
+          ? `${unboundPrivilegedPersonas} privileged ${unboundPrivilegedPersonas === 1 ? 'persona remains' : 'personas remain'} unbound and never link by email; include ${unboundPrivilegedPersonas === 1 ? 'it' : 'them'} in --entra-map or bind in Admin -> Users.`
+          : `seed:demo ran without --entra-map: ${unboundPrivilegedPersonas} privileged ${unboundPrivilegedPersonas === 1 ? 'persona remains' : 'personas remain'} unbound and never link by email; pass --entra-map or bind them in Admin -> Users.`,
+      }),
+    );
+  }
+
   const result: SeedDemoTenantResult = {
     event: 'seed.demo_tenant_completed',
     tenantId: tenantConfig.tenantId,
     environment: tenantConfig.environment,
     mappedEntraPersonas,
+    unboundPrivilegedPersonas,
     counts: summarizeCounts(seedStore),
   };
   log(JSON.stringify(result));

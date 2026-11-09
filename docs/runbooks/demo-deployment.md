@@ -32,6 +32,8 @@ Before deploying the Bicep template, an operator with access to the demo Microso
    | `07 Managing Partner` | `P-000038` | Gethin Lloyd | `gethin.lloyd@<demo-tenant>.onmicrosoft.com` | `gethin.lloyd@notalawfirm.example` | `managing_partner` |
    | `08 Admin` | `P-000004` | Huw Pritchard | `huw.pritchard@<demo-tenant>.onmicrosoft.com` | `huw.pritchard@notalawfirm.example` | `admin` (require MFA) |
 
+   **Important (S0-30 — privileged personas never link by email):** Sign-in never binds a privileged persona (any employee whose resolved roles or permissions include a permission with `requiresMfa: true` or `sensitivity: "critical"`, including `02 Partner`, `06 Risk & Compliance`, `07 Managing Partner`, and `08 Admin`) by email; an unlinked privileged user receives `"Your account needs to be linked by an administrator."` instead. Privileged demo personas **must** therefore be bound via `--entra-map` (Section 5a) or explicitly by an administrator in **Admin → Users** (**Admin → RBAC & Entra ID**). Non-privileged employees link by email only when `rbac.identityMapping.emailLinking.enabled` is `true` and their verified directory sign-in domain matches `rbac.identityMapping.emailLinking.domains` (defaulting to `branding.primaryDomain`).
+
 ## 3. Infrastructure Deployment (`core/infra/main.bicep`)
 
 Deploy `core/infra/main.bicep` into the non-live UK South resource group with the following parameters:
@@ -92,7 +94,7 @@ To bind the real Entra test users created in Section 2 to the seeded personas, c
 }
 ```
 
-When `--entra-map` is supplied, `seed:demo` sets `entraObjectId` **only** on the person IDs listed in the map and leaves all other seeded people without an `entraObjectId`. When `--entra-map` is omitted, `seed:demo` builds the store with `includeSyntheticEntraOids: false` so that no synthetic Entra Object IDs are written and email first-linking can bind users on first sign-in. Never commit the mapping file to source control.
+When `--entra-map` is supplied, `seed:demo` sets `entraObjectId` **only** on the person IDs listed in the map and leaves all other seeded people without an `entraObjectId`. When `--entra-map` is omitted, `seed:demo` builds the store with `includeSyntheticEntraOids: false` (so no synthetic Entra Object IDs are written) and prints a structured warning reporting how many privileged personas remain unbound (naming no email addresses). Because privileged personas never link by email (S0-30), they **must** be bound with `--entra-map` or explicitly by an administrator in **Admin → Users** (**Admin → RBAC & Entra ID**). Non-privileged employees link by email on first sign-in only when `rbac.identityMapping.emailLinking.enabled` is `true` and their verified directory sign-in domain belongs to `rbac.identityMapping.emailLinking.domains` (defaulting to `branding.primaryDomain`). Never commit the mapping file to source control.
 
 ### 5b. Running the Seed Command
 
@@ -110,7 +112,7 @@ Safety checks enforced by `seed:demo`:
 - Refuses to run when the resolved `tenantConfig.tenantId` differs from the seed snapshot's `firmId`.
 - Refuses to overwrite a non-empty or unparseable store file unless `--force` is passed.
 - Builds fresh relative dates anchored to the current UTC date (`createSeedStore(new Date(), { includeSyntheticEntraOids: false })`) so key dates, SLA deadlines, and task due dates are always current when seeded.
-- Prints only record counts, `tenantId`, and `environment` (never person, client, or matter names).
+- Prints only record counts, `tenantId`, and `environment` (never person, client, or matter names), plus a structured warning on `stderr` when run without `--entra-map` (or whenever privileged personas remain unbound) stating how many privileged personas are still unbound without naming any email addresses.
 
 To regenerate the committed seed snapshot (`data/seed-not-a-law-firm.json`, used by deterministic unit and e2e tests) from `buildDemoData` (`src/seed/demo.ts`) after updating seed fixtures:
 

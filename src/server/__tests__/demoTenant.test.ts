@@ -7,8 +7,10 @@ import {
   isMatterConflictCheckAwaitingDecision,
   isMatterOpeningInProgress,
 } from '@/domain/matterOpeningRecord';
+import { isPrivilegedPersonForEmailLinking } from '@/domain/rbac';
 import { isComplianceOrOnboardingTask } from '@/domain/tasks';
 import {
+  getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
   isNonLiveDemoEnvironment,
   setActiveTenantConfigForTesting,
@@ -779,6 +781,110 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       expect(thrownEntraMapMessage).not.toContain('rhian.morgan');
     } finally {
       delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('16. seed:demo without --entra-map prints a warning stating how many privileged personas remain unbound, with no email address in the output (S0-30, R381, R392)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-s030-seed-warn-'));
+    const storePath = path.join(tmpDir, 'runtime-store.json');
+    const fullMapPath = path.join(tmpDir, 'entra-map.local.json');
+    const stdoutLogs: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const unmappedRes = runSeedDemoTenant({
+        args: [],
+        env: {
+          ...process.env,
+          PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+          PLATFORM_ENVIRONMENT: 'demo',
+        },
+        runtimeStorePath: storePath,
+        logger: (line) => stdoutLogs.push(line),
+      });
+
+      const activeTenantCfg = getActiveTenantConfiguration();
+      const writtenStore = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+      const privilegedSeededPeople = writtenStore.people.filter(
+        (person: (typeof writtenStore.people)[number]) =>
+          person.isEmployee &&
+          !person.mergedIntoId &&
+          isPrivilegedPersonForEmailLinking(person, {
+            allPeople: writtenStore.people,
+            teams: writtenStore.teams ?? [],
+            tenantId: activeTenantCfg.tenantId,
+            rbacConfig: activeTenantCfg.rbac,
+          }),
+      );
+      expect(privilegedSeededPeople.length).toBeGreaterThan(0);
+      expect(unmappedRes.unboundPrivilegedPersonas).toBe(privilegedSeededPeople.length);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const rawWarnLine = String(warnSpy.mock.calls[0]?.[0] ?? '');
+      const parsedWarn = JSON.parse(rawWarnLine) as {
+        event: string;
+        tenantId: string;
+        environment: string;
+        unboundPrivilegedPersonas: number;
+        warning: string;
+      };
+      expect(parsedWarn.event).toBe('seed.demo_tenant_unbound_privileged_warning');
+      expect(parsedWarn.tenantId).toBe('not-a-law-firm');
+      expect(parsedWarn.environment).toBe('demo');
+      expect(parsedWarn.unboundPrivilegedPersonas).toBe(privilegedSeededPeople.length);
+      expect(parsedWarn.warning).toContain('without --entra-map');
+      expect(parsedWarn.warning).toContain(
+        `${privilegedSeededPeople.length} privileged`,
+      );
+      expect(parsedWarn.warning).toContain('unbound');
+
+      // Neither stdout nor stderr warning output may contain any email address, domain, or person name
+      const combinedOutput = [...stdoutLogs, rawWarnLine].join('\n');
+      expect(combinedOutput).not.toContain('@');
+      expect(combinedOutput.toLowerCase()).not.toContain('notalawfirm.example');
+      expect(combinedOutput.toLowerCase()).not.toContain('notalawfirm.co.uk');
+      for (const person of writtenStore.people as Array<{
+        firstName?: string;
+        surname?: string;
+        emails?: Array<{ address?: string }>;
+      }>) {
+        for (const em of person.emails ?? []) {
+          if (em.address) {
+            expect(combinedOutput.toLowerCase()).not.toContain(
+              em.address.toLowerCase(),
+            );
+          }
+        }
+      }
+      expect(combinedOutput).not.toContain('Rhian');
+      expect(combinedOutput).not.toContain('Huw');
+      expect(combinedOutput).not.toContain('Gethin');
+      expect(combinedOutput).not.toContain('Bethan');
+
+      // Positive control: supplying --entra-map covering all privileged personas emits no warning
+      const allPrivilegedMap: Record<string, string> = {};
+      privilegedSeededPeople.forEach((p: { id: string }, index: number) => {
+        const suffix = String(index + 1).padStart(4, '0');
+        allPrivilegedMap[p.id] = `33333333-4444-4555-8666-77777777${suffix}`;
+      });
+      fs.writeFileSync(fullMapPath, JSON.stringify(allPrivilegedMap, null, 2), 'utf8');
+      warnSpy.mockClear();
+
+      const mappedRes = runSeedDemoTenant({
+        args: ['--force', '--entra-map', fullMapPath],
+        env: {
+          ...process.env,
+          PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+          PLATFORM_ENVIRONMENT: 'demo',
+        },
+        runtimeStorePath: storePath,
+        logger: () => {},
+      });
+      expect(mappedRes.unboundPrivilegedPersonas).toBe(0);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
