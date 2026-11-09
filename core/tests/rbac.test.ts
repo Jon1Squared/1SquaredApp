@@ -6497,20 +6497,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ).toBe(8194);
         }
 
-        // Direct buildFeeEarnerWeeklyTime check for FE002 with and without BRI001-0003 hidden
+        // Direct buildFeeEarnerWeeklyTime check for FE002 with and without BRI001-0003 excluded
         const fe2 = pms.listFeeEarners().find((fe) => fe.fee_earner_id === 'FE002')!;
         const allTe = pms.listAllTimeEntries();
         const weekAllowed = buildFeeEarnerWeeklyTime({
           feeEarner: fe2,
           timeEntries: allTe,
           asAtDate: extractInfo.asAtDate,
-          hiddenMatterCodes: new Set(),
         })!;
         const weekOutsider = buildFeeEarnerWeeklyTime({
           feeEarner: fe2,
-          timeEntries: allTe,
+          timeEntries: allTe.filter((t) => t.matter_code !== 'BRI001-0003'),
           asAtDate: extractInfo.asAtDate,
-          hiddenMatterCodes: new Set(['BRI001-0003']),
         })!;
         expect(round1(weekAllowed.weekTotalHours - weekOutsider.weekTotalHours)).toBe(9.8);
         expect(
@@ -6618,6 +6616,58 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
         expect(store.notes.length).toBe(notesBeforeR315);
         expect(store.tasks.length).toBe(tasksBeforeR315);
+
+        // 2b. R337: An unlinked PMS code whose text equals the matterNumber of an accessible 1Squared matter returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note, and invalid amountGbp values are rejected
+        const harLinkIdx = store.pmsLinks.findIndex(
+          (l) => l.entityType === 'matter' && l.pmsCode === 'HAR001-0003',
+        );
+        expect(harLinkIdx).toBeGreaterThanOrEqual(0);
+        const [removedHarLink] = store.pmsLinks.splice(harLinkIdx, 1);
+        const signOffsBeforeR337 = (store.signOffs ?? []).length;
+        try {
+          const unlinkedBill = await requestMatterBillAction('HAR001-0003');
+          expect(isActionDenied(unlinkedBill)).toBe(true);
+          if (isActionDenied(unlinkedBill)) {
+            expect(unlinkedBill.code).toBe('FORBIDDEN');
+            expect(unlinkedBill.message).toBe('Matter not found or access denied.');
+          }
+
+          const unlinkedWriteOff = await flagMatterWriteOffAction('HAR001-0003', 450);
+          expect(isActionDenied(unlinkedWriteOff)).toBe(true);
+          if (isActionDenied(unlinkedWriteOff)) {
+            expect(unlinkedWriteOff.code).toBe('FORBIDDEN');
+            expect(unlinkedWriteOff.message).toBe('Matter not found or access denied.');
+          }
+
+          const unlinkedCc = await recordInvoiceCreditControlActionAction({
+            invoiceNumber: 'PV/2026/0040',
+            matterCode: 'HAR001-0003',
+            clientCode: 'HAR001',
+            actionType: 'log_call',
+            note: 'Should fail on unlinked matter',
+          });
+          expect(isActionDenied(unlinkedCc)).toBe(true);
+          if (isActionDenied(unlinkedCc)) {
+            expect(unlinkedCc.code).toBe('FORBIDDEN');
+            expect(unlinkedCc.message).toBe('Matter not found or access denied.');
+          }
+
+          expect(store.tasks.length).toBe(tasksBeforeR315);
+          expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+          expect(store.notes.length).toBe(notesBeforeR315);
+        } finally {
+          store.pmsLinks.splice(harLinkIdx, 0, removedHarLink!);
+        }
+
+        for (const invalidAmount of [0, -100, Number.NaN, Number.POSITIVE_INFINITY]) {
+          const badAmtRes = await flagMatterWriteOffAction('HAR001-0003', invalidAmount);
+          expect(isActionDenied(badAmtRes)).toBe(true);
+          if (isActionDenied(badAmtRes)) {
+            expect(badAmtRes.code).toBe('FORBIDDEN');
+            expect(badAmtRes.message).toMatch(/finite number greater than 0/i);
+          }
+        }
+        expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
 
         // 3. Revoke finance:credit_control on partner: all 3 actions return FORBIDDEN mentioning finance:credit_control
         partner.permissionOverrides = {

@@ -15,6 +15,8 @@ import {
   buildFeeEarnerWeeklyTime,
   buildFirmFinanceRollups,
   findPmsCodeForRecord,
+  isValidPmsAsAtDate,
+  PMS_AS_AT_UNAVAILABLE_LABEL,
 } from '@/domain/pms';
 import { getActiveActorSession } from '@/domain/rbac';
 import type { Person, PmsLink } from '@/domain/types';
@@ -192,7 +194,7 @@ export function verifyFinanceActorAndPermission(
       .map((l) => l.pmsCode),
   );
   const accessibleMatterIds = new Set(
-    store.matters.filter(visibility.canViewMatter).map((m) => m.id),
+    store.matters.filter((m) => !hiddenMatterIds.has(m.id)).map((m) => m.id),
   );
   const accessibleLinkedPmsMatterCodes = new Set(
     store.pmsLinks
@@ -277,13 +279,40 @@ export function getMatterFinanceRows(
   const pms = getPmsSource();
   const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
 
-  const pmsExtractInfo: PmsExtractInfo = isCleanEmpty
-    ? {
-        asAtDate: now.toISOString().slice(0, 10),
+  if (isCleanEmpty) {
+    return {
+      pmsExtractInfo: {
+        asAtDate: '',
         sourceFile: 'No PMS linked (Clean Client Deployment)',
         importedAt: now.toISOString(),
-      }
-    : pms.getExtractInfo();
+      },
+      pmsLinks: visiblePmsLinks,
+      pmsSummaryByMatterId: {},
+      allMatterFins: [],
+      pmsAgedDebt: [],
+      pmsInvoices: [],
+      pmsAllDisbursements: [],
+      pmsClientAccountByMatterCode: {},
+    };
+  }
+
+  const pmsExtractInfo = pms.getExtractInfo();
+  if (!isValidPmsAsAtDate(pmsExtractInfo.asAtDate)) {
+    return {
+      pmsExtractInfo: {
+        asAtDate: '',
+        sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
+        importedAt: pmsExtractInfo.importedAt,
+      },
+      pmsLinks: visiblePmsLinks,
+      pmsSummaryByMatterId: {},
+      allMatterFins: [],
+      pmsAgedDebt: [],
+      pmsInvoices: [],
+      pmsAllDisbursements: [],
+      pmsClientAccountByMatterCode: {},
+    };
+  }
 
   const isCodeAllowed = (matterCode: string): boolean => {
     if (!accessibleLinkedPmsMatterCodes.has(matterCode)) return false;
@@ -291,7 +320,7 @@ export function getMatterFinanceRows(
     return true;
   };
 
-  const rawMatterFins = isCleanEmpty ? [] : pms.getAllMatterFinancials();
+  const rawMatterFins = pms.getAllMatterFinancials();
   const allMatterFins = rawMatterFins.filter((f) => isCodeAllowed(f.matter_code));
   const finByMatterCode = new Map(allMatterFins.map((f) => [f.matter_code, f]));
 
@@ -307,24 +336,22 @@ export function getMatterFinanceRows(
     }
   }
 
-  const pmsAgedDebt: PmsInvoiceBalance[] = isCleanEmpty
-    ? []
-    : pms.getAgedDebt().filter((inv) => isCodeAllowed(inv.matter_code));
-  const pmsInvoices: PmsInvoiceDetail[] = isCleanEmpty
-    ? []
-    : pms.getInvoices().filter((inv) => isCodeAllowed(inv.matter_code));
+  const pmsAgedDebt: PmsInvoiceBalance[] = pms
+    .getAgedDebt()
+    .filter((inv) => isCodeAllowed(inv.matter_code));
+  const pmsInvoices: PmsInvoiceDetail[] = pms
+    .getInvoices()
+    .filter((inv) => isCodeAllowed(inv.matter_code));
 
   const pmsAllDisbursements: PmsDisbursement[] = [];
   const pmsClientAccountByMatterCode: Record<string, PmsClientAccountEntry[]> = {};
-  if (!isCleanEmpty) {
-    for (const mf of allMatterFins) {
-      if (mf.unbilled_disbursements > 0) {
-        pmsAllDisbursements.push(...pms.getDisbursements(mf.matter_code));
-      }
-      const ledgerEntries = pms.getClientAccountLedger(mf.matter_code);
-      if (mf.client_account_balance > 0 || ledgerEntries.length > 0) {
-        pmsClientAccountByMatterCode[mf.matter_code] = ledgerEntries;
-      }
+  for (const mf of allMatterFins) {
+    if (mf.unbilled_disbursements > 0) {
+      pmsAllDisbursements.push(...pms.getDisbursements(mf.matter_code));
+    }
+    const ledgerEntries = pms.getClientAccountLedger(mf.matter_code);
+    if (mf.client_account_balance > 0 || ledgerEntries.length > 0) {
+      pmsClientAccountByMatterCode[mf.matter_code] = ledgerEntries;
     }
   }
 
@@ -373,6 +400,9 @@ export function getMyFinanceFigures(
 
   const pms = getPmsSource();
   const extractInfo = pms.getExtractInfo();
+  if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
+    return { myFeeEarnerFigures: null, myWeeklyTime: null };
+  }
   const feeEarners = pms.listFeeEarners();
   const myFe = feeEarners.find((fe) => fe.fee_earner_id === myFeCode) ?? null;
   if (!myFe) {
@@ -435,7 +465,7 @@ export function getFirmFinance(
   if (isCleanEmpty) {
     return {
       pmsExtractInfo: {
-        asAtDate: now.toISOString().slice(0, 10),
+        asAtDate: '',
         sourceFile: 'No PMS linked (Clean Client Deployment)',
         importedAt: now.toISOString(),
       },
@@ -466,6 +496,37 @@ export function getFirmFinance(
 
   const pms = getPmsSource();
   const extractInfo = pms.getExtractInfo();
+  if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
+    return {
+      pmsExtractInfo: {
+        asAtDate: '',
+        sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
+        importedAt: extractInfo.importedAt,
+      },
+      allFeeEarnerPerformance: [],
+      pmsMonthlyFeesBilled: { months: [], yearToDateTotal: 0 },
+      pmsCashReceived: {
+        currentMonthTotal: 0,
+        currentMonthReceiptCount: 0,
+        previousMonthTotal: 0,
+        previousMonthReceiptCount: 0,
+      },
+      pmsDepartmentFinancials: {
+        departments: [],
+        firmTotal: {
+          practiceArea: 'Firm total',
+          openMatters: 0,
+          billedThisYear: 0,
+          unbilledWip: 0,
+          outstandingDebt: 0,
+          overdueDebt: 0,
+          currentMonthHours: 0,
+        },
+      },
+      allClientFins: [],
+      pmsSummaryByClientId: {},
+    };
+  }
   const rollups = buildFirmFinanceRollups(
     {
       asAtDate: extractInfo.asAtDate,

@@ -415,7 +415,6 @@ describe('Role-based Home pages & configuration', () => {
       payments: pms.listAllPayments(),
       clients: pms.listClients(),
       feeEarners,
-      year: '2026',
     });
 
     // Check Monthly fees billed Jan-Oct 2026 (exact SQL parity)
@@ -461,12 +460,14 @@ describe('Role-based Home pages & configuration', () => {
     expect(isActionDenied(billRes)).toBe(false);
     expect(billRes.ok).toBe(true);
 
-    // Flag write-off on TGL001-0002 by partner (finance:credit_control) creates a new SignOffItem
-    const woRes = flagMatterWriteOff('TGL001-0002', 350, 'P-000001');
+    // Flag write-off on linked PMS matter SEV001-0001 by partner (finance:credit_control) creates a new SignOffItem, while unlinked TGL001-0002 is rejected (R337)
+    const unlinkedWo = flagMatterWriteOff('TGL001-0002', 350, 'P-000001');
+    expect(isActionDenied(unlinkedWo)).toBe(true);
+    const woRes = flagMatterWriteOff('SEV001-0001', 2984, 'P-000001');
     expect(isActionDenied(woRes)).toBe(false);
     expect(woRes.ok).toBe(true);
     const snapFinal = getAppSnapshot('P-000001');
-    expect(snapFinal.signOffs.some((s) => s.matterNumber === 'TGL001-0002')).toBe(true);
+    expect(snapFinal.signOffs.some((s) => s.matterNumber === 'SEV001-0001')).toBe(true);
   });
 
   it('links configurable Home page roles to Employee Roles in the People taxonomy and removes test_role', () => {

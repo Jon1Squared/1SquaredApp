@@ -5,10 +5,10 @@
  */
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { isValidPmsAsAtDate, PMS_AS_AT_UNAVAILABLE_LABEL } from '../domain/pms';
 import {
   buildPmsDatabaseFromWorkbook,
   DEFAULT_PMS_DB_PATH,
-  PMS_AS_AT_DATE,
 } from './importPms';
 import type {
   PmsAgeBucket,
@@ -168,8 +168,16 @@ export class DemoDbPmsSource implements PmsSource {
       const row = db
         .prepare(`SELECT as_at_date, imported_at, source_file FROM extract_info LIMIT 1`)
         .get() as Record<string, unknown> | undefined;
+      const rawAsAt = row?.as_at_date ? String(row.as_at_date).trim() : '';
+      if (!isValidPmsAsAtDate(rawAsAt)) {
+        return {
+          asAtDate: '',
+          importedAt: row?.imported_at ? String(row.imported_at) : '',
+          sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
+        };
+      }
       return {
-        asAtDate: row?.as_at_date ? String(row.as_at_date) : PMS_AS_AT_DATE,
+        asAtDate: rawAsAt,
         importedAt: row?.imported_at ? String(row.imported_at) : new Date().toISOString(),
         sourceFile: row?.source_file ? String(row.source_file) : '1Squared_PMS_Demo_Data.xlsx',
       };
@@ -410,6 +418,18 @@ export class DemoDbPmsSource implements PmsSource {
           appliedCreditNotes,
         };
       });
+    } finally {
+      db.close();
+    }
+  }
+
+  getInvoiceBalance(invoiceNumber: string): PmsInvoiceBalance | null {
+    const db = this.openDb();
+    try {
+      const row = db
+        .prepare(`SELECT * FROM v_invoice_balances WHERE invoice_number = ?`)
+        .get(invoiceNumber) as Record<string, unknown> | undefined;
+      return row ? this.mapInvoiceBalance(row) : null;
     } finally {
       db.close();
     }

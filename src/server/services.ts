@@ -79,6 +79,8 @@ import {
   computeAutomaticPmsLinks,
   findOneSquaredIdForPmsCode,
   findPmsCodeForRecord,
+  isValidPmsAsAtDate,
+  PMS_AS_AT_UNAVAILABLE_LABEL,
   suggestMatterMatches,
   type PmsSuggestedMatch,
 } from '@/domain/pms';
@@ -8910,6 +8912,20 @@ export function getMatterPmsViewBundle(
   const link =
     visiblePmsLinks.find((l) => l.entityType === 'matter' && l.onesquaredId === matterId) ?? null;
 
+  if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
+    return {
+      extractInfo: {
+        asAtDate: '',
+        sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
+        importedAt: extractInfo.importedAt,
+      },
+      link,
+      matterBundle: null,
+      unlinkedPmsMattersForClient: [],
+      allUnlinkedPmsMatters: [],
+    };
+  }
+
   const matterBundle = link ? pms.getMatterFullBundle(link.pmsCode) : null;
 
   const canManageLinks = permSet.permissions.has('finance:manage_links');
@@ -8967,6 +8983,21 @@ export function getClientPmsViewBundle(
   const extractInfo = pms.getExtractInfo();
   const link =
     visiblePmsLinks.find((l) => l.entityType === recordType && l.onesquaredId === recordId) ?? null;
+
+  if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
+    return {
+      extractInfo: {
+        asAtDate: '',
+        sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
+        importedAt: extractInfo.importedAt,
+      },
+      link,
+      clientBundle: null,
+      pmsClient: null,
+      oneSquaredMatterIdByPmsCode: {},
+      groupView: null,
+    };
+  }
 
   const allPmsClients = pms.listClients();
   const visibleMatterFins = pms
@@ -10411,13 +10442,14 @@ export function requestMatterBill(
   if (!auth.ok) return auth;
 
   const { store, actor, tokenRoles } = auth;
-  const matter = store.matters.find((m) => m.matterNumber === matterCode && !m.mergedIntoId);
-  const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode) ?? matter?.id ?? null;
+  const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
   const targetMatter = linkedId
     ? store.matters.find((m) => m.id === linkedId && !m.mergedIntoId)
-    : matter;
+    : undefined;
+  const pmsMatter = linkedId ? getPmsSource().getMatterFinancials(matterCode) : null;
   if (
     !targetMatter ||
+    !pmsMatter ||
     !canPersonAccessMatter(targetMatter, actor.id, actor, {
       allPeople: store.people,
       teams: store.teams,
@@ -10473,13 +10505,22 @@ export function flagMatterWriteOff(
   const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
+  if (typeof amountGbp !== 'number' || !Number.isFinite(amountGbp) || amountGbp <= 0) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Write-off amount must be a finite number greater than 0.',
+    );
+  }
+
   const { store, actor, tokenRoles } = auth;
   const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
   const matter = linkedId
     ? store.matters.find((m) => m.id === linkedId && !m.mergedIntoId)
-    : store.matters.find((m) => m.matterNumber === matterCode && !m.mergedIntoId);
+    : undefined;
+  const pmsMatter = linkedId ? getPmsSource().getMatterFinancials(matterCode) : null;
   if (
     !matter ||
+    !pmsMatter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: store.people,
       teams: store.teams,
@@ -10610,19 +10651,21 @@ export function recordInvoiceCreditControlAction(
   if (!auth.ok) return auth;
 
   const { store, actor, tokenRoles } = auth;
-  const matterByNumber = store.matters.find(
-    (m) => m.matterNumber === input.matterCode && !m.mergedIntoId,
+  const linkedMatterId = findOneSquaredIdForPmsCode(
+    store.pmsLinks,
+    'matter',
+    input.matterCode,
   );
-  const linkedMatterId =
-    findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', input.matterCode) ??
-    matterByNumber?.id ??
-    null;
 
   const matter = linkedMatterId
     ? store.matters.find((m) => m.id === linkedMatterId && !m.mergedIntoId)
     : null;
+  const pmsMatter = linkedMatterId
+    ? getPmsSource().getMatterFinancials(input.matterCode)
+    : null;
   if (
     !matter ||
+    !pmsMatter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: store.people,
       teams: store.teams,
@@ -10635,10 +10678,7 @@ export function recordInvoiceCreditControlAction(
     );
   }
 
-  const pmsInvoice =
-    getPmsSource()
-      .listAllInvoiceBalances()
-      .find((inv) => inv.invoice_number === input.invoiceNumber) ?? null;
+  const pmsInvoice = getPmsSource().getInvoiceBalance(input.invoiceNumber);
   if (!pmsInvoice || pmsInvoice.matter_code !== input.matterCode) {
     return buildActionDenied(
       'FORBIDDEN',

@@ -69,8 +69,20 @@ export function formatWholePct(fraction: number | null | undefined): string {
   return `${Math.round(fraction * 100)}%`;
 }
 
-/** Format the PMS as-at date label (e.g. "16 Oct 2026"). */
+export const PMS_AS_AT_UNAVAILABLE_LABEL = 'PMS as-at date unavailable';
+
+/** Return true only when `value` is a valid calendar date formatted as `YYYY-MM-DD`. */
+export function isValidPmsAsAtDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return parsed.toISOString().slice(0, 10) === value;
+}
+
+/** Format the PMS as-at date label (e.g. "16 Oct 2026"), or "PMS as-at date unavailable" when missing/invalid. */
 export function formatPmsAsAtLabel(asAtDate: string): string {
+  if (!isValidPmsAsAtDate(asAtDate)) return PMS_AS_AT_UNAVAILABLE_LABEL;
   return formatDate(asAtDate);
 }
 
@@ -626,11 +638,10 @@ export function buildFeeEarnerWeeklyTime(params: {
   feeEarner: Pick<PmsFeeEarner, 'fee_earner_id' | 'annual_target_hours'> | null | undefined;
   timeEntries: readonly PmsTimeEntry[];
   asAtDate: string;
-  hiddenMatterCodes?: ReadonlySet<string>;
   customDailyPace?: number | null;
 }): PmsFeeEarnerWeeklyTime | null {
-  const { feeEarner, timeEntries, asAtDate, hiddenMatterCodes, customDailyPace } = params;
-  if (!feeEarner) return null;
+  const { feeEarner, timeEntries, asAtDate, customDailyPace } = params;
+  if (!feeEarner || !isValidPmsAsAtDate(asAtDate)) return null;
 
   const rawTargetHours = Number(feeEarner.annual_target_hours ?? 0);
   const targetHours =
@@ -646,11 +657,11 @@ export function buildFeeEarnerWeeklyTime(params: {
   const visibleEntries = timeEntries.filter(
     (t) =>
       t.fee_earner_id === feeEarner.fee_earner_id &&
-      !hiddenMatterCodes?.has(t.matter_code) &&
       t.chargeable === 'Y',
   );
 
-  const parsedAsAt = new Date(`${asAtDate.slice(0, 10)}T00:00:00Z`);
+  const asAtIso = asAtDate.slice(0, 10);
+  const parsedAsAt = new Date(`${asAtIso}T00:00:00Z`);
   const utcDay = parsedAsAt.getUTCDay();
   const offsetToMonday = utcDay === 0 ? -6 : 1 - utcDay;
   const mondayMs = parsedAsAt.getTime() + offsetToMonday * 86_400_000;
@@ -670,7 +681,7 @@ export function buildFeeEarnerWeeklyTime(params: {
 
   const hoursByDate = new Map<string, number>();
   for (const t of visibleEntries) {
-    if (t.date >= weekStart && t.date <= weekEnd) {
+    if (t.date >= weekStart && t.date <= weekEnd && t.date <= asAtIso) {
       hoursByDate.set(t.date, roundMoney2((hoursByDate.get(t.date) ?? 0) + t.hours));
     }
   }
@@ -686,10 +697,10 @@ export function buildFeeEarnerWeeklyTime(params: {
   let unbilledWip = 0;
   const unbilledMatters = new Set<string>();
   let oldestUnbilledDate: string | null = null;
-  const currentYm = asAtDate.slice(0, 7);
+  const currentYm = asAtIso.slice(0, 7);
 
   for (const t of visibleEntries) {
-    if (t.date.slice(0, 7) === currentYm && t.date <= asAtDate.slice(0, 10)) {
+    if (t.date.slice(0, 7) === currentYm && t.date <= asAtIso) {
       mtdHours += t.hours;
     }
     if (t.billed_status === 'Unbilled') {
@@ -716,7 +727,6 @@ export function buildFeeEarnerWeeklyTime(params: {
 
 export interface FirmFinanceRollupInputRows {
   asAtDate: string;
-  year?: string;
   feeEarners: readonly PmsFeeEarner[];
   clients: readonly PmsClient[];
   matterFinancials: readonly PmsMatterFinancials[];
@@ -748,6 +758,32 @@ export function buildFirmFinanceRollups(
   rows: FirmFinanceRollupInputRows,
   hiddenMatterCodes: ReadonlySet<string> = new Set(),
 ): FirmFinanceRollups {
+  if (!isValidPmsAsAtDate(rows.asAtDate)) {
+    return {
+      allFeeEarnerPerformance: [],
+      allClientFins: [],
+      pmsMonthlyFeesBilled: { months: [], yearToDateTotal: 0 },
+      pmsCashReceived: {
+        currentMonthTotal: 0,
+        currentMonthReceiptCount: 0,
+        previousMonthTotal: 0,
+        previousMonthReceiptCount: 0,
+      },
+      pmsDepartmentFinancials: {
+        departments: [],
+        firmTotal: {
+          practiceArea: 'Firm total',
+          openMatters: 0,
+          billedThisYear: 0,
+          unbilledWip: 0,
+          outstandingDebt: 0,
+          overdueDebt: 0,
+          currentMonthHours: 0,
+        },
+      },
+    };
+  }
+
   const visibleMatters = rows.matterFinancials.filter(
     (m) => !hiddenMatterCodes.has(m.matter_code),
   );
@@ -761,25 +797,30 @@ export function buildFirmFinanceRollups(
     (p) => !hiddenMatterCodes.has(p.matter_code),
   );
 
-  const asAtYear = rows.asAtDate.slice(0, 4);
+  const asAtIso = rows.asAtDate.slice(0, 10);
+  const asAtYear = asAtIso.slice(0, 4);
   const asAtYearNum = Number(asAtYear) || 0;
-  const asAtMonthNum = Math.min(12, Math.max(1, Number(rows.asAtDate.slice(5, 7)) || 12));
-  const currentYm = rows.asAtDate.slice(0, 7);
+  const asAtMonthNum = Math.min(12, Math.max(1, Number(asAtIso.slice(5, 7)) || 12));
+  const currentYm = asAtIso.slice(0, 7);
   const prevYearNum = asAtMonthNum === 1 ? asAtYearNum - 1 : asAtYearNum;
   const prevMonthNum = asAtMonthNum === 1 ? 12 : asAtMonthNum - 1;
   const previousYm = `${String(prevYearNum).padStart(4, '0')}-${String(prevMonthNum).padStart(2, '0')}`;
 
-  // 1. Fee-earner performance
+  // 1. Fee-earner performance (chargeable_hours & pct_of_annual_target scoped to as-at year up to asAtIso, R339)
   const sortedFeeEarners = [...rows.feeEarners].sort((a, b) =>
     a.fee_earner_id.localeCompare(b.fee_earner_id),
   );
   const allFeeEarnerPerformance: PmsFeeEarnerPerformance[] = sortedFeeEarners.map((fe) => {
     const feEntries = visibleTimeEntries.filter((t) => t.fee_earner_id === fe.fee_earner_id);
     const chargeable_hours = sumMoneyPence(feEntries, (t) =>
-      t.chargeable === 'Y' ? t.hours : 0,
+      t.chargeable === 'Y' && t.date.slice(0, 4) === asAtYear && t.date <= asAtIso
+        ? t.hours
+        : 0,
     );
     const chargeable_hours_this_month = sumMoneyPence(feEntries, (t) =>
-      t.chargeable === 'Y' && t.date.slice(0, 7) === currentYm ? t.hours : 0,
+      t.chargeable === 'Y' && t.date.slice(0, 7) === currentYm && t.date <= asAtIso
+        ? t.hours
+        : 0,
     );
     const time_value = sumMoneyPence(feEntries, (t) => t.value);
     const unbilled_wip = sumMoneyPence(feEntries, (t) =>
@@ -818,11 +859,14 @@ export function buildFirmFinanceRollups(
     buildClientFinancialsFromRows(client, visibleMatters, visibleInvoices),
   );
 
-  // 3. Monthly fees billed (derived from asAtDate year and month range)
-  const targetYear = rows.year ?? asAtYear;
+  // 3. Monthly fees billed (derived from asAtDate year and month range up to asAtIso, R339)
   const byYm = new Map<string, number>();
   for (const inv of visibleInvoices) {
-    if (inv.invoice_date.slice(0, 4) !== targetYear || inv.exported_status === 'Draft') {
+    if (
+      inv.invoice_date.slice(0, 4) !== asAtYear ||
+      inv.invoice_date > asAtIso ||
+      inv.exported_status === 'Draft'
+    ) {
       continue;
     }
     const ym = inv.invoice_date.slice(0, 7);
@@ -842,10 +886,9 @@ export function buildFirmFinanceRollups(
     'Nov',
     'Dec',
   ];
-  const monthNames =
-    targetYear === asAtYear ? allMonthNames.slice(0, asAtMonthNum) : allMonthNames;
+  const monthNames = allMonthNames.slice(0, asAtMonthNum);
   const months: PmsMonthlyFeesBilled[] = monthNames.map((shortName, idx) => {
-    const monthKey = `${targetYear}-${String(idx + 1).padStart(2, '0')}`;
+    const monthKey = `${asAtYear}-${String(idx + 1).padStart(2, '0')}`;
     return {
       monthKey,
       monthShort: shortName,
@@ -860,6 +903,7 @@ export function buildFirmFinanceRollups(
   let previousMonthTotal = 0;
   let previousMonthReceiptCount = 0;
   for (const p of visiblePayments) {
+    if (p.receipt_date > asAtIso) continue;
     const ym = p.receipt_date.slice(0, 7);
     if (ym === currentYm) {
       currentMonthTotal += p.amount;
@@ -876,7 +920,7 @@ export function buildFirmFinanceRollups(
     previousMonthReceiptCount,
   };
 
-  // 5. Department financials
+  // 5. Department financials (billedThisYear scoped to as-at year up to asAtIso, R339)
   const matterPracticeAreaByCode = new Map<string, string>();
   const mattersByPracticeArea = new Map<string, PmsMatterFinancials[]>();
   for (const m of visibleMatters) {
@@ -889,7 +933,17 @@ export function buildFirmFinanceRollups(
   const departments: PmsDepartmentFinancials[] = [];
   for (const [practiceArea, deptMatters] of mattersByPracticeArea.entries()) {
     const openMatters = deptMatters.filter((m) => m.status === 'Open').length;
-    const billedThisYear = roundMoney2(deptMatters.reduce((s, m) => s + m.fees_billed, 0));
+    const billedThisYear = roundMoney2(
+      visibleInvoices
+        .filter(
+          (inv) =>
+            matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
+            inv.invoice_date.slice(0, 4) === asAtYear &&
+            inv.invoice_date <= asAtIso &&
+            inv.exported_status !== 'Draft',
+        )
+        .reduce((s, inv) => s + inv.fees_net, 0),
+    );
     const unbilledWip = roundMoney2(deptMatters.reduce((s, m) => s + m.unbilled_wip, 0));
     const outstandingDebt = roundMoney2(
       deptMatters.reduce((s, m) => s + m.outstanding_debt, 0),
@@ -909,7 +963,8 @@ export function buildFirmFinanceRollups(
           (t) =>
             matterPracticeAreaByCode.get(t.matter_code) === practiceArea &&
             t.chargeable === 'Y' &&
-            t.date.slice(0, 7) === currentYm,
+            t.date.slice(0, 7) === currentYm &&
+            t.date <= asAtIso,
         )
         .reduce((s, t) => s + t.hours, 0),
     );

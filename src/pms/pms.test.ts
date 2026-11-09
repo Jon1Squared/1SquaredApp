@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildPmsDatabaseFromWorkbook, resolveWorkbookPath } from './importPms';
+import * as pmsSourceModule from './pmsSource';
 import { DemoDbPmsSource } from './pmsSource';
 import { openXlsxWorkbook, parseMoney } from './xlsxReader';
 
@@ -285,6 +286,180 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(novWeek.monthToDateHours).toBe(3.5);
     expect(novWeek.dailyPaceHours).toBe(0);
     expect(novWeek.weeklyPaceHours).toBe(0);
+
+    // R339: Adding a 2025 invoice and a 2025 time entry does not change current-year (2026) billedThisYear, yearToDateTotal, chargeable_hours, or pct_of_annual_target
+    const inv2025 = {
+      ...baseInvoices[0]!,
+      invoice_number: 'PV/2025/0999',
+      matter_code: 'PEN001-0001',
+      client_code: 'PEN001',
+      invoice_date: '2025-10-12',
+      due_date: '2025-11-12',
+      invoice_type: 'Interim',
+      fees_net: 9000,
+      total: 10800,
+      paid: 10800,
+      outstanding: 0,
+      exported_status: 'Posted',
+    };
+    const te2025 = {
+      ...baseTimeEntries[0]!,
+      time_id: 'T2025999',
+      matter_code: 'PEN001-0001',
+      fee_earner_id: 'FE005',
+      date: '2025-10-12',
+      hours: 12.0,
+      value: 2580,
+      chargeable: 'Y' as const,
+      billed_status: 'Billed' as const,
+      billed_value: 2580,
+    };
+    const withPriorYear = buildFirmFinanceRollups({
+      asAtDate: source.getExtractInfo().asAtDate,
+      matterFinancials: source.getAllMatterFinancials(),
+      invoices: [...baseInvoices, inv2025],
+      timeEntries: [...baseTimeEntries, te2025],
+      payments: basePayments,
+      clients: source.listClients(),
+      feeEarners: source.listFeeEarners(),
+    });
+    expect(withPriorYear.pmsMonthlyFeesBilled.yearToDateTotal).toBe(181673.48);
+    expect(withPriorYear.pmsDepartmentFinancials.firmTotal.billedThisYear).toBe(181673.48);
+    const fe005Baseline = perfById.get('FE005')!;
+    const fe005WithPriorYear = withPriorYear.allFeeEarnerPerformance.find(
+      (p) => p.fee_earner_id === 'FE005',
+    )!;
+    expect(fe005WithPriorYear.chargeable_hours).toBe(fe005Baseline.chargeable_hours);
+    expect(fe005WithPriorYear.pct_of_annual_target).toBe(fe005Baseline.pct_of_annual_target);
+  });
+
+  it('handles an extract with no as-at date or a malformed as-at date without throwing or falling back to October (R338)', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const {
+      buildFeeEarnerWeeklyTime,
+      buildFirmFinanceRollups,
+      formatPmsAsAtLabel,
+      PMS_AS_AT_UNAVAILABLE_LABEL,
+    } = await import('@/domain/pms');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-r338-'));
+    const tmpDbPath = path.join(tmpDir, 'pms-r338.sqlite');
+    try {
+      buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
+      const customSource = new DemoDbPmsSource(tmpDbPath);
+
+      for (const badDate of ['', 'not-a-date', '2026-02-31']) {
+        const db = new DatabaseSync(tmpDbPath);
+        try {
+          if (badDate === '') {
+            db.exec(`DELETE FROM extract_info;`);
+          } else {
+            db.exec(`DELETE FROM extract_info;`);
+            db.prepare(
+              `INSERT INTO extract_info (as_at_date, imported_at, source_file) VALUES (?, ?, ?)`,
+            ).run(badDate, '2026-11-09T09:00:00Z', 'bad.xlsx');
+          }
+        } finally {
+          db.close();
+        }
+
+        const info = customSource.getExtractInfo();
+        expect(info.asAtDate).toBe('');
+        expect(info.sourceFile).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
+        expect(formatPmsAsAtLabel(info.asAtDate)).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
+        expect(formatPmsAsAtLabel(badDate)).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
+        expect(formatPmsAsAtLabel(badDate)).not.toMatch(/Oct/i);
+
+        const rollups = buildFirmFinanceRollups({
+          asAtDate: badDate,
+          feeEarners: customSource.listFeeEarners(),
+          clients: customSource.listClients(),
+          matterFinancials: customSource.getAllMatterFinancials(),
+          invoices: customSource.listAllInvoiceBalances(),
+          timeEntries: customSource.listAllTimeEntries(),
+          payments: customSource.listAllPayments(),
+        });
+        expect(rollups.allFeeEarnerPerformance).toEqual([]);
+        expect(rollups.pmsMonthlyFeesBilled).toEqual({ months: [], yearToDateTotal: 0 });
+        expect(rollups.pmsCashReceived).toEqual({
+          currentMonthTotal: 0,
+          currentMonthReceiptCount: 0,
+          previousMonthTotal: 0,
+          previousMonthReceiptCount: 0,
+        });
+        expect(rollups.pmsDepartmentFinancials.departments).toEqual([]);
+
+        const weekly = buildFeeEarnerWeeklyTime({
+          feeEarner: customSource.listFeeEarners()[0],
+          timeEntries: customSource.listAllTimeEntries(),
+          asAtDate: badDate,
+        });
+        expect(weekly).toBeNull();
+
+        const { isActionDenied } = await import('@/domain/actionResult');
+        const { getFirmFinance, getMatterFinanceRows, getMyFinanceFigures } =
+          await import('@/server/financeServices');
+        const { getClientPmsViewBundle, getMatterPmsViewBundle } =
+          await import('@/server/services');
+        const getPmsSpy = vi
+          .spyOn(pmsSourceModule, 'getPmsSource')
+          .mockReturnValue(customSource);
+        try {
+          const rowsRes = getMatterFinanceRows('P-000001');
+          expect(isActionDenied(rowsRes)).toBe(false);
+          if (!isActionDenied(rowsRes)) {
+            expect(rowsRes.pmsExtractInfo.asAtDate).toBe('');
+            expect(rowsRes.pmsExtractInfo.sourceFile).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
+            expect(rowsRes.allMatterFins).toEqual([]);
+            expect(rowsRes.pmsSummaryByMatterId).toEqual({});
+          }
+
+          const myRes = getMyFinanceFigures('P-000002');
+          expect(isActionDenied(myRes)).toBe(false);
+          if (!isActionDenied(myRes)) {
+            expect(myRes.myFeeEarnerFigures).toBeNull();
+            expect(myRes.myWeeklyTime).toBeNull();
+          }
+
+          const firmRes = getFirmFinance('P-000001');
+          expect(isActionDenied(firmRes)).toBe(false);
+          if (!isActionDenied(firmRes)) {
+            expect(firmRes.pmsExtractInfo.asAtDate).toBe('');
+            expect(firmRes.pmsExtractInfo.sourceFile).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
+            expect(firmRes.allFeeEarnerPerformance).toEqual([]);
+            expect(firmRes.pmsMonthlyFeesBilled).toEqual({ months: [], yearToDateTotal: 0 });
+            expect(firmRes.allClientFins).toEqual([]);
+          }
+
+          const matterBundleRes = getMatterPmsViewBundle('M-000001', 'P-000001');
+          expect(isActionDenied(matterBundleRes)).toBe(false);
+          if (!isActionDenied(matterBundleRes)) {
+            expect(matterBundleRes.extractInfo.asAtDate).toBe('');
+            expect(matterBundleRes.extractInfo.sourceFile).toBe(
+              PMS_AS_AT_UNAVAILABLE_LABEL,
+            );
+            expect(matterBundleRes.matterBundle).toBeNull();
+          }
+
+          const clientBundleRes = getClientPmsViewBundle(
+            'organisation',
+            'O-000001',
+            'P-000001',
+          );
+          expect(isActionDenied(clientBundleRes)).toBe(false);
+          if (!isActionDenied(clientBundleRes)) {
+            expect(clientBundleRes.extractInfo.asAtDate).toBe('');
+            expect(clientBundleRes.extractInfo.sourceFile).toBe(
+              PMS_AS_AT_UNAVAILABLE_LABEL,
+            );
+            expect(clientBundleRes.clientBundle).toBeNull();
+          }
+        } finally {
+          getPmsSpy.mockRestore();
+        }
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('automatically links PMS clients and fee earners and preserves manual links', async () => {

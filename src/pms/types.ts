@@ -348,6 +348,7 @@ export interface PmsSource {
   getMatterWipBreakdown(matterCode: string): PmsMatterWipBreakdown;
   getFeeEstimates(matterCode: string): PmsFeeEstimate[];
   getInvoices(filter?: { matterCode?: string; clientCode?: string }): PmsInvoiceDetail[];
+  getInvoiceBalance(invoiceNumber: string): PmsInvoiceBalance | null;
   listAllInvoiceBalances(): PmsInvoiceBalance[];
   getAgedDebt(clientCode?: string): PmsInvoiceBalance[];
   getDisbursements(matterCode: string): PmsDisbursement[];
