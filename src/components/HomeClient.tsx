@@ -22,13 +22,30 @@ import {
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate } from '@/domain/dates';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
-import { enquiryDisplayName, isEnquiryOpen } from '@/domain/enquiries';
+import {
+  computeEnquiryDashboardMetrics,
+  enquiryDisplayName,
+  filterEnquiriesForPracticeAreasAndTeams,
+  formatLondonDateIso,
+  isDueTimestampOverdue,
+  isEnquiryOpen,
+} from '@/domain/enquiries';
 import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
+import {
+  isHighOrCriticalRiskRating,
+  isMatterConflictCheckAwaitingDecision,
+} from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
-import { findOneSquaredIdForPmsCode, formatGbp } from '@/domain/pms';
+import {
+  findOneSquaredIdForPmsCode,
+  formatGbp,
+  formatPmsAsAtLabel,
+  isValidPmsAsAtDate,
+  PMS_AS_AT_UNAVAILABLE_LABEL,
+} from '@/domain/pms';
 import type { SearchDoc } from '@/domain/search';
 import { isTaskOpen } from '@/domain/tasks';
 import type {
@@ -158,7 +175,7 @@ export function HomeClient({
   values,
   finance = DEFAULT_FINANCE_CAPABILITIES,
   pmsLinks = [],
-  pmsAsAtDate = '2026-10-16',
+  pmsAsAtDate,
   pmsSummaryByMatterId = {},
   allMatterFins = [],
   allClientFins = [],
@@ -206,43 +223,20 @@ export function HomeClient({
     };
   }, [currentUser.id]);
 
-  const hasDemoSeedData = useMemo(
-    () =>
-      matters.some(
-        (m) =>
-          m.matterNumber === 'PEN001-0001' ||
-          m.matterNumber === 'PRI001-0001' ||
-          m.matterNumber === 'TGL001-0002',
-      ) || allMatterFins.length > 0,
-    [matters, allMatterFins.length],
-  );
-
   // Quick enquiry capture state (Panel 13 - Enquiries Coordinator)
-  const [qFirstName, setQFirstName] = useState(hasDemoSeedData ? 'Gareth' : '');
-  const [qLastName, setQLastName] = useState(hasDemoSeedData ? 'Hughes' : '');
-  const [qOnBehalf, setQOnBehalf] = useState(
-    hasDemoSeedData ? 'Hughes Lloyd Accountants LLP' : '',
-  );
-  const [qPhone, setQPhone] = useState(hasDemoSeedData ? '029 2018 0740' : '');
-  const [qEmail, setQEmail] = useState(
-    hasDemoSeedData ? 'gareth.hughes@hugheslloyd.co.uk' : '',
-  );
-  const [qChannelId, setQChannelId] = useState('enquiry_channel.phone');
-  const [qPracticeAreaId, setQPracticeAreaId] = useState('work_type.real_estate_and_property');
-  const [qUrgencyId, setQUrgencyId] = useState('enquiry_urgency.urgent');
-  const [qBestTime, setQBestTime] = useState(hasDemoSeedData ? 'Before 16:30 today' : '');
-  const [qSummary, setQSummary] = useState(
-    hasDemoSeedData
-      ? 'Referral: commercial freehold acquisition on Cowbridge Road for mutual client (~£950k)'
-      : '',
-  );
-  const [qOtherParties, setQOtherParties] = useState(
-    hasDemoSeedData ? 'Vendor: Vale Retail Estates Ltd; Lender: Principality Commercial' : '',
-  );
-  const [qPrivacyGiven, setQPrivacyGiven] = useState(true);
-  const [qLinkExistingId, setQLinkExistingId] = useState<string | null>(
-    hasDemoSeedData ? 'P-000011' : null,
-  );
+  const [qFirstName, setQFirstName] = useState('');
+  const [qLastName, setQLastName] = useState('');
+  const [qOnBehalf, setQOnBehalf] = useState('');
+  const [qPhone, setQPhone] = useState('');
+  const [qEmail, setQEmail] = useState('');
+  const [qChannelId, setQChannelId] = useState('');
+  const [qPracticeAreaId, setQPracticeAreaId] = useState('');
+  const [qUrgencyId, setQUrgencyId] = useState('');
+  const [qBestTime, setQBestTime] = useState('');
+  const [qSummary, setQSummary] = useState('');
+  const [qOtherParties, setQOtherParties] = useState('');
+  const [qPrivacyGiven, setQPrivacyGiven] = useState(false);
+  const [qLinkExistingId, setQLinkExistingId] = useState<string | null>(null);
 
   const roleConfig: RoleHomeConfig = useMemo(() => {
     return (
@@ -252,13 +246,77 @@ export function HomeClient({
     );
   }, [homePagesConfig.roles, activeRoleKey]);
 
-  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const nowDate = useMemo(() => new Date(), []);
+  const nowIso = useMemo(() => nowDate.toISOString(), [nowDate]);
+  const todayIso = useMemo(() => formatLondonDateIso(nowIso), [nowIso]);
   const tomorrowIso = useMemo(() => {
     const d = new Date(`${todayIso}T12:00:00Z`);
     d.setUTCDate(d.getUTCDate() + 1);
     return d.toISOString().slice(0, 10);
   }, [todayIso]);
-  const formattedAsAt = useMemo(() => formatDate(pmsAsAtDate) || '16 Oct 2026', [pmsAsAtDate]);
+  const next7DaysIso = useMemo(() => {
+    const d = new Date(`${todayIso}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 7);
+    return d.toISOString().slice(0, 10);
+  }, [todayIso]);
+  const next14DaysIso = useMemo(() => {
+    const d = new Date(`${todayIso}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 14);
+    return d.toISOString().slice(0, 10);
+  }, [todayIso]);
+  const formattedAsAt = useMemo(
+    () => (isValidPmsAsAtDate(pmsAsAtDate) ? formatPmsAsAtLabel(pmsAsAtDate) : '—'),
+    [pmsAsAtDate],
+  );
+  const pmsAsAtCaption = useMemo(
+    () =>
+      isValidPmsAsAtDate(pmsAsAtDate)
+        ? `PMS as at ${formatPmsAsAtLabel(pmsAsAtDate)}`
+        : PMS_AS_AT_UNAVAILABLE_LABEL,
+    [pmsAsAtDate],
+  );
+  const currentMonthKey = useMemo(() => todayIso.slice(0, 7), [todayIso]);
+  const currentMonthShort = useMemo(() => {
+    const d = new Date(`${todayIso}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? 'Month'
+      : d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
+  }, [todayIso]);
+  const currentMonthYearLabel = useMemo(() => {
+    const d = new Date(`${todayIso}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? todayIso.slice(0, 7)
+      : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }, [todayIso]);
+
+  // PMS financial period labels derived strictly from pmsAsAtDate (R319, R344, R372)
+  const pmsMonthKey = useMemo(
+    () => (isValidPmsAsAtDate(pmsAsAtDate) ? pmsAsAtDate.slice(0, 7) : ''),
+    [pmsAsAtDate],
+  );
+  const pmsYearLabel = useMemo(
+    () => (isValidPmsAsAtDate(pmsAsAtDate) ? pmsAsAtDate.slice(0, 4) : '—'),
+    [pmsAsAtDate],
+  );
+  const pmsMonthShort = useMemo(() => {
+    if (!isValidPmsAsAtDate(pmsAsAtDate)) return '—';
+    const d = new Date(`${pmsAsAtDate}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? '—'
+      : d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
+  }, [pmsAsAtDate]);
+  const pmsMonthYearLabel = useMemo(() => {
+    if (!isValidPmsAsAtDate(pmsAsAtDate)) return PMS_AS_AT_UNAVAILABLE_LABEL;
+    const d = new Date(`${pmsAsAtDate}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? PMS_AS_AT_UNAVAILABLE_LABEL
+      : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }, [pmsAsAtDate]);
+
+  const enquiryMetrics = useMemo(
+    () => computeEnquiryDashboardMetrics(enquiries, nowIso, { todayIso, currentMonthKey }),
+    [enquiries, nowIso, todayIso, currentMonthKey],
+  );
 
   const personById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
   const orgById = useMemo(() => new Map(organisations.map((o) => [o.id, o])), [organisations]);
@@ -284,25 +342,14 @@ export function HomeClient({
 
   // Supported fee earners for Legal Secretary
   const supportedFeeEarnerIds = useMemo(() => {
-    const explicit =
-      effectiveWorkPerson.supportsIds && effectiveWorkPerson.supportsIds.length > 0
-        ? effectiveWorkPerson.supportsIds
-        : currentUser.supportsIds && currentUser.supportsIds.length > 0
-          ? currentUser.supportsIds
-          : hasDemoSeedData
-            ? ['P-000001', 'P-000002']
-            : [];
-    return explicit;
-  }, [effectiveWorkPerson.supportsIds, currentUser.supportsIds, hasDemoSeedData]);
-
-  const supportedNamesLabel = useMemo(() => {
-    return supportedFeeEarnerIds
-      .map((id) => {
-        const p = personById.get(id);
-        return p ? `${personDisplayName(p)} (${p.jobTitle.split(',')[0]})` : id;
-      })
-      .join(' & ');
-  }, [supportedFeeEarnerIds, personById]);
+    if (effectiveWorkPerson.supportsIds && effectiveWorkPerson.supportsIds.length > 0) {
+      return effectiveWorkPerson.supportsIds;
+    }
+    if (currentUser.supportsIds && currentUser.supportsIds.length > 0) {
+      return currentUser.supportsIds;
+    }
+    return [];
+  }, [effectiveWorkPerson.supportsIds, currentUser.supportsIds]);
 
   // User's teams
   const myTeams = useMemo(
@@ -310,7 +357,10 @@ export function HomeClient({
       teams.filter(
         (t) =>
           t.active &&
-          (t.memberIds.includes(effectiveWorkPerson.id) || t.memberIds.includes(currentUser.id)),
+          (t.memberIds.includes(effectiveWorkPerson.id) ||
+            t.memberIds.includes(currentUser.id) ||
+            t.leadIds.includes(effectiveWorkPerson.id) ||
+            t.leadIds.includes(currentUser.id)),
       ),
     [teams, effectiveWorkPerson.id, currentUser.id],
   );
@@ -351,19 +401,32 @@ export function HomeClient({
 
   // Supervised matters for Partner
   const supervisedMatters = useMemo(() => {
-    const partnerId =
-      activeRoleKey === 'partner' || activeRoleKey === 'managing_partner'
-        ? effectiveWorkPerson.id
-        : 'P-000001';
-    const list = matters.filter(
+    const partnerId = effectiveWorkPerson.id;
+    return matters.filter(
       (m) =>
         m.matterStatusId !== 'matter_status.closed' &&
         (m.supervisingPartnerId === partnerId || m.responsiblePartnerId === partnerId),
     );
-    return list.length > 0
-      ? list
-      : matters.filter((m) => m.matterStatusId !== 'matter_status.closed');
-  }, [matters, effectiveWorkPerson.id, activeRoleKey]);
+  }, [matters, effectiveWorkPerson.id]);
+
+  // Practice-area / department enquiries for Partner (R343, R361)
+  const myPracticeAreaIds = useMemo(
+    () => new Set(myTeams.flatMap((t) => t.practiceAreaIds).filter(Boolean)),
+    [myTeams],
+  );
+  const partnerEnquiryScope = useMemo(
+    () => filterEnquiriesForPracticeAreasAndTeams(enquiries, myPracticeAreaIds, myTeamIds),
+    [enquiries, myPracticeAreaIds, myTeamIds],
+  );
+  const partnerPracticeAreaEnquiries = partnerEnquiryScope.enquiries;
+  const partnerEnquiryMetrics = useMemo(
+    () =>
+      computeEnquiryDashboardMetrics(partnerPracticeAreaEnquiries, nowIso, {
+        todayIso,
+        currentMonthKey,
+      }),
+    [partnerPracticeAreaEnquiries, nowIso, todayIso, currentMonthKey],
+  );
 
   // Pending sign-offs
   const pendingSignOffs = useMemo(
@@ -456,8 +519,8 @@ export function HomeClient({
     router.refresh();
   }
 
-  async function handleTakeEnquiry(enq: Enquiry, targetAssigneeId?: string) {
-    const assigneeId = targetAssigneeId ?? effectiveWorkPerson.id;
+  async function handleTakeEnquiry(enq: Enquiry) {
+    const assigneeId = effectiveWorkPerson.id;
     await assignEnquiryAction(enq.id, assigneeId, enq.assignedTeamId);
     const assignee = personById.get(assigneeId);
     showToast(
@@ -540,8 +603,15 @@ export function HomeClient({
     setQFirstName('');
     setQLastName('');
     setQOnBehalf('');
+    setQPhone('');
+    setQEmail('');
+    setQChannelId('');
+    setQPracticeAreaId('');
+    setQUrgencyId('');
+    setQBestTime('');
     setQSummary('');
     setQOtherParties('');
+    setQPrivacyGiven(false);
     setQLinkExistingId(null);
     router.refresh();
   }
@@ -600,66 +670,63 @@ export function HomeClient({
               ) : null}
             </div>
             <div className="kpi-value">{myOpenEnquiries.length}</div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 urgent callback · 1 follow-up'
-                : `${myOpenEnquiries.length} open assigned`}
-            </div>
+            <div className="kpi-sub">{myOpenEnquiries.length} open assigned</div>
           </div>
         );
       }
       case 'fe_active_matters': {
-        const count = hasDemoSeedData ? myActiveMatters.length || 5 : myActiveMatters.length;
+        const count = myActiveMatters.length;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>My active matters</span>
-              {hasDemoSeedData ? <StatusPill label="1 at 90% est." tone="warning" /> : null}
             </div>
             <div className="kpi-value">{count}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData ? '4 lead · 1 team member' : `${count} active matters`}
+              {count} active matter{count === 1 ? '' : 's'}
             </div>
           </div>
         );
       }
       case 'fe_hours_month': {
+        const hasFigures = myWeeklyTime !== null || myFeeEarnerFigures !== null;
         const mtd =
           myWeeklyTime?.monthToDateHours ??
           myFeeEarnerFigures?.chargeable_hours_this_month ??
-          (hasDemoSeedData ? 12.6 : 0);
-        const ytd = myFeeEarnerFigures?.chargeable_hours ?? (hasDemoSeedData ? 38.4 : 0);
-        const target = myFeeEarnerFigures?.annual_target_hours ?? 1200;
+          0;
+        const ytd = myFeeEarnerFigures?.chargeable_hours ?? 0;
+        const target = myFeeEarnerFigures?.annual_target_hours ?? null;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Chargeable hrs (Oct)</span>
+              <span>Chargeable hrs ({pmsMonthShort})</span>
               <span className="mono-code">PMS</span>
             </div>
-            <div className="kpi-value">{mtd.toFixed(1)} h</div>
+            <div className="kpi-value">{hasFigures ? `${mtd.toFixed(1)} h` : '–'}</div>
             <div className="kpi-sub">
-              {ytd.toFixed(1)} h YTD of {target.toLocaleString('en-GB')} h annual target
+              {!hasFigures
+                ? 'No time data available'
+                : target && target > 0
+                  ? `${ytd.toFixed(1)} h YTD of ${target.toLocaleString('en-GB')} h · ${pmsAsAtCaption}`
+                  : `${ytd.toFixed(1)} h YTD · ${pmsAsAtCaption}`}
             </div>
           </div>
         );
       }
       case 'fe_unbilled_wip': {
-        const wip =
-          myWeeklyTime?.myUnbilledWip ??
-          myFeeEarnerFigures?.unbilled_wip ??
-          (hasDemoSeedData ? 9042.9 : 0);
-        const count = myWeeklyTime?.myUnbilledMatterCount ?? (hasDemoSeedData ? 5 : 0);
+        const wip = myWeeklyTime?.myUnbilledWip ?? myFeeEarnerFigures?.unbilled_wip ?? null;
+        const count = myWeeklyTime?.myUnbilledMatterCount ?? 0;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>My unbilled WIP</span>
               <span className="mono-code">PMS</span>
             </div>
-            <div className="kpi-value">{formatGbp(wip)}</div>
+            <div className="kpi-value">{wip !== null ? formatGbp(wip) : '–'}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? `Across ${count} matters · oldest 7 Sep`
-                : `Across ${count} matters`}
+              {wip !== null
+                ? `Across ${count} matter${count === 1 ? '' : 's'}`
+                : 'No WIP data available'}
             </div>
           </div>
         );
@@ -671,13 +738,10 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Supervised matters</span>
-              {hasDemoSeedData ? <StatusPill label="3 need attention" tone="warning" /> : null}
             </div>
             <div className="kpi-value">{supervisedMatters.length} open</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '2 closed in 2026 · 1 pending opening'
-                : `${matters.filter((m) => m.matterStatusId === 'matter_status.closed').length} closed`}
+              {matters.filter((m) => m.matterStatusId === 'matter_status.closed').length} closed
             </div>
           </div>
         );
@@ -688,11 +752,9 @@ export function HomeClient({
               <span>Team unbilled WIP</span>
               <span className="mono-code">PMS</span>
             </div>
-            <div className="kpi-value">
-              {hasDemoSeedData ? '£20,308.00' : formatGbp(firmWipTotal)}
-            </div>
+            <div className="kpi-value">{formatGbp(firmWipTotal)}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData ? '£6,390.00 over 30 days old' : `${allMatterFins.length} matters`}
+              {allMatterFins.length} matter{allMatterFins.length === 1 ? '' : 's'}
             </div>
           </div>
         );
@@ -701,15 +763,14 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Overdue client debt</span>
-              {hasDemoSeedData ? <StatusPill label="1 at 90+ days" tone="alert" /> : null}
+              {overdueBillsCount > 0 ? (
+                <StatusPill label={`${overdueBillsCount} overdue`} tone="alert" />
+              ) : null}
             </div>
-            <div className="kpi-value">
-              {hasDemoSeedData ? '£5,644.20' : formatGbp(firmOverdueDebt)}
-            </div>
+            <div className="kpi-value">{formatGbp(firmOverdueDebt)}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? 'Across 4 bills · £18,454.02 total debt'
-                : `Across ${overdueBillsCount} bills · ${formatGbp(firmTotalDebt)} total debt`}
+              Across {overdueBillsCount} bill{overdueBillsCount === 1 ? '' : 's'} ·{' '}
+              {formatGbp(firmTotalDebt)} total debt
             </div>
           </div>
         );
@@ -722,11 +783,9 @@ export function HomeClient({
             </div>
             <div className="kpi-value">{pendingSignOffs.length}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 write-off · 1 high-risk opening · 1 undertaking'
-                : pendingSignOffs.length === 0
-                  ? 'All sign-offs up to date'
-                  : `${pendingSignOffs.length} pending partner review`}
+              {pendingSignOffs.length === 0
+                ? 'All sign-offs up to date'
+                : `${pendingSignOffs.length} pending partner review`}
             </div>
           </div>
         );
@@ -734,49 +793,50 @@ export function HomeClient({
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Dept enquiries (Oct)</span>
-              {hasDemoSeedData ? <StatusPill label="57% conv." tone="positive" /> : null}
+              <span>Dept enquiries ({currentMonthShort})</span>
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 7 : enquiries.length}</div>
+            <div className="kpi-value">
+              {partnerEnquiryScope.hasScope ? partnerEnquiryMetrics.monthReceivedCount : '—'}
+            </div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '4 converted · 2 in contact · 1 unassigned'
-                : `${convertedEnqsCount} converted · ${unassignedEnqsCount} unassigned`}
+              {partnerEnquiryScope.hasScope
+                ? `${partnerEnquiryMetrics.monthConvertedCount} converted · ${partnerEnquiryMetrics.monthUnassignedCount} unassigned`
+                : 'No practice area set'}
             </div>
           </div>
         );
 
       // 03 Legal Secretary
-      case 'ls_tasks_queue':
+      case 'ls_tasks_queue': {
+        const secOpenTasks = tasks.filter(
+          (t) =>
+            isTaskOpen(t) &&
+            (t.assignedPersonId === effectiveWorkPerson.id ||
+              (t.assignedPersonId && supportedFeeEarnerIds.includes(t.assignedPersonId)) ||
+              (t.assignedTeamId !== null && myTeamIds.has(t.assignedTeamId))),
+        );
+        const secOverdueCount = secOpenTasks.filter((t) => t.dueAt.slice(0, 10) < todayIso).length;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Tasks in my queue</span>
-              {hasDemoSeedData ? <StatusPill label="1 overdue" tone="alert" /> : null}
+              {secOverdueCount > 0 ? (
+                <StatusPill label={`${secOverdueCount} overdue`} tone="alert" />
+              ) : null}
             </div>
-            <div className="kpi-value">
-              {hasDemoSeedData ? 6 : tasks.filter((t) => isTaskOpen(t)).length}
-            </div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '3 assigned to me · 3 in Real Estate queue'
-                : `${myOpenTasks.length} assigned to me`}
-            </div>
+            <div className="kpi-value">{secOpenTasks.length}</div>
+            <div className="kpi-sub">{myOpenTasks.length} assigned to me</div>
           </div>
         );
+      }
       case 'ls_letters_docs':
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Letters & docs to prepare</span>
-              {hasDemoSeedData ? <StatusPill label="2 due today" tone="warning" /> : null}
+              <span>Letters &amp; docs to prepare</span>
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 4 : 0}</div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 engagement letter · 1 non-engagement · 2 packs'
-                : 'No pending correspondence'}
-            </div>
+            <div className="kpi-value">–</div>
+            <div className="kpi-sub">Not yet available</div>
           </div>
         );
       case 'ls_matter_openings':
@@ -784,31 +844,37 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Matter openings in progress</span>
-              {hasDemoSeedData ? <StatusPill label="2 awaiting client" tone="warning" /> : null}
             </div>
             <div className="kpi-value">
-              {hasDemoSeedData
-                ? 3
-                : matters.filter((m) => m.matterStatusId === 'matter_status.opening').length}
+              {matters.filter((m) => m.matterStatusId === 'matter_status.opening').length}
             </div>
-            <div className="kpi-sub">AML, engagement letter & retainer checks</div>
+            <div className="kpi-sub">AML, engagement letter &amp; retainer checks</div>
           </div>
         );
-      case 'ls_completions_7d':
+      case 'ls_completions_7d': {
+        const completionsCount = matters
+          .filter((m) => m.matterStatusId !== 'matter_status.closed')
+          .reduce((acc, m) => {
+            const subcatLabel = resolveLabel(values, m.workTypeSubcategoryId);
+            const critDates = extractCriticalDates(m, subcatLabel).filter(
+              (cd) => cd.date.slice(0, 10) >= todayIso && cd.date.slice(0, 10) <= next7DaysIso,
+            );
+            return acc + critDates.length;
+          }, 0);
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Completions next 7 days</span>
-              {hasDemoSeedData ? <StatusPill label="Fri 23 Oct" tone="neutral" /> : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 1 : 0}</div>
+            <div className="kpi-value">{completionsCount}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? 'PRI001-0001 · £84,943.60 in client a/c'
-                : 'No completions scheduled'}
+              {completionsCount === 0
+                ? 'No completions scheduled'
+                : `${completionsCount} key date${completionsCount === 1 ? '' : 's'} due`}
             </div>
           </div>
         );
+      }
       case 'ls_unbilled_disb':
         return (
           <div key={cardId} className="kpi-card">
@@ -816,33 +882,30 @@ export function HomeClient({
               <span>Unbilled disbursements</span>
               <span className="mono-code">PMS</span>
             </div>
-            <div className="kpi-value">
-              {hasDemoSeedData ? '£682.00' : formatGbp(firmUnbilledDisbNet)}
-            </div>
+            <div className="kpi-value">{formatGbp(firmUnbilledDisbNet)}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '3 items on supported matters'
-                : `${unbilledDisbsList.length} items`}
+              {unbilledDisbsList.length} item{unbilledDisbsList.length === 1 ? '' : 's'}
             </div>
           </div>
         );
 
       // 04 Enquiries Coordinator
-      case 'ec_callbacks_due':
+      case 'ec_callbacks_due': {
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Callbacks due today</span>
-              {hasDemoSeedData ? <StatusPill label="1 overdue" tone="alert" /> : null}
+              {enquiryMetrics.overdueCallbacksCount > 0 ? (
+                <StatusPill label={`${enquiryMetrics.overdueCallbacksCount} overdue`} tone="alert" />
+              ) : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 5 : openEnqsCount}</div>
+            <div className="kpi-value">{enquiryMetrics.callbacksDueTodayCount}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 emergency · 2 urgent · 2 standard'
-                : `${openEnqsCount} open enquiries`}
+              {openEnqsCount} open enquir{openEnqsCount === 1 ? 'y' : 'ies'} total
             </div>
           </div>
         );
+      }
       case 'ec_unassigned':
         return (
           <div key={cardId} className="kpi-card">
@@ -850,12 +913,8 @@ export function HomeClient({
               <span>Unassigned enquiries</span>
               {unassignedEnqsCount > 0 ? <StatusPill label="Needs owner" tone="warning" /> : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 3 : unassignedEnqsCount}</div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 Real Estate · 1 Employment · 1 Family'
-                : `${unassignedEnqsCount} awaiting assignment`}
-            </div>
+            <div className="kpi-value">{unassignedEnqsCount}</div>
+            <div className="kpi-sub">{unassignedEnqsCount} awaiting assignment</div>
           </div>
         );
       case 'ec_awaiting_fe': {
@@ -868,7 +927,7 @@ export function HomeClient({
               <span>Awaiting fee earner contact</span>
               {awaitingCount > 0 ? <StatusPill label="Chase" tone="neutral" /> : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 3 : awaitingCount}</div>
+            <div className="kpi-value">{awaitingCount}</div>
             <div className="kpi-sub">Assigned but first contact not yet logged</div>
           </div>
         );
@@ -877,17 +936,12 @@ export function HomeClient({
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Converted in October</span>
-              {hasDemoSeedData ? <StatusPill label="53% conv." tone="positive" /> : null}
+              <span>Converted ({currentMonthShort})</span>
             </div>
             <div className="kpi-value">
-              {hasDemoSeedData ? '9 of 17' : `${convertedEnqsCount} of ${enquiries.length}`}
+              {enquiryMetrics.monthConvertedCount} of {enquiryMetrics.monthReceivedCount}
             </div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '3 in contact · 3 declined/referred · 2 no resp.'
-                : `${openEnqsCount} open`}
-            </div>
+            <div className="kpi-sub">{enquiryMetrics.monthOpenCount} open this month</div>
           </div>
         );
       case 'ec_no_response': {
@@ -898,7 +952,7 @@ export function HomeClient({
               <span>3+ attempts — no response</span>
               {noRespCount > 0 ? <StatusPill label="Review" tone="warning" /> : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 1 : noRespCount}</div>
+            <div className="kpi-value">{noRespCount}</div>
             <div className="kpi-sub">Threshold from Admin › Enquiries (3 tries)</div>
           </div>
         );
@@ -930,9 +984,7 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Overdue debt</span>
-              {hasDemoSeedData ? (
-                <StatusPill label="£3,300 at 90+d" tone="alert" />
-              ) : overdueBillsCount > 0 ? (
+              {overdueBillsCount > 0 ? (
                 <StatusPill label={`${overdueBillsCount} overdue`} tone="alert" />
               ) : null}
             </div>
@@ -954,9 +1006,7 @@ export function HomeClient({
             </div>
             <div className="kpi-value">{formatGbp(firmWipTotal)}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? 'Across 8 open matters · oldest entry 2 Sep'
-                : `Across ${wipMattersCount} open matter${wipMattersCount === 1 ? '' : 's'}`}
+              Across {wipMattersCount} open matter{wipMattersCount === 1 ? '' : 's'}
             </div>
           </div>
         );
@@ -970,9 +1020,7 @@ export function HomeClient({
             </div>
             <div className="kpi-value">{formatGbp(firmUnbilledDisbNet)}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '4 items (£1,416.00 inc VAT)'
-                : `${unbilledDisbsList.length} item${unbilledDisbsList.length === 1 ? '' : 's'}`}
+              {unbilledDisbsList.length} item{unbilledDisbsList.length === 1 ? '' : 's'}
             </div>
           </div>
         );
@@ -981,15 +1029,12 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Client account held</span>
-              <StatusPill label="Reconciled" tone="positive" />
             </div>
             <div className="kpi-value">{formatGbp(firmClientAccountHeld)}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? 'PRI001-0001 (£84.9k) · PUG001-0001 (£33.5k)'
-                : firmClientAccountHeld > 0
-                  ? 'Held across active matters'
-                  : 'No client funds currently held'}
+              {firmClientAccountHeld > 0
+                ? 'Held across active matters'
+                : 'No client funds currently held'}
             </div>
           </div>
         );
@@ -1000,48 +1045,46 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>AML / ID checks pending</span>
-              {hasDemoSeedData ? <StatusPill label="1 overdue >5d" tone="alert" /> : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 4 : 0}</div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '2 matters · 1 organisation · 1 individual'
-                : 'No pending AML or ID checks'}
-            </div>
+            <div className="kpi-value">–</div>
+            <div className="kpi-sub">Not yet available</div>
           </div>
         );
-      case 'rc_conflicts_pending':
+      case 'rc_conflicts_pending': {
+        const referredCount = matters.filter((m) =>
+          isMatterConflictCheckAwaitingDecision(m),
+        ).length;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Conflict checks awaiting sign-off</span>
-              {hasDemoSeedData ? <StatusPill label="1 potential hit" tone="warning" /> : null}
+              {referredCount > 0 ? (
+                <StatusPill label={`${referredCount} referred`} tone="warning" />
+              ) : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 2 : 0}</div>
+            <div className="kpi-value">{referredCount}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 matter opening · 1 new enquiry'
-                : 'No conflict checks awaiting sign-off'}
+              {referredCount === 0
+                ? 'No conflict checks awaiting sign-off'
+                : `${referredCount} referred for review`}
             </div>
           </div>
         );
+      }
       case 'rc_high_risk_matters': {
         const highRiskCount = matters.filter(
           (m) =>
             m.matterStatusId !== 'matter_status.closed' &&
-            m.riskRatingId?.toLowerCase().includes('high'),
+            isHighOrCriticalRiskRating(m.riskRatingId, values),
         ).length;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>High-risk open matters</span>
-              {hasDemoSeedData ? <StatusPill label="EDD active" tone="neutral" /> : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 3 : highRiskCount}</div>
+            <div className="kpi-value">{highRiskCount}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 offshore SPV · 1 PEP · 1 high-value lit.'
-                : `${highRiskCount} high-risk open matter${highRiskCount === 1 ? '' : 's'}`}
+              {highRiskCount} high-risk open matter{highRiskCount === 1 ? '' : 's'}
             </div>
           </div>
         );
@@ -1054,14 +1097,9 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Overdue compliance tasks</span>
-              {hasDemoSeedData ? <StatusPill label="Across 3 teams" tone="warning" /> : null}
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 5 : overdueComplianceCount}</div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '2 Real Estate · 2 Employment · 1 Corporate'
-                : `${overdueComplianceCount} overdue`}
-            </div>
+            <div className="kpi-value">{overdueComplianceCount}</div>
+            <div className="kpi-sub">{overdueComplianceCount} overdue</div>
           </div>
         );
       }
@@ -1070,30 +1108,25 @@ export function HomeClient({
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
               <span>Open SRA breaches / complaints</span>
-              <StatusPill label="No material breach" tone="positive" />
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? '1 / 1' : '0 / 0'}</div>
-            <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '1 stage-1 complaint · 1 minor residual review'
-                : 'No open complaints or breaches'}
-            </div>
+            <div className="kpi-value">–</div>
+            <div className="kpi-sub">Not yet available</div>
           </div>
         );
 
       // 07 Managing Partner / Admin
       case 'mp_fees_ytd': {
-        const octFeesVal =
-          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === '2026-10')?.feesNet ?? 0;
+        const currentMonthFeesVal =
+          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === pmsMonthKey)?.feesNet ?? 0;
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Fees billed YTD (2026)</span>
+              <span>Fees billed YTD ({pmsYearLabel})</span>
               <span className="mono-code">PMS</span>
             </div>
             <div className="kpi-value">{formatGbp(pmsMonthlyFeesBilled.yearToDateTotal)}</div>
             <div className="kpi-sub">
-              {formatGbp(octFeesVal)} billed in Oct · net of credit notes
+              {formatGbp(currentMonthFeesVal)} billed in {pmsMonthShort} · {pmsAsAtCaption}
             </div>
           </div>
         );
@@ -1102,13 +1135,14 @@ export function HomeClient({
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Cash received (Oct)</span>
-              {hasDemoSeedData ? <StatusPill label="77% of £40k target" tone="positive" /> : null}
+              <span>Cash received ({pmsMonthShort})</span>
+              <span className="mono-code">PMS</span>
             </div>
             <div className="kpi-value">{formatGbp(pmsCashReceived.currentMonthTotal)}</div>
             <div className="kpi-sub">
-              {pmsCashReceived.currentMonthReceiptCount} receipts · Sep was{' '}
-              {formatGbp(pmsCashReceived.previousMonthTotal)}
+              {pmsCashReceived.currentMonthReceiptCount} receipt
+              {pmsCashReceived.currentMonthReceiptCount === 1 ? '' : 's'} · Prev month{' '}
+              {formatGbp(pmsCashReceived.previousMonthTotal)} · {pmsAsAtCaption}
             </div>
           </div>
         );
@@ -1134,9 +1168,7 @@ export function HomeClient({
             </div>
             <div className="kpi-value">{formatGbp(firmTotalDebt)}</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '£3,300.00 at 90+ days (1 bill)'
-                : `${overdueBillsCount} overdue bill${overdueBillsCount === 1 ? '' : 's'}`}
+              {overdueBillsCount} overdue bill{overdueBillsCount === 1 ? '' : 's'}
             </div>
           </div>
         );
@@ -1144,14 +1176,11 @@ export function HomeClient({
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
-              <span>Open matters & conversion</span>
-              {hasDemoSeedData ? <StatusPill label="53% Oct conv." tone="positive" /> : null}
+              <span>Open matters &amp; conversion</span>
             </div>
-            <div className="kpi-value">{hasDemoSeedData ? 11 : openMattersCount} open</div>
+            <div className="kpi-value">{openMattersCount} open</div>
             <div className="kpi-sub">
-              {hasDemoSeedData
-                ? '9 of 17 Oct enquiries converted'
-                : `${convertedEnqsCount} of ${enquiries.length} enquiries converted`}
+              {convertedEnqsCount} of {enquiries.length} enquiries converted
             </div>
           </div>
         );
@@ -1477,7 +1506,7 @@ export function HomeClient({
               (t.assignedPersonId === effectiveWorkPerson.id ||
                 t.assignedPersonId === currentUser.id ||
                 (t.assignedPersonId && supportedFeeEarnerIds.includes(t.assignedPersonId)) ||
-                t.assignedTeamId === 'TM-000001'),
+                (t.assignedTeamId !== null && myTeamIds.has(t.assignedTeamId))),
           )
         : selectHomeCandidateTasks({
             tasks,
@@ -1768,7 +1797,11 @@ export function HomeClient({
                               label={
                                 e.status === 'In contact'
                                   ? 'In contact · Ready to convert'
-                                  : `${urgLabel} · Due ${e.bestTimeToCall || '17:30 today'}`
+                                  : e.bestTimeToCall
+                                    ? `${urgLabel} · Best time ${e.bestTimeToCall}`
+                                    : e.firstContactDueAt
+                                      ? `${urgLabel} · Due ${formatDate(e.firstContactDueAt)}`
+                                      : urgLabel
                               }
                               tone={
                                 e.status === 'In contact'
@@ -1822,23 +1855,27 @@ export function HomeClient({
       // 3. my_active_matters
       // ================================================================
       case 'my_active_matters': {
-        // Show the fee earner's active PMS-backed matters
-        const feCode = myWeeklyTime?.feeEarnerId ?? 'FE005';
-        const pmsMattersForFe = allMatterFins.filter(
-          (m) =>
-            m.status === 'Open' &&
-            (m.fee_earner_id === feCode ||
-              m.matter_code === 'HAR001-0003' ||
-              m.matter_code === 'PEN001-0002'),
-        );
-        const rows = pmsMattersForFe.length > 0 ? pmsMattersForFe : allMatterFins.slice(0, 5);
+        // Show the fee earner's active PMS-backed matters (or 1Squared active matters)
+        const feCode =
+          myWeeklyTime?.feeEarnerId ??
+          effectiveWorkPerson.employment?.feeEarner?.timekeeperCode ??
+          null;
+        const myActiveMatterCodes = new Set(myActiveMatters.map((m) => m.matterNumber));
+        const myActiveMatterIds = new Set(myActiveMatters.map((m) => m.id));
+        const rows = allMatterFins.filter((m) => {
+          if (m.status !== 'Open') return false;
+          if (feCode && m.fee_earner_id === feCode) return true;
+          if (myActiveMatterCodes.has(m.matter_code)) return true;
+          const linkedId = findOneSquaredIdForPmsCode(pmsLinks, 'matter', m.matter_code);
+          return linkedId !== null && myActiveMatterIds.has(linkedId);
+        });
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">My active matters — at a glance</h2>
                 <span className="panel-subtitle">
-                  1Squared Matters + PMS financials · as at {formattedAsAt}
+                  1Squared Matters + {pmsAsAtCaption}
                 </span>
               </div>
               <div className="panel-actions">
@@ -1859,90 +1896,127 @@ export function HomeClient({
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.length === 0 ? (
+                  {rows.length === 0 && myActiveMatters.length === 0 ? (
                     <tr>
                       <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '20px 12px' }}>
                         No active matters currently recorded.
                       </td>
                     </tr>
-                  ) : rows.map((m) => {
-                    const href = matterHrefForCode(m.matter_code);
-                    const pct = m.estimate_used_pct ? Math.round(m.estimate_used_pct * 100) : null;
-                    const barClass =
-                      pct && pct >= 100 ? 'coral' : pct && pct >= 75 ? 'amber' : '';
-                    return (
-                      <tr key={m.matter_code}>
-                        <td>
-                          <div style={{ fontWeight: 600 }}>
-                            <Link href={href}>{m.matter_code}</Link>
-                          </div>
-                          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                            {m.matter_description}
-                          </div>
-                        </td>
-                        <td>
-                          <div>{m.client_name}</div>
-                          <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                            {m.practice_area} · {m.work_type}
-                          </div>
-                        </td>
-                        <td style={{ minWidth: 165 }}>
-                          {m.billing_basis === 'Fixed Fee' ? (
-                            <>
-                              <div style={{ fontSize: 12 }}>
-                                Fixed fee <strong>{formatGbp(m.fixed_fee_amount)}</strong>
-                              </div>
-                              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                                Time recorded {formatGbp(m.time_value_recorded)}
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div
+                  ) : rows.length > 0 ? (
+                    rows.map((m) => {
+                      const href = matterHrefForCode(m.matter_code);
+                      const pct = m.estimate_used_pct ? Math.round(m.estimate_used_pct * 100) : null;
+                      const barClass =
+                        pct && pct >= 100 ? 'coral' : pct && pct >= 75 ? 'amber' : '';
+                      return (
+                        <tr key={m.matter_code}>
+                          <td>
+                            <div style={{ fontWeight: 600 }}>
+                              <Link href={href}>{m.matter_code}</Link>
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                              {m.matter_description}
+                            </div>
+                          </td>
+                          <td>
+                            <div>{m.client_name}</div>
+                            <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                              {m.practice_area} · {m.work_type}
+                            </div>
+                          </td>
+                          <td style={{ minWidth: 165 }}>
+                            {m.billing_basis === 'Fixed Fee' ? (
+                              <>
+                                <div style={{ fontSize: 12 }}>
+                                  Fixed fee <strong>{formatGbp(m.fixed_fee_amount)}</strong>
+                                </div>
+                                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                  Time recorded {formatGbp(m.time_value_recorded)}
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    fontSize: 11.5,
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  <span>
+                                    {formatGbp(m.time_value_recorded)} of {formatGbp(m.fee_estimate)}
+                                  </span>
+                                  {pct !== null ? <strong>{pct}%</strong> : null}
+                                </div>
+                                <div className="progress-track">
+                                  <div
+                                    className={`progress-fill ${barClass}`}
+                                    style={{ width: `${Math.min(pct ?? 0, 100)}%` }}
+                                  />
+                                </div>
+                              </>
+                            )}
+                          </td>
+                          <td className="num">
+                            <strong>{formatGbp(m.unbilled_wip)}</strong>
+                          </td>
+                          <td className="num">
+                            {m.outstanding_debt > 0 ? (
+                              <span
                                 style={{
-                                  display: 'flex',
-                                  justifyContent: 'space-between',
-                                  fontSize: 11.5,
-                                  marginBottom: 4,
+                                  fontWeight: 600,
+                                  color:
+                                    (m.max_invoice_days_past_due ?? 0) > 0
+                                      ? 'var(--coral-text)'
+                                      : 'var(--text-primary)',
                                 }}
                               >
-                                <span>
-                                  {formatGbp(m.time_value_recorded)} of {formatGbp(m.fee_estimate)}
-                                </span>
-                                {pct !== null ? <strong>{pct}%</strong> : null}
-                              </div>
-                              <div className="progress-track">
-                                <div
-                                  className={`progress-fill ${barClass}`}
-                                  style={{ width: `${Math.min(pct ?? 0, 100)}%` }}
-                                />
-                              </div>
-                            </>
-                          )}
-                        </td>
-                        <td className="num">
-                          <strong>{formatGbp(m.unbilled_wip)}</strong>
-                        </td>
-                        <td className="num">
-                          {m.outstanding_debt > 0 ? (
-                            <span
-                              style={{
-                                fontWeight: 600,
-                                color:
-                                  (m.max_invoice_days_past_due ?? 0) > 0
-                                    ? 'var(--coral-text)'
-                                    : 'var(--text-primary)',
-                              }}
-                            >
-                              {formatGbp(m.outstanding_debt)}
-                            </span>
-                          ) : (
-                            <span className="muted">£0.00</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                                {formatGbp(m.outstanding_debt)}
+                              </span>
+                            ) : (
+                              <span className="muted">£0.00</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    myActiveMatters.map((m) => {
+                      const clientOrg = orgById.get(m.clientId);
+                      const clientPer = personById.get(m.clientId);
+                      const clientName = clientOrg
+                        ? clientOrg.legalName
+                        : clientPer
+                          ? personDisplayName(clientPer)
+                          : m.clientId;
+                      return (
+                        <tr key={m.id}>
+                          <td>
+                            <div style={{ fontWeight: 600 }}>
+                              <Link href={`/matters/${m.id}`}>{m.matterNumber}</Link>
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                              {m.title}
+                            </div>
+                          </td>
+                          <td>
+                            <div>{clientName}</div>
+                            <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                              {resolveLabel(values, m.practiceAreaId)}
+                            </div>
+                          </td>
+                          <td>
+                            {m.feeEstimateGbp !== null
+                              ? formatGbp(m.feeEstimateGbp)
+                              : '–'}
+                          </td>
+                          <td className="num muted">–</td>
+                          <td className="num muted">–</td>
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>
@@ -1956,40 +2030,35 @@ export function HomeClient({
       case 'my_time_and_wip': {
         const wt = myWeeklyTime;
         const fePerf = myFeeEarnerFigures;
-        const dailyPace = wt?.dailyPaceHours ?? 5.2;
-        const weeklyPace = wt?.weeklyPaceHours ?? 26;
-        const weekTotal = wt?.weekTotalHours ?? (hasDemoSeedData ? 7.6 : 0);
-        const ytdHours = fePerf?.chargeable_hours ?? (hasDemoSeedData ? 38.4 : 0);
-        const targetHours = fePerf?.annual_target_hours ?? 1200;
-        const billedValue = fePerf?.billed_value ?? (hasDemoSeedData ? 1860 : 0);
-        const myWip = wt?.myUnbilledWip ?? fePerf?.unbilled_wip ?? (hasDemoSeedData ? 9042.9 : 0);
-        const readyToBill = hasDemoSeedData ? 2325 : 0;
+        const dailyPace = wt?.dailyPaceHours && wt.dailyPaceHours > 0 ? wt.dailyPaceHours : null;
+        const weeklyPace =
+          wt?.weeklyPaceHours && wt.weeklyPaceHours > 0 ? wt.weeklyPaceHours : null;
+        const weekTotal = wt?.weekTotalHours ?? 0;
+        const ytdHours = fePerf?.chargeable_hours ?? 0;
+        const targetHours = fePerf?.annual_target_hours ?? null;
+        const billedValue = fePerf?.billed_value ?? 0;
+        const myWip = wt?.myUnbilledWip ?? fePerf?.unbilled_wip ?? 0;
         const weekdays =
-          wt?.weekdays ??
-          (hasDemoSeedData
-            ? [
-                { dayLabel: 'Mon', date: '2026-10-12', hours: 0.8 },
-                { dayLabel: 'Tue', date: '2026-10-13', hours: 1.5 },
-                { dayLabel: 'Wed', date: '2026-10-14', hours: 4.4 },
-                { dayLabel: 'Thu', date: '2026-10-15', hours: 0.3 },
-                { dayLabel: 'Fri', date: '2026-10-16', hours: 0.6 },
-              ]
-            : [
-                { dayLabel: 'Mon', date: '2026-10-12', hours: 0 },
-                { dayLabel: 'Tue', date: '2026-10-13', hours: 0 },
-                { dayLabel: 'Wed', date: '2026-10-14', hours: 0 },
-                { dayLabel: 'Thu', date: '2026-10-15', hours: 0 },
-                { dayLabel: 'Fri', date: '2026-10-16', hours: 0 },
-              ]);
+          wt?.weekdays ?? [
+            { dayLabel: 'Mon', date: 'mon', hours: 0 },
+            { dayLabel: 'Tue', date: 'tue', hours: 0 },
+            { dayLabel: 'Wed', date: 'wed', hours: 0 },
+            { dayLabel: 'Thu', date: 'thu', hours: 0 },
+            { dayLabel: 'Fri', date: 'fri', hours: 0 },
+          ];
+        const maxDayHours = Math.max(...weekdays.map((d) => d.hours), 1);
 
-        const weekPct = Math.min(Math.max((weekTotal / weeklyPace) * 100, 0), 100);
+        const weekPct =
+          weeklyPace !== null ? Math.min(Math.max((weekTotal / weeklyPace) * 100, 0), 100) : 0;
         const wipK = `£${(myWip / 1000).toFixed(1)}k`;
-        const readyK = `£${(readyToBill / 1000).toFixed(1)}k`;
+        const readyLabel = '–';
         const billedK = `£${(billedValue / 1000).toFixed(1)}k`;
         const billedFormatted = `£${Math.round(billedValue).toLocaleString('en-GB')}`;
-        const readyWipPct = myWip > 0 ? Math.min(Math.max((readyToBill / myWip) * 100, 6), 100) : 0;
+        const readyWipPct = 0;
         const ytdTargetRatio =
-          targetHours > 0 && ytdHours > 0 ? Math.min(Math.max(ytdHours / targetHours, 0.06), 1) : 0;
+          targetHours !== null && targetHours > 0 && ytdHours > 0
+            ? Math.min(Math.max(ytdHours / targetHours, 0.06), 1)
+            : 0;
 
         const renderRing = (size: number, stroke: number, ratio: number, color: string) => {
           const r = (size - stroke) / 2;
@@ -2037,17 +2106,26 @@ export function HomeClient({
               <div className="tw-card-b__strip">
                 <div className="tw-card-b__left">
                   <div className="tw-ring-large">
-                    {renderRing(64, 5.5, weekTotal / weeklyPace, '#45645a')}
+                    {renderRing(
+                      64,
+                      5.5,
+                      weeklyPace !== null ? weekTotal / weeklyPace : 0,
+                      '#45645a',
+                    )}
                     <div className="tw-ring-large__label">
                       <span className="tw-ring-large__hrs">{weekTotal.toFixed(1)}h</span>
-                      <span className="tw-ring-large__sub">of {weeklyPace}h</span>
+                      {weeklyPace !== null ? (
+                        <span className="tw-ring-large__sub">of {weeklyPace}h</span>
+                      ) : null}
                     </div>
                   </div>
 
                   <div className="tw-week-chart tw-week-chart--compact">
                     <div className="tw-week-chart__plot">
                       {weekdays.map((d) => {
-                        const barPct = Math.min(Math.max((d.hours / dailyPace) * 100, 6), 100);
+                        const denom = dailyPace ?? maxDayHours;
+                        const barPct =
+                          d.hours > 0 ? Math.min(Math.max((d.hours / denom) * 100, 6), 100) : 6;
                         return (
                           <div
                             key={d.date}
@@ -2084,7 +2162,7 @@ export function HomeClient({
                   </div>
                   <div className="tw-card-b__legend">
                     <span className="tw-card-b__dot" aria-hidden="true" />
-                    <span>{readyK} ready to bill</span>
+                    <span>{readyLabel} ready to bill</span>
                   </div>
                 </div>
               </div>
@@ -2106,21 +2184,27 @@ export function HomeClient({
               <div>
                 <div>
                   <span className="tw-card-a__hours-num">{weekTotal.toFixed(1)}h</span>
-                  <span className="tw-card-a__hours-pace">/ {weeklyPace}h</span>
+                  {weeklyPace !== null ? (
+                    <span className="tw-card-a__hours-pace">/ {weeklyPace}h</span>
+                  ) : null}
                 </div>
-                <div className="tw-bar-track">
-                  <div
-                    className="tw-bar-fill"
-                    style={{ width: `${weekPct}%`, background: '#45645a' }}
-                  />
-                </div>
-                <div className="tw-card-a__caption">This week</div>
+                {weeklyPace !== null ? (
+                  <div className="tw-bar-track">
+                    <div
+                      className="tw-bar-fill"
+                      style={{ width: `${weekPct}%`, background: '#45645a' }}
+                    />
+                  </div>
+                ) : null}
+                <div className="tw-card-a__caption">This week · {pmsAsAtCaption}</div>
               </div>
 
               <div className="tw-week-chart">
                 <div className="tw-week-chart__plot">
                   {weekdays.map((d) => {
-                    const barPct = Math.min(Math.max((d.hours / dailyPace) * 100, 6), 100);
+                    const denom = dailyPace ?? maxDayHours;
+                    const barPct =
+                      d.hours > 0 ? Math.min(Math.max((d.hours / denom) * 100, 6), 100) : 6;
                     return (
                       <div
                         key={d.date}
@@ -2149,10 +2233,10 @@ export function HomeClient({
               </div>
 
               <div className="tw-metric">
-                {renderRing(44, 5, readyToBill / Math.max(myWip, 1), '#9e6730')}
+                {renderRing(44, 5, 0, '#9e6730')}
                 <div>
                   <div className="tw-metric__value">{wipK}</div>
-                  <div className="tw-metric__sub">WIP · {readyK} ready</div>
+                  <div className="tw-metric__sub">WIP · {readyLabel} ready</div>
                 </div>
               </div>
             </div>
@@ -2164,6 +2248,32 @@ export function HomeClient({
       // 5. key_dates_and_deadlines
       // ================================================================
       case 'key_dates_and_deadlines': {
+        const upcomingKeyDates: {
+          id: string;
+          dateIso: string;
+          label: string;
+          matterId: string;
+          matterNumber: string;
+          matterTitle: string;
+        }[] = [];
+        for (const m of myActiveMatters) {
+          const subcatLabel = resolveLabel(values, m.workTypeSubcategoryId);
+          const critDates = extractCriticalDates(m, subcatLabel);
+          for (const cd of critDates) {
+            const dateIso = cd.date.slice(0, 10);
+            if (dateIso >= todayIso && dateIso <= next14DaysIso) {
+              upcomingKeyDates.push({
+                id: `${m.id}-${cd.fieldId}`,
+                dateIso,
+                label: cd.label,
+                matterId: m.id,
+                matterNumber: m.matterNumber,
+                matterTitle: m.title,
+              });
+            }
+          }
+        }
+        upcomingKeyDates.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -2172,54 +2282,27 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {upcomingKeyDates.length === 0 ? (
                 <div className="panel-body padded muted">
                   No key dates or deadlines in the next 14 days.
                 </div>
               ) : (
                 <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Fri 23 Oct · 4 days" tone="warning" />
-                        <Link href={matterHrefForCode('PRI001-0001')}>
-                          Completion — Purchase of 14 Cathedral Road
-                        </Link>
+                  {upcomingKeyDates.map((kd) => (
+                    <li key={kd.id} className="worklist-row">
+                      <div className="worklist-main">
+                        <div className="worklist-title">
+                          <StatusPill label={formatDate(kd.dateIso)} tone="warning" />
+                          <Link href={`/matters/${kd.matterId}`}>
+                            {kd.label} — {kd.matterTitle}
+                          </Link>
+                        </div>
+                        <div className="worklist-meta">
+                          <span className="mono-code">{kd.matterNumber}</span>
+                        </div>
                       </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PRI001-0001</span>
-                        <span>· Owen &amp; Carys Price · £84,943.60 held on client account</span>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Tue 27 Oct · 8 days" tone="neutral" />
-                        <Link href={matterHrefForCode('PEN001-0001')}>
-                          Target exchange of lease — Unit 4, Cardiff Bay Retail Park
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PEN001-0001</span>
-                        <span>· Penarth Estates Ltd</span>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Fri 30 Oct · 11 days" tone="neutral" />
-                        <Link href={matterHrefForCode('HAR001-0003')}>
-                          s.106 unilateral undertaking sign-off with Cardiff Council
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">HAR001-0003</span>
-                        <span>· Harbourline Housing Association</span>
-                      </div>
-                    </div>
-                  </li>
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
@@ -2231,91 +2314,42 @@ export function HomeClient({
       // 6. waiting_on_client
       // ================================================================
       case 'waiting_on_client': {
+        const waitingTasks = tasks.filter(
+          (t) =>
+            t.status === 'Waiting' &&
+            (t.assignedPersonId === effectiveWorkPerson.id || t.assignedPersonId === currentUser.id),
+        );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">Waiting on client / third party</h2>
-                <StatusPill label={hasDemoSeedData ? '3 items' : '0 items'} tone="neutral" />
+                <StatusPill
+                  label={`${waitingTasks.length} item${waitingTasks.length === 1 ? '' : 's'}`}
+                  tone="neutral"
+                />
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {waitingTasks.length === 0 ? (
                 <div className="panel-body padded muted">
                   No items currently waiting on clients or third parties.
                 </div>
               ) : (
                 <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <Link href={matterHrefForCode('TGL001-0002')}>
-                          Certified source-of-funds bank statements &amp; signed engagement letter
-                        </Link>
+                  {waitingTasks.map((t) => (
+                    <li key={t.id} className="worklist-row">
+                      <div className="worklist-main">
+                        <div className="worklist-title">
+                          <Link href={`/tasks/${t.id}`}>{t.title}</Link>
+                        </div>
+                        <div className="worklist-meta">
+                          <span className="mono-code">{t.reference}</span>
+                          <span>· Due {formatDate(t.dueAt)}</span>
+                        </div>
                       </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">TGL001-0002</span>
-                        <span>· Tŷ Glas Developments Ltd · Waiting 4 days</span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--sm"
-                        onClick={() =>
-                          showToast('Sent chase reminder to Llinos Jenkins (Tŷ Glas Developments Ltd).')
-                        }
-                      >
-                        Chase
-                      </button>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <Link href={matterHrefForCode('PEN001-0001')}>
-                          Landlord instructions on rent deposit deed wording
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PEN001-0001</span>
-                        <span>· Alun Davies (Penarth Estates Ltd) · Waiting 5 days</span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--sm"
-                        onClick={() =>
-                          showToast('Sent chase reminder to Alun Davies (Penarth Estates Ltd).')
-                        }
-                      >
-                        Chase
-                      </button>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <Link href={matterHrefForCode('PEN001-0002')}>
-                          Joint surveyor report from Cadwyn Surveying
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PEN001-0002</span>
-                        <span>· Dr Sarah Holt · Due next week</span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--sm"
-                        onClick={() => showToast('Sent chase note to Dr Sarah Holt (Cadwyn Surveying).')}
-                      >
-                        Chase
-                      </button>
-                    </div>
-                  </li>
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
@@ -2428,7 +2462,7 @@ export function HomeClient({
             isTaskOpen(t) &&
             (t.assignedPersonId === effectiveWorkPerson.id ||
               (t.assignedPersonId && supportedFeeEarnerIds.includes(t.assignedPersonId)) ||
-              t.assignedTeamId === 'TM-000001'),
+              (t.assignedTeamId !== null && myTeamIds.has(t.assignedTeamId))),
         );
         return renderTaskWidgetCard(panelId, 'Team tasks', secTasks, column);
       }
@@ -2448,126 +2482,9 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
-              {!hasDemoSeedData ? (
-                <div className="panel-body padded muted">
-                  No documents or correspondence currently queued.
-                </div>
-              ) : (
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Document / letter</th>
-                      <th>Matter / Enquiry</th>
-                      <th>Fee earner</th>
-                      <th>Status</th>
-                      <th className="num">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>Non-engagement letter — Marcus Finch</div>
-                        <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                          Auto-generated when enquiry declined (conflict)
-                        </div>
-                      </td>
-                      <td>
-                        <span className="mono-code">ENQ-000006</span>
-                      </td>
-                      <td>Owain Jenkins</td>
-                      <td>
-                        <StatusPill label="Overdue 1d" tone="alert" />
-                      </td>
-                      <td className="num">
-                        <Link href="/enquiries/ENQ-000006" className="btn btn--primary btn--sm">
-                          Mark sent
-                        </Link>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>
-                          Client care &amp; engagement letter (fixed fee)
-                        </div>
-                        <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                          Plot 9, Parc Tŷ Glas acquisition
-                        </div>
-                      </td>
-                      <td>
-                        <Link href={matterHrefForCode('TGL001-0002')} className="mono-code">
-                          TGL001-0002
-                        </Link>
-                      </td>
-                      <td>Dafydd Evans</td>
-                      <td>
-                        <StatusPill label="Draft ready" tone="warning" />
-                      </td>
-                      <td className="num">
-                        <Link
-                          href={matterHrefForCode('TGL001-0002')}
-                          className="btn btn--secondary btn--sm"
-                        >
-                          Send for sign
-                        </Link>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>
-                          Completion statement &amp; engrossed TR1 transfer
-                        </div>
-                        <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                          14 Cathedral Road — completion 23 Oct
-                        </div>
-                      </td>
-                      <td>
-                        <Link href={matterHrefForCode('PRI001-0001')} className="mono-code">
-                          PRI001-0001
-                        </Link>
-                      </td>
-                      <td>Dafydd Evans</td>
-                      <td>
-                        <StatusPill label="In progress" tone="neutral" />
-                      </td>
-                      <td className="num">
-                        <Link
-                          href={matterHrefForCode('PRI001-0001')}
-                          className="btn btn--secondary btn--sm"
-                        >
-                          Open
-                        </Link>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>
-                          Clean s.106 unilateral undertaking bundle
-                        </div>
-                        <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                          To Cardiff Council legal department
-                        </div>
-                      </td>
-                      <td>
-                        <Link href={matterHrefForCode('HAR001-0003')} className="mono-code">
-                          HAR001-0003
-                        </Link>
-                      </td>
-                      <td>Rhian Morgan</td>
-                      <td>
-                        <StatusPill label="Awaiting partner" tone="neutral" />
-                      </td>
-                      <td className="num">
-                        <Link
-                          href={matterHrefForCode('HAR001-0003')}
-                          className="btn btn--secondary btn--sm"
-                        >
-                          Prepare PDF
-                        </Link>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              )}
+              <div className="panel-body padded muted">
+                No documents or correspondence currently queued.
+              </div>
             </div>
           </section>
         );
@@ -2577,6 +2494,7 @@ export function HomeClient({
       // 10. matter_openings_in_progress
       // ================================================================
       case 'matter_openings_in_progress': {
+        const openingMatters = matters.filter((m) => m.matterStatusId === 'matter_status.opening');
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -2588,117 +2506,84 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {openingMatters.length === 0 ? (
                 <div className="panel-body padded muted">
                   No matter openings currently in progress.
                 </div>
               ) : (
                 <ul className="worklist">
-                  <li className="worklist-row" style={{ gridTemplateColumns: '1fr' }}>
-                    <div className="worklist-main">
-                      <div
-                        className="worklist-title"
-                        style={{ justifyContent: 'space-between' }}
+                  {openingMatters.map((m) => {
+                    const conflictDone =
+                      m.conflictDecision?.outcome === 'Cleared' ||
+                      m.conflictCheckRecord?.status === 'Cleared' ||
+                      m.conflictCheckRecord?.status === 'Approved' ||
+                      m.conflictCheckStatus === 'Cleared';
+                    const amlDone =
+                      m.amlStatus === 'Completed' ||
+                      m.amlStatus === 'Verified' ||
+                      m.amlStatus === 'Cleared';
+                    const engDone = m.engagementLetterStatus === 'Signed';
+                    const retainerDone =
+                      m.retainerMoniesOnAccountGbp !== null && m.retainerMoniesOnAccountGbp > 0;
+                    const completedSteps = [conflictDone, amlDone, engDone, retainerDone].filter(
+                      Boolean,
+                    ).length;
+                    const clientOrg = orgById.get(m.clientId);
+                    const clientPer = personById.get(m.clientId);
+                    const clientLabel = clientOrg
+                      ? clientOrg.legalName
+                      : clientPer
+                        ? personDisplayName(clientPer)
+                        : m.clientId;
+                    return (
+                      <li
+                        key={m.id}
+                        className="worklist-row"
+                        style={{ gridTemplateColumns: '1fr' }}
                       >
-                        <span>
-                          <span className="mono-code">TGL001-0002</span>{' '}
-                          <Link href={matterHrefForCode('TGL001-0002')}>
-                            <strong>Purchase of Plot 9, Parc Tŷ Glas</strong>
-                          </Link>{' '}
-                          — Tŷ Glas Developments Ltd
-                        </span>
-                        <StatusPill label="2 of 4 complete · High risk" tone="alert" />
-                      </div>
-                      <div className="onboarding-steps">
-                        <div className="onb-step done">
-                          <span>1. Conflict check</span>
-                          <span>✓ Cleared</span>
+                        <div className="worklist-main">
+                          <div
+                            className="worklist-title"
+                            style={{ justifyContent: 'space-between' }}
+                          >
+                            <span>
+                              <span className="mono-code">{m.matterNumber}</span>{' '}
+                              <Link href={`/matters/${m.id}`}>
+                                <strong>{m.title}</strong>
+                              </Link>{' '}
+                              — {clientLabel}
+                            </span>
+                            <StatusPill
+                              label={`${completedSteps} of 4 complete`}
+                              tone={completedSteps === 4 ? 'positive' : 'warning'}
+                            />
+                          </div>
+                          <div className="onboarding-steps">
+                            <div className={`onb-step ${conflictDone ? 'done' : 'warn'}`}>
+                              <span>1. Conflict check</span>
+                              <span>{conflictDone ? '✓ Cleared' : m.conflictCheckStatus || 'Not recorded'}</span>
+                            </div>
+                            <div className={`onb-step ${amlDone ? 'done' : 'warn'}`}>
+                              <span>2. AML / CDD</span>
+                              <span>{amlDone ? '✓ Complete' : m.amlStatus || 'Not recorded'}</span>
+                            </div>
+                            <div className={`onb-step ${engDone ? 'done' : 'warn'}`}>
+                              <span>3. Engagement letter</span>
+                              <span>{engDone ? '✓ Signed' : m.engagementLetterStatus || 'Not recorded'}</span>
+                            </div>
+                            <div className={`onb-step ${retainerDone ? 'done' : 'warn'}`}>
+                              <span>4. Retainer on a/c</span>
+                              <span>
+                                {retainerDone
+                                  ? `✓ ${formatGbp(m.retainerMoniesOnAccountGbp!)}`
+                                  : 'Not recorded'}
+                              </span>
+                            </div>
+                          </div>
                         </div>
-                        <div className="onb-step alert">
-                          <span>2. AML / EDD</span>
-                          <span>Pending SoF</span>
-                        </div>
-                        <div className="onb-step warn">
-                          <span>3. Engagement letter</span>
-                          <span>Drafting</span>
-                        </div>
-                        <div className="onb-step warn">
-                          <span>4. Retainer on a/c</span>
-                          <span>Requested £5k</span>
-                        </div>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row" style={{ gridTemplateColumns: '1fr' }}>
-                    <div className="worklist-main">
-                      <div
-                        className="worklist-title"
-                        style={{ justifyContent: 'space-between' }}
-                      >
-                        <span>
-                          <span className="mono-code">HUG002-0001</span>{' '}
-                          <Link href={matterHrefForCode('HUG002-0001')}>
-                            <strong>Purchase of 18 Cathedral View, Pontcanna</strong>
-                          </Link>{' '}
-                          — Mared Hughes
-                        </span>
-                        <StatusPill label="3 of 4 complete" tone="warning" />
-                      </div>
-                      <div className="onboarding-steps">
-                        <div className="onb-step done">
-                          <span>1. Conflict check</span>
-                          <span>✓ Cleared</span>
-                        </div>
-                        <div className="onb-step warn">
-                          <span>2. AML / ID&amp;V</span>
-                          <span>PoA awaited</span>
-                        </div>
-                        <div className="onb-step done">
-                          <span>3. Engagement letter</span>
-                          <span>✓ Signed</span>
-                        </div>
-                        <div className="onb-step done">
-                          <span>4. Retainer on a/c</span>
-                          <span>✓ £450 rec&apos;d</span>
-                        </div>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row" style={{ gridTemplateColumns: '1fr' }}>
-                    <div className="worklist-main">
-                      <div
-                        className="worklist-title"
-                        style={{ justifyContent: 'space-between' }}
-                      >
-                        <span>
-                          <span className="mono-code">JON002-0001</span>{' '}
-                          <Link href={matterHrefForCode('JON002-0001')}>
-                            <strong>Employment Tribunal claim — Sam Jones</strong>
-                          </Link>{' '}
-                          — Converted from ENQ-000003
-                        </span>
-                        <StatusPill label="2 of 4 complete" tone="warning" />
-                      </div>
-                      <div className="onboarding-steps">
-                        <div className="onb-step done">
-                          <span>1. Conflict check</span>
-                          <span>✓ Cleared</span>
-                        </div>
-                        <div className="onb-step warn">
-                          <span>2. AML / ID&amp;V</span>
-                          <span>Pending</span>
-                        </div>
-                        <div className="onb-step warn">
-                          <span>3. Engagement letter</span>
-                          <span>Sent 16 Oct</span>
-                        </div>
-                        <div className="onb-step done">
-                          <span>4. Retainer on a/c</span>
-                          <span>N/A</span>
-                        </div>
-                      </div>
-                    </div>
-                  </li>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -2710,6 +2595,39 @@ export function HomeClient({
       // 11. upcoming_completions_and_filings (03 Legal Secretary)
       // ================================================================
       case 'upcoming_completions_and_filings': {
+        const upcomingFilings: {
+          id: string;
+          dateIso: string;
+          label: string;
+          matterId: string;
+          matterNumber: string;
+          matterTitle: string;
+        }[] = [];
+        const supportedSet = new Set(supportedFeeEarnerIds);
+        const targetMatters = matters.filter(
+          (m) =>
+            m.matterStatusId !== 'matter_status.closed' &&
+            (supportedSet.size === 0 ||
+              (m.leadFeeEarnerId !== null && supportedSet.has(m.leadFeeEarnerId)) ||
+              m.teamMemberIds.some((id) => supportedSet.has(id))),
+        );
+        for (const m of targetMatters) {
+          const subcatLabel = resolveLabel(values, m.workTypeSubcategoryId);
+          for (const cd of extractCriticalDates(m, subcatLabel)) {
+            const dateIso = cd.date.slice(0, 10);
+            if (dateIso >= todayIso && dateIso <= next7DaysIso) {
+              upcomingFilings.push({
+                id: `${m.id}-${cd.fieldId}`,
+                dateIso,
+                label: cd.label,
+                matterId: m.id,
+                matterNumber: m.matterNumber,
+                matterTitle: m.title,
+              });
+            }
+          }
+        }
+        upcomingFilings.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -2719,56 +2637,27 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {upcomingFilings.length === 0 ? (
                 <div className="panel-body padded muted">
                   No upcoming completions or filings in the next 7 days.
                 </div>
               ) : (
                 <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Fri 23 Oct" tone="warning" />
-                        <Link href={matterHrefForCode('PRI001-0001')}>
-                          Completion — 14 Cathedral Road (Owen &amp; Carys Price)
-                        </Link>
+                  {upcomingFilings.map((item) => (
+                    <li key={item.id} className="worklist-row">
+                      <div className="worklist-main">
+                        <div className="worklist-title">
+                          <StatusPill label={formatDate(item.dateIso)} tone="warning" />
+                          <Link href={`/matters/${item.matterId}`}>
+                            {item.label} — {item.matterTitle}
+                          </Link>
+                        </div>
+                        <div className="worklist-meta">
+                          <span className="mono-code">{item.matterNumber}</span>
+                        </div>
                       </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PRI001-0001</span>
-                        <span>
-                          · Dafydd Evans · £84,943.60 completion funds held · CHAPS requisition needed Thu
-                        </span>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Tue 27 Oct" tone="neutral" />
-                        <Link href={matterHrefForCode('PEN001-0001')}>
-                          Agreement for lease exchange — Unit 4, Cardiff Bay Retail Park
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PEN001-0001</span>
-                        <span>· Dafydd Evans / Rhian Morgan · Engrossments to prepare</span>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Fri 30 Oct" tone="neutral" />
-                        <Link href={matterHrefForCode('HAR001-0003')}>
-                          s.106 unilateral undertaking execution — Butetown regeneration
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">HAR001-0003</span>
-                        <span>· Rhian Morgan · Seal &amp; witness requirements</span>
-                      </div>
-                    </div>
-                  </li>
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
@@ -2780,10 +2669,21 @@ export function HomeClient({
       // 12. disbursements_and_invoices_to_log (03 Legal Secretary)
       // ================================================================
       case 'disbursements_and_invoices_to_log': {
+        const supportedSet = new Set(supportedFeeEarnerIds);
+        const supportedMatterCodes = new Set(
+          matters
+            .filter(
+              (m) =>
+                supportedSet.size === 0 ||
+                (m.leadFeeEarnerId !== null && supportedSet.has(m.leadFeeEarnerId)) ||
+                m.teamMemberIds.some((id) => supportedSet.has(id)),
+            )
+            .map((m) => m.matterNumber),
+        );
         const teamDisbs = pmsAllDisbursements.filter(
           (d) =>
             d.billed_status === 'Unbilled' &&
-            (d.matter_code === 'PEN001-0002' || d.matter_code === 'PRI001-0001'),
+            (supportedSet.size === 0 || supportedMatterCodes.has(d.matter_code)),
         );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
@@ -2792,7 +2692,7 @@ export function HomeClient({
                 <h2 className="panel-title">Unbilled disbursements on team matters</h2>
                 <span className="mono-code">PMS · read-only</span>
               </div>
-              <span className="panel-subtitle">As at {formattedAsAt}</span>
+              <span className="panel-subtitle">{pmsAsAtCaption}</span>
             </div>
             <div className="panel-body">
               {teamDisbs.length === 0 ? (
@@ -2958,6 +2858,7 @@ export function HomeClient({
                       value={qChannelId}
                       onChange={(e) => setQChannelId(e.target.value)}
                     >
+                      <option value="">Select channel…</option>
                       <option value="enquiry_channel.phone">Phone</option>
                       <option value="enquiry_channel.email">Email</option>
                       <option value="enquiry_channel.web_form">Web form</option>
@@ -2974,6 +2875,7 @@ export function HomeClient({
                       value={qPracticeAreaId}
                       onChange={(e) => setQPracticeAreaId(e.target.value)}
                     >
+                      <option value="">Select practice area…</option>
                       <option value="work_type.real_estate_and_property">
                         Real Estate &amp; Property → Real Estate team
                       </option>
@@ -3000,8 +2902,9 @@ export function HomeClient({
                       value={qUrgencyId}
                       onChange={(e) => setQUrgencyId(e.target.value)}
                     >
+                      <option value="">Select urgency…</option>
                       <option value="enquiry_urgency.urgent">
-                        Urgent — end of same working day (17:30 today)
+                        Urgent — end of same working day
                       </option>
                       <option value="enquiry_urgency.emergency">
                         Emergency — within 2 working hours
@@ -3116,75 +3019,81 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              <ul className="worklist">
-                {openEnqs.slice(0, 6).map((e) => {
-                  const urgLabel = resolveLabel(values, e.urgencyId) || 'Standard';
-                  const paLabel = resolveLabel(values, e.practiceAreaId) || 'General';
-                  const assignee = e.assignedToId ? personById.get(e.assignedToId) : null;
-                  const isOverdue =
-                    e.firstContactDueAt && e.firstContactDueAt.slice(0, 10) < todayIso;
-                  return (
-                    <li key={e.id} className="worklist-row">
-                      <div className="worklist-main">
-                        <div className="worklist-title">
-                          <StatusPill
-                            label={
-                              isOverdue
-                                ? `SLA overdue · ${urgLabel}`
-                                : `${urgLabel} · Due ${e.bestTimeToCall || '17:30 today'}`
-                            }
-                            tone={isOverdue || urgLabel === 'Emergency' ? 'alert' : 'warning'}
-                          />
-                          <Link href={`/enquiries/${e.id}`}>
-                            {enquiryDisplayName(e)} — {e.summary}
-                          </Link>
+              {openEnqs.length === 0 ? (
+                <div className="panel-body padded muted">No open enquiries in the callback queue.</div>
+              ) : (
+                <ul className="worklist">
+                  {openEnqs.slice(0, 6).map((e) => {
+                    const urgLabel = resolveLabel(values, e.urgencyId) || 'Standard';
+                    const paLabel = resolveLabel(values, e.practiceAreaId) || 'General';
+                    const assignee = e.assignedToId ? personById.get(e.assignedToId) : null;
+                    const isOverdue =
+                      Boolean(e.firstContactDueAt) &&
+                      e.contactLog.length === 0 &&
+                      isDueTimestampOverdue(e.firstContactDueAt!, nowIso, todayIso);
+                    return (
+                      <li key={e.id} className="worklist-row">
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <StatusPill
+                              label={
+                                isOverdue
+                                  ? `SLA overdue · ${urgLabel}`
+                                  : `${urgLabel} · Due ${e.bestTimeToCall || 'today'}`
+                              }
+                              tone={isOverdue || urgLabel === 'Emergency' ? 'alert' : 'warning'}
+                            />
+                            <Link href={`/enquiries/${e.id}`}>
+                              {enquiryDisplayName(e)} — {e.summary}
+                            </Link>
+                          </div>
+                          <div className="worklist-meta">
+                            <span className="mono-code">{e.reference}</span>
+                            <span>· {paLabel}</span>
+                            <span>
+                              ·{' '}
+                              {assignee
+                                ? `Assigned to ${personDisplayName(assignee)}`
+                                : 'Unassigned'}
+                            </span>
+                            {e.contactLog.length > 0 ? (
+                              <span>· {e.contactLog.length} contact attempt(s)</span>
+                            ) : null}
+                          </div>
                         </div>
-                        <div className="worklist-meta">
-                          <span className="mono-code">{e.reference}</span>
-                          <span>· {paLabel}</span>
-                          <span>
-                            ·{' '}
-                            {assignee
-                              ? `Assigned to ${personDisplayName(assignee)}`
-                              : 'Unassigned'}
-                          </span>
-                          {e.contactLog.length > 0 ? (
-                            <span>· {e.contactLog.length} contact attempt(s)</span>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="worklist-right">
-                        <button
-                          type="button"
-                          className="btn btn--secondary btn--sm"
-                          onClick={() => {
-                            setLogModalEnq(e);
-                            setLogNote('');
-                          }}
-                        >
-                          Log contact
-                        </button>
-                        {!e.assignedToId ? (
+                        <div className="worklist-right">
                           <button
                             type="button"
-                            className="btn btn--primary btn--sm"
-                            onClick={() => handleTakeEnquiry(e, 'P-000002')}
-                          >
-                            Assign
-                          </button>
-                        ) : (
-                          <Link
-                            href={`/enquiries/${e.id}`}
                             className="btn btn--secondary btn--sm"
+                            onClick={() => {
+                              setLogModalEnq(e);
+                              setLogNote('');
+                            }}
                           >
-                            Open
-                          </Link>
-                        )}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+                            Log contact
+                          </button>
+                          {!e.assignedToId ? (
+                            <button
+                              type="button"
+                              className="btn btn--primary btn--sm"
+                              onClick={() => handleTakeEnquiry(e)}
+                            >
+                              Take
+                            </button>
+                          ) : (
+                            <Link
+                              href={`/enquiries/${e.id}`}
+                              className="btn btn--secondary btn--sm"
+                            >
+                              Open
+                            </Link>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           </section>
         );
@@ -3230,16 +3139,15 @@ export function HomeClient({
                           </div>
                         </div>
                         <div className="worklist-right">
+                          <Link
+                            href={`/enquiries/${e.id}`}
+                            className="btn btn--secondary btn--sm"
+                          >
+                            Route / assign
+                          </Link>
                           <button
                             type="button"
                             className="btn btn--primary btn--sm"
-                            onClick={() => handleTakeEnquiry(e, 'P-000002')}
-                          >
-                            Assign to Dafydd Evans
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn--secondary btn--sm"
                             onClick={() => handleTakeEnquiry(e)}
                           >
                             Take
@@ -3323,30 +3231,20 @@ export function HomeClient({
       // 17. todays_outcomes_and_conversion (04 Enquiries Coordinator)
       // ================================================================
       case 'todays_outcomes_and_conversion': {
-        const totalEnqs = hasDemoSeedData ? 17 : enquiries.length;
-        const convCount = hasDemoSeedData
-          ? 9
-          : enquiries.filter((e) => e.status === 'Converted').length;
-        const convPct = totalEnqs > 0 ? Math.round((convCount / totalEnqs) * 100) : 0;
-        const openCount = hasDemoSeedData
-          ? 3
-          : enquiries.filter((e) => isEnquiryOpen(e)).length;
-        const declinedCount = hasDemoSeedData
-          ? 2
-          : enquiries.filter((e) => e.status === 'Declined').length;
-        const referredCount = hasDemoSeedData
-          ? 1
-          : enquiries.filter((e) => e.status === 'Referred out').length;
-        const noRespCount = hasDemoSeedData
-          ? 2
-          : enquiries.filter((e) => e.status === 'No response').length;
+        const totalEnqs = enquiryMetrics.monthReceivedCount;
+        const convCount = enquiryMetrics.monthConvertedCount;
+        const convPct = enquiryMetrics.monthConversionPct;
+        const openCount = enquiryMetrics.monthOpenCount;
+        const declinedCount = enquiryMetrics.monthDeclinedCount;
+        const referredCount = enquiryMetrics.monthReferredCount;
+        const noRespCount = enquiryMetrics.monthNoResponseCount;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">This month&apos;s outcomes &amp; conversion</h2>
               </div>
-              <span className="panel-subtitle">October 2026</span>
+              <span className="panel-subtitle">{currentMonthYearLabel}</span>
             </div>
             <div className="panel-body padded">
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
@@ -3377,12 +3275,6 @@ export function HomeClient({
                   <div className="val">{noRespCount}</div>
                 </div>
               </div>
-              {hasDemoSeedData ? (
-                <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-secondary)' }}>
-                  Declined &amp; referred-out enquiries automatically generated{' '}
-                  <strong>3 non-engagement letter tasks</strong> (2 working-day rule).
-                </div>
-              ) : null}
             </div>
           </section>
         );
@@ -3392,16 +3284,25 @@ export function HomeClient({
       // 18. referral_sources_this_month (04 Enquiries Coordinator)
       // ================================================================
       case 'referral_sources_this_month': {
+        const channelRowsMap = new Map<string, { label: string; count: number; converted: number }>();
+        for (const e of enquiryMetrics.monthEnquiries) {
+          const chLabel = resolveLabel(values, e.channelId) || 'Unspecified';
+          const entry = channelRowsMap.get(chLabel) ?? { label: chLabel, count: 0, converted: 0 };
+          entry.count += 1;
+          if (e.status === 'Converted') entry.converted += 1;
+          channelRowsMap.set(chLabel, entry);
+        }
+        const channelRows = Array.from(channelRowsMap.values()).sort((a, b) => b.count - a.count);
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">Enquiry channels &amp; referral sources</h2>
               </div>
-              <span className="panel-subtitle">October 2026</span>
+              <span className="panel-subtitle">{currentMonthYearLabel}</span>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {channelRows.length === 0 ? (
                 <div className="panel-body padded muted">
                   No enquiry channel or referral source activity recorded yet.
                 </div>
@@ -3415,33 +3316,15 @@ export function HomeClient({
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <td>Phone — direct &amp; existing clients</td>
-                      <td className="num">6</td>
-                      <td className="num">
-                        <strong>4</strong>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        Professional referrals (Gareth Hughes ·{' '}
-                        <Link href="/organisations/O-000009">Hughes Lloyd</Link>)
-                      </td>
-                      <td className="num">4</td>
-                      <td className="num">
-                        <strong>3</strong>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>Website / Digital enquiry form</td>
-                      <td className="num">5</td>
-                      <td className="num">2</td>
-                    </tr>
-                    <tr>
-                      <td>Walk-in / Cardiff reception</td>
-                      <td className="num">2</td>
-                      <td className="num">0</td>
-                    </tr>
+                    {channelRows.map((ch) => (
+                      <tr key={ch.label}>
+                        <td>{ch.label}</td>
+                        <td className="num">{ch.count}</td>
+                        <td className="num">
+                          <strong>{ch.converted}</strong>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               )}
@@ -3454,14 +3337,82 @@ export function HomeClient({
       // 19. matters_needing_partner_attention (02 Partner)
       // ================================================================
       case 'matters_needing_partner_attention': {
+        const attentionRows: Array<{
+          code: string;
+          title: string;
+          pillLabel: string;
+          pillTone: 'alert' | 'warning';
+          meta: string;
+          wip: number;
+          invoiceNumber: string | null;
+          clientCode: string;
+        }> = [];
+        const seenCodes = new Set<string>();
+        for (const mf of allMatterFins) {
+          const overdueDays = mf.max_invoice_days_past_due ?? 0;
+          const estPct = mf.estimate_used_pct ? Math.round(mf.estimate_used_pct * 100) : 0;
+          if (overdueDays > 60 && mf.outstanding_debt > 0) {
+            const matchingInv = pmsAgedDebt.find(
+              (inv) => inv.matter_code === mf.matter_code && (inv.days_past_due ?? 0) > 60,
+            );
+            const overdueAmount = matchingInv ? matchingInv.outstanding : mf.outstanding_debt;
+            attentionRows.push({
+              code: mf.matter_code,
+              title: `${mf.matter_description} (${mf.client_name})`,
+              pillLabel: `${overdueDays}d overdue (${formatGbp(overdueAmount)})`,
+              pillTone: overdueDays >= 90 ? 'alert' : 'warning',
+              meta: `Lead: ${mf.fee_earner_name} · Overdue debt ${formatGbp(overdueAmount)}`,
+              wip: mf.unbilled_wip,
+              invoiceNumber: matchingInv?.invoice_number ?? null,
+              clientCode: mf.client_code,
+            });
+            seenCodes.add(mf.matter_code);
+          } else if (estPct >= 85) {
+            attentionRows.push({
+              code: mf.matter_code,
+              title: `${mf.matter_description} (${mf.client_name})`,
+              pillLabel: `At ${estPct}% of estimate`,
+              pillTone: estPct >= 100 ? 'alert' : 'warning',
+              meta: `Lead: ${mf.fee_earner_name} · Time recorded ${formatGbp(mf.time_value_recorded)} of ${formatGbp(mf.fee_estimate)} · Unbilled WIP ${formatGbp(mf.unbilled_wip)}`,
+              wip: mf.unbilled_wip,
+              invoiceNumber: null,
+              clientCode: mf.client_code,
+            });
+            seenCodes.add(mf.matter_code);
+          }
+        }
+        for (const m of supervisedMatters) {
+          if (seenCodes.has(m.matterNumber)) continue;
+          const amlLabel = m.amlStatus;
+          if (isHighOrCriticalRiskRating(m.riskRatingId, values) && amlLabel !== 'Verified') {
+            const clientObj = orgById.get(m.clientId) ?? personById.get(m.clientId);
+            const clientName = clientObj
+              ? 'legalName' in clientObj
+                ? clientObj.legalName
+                : personDisplayName(clientObj)
+              : m.clientId;
+            const lead = m.leadFeeEarnerId ? personById.get(m.leadFeeEarnerId) : null;
+            attentionRows.push({
+              code: m.matterNumber,
+              title: `${m.title} (${clientName})`,
+              pillLabel: `High risk · AML ${amlLabel || 'Pending'}`,
+              pillTone: 'alert',
+              meta: `Lead: ${lead ? personDisplayName(lead) : 'Unassigned'}`,
+              wip: 0,
+              invoiceNumber: null,
+              clientCode: m.clientId,
+            });
+            seenCodes.add(m.matterNumber);
+          }
+        }
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">Matters needing partner attention</h2>
                 <StatusPill
-                  label={hasDemoSeedData ? '4 matters' : '0 matters'}
-                  tone={hasDemoSeedData ? 'warning' : 'neutral'}
+                  label={`${attentionRows.length} ${attentionRows.length === 1 ? 'matter' : 'matters'}`}
+                  tone={attentionRows.length > 0 ? 'warning' : 'neutral'}
                 />
               </div>
               <span className="panel-subtitle">
@@ -3469,163 +3420,74 @@ export function HomeClient({
               </span>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {attentionRows.length === 0 ? (
                 <div className="panel-body padded muted">
                   No matters currently flagged for partner attention.
                 </div>
               ) : (
                 <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="90+ days overdue (£3,300)" tone="alert" />
-                        <Link href={matterHrefForCode('BAY001-0001')}>
-                          New café lease — Mermaid Quay (Bay Side Cafés Ltd)
-                        </Link>
+                  {attentionRows.slice(0, 6).map((item) => (
+                    <li key={item.code} className="worklist-row">
+                      <div className="worklist-main">
+                        <div className="worklist-title">
+                          <StatusPill label={item.pillLabel} tone={item.pillTone} />
+                          <Link href={matterHrefForCode(item.code)}>{item.title}</Link>
+                        </div>
+                        <div className="worklist-meta">
+                          <span className="mono-code">{item.code}</span>
+                          <span>· {item.meta}</span>
+                        </div>
                       </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">BAY001-0001</span>
-                        <span>
-                          · Lead: Dafydd Evans · Invoice PV-2026-009 (£3,300.00 inc VAT) due 14 Jul
-                          2026 (94 days overdue)
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      {finance.canCreditControl ? (
-                        <button
-                          type="button"
-                          className="btn btn--secondary btn--sm"
-                          onClick={async () => {
-                            const res = await recordInvoiceCreditControlActionAction({
-                              invoiceNumber: 'PV-2026-009',
-                              matterCode: 'BAY001-0001',
-                              clientCode: 'BAY001',
-                              actionType: 'escalate',
-                            });
-                            if (isActionDenied(res)) {
-                              showToast(res.message);
-                              return;
-                            }
-                            showToast('Assigned formal credit-control escalation on BAY001-0001.');
-                            router.refresh();
-                          }}
-                        >
-                          Assign chase
-                        </button>
-                      ) : null}
-                      <Link
-                        href={matterHrefForCode('BAY001-0001')}
-                        className="btn btn--primary btn--sm"
-                      >
-                        Review matter
-                      </Link>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="At 90% of £18k estimate" tone="warning" />
-                        <Link href={matterHrefForCode('PEN001-0002')}>
-                          Rent review &amp; dilapidations — Units 1–3 Marina Parade (Penarth Estates
-                          Ltd)
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PEN001-0002</span>
-                        <span>
-                          · Lead: Aled Thomas · Time recorded £16,149.00 of £18,000.00 · Unbilled WIP
-                          £4,569.00 + £726.00 overdue (32d)
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <Link
-                        href={matterHrefForCode('PEN001-0002')}
-                        className="btn btn--secondary btn--sm"
-                      >
-                        Revise estimate
-                      </Link>
-                      {finance.canCreditControl ? (
-                        <button
-                          type="button"
+                      <div className="worklist-right">
+                        {finance.canCreditControl && item.invoiceNumber ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            onClick={async () => {
+                              const res = await recordInvoiceCreditControlActionAction({
+                                invoiceNumber: item.invoiceNumber!,
+                                matterCode: item.code,
+                                clientCode: item.clientCode,
+                                actionType: 'escalate',
+                              });
+                              if (isActionDenied(res)) {
+                                showToast(res.message);
+                                return;
+                              }
+                              showToast(
+                                `Assigned formal credit-control escalation on ${item.code}.`,
+                              );
+                              router.refresh();
+                            }}
+                          >
+                            Assign chase
+                          </button>
+                        ) : finance.canCreditControl && item.wip > 0 ? (
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--sm"
+                            onClick={async () => {
+                              const res = await requestMatterBillAction(item.code);
+                              if (isActionDenied(res)) {
+                                showToast(res.message);
+                                return;
+                              }
+                              showToast(`Requested interim bill on ${item.code}.`);
+                              router.refresh();
+                            }}
+                          >
+                            Approve billing
+                          </button>
+                        ) : null}
+                        <Link
+                          href={matterHrefForCode(item.code)}
                           className="btn btn--primary btn--sm"
-                          onClick={async () => {
-                            const res = await requestMatterBillAction('PEN001-0002');
-                            if (isActionDenied(res)) {
-                              showToast(res.message);
-                              return;
-                            }
-                            showToast('Requested interim bill on PEN001-0002 (£4,569.00 WIP).');
-                            router.refresh();
-                          }}
                         >
-                          Approve billing
-                        </button>
-                      ) : null}
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="High risk · AML &amp; SoF pending" tone="alert" />
-                        <Link href={matterHrefForCode('TGL001-0002')}>
-                          Purchase of Plot 9, Parc Tŷ Glas (Tŷ Glas Developments Ltd)
+                          Review matter
                         </Link>
                       </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">TGL001-0002</span>
-                        <span>
-                          · Lead: Dafydd Evans · Offshore SPV structure requires enhanced due
-                          diligence before exchange
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <Link
-                        href={matterHrefForCode('TGL001-0002')}
-                        className="btn btn--primary btn--sm"
-                      >
-                        Open compliance
-                      </Link>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="WIP 44 days old (£6,390)" tone="warning" />
-                        <Link href={matterHrefForCode('HAR001-0003')}>
-                          Butetown regeneration — development agreement (Harbourline Housing Assoc.)
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">HAR001-0003</span>
-                        <span>
-                          · Lead: Rhian Morgan · £6,390.00 unbilled WIP from Sep/Oct · £1,620.00
-                          invoice 18 days overdue
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      {finance.canCreditControl ? (
-                        <button
-                          type="button"
-                          className="btn btn--primary btn--sm"
-                          onClick={async () => {
-                            const res = await requestMatterBillAction('HAR001-0003');
-                            if (isActionDenied(res)) {
-                              showToast(res.message);
-                              return;
-                            }
-                            showToast('Raised billing task for HAR001-0003 (£6,390.00 WIP).');
-                            router.refresh();
-                          }}
-                        >
-                          Approve interim bill
-                        </button>
-                      ) : null}
-                    </div>
-                  </li>
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
@@ -3700,18 +3562,14 @@ export function HomeClient({
       // 21. team_workload_and_utilisation (02 Partner)
       // ================================================================
       case 'team_workload_and_utilisation': {
-        const teamFeCodes = ['FE001', 'FE003', 'FE004', 'FE005', 'FE006', 'FE008'];
-        const rows = allFeeEarnerPerformance.filter((fe) =>
-          teamFeCodes.includes(fe.fee_earner_id),
-        );
+        const rows = allFeeEarnerPerformance;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">Team workload &amp; utilisation</h2>
                 <span className="panel-subtitle">
-                  1Squared open matters/tasks + PMS `v_fee_earner_performance` · as at{' '}
-                  {formattedAsAt}
+                  1Squared open matters/tasks + PMS `v_fee_earner_performance` · {pmsAsAtCaption}
                 </span>
               </div>
             </div>
@@ -3728,8 +3586,8 @@ export function HomeClient({
                       <th>Grade · Rate</th>
                       <th className="num">Open matters</th>
                       <th className="num">Open tasks</th>
-                      <th className="num">Oct hrs</th>
-                      <th>YTD hrs vs 1,200h target</th>
+                      <th className="num">{pmsMonthShort} hrs</th>
+                      <th>YTD hrs vs target</th>
                       <th className="num">Unbilled WIP</th>
                     </tr>
                   </thead>
@@ -3737,6 +3595,21 @@ export function HomeClient({
                     {rows.map((fe) => {
                       const pct = Math.round(fe.pct_of_annual_target * 1000) / 10;
                       const barWidth = Math.min(Math.round(pct * 5), 100);
+                      const person = people.find(
+                        (p) => personDisplayName(p).toLowerCase() === fe.name.toLowerCase(),
+                      );
+                      const feOpenMatters = person
+                        ? matters.filter(
+                            (m) =>
+                              m.matterStatusId !== 'matter_status.closed' &&
+                              (m.leadFeeEarnerId === person.id ||
+                                m.teamMemberIds.includes(person.id)),
+                          ).length
+                        : 0;
+                      const feOpenTasks = person
+                        ? tasks.filter((t) => isTaskOpen(t) && t.assignedPersonId === person.id)
+                        : [];
+                      const feOverdueTasks = feOpenTasks.filter((t) => t.dueAt < todayIso).length;
                       return (
                         <tr key={fe.fee_earner_id}>
                           <td>
@@ -3745,9 +3618,11 @@ export function HomeClient({
                           <td>
                             {fe.grade} · £{fe.standard_hourly_rate}/hr
                           </td>
-                          <td className="num">{fe.fee_earner_id === 'FE005' ? 4 : 2}</td>
+                          <td className="num">{feOpenMatters}</td>
                           <td className="num">
-                            {fe.fee_earner_id === 'FE005' ? '6 (2 overdue)' : '2'}
+                            {feOverdueTasks > 0
+                              ? `${feOpenTasks.length} (${feOverdueTasks} overdue)`
+                              : `${feOpenTasks.length}`}
                           </td>
                           <td className="num">{fe.chargeable_hours_this_month.toFixed(1)} h</td>
                           <td style={{ minWidth: 150 }}>
@@ -3787,6 +3662,12 @@ export function HomeClient({
       // 22. wip_ready_to_bill_and_aged_debt (02 Partner)
       // ================================================================
       case 'wip_ready_to_bill_and_aged_debt': {
+        const supervisedCodes = new Set(supervisedMatters.map((m) => m.matterNumber));
+        const portfolioFinRows = allMatterFins.filter(
+          (mf) =>
+            (supervisedCodes.size === 0 || supervisedCodes.has(mf.matter_code)) &&
+            (mf.unbilled_wip > 0 || mf.outstanding_debt > 0),
+        );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -3794,10 +3675,10 @@ export function HomeClient({
                 <h2 className="panel-title">Unbilled WIP &amp; overdue debt on my matters</h2>
                 <span className="mono-code">PMS · read-only</span>
               </div>
-              <span className="panel-subtitle">Supervised portfolio · as at {formattedAsAt}</span>
+              <span className="panel-subtitle">Supervised portfolio · {pmsAsAtCaption}</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
-              {!hasDemoSeedData ? (
+              {portfolioFinRows.length === 0 ? (
                 <div className="panel-body padded muted">
                   No unbilled WIP or overdue debt on supervised matters.
                 </div>
@@ -3814,174 +3695,84 @@ export function HomeClient({
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('HAR001-0003')}>
-                          <strong>HAR001-0003</strong>
-                        </Link>{' '}
-                        · Butetown regeneration
-                      </td>
-                      <td>Harbourline Housing Assoc.</td>
-                      <td className="num">
-                        <strong>£6,390.00</strong>
-                      </td>
-                      <td className="num">£0.00</td>
-                      <td className="num">
-                        <StatusPill label="£1,620.00 (18d)" tone="warning" />
-                      </td>
-                      <td className="num">
-                        {finance.canCreditControl ? (
-                          <button
-                            type="button"
-                            className="btn btn--secondary btn--sm"
-                            onClick={async () => {
-                              const res = await requestMatterBillAction('HAR001-0003');
-                              if (isActionDenied(res)) {
-                                showToast(res.message);
-                                return;
-                              }
-                              showToast('Requested bill on HAR001-0003.');
-                              router.refresh();
-                            }}
-                          >
-                            Request bill
-                          </button>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('PEN001-0002')}>
-                          <strong>PEN001-0002</strong>
-                        </Link>{' '}
-                        · Rent review &amp; dilapidations
-                      </td>
-                      <td>Penarth Estates Ltd</td>
-                      <td className="num">
-                        <strong>£4,569.00</strong>
-                      </td>
-                      <td className="num">£640.00</td>
-                      <td className="num">
-                        <StatusPill label="£726.00 (32d)" tone="warning" />
-                      </td>
-                      <td className="num">
-                        {finance.canCreditControl ? (
-                          <button
-                            type="button"
-                            className="btn btn--secondary btn--sm"
-                            onClick={async () => {
-                              const res = await requestMatterBillAction('PEN001-0002');
-                              if (isActionDenied(res)) {
-                                showToast(res.message);
-                                return;
-                              }
-                              showToast('Requested bill on PEN001-0002.');
-                              router.refresh();
-                            }}
-                          >
-                            Request bill
-                          </button>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('PEN001-0001')}>
-                          <strong>PEN001-0001</strong>
-                        </Link>{' '}
-                        · Lease of Unit 4
-                      </td>
-                      <td>Penarth Estates Ltd</td>
-                      <td className="num">
-                        <strong>£4,733.90</strong>
-                      </td>
-                      <td className="num">£0.00</td>
-                      <td className="num">£0.00 (not due)</td>
-                      <td className="num">
-                        {finance.canCreditControl ? (
-                          <button
-                            type="button"
-                            className="btn btn--secondary btn--sm"
-                            onClick={async () => {
-                              const res = await requestMatterBillAction('PEN001-0001');
-                              if (isActionDenied(res)) {
-                                showToast(res.message);
-                                return;
-                              }
-                              showToast('Requested bill on PEN001-0001.');
-                              router.refresh();
-                            }}
-                          >
-                            Request bill
-                          </button>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('PRI001-0001')}>
-                          <strong>PRI001-0001</strong>
-                        </Link>{' '}
-                        · 14 Cathedral Road
-                      </td>
-                      <td>Owen &amp; Carys Price</td>
-                      <td className="num">
-                        <strong>£1,985.00</strong>
-                      </td>
-                      <td className="num">£42.00</td>
-                      <td className="num">£0.00</td>
-                      <td className="num">
-                        <span className="muted" style={{ fontSize: 11.5 }}>
-                          Fixed fee £1,500 on completion
-                        </span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('BAY001-0001')}>
-                          <strong>BAY001-0001</strong>
-                        </Link>{' '}
-                        · Mermaid Quay café lease
-                      </td>
-                      <td>Bay Side Cafés Ltd</td>
-                      <td className="num">£0.00</td>
-                      <td className="num">£0.00</td>
-                      <td className="num">
-                        <StatusPill label="£3,300.00 (94d)" tone="alert" />
-                      </td>
-                      <td className="num">
-                        {finance.canCreditControl ? (
-                          <button
-                            type="button"
-                            className="btn btn--secondary btn--sm"
-                            onClick={async () => {
-                              const res = await recordInvoiceCreditControlActionAction({
-                                invoiceNumber: 'PV-2026-009',
-                                matterCode: 'BAY001-0001',
-                                clientCode: 'BAY001',
-                                actionType: 'escalate',
-                              });
-                              if (isActionDenied(res)) {
-                                showToast(res.message);
-                                return;
-                              }
-                              showToast('Escalated PV-2026-009 (£3,300.00) on BAY001-0001.');
-                              router.refresh();
-                            }}
-                          >
-                            Escalate
-                          </button>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                    </tr>
+                    {portfolioFinRows.slice(0, 8).map((mf) => {
+                      const daysLate = mf.max_invoice_days_past_due ?? 0;
+                      const overdueInv = pmsAgedDebt.find(
+                        (inv) => inv.matter_code === mf.matter_code && (inv.days_past_due ?? 0) > 0,
+                      );
+                      const overdueAmount = overdueInv ? overdueInv.outstanding : daysLate > 0 ? mf.outstanding_debt : 0;
+                      return (
+                        <tr key={mf.matter_code}>
+                          <td>
+                            <Link href={matterHrefForCode(mf.matter_code)}>
+                              <strong>{mf.matter_code}</strong>
+                            </Link>{' '}
+                            · {mf.matter_description}
+                          </td>
+                          <td>{mf.client_name}</td>
+                          <td className="num">
+                            <strong>{formatGbp(mf.unbilled_wip)}</strong>
+                          </td>
+                          <td className="num">{formatGbp(mf.unbilled_disbursements)}</td>
+                          <td className="num">
+                            {overdueAmount > 0 ? (
+                              <StatusPill
+                                label={`${formatGbp(overdueAmount)} (${daysLate}d)`}
+                                tone={daysLate >= 90 ? 'alert' : 'warning'}
+                              />
+                            ) : (
+                              '£0.00'
+                            )}
+                          </td>
+                          <td className="num">
+                            {!finance.canCreditControl ? (
+                              <span className="muted">—</span>
+                            ) : mf.unbilled_wip > 0 ? (
+                              <button
+                                type="button"
+                                className="btn btn--secondary btn--sm"
+                                onClick={async () => {
+                                  const res = await requestMatterBillAction(mf.matter_code);
+                                  if (isActionDenied(res)) {
+                                    showToast(res.message);
+                                    return;
+                                  }
+                                  showToast(`Requested bill on ${mf.matter_code}.`);
+                                  router.refresh();
+                                }}
+                              >
+                                Request bill
+                              </button>
+                            ) : overdueInv ? (
+                              <button
+                                type="button"
+                                className="btn btn--secondary btn--sm"
+                                onClick={async () => {
+                                  const res = await recordInvoiceCreditControlActionAction({
+                                    invoiceNumber: overdueInv.invoice_number,
+                                    matterCode: mf.matter_code,
+                                    clientCode: mf.client_code,
+                                    actionType: 'escalate',
+                                  });
+                                  if (isActionDenied(res)) {
+                                    showToast(res.message);
+                                    return;
+                                  }
+                                  showToast(
+                                    `Escalated ${overdueInv.invoice_number} on ${mf.matter_code}.`,
+                                  );
+                                  router.refresh();
+                                }}
+                              >
+                                Escalate
+                              </button>
+                            ) : (
+                              <span className="muted">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -3998,67 +3789,44 @@ export function HomeClient({
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
-                <h2 className="panel-title">Enquiries &amp; conversion — Real Estate</h2>
+                <h2 className="panel-title">Enquiries &amp; conversion — my practice area</h2>
               </div>
-              <span className="panel-subtitle">October 2026</span>
+              <span className="panel-subtitle">{currentMonthYearLabel}</span>
             </div>
             <div className="panel-body padded">
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(4, 1fr)',
-                  gap: 8,
-                  textAlign: 'center',
-                }}
-              >
-                <div className="legend-item">
-                  <div className="lbl">Received</div>
-                  <div className="val">{hasDemoSeedData ? 7 : enquiries.length}</div>
-                </div>
-                <div className="legend-item">
-                  <div className="lbl">Converted</div>
-                  <div className="val" style={{ color: 'var(--green-text)' }}>
-                    {hasDemoSeedData
-                      ? 4
-                      : enquiries.filter((e) => e.status === 'Converted').length}
-                  </div>
-                </div>
-                <div className="legend-item">
-                  <div className="lbl">In contact</div>
-                  <div className="val">
-                    {hasDemoSeedData
-                      ? 2
-                      : enquiries.filter((e) => e.status === 'In contact').length}
-                  </div>
-                </div>
-                <div className="legend-item">
-                  <div className="lbl">Unassigned</div>
-                  <div className="val" style={{ color: 'var(--amber-text)' }}>
-                    {hasDemoSeedData
-                      ? 1
-                      : enquiries.filter((e) => isEnquiryOpen(e) && !e.assignedToId).length}
-                  </div>
-                </div>
-              </div>
-              {hasDemoSeedData ? (
+              {!partnerEnquiryScope.hasScope ? (
+                <div className="muted">No practice area set</div>
+              ) : (
                 <div
                   style={{
-                    marginTop: 12,
-                    fontSize: 12.5,
-                    color: 'var(--text-secondary)',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: 8,
+                    textAlign: 'center',
                   }}
                 >
-                  <span>
-                    Unassigned: <strong>Tranter Haulage Ltd</strong> ( Newport depot refinancing)
-                  </span>
-                  <Link href="/enquiries" className="btn btn--secondary btn--sm">
-                    Assign
-                  </Link>
+                  <div className="legend-item">
+                    <div className="lbl">Received</div>
+                    <div className="val">{partnerEnquiryMetrics.monthReceivedCount}</div>
+                  </div>
+                  <div className="legend-item">
+                    <div className="lbl">Converted</div>
+                    <div className="val" style={{ color: 'var(--green-text)' }}>
+                      {partnerEnquiryMetrics.monthConvertedCount}
+                    </div>
+                  </div>
+                  <div className="legend-item">
+                    <div className="lbl">In contact</div>
+                    <div className="val">{partnerEnquiryMetrics.monthInContactCount}</div>
+                  </div>
+                  <div className="legend-item">
+                    <div className="lbl">Unassigned</div>
+                    <div className="val" style={{ color: 'var(--amber-text)' }}>
+                      {partnerEnquiryMetrics.monthUnassignedCount}
+                    </div>
+                  </div>
                 </div>
-              ) : null}
+              )}
             </div>
           </section>
         );
@@ -4079,70 +3847,9 @@ export function HomeClient({
               </Link>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
-                <div className="panel-body padded muted">
-                  No client or referrer touchpoints currently due.
-                </div>
-              ) : (
-                <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Platinum · Review due" tone="warning" />
-                        <Link href="/organisations/O-000001">Penarth Estates Ltd</Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span>Alun Davies (MD) · £26,568 billed YTD · £9,303 WIP</span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <Link
-                        href="/organisations/O-000001"
-                        className="btn btn--secondary btn--sm"
-                      >
-                        Log touchpoint
-                      </Link>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Key referrer" tone="positive" />
-                        <Link href="/organisations/O-000009">
-                          Hughes Lloyd Accountants LLP (Gareth Hughes)
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span>3 enquiries referred in Q3/Q4 · Last lunch 42 days ago</span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <Link href="/people/P-000011" className="btn btn--secondary btn--sm">
-                        Book catch-up
-                      </Link>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Gold · Panel" tone="neutral" />
-                        <Link href="/organisations/O-000002">Harbourline Housing Association</Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span>Ffion Roberts (Head of Legal) · £39,615 billed YTD · £6,390 WIP</span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <Link
-                        href="/organisations/O-000002"
-                        className="btn btn--secondary btn--sm"
-                      >
-                        Open
-                      </Link>
-                    </div>
-                  </li>
-                </ul>
-              )}
+              <div className="panel-body padded muted">
+                No client or referrer touchpoints currently due.
+              </div>
             </div>
           </section>
         );
@@ -4183,7 +3890,7 @@ export function HomeClient({
               </div>
               <span className="panel-subtitle">
                 {formatGbp(totalBandDebt)} across {pmsAgedDebt.length} unpaid / part-paid bill
-                {pmsAgedDebt.length === 1 ? '' : 's'} · as at {formattedAsAt}
+                {pmsAgedDebt.length === 1 ? '' : 's'} · {pmsAsAtCaption}
               </span>
             </div>
             <div className="panel-body padded">
@@ -4500,7 +4207,7 @@ export function HomeClient({
                                 tone={pct >= 75 ? 'warning' : 'positive'}
                               />
                             ) : (
-                              <StatusPill label="On track" tone="positive" />
+                              <span className="muted">No estimate</span>
                             )}
                           </td>
                           <td className="num">
@@ -4562,10 +4269,6 @@ export function HomeClient({
       // 28. client_account_reconciliation_and_exceptions (05 Finance)
       // ================================================================
       case 'client_account_reconciliation_and_exceptions': {
-        const priEntries = pmsClientAccountByMatterCode['PRI001-0001'] ?? [];
-        const pugEntries = pmsClientAccountByMatterCode['PUG001-0001'] ?? [];
-        const lastPriDate = priEntries[priEntries.length - 1]?.date ?? '2026-10-08';
-        const lastPugDate = pugEntries[pugEntries.length - 1]?.date ?? '2026-09-22';
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -4577,55 +4280,12 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
-                <div className="panel-body padded muted">
-                  No client account balances currently held.
-                </div>
-              ) : (
-                <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Active · Completion 23 Oct" tone="positive" />
-                        <Link href={matterHrefForCode('PRI001-0001')}>
-                          PRI001-0001 — Purchase of 14 Cathedral Road (Owen &amp; Carys Price)
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span>
-                          Last movement: {formatDate(lastPriDate)} (Receipt of completion monies from
-                          client £84,500.00)
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <strong>£84,943.60</strong>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="24 days since last movement" tone="warning" />
-                        <Link href={matterHrefForCode('PUG001-0001')}>
-                          PUG001-0001 — Estate of the late Margaret Pugh (Alun Pugh)
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span>
-                          Last movement: {formatDate(lastPugDate)} (Transfer to office a/c for
-                          PV-2026-016 £4,956.00) · Estate distribution pending IHT clearance
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <strong>£33,510.60</strong>
-                    </div>
-                  </li>
-                </ul>
-              )}
+              <div className="panel-body padded muted">
+                No client account reconciliations or residual balance exceptions recorded.
+              </div>
             </div>
             <div className="panel-footer">
-              <span>Zero closed matters holding residual client funds (SRA Rule 2.5 check)</span>
+              <span>Client account reconciliation monitoring</span>
               <span>Total held: {formatGbp(firmClientAccountHeld)}</span>
             </div>
           </section>
@@ -4687,19 +4347,20 @@ export function HomeClient({
       // 30. cash_collection_vs_target (05 Finance)
       // ================================================================
       case 'cash_collection_vs_target': {
-        const octCash = pmsCashReceived.currentMonthTotal;
-        const target = 40000;
-        const pct = Math.min(Math.round((octCash / target) * 100), 100);
-        const octFees =
-          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === '2026-10')?.feesNet ??
-          (hasDemoSeedData ? 41477.35 : 0);
+        const currentMonthCash = pmsCashReceived.currentMonthTotal;
+        const currentMonthFees =
+          pmsMonthlyFeesBilled.months.find((m) => m.monthKey === pmsMonthKey)?.feesNet ?? 0;
+        const currentMonthInvoicesCount = pmsInvoices.filter(
+          (inv) => Boolean(pmsMonthKey) && inv.invoice_date.startsWith(pmsMonthKey),
+        ).length;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
-                <h2 className="panel-title">Cash collection &amp; billing — October 2026</h2>
+                <h2 className="panel-title">Cash collection &amp; billing — {pmsMonthYearLabel}</h2>
                 <span className="mono-code">PMS `payments` + `invoices`</span>
               </div>
+              <span className="panel-subtitle">{pmsAsAtCaption}</span>
             </div>
             <div className="panel-body padded">
               <div style={{ marginBottom: 12 }}>
@@ -4712,15 +4373,10 @@ export function HomeClient({
                   }}
                 >
                   <span>
-                    Cash receipts in October ({pmsCashReceived.currentMonthReceiptCount} payment
+                    Cash receipts ({pmsCashReceived.currentMonthReceiptCount} payment
                     {pmsCashReceived.currentMonthReceiptCount === 1 ? '' : 's'})
                   </span>
-                  <strong>
-                    {formatGbp(octCash)} / £40,000 target ({pct}%)
-                  </strong>
-                </div>
-                <div className="progress-track">
-                  <div className="progress-fill green" style={{ width: `${pct}%` }} />
+                  <strong>{formatGbp(currentMonthCash)} · No target configured</strong>
                 </div>
               </div>
               <div
@@ -4732,19 +4388,17 @@ export function HomeClient({
                 }}
               >
                 <div className="legend-item">
-                  <div className="lbl">Fees billed in Oct (ex VAT)</div>
-                  <div className="val">{formatGbp(octFees)}</div>
+                  <div className="lbl">Fees billed in {pmsMonthShort} (ex VAT)</div>
+                  <div className="val">{formatGbp(currentMonthFees)}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {hasDemoSeedData
-                      ? '5 invoices issued (6–13 Oct)'
-                      : '0 invoices issued'}
+                    {currentMonthInvoicesCount} invoice{currentMonthInvoicesCount === 1 ? '' : 's'} issued
                   </div>
                 </div>
                 <div className="legend-item">
-                  <div className="lbl">Credit notes in 2026</div>
-                  <div className="val">{hasDemoSeedData ? '-£900.00' : '£0.00'}</div>
+                  <div className="lbl">Fees billed YTD (ex VAT)</div>
+                  <div className="val">{formatGbp(pmsMonthlyFeesBilled.yearToDateTotal)}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {hasDemoSeedData ? 'CN-2026-001 on PEN001-0003' : '0 credit notes'}
+                    {pmsYearLabel} year to date · {pmsAsAtCaption}
                   </div>
                 </div>
               </div>
@@ -4762,126 +4416,11 @@ export function HomeClient({
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">AML &amp; Customer Due Diligence queue</h2>
-                <StatusPill
-                  label={hasDemoSeedData ? '4 pending' : '0 pending'}
-                  tone={hasDemoSeedData ? 'alert' : 'positive'}
-                />
               </div>
               <span className="panel-subtitle">MLR 2017 · ID&amp;V, SoF &amp; SoW checks</span>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
-                <div className="panel-body padded muted">
-                  No pending AML or Customer Due Diligence checks.
-                </div>
-              ) : (
-                <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="High risk · EDD required" tone="alert" />
-                        <Link href={matterHrefForCode('TGL001-0002')}>
-                          Tŷ Glas Developments Ltd — Purchase of Plot 9, Parc Tŷ Glas
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">TGL001-0002</span>
-                        <span>
-                          · Lead: Dafydd Evans · Offshore Jersey holding company (UBO declaration
-                          &amp; certified bank statements pending)
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <Link
-                        href={matterHrefForCode('TGL001-0002')}
-                        className="btn btn--primary btn--sm"
-                      >
-                        Review EDD
-                      </Link>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="ID partial match · Overdue 1d" tone="alert" />
-                        <Link href="/people/P-000013">
-                          Mared Hughes — Purchase of 18 Cathedral View, Pontcanna
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">HUG002-0001</span>
-                        <span>
-                          · Electronic ID check flagged address discrepancy; certified Welsh Water
-                          utility bill uploaded for MLRO sign-off
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--primary btn--sm"
-                        onClick={() => {
-                          showToast('Verified proof of address for Mared Hughes (HUG002-0001).');
-                        }}
-                      >
-                        Verify ID
-                      </button>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Pending · Converted 14 Oct" tone="warning" />
-                        <Link href={matterHrefForCode('JON002-0001')}>
-                          Sam Jones — Employment Tribunal claim
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">JON002-0001</span>
-                        <span>
-                          · Lead: Owain Jenkins · Passport &amp; driving licence link sent via portal
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        onClick={() =>
-                          showToast('Sent AML reminder to Owain Jenkins for JON002-0001.')
-                        }
-                      >
-                        Chase FE
-                      </button>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Periodic refresh due" tone="neutral" />
-                        <Link href="/organisations/O-000005">
-                          Severn Holdings plc — 3-year CDD refresh
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">SEV001</span>
-                        <span>
-                          · Relationship partner: Gethin Lloyd · PSC register check due 31 Oct 2026
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <Link
-                        href="/organisations/O-000005"
-                        className="btn btn--secondary btn--sm"
-                      >
-                        Open org
-                      </Link>
-                    </div>
-                  </li>
-                </ul>
-              )}
+              <div className="panel-body padded muted">Not yet available</div>
             </div>
           </section>
         );
@@ -4891,92 +4430,49 @@ export function HomeClient({
       // 32. conflict_checks_awaiting_decision (06 Risk & Compliance)
       // ================================================================
       case 'conflict_checks_awaiting_decision': {
+        const referredMatters = matters.filter((m) =>
+          isMatterConflictCheckAwaitingDecision(m),
+        );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">Conflict checks — awaiting MLRO / COLP decision</h2>
                 <StatusPill
-                  label={hasDemoSeedData ? '2 awaiting decision' : '0 awaiting decision'}
-                  tone={hasDemoSeedData ? 'warning' : 'positive'}
+                  label={`${referredMatters.length} awaiting decision`}
+                  tone={referredMatters.length > 0 ? 'warning' : 'positive'}
                 />
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {referredMatters.length === 0 ? (
                 <div className="panel-body padded muted">
                   No conflict checks currently awaiting MLRO or COLP decision.
                 </div>
               ) : (
                 <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Potential party match" tone="warning" />
-                        <Link href={matterHrefForCode('TYG001-0001')}>
-                          Tŷ Glas Developments Ltd — Former Docklands Timber Yard
+                  {referredMatters.map((m) => (
+                    <li key={m.id} className="worklist-row">
+                      <div className="worklist-main">
+                        <div className="worklist-title">
+                          <StatusPill label="Referred" tone="warning" />
+                          <Link href={`/matters/${m.id}`}>
+                            {m.matterNumber} — {m.title}
+                          </Link>
+                        </div>
+                        <div className="worklist-meta">
+                          <span>
+                            {m.conflictCheckRecord?.reviewerMessage || 'Awaiting compliance review'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="worklist-right">
+                        <Link href={`/matters/${m.id}`} className="btn btn--secondary btn--sm">
+                          Open matter
                         </Link>
                       </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">TYG001-0001</span>
-                        <span>
-                          · Counterparty <strong>Coastline Outdoor Ltd</strong> is also tenant
-                          counterparty on active matter <strong>PEN001-0004</strong> (Penarth Estates
-                          Ltd). Unrelated site; information barrier under review.
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        onClick={() =>
-                          showToast('Recorded COLP conflict refusal on TYG001-0001.')
-                        }
-                      >
-                        Decline (conflict)
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--primary btn--sm"
-                        onClick={() =>
-                          showToast(
-                            'Cleared TYG001-0001 subject to information barrier between Real Estate teams.',
-                          )
-                        }
-                      >
-                        Clear with barrier
-                      </button>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Ready to clear" tone="positive" />
-                        <Link href="/enquiries/ENQ-000010">
-                          Coastal Storage Ltd — Assignment of lease at Unit 7, Atlantic Wharf
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">ENQ-000010</span>
-                        <span>
-                          · Other party named: <strong>Atlantic Wharf Estates Ltd</strong> — 0 matches
-                          across clients, people or opposing parties.
-                        </span>
-                      </div>
-                    </div>
-                    <div className="worklist-right">
-                      <button
-                        type="button"
-                        className="btn btn--primary btn--sm"
-                        onClick={() =>
-                          showToast('Marked conflict search Clear on ENQ-000010 (Coastal Storage Ltd).')
-                        }
-                      >
-                        Mark Clear
-                      </button>
-                    </div>
-                  </li>
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
@@ -4988,78 +4484,51 @@ export function HomeClient({
       // 33. high_risk_matters_and_pep_register (06 Risk & Compliance)
       // ================================================================
       case 'high_risk_matters_and_pep_register': {
+        const highRiskMatters = matters.filter(
+          (m) =>
+            m.matterStatusId !== 'matter_status.closed' &&
+            isHighOrCriticalRiskRating(m.riskRatingId, values),
+        );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">High-risk matters, PEPs &amp; sanctions watch</h2>
                 <StatusPill
-                  label={hasDemoSeedData ? '3 matters' : '0 matters'}
-                  tone="neutral"
+                  label={`${highRiskMatters.length} high-risk matter${highRiskMatters.length === 1 ? '' : 's'}`}
+                  tone={highRiskMatters.length > 0 ? 'warning' : 'neutral'}
                 />
               </div>
+              <span className="panel-subtitle">PEP &amp; sanctions watch: Not yet available</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
-              {!hasDemoSeedData ? (
+              {highRiskMatters.length === 0 ? (
                 <div className="panel-body padded muted">
-                  No high-risk matters, PEPs or sanctions alerts recorded.
+                  No high-risk open matters recorded. PEP and sanctions screening is not yet available.
                 </div>
               ) : (
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Matter</th>
-                      <th>Client</th>
-                      <th>Risk driver</th>
-                      <th>AML / EDD status</th>
-                      <th className="num">Client a/c held</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('TGL001-0002')}>
-                          <strong>TGL001-0002</strong>
-                        </Link>{' '}
-                        · Plot 9, Parc Tŷ Glas
-                      </td>
-                      <td>Tŷ Glas Developments Ltd</td>
-                      <td>Offshore SPV buyer (Jersey)</td>
-                      <td>
-                        <StatusPill label="EDD in progress" tone="warning" />
-                      </td>
-                      <td className="num">£0.00</td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('HAR001-0003')}>
-                          <strong>HAR001-0003</strong>
-                        </Link>{' '}
-                        · Butetown regeneration
-                      </td>
-                      <td>Harbourline Housing Assoc.</td>
-                      <td>Public body grant funding / domestic PEP board member</td>
-                      <td>
-                        <StatusPill label="EDD verified 12 Mar" tone="positive" />
-                      </td>
-                      <td className="num">£0.00</td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <Link href={matterHrefForCode('HAR001-0012')}>
-                          <strong>HAR001-0012</strong>
-                        </Link>{' '}
-                        · Waterfront Quays TCC claim
-                      </td>
-                      <td>Harbourline Housing Assoc.</td>
-                      <td>High-value litigation (£2.85m claim)</td>
-                      <td>
-                        <StatusPill label="Verified" tone="positive" />
-                      </td>
-                      <td className="num">£0.00</td>
-                    </tr>
-                  </tbody>
-                </table>
+                <ul className="worklist">
+                  {highRiskMatters.map((m) => {
+                    const riskLabel = resolveLabel(values, m.riskRatingId) || 'High risk';
+                    return (
+                      <li key={m.id} className="worklist-row">
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <StatusPill label={riskLabel} tone="warning" />
+                            <Link href={`/matters/${m.id}`}>
+                              {m.matterNumber} — {m.title}
+                            </Link>
+                          </div>
+                        </div>
+                        <div className="worklist-right">
+                          <Link href={`/matters/${m.id}`} className="btn btn--secondary btn--sm">
+                            Open matter
+                          </Link>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
               )}
             </div>
           </section>
@@ -5078,44 +4547,9 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
-                <div className="panel-body padded muted">
-                  No open undertakings or scheduled periodic file reviews.
-                </div>
-              ) : (
-                <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Undertaking · Due 23 Oct" tone="warning" />
-                        <Link href={matterHrefForCode('PRI001-0001')}>
-                          Discharge of seller&apos;s legal charge on 14 Cathedral Road
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PRI001-0001</span>
-                        <span>
-                          · Dafydd Evans · Awaiting partner counter-signature (Rhian Morgan)
-                        </span>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="File review · Due 30 Oct" tone="neutral" />
-                        <Link href={matterHrefForCode('BRI001-0003')}>
-                          Q4 Lexcel file review — Acquisition of Afon Care Homes Ltd
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">BRI001-0003</span>
-                        <span>· Reviewer: Bethan Rees · Lead: Gethin Lloyd</span>
-                      </div>
-                    </div>
-                  </li>
-                </ul>
-              )}
+              <div className="panel-body padded muted">
+                No open undertakings or scheduled periodic file reviews.
+              </div>
             </div>
           </section>
         );
@@ -5135,41 +4569,9 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
-                <div className="panel-body padded muted">
-                  No open complaints, SRA breaches or residual balance alerts.
-                </div>
-              ) : (
-                <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Stage 1 complaint · Resp. due 28 Oct" tone="warning" />
-                        <span>CMP-2026-02 — Delay query on estate interim distribution</span>
-                      </div>
-                      <div className="worklist-meta">
-                        <span className="mono-code">PUG001-0001</span>
-                        <span>· Investigating partner: Rhian Morgan · Non-reportable to SRA</span>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="SRA Rule 2.5 watch" tone="neutral" />
-                        <Link href={matterHrefForCode('PUG001-0001')}>
-                          Client balance £33,510.60 held 24 days without movement (PUG001-0001)
-                        </Link>
-                      </div>
-                      <div className="worklist-meta">
-                        <span>
-                          Valid reason recorded: awaiting HMRC IHT421 clearance before distribution
-                        </span>
-                      </div>
-                    </div>
-                  </li>
-                </ul>
-              )}
+              <div className="panel-body padded muted">
+                No open complaints, SRA breaches or residual balance alerts.
+              </div>
             </div>
           </section>
         );
@@ -5179,6 +4581,25 @@ export function HomeClient({
       // 36. overdue_compliance_tasks_by_team (06 Risk & Compliance)
       // ================================================================
       case 'overdue_compliance_tasks_by_team': {
+        const teamComplianceRows = teams
+          .filter((tm) => tm.active)
+          .map((tm) => {
+            const teamTasks = tasks.filter(
+              (t) =>
+                isTaskOpen(t) &&
+                t.assignedTeamId === tm.id &&
+                (t.taskTypeId === 'task_type.compliance' ||
+                  t.title.toLowerCase().includes('aml') ||
+                  t.title.toLowerCase().includes('cdd') ||
+                  t.title.toLowerCase().includes('conflict')),
+            );
+            const overdue = teamTasks.filter((t) => t.dueAt < todayIso).length;
+            const dueThisWeek = teamTasks.filter(
+              (t) => t.dueAt >= todayIso && t.dueAt <= next7DaysIso,
+            ).length;
+            return { team: tm, overdue, dueThisWeek };
+          })
+          .filter((r) => r.overdue > 0 || r.dueThisWeek > 0);
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -5187,7 +4608,7 @@ export function HomeClient({
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
+              {teamComplianceRows.length === 0 ? (
                 <div className="panel-body padded muted">
                   No overdue compliance or onboarding tasks across teams.
                 </div>
@@ -5202,75 +4623,34 @@ export function HomeClient({
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <td>Real Estate &amp; Property</td>
-                      <td className="num">
-                        <StatusPill label="2" tone="alert" />
-                      </td>
-                      <td className="num">3</td>
-                      <td className="num">
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          onClick={async () => {
-                            const res = await remindTeamLeadOverdueComplianceAction('TM-000001');
-                            if (isActionDenied(res)) {
-                              showToast(res.message);
-                              return;
-                            }
-                            showToast('Sent compliance reminder to Rhian Morgan (Real Estate).');
-                          }}
-                        >
-                          Remind team lead
-                        </button>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>Employment &amp; HR</td>
-                      <td className="num">
-                        <StatusPill label="2" tone="alert" />
-                      </td>
-                      <td className="num">1</td>
-                      <td className="num">
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          onClick={async () => {
-                            const res = await remindTeamLeadOverdueComplianceAction('TM-000005');
-                            if (isActionDenied(res)) {
-                              showToast(res.message);
-                              return;
-                            }
-                            showToast('Sent compliance reminder to Siân Llewellyn (Employment).');
-                          }}
-                        >
-                          Remind team lead
-                        </button>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>Corporate &amp; Commercial</td>
-                      <td className="num">
-                        <StatusPill label="1" tone="warning" />
-                      </td>
-                      <td className="num">2</td>
-                      <td className="num">
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          onClick={async () => {
-                            const res = await remindTeamLeadOverdueComplianceAction('TM-000002');
-                            if (isActionDenied(res)) {
-                              showToast(res.message);
-                              return;
-                            }
-                            showToast('Sent compliance reminder to Catrin Hopkins (Corporate).');
-                          }}
-                        >
-                          Remind team lead
-                        </button>
-                      </td>
-                    </tr>
+                    {teamComplianceRows.map(({ team, overdue, dueThisWeek }) => (
+                      <tr key={team.id}>
+                        <td>{team.name}</td>
+                        <td className="num">
+                          <StatusPill
+                            label={`${overdue}`}
+                            tone={overdue > 0 ? 'alert' : 'neutral'}
+                          />
+                        </td>
+                        <td className="num">{dueThisWeek}</td>
+                        <td className="num">
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={async () => {
+                              const res = await remindTeamLeadOverdueComplianceAction(team.id);
+                              if (isActionDenied(res)) {
+                                showToast(res.message);
+                                return;
+                              }
+                              showToast(`Sent compliance reminder for ${team.name}.`);
+                            }}
+                          >
+                            Remind team lead
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               )}
@@ -5285,28 +4665,31 @@ export function HomeClient({
       case 'firm_financial_pulse': {
         const months = pmsMonthlyFeesBilled.months;
         const maxMonth = Math.max(...months.map((m) => m.feesNet), 45000);
+        const clientAccountMatterCount = allMatterFins.filter(
+          (m) => m.client_account_balance > 0,
+        ).length;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
-                <h2 className="panel-title">Firm financial pulse — 2026 year to date</h2>
+                <h2 className="panel-title">Firm financial pulse — {pmsYearLabel} year to date</h2>
                 <span className="mono-code">
                   PMS `invoices`, `payments`, `v_matter_financials`
                 </span>
               </div>
               <span className="panel-subtitle">
-                Net of credit notes · ex VAT · as at {formattedAsAt}
+                Net of credit notes · ex VAT · {pmsAsAtCaption}
               </span>
             </div>
             <div className="panel-body padded">
               <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-                Monthly fees billed (Jan – Oct 2026) · Total YTD:{' '}
+                Monthly fees billed ({pmsYearLabel}) · Total YTD:{' '}
                 <strong>{formatGbp(pmsMonthlyFeesBilled.yearToDateTotal)}</strong>
               </div>
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(10, 1fr)',
+                  gridTemplateColumns: `repeat(${Math.max(months.length, 1)}, 1fr)`,
                   gap: 6,
                   alignItems: 'end',
                   height: 110,
@@ -5319,7 +4702,7 @@ export function HomeClient({
                     m.feesNet > 0 ? Math.max(Math.round((m.feesNet / maxMonth) * 74), 8) : 3;
                   const shortVal =
                     m.feesNet > 0 ? `£${(m.feesNet / 1000).toFixed(1)}k` : '—';
-                  const isCurrent = m.monthKey === '2026-10';
+                  const isCurrent = m.monthKey === pmsMonthKey;
                   return (
                     <div key={m.monthKey} style={{ textAlign: 'center' }}>
                       <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{shortVal}</div>
@@ -5343,7 +4726,7 @@ export function HomeClient({
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(10, 1fr)',
+                  gridTemplateColumns: `repeat(${Math.max(months.length, 1)}, 1fr)`,
                   gap: 6,
                   fontSize: 11,
                   color: 'var(--text-muted)',
@@ -5355,7 +4738,7 @@ export function HomeClient({
                   <div
                     key={m.monthKey}
                     style={
-                      m.monthKey === '2026-10'
+                      m.monthKey === pmsMonthKey
                         ? { fontWeight: 700, color: 'var(--text-primary)' }
                         : undefined
                     }
@@ -5381,26 +4764,26 @@ export function HomeClient({
                   </div>
                 </div>
                 <div className="legend-item">
-                  <div className="lbl">Cash collected YTD</div>
-                  <div className="val">
-                    {hasDemoSeedData ? '£166,184.42' : formatGbp(pmsCashReceived.currentMonthTotal)}
-                  </div>
+                  <div className="lbl">Cash collected</div>
+                  <div className="val">{formatGbp(pmsCashReceived.currentMonthTotal)}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {hasDemoSeedData ? '77% collection rate on gross billed' : 'Year to date'}
+                    {pmsCashReceived.currentMonthReceiptCount} receipt
+                    {pmsCashReceived.currentMonthReceiptCount === 1 ? '' : 's'}
                   </div>
                 </div>
                 <div className="legend-item">
                   <div className="lbl">Client account held</div>
                   <div className="val">{formatGbp(firmClientAccountHeld)}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {hasDemoSeedData ? 'Across 2 active matters' : 'Active matters'}
+                    Across {clientAccountMatterCount} active matter
+                    {clientAccountMatterCount === 1 ? '' : 's'}
                   </div>
                 </div>
                 <div className="legend-item">
-                  <div className="lbl">Write-offs / credit notes</div>
-                  <div className="val">{hasDemoSeedData ? '£900.00' : '£0.00'}</div>
+                  <div className="lbl">Overdue debt</div>
+                  <div className="val">{formatGbp(firmOverdueDebt)}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {hasDemoSeedData ? '0.5% of fees billed YTD' : '0.0% of fees billed YTD'}
+                    Past due date
                   </div>
                 </div>
               </div>
@@ -5423,7 +4806,7 @@ export function HomeClient({
                   PMS `v_matter_financials` + `v_fee_earner_performance`
                 </span>
               </div>
-              <span className="panel-subtitle">2026 YTD · as at {formattedAsAt}</span>
+              <span className="panel-subtitle">{pmsYearLabel} YTD · {pmsAsAtCaption}</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
               <table className="data-table">
@@ -5435,7 +4818,7 @@ export function HomeClient({
                     <th className="num">Unbilled WIP</th>
                     <th className="num">Outstanding debt</th>
                     <th className="num">Overdue debt</th>
-                    <th className="num">Oct hrs</th>
+                    <th className="num">{pmsMonthShort} hrs</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -5490,7 +4873,7 @@ export function HomeClient({
                 <h2 className="panel-title">Fee earner utilisation &amp; billing</h2>
                 <span className="mono-code">PMS `v_fee_earner_performance`</span>
               </div>
-              <span className="panel-subtitle">Annual target: 1,200 chargeable hrs per fee earner</span>
+              <span className="panel-subtitle">{pmsAsAtCaption}</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
               {allFeeEarnerPerformance.length === 0 ? (
@@ -5503,7 +4886,7 @@ export function HomeClient({
                     <tr>
                       <th>Fee earner</th>
                       <th>Department · Grade</th>
-                      <th className="num">Oct hrs</th>
+                      <th className="num">{pmsMonthShort} hrs</th>
                       <th className="num">YTD hrs</th>
                       <th className="num">% target</th>
                       <th className="num">Billed value</th>
@@ -5542,11 +4925,12 @@ export function HomeClient({
       // 40. enquiries_conversion_and_pipeline (07 Managing Partner)
       // ================================================================
       case 'enquiries_conversion_and_pipeline': {
-        const totalEnqs = hasDemoSeedData ? 17 : enquiries.length;
-        const convCount = hasDemoSeedData
-          ? 9
-          : enquiries.filter((e) => e.status === 'Converted').length;
-        const convPct = totalEnqs > 0 ? Math.round((convCount / totalEnqs) * 100) : 0;
+        const totalEnqs = enquiryMetrics.monthReceivedCount;
+        const convCount = enquiryMetrics.monthConvertedCount;
+        const convPct = enquiryMetrics.monthConversionPct;
+        const slaMetPct =
+          enquiryMetrics.slaMetPct !== null ? `${enquiryMetrics.slaMetPct}%` : '—';
+        const overdueSlaCount = enquiryMetrics.overdueSlaCount;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -5555,41 +4939,30 @@ export function HomeClient({
                   New business — enquiries, conversion &amp; SLA health
                 </h2>
               </div>
-              <span className="panel-subtitle">October 2026</span>
+              <span className="panel-subtitle">{currentMonthYearLabel}</span>
             </div>
             <div className="panel-body padded">
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
                 <div className="legend-item">
-                  <div className="lbl">Enquiries (Oct)</div>
+                  <div className="lbl">Enquiries ({currentMonthShort})</div>
                   <div className="val">{totalEnqs}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {hasDemoSeedData ? '+13% vs Sep' : 'Current month'}
-                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Current month</div>
                 </div>
                 <div className="legend-item">
                   <div className="lbl">Converted to matters</div>
                   <div className="val" style={{ color: 'var(--green-text)' }}>
                     {convCount} ({convPct}%)
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Target ≥ 45%</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Conversion rate</div>
                 </div>
                 <div className="legend-item">
                   <div className="lbl">First-contact SLA met</div>
-                  <div className="val">{hasDemoSeedData ? '88%' : '—'}</div>
+                  <div className="val">{slaMetPct}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {hasDemoSeedData ? '1 currently overdue' : '0 overdue'}
+                    {overdueSlaCount} overdue
                   </div>
                 </div>
               </div>
-              {hasDemoSeedData ? (
-                <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-secondary)' }}>
-                  Top referrer:{' '}
-                  <strong>
-                    <Link href="/organisations/O-000009">Hughes Lloyd Accountants LLP</Link>
-                  </strong>{' '}
-                  (4 enquiries · 3 converted).
-                </div>
-              ) : null}
             </div>
           </section>
         );
@@ -5603,7 +4976,7 @@ export function HomeClient({
           .filter((c) => c.fees_billed_ytd > 0 || c.unbilled_wip > 0)
           .sort((a, b) => b.fees_billed_ytd - a.fees_billed_ytd)
           .slice(0, 6);
-        const totalBilled = pmsMonthlyFeesBilled.yearToDateTotal || 181673.48;
+        const totalBilled = pmsMonthlyFeesBilled.yearToDateTotal;
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -5632,7 +5005,10 @@ export function HomeClient({
                   </thead>
                   <tbody>
                     {topClients.map((c) => {
-                      const sharePct = Math.round((c.fees_billed_ytd / totalBilled) * 1000) / 10;
+                      const sharePct =
+                        totalBilled > 0
+                          ? Math.round((c.fees_billed_ytd / totalBilled) * 1000) / 10
+                          : 0;
                       const usedPct =
                         c.credit_limit_used_pct !== null
                           ? Math.round(c.credit_limit_used_pct * 1000) / 10
@@ -5683,63 +5059,10 @@ export function HomeClient({
                 <h2 className="panel-title">
                   Exceptions — financial, compliance &amp; operational
                 </h2>
-                <StatusPill
-                  label={hasDemoSeedData ? '4 items' : '0 items'}
-                  tone={hasDemoSeedData ? 'alert' : 'positive'}
-                />
               </div>
             </div>
             <div className="panel-body">
-              {!hasDemoSeedData ? (
-                <div className="panel-body padded muted">
-                  No financial, compliance or operational exceptions flagged.
-                </div>
-              ) : (
-                <ul className="worklist">
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="90+d debt" tone="alert" />
-                        <Link href={matterHrefForCode('BAY001-0001')}>
-                          Bay Side Cafés Ltd — £3,300.00 invoice 94 days overdue (BAY001-0001)
-                        </Link>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="112% of cap" tone="alert" />
-                        <Link href={matterHrefForCode('SEV001-0001')}>
-                          Severn Holdings plc — £27,984 recorded vs £25,000 capped fee (SEV001-0001)
-                        </Link>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="High risk · EDD" tone="warning" />
-                        <Link href={matterHrefForCode('TGL001-0002')}>
-                          Tŷ Glas Developments Ltd — Offshore SPV source of funds pending
-                          (TGL001-0002)
-                        </Link>
-                      </div>
-                    </div>
-                  </li>
-                  <li className="worklist-row">
-                    <div className="worklist-main">
-                      <div className="worklist-title">
-                        <StatusPill label="Revised est. pending" tone="warning" />
-                        <Link href={matterHrefForCode('BRI001-0003')}>
-                          Brightwater Care Group — £72,000 revised estimate awaiting client sign-off
-                          (BRI001-0003)
-                        </Link>
-                      </div>
-                    </div>
-                  </li>
-                </ul>
-              )}
+              <div className="panel-body padded muted">Not yet available</div>
             </div>
           </section>
         );

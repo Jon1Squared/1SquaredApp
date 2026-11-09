@@ -689,6 +689,58 @@ export function validateMatterRiskAssessmentInput(
   };
 }
 
+export const HIGH_RISK_RATING_IDS: ReadonlySet<string> = new Set([
+  'risk_rating.high',
+  'risk_rating.critical',
+]);
+
+export const HIGH_RISK_SYSTEM_KEYS: ReadonlySet<string> = new Set([
+  'high',
+  'critical',
+]);
+
+/**
+ * Returns true when `riskRatingId` represents a High or Critical risk rating,
+ * matching either one of the canonical `HIGH_RISK_RATING_IDS`
+ * (`'risk_rating.high'`, `'risk_rating.critical'`) or a `risk_rating`
+ * ChoiceValue whose `systemKey` is `'high'` or `'critical'`.
+ * Never uses substring matching on `riskRatingId` (R345).
+ */
+export function isHighOrCriticalRiskRating(
+  riskRatingId: string | null | undefined,
+  values: readonly ChoiceValue[] = [],
+): boolean {
+  if (!riskRatingId) return false;
+  if (HIGH_RISK_RATING_IDS.has(riskRatingId)) return true;
+  const matched = values.find(
+    (v) => v.listKey === 'risk_rating' && v.id === riskRatingId,
+  );
+  if (matched?.systemKey && HIGH_RISK_SYSTEM_KEYS.has(matched.systemKey)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true when a matter's conflict check is currently awaiting MLRO/COLP
+ * review (`conflictCheckRecord.status === 'Referred'`, or when
+ * `conflictCheckRecord` is absent, `conflictStatusPillFromLegacy(matter.conflictCheckStatus) === 'Referred'`
+ * combined with `!matter.conflictDecision`) (R345, R351, R365, R367).
+ */
+export function isMatterConflictCheckAwaitingDecision(matter: {
+  conflictCheckStatus?: string | null;
+  conflictCheckRecord?: Matter['conflictCheckRecord'] | null;
+  conflictDecision?: Partial<NonNullable<Matter['conflictDecision']>> | null;
+}): boolean {
+  if (matter.conflictCheckRecord) {
+    return matter.conflictCheckRecord.status === 'Referred';
+  }
+  return (
+    !matter.conflictDecision &&
+    conflictStatusPillFromLegacy(matter.conflictCheckStatus ?? undefined) === 'Referred'
+  );
+}
+
 /**
  * Resolves the `risk_rating` ChoiceValue ID matching a calculated `RiskLevel`.
  */
@@ -1279,7 +1331,7 @@ export function resolveMatterOpeningSnapshot(
         String(matter.fieldValues?.['claimValue'] || '') ||
         resolveLabel(values, matter.matterSizeId) ||
         '—',
-      responsibleOffice: String(matter.fieldValues?.['responsibleOffice'] || 'Cardiff'),
+      responsibleOffice: String(matter.fieldValues?.['responsibleOffice'] || '—'),
       sourceOfWork:
         String(matter.fieldValues?.['sourceOfWork'] || '') ||
         resolveLabel(values, matter.referrerTypeId) ||

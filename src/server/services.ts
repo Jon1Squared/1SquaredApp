@@ -859,6 +859,8 @@ function getAppSnapshotInScope(
     }
   }
 
+  const resolvedFirmName =
+    activeTenantCfg.displayName || store.firm?.shortName || store.firm?.name || '';
   const searchIndex = buildSearchIndex(
     store.people,
     store.organisations,
@@ -868,6 +870,7 @@ function getAppSnapshotInScope(
     visibleEnquiries,
     visibleTasks,
     store.teams,
+    resolvedFirmName,
   );
   const attention = attentionList([...store.people, ...store.organisations], store.values, now, {
     userId: effectiveWorkPerson.id,
@@ -7479,7 +7482,7 @@ export function saveEnquiryRecord(
     privacyNoticeGiven:
       input.privacyNoticeGiven !== undefined
         ? Boolean(input.privacyNoticeGiven)
-        : existing?.privacyNoticeGiven ?? true,
+        : existing?.privacyNoticeGiven ?? false,
     linkedPersonId:
       input.linkedPersonId !== undefined ? input.linkedPersonId : existing?.linkedPersonId ?? null,
     customFields:
@@ -7496,35 +7499,20 @@ export function saveEnquiryRecord(
 
   if (!asDraft) {
     const missingFields = getMissingRoutingFields(mergedInput, store.customFields);
-    const errors: Record<string, string> = { ...cfValidation.errors };
+    const errors: Record<string, string> = {
+      ...cfValidation.errors,
+      ...validateEnquiryInput(mergedInput),
+    };
+    if (
+      existing &&
+      existing.status !== 'Draft' &&
+      !existing.privacyNoticeGiven &&
+      !mergedInput.privacyNoticeGiven
+    ) {
+      delete errors.privacyNoticeGiven;
+    }
     if (!mergedInput.firstName) errors.firstName = 'First name is required.';
     if (!mergedInput.lastName) errors.lastName = 'Last name is required.';
-    if (!mergedInput.firstName || !mergedInput.lastName) {
-      errors.name = 'First name and last name are required.';
-    }
-    if (!mergedInput.phone && !mergedInput.email) {
-      errors.contact = 'At least one of email or phone number is required.';
-    }
-    if (mergedInput.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mergedInput.email)) {
-      errors.email = 'Enter a valid email address.';
-    }
-    if (!mergedInput.channelId) {
-      errors.channelId = 'Channel is required.';
-    }
-    if (!mergedInput.practiceAreaId) {
-      errors.practiceAreaId = 'Practice area is required.';
-    }
-    if (!mergedInput.summary) {
-      errors.summary = 'Summary is required.';
-    } else if (mergedInput.summary.length > 120) {
-      errors.summary = 'Summary must be 120 characters or fewer.';
-    }
-    if (!mergedInput.notes) {
-      errors.notes = 'High-level notes are required.';
-    }
-    if (!mergedInput.urgencyId) {
-      errors.urgencyId = 'Urgency is required.';
-    }
 
     if (missingFields.length > 0 || Object.keys(errors).length > 0) {
       return { errors, missingFields };

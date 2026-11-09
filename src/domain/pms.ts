@@ -226,11 +226,10 @@ export function computeAutomaticPmsLinks(
     }
   }
 
-  // 4. Optional initial seed links for the demo matters that exist in both systems
+  // 4. Optional initial seed links for matters that exist in both systems
   if (includeInitialSeedMatterLinks) {
     for (const m of matters) {
       if (m.mergedIntoId) continue;
-      if (m.id > 'M-000018') continue;
       if (usedOneSquared.has(`matter:${m.id}`)) continue;
       const exactPms = pmsMatters.find(
         (pm) =>

@@ -313,7 +313,7 @@ describe('Role-based Home pages & configuration', () => {
   });
 
   it('cycles panel placements Primary -> Summary -> Off and persists Admin › Home pages changes and resets', () => {
-    const defaults = createDefaultHomePagesConfig();
+    const defaults = createDefaultHomePagesConfig('2026-11-09T09:00:00Z');
     const partnerRole = defaults.roles.find((r) => r.key === 'partner')!;
 
     // Initially 'aged_debt_by_age_band' is 'off' on partner

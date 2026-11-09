@@ -1010,7 +1010,7 @@ export function QuoteFormClient({
                   id="qte-prospect-org"
                   type="text"
                   className="field-input"
-                  placeholder="e.g. Penarth Estates Ltd"
+                  placeholder="e.g. Example Holdings Ltd"
                   value={prospectOrganisationName}
                   onChange={(e) => {
                     setProspectOrganisationName(e.target.value);

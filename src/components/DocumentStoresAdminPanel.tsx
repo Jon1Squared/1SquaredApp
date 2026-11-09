@@ -357,7 +357,7 @@ export function DocumentStoresAdminPanel({
 
   const sampleRenderedMatterFolderName = useMemo(() => {
     return folderNameTemplateDraft
-      .replace(/\{matterNumber\}/g, 'NALF-2026-0104')
+      .replace(/\{matterNumber\}/g, 'ABC123-0001')
       .replace(/\{matterDescription\}/g, 'Acquisition of 14 Chancery Lane')
       .replace(/\{clientNumber\}/g, 'CLI-0042')
       .replace(/\{departmentCode\}/g, 'RE')

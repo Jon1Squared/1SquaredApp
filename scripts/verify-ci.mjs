@@ -134,22 +134,28 @@ const gitleaksBin = resolveGitleaksBinary();
 checkGitleaksVersion(gitleaksBin);
 
 runStep(
-  '1/10 Secret scan (gitleaks)',
+  '1/11 Secret scan (gitleaks)',
   gitleaksBin,
   ['dir', '.', '--config', '.gitleaks.toml', '--redact'],
   testEnv,
 );
-runStep('2/10 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
-runStep('3/10 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
-runStep('4/10 ESLint check', npmCmd, ['run', 'lint'], testEnv);
+runStep('2/11 Generate extension registry', npmCmd, ['run', 'generate:extensions'], testEnv);
+runStep('3/11 TypeScript typecheck', npxCmd, ['tsc', '--noEmit'], testEnv);
+runStep('4/11 ESLint check', npmCmd, ['run', 'lint'], testEnv);
 runStep(
-  '5/10 Verify invented-only fixture data in data/ and src/seed/',
+  '5/11 Verify invented-only fixture data in data/ and src/seed/',
   process.execPath,
   ['scripts/verify-invented-fixtures.mjs'],
   testEnv,
 );
+runStep(
+  '6/11 Verify no demo literals in src/components/ and src/domain/',
+  process.execPath,
+  ['scripts/verify-no-demo-literals.mjs'],
+  testEnv,
+);
 
-console.log('\n=== [CI Verify] 6/10 Verify generated extension registry contains bundled extension ===');
+console.log('\n=== [CI Verify] 7/11 Verify generated extension registry contains bundled extension ===');
 const registryPath = path.resolve(
   process.cwd(),
   'src/platform/generated/extensionRegistry.ts',
@@ -165,19 +171,19 @@ if (!registryContent.includes('extModule_0')) {
 }
 
 runStep(
-  '7/10 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
+  '8/11 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
   npmCmd,
   ['test'],
   testEnv,
 );
 runStep(
-  '8/10 Verify production build (PLATFORM_ENVIRONMENT=live)',
+  '9/11 Verify production build (PLATFORM_ENVIRONMENT=live)',
   npmCmd,
   ['run', 'build'],
   liveBuildEnv,
 );
 
-console.log('\n=== [CI Verify] 9/10 Verify client bundle (.next/static) contains no API keys ===');
+console.log('\n=== [CI Verify] 10/11 Verify client bundle (.next/static) contains no API keys ===');
 const staticDir = path.resolve(process.cwd(), '.next/static');
 const staticFiles = collectFilesRecursively(staticDir);
 if (staticFiles.length === 0) {
@@ -196,7 +202,7 @@ for (const filePath of staticFiles) {
 }
 
 runStep(
-  '10/10 Run Playwright role journey smoke tests (PLATFORM_ENVIRONMENT=test)',
+  '11/11 Run Playwright role journey smoke tests (PLATFORM_ENVIRONMENT=test)',
   npmCmd,
   ['run', 'e2e'],
   testEnv,

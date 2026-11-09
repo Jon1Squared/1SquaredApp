@@ -35,7 +35,7 @@ interface RbacAdminSectionProps {
 type SubTab = 'matrix' | 'departments' | 'entra' | 'overrides';
 
 export function RbacAdminSection({
-  currentUserId = 'P-000001',
+  currentUserId = '',
   currentUserPermissions = [],
   permissionsByPersonId,
   rbacConfig: rbacConfigProp,

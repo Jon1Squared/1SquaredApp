@@ -105,6 +105,51 @@ interface Props {
   orgStructure: OrgStructureCatalogue;
 }
 
+export interface PersonComplianceDisplay {
+  checksLastPerformed: string;
+  idVerification: {
+    label: string;
+    pillClass: 'client-pill--red' | 'client-pill--amber' | 'client-pill--green' | 'client-pill--neutral';
+  };
+  sanctionsAndPep: {
+    label: string;
+    pillClass: 'client-pill--neutral';
+  };
+  recheckDue: string;
+}
+
+export function resolvePersonComplianceDisplay(
+  person: Pick<Person, 'verifiedAt' | 'lastVerifiedAt'>,
+  verSys: string | null | undefined,
+  mainOrg?: Pick<Organisation, 'lastVerifiedAt'> | null,
+): PersonComplianceDisplay {
+  const lastCheckDateRaw =
+    person.verifiedAt || person.lastVerifiedAt || mainOrg?.lastVerifiedAt || null;
+  const checksLastPerformed = lastCheckDateRaw
+    ? formatDate(lastCheckDateRaw) || 'Not recorded'
+    : 'Not recorded';
+
+  const verifiedFormatted = person.verifiedAt ? formatDate(person.verifiedAt) : '';
+  const idVerification: PersonComplianceDisplay['idVerification'] =
+    verSys === 'expired'
+      ? { label: 'Expired', pillClass: 'client-pill--red' }
+      : verSys === 'in_progress'
+        ? { label: 'In progress', pillClass: 'client-pill--amber' }
+        : verifiedFormatted
+          ? { label: `Verified ${verifiedFormatted}`, pillClass: 'client-pill--green' }
+          : { label: 'Not verified', pillClass: 'client-pill--neutral' };
+
+  return {
+    checksLastPerformed,
+    idVerification,
+    sanctionsAndPep: {
+      label: 'Not checked',
+      pillClass: 'client-pill--neutral',
+    },
+    recheckDue: 'Not set',
+  };
+}
+
 export function PersonProfileClient({
   person,
   allPeople,
@@ -293,9 +338,9 @@ export function PersonProfileClient({
     return Array.from(map.values());
   }, [personDirectMatters, clientOrgMatters]);
 
-  // Display cards for client matters (including the second Harbourline demo matter from the design when viewing Mark Bevan / Harbourline)
+  // Display cards for client matters
   const displayClientMatters = useMemo(() => {
-    const items = clientMatters.map((m) => {
+    return clientMatters.map((m) => {
       const stageLabel = resolveLabel(values, m.stageId) || 'Stage 4 — Drafting & negotiation';
       const stageMatch = stageLabel.match(/Stage\s+(\d+)/i);
       const stageNum = stageMatch ? Math.min(6, Math.max(1, Number(stageMatch[1]))) : 4;
@@ -306,14 +351,11 @@ export function PersonProfileClient({
       const subcategory = resolveLabel(values, m.workTypeSubcategoryId);
       const feeEarner = m.leadFeeEarnerId
         ? nameById[m.leadFeeEarnerId] ?? m.leadFeeEarnerId
-        : 'Owen Price';
-      const isHarbourlineCladding = m.matterNumber === 'HAR001-0012';
-      const nextStep = isHarbourlineCladding
-        ? 'Next: Defence due 6 Nov 2026'
-        : m.targetCompletionAt
-          ? `Next: Completion target ${formatDate(m.targetCompletionAt)}`
-          : 'Next: Review milestone';
-      const nextStepHighlight = isHarbourlineCladding;
+        : 'Unassigned';
+      const nextStep = m.targetCompletionAt
+        ? `Next: Completion target ${formatDate(m.targetCompletionAt)}`
+        : 'Next: Review milestone';
+      const nextStepHighlight = false;
 
       return {
         id: m.id,
@@ -334,41 +376,16 @@ export function PersonProfileClient({
         nextStepHighlight,
       };
     });
-
-    if (
-      (person.id === 'P-000018' || mainOrg?.id === 'O-000002') &&
-      !items.some((x) => x.matterNumber === 'HAR001-0003')
-    ) {
-      items.push({
-        id: 'HAR001-0003-demo',
-        href: items[0]?.href ?? '/matters',
-        matterNumber: 'HAR001-0003',
-        title: 'Butetown regeneration — development agreement',
-        badge: 'Development',
-        subtitle:
-          'Real Estate & Property · Development & planning · Fee earner Rhian Morgan',
-        stageNum: 4,
-        stageName: 'Drafting & negotiation',
-        nextStep: 'Next: Completion target 15 Jan 2027',
-        nextStepHighlight: false,
-      });
-    }
-
-    return items;
-  }, [clientMatters, values, nameById, person.id, mainOrg?.id]);
+  }, [clientMatters, values, nameById]);
 
   // Compliance status & Able to Act flag
   const defaultAbleToAct = verSys !== 'expired' && recSys !== 'archived' && recSys !== 'deceased';
   const ableToAct = ableToActOverride ?? defaultAbleToAct;
-  const lastCheckDateRaw =
-    person.verifiedAt ||
-    person.lastVerifiedAt ||
-    mainOrg?.lastVerifiedAt ||
-    '2026-08-18';
-  const lastCheckFormatted =
-    person.id === 'P-000018' && !person.verifiedAt
-      ? '18 Aug 2026'
-      : formatDate(lastCheckDateRaw) || '18 Aug 2026';
+  const complianceDisplay = useMemo(
+    () => resolvePersonComplianceDisplay(person, verSys, mainOrg),
+    [person, verSys, mainOrg],
+  );
+  const lastCheckFormatted = complianceDisplay.checksLastPerformed;
 
   // Record completeness calculation
   const completenessInfo = useMemo(() => {
@@ -429,26 +446,6 @@ export function PersonProfileClient({
         } => Boolean(x),
       );
 
-    if (person.id === 'P-000018' || mainOrg.id === 'O-000002') {
-      const demoExtras = [
-        {
-          id: 'demo-sian-jenkins',
-          href: linkedFromStore[0]?.href ?? `/organisations/${mainOrg.id}`,
-          name: 'Siân Jenkins',
-          jobTitle: 'Finance Director',
-          initials: 'SJ',
-        },
-        {
-          id: 'demo-tom-hughes',
-          href: linkedFromStore[0]?.href ?? `/organisations/${mainOrg.id}`,
-          name: 'Tom Hughes',
-          jobTitle: 'Head of Assets',
-          initials: 'TH',
-        },
-      ];
-      return [...demoExtras, ...linkedFromStore];
-    }
-
     return linkedFromStore;
   }, [mainOrg, links, person.id, allPeople]);
 
@@ -463,65 +460,9 @@ export function PersonProfileClient({
       meta: `${formatDate(n.at.slice(0, 10))} · ${nameById[n.authorId] ?? n.authorId}`,
     }));
 
-    const seededItems = [
-      {
-        id: 'act-1',
-        category: 'meetings' as const,
-        dotColor: '#1f5c45',
-        typeLabel: 'Meeting',
-        title:
-          person.id === 'P-000018'
-            ? 'Quarterly review — cladding claim strategy'
-            : `Client review meeting with ${personDisplayName(person)}`,
-        meta: `11 Oct 2026 · ${
-          person.relationshipOwnerId
-            ? nameById[person.relationshipOwnerId] ?? 'Rhian Morgan'
-            : 'Rhian Morgan'
-        }, Owen Price`,
-      },
-      {
-        id: 'act-2',
-        category: 'emails' as const,
-        dotColor: '#2563eb',
-        typeLabel: 'Email received',
-        title:
-          person.id === 'P-000018'
-            ? 'RE: Expert report on Block B'
-            : `RE: Matter update & next steps`,
-        meta: `9 Oct 2026 · filed to ${displayClientMatters[0]?.matterNumber ?? 'MAT-0001'}`,
-      },
-      {
-        id: 'act-3',
-        category: 'documents' as const,
-        dotColor: '#7c3aed',
-        typeLabel: 'Document',
-        title:
-          person.id === 'P-000018'
-            ? 'Particulars of claim v3'
-            : 'Draft engagement & scope schedule',
-        meta: '2 Oct 2026 · Owen Price',
-      },
-      {
-        id: 'act-4',
-        category: 'notes' as const,
-        dotColor: '#b45309',
-        typeLabel: 'Note',
-        title:
-          person.id === 'P-000018'
-            ? 'Mark keen to keep board updated monthly'
-            : person.relationshipNotes || `${person.firstName} prefers concise monthly updates`,
-        meta: `28 Sep 2026 · ${
-          person.relationshipOwnerId
-            ? nameById[person.relationshipOwnerId] ?? 'Rhian Morgan'
-            : 'Rhian Morgan'
-        }`,
-      },
-    ];
-
-    const all = [...userNoteItems, ...seededItems];
-    if (activityFilter === 'all') return all;
-    return all.filter((item) => item.category === activityFilter);
-  }, [notes, nameById, person, displayClientMatters, activityFilter]);
+    if (activityFilter === 'all') return userNoteItems;
+    return userNoteItems.filter((item) => item.category === activityFilter);
+  }, [notes, nameById, activityFilter]);
 
   if (isClientPerson) {
     const initials =
@@ -542,32 +483,18 @@ export function PersonProfileClient({
     const languageLabel = resolveLabel(values, person.preferredLanguageId) || 'English';
 
     const pmsSummary = canViewFinance ? pmsView?.clientBundle?.summary : undefined;
-    const unbilledWipGbp = !canViewFinance
-      ? 0
-      : person.id === 'P-000018'
-        ? 18240
-        : pmsSummary
-          ? pmsSummary.unbilled_wip
-          : displayClientMatters.length * 4250;
-    const outstandingGbp = !canViewFinance
-      ? 0
-      : person.id === 'P-000018'
-        ? 6480
-        : pmsSummary
-          ? pmsSummary.outstanding_debt
-          : 0;
-    const overdueCount = !canViewFinance
-      ? 0
-      : person.id === 'P-000018'
+    const unbilledWipGbp = canViewFinance && pmsSummary ? pmsSummary.unbilled_wip : 0;
+    const outstandingGbp = canViewFinance && pmsSummary ? pmsSummary.outstanding_debt : 0;
+    const overdueCount =
+      canViewFinance &&
+      pmsSummary &&
+      pmsSummary.aged_1_30 +
+        pmsSummary.aged_31_60 +
+        pmsSummary.aged_61_90 +
+        pmsSummary.aged_90_plus >
+        0
         ? 1
-        : pmsSummary &&
-            pmsSummary.aged_1_30 +
-              pmsSummary.aged_31_60 +
-              pmsSummary.aged_61_90 +
-              pmsSummary.aged_90_plus >
-              0
-          ? 1
-          : 0;
+        : 0;
 
     const clientMatterIds = new Set(clientMatters.map((m) => m.id));
     const openTasksForPerson = tasks
@@ -734,15 +661,12 @@ export function PersonProfileClient({
                       {' · '}
                     </>
                   ) : null}
-                  <span>
-                    Client since{' '}
-                    {person.id === 'P-000018'
-                      ? 'March 2019'
-                      : person.firstKnownAt
-                        ? formatDate(person.firstKnownAt)
-                        : 'March 2021'}
-                  </span>
-                  {' · '}
+                  {person.firstKnownAt ? (
+                    <>
+                      <span>Client since {formatDate(person.firstKnownAt)}</span>
+                      {' · '}
+                    </>
+                  ) : null}
                   <span>Prefers {prefContactLabel.toLowerCase()}</span>
                 </div>
               </div>
@@ -832,9 +756,12 @@ export function PersonProfileClient({
         {canViewFinance && overdueCount > 0 ? (
           <div className="client-invoice-banner" role="region" aria-label="Overdue invoice alert">
             <div>
-              <strong>Invoice INV-0412 is 14 days overdue</strong> ·{' '}
+              <strong>Overdue invoice balance</strong> ·{' '}
               <span>
-                {formatGbp(outstandingGbp)} on {displayClientMatters[0]?.matterNumber ?? 'HAR001-0012'}{' '}
+                {formatGbp(outstandingGbp)}
+                {displayClientMatters[0]?.matterNumber
+                  ? ` on ${displayClientMatters[0].matterNumber}`
+                  : ''}{' '}
                 ({mainOrg ? mainOrg.legalName : personDisplayName(person)})
               </span>
             </div>
@@ -892,8 +819,12 @@ export function PersonProfileClient({
 
           <div className="client-kpi-card">
             <div className="client-kpi-label">LAST INTERACTION</div>
-            <div className="client-kpi-value">11 days</div>
-            <div className="client-kpi-sub">Meeting · 11 Oct 2026</div>
+            <div className="client-kpi-value">
+              {person.lastInteractionAt ? formatDate(person.lastInteractionAt) : '—'}
+            </div>
+            <div className="client-kpi-sub">
+              {person.lastInteractionAt ? 'Last recorded interaction' : 'Not recorded'}
+            </div>
           </div>
         </div>
 
@@ -1039,23 +970,29 @@ export function PersonProfileClient({
                 </div>
 
                 <div>
-                  {activityFeedItems.map((item) => (
-                    <div key={item.id} className="client-activity-item">
-                      <span
-                        className="client-activity-dot"
-                        style={{ background: item.dotColor }}
-                        aria-hidden="true"
-                      />
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 13.5, color: '#0f172a' }}>
-                          <strong>{item.typeLabel}</strong> · {item.title}
-                        </div>
-                        <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
-                          {item.meta}
+                  {activityFeedItems.length === 0 ? (
+                    <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                      No recent activity recorded.
+                    </p>
+                  ) : (
+                    activityFeedItems.map((item) => (
+                      <div key={item.id} className="client-activity-item">
+                        <span
+                          className="client-activity-dot"
+                          style={{ background: item.dotColor }}
+                          aria-hidden="true"
+                        />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, color: '#0f172a' }}>
+                            <strong>{item.typeLabel}</strong> · {item.title}
+                          </div>
+                          <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                            {item.meta}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
 
                 <div style={{ marginTop: 12 }}>
@@ -1188,37 +1125,29 @@ export function PersonProfileClient({
                 <div className="client-side-row">
                   <span style={{ color: '#64748b' }}>Checks last performed</span>
                   <strong style={{ color: '#0f172a', fontSize: 12.5 }}>
-                    {lastCheckFormatted}
+                    {complianceDisplay.checksLastPerformed}
                   </strong>
                 </div>
 
                 <div className="client-side-row">
                   <span style={{ color: '#64748b' }}>ID verification</span>
-                  <span
-                    className={`client-pill ${
-                      verSys === 'expired'
-                        ? 'client-pill--red'
-                        : verSys === 'in_progress'
-                          ? 'client-pill--amber'
-                          : 'client-pill--green'
-                    }`}
-                  >
-                    {verSys === 'expired'
-                      ? 'Expired'
-                      : verSys === 'in_progress'
-                        ? 'In progress'
-                        : `Verified ${lastCheckFormatted}`}
+                  <span className={`client-pill ${complianceDisplay.idVerification.pillClass}`}>
+                    {complianceDisplay.idVerification.label}
                   </span>
                 </div>
 
                 <div className="client-side-row">
                   <span style={{ color: '#64748b' }}>Sanctions &amp; PEP</span>
-                  <span className="client-pill client-pill--green">Clear</span>
+                  <span className={`client-pill ${complianceDisplay.sanctionsAndPep.pillClass}`}>
+                    {complianceDisplay.sanctionsAndPep.label}
+                  </span>
                 </div>
 
                 <div className="client-side-row">
                   <span style={{ color: '#64748b' }}>Re-check due</span>
-                  <strong style={{ color: '#0f172a', fontSize: 12.5 }}>Aug 2027</strong>
+                  <strong style={{ color: '#0f172a', fontSize: 12.5 }}>
+                    {complianceDisplay.recheckDue}
+                  </strong>
                 </div>
               </section>
 
@@ -1346,12 +1275,8 @@ export function PersonProfileClient({
                       {mainOrg.legalName}
                     </Link>
                     <div style={{ fontSize: 12.5, color: '#64748b', marginTop: 2 }}>
-                      Client · {mainLink?.jobTitle || person.jobTitle || 'Contact'}{' '}
-                      {person.id === 'P-000018'
-                        ? 'since 2017'
-                        : mainLink?.startDate
-                          ? `since ${mainLink.startDate.slice(0, 4)}`
-                          : ''}
+                      Client · {mainLink?.jobTitle || person.jobTitle || 'Contact'}
+                      {mainLink?.startDate ? ` since ${mainLink.startDate.slice(0, 4)}` : ''}
                     </div>
                   </div>
 

@@ -118,6 +118,50 @@ function shortPracticeBadge(practiceArea: string, fallbackBadge?: string): strin
   return fallbackBadge || practiceArea || 'Matter';
 }
 
+export interface OrganisationComplianceDisplay {
+  checksLastPerformed: string;
+  companyVerification: { label: string; tone: 'positive' | 'warning' | 'alert' | 'neutral' };
+  sanctionsAndPep: { label: string; tone: 'positive' | 'warning' | 'alert' | 'neutral' };
+  recheckDue: string;
+}
+
+export function resolveOrganisationComplianceDisplay(
+  organisation: Pick<Organisation, 'lastVerifiedAt' | 'reviewDate'>,
+  verSys: string | undefined,
+): OrganisationComplianceDisplay {
+  const verifiedDateLabel = organisation.lastVerifiedAt
+    ? formatDate(organisation.lastVerifiedAt) || null
+    : null;
+  const checksLastPerformed = verifiedDateLabel ?? 'Not recorded';
+
+  let companyVerification: OrganisationComplianceDisplay['companyVerification'];
+  if (verSys === 'expired') {
+    companyVerification = { label: 'Expired', tone: 'alert' };
+  } else if (verSys === 'in_progress') {
+    companyVerification = { label: 'In progress', tone: 'warning' };
+  } else if (verifiedDateLabel) {
+    companyVerification = { label: `Verified ${verifiedDateLabel}`, tone: 'positive' };
+  } else {
+    companyVerification = { label: 'Not verified', tone: 'neutral' };
+  }
+
+  const sanctionsAndPep: OrganisationComplianceDisplay['sanctionsAndPep'] = {
+    label: 'Not checked',
+    tone: 'neutral',
+  };
+
+  const recheckDue = organisation.reviewDate
+    ? formatDate(organisation.reviewDate) || 'Not set'
+    : 'Not set';
+
+  return {
+    checksLastPerformed,
+    companyVerification,
+    sanctionsAndPep,
+    recheckDue,
+  };
+}
+
 export function OrganisationProfileClient({
   organisation,
   allOrganisations,
@@ -127,7 +171,7 @@ export function OrganisationProfileClient({
   tasks = [],
   teams = [],
   enquiries = [],
-  currentUserId = 'P-0001',
+  currentUserId = '',
   currentUserRole = 'admin',
   canTakeByTaskId,
   canViewFinance = false,
@@ -203,8 +247,6 @@ export function OrganisationProfileClient({
   const sectorLabel = resolveLabel(values, organisation.sectorId);
   const tierLabel = resolveLabel(values, organisation.clientTierId);
 
-  const isHarbourline = organisation.id === 'O-000002';
-
   // Build unified display matters list for this organisation
   const linked1SqMatters = useMemo(
     () =>
@@ -219,83 +261,6 @@ export function OrganisationProfileClient({
   );
 
   const displayMatters = useMemo<OrgMatterDisplayItem[]>(() => {
-    if (isHarbourline) {
-      const harbourlineMatterHref = linked1SqMatters[0]
-        ? `/matters/${linked1SqMatters[0].id}`
-        : '/matters';
-      const baseHarbourline: OrgMatterDisplayItem[] = [
-        {
-          id: linked1SqMatters[0]?.id ?? 'HAR001-0003',
-          matterNumber: 'HAR001-0003',
-          title: 'Dilapidations & defective cladding claim',
-          href: harbourlineMatterHref,
-          badge: 'Disputes',
-          subtitle: 'Dispute Resolution · Property disputes · Fee earner Owain Jenkins',
-          stageNum: 4,
-          stageName: 'Drafting & Negotiation',
-          keyDateText: 'Key date 3 Sep 2026 — 50 days overdue',
-          keyDateOverdue: true,
-          isClientRole: true,
-        },
-        {
-          id: 'HAR001-0002',
-          matterNumber: 'HAR001-0002',
-          title: 'Legal services panel tender 2027',
-          href: harbourlineMatterHref,
-          badge: 'Advisory',
-          subtitle: 'Public Sector · Procurement · Fee earner Rhian Morgan',
-          stageNum: 3,
-          stageName: 'Due diligence',
-          keyDateText: 'Next: Pricing schedule sign-off 24 Oct 2026',
-          keyDateOverdue: false,
-          isClientRole: true,
-        },
-        {
-          id: 'HAR001-0001',
-          matterNumber: 'HAR001-0001',
-          title: 'Stock transfer — 42 homes, Splott, Cardiff',
-          href: harbourlineMatterHref,
-          badge: 'Property',
-          subtitle: 'Real Estate & Property · Social housing · Fee earner Dafydd Evans',
-          stageNum: 2,
-          stageName: 'Matter opening',
-          keyDateText: 'Next: Title review 6 Nov 2026',
-          keyDateOverdue: false,
-          isClientRole: true,
-        },
-      ];
-      // Append any newly created matters for Harbourline beyond the initial seed
-      const extraCreated = linked1SqMatters
-        .slice(1)
-        .map((m): OrgMatterDisplayItem => {
-          const stLabel = resolveLabel(values, m.stageId) || 'Stage 2 — Matter opening';
-          const stMatch = stLabel.match(/Stage\s+(\d+)/i);
-          const stageNum = stMatch ? Math.min(6, Math.max(1, Number(stMatch[1]))) : 2;
-          const stageName = stLabel.replace(/^Stage\s+\d+\s*[—–-]\s*/i, '').trim() || stLabel;
-          const paLabel = resolveLabel(values, m.practiceAreaId);
-          const subLabel = resolveLabel(values, m.workTypeSubcategoryId);
-          const feName = m.leadFeeEarnerId ? nameById[m.leadFeeEarnerId] ?? m.leadFeeEarnerId : '';
-          return {
-            id: m.id,
-            matterNumber: m.matterNumber,
-            title: m.title,
-            href: `/matters/${m.id}`,
-            badge: shortPracticeBadge(paLabel, m.typeBadge),
-            subtitle: [paLabel, subLabel, feName ? `Fee earner ${feName}` : '']
-              .filter(Boolean)
-              .join(' · '),
-            stageNum,
-            stageName,
-            keyDateText: m.targetCompletionAt
-              ? `Next: Target completion ${formatDate(m.targetCompletionAt)}`
-              : 'Next: Milestone review',
-            keyDateOverdue: false,
-            isClientRole: m.clientId === organisation.id,
-          };
-        });
-      return [...extraCreated, ...baseHarbourline];
-    }
-
     const mapped1Sq: OrgMatterDisplayItem[] = linked1SqMatters.map((m) => {
       const stLabel = resolveLabel(values, m.stageId) || 'Stage 4 — Drafting & Negotiation';
       const stMatch = stLabel.match(/Stage\s+(\d+)/i);
@@ -354,23 +319,18 @@ export function OrganisationProfileClient({
     }
 
     return mapped1Sq;
-  }, [isHarbourline, linked1SqMatters, values, nameById, organisation.id, pmsView]);
+  }, [linked1SqMatters, values, nameById, organisation.id, pmsView]);
 
-  // Key contacts list (includes current linked people; for Harbourline, shows the 4 contacts count & badges)
+  // Key contacts list (includes current linked people)
   const displayContacts = useMemo(() => {
     const fromLinks = currentLinks.map((l) => {
       const p = personById.get(l.personId);
       const name = p ? personDisplayName(p) : l.personId;
       const rolesText = renderLinkRoles(l, values);
       const isBilling = rolesText.toLowerCase().includes('billing');
-      let subtitle = [l.jobTitle || p?.jobTitle, l.roleWithinOrganisation || l.department, rolesText]
+      const subtitle = [l.jobTitle || p?.jobTitle, l.roleWithinOrganisation || l.department, rolesText]
         .filter(Boolean)
         .join(' · ');
-      if (isHarbourline && p?.id === 'P-000019') {
-        subtitle = 'Head of Legal · Instructs on disputes';
-      } else if (isHarbourline && p?.id === 'P-000018') {
-        subtitle = 'Chief Executive · Key relationship contact';
-      }
       return {
         id: l.id,
         personId: l.personId,
@@ -384,36 +344,8 @@ export function OrganisationProfileClient({
       };
     });
 
-    if (isHarbourline && fromLinks.length < 4) {
-      const extras = [
-        {
-          id: 'har-contact-billing',
-          personId: 'P-000018',
-          name: 'Siân Jenkins',
-          initials: 'SJ',
-          href: '/people/P-000018',
-          subtitle: 'Finance Director · Billing contact',
-          badge: 'Billing',
-          badgeTone: 'neutral' as const,
-          linkRecord: null,
-        },
-        {
-          id: 'har-contact-assets',
-          personId: 'P-000019',
-          name: 'Tom Hughes',
-          initials: 'TH',
-          href: '/people/P-000019',
-          subtitle: 'Head of Assets · Property & stock transfer',
-          badge: 'Contact',
-          badgeTone: 'neutral' as const,
-          linkRecord: null,
-        },
-      ];
-      return [...fromLinks, ...extras.slice(0, 4 - fromLinks.length)];
-    }
-
     return fromLinks;
-  }, [currentLinks, personById, values, isHarbourline]);
+  }, [currentLinks, personById, values]);
 
   // PMS financial summary
   const pmsBundle = canViewFinance ? (pmsView?.clientBundle ?? null) : null;
@@ -421,7 +353,7 @@ export function OrganisationProfileClient({
     ? (pmsBundle?.summary ?? pmsView?.groupView?.totals ?? null)
     : null;
   const pmsClient = canViewFinance ? (pmsView?.pmsClient ?? null) : null;
-  const asAtLabel = pmsView ? formatPmsAsAtLabel(pmsView.extractInfo.asAtDate) : '16 Oct 2026';
+  const asAtLabel = pmsView ? formatPmsAsAtLabel(pmsView.extractInfo.asAtDate) : '—';
 
   const openMattersCount = displayMatters.length;
   const distinctBadges = Array.from(new Set(displayMatters.map((m) => m.badge))).join(', ');
@@ -444,37 +376,28 @@ export function OrganisationProfileClient({
         .join(' · ')
     : 'Not linked to PMS';
 
-  const lastInteractionDisplay = isHarbourline
-    ? { value: '4 days', sub: 'Meeting · 19 Oct 2026' }
-    : {
-        value: organisation.lastInteractionAt
-          ? formatDate(organisation.lastInteractionAt)
-          : 'Not recorded',
-        sub: notes[0]
-          ? `Note · ${formatDate(notes[0].at.slice(0, 10))}`
-          : 'Last meaningful interaction',
-      };
+  const lastInteractionDisplay = {
+    value: organisation.lastInteractionAt
+      ? formatDate(organisation.lastInteractionAt)
+      : 'Not recorded',
+    sub: notes[0]
+      ? `Note · ${formatDate(notes[0].at.slice(0, 10))}`
+      : 'Last meaningful interaction',
+  };
 
   // Compliance sidebar derived values
   const ableToAct =
     conflictSys !== 'conflict' && verSys !== 'expired' && recSys !== 'archived';
-  const lastVerifiedDisplay = isHarbourline
-    ? '12 Mar 2026'
-    : formatDate(organisation.lastVerifiedAt) || '12 Mar 2026';
-  const recheckDueDisplay = isHarbourline
-    ? 'Mar 2027'
-    : organisation.reviewDate
-      ? formatDate(organisation.reviewDate)
-      : 'Mar 2027';
+  const complianceDisplay = resolveOrganisationComplianceDisplay(organisation, verSys);
+  const lastVerifiedDisplay = complianceDisplay.checksLastPerformed;
+  const recheckDueDisplay = complianceDisplay.recheckDue;
 
   // Panel / standing badge for Relationship sidebar
   const panelFieldVal = organisation.customFields['cf_panel_appointment'];
-  const panelLabel = isHarbourline
-    ? 'Retender 2027'
-    : panelFieldVal
-      ? resolveLabel(values, String(panelFieldVal))
-      : resolveLabel(values, organisation.pipelineStageId) ||
-        resolveLabel(values, organisation.relationshipStandingId);
+  const panelLabel = panelFieldVal
+    ? resolveLabel(values, String(panelFieldVal))
+    : resolveLabel(values, organisation.pipelineStageId) ||
+      resolveLabel(values, organisation.relationshipStandingId);
 
   const orgEnquiries = useMemo(
     () =>
@@ -578,7 +501,7 @@ export function OrganisationProfileClient({
             {verSys === 'in_progress' ? (
               <StatusPill label="Due diligence in progress" tone="warning" />
             ) : null}
-            {riskSys === 'high' && !isHarbourline ? (
+            {riskSys === 'high' ? (
               <StatusPill label="High risk" tone="warning" />
             ) : null}
           </div>
@@ -1199,20 +1122,8 @@ export function OrganisationProfileClient({
                     </div>
                     <div className="worklist-right">
                       <StatusPill
-                        label={
-                          verSys === 'expired'
-                            ? 'Expired'
-                            : verSys === 'in_progress'
-                              ? 'In progress'
-                              : `Verified ${lastVerifiedDisplay}`
-                        }
-                        tone={
-                          verSys === 'expired'
-                            ? 'alert'
-                            : verSys === 'in_progress'
-                              ? 'warning'
-                              : 'positive'
-                        }
+                        label={complianceDisplay.companyVerification.label}
+                        tone={complianceDisplay.companyVerification.tone}
                       />
                     </div>
                   </li>
@@ -1225,16 +1136,8 @@ export function OrganisationProfileClient({
                     </div>
                     <div className="worklist-right">
                       <StatusPill
-                        label={
-                          conflictSys === 'conflict' || conflictSys === 'potential'
-                            ? resolveLabel(values, organisation.conflictStatusId)
-                            : 'Clear'
-                        }
-                        tone={
-                          conflictSys === 'conflict' || conflictSys === 'potential'
-                            ? 'warning'
-                            : 'positive'
-                        }
+                        label={complianceDisplay.sanctionsAndPep.label}
+                        tone={complianceDisplay.sanctionsAndPep.tone}
                       />
                     </div>
                   </li>
@@ -1335,7 +1238,7 @@ export function OrganisationProfileClient({
                       <div className="worklist-right">
                         <StatusPill
                           label={panelLabel}
-                          tone={isHarbourline ? 'warning' : 'positive'}
+                          tone="positive"
                         />
                       </div>
                     </li>

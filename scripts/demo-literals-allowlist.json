@@ -1,0 +1,17 @@
+[
+  {
+    "file": "src/components/DocumentStoresAdminPanel.tsx",
+    "literal": "ABC123-0001",
+    "reason": "Generic matter-number format illustration in the admin SharePoint path template help text."
+  },
+  {
+    "file": "src/components/MatterFormClient.tsx",
+    "literal": "ABC123-0001",
+    "reason": "Generic matter-number format placeholder on the matter form."
+  },
+  {
+    "file": "src/domain/types.ts",
+    "literal": "ABC001-0001",
+    "reason": "Generic matter-number format comment on the Matter type definition."
+  }
+]

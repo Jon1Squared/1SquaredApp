@@ -1611,6 +1611,7 @@ export function DocumentTemplatesAdminPanel({
                   );
                   const isSelfSubmitted =
                     !snapshot?.config.approval.allowSelfApproval &&
+                    Boolean(currentUserId) &&
                     (ver.submittedByUserId === currentUserId ||
                       ver.createdByUserId === currentUserId);
 
