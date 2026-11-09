@@ -5600,8 +5600,8 @@ export function HomeClient({
       // ================================================================
       case 'top_clients_and_concentration': {
         const topClients = [...allClientFins]
-          .filter((c) => c.fees_billed > 0 || c.unbilled_wip > 0)
-          .sort((a, b) => b.fees_billed - a.fees_billed)
+          .filter((c) => c.fees_billed_ytd > 0 || c.unbilled_wip > 0)
+          .sort((a, b) => b.fees_billed_ytd - a.fees_billed_ytd)
           .slice(0, 6);
         const totalBilled = pmsMonthlyFeesBilled.yearToDateTotal || 181673.48;
         return (
@@ -5632,7 +5632,7 @@ export function HomeClient({
                   </thead>
                   <tbody>
                     {topClients.map((c) => {
-                      const sharePct = Math.round((c.fees_billed / totalBilled) * 1000) / 10;
+                      const sharePct = Math.round((c.fees_billed_ytd / totalBilled) * 1000) / 10;
                       const usedPct =
                         c.credit_limit_used_pct !== null
                           ? Math.round(c.credit_limit_used_pct * 1000) / 10
@@ -5645,7 +5645,7 @@ export function HomeClient({
                             </Link>
                           </td>
                           <td className="num">
-                            <strong>{formatGbp(c.fees_billed)}</strong>
+                            <strong>{formatGbp(c.fees_billed_ytd)}</strong>
                           </td>
                           <td className="num">{sharePct.toFixed(1)}%</td>
                           <td className="num">

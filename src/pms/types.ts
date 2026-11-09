@@ -240,6 +240,7 @@ export interface PmsClientFinancials {
   status: string;
   unbilled_wip: number;
   fees_billed: number;
+  fees_billed_ytd: number;
   disbursements_billed: number;
   total_invoiced_inc_vat: number;
   total_paid: number;

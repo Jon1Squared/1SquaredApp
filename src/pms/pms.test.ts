@@ -287,7 +287,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(novWeek.dailyPaceHours).toBe(0);
     expect(novWeek.weeklyPaceHours).toBe(0);
 
-    // R339 & R358: Adding a 2025 invoice and a 2025 time entry does not change current-year (2026) billedThisYear, yearToDateTotal, chargeable_hours, pct_of_annual_target, time_value, billed_value, written_off, or client fees_billed
+    // R339, R358 & R374: Adding prior-year (2025) or future-dated same-year (after asAtDate 2026-10-16) invoices and time entries does not change current-year YTD figures (billedThisYear, yearToDateTotal, chargeable_hours, pct_of_annual_target, time_value, billed_value, written_off, or client fees_billed_ytd), while client fees_billed remains all-time
     const inv2025 = {
       ...baseInvoices[0]!,
       invoice_number: 'PV/2025/0999',
@@ -300,6 +300,20 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       total: 10800,
       paid: 10800,
       outstanding: 0,
+      exported_status: 'Posted',
+    };
+    const invFuture2026 = {
+      ...baseInvoices[0]!,
+      invoice_number: 'PV/2026/0998',
+      matter_code: 'PEN001-0001',
+      client_code: 'PEN001',
+      invoice_date: '2026-12-15',
+      due_date: '2027-01-15',
+      invoice_type: 'Interim',
+      fees_net: 6400,
+      total: 7680,
+      paid: 0,
+      outstanding: 7680,
       exported_status: 'Posted',
     };
     const te2025 = {
@@ -315,32 +329,46 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       billed_value: 2580,
       write_off_value: 350,
     };
-    const withPriorYear = buildFirmFinanceRollups({
+    const teFuture2026 = {
+      ...baseTimeEntries[0]!,
+      time_id: 'T2026998',
+      matter_code: 'PEN001-0001',
+      fee_earner_id: 'FE005',
+      date: '2026-12-15',
+      hours: 8.0,
+      value: 1720,
+      chargeable: 'Y' as const,
+      billed_status: 'Billed' as const,
+      billed_value: 1720,
+      write_off_value: 200,
+    };
+    const withPriorAndFuture = buildFirmFinanceRollups({
       asAtDate: source.getExtractInfo().asAtDate,
       matterFinancials: source.getAllMatterFinancials(),
-      invoices: [...baseInvoices, inv2025],
-      timeEntries: [...baseTimeEntries, te2025],
+      invoices: [...baseInvoices, inv2025, invFuture2026],
+      timeEntries: [...baseTimeEntries, te2025, teFuture2026],
       payments: basePayments,
       clients: source.listClients(),
       feeEarners: source.listFeeEarners(),
     });
-    expect(withPriorYear.pmsMonthlyFeesBilled.yearToDateTotal).toBe(181673.48);
-    expect(withPriorYear.pmsDepartmentFinancials.firmTotal.billedThisYear).toBe(181673.48);
+    expect(withPriorAndFuture.pmsMonthlyFeesBilled.yearToDateTotal).toBe(181673.48);
+    expect(withPriorAndFuture.pmsDepartmentFinancials.firmTotal.billedThisYear).toBe(181673.48);
     const fe005Baseline = perfById.get('FE005')!;
-    const fe005WithPriorYear = withPriorYear.allFeeEarnerPerformance.find(
+    const fe005WithPriorAndFuture = withPriorAndFuture.allFeeEarnerPerformance.find(
       (p) => p.fee_earner_id === 'FE005',
     )!;
-    expect(fe005WithPriorYear.chargeable_hours).toBe(fe005Baseline.chargeable_hours);
-    expect(fe005WithPriorYear.pct_of_annual_target).toBe(fe005Baseline.pct_of_annual_target);
-    expect(fe005WithPriorYear.time_value).toBe(fe005Baseline.time_value);
-    expect(fe005WithPriorYear.billed_value).toBe(fe005Baseline.billed_value);
-    expect(fe005WithPriorYear.written_off).toBe(fe005Baseline.written_off);
+    expect(fe005WithPriorAndFuture.chargeable_hours).toBe(fe005Baseline.chargeable_hours);
+    expect(fe005WithPriorAndFuture.pct_of_annual_target).toBe(fe005Baseline.pct_of_annual_target);
+    expect(fe005WithPriorAndFuture.time_value).toBe(fe005Baseline.time_value);
+    expect(fe005WithPriorAndFuture.billed_value).toBe(fe005Baseline.billed_value);
+    expect(fe005WithPriorAndFuture.written_off).toBe(fe005Baseline.written_off);
 
     const pen001Baseline = rollups.allClientFins.find((c) => c.client_code === 'PEN001')!;
-    const pen001WithPriorYear = withPriorYear.allClientFins.find(
+    const pen001WithPriorAndFuture = withPriorAndFuture.allClientFins.find(
       (c) => c.client_code === 'PEN001',
     )!;
-    expect(pen001WithPriorYear.fees_billed).toBe(pen001Baseline.fees_billed);
+    expect(pen001WithPriorAndFuture.fees_billed).toBe(pen001Baseline.fees_billed);
+    expect(pen001WithPriorAndFuture.fees_billed_ytd).toBe(pen001Baseline.fees_billed_ytd);
   });
 
   it('handles an extract with no as-at date or a malformed as-at date without throwing or falling back to October (R338)', async () => {

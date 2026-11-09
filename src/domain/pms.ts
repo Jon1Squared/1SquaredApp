@@ -577,7 +577,8 @@ export function buildClientFinancialsFromRows(
   );
 
   const unbilled_wip = sumMoneyPence(clientMatters, (m) => m.unbilled_wip);
-  const fees_billed = isValidPmsAsAtDate(asAtDate)
+  const fees_billed = sumMoneyPence(clientMatters, (m) => m.fees_billed);
+  const fees_billed_ytd = isValidPmsAsAtDate(asAtDate)
     ? sumMoneyPence(visibleInvoices, (inv) =>
         inv.client_code === client.client_code &&
         inv.invoice_date.slice(0, 4) === asAtDate.slice(0, 4) &&
@@ -585,7 +586,7 @@ export function buildClientFinancialsFromRows(
           ? inv.fees_net
           : 0,
       )
-    : sumMoneyPence(clientMatters, (m) => m.fees_billed);
+    : 0;
   const disbursements_billed = sumMoneyPence(clientMatters, (m) => m.disbursements_billed);
   const total_invoiced_inc_vat = sumMoneyPence(clientMatters, (m) => m.total_invoiced_inc_vat);
   const total_paid = sumMoneyPence(clientMatters, (m) => m.total_paid);
@@ -624,6 +625,7 @@ export function buildClientFinancialsFromRows(
     status: client.status,
     unbilled_wip,
     fees_billed,
+    fees_billed_ytd,
     disbursements_billed,
     total_invoiced_inc_vat,
     total_paid,
