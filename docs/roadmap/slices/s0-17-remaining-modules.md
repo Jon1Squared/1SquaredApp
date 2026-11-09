@@ -70,9 +70,9 @@ Every table carries `tenant_id TEXT NOT NULL`, enforced by `TenantScopedReposito
 | `custom_field_definitions` | `tenant_id`, `id`, `record_type`, `field_key`, `label`, `field_type`, `section`, `required BOOLEAN`, `active BOOLEAN`, `sort_order INTEGER NOT NULL`, `source` (`'tenant_config' \| 'admin'`), `updated_at TIMESTAMPTZ` | `options_json` (merged at runtime with declarative `tenantConfig.customFields`, activating `[x-reserved:S0-17]`) | `PRIMARY KEY (tenant_id, id)`; `INDEX idx_custom_fields_tenant_type ON custom_field_definitions (tenant_id, record_type, sort_order)` |
 | `tenant_module_configs` | `tenant_id`, `config_key` (`'org_structure'`, `'matter_party_taxonomy'`, `'home_pages'`, `'matter_costs'`), `updated_at TIMESTAMPTZ`, `updated_by_id` | `config_json` | `PRIMARY KEY (tenant_id, config_key)` |
 
-## Migrations (`R408`)
+## Migrations (`R408`, `R417`)
 
-Expand-only migrations across S0-17a–c (`people.employment_json` stays nullable and tolerated until `S0-20`'s contract migration `0014` so `S0-16` / `S0-17a` replicas never break during `migrate`, `R408`):
+Expand-only migrations across S0-17a–c. **From `S0-17b` onwards, nothing in runtime code reads or writes `people.employment_json`** (`TenantDirectoryRepository` uses explicit column lists on `people` omitting `employment_json`, and all employment reads/writes go solely through `employee_employment_records`; `docs/runbooks/store-cut-over.md` imports `hr` before traffic starts), while the nullable `people.employment_json` column stays physically present on disk until `S0-20`'s contract migration `0014` so `S0-16` / `S0-17a` replicas never break during `S0-17b`'s `migrate` and `S0-19b` replicas never touch `people.employment_json` when `S0-20`'s `migrate` drops it (`R408`, `R417`):
 
 1. **`0009_intake_quotes_tasks_expand`** (`S0-17a`, `kind: 'expand'`, `requiresAppliedVersion: '0008'`, `CORE_REQUIRED_SCHEMA_VERSION = '0009'`): creates the 9 S0-17a tables + indexes; `downSql` drops them.
 2. **`0010_hr_teams_and_rbac_expand`** (`S0-17b`, `kind: 'expand'`, `requiresAppliedVersion: '0009'`, `CORE_REQUIRED_SCHEMA_VERSION = '0010'`): creates `teams`, `employee_employment_records` (`ON DELETE RESTRICT`), `employee_sensitive_records` (`ON DELETE RESTRICT`), and `tenant_rbac_configs` + indexes; `downSql` drops them.
@@ -89,17 +89,17 @@ Only **7 synchronous exports** in `src/server/services.ts` remain to convert acr
 - **`S0-17b` (3 exports -> `async`, Size M ~2 days):** `getEmployeeDetailsForUser` (`:1105`, `people/[id]/page.tsx:31`), `switchViewingRole` (`:9748`, `actions.ts:809`), and `previewRbacOverrides` (`:10103`, `actions.ts:872`), plus removing `getStore()` from `src/server/authorize.ts:125`.
 - **`S0-17c` (0 new `services.ts` exports -> `async`, Size M ~2 days):** all 19 catalogue/admin exports in `services.ts` are already `async` after `S0-15`; remove `getStore()` in `src/app/actions.ts:449, 483, 494`, `src/app/api/matters/extract/route.ts:2539`, `src/server/documentGenerationServices.ts`, and `src/server/documentStoreServices.ts`.
 
-## Operations that span modules (`Owner Decision 5`, `R406`, `R410`)
+## Operations that span modules (`Owner Decision 5`, `R406`, `R410`, `R417`, `R418`)
 
 1. **`S0-17a`:** `prepareEnquiryConversion` (`:8490`) + `saveMatterRecord` (`finalizeEnquiryConversionToMatter` `:8809`), `prepareQuoteConversionRecord` (`:11905`) + `saveMatterRecord` (`finalizeQuoteConversionToMatter` `:12333`), automatic opening `tasks`, partner cost `signOffs`, `flagMatterWriteOff`, and `runKeyDateReminderSchedulerRecord` (`:13684`) move into **single PostgreSQL transactions** with `audit_entries`. `executeMerge` (`:5639`) keeps `withJsonStoreWriteLock` + delta compensation (`R406`) solely for `pmsLinks` until `S0-18`.
 2. **`S0-17b` (`R410`, `R413`):**
-   - **Maintaining `firmWorkEmail` in `person_emails` (`R410`):** whenever `savePersonRecord` (`:1446`), `importHrFromStore`, or employment updates write `employee_employment_records` (`employment.systems.firmWorkEmail`), the **same PostgreSQL transaction** updates `person_emails` (`source = 'firm_work_email'`) so `resolveOrProvisionEntraEmployee` (`B13` / `S0-30`) continues matching all active emails and `firmWorkEmail` across all people (while reads tolerate `people.employment_json` fallback until `S0-20`, `R408`).
+   - **Maintaining `firmWorkEmail` in `person_emails` (`R410`, `R417`):** whenever `savePersonRecord` (`:1446`), `importHrFromStore`, or employment updates write `employee_employment_records` (`employment.systems.firmWorkEmail`), the **same PostgreSQL transaction** updates `person_emails` (`source = 'firm_work_email'`) so `resolveOrProvisionEntraEmployee` (`B13` / `S0-30`) continues matching all active emails and `firmWorkEmail` across all people, **and nothing reads or writes `people.employment_json` from `S0-17b` onwards** (`R417`).
    - **HR sensitive/payroll audit atomicity:** `getEmployeeDetailsForUser`, `logEmployeeRestrictedAccess`, and `savePersonRecord` write `view-payroll`, `view-sensitive`, `update-payroll`, and `update-sensitive` into `audit_entries` in the **same PostgreSQL transaction**. `reassignLeaverOwnedRecords` (`:1196`) becomes 100% single-transaction in PostgreSQL.
 3. **`S0-17c`:** activates `[x-reserved:S0-17]` `customFields` (`tenant-config.schema.json:411`, `config-engine/index.ts:742`, `tenant-config-usage.test.ts:620`) and removes all `@remove-in S0-17*` entries from `src/server/auditAdapter.ts` (leaving only `linkPmsRecord` / `unlinkPmsRecord` for `S0-18`).
 
 ## Tests
 
-- **Unit, `R410`, `R413` & domain tests:** enquiry draft/reopen/privacy/retention (`B3`, `B8`, `R362`), quote conversion (`B5`), tasks (`B9`), sign-offs (`S0-03`), HR sensitive/payroll same-transaction audit, **`ON DELETE RESTRICT` refusal test when attempting to delete a `people` row with `employee_employment_records` or `employee_sensitive_records` (`R413`)**, **`firmWorkEmail` update -> `person_emails` S0-30 test (`R410`)**, and declarative `customFields` (`tenant-config-usage.test.ts`).
+- **Unit, `R410`, `R413`, `R417` & domain tests:** enquiry draft/reopen/privacy/retention (`B3`, `B8`, `R362`), quote conversion (`B5`), tasks (`B9`), sign-offs (`S0-03`), HR sensitive/payroll same-transaction audit, **`ON DELETE RESTRICT` refusal test when attempting to delete a `people` row with `employee_employment_records` or `employee_sensitive_records` (`R413`)**, **`firmWorkEmail` update -> `person_emails` S0-30 test (`R410`)**, **zero `people.employment_json` runtime dependency test in `S0-17b` (`R417`: drop `people.employment_json` in a test database after importing `hr`, then run the HR and people tests and assert all pass)**, and declarative `customFields` (`tenant-config-usage.test.ts`).
 - **Contract, two-tenant isolation & E2E tests:** `0009`–`0011` `upSql` -> `downSql` -> `upSql` round-trips; zero `getStore()`/`saveStore()` left in `authorize.ts`, `documentGenerationServices.ts`, `documentStoreServices.ts`, or `extract/route.ts`; two-tenant PgBouncer isolation (`core/tests/isolation.test.ts`) for every S0-17a/b/c module; all 9 Playwright journeys pass (`npm run e2e`).
 
 ## Help and documentation (rule 11)
@@ -110,7 +110,7 @@ Only **7 synchronous exports** in `src/server/services.ts` remain to convert acr
 ## Acceptance criteria
 
 - Every `FirmStore` collection except `pmsLinks` (`S0-18`) runs exclusively on `TenantScopedRepository` subclasses in PostgreSQL across the three branches/PRs (`S0-17a`, `S0-17b`, `S0-17c`), writing `audit_entries` in the same transaction.
-- `employee_employment_records` and `employee_sensitive_records` enforce `ON DELETE RESTRICT` (`R413`), `firmWorkEmail` stays synced in `person_emails` (`R410`), `people.employment_json` drop is deferred to `S0-20` (`R408`), `[x-reserved:S0-17]` `customFields` is active, and `npm run ci` passes (`MAX_KNOWN_GAPS = 0`).
+- `employee_employment_records` and `employee_sensitive_records` enforce `ON DELETE RESTRICT` (`R413`), `firmWorkEmail` stays synced in `person_emails` (`R410`), nothing reads or writes `people.employment_json` from `S0-17b` onwards while the column drop stays deferred to `S0-20` (`R408`, `R417`), `[x-reserved:S0-17]` `customFields` is active, and `npm run ci` passes (`MAX_KNOWN_GAPS = 0`).
 
 ## Manual blockers
 
