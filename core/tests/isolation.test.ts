@@ -313,7 +313,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     );
     const singleTenantConfig = loadAndValidateTenantConfig(
       notALawFirmBaseConfig,
-      notALawFirmDevOverlay,
+      {
+        ...notALawFirmDevOverlay,
+        featureFlags: { enableDemoMode: false },
+      },
       'live',
       'single_tenant',
     );

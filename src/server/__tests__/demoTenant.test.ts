@@ -15,6 +15,7 @@ import {
 import {
   isDataResetAllowedEnvironment,
   isDemoModeEnabled,
+  resetAllDemoData,
 } from '@/server/services';
 import {
   clearStoreMemoryCache,
@@ -91,6 +92,18 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     expect(isNonLiveDemoEnvironment()).toBe(false);
     expect(isDemoModeEnabled()).toBe(false);
     expect(isDataResetAllowedEnvironment()).toBe(false);
+
+    // R333: NODE_ENV=production with PLATFORM_ENVIRONMENT=live returns false for isDemoModeEnabled()
+    setActiveTenantConfigForTesting(null);
+    vi.stubEnv('PLATFORM_ENVIRONMENT', 'live');
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      expect(isNonLiveDemoEnvironment()).toBe(false);
+      expect(isDemoModeEnabled()).toBe(false);
+      expect(isDataResetAllowedEnvironment()).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('2. getStore() with no runtime file returns a clean deployment store and never back-fills demo data into an existing store', () => {
@@ -208,6 +221,21 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
         logger: () => {},
       });
       expect(forcedResult.event).toBe('seed.demo_tenant_completed');
+
+      // R335: Unparseable store file is refused without --force
+      fs.writeFileSync(storePath, '{ not valid json', 'utf8');
+      expect(() =>
+        runSeedDemoTenant({
+          args: [],
+          env: {
+            ...process.env,
+            PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+            PLATFORM_ENVIRONMENT: 'demo',
+          },
+          runtimeStorePath: storePath,
+          logger: () => {},
+        }),
+      ).toThrow(/Refusing to overwrite an unparseable store file without --force/);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -273,5 +301,134 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     expect(JSON.stringify(regenerated, null, 2)).toBe(
       loadCommittedSeedStoreRaw().replace(/\r\n/g, '\n').trim(),
     );
+  });
+
+  it('7. getStore() in training environment with enableDemoMode=true preserves a custom firm.name instead of overwriting with Not A Law Firm LLP (R313)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r313-branding-'));
+    const storePath = path.join(tmpDir, 'runtime-store.json');
+    const baseCfg = getActiveTenantRawBaseConfig();
+
+    try {
+      setActiveTenantConfigForTesting(
+        {
+          ...baseCfg,
+          environment: 'training',
+        },
+        {
+          environment: 'training',
+          featureFlags: { enableDemoMode: true },
+        },
+      );
+      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
+
+      const customStore = loadCommittedSeedStore();
+      customStore.isCleanDeployment = false;
+      customStore.firm = {
+        name: 'Invented Other LLP',
+        shortName: 'Invented Other',
+        offices: ['Cardiff'],
+      };
+      fs.writeFileSync(storePath, JSON.stringify(customStore, null, 2), 'utf8');
+
+      clearStoreMemoryCache();
+      const loaded = getStore();
+      expect(loaded.firm.name).toBe('Invented Other LLP');
+      expect(loaded.firm.shortName).toBe('Invented Other');
+    } finally {
+      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('8. resetAllDemoData preserves mapped entraObjectId bindings from the pre-reset store (R326)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r326-reset-'));
+    const storePath = path.join(tmpDir, 'runtime-store.json');
+    const mapPath = path.join(tmpDir, 'entra-map.local.json');
+
+    try {
+      fs.writeFileSync(
+        mapPath,
+        JSON.stringify(
+          {
+            'P-000001': '22222222-3333-4444-8555-666666666601',
+            'P-000004': '22222222-3333-4444-8555-666666666604',
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+
+      runSeedDemoTenant({
+        args: ['--entra-map', mapPath],
+        env: {
+          ...process.env,
+          PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+          PLATFORM_ENVIRONMENT: 'demo',
+        },
+        runtimeStorePath: storePath,
+        logger: () => {},
+      });
+
+      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
+      clearStoreMemoryCache();
+
+      resetAllDemoData('P-000004');
+
+      const afterReset = getStore();
+      const p1 = afterReset.people.find((p) => p.id === 'P-000001');
+      const p4 = afterReset.people.find((p) => p.id === 'P-000004');
+      const p2 = afterReset.people.find((p) => p.id === 'P-000002');
+      expect(p1?.entraObjectId).toBe('22222222-3333-4444-8555-666666666601');
+      expect(p4?.entraObjectId).toBe('22222222-3333-4444-8555-666666666604');
+      expect(p2?.entraObjectId).toBeUndefined();
+    } finally {
+      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('9. seed:demo with a faked clock produces key dates in the future and no synthetic entraObjectId values when --entra-map is omitted (R328)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r328-clock-'));
+    const storePath = path.join(tmpDir, 'runtime-store.json');
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2027-06-15T10:00:00Z'));
+    try {
+      runSeedDemoTenant({
+        args: [],
+        env: {
+          ...process.env,
+          PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+          PLATFORM_ENVIRONMENT: 'demo',
+        },
+        runtimeStorePath: storePath,
+        logger: () => {},
+      });
+
+      const seeded = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+      expect(seeded.keyDates.length).toBeGreaterThan(0);
+      for (const kd of seeded.keyDates) {
+        expect(kd.dueDate > '2027-06-15').toBe(true);
+      }
+      const peopleWithOids = seeded.people.filter(
+        (p: { entraObjectId?: string }) => p.entraObjectId !== undefined,
+      );
+      expect(peopleWithOids).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('10. every seeded key date satisfies four-eyes verification (verifiedById !== proposedById) and counters.KD equals keyDates.length (R329)', () => {
+    const committed = loadCommittedSeedStore();
+    expect(committed.keyDates).toBeDefined();
+    expect(committed.keyDates!.length).toBe(5);
+    expect(committed.counters.KD).toBe(committed.keyDates!.length);
+    for (const kd of committed.keyDates!) {
+      expect(kd.verification?.proposedById).toBeDefined();
+      expect(kd.verification?.verifiedById).not.toBe(kd.verification?.proposedById);
+    }
   });
 });

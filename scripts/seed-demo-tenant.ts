@@ -1,4 +1,5 @@
-import './register-server-only-shim';
+process.env.TZ = 'UTC';
+
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,7 +11,7 @@ import {
   resolveRuntimeStorePath,
   writeCommittedSeedStoreSnapshot,
 } from '../src/seed/seedSnapshot';
-import { saveStore, type FirmStore } from '../src/server/store';
+import { createSeedStore, type FirmStore } from '../src/server/store';
 
 export interface SeedDemoTenantOptions {
   args?: string[];
@@ -138,6 +139,13 @@ export function runSeedDemoTenant(
     throw new Error('Refusing to seed demo data in the live environment.');
   }
 
+  const committedSnapshot = loadCommittedSeedStore(rootDir);
+  if (tenantConfig.tenantId !== committedSnapshot.firmId) {
+    throw new Error(
+      `Refusing to seed demo data: tenantId (${tenantConfig.tenantId}) does not match seed snapshot firmId (${committedSnapshot.firmId}).`,
+    );
+  }
+
   if (writeSnapshot) {
     const { store } = writeCommittedSeedStoreSnapshot(rootDir);
     const result: SeedDemoTenantResult = {
@@ -156,21 +164,26 @@ export function runSeedDemoTenant(
 
   if (fs.existsSync(targetStorePath)) {
     let existingStore: Partial<FirmStore> | null = null;
+    let parseFailed = false;
     try {
       existingStore = JSON.parse(
         fs.readFileSync(targetStorePath, 'utf8'),
       ) as Partial<FirmStore>;
     } catch {
-      existingStore = null;
+      parseFailed = true;
     }
-    if (isStoreNonEmpty(existingStore) && !force) {
+    if ((parseFailed || isStoreNonEmpty(existingStore)) && !force) {
       throw new Error(
-        'Refusing to overwrite a non-empty store without --force.',
+        parseFailed
+          ? 'Refusing to overwrite an unparseable store file without --force.'
+          : 'Refusing to overwrite a non-empty store without --force.',
       );
     }
   }
 
-  const seedStore = loadCommittedSeedStore(rootDir);
+  const seedStore = createSeedStore(new Date(), {
+    includeSyntheticEntraOids: false,
+  });
   seedStore.firmId = tenantConfig.tenantId;
   seedStore.isCleanDeployment = false;
 
@@ -192,7 +205,6 @@ export function runSeedDemoTenant(
     fs.mkdirSync(targetDir, { recursive: true });
   }
   fs.writeFileSync(targetStorePath, JSON.stringify(seedStore, null, 2), 'utf8');
-  saveStore(seedStore);
 
   const result: SeedDemoTenantResult = {
     event: 'seed.demo_tenant_completed',

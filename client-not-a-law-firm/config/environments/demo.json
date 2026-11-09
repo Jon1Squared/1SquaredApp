@@ -5,8 +5,8 @@
     "enableDemoMode": true
   },
   "integrations": {
-    "pmsConnectionSecretVaultRef": "kv://kv-not-a-law-firm-demo/pms-connection-string",
-    "companiesHouseApiKeyVaultRef": "kv://kv-not-a-law-firm-demo/companies-house-api-key",
+    "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-demo/pms-connection-string",
+    "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-demo/companies-house-api-key",
     "aiProviderChoice": "anthropic"
   }
 }

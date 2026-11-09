@@ -1,6 +1,9 @@
 {
   "environment": "dev",
   "hostingMode": "multi_tenant",
+  "featureFlags": {
+    "enableDemoMode": true
+  },
   "integrations": {
     "pmsConnectionSecretVaultRef": "kv://kv-not-a-law-firm-dev/pms-connection-string",
     "companiesHouseApiKeyVaultRef": "kv://kv-not-a-law-firm-dev/companies-house-api-key",

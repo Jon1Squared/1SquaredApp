@@ -106,6 +106,7 @@ export interface WorkingHoursConfig {
   workDayEnd: string; // e.g. "17:30"
   workingDays: number[]; // 1..5 (Mon..Fri)
   emergencyHours: number; // default 2
+  useUtc?: boolean;
 }
 
 export const DEFAULT_WORKING_HOURS: WorkingHoursConfig = {
@@ -122,14 +123,36 @@ function parseHm(hm: string): { h: number; m: number; minutes: number } {
   return { h, m, minutes: h * 60 + m };
 }
 
-export function isWorkingDay(date: Date, workingDays: number[] = [1, 2, 3, 4, 5]): boolean {
-  const dow = date.getDay();
+export function isWorkingDay(
+  date: Date,
+  workingDays: number[] = [1, 2, 3, 4, 5],
+  useUtc = false,
+): boolean {
+  const dow = useUtc ? date.getUTCDay() : date.getDay();
   if (!workingDays.includes(dow)) return false;
-  return !EW_BANK_HOLIDAYS.has(toIsoDate(date));
+  const iso = useUtc ? date.toISOString().slice(0, 10) : toIsoDate(date);
+  return !EW_BANK_HOLIDAYS.has(iso);
 }
 
 function nextWorkingDayStart(date: Date, cfg: WorkingHoursConfig): Date {
   const start = parseHm(cfg.workDayStart);
+  if (cfg.useUtc) {
+    const d = new Date(
+      Date.UTC(
+        date.getUTCFullYear(),
+        date.getUTCMonth(),
+        date.getUTCDate() + 1,
+        start.h,
+        start.m,
+        0,
+        0,
+      ),
+    );
+    while (!isWorkingDay(d, cfg.workingDays, true)) {
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    return d;
+  }
   const d = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, start.h, start.m, 0, 0);
   while (!isWorkingDay(d, cfg.workingDays)) {
     d.setDate(d.getDate() + 1);
@@ -147,6 +170,19 @@ export function addWorkingDays(
   const end = parseHm(cfg.workDayEnd);
   const d = new Date(base);
   let remaining = Math.max(0, Math.round(days));
+  if (cfg.useUtc) {
+    while (!isWorkingDay(d, cfg.workingDays, true)) {
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    while (remaining > 0) {
+      d.setUTCDate(d.getUTCDate() + 1);
+      if (isWorkingDay(d, cfg.workingDays, true)) {
+        remaining--;
+      }
+    }
+    d.setUTCHours(end.h, end.m, 0, 0);
+    return d;
+  }
   while (!isWorkingDay(d, cfg.workingDays)) {
     d.setDate(d.getDate() + 1);
   }
@@ -170,13 +206,20 @@ export function addWorkingHours(
   const start = parseHm(cfg.workDayStart);
   const end = parseHm(cfg.workDayEnd);
   let cursor = new Date(base);
+  const useUtc = Boolean(cfg.useUtc);
 
-  if (!isWorkingDay(cursor, cfg.workingDays)) {
+  if (!isWorkingDay(cursor, cfg.workingDays, useUtc)) {
     cursor = nextWorkingDayStart(cursor, cfg);
   } else {
-    const curMin = cursor.getHours() * 60 + cursor.getMinutes();
+    const curMin = useUtc
+      ? cursor.getUTCHours() * 60 + cursor.getUTCMinutes()
+      : cursor.getHours() * 60 + cursor.getMinutes();
     if (curMin < start.minutes) {
-      cursor.setHours(start.h, start.m, 0, 0);
+      if (useUtc) {
+        cursor.setUTCHours(start.h, start.m, 0, 0);
+      } else {
+        cursor.setHours(start.h, start.m, 0, 0);
+      }
     } else if (curMin >= end.minutes) {
       cursor = nextWorkingDayStart(cursor, cfg);
     }
@@ -184,10 +227,16 @@ export function addWorkingHours(
 
   let minsRemaining = Math.max(1, Math.round(hours * 60));
   while (minsRemaining > 0) {
-    const curMin = cursor.getHours() * 60 + cursor.getMinutes();
+    const curMin = useUtc
+      ? cursor.getUTCHours() * 60 + cursor.getUTCMinutes()
+      : cursor.getHours() * 60 + cursor.getMinutes();
     const availToday = Math.max(0, end.minutes - curMin);
     if (minsRemaining <= availToday) {
-      cursor.setMinutes(cursor.getMinutes() + minsRemaining);
+      if (useUtc) {
+        cursor.setUTCMinutes(cursor.getUTCMinutes() + minsRemaining);
+      } else {
+        cursor.setMinutes(cursor.getMinutes() + minsRemaining);
+      }
       minsRemaining = 0;
     } else {
       minsRemaining -= availToday;
@@ -211,6 +260,7 @@ export function calculateFirstContactDue(
   const base = toDate(receivedAt) ?? new Date();
   const norm = urgencyKeyOrLabel.toLowerCase();
   const end = parseHm(cfg.workDayEnd);
+  const useUtc = Boolean(cfg.useUtc);
 
   if (norm.includes('emergency')) {
     return addWorkingHours(base, cfg.emergencyHours || 2, cfg).toISOString();
@@ -218,13 +268,23 @@ export function calculateFirstContactDue(
 
   if (norm.includes('urgent')) {
     const d = new Date(base);
-    const curMin = d.getHours() * 60 + d.getMinutes();
-    if (isWorkingDay(d, cfg.workingDays) && curMin < end.minutes) {
-      d.setHours(end.h, end.m, 0, 0);
+    const curMin = useUtc
+      ? d.getUTCHours() * 60 + d.getUTCMinutes()
+      : d.getHours() * 60 + d.getMinutes();
+    if (isWorkingDay(d, cfg.workingDays, useUtc) && curMin < end.minutes) {
+      if (useUtc) {
+        d.setUTCHours(end.h, end.m, 0, 0);
+      } else {
+        d.setHours(end.h, end.m, 0, 0);
+      }
       return d.toISOString();
     }
     const next = nextWorkingDayStart(d, cfg);
-    next.setHours(end.h, end.m, 0, 0);
+    if (useUtc) {
+      next.setUTCHours(end.h, end.m, 0, 0);
+    } else {
+      next.setHours(end.h, end.m, 0, 0);
+    }
     return next.toISOString();
   }
 

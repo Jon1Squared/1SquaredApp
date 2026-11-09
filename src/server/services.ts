@@ -6402,7 +6402,23 @@ export function resetAllDemoData(byId: string): void {
   const prevStore = getStore();
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
   const actorName = actor ? personDisplayName(actor) : byId;
+  const prevEntraByPersonId = new Map<string, string | null | undefined>();
+  for (const p of prevStore.people) {
+    prevEntraByPersonId.set(p.id, p.entraObjectId);
+  }
   const fresh = resetStore();
+  if (prevEntraByPersonId.size > 0) {
+    for (const p of fresh.people) {
+      if (prevEntraByPersonId.has(p.id)) {
+        const prevOid = prevEntraByPersonId.get(p.id);
+        if (prevOid === undefined) {
+          delete p.entraObjectId;
+        } else {
+          p.entraObjectId = prevOid;
+        }
+      }
+    }
+  }
   writeAudit(fresh, {
     recordType: 'system',
     recordId: 'demo-data',

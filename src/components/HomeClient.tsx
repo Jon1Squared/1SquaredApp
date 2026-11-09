@@ -846,7 +846,14 @@ export function HomeClient({
               <span>Matter openings in progress</span>
             </div>
             <div className="kpi-value">
-              {matters.filter((m) => m.matterStatusId === 'matter_status.opening').length}
+              {
+                matters.filter(
+                  (m) =>
+                    m.matterStatusId === 'matter_status.opening' ||
+                    m.matterStatusId === 'matter_status.prospective_enquiry' ||
+                    m.matterStatusId === 'matter_status.cmi_incomplete',
+                ).length
+              }
             </div>
             <div className="kpi-sub">AML, engagement letter &amp; retainer checks</div>
           </div>
@@ -2494,7 +2501,12 @@ export function HomeClient({
       // 10. matter_openings_in_progress
       // ================================================================
       case 'matter_openings_in_progress': {
-        const openingMatters = matters.filter((m) => m.matterStatusId === 'matter_status.opening');
+        const openingMatters = matters.filter(
+          (m) =>
+            m.matterStatusId === 'matter_status.opening' ||
+            m.matterStatusId === 'matter_status.prospective_enquiry' ||
+            m.matterStatusId === 'matter_status.cmi_incomplete',
+        );
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -2517,12 +2529,15 @@ export function HomeClient({
                       m.conflictDecision?.outcome === 'Cleared' ||
                       m.conflictCheckRecord?.status === 'Cleared' ||
                       m.conflictCheckRecord?.status === 'Approved' ||
-                      m.conflictCheckStatus === 'Cleared';
+                      m.conflictCheckStatus === 'Cleared' ||
+                      m.conflictCheckStatus === 'Clear';
                     const amlDone =
                       m.amlStatus === 'Completed' ||
                       m.amlStatus === 'Verified' ||
                       m.amlStatus === 'Cleared';
-                    const engDone = m.engagementLetterStatus === 'Signed';
+                    const engDone =
+                      m.engagementLetterStatus === 'Signed' ||
+                      m.engagementLetterStatus === 'Signed & returned';
                     const retainerDone =
                       m.retainerMoniesOnAccountGbp !== null && m.retainerMoniesOnAccountGbp > 0;
                     const completedSteps = [conflictDone, amlDone, engDone, retainerDone].filter(
@@ -4462,7 +4477,9 @@ export function HomeClient({
                         </div>
                         <div className="worklist-meta">
                           <span>
-                            {m.conflictCheckRecord?.reviewerMessage || 'Awaiting compliance review'}
+                            {m.conflictCheckRecord?.reviewerMessage ||
+                              m.conflictDecision?.summary ||
+                              'Awaiting compliance review'}
                           </span>
                         </div>
                       </div>
@@ -4589,6 +4606,8 @@ export function HomeClient({
                 isTaskOpen(t) &&
                 t.assignedTeamId === tm.id &&
                 (t.taskTypeId === 'task_type.compliance' ||
+                  t.taskTypeId === 'task_type.conflict_check' ||
+                  t.taskTypeId === 'task_type.complete_matter_opening' ||
                   t.title.toLowerCase().includes('aml') ||
                   t.title.toLowerCase().includes('cdd') ||
                   t.title.toLowerCase().includes('conflict')),

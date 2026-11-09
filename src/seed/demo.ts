@@ -3,7 +3,7 @@
  * All names, companies and numbers are fictional. Phone numbers use Ofcom drama ranges.
  * Every date is relative to `today`.
  */
-import { calculateFirstContactDue } from '@/domain/dates';
+import { calculateFirstContactDue, DEFAULT_WORKING_HOURS } from '@/domain/dates';
 import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
 import {
   getActiveTenantConfiguration,
@@ -1141,6 +1141,14 @@ export function buildDemoData(
     const id = `M-${String(++mn).padStart(6, '0')}`;
     const createdBy = fields.leadFeeEarnerId || 'P-000001';
     const seedOrg = seedPracticeAreaOrgAssignment[fields.practiceAreaId];
+    const conflictDecidedById =
+      fields.conflictClearedById !== undefined && fields.conflictClearedById !== null
+        ? fields.conflictClearedById
+        : 'P-000003';
+    const conflictDecider = people.find((p) => p.id === conflictDecidedById);
+    const conflictDecidedByName = conflictDecider
+      ? `${conflictDecider.firstName} ${conflictDecider.surname}`.trim()
+      : conflictDecidedById;
     const m: Matter = {
       id,
       recordType: 'matter',
@@ -1212,11 +1220,8 @@ export function buildDemoData(
             ? {
                 outcome: 'Cleared',
                 summary: fields.conflictNotes || 'Conflict search completed and cleared.',
-                decidedById:
-                  fields.conflictClearedById !== undefined && fields.conflictClearedById !== null
-                    ? fields.conflictClearedById
-                    : 'P-000003',
-                decidedByName: 'Risk & Compliance',
+                decidedById: conflictDecidedById,
+                decidedByName: conflictDecidedByName,
                 decidedAt: fields.conflictCheckDate ?? day(createdOffset),
                 sourceRecordId: id,
                 matchesCount: 0,
@@ -1232,11 +1237,8 @@ export function buildDemoData(
               ? {
                   outcome: 'Potential conflict',
                   summary: fields.conflictNotes || 'Referred for partner / COLP review.',
-                  decidedById:
-                    fields.conflictClearedById !== undefined && fields.conflictClearedById !== null
-                      ? fields.conflictClearedById
-                      : 'P-000003',
-                  decidedByName: 'Risk & Compliance',
+                  decidedById: conflictDecidedById,
+                  decidedByName: conflictDecidedByName,
                   decidedAt: fields.conflictCheckDate ?? day(createdOffset),
                   sourceRecordId: id,
                   matchesCount: 1,
@@ -1398,7 +1400,7 @@ export function buildDemoData(
       'RE01-11': 'No',
       'RE01-12': 23625,
       'RE01-14': { primary: day(-10), secondary: day(-2) },
-      'RE01-16': day(14),
+      'RE01-16': day(5),
       'RE01-17': day(28),
       'RE01-18': day(58),
     },
@@ -2478,7 +2480,11 @@ export function buildDemoData(
         ? 'Urgent'
         : 'Standard';
     const firstContactDueAt =
-      fields.firstContactDueAt ?? calculateFirstContactDue(receivedAt, urgencyLabel);
+      fields.firstContactDueAt ??
+      calculateFirstContactDue(receivedAt, urgencyLabel, {
+        ...DEFAULT_WORKING_HOURS,
+        useUtc: true,
+      });
 
     const enq: Enquiry = {
       id,

@@ -22,7 +22,6 @@ import {
 } from './rbacRuntime';
 import {
   getActiveTenantConfiguration,
-  isNonLiveDemoEnvironment,
 } from '@/platform/tenantRuntime';
 import type { KeyDate } from '@/domain/keyDates.types';
 import type {
@@ -339,13 +338,13 @@ export function createSeedStore(
     audit: demo.audit,
     mergeHistory: [],
     recentlyViewed: demo.recentlyViewed,
-    counters: { ...demo.counters, PMSL: pmsLinks.length, KD: 6 },
+    counters: { ...demo.counters, PMSL: pmsLinks.length, KD: 5 },
     keyDates: buildSeedKeyDates(partyMigration.matters, demo.teams, today),
     keyDateNotApplicable: [],
     keyDateReminderStates: [],
     keyDateCalendarSyncs: [],
   };
-  migrateFirmBrandingToNotALawFirm(store);
+  syncStoreFirmIdAndHomeRoles(store);
   return store;
 }
 
@@ -366,8 +365,11 @@ function buildSeedKeyDates(
   const m0PartnerId = m0.responsiblePartnerId || m0.leadFeeEarnerId || m0.createdById;
   const m1LeadId = m1.leadFeeEarnerId || m1.responsiblePartnerId || m1.createdById;
   const m2LeadId = m2.leadFeeEarnerId || m2.responsiblePartnerId || m2.createdById;
+  const m2PartnerId = m2.responsiblePartnerId || m2.leadFeeEarnerId || m2.createdById;
   const m4LeadId = m4.leadFeeEarnerId || m4.responsiblePartnerId || m4.createdById;
+  const m4PartnerId = m4.responsiblePartnerId || m4.leadFeeEarnerId || m4.createdById;
   const m6LeadId = m6.leadFeeEarnerId || m6.responsiblePartnerId || m6.createdById;
+  const m6PartnerId = m6.responsiblePartnerId || m6.leadFeeEarnerId || m6.createdById;
   const addDaysIso = (d: number) => {
     const dt = new Date(today.getTime());
     dt.setUTCDate(dt.getUTCDate() + d);
@@ -474,12 +476,12 @@ function buildSeedKeyDates(
         required: false,
         proposedById: m2LeadId,
         proposedAt: nowIso,
-        verifiedById: m2LeadId,
+        verifiedById: m2PartnerId,
         verifiedAt: nowIso,
       },
       createdById: m2LeadId,
       createdAt: nowIso,
-      updatedById: m2LeadId,
+      updatedById: m2PartnerId,
       updatedAt: nowIso,
       version: 1,
     },
@@ -506,13 +508,13 @@ function buildSeedKeyDates(
         required: true,
         proposedById: m4LeadId,
         proposedAt: nowIso,
-        verifiedById: m0PartnerId,
+        verifiedById: m4PartnerId,
         verifiedAt: nowIso,
       },
       notes: 'Statutory 28-day adjudication decision deadline from Referral Notice.',
       createdById: m4LeadId,
       createdAt: nowIso,
-      updatedById: m0PartnerId,
+      updatedById: m4PartnerId,
       updatedAt: nowIso,
       version: 1,
     },
@@ -539,13 +541,13 @@ function buildSeedKeyDates(
         required: true,
         proposedById: m6LeadId,
         proposedAt: nowIso,
-        verifiedById: m6LeadId,
+        verifiedById: m6PartnerId,
         verifiedAt: nowIso,
       },
       notes: 'Listed before Employment Judge for case management directions.',
       createdById: m6LeadId,
       createdAt: nowIso,
-      updatedById: m6LeadId,
+      updatedById: m6PartnerId,
       updatedAt: nowIso,
       version: 1,
     },
@@ -589,7 +591,11 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
 
   return {
     firmId: resolveActiveFirmId(),
-    firm: FIRM,
+    firm: {
+      name: tenantCfg.displayName,
+      shortName: tenantCfg.displayName.replace(/\s+LLP$/i, '').trim() || tenantCfg.displayName,
+      offices: orgStructure.offices.map((o) => o.name),
+    },
     isCleanDeployment: true,
     lists: seedLists.lists,
     values: partyMigration.values,
@@ -669,10 +675,6 @@ async function trySyncToFirestore(store: FirmStore): Promise<void> {
   }
 }
 
-function isStoreDemoModeEnabled(): boolean {
-  return isNonLiveDemoEnvironment();
-}
-
 function hasInvalidSupervisingPartner(person: Person, allPeople: Person[]): boolean {
   const supId = person.employment?.supervisingPartnerId;
   if (!supId) return false;
@@ -704,7 +706,7 @@ function syncStoreHomePageRoles(store: FirmStore): boolean {
   return false;
 }
 
-function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
+function syncStoreFirmIdAndHomeRoles(store: FirmStore): boolean {
   let changed = false;
   const activeFirmId = resolveActiveFirmId();
   if (store.firmId !== activeFirmId) {
@@ -712,79 +714,6 @@ function migrateFirmBrandingToNotALawFirm(store: FirmStore): boolean {
     changed = true;
   }
   if (syncStoreHomePageRoles(store)) {
-    changed = true;
-  }
-  if (!isStoreDemoModeEnabled() || store.isCleanDeployment) {
-    return changed;
-  }
-  const tenantCfg = getActiveTenantConfiguration();
-  const targetDomain = resolveConfiguredFirmPrimaryDomain(tenantCfg);
-  if (!store.firm || store.firm.name !== FIRM.name || store.firm.shortName !== FIRM.shortName) {
-    store.firm = { ...FIRM };
-    changed = true;
-  }
-  if (store.orgStructure && Array.isArray(store.orgStructure.legalEntities)) {
-    const defaultEntities = buildDefaultOrgStructure({
-      legalName: tenantCfg.displayName,
-    }).legalEntities;
-    for (const defLe of defaultEntities) {
-      const existingLe = store.orgStructure.legalEntities.find((le) => le.id === defLe.id);
-      if (existingLe && existingLe.name.includes('Pembroke Vaughan')) {
-        existingLe.name = defLe.name;
-        existingLe.code = defLe.code;
-        changed = true;
-      }
-    }
-  }
-  if (Array.isArray(store.people)) {
-    for (const p of store.people) {
-      if (Array.isArray(p.emails)) {
-        for (const em of p.emails) {
-          if (em.address.toLowerCase().includes('@pembrokevaughan.example')) {
-            em.address = em.address.replace(
-              /@pembrokevaughan\.example/gi,
-              `@${targetDomain}`,
-            );
-            changed = true;
-          }
-        }
-        // Deduplicate emails if migration collapsed an existing + newly added email
-        const seen = new Set<string>();
-        p.emails = p.emails.filter((em) => {
-          const lower = em.address.toLowerCase();
-          if (seen.has(lower)) return false;
-          seen.add(lower);
-          return true;
-        });
-      }
-      if (p.employment?.systems?.firmWorkEmail?.toLowerCase().includes('@pembrokevaughan')) {
-        p.employment.systems.firmWorkEmail = p.employment.systems.firmWorkEmail.replace(
-          /@pembrokevaughan\.example/gi,
-          `@${targetDomain}`,
-        );
-        changed = true;
-      }
-    }
-  }
-  if (store.homePagesConfig && Array.isArray(store.homePagesConfig.roles)) {
-    for (const r of store.homePagesConfig.roles) {
-      if (r.demoUserEmail?.toLowerCase().includes('@pembrokevaughan.example')) {
-        r.demoUserEmail = r.demoUserEmail.replace(
-          /@pembrokevaughan\.example/gi,
-          `@${targetDomain}`,
-        );
-        changed = true;
-      }
-    }
-  }
-  if (
-    store.matterCostsConfig &&
-    (store.matterCostsConfig.clientProfileCode === 'BASE-STANDARD' ||
-      store.matterCostsConfig.clientProfileName.includes('Pembroke Vaughan') ||
-      store.matterCostsConfig.clientProfileName.includes('Standard Base Platform'))
-  ) {
-    store.matterCostsConfig.clientProfileCode = tenantCfg.tenantId;
-    store.matterCostsConfig.clientProfileName = `${tenantCfg.displayName} — Client Configuration (${tenantCfg.branding.primaryDomain})`;
     changed = true;
   }
   return changed;
@@ -1087,7 +1016,7 @@ export function getStore(): FirmStore {
         migrated = true;
       }
 
-      if (migrateFirmBrandingToNotALawFirm(parsed)) {
+      if (syncStoreFirmIdAndHomeRoles(parsed)) {
         migrated = true;
       }
 

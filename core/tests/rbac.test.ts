@@ -127,7 +127,7 @@ import {
 } from '../../src/domain/pms';
 import { getPmsSource } from '../../src/pms/pmsSource';
 import { attentionList } from '../../src/domain/attention';
-import { clearStoreMemoryCache, getStore } from '../../src/server/store';
+import { clearStoreMemoryCache, getStore, resetStore } from '../../src/server/store';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -1300,6 +1300,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('enforces R52, R53, R54, R55, R60, R61, R62, R63, R70 and R71 security invariants', async () => {
+      resetStore();
       resetAllDemoData('P-000001');
 
       // R52: resolveOrProvisionEntraEmployee with roles: [] creates a person without admin and without admin:access
@@ -2346,27 +2347,39 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(isActionDenied(liveReset)).toBe(true);
           if (isActionDenied(liveReset)) {
             expect(liveReset.code).toBe('FORBIDDEN');
+            expect(liveReset.message).toBe(
+              'Demo data reset is disabled in the live environment.',
+            );
           }
           const liveClear = await clearAllDataAction();
           expect(isActionDenied(liveClear)).toBe(true);
           if (isActionDenied(liveClear)) {
             expect(liveClear.code).toBe('FORBIDDEN');
+            expect(liveClear.message).toBe(
+              'Clearing all data is disabled in the live environment.',
+            );
           }
         } finally {
           process.env.PLATFORM_ENVIRONMENT = prevEnv;
           setActiveTenantConfigForTesting(null);
         }
 
-        // Non-live environment with enableDemoMode=false is also denied
+        // Non-live environment with enableDemoMode=false is also denied with its own reason
         const flagOffReset = await resetDemoDataAction();
         expect(isActionDenied(flagOffReset)).toBe(true);
         if (isActionDenied(flagOffReset)) {
           expect(flagOffReset.code).toBe('FORBIDDEN');
+          expect(flagOffReset.message).toBe(
+            'Demo data reset is disabled when enableDemoMode is false.',
+          );
         }
         const flagOffClear = await clearAllDataAction();
         expect(isActionDenied(flagOffClear)).toBe(true);
         if (isActionDenied(flagOffClear)) {
           expect(flagOffClear.code).toBe('FORBIDDEN');
+          expect(flagOffClear.message).toBe(
+            'Clearing all data is disabled when enableDemoMode is false.',
+          );
         }
 
         // Admin with MFA in test environment with enableDemoMode=true succeeds and writes data-reset / data-cleared audit entries with actor name & ID
