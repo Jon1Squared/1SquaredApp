@@ -101,6 +101,7 @@ Do these first, in this order (S0-27 sits between S0-02 and S0-03). S0-01 should
 | S0-11a | Remove demo content from product code (D5), one pull request per area: Home, matter profile, person and organisation profiles. Remove fake compliance statuses and the hard-coded firm name; add a CI check for demo literals. | P6 | L | – |
 | S0-11b | Demo tenant (ADR 0026): a seed command that loads demo data into a tenant, and a non-live demo deployment with demo mode and the email allow-list, so demos keep working. Becomes a tenant in the shared deployment after S0-17. | P6 | M | S0-11a |
 | S0-12 | Tenant settings: apply or remove each of the seven ignored settings; add a test that every schema key is used at runtime or marked reserved. | P7 | S | S0-06 |
+| S0-30 | Employee identity binding (B13, [slice plan](slices/s0-30-employee-identity-binding.md)): changing an employee’s email needs `employee:edit_core` and MFA and is audited; sign-in links by email only within the tenant’s linking domains (new additive `rbac.identityMapping.emailLinking` settings), never to a privileged persona or an ambiguous address; two-tenant and role tests; help. Must land before the demo deployment and any real tenant’s onboarding. | B13, P1, P8 | M | S0-03 |
 
 **Checkpoint A:** re-run the status review for the 0A rows and update `feature-list.md`.
 
@@ -147,14 +148,14 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 | 30 Rates and charging | S0-04, S0-23, S0-28 |
 | 31 Registers engine | S0-24 |
 | 32 Search and notifications | S0-11a, S0-25, S0-26, S0-29 |
-| P1 Permission checks | S0-02 to S0-07, S0-10 |
+| P1 Permission checks | S0-02 to S0-07, S0-10, S0-30 |
 | P2 Off the transitional store | S0-14 to S0-17, S0-20 |
 | P3 PMS per tenant | S0-18 |
 | P4 Finance exposure | S0-10 |
 | P5 Secrets | S0-01 (plus the deferred key rotation) |
 | P6 Demo content | S0-11a, S0-11b |
 | P7 Ignored settings | S0-06, S0-12 |
-| P8 Two-tenant tests | S0-03, S0-15 to S0-18, S0-21, S0-24, S0-25, S0-28 |
+| P8 Two-tenant tests | S0-03, S0-15 to S0-18, S0-21, S0-24, S0-25, S0-28, S0-30 |
 | P9 Scheduler | S0-19 |
 | P10 Test coverage | S0-27, and tests in every slice |
 | P11 Help articles | Every slice |
@@ -166,6 +167,7 @@ Every stage 0 row in `feature-list.md` and the slices that deliver it. Any new s
 | B8, B9 | S0-05 |
 | B11, B12 | S0-03 |
 | B10 | S0-06 |
+| B13 | S0-30 |
 
 ## 5b. Work packages
 
@@ -176,6 +178,7 @@ To cut the number of hand-offs, slices are built and reviewed in five work packa
 | WP1 Safety foundations | S0-01 review fixes (R229–R235), S0-02, S0-27, S0-08 | Now | Nothing |
 | WP2 Lock-down and bug fixes | S0-03, S0-04, S0-05, S0-06, S0-07, S0-09, S0-12 | After WP1 merges | Nothing |
 | WP3 Finance and demo | S0-10, S0-11a, S0-11b | After WP2 | D4 accepted; demo Entra app (manual) |
+| WP3a Identity binding fix | S0-30, on its own branch from `develop` | Now, alongside the WP3 fixes | Nothing |
 | WP4 Make it solid (0B) | S0-13 to S0-20 | After D3 and D6 are accepted | Azure subscription access (manual) |
 | WP5 Make it shared (0C) | S0-21 to S0-26, S0-28, S0-29 | After WP4 | D7, D8, D10, D11; Teams app, mailbox and CFA/DBA caps (manual) |
 
@@ -238,3 +241,4 @@ These need a person with the right admin access. Claude Code should list them in
 | 6 Nov 2026 | Antigravity review of the plan (findings AG1–AG12): added B11 (person save allows self-granted roles) and B12 (ethical walls fail open) to S0-03, which grows to L; widened S0-07 (both conflict searches) and S0-09 (all merge references, no employee merges; now L); two-tenant tests for S0-24 and S0-25; S0-01 and S0-02 slice plans and ADRs 0024 and 0025 corrected. AG12 rejected (the cited references are not in the documents). |
 | 6 Nov 2026 | Work packages (section 5b): five packages, one review each; S0-11a moved to WP3. Draft ADRs 0028 (D3), 0029 (D4) and 0030 (D6) added as Proposed. |
 | 7 Nov 2026 | D12 decided: ADR 0031 accepted (`integrations.aiProviderChoice` gains `anthropic`, default remains `disabled`; extraction runs only when `enableAiMatterExtraction` is true and `aiProviderChoice === 'anthropic'`; `azure_openai_uk` stays reserved). |
+| 9 Nov 2026 | Added B13 (employee sign-in can be taken over: email edits need only `contact:edit`, and sign-in links by email to any unbound employee) and slice S0-30 to fix it, as package WP3a, built from `develop` alongside the WP3 fixes and landing before the demo deployment. Found in the WP3 second retest (R373); predates WP3. Backlog ID list in `CLAUDE.md`, `AGENTS.md` and `feature-list.md` updated for P13 (added in S0-11a) and B13, with the owner’s approval. |
