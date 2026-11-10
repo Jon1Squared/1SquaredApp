@@ -135,8 +135,10 @@ jobs:
       - name: Verify bundled job entry point and container image (R404)
         run: |
           node dist/jobs/run-job.mjs --list
+          node dist/jobs/import-store.mjs --help
           docker build --build-arg PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" -t onesquared-ci:test .
           docker run --rm onesquared-ci:test node dist/jobs/run-job.mjs --list
+          docker run --rm onesquared-ci:test node dist/jobs/import-store.mjs --help
 
   e2e:
     name: Role Journey Smoke Tests (Playwright)

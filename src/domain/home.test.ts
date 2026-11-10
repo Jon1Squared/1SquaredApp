@@ -40,12 +40,12 @@ import {
 } from '@/server/services';
 
 describe('Role-based Home pages & configuration', () => {
-  beforeEach(() => {
-    resetAllDemoData('P-000001');
+  beforeEach(async () => {
+    await resetAllDemoData('P-000001');
   });
 
-  afterAll(() => {
-    resetAllDemoData('P-000001');
+  afterAll(async () => {
+    await resetAllDemoData('P-000001');
   });
 
   it('defines all 43 panels across 7 categories and 35 headline figure cards, including To Do', () => {
@@ -308,7 +308,7 @@ describe('Role-based Home pages & configuration', () => {
     } finally {
       setTestEntraSessionOverride(undefined);
       setActiveTenantConfigForTesting(null, undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 

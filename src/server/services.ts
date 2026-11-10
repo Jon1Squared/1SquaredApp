@@ -3,10 +3,14 @@ import { cookies } from 'next/headers';
 import { resolveRequestCorrelationId } from './correlationId';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import {
-  prepareMergedEntityDocumentsInStore,
-  repointMergedEntityInDocRepository,
+  repointMergedEntityWithCompensation,
   resolveTenantContextForStoreUser,
 } from './documentGenerationServices';
+import { withJsonStoreWriteLock } from './storeLock';
+import {
+  clearMigratedPostgresModulesForTenant,
+  importFirmStoreModulesToPostgres,
+} from './storePostgresImport';
 import { attentionList } from '@/domain/attention';
 import { buildActionDenied, isActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { diffRecords } from '@/domain/audit';
@@ -5636,12 +5640,13 @@ function replaceRecordIdPathSegment(href: string, mergedId: string, survivorId: 
   return href.replace(new RegExp(`(?<=^|/)${escaped}(?=$|/|\\?|#)`, 'g'), survivorId);
 }
 
-export function executeMerge(
+export async function executeMerge(
   recordType: RecordType,
   survivorId: string,
   mergedId: string,
   byId: string,
-): MergeHistory & Partial<ActionDenied> {
+): Promise<MergeHistory & Partial<ActionDenied>> {
+  return withJsonStoreWriteLock(async (compensator) => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -5685,7 +5690,7 @@ export function executeMerge(
   }
 
   // R271 & R272: Resolve verified tenant context before mutating any record
-  const { ctx: resolvedMergeCtx } = resolveTenantContextForStoreUser(
+  resolveTenantContextForStoreUser(
     store,
     actor!.id,
   );
@@ -6059,15 +6064,16 @@ export function executeMerge(
     };
     store.mergeHistory.unshift(history);
 
-    // 8a. Prepare repointed document and documentLink arrays on store after all in-memory repointing and before saveStore (R296)
-    const storeDocsPrepared = prepareMergedEntityDocumentsInStore(
+    // 8. Repoint generated documents and links in PostgreSQL with delta compensation (R405, R406)
+    const repoDocsUpdated = await repointMergedEntityWithCompensation(
       store,
-      resolvedMergeCtx,
+      actor,
       recordType,
       merged.id,
       survivor.id,
+      compensator,
     );
-    if (storeDocsPrepared > 0 && !plan.fieldsTaken.includes('Generated documents')) {
+    if (repoDocsUpdated > 0 && !plan.fieldsTaken.includes('Generated documents')) {
       plan.fieldsTaken.push('Generated documents');
     }
 
@@ -6096,18 +6102,9 @@ export function executeMerge(
     });
 
     saveStore(store);
-
-    // 8b. Write repointed documents and links to TenantDocumentRepository after saveStore (R272)
-    repointMergedEntityInDocRepository(
-      store,
-      actor,
-      recordType,
-      merged.id,
-      survivor.id,
-    );
-
     return history;
   } catch (err) {
+    await compensator.compensateAll();
     for (const key of Object.keys(store)) {
       delete (store as unknown as Record<string, unknown>)[key];
     }
@@ -6131,6 +6128,7 @@ export function executeMerge(
     }
     throw err;
   }
+  });
 }
 
 export function findCandidateDuplicatesForRecord(record: AnyRecord): AnyRecord[] {
@@ -6541,7 +6539,8 @@ export function reorderCustomField(id: string, direction: -1 | 1, byId: string):
   saveStore(store);
 }
 
-export function resetAllDemoData(byId: string): void {
+export async function resetAllDemoData(byId: string): Promise<void> {
+  await withJsonStoreWriteLock(async () => {
   const prevStore = getStore();
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
   const actorName = actor ? personDisplayName(actor) : byId;
@@ -6579,9 +6578,12 @@ export function resetAllDemoData(byId: string): void {
     byId,
   });
   saveStore(fresh);
+  await importFirmStoreModulesToPostgres({ store: fresh, clearFirst: true });
+  });
 }
 
-export function clearAllDataToCleanDeployment(byId: string = 'system'): void {
+export async function clearAllDataToCleanDeployment(byId: string = 'system'): Promise<void> {
+  await withJsonStoreWriteLock(async () => {
   const prevStore = getStore();
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
   const actorName = actor ? personDisplayName(actor) : byId;
@@ -6596,6 +6598,8 @@ export function clearAllDataToCleanDeployment(byId: string = 'system'): void {
     byId,
   });
   saveStore(clean);
+  await clearMigratedPostgresModulesForTenant();
+  });
 }
 
 // ------------------------------------------------------------------ Notifications

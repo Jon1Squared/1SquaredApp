@@ -60,8 +60,8 @@ function buildVerifiedActorSession(personId = 'P-000001') {
 }
 
 describe('S0-08: Matter risk assessment answers kept and scored on the server (B1, Item 4)', () => {
-  beforeEach(() => {
-    resetAllDemoData('P-000001');
+  beforeEach(async () => {
+    await resetAllDemoData('P-000001');
   });
 
   it('1. New matter: stores entered questionnaire answers and sets overallRisk and riskRatingId from server scoring (ignoring client riskRatingId and forged snapshot fields)', async () => {

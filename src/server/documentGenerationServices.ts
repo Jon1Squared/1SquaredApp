@@ -2,11 +2,11 @@
  * Server Services for Core Document Generation (`src/server/documentGenerationServices.ts`).
  *
  * Bridges Next.js server actions and API routes to `@platform/core` Document Generation:
- * - Resolves `TenantContext` from the authenticated user's full role set.
- * - Uses `LocalTenantStorageProvider` (`local-fs` under `data/storage/tenant-<slug>-<env>/`) by default.
- * - Persists template/version/document/link/usage records in `TenantDocumentRepository` synced with `FirmStore`.
- * - Seeds default approved templates (**Client Care & Engagement Letter** and **General Correspondence Letter**)
- *   plus a sample **Submitted** template in the Approval Queue for demo deployments.
+ * - Resolves `TenantContext` from the authenticated user's verified Entra ID session.
+ * - Uses `LocalTenantStorageProvider` (`local-fs` under `data/storage/tenant-<slug>-<env>/`) locally
+ *   or Azure Blob Storage in hosted environments.
+ * - Persists all template, version, generated document, link, usage, and configuration records
+ *   solely in per-tenant PostgreSQL (`TenantDocumentRepository`, `R405`).
  */
 
 import crypto from 'node:crypto';
@@ -44,6 +44,7 @@ import {
   type DocumentLinkRecord,
   type DocumentOutputFormat,
   type DocumentPermission,
+  type DocumentPermissionActor,
   type DocumentStorageProvider,
   type DocumentTemplateRecord,
   type DocumentTemplateVersionRecord,
@@ -54,7 +55,6 @@ import {
   type PromptedFieldDefinition,
   type ScopedDownloadToken,
   type TemplateAvailabilityRules,
-  type DocumentPermissionActor,
   type TemplatePackageManifest,
   type TemplatePlaceholderMapping,
   type TemplateUsageReportFilter,
@@ -93,6 +93,14 @@ import {
   saveStore,
   type FirmStore,
 } from './store';
+import {
+  withJsonStoreWriteLock,
+  type RecordDeltaCompensator,
+} from './storeLock';
+
+void findUnmappedPlaceholders;
+void hasPermission;
+void normaliseActorHomeRoles;
 
 export interface SerializableCatalogueField {
   key: string;
@@ -204,11 +212,12 @@ export function getDocumentStorage(
   return global.__oneSquaredDocStorage;
 }
 
-export function getEffectiveTenantConfig(
-  store: FirmStore,
-): TenantConfiguration {
+export async function getEffectiveTenantConfig(
+  ctx: TenantContext,
+  repo: TenantDocumentRepository,
+): Promise<TenantConfiguration> {
   const baseCfg = getActiveTenantConfiguration();
-  const override = store.documentGenerationConfigOverride;
+  const override = await repo.getDocumentGenerationTenantConfig(ctx);
   if (!override) {
     return baseCfg;
   }
@@ -277,75 +286,6 @@ export function resolveTenantContextForStoreUser(
   return { ctx, user };
 }
 
-function syncStoreToRepository(
-  ctx: TenantContext,
-  store: FirmStore,
-  repo: TenantDocumentRepository,
-  storage: DocumentStorageProvider,
-): void {
-  for (const t of store.documentTemplates ?? []) {
-    if (t.tenantId === ctx.tenantId) {
-      repo.putTemplate(ctx, t);
-    }
-  }
-  for (const v of store.documentTemplateVersions ?? []) {
-    if (v.tenantId === ctx.tenantId) {
-      repo.putTemplateVersion(ctx, v);
-    }
-  }
-  for (const d of store.documents ?? []) {
-    if (d.tenantId === ctx.tenantId) {
-      repo.putDocument(ctx, d);
-    }
-  }
-  for (const l of store.documentLinks ?? []) {
-    if (l.tenantId === ctx.tenantId) {
-      repo.putDocumentLink(ctx, l);
-    }
-  }
-  const existingEventIds = new Set(
-    repo.listUsageEvents(ctx).map((e) => e.id),
-  );
-  for (const ev of store.templateUsageEvents ?? []) {
-    if (ev.tenantId === ctx.tenantId && !existingEventIds.has(ev.id)) {
-      repo.putUsageEvent(ctx, ev);
-    }
-  }
-
-  // Ensure seeded template binaries exist in storage even after a cold restart or in-memory test reset
-  const cclVersion = repo.getTemplateVersionById(ctx, 'TPL-SEED-CCL-V1');
-  if (cclVersion) {
-    void storage
-      .getObjectBytes(ctx, { blobKey: cclVersion.blobKey })
-      .catch(async () => {
-        await storage.putObject(ctx, {
-          category: 'templates',
-          objectId: cclVersion.id,
-          fileName: cclVersion.fileName,
-          contentType:
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          bytes: buildSeedClientCareTemplateDocxBytes(),
-        });
-      });
-  }
-
-  const corrVersion = repo.getTemplateVersionById(ctx, 'TPL-SEED-CORR-V1');
-  if (corrVersion) {
-    void storage
-      .getObjectBytes(ctx, { blobKey: corrVersion.blobKey })
-      .catch(async () => {
-        await storage.putObject(ctx, {
-          category: 'templates',
-          objectId: corrVersion.id,
-          fileName: corrVersion.fileName,
-          contentType:
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          bytes: buildSeedGeneralCorrespondenceDocxBytes(),
-        });
-      });
-  }
-}
-
 export function getDocumentRepository(): TenantDocumentRepository {
   if (!global.__oneSquaredDocRepo) {
     global.__oneSquaredDocRepo = new TenantDocumentRepository();
@@ -353,109 +293,14 @@ export function getDocumentRepository(): TenantDocumentRepository {
   return global.__oneSquaredDocRepo;
 }
 
-export function prepareMergedEntityDocumentsInStore(
-  store: FirmStore,
-  ctx: TenantContext,
-  entityType: 'organisation' | 'person',
-  mergedId: string,
-  survivorId: string,
-): number {
-  const repo = getDocumentRepository();
-  let updatedCount = 0;
-
-  // Include any documents/links present in the repository for this tenant before repointing store arrays
-  const repoDocs = repo.listDocuments(ctx, { includeDeleted: true });
-  if (repoDocs.length > 0) {
-    const storeDocById = new Map(
-      (store.documents ?? []).map((d) => [d.id, d]),
-    );
-    for (const d of repoDocs) {
-      if (!storeDocById.has(d.id)) {
-        storeDocById.set(d.id, { ...d });
-      }
-    }
-    store.documents = Array.from(storeDocById.values());
-
-    const storeLinkById = new Map(
-      (store.documentLinks ?? []).map((l) => [l.id, l]),
-    );
-    for (const d of repoDocs) {
-      for (const l of repo.listLinksForDocument(ctx, d.id)) {
-        if (!storeLinkById.has(l.id)) {
-          storeLinkById.set(l.id, { ...l });
-        }
-      }
-    }
-    store.documentLinks = Array.from(storeLinkById.values());
-  }
-
-  if (Array.isArray(store.documents)) {
-    for (const doc of store.documents) {
-      if (doc.tenantId && doc.tenantId !== ctx.tenantId) continue;
-      let changed = false;
-      if (doc.primaryClientId === mergedId) {
-        doc.primaryClientId = survivorId;
-        changed = true;
-      }
-      if (doc.recipientPartyId === mergedId) {
-        doc.recipientPartyId = survivorId;
-        changed = true;
-      }
-      if (changed) {
-        updatedCount++;
-      }
-    }
-  }
-
-  if (Array.isArray(store.documentLinks)) {
-    const nextLinks: DocumentLinkRecord[] = [];
-    for (const link of store.documentLinks) {
-      if (
-        (!link.tenantId || link.tenantId === ctx.tenantId) &&
-        link.entityType === entityType &&
-        link.entityId === mergedId
-      ) {
-        const duplicateExists =
-          store.documentLinks.some(
-            (other) =>
-              other !== link &&
-              (!other.tenantId || other.tenantId === ctx.tenantId) &&
-              other.documentId === link.documentId &&
-              other.entityType === entityType &&
-              other.entityId === survivorId &&
-              other.linkRole === link.linkRole,
-          ) ||
-          nextLinks.some(
-            (other) =>
-              (!other.tenantId || other.tenantId === ctx.tenantId) &&
-              other.documentId === link.documentId &&
-              other.entityType === entityType &&
-              other.entityId === survivorId &&
-              other.linkRole === link.linkRole,
-          );
-        if (!duplicateExists) {
-          link.entityId = survivorId;
-          nextLinks.push(link);
-          updatedCount++;
-        }
-      } else {
-        nextLinks.push(link);
-      }
-    }
-    store.documentLinks = nextLinks;
-  }
-
-  return updatedCount;
-}
-
-export function repointMergedEntityInDocRepository(
+export async function repointMergedEntityWithCompensation(
   store: FirmStore,
   actor: Person | null,
   entityType: 'organisation' | 'person',
   mergedId: string,
   survivorId: string,
-): number {
-  const repo = getDocumentRepository();
+  compensator: RecordDeltaCompensator,
+): Promise<number> {
   if (!actor) {
     throw new Error(
       'UNAUTHENTICATED: Verified Entra ID session is required for document merge repointing.',
@@ -469,51 +314,56 @@ export function repointMergedEntityInDocRepository(
     actor.id,
     activeVerified,
   );
-
-  // R282: Do not call prepareMergedEntityDocumentsInStore a second time after saveStore.
-  // Snapshot affected tenant repository documents and links before writing, and restore on failure.
-  const repoSnapshot = repo.snapshotTenantDocumentsAndLinks(ctx);
-  try {
-    const repoUpdated = repo.repointMergedEntity(
-      ctx,
-      entityType,
-      mergedId,
-      survivorId,
-    );
-
-    for (const d of store.documents ?? []) {
-      if (d.tenantId === ctx.tenantId) {
-        repo.putDocument(ctx, d);
-      }
-    }
-    for (const l of store.documentLinks ?? []) {
-      if (l.tenantId === ctx.tenantId) {
-        repo.putDocumentLink(ctx, l);
-      }
-    }
-
-    return repoUpdated;
-  } catch (err) {
-    repo.restoreTenantDocumentsAndLinks(ctx, repoSnapshot);
-    throw err;
-  }
+  const repo = getDocumentRepository();
+  const { updatedCount, undoDelta } = await repo.repointMergedEntityWithDelta(
+    ctx,
+    entityType,
+    mergedId,
+    survivorId,
+  );
+  compensator.register('documents.merge_repoint', undoDelta);
+  return updatedCount;
 }
 
-function persistRepositoryToStore(
+async function ensureSeedTemplateBlobsExist(
   ctx: TenantContext,
-  store: FirmStore,
   repo: TenantDocumentRepository,
-): void {
-  store.documentTemplates = repo.listTemplates(ctx);
-  store.documentTemplateVersions = repo.listAllTemplateVersions(ctx);
-  store.documents = repo.listDocuments(ctx, { includeDeleted: true });
-  const allLinks: DocumentLinkRecord[] = [];
-  for (const doc of store.documents) {
-    allLinks.push(...repo.listLinksForDocument(ctx, doc.id));
+  storage: DocumentStorageProvider,
+): Promise<void> {
+  const cclVersion = await repo.getTemplateVersionById(ctx, 'TPL-SEED-CCL-V1');
+  if (cclVersion) {
+    try {
+      await storage.getObjectBytes(ctx, { blobKey: cclVersion.blobKey });
+    } catch {
+      await storage.putObject(ctx, {
+        category: 'templates',
+        objectId: cclVersion.id,
+        fileName: cclVersion.fileName,
+        contentType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        bytes: buildSeedClientCareTemplateDocxBytes(),
+      });
+    }
   }
-  store.documentLinks = allLinks;
-  store.templateUsageEvents = repo.listUsageEvents(ctx);
-  saveStore(store);
+
+  const corrVersion = await repo.getTemplateVersionById(
+    ctx,
+    'TPL-SEED-CORR-V1',
+  );
+  if (corrVersion) {
+    try {
+      await storage.getObjectBytes(ctx, { blobKey: corrVersion.blobKey });
+    } catch {
+      await storage.putObject(ctx, {
+        category: 'templates',
+        objectId: corrVersion.id,
+        fileName: corrVersion.fileName,
+        contentType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        bytes: buildSeedGeneralCorrespondenceDocxBytes(),
+      });
+    }
+  }
 }
 
 /**
@@ -522,13 +372,52 @@ function persistRepositoryToStore(
  * 2. **General Client Correspondence Letter** (`Active`, v1 approved)
  * 3. **File Attendance & Hearing Note** (`Submitted`, awaiting approval in the Approval Queue)
  */
+const inFlightSeedTemplatesByTenant = new Map<string, Promise<void>>();
+
 async function ensureSeedDocumentTemplates(
   ctx: TenantContext,
   store: FirmStore,
   repo: TenantDocumentRepository,
   storage: DocumentStorageProvider,
 ): Promise<void> {
-  if (repo.listTemplates(ctx).length > 0) return;
+  if (store.isCleanDeployment) {
+    return;
+  }
+  const inflightKey = `${ctx.tenantId}::${ctx.postgresDatabaseName}`;
+  const inflight = inFlightSeedTemplatesByTenant.get(inflightKey);
+  if (inflight) {
+    await inflight;
+    return;
+  }
+  const runPromise = ensureSeedDocumentTemplatesInner(ctx, store, repo, storage)
+    .catch((err: unknown) => {
+      const sqlState = (err as { sqlState?: string; code?: string })?.sqlState;
+      if (sqlState === '23505') {
+        return;
+      }
+      throw err;
+    })
+    .finally(() => {
+      inFlightSeedTemplatesByTenant.delete(inflightKey);
+    });
+  inFlightSeedTemplatesByTenant.set(inflightKey, runPromise);
+  await runPromise;
+}
+
+async function ensureSeedDocumentTemplatesInner(
+  ctx: TenantContext,
+  store: FirmStore,
+  repo: TenantDocumentRepository,
+  storage: DocumentStorageProvider,
+): Promise<void> {
+  if (store.isCleanDeployment) {
+    return;
+  }
+  const existingTemplates = await repo.listTemplates(ctx);
+  if (existingTemplates.length > 0) {
+    await ensureSeedTemplateBlobsExist(ctx, repo, storage);
+    return;
+  }
 
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
@@ -567,7 +456,8 @@ async function ensureSeedDocumentTemplates(
   );
   const seedPartnerId =
     activeEmployees.find(
-      (p) => p.roles?.includes('partner') || p.roles?.includes('managing_partner'),
+      (p) =>
+        p.roles?.includes('partner') || p.roles?.includes('managing_partner'),
     )?.id ??
     activeEmployees[0]?.id ??
     ctx.actorId;
@@ -581,7 +471,7 @@ async function ensureSeedDocumentTemplates(
         p.roles?.includes('fee_earner'),
     )?.id ?? seedReviewerId;
 
-  repo.putTemplate(ctx, {
+  await repo.putTemplate(ctx, {
     id: 'TPL-SEED-CCL',
     tenantId: ctx.tenantId,
     code: 'CCL-ENG-01',
@@ -591,7 +481,8 @@ async function ensureSeedDocumentTemplates(
     category: 'Client Care',
     tags: ['client-care', 'engagement', 'onboarding'],
     outputDocumentType: 'client_care',
-    filenamePattern: '{{matter.reference}} - Client Care Letter - {{client.name}}',
+    filenamePattern:
+      '{{matter.reference}} - Client Care Letter - {{client.name}}',
     availabilityRules: {
       sourceContexts: ['matter'],
     },
@@ -602,7 +493,7 @@ async function ensureSeedDocumentTemplates(
     updatedAt: nowIso,
   });
 
-  repo.putTemplateVersion(ctx, {
+  await repo.putTemplateVersion(ctx, {
     id: 'TPL-SEED-CCL-V1',
     tenantId: ctx.tenantId,
     templateId: 'TPL-SEED-CCL',
@@ -627,7 +518,7 @@ async function ensureSeedDocumentTemplates(
     changeNote: 'Initial approved firm-wide Client Care & Engagement Letter',
   });
 
-  // 2. General Client Correspondence Letter (Active, no Financial fields so usable by all roles)
+  // 2. General Client Correspondence Letter (Active)
   const corrBytes = buildSeedGeneralCorrespondenceDocxBytes();
   const corrExtracted = await engine.extractPlaceholders(corrBytes);
   const corrPrompted: PromptedFieldDefinition[] = [
@@ -655,7 +546,7 @@ async function ensureSeedDocumentTemplates(
     bytes: corrBytes,
   });
 
-  repo.putTemplate(ctx, {
+  await repo.putTemplate(ctx, {
     id: 'TPL-SEED-CORR',
     tenantId: ctx.tenantId,
     code: 'CORR-GEN-01',
@@ -665,7 +556,8 @@ async function ensureSeedDocumentTemplates(
     category: 'Correspondence',
     tags: ['letter', 'correspondence', 'general'],
     outputDocumentType: 'letter',
-    filenamePattern: '{{matter.reference}} - Letter to {{party.recipient.name}}',
+    filenamePattern:
+      '{{matter.reference}} - Letter to {{party.recipient.name}}',
     availabilityRules: {
       sourceContexts: ['matter', 'client'],
     },
@@ -676,7 +568,7 @@ async function ensureSeedDocumentTemplates(
     updatedAt: nowIso,
   });
 
-  repo.putTemplateVersion(ctx, {
+  await repo.putTemplateVersion(ctx, {
     id: 'TPL-SEED-CORR-V1',
     tenantId: ctx.tenantId,
     templateId: 'TPL-SEED-CORR',
@@ -714,7 +606,9 @@ async function ensureSeedDocumentTemplates(
       { text: 'Date: {{ date.today | date:"d MMMM yyyy" }}' },
       { text: 'Client: {{ client.name }}' },
       { text: 'Matter: {{ matter.title }}' },
-      { text: 'Fee Earner: {{ feeEarner.fullName }} ({{ feeEarner.jobTitle }})' },
+      {
+        text: 'Fee Earner: {{ feeEarner.fullName }} ({{ feeEarner.jobTitle }})',
+      },
       {
         text: 'Summary of Attendance / Advice Given:',
         heading: 'Heading2',
@@ -748,7 +642,7 @@ async function ensureSeedDocumentTemplates(
     bytes: attBytes,
   });
 
-  repo.putTemplate(ctx, {
+  await repo.putTemplate(ctx, {
     id: 'TPL-SEED-ATT',
     tenantId: ctx.tenantId,
     code: 'ATT-NOTE-01',
@@ -769,7 +663,7 @@ async function ensureSeedDocumentTemplates(
     updatedAt: nowIso,
   });
 
-  repo.putTemplateVersion(ctx, {
+  await repo.putTemplateVersion(ctx, {
     id: 'TPL-SEED-ATT-V1',
     tenantId: ctx.tenantId,
     templateId: 'TPL-SEED-ATT',
@@ -791,8 +685,6 @@ async function ensureSeedDocumentTemplates(
     submittedAt: nowIso,
     changeNote: 'Submitted for Risk & Compliance / Partner approval',
   });
-
-  persistRepositoryToStore(ctx, store, repo);
 }
 
 export async function getInitializedDocGenContext(
@@ -807,20 +699,15 @@ export async function getInitializedDocGenContext(
   storage: DocumentStorageProvider;
 }> {
   const store = getStore();
-  const config = getEffectiveTenantConfig(store);
   const { ctx, user } = resolveTenantContextForStoreUser(
     store,
     userId,
     session,
   );
-
-  if (!global.__oneSquaredDocRepo) {
-    global.__oneSquaredDocRepo = new TenantDocumentRepository();
-  }
-  const repo = global.__oneSquaredDocRepo;
+  const repo = getDocumentRepository();
+  const config = await getEffectiveTenantConfig(ctx, repo);
   const storage = getDocumentStorage(config);
 
-  syncStoreToRepository(ctx, store, repo, storage);
   await ensureSeedDocumentTemplates(ctx, store, repo, storage);
 
   return { store, ctx, user, config, repo, storage };
@@ -843,8 +730,8 @@ export async function getDocumentGenerationSnapshotForUser(
     config,
   );
 
-  const serializableCatalogue: SerializableCatalogueField[] = readableFields.map(
-    (f) => ({
+  const serializableCatalogue: SerializableCatalogueField[] =
+    readableFields.map((f) => ({
       key: f.key,
       displayName: f.displayName,
       description: f.description,
@@ -853,11 +740,14 @@ export async function getDocumentGenerationSnapshotForUser(
       requiredPermission: f.requiredPermission,
       sinceVersion: f.sinceVersion,
       sampleValue: f.sampleValue,
-    }),
-  );
+    }));
 
-  const templates = repo.listTemplates(ctx);
-  const versions = repo.listAllTemplateVersions(ctx);
+  const [templates, versions, allDocs, allLinks] = await Promise.all([
+    repo.listTemplates(ctx),
+    repo.listAllTemplateVersions(ctx),
+    repo.listDocuments(ctx),
+    repo.listAllDocumentLinks(ctx),
+  ]);
   const pendingApprovalsCount = versions.filter(
     (v) => v.status === 'Submitted',
   ).length;
@@ -866,13 +756,22 @@ export async function getDocumentGenerationSnapshotForUser(
     store.matters.map((m) => [m.id, toMatterAccessSubject(m)!]),
   );
 
-  const allDocs = repo.listDocuments(ctx);
+  const linksByDocId = new Map<string, DocumentLinkRecord[]>();
+  for (const link of allLinks) {
+    const bucket = linksByDocId.get(link.documentId);
+    if (bucket) {
+      bucket.push(link);
+    } else {
+      linksByDocId.set(link.documentId, [link]);
+    }
+  }
+
   const accessibleDocs = allDocs.filter((doc) => {
     const linkedMatters = [];
     if (doc.primaryMatterId && mattersById.has(doc.primaryMatterId)) {
       linkedMatters.push(mattersById.get(doc.primaryMatterId)!);
     }
-    for (const l of repo.listLinksForDocument(ctx, doc.id)) {
+    for (const l of linksByDocId.get(doc.id) ?? []) {
       if (l.entityType === 'matter' && mattersById.has(l.entityId)) {
         const m = mattersById.get(l.entityId)!;
         if (!linkedMatters.some((x) => x.id === m.id)) {
@@ -884,10 +783,9 @@ export async function getDocumentGenerationSnapshotForUser(
   });
 
   const accessibleDocIds = new Set(accessibleDocs.map((d) => d.id));
-  const documentLinks: DocumentLinkRecord[] = [];
-  for (const docId of accessibleDocIds) {
-    documentLinks.push(...repo.listLinksForDocument(ctx, docId));
-  }
+  const documentLinks = allLinks.filter((l) =>
+    accessibleDocIds.has(l.documentId),
+  );
 
   const versionById = new Map(versions.map((v) => [v.id, v]));
   const permittedTemplateIds = templates
@@ -918,28 +816,29 @@ export async function getDocumentGenerationSnapshotForUser(
   };
 }
 
-function appendAudit(
-  store: FirmStore,
-  entry: {
-    recordType: 'matter' | 'organisation' | 'person';
-    recordId: string;
-    action: 'create' | 'update' | 'delete';
-    field: string;
-    oldValue: string | null;
-    newValue: string | null;
-    byId: string;
-  },
-): void {
-  store.audit.unshift({
-    id: nextId(store, 'AU'),
-    recordType: entry.recordType,
-    recordId: entry.recordId,
-    action: entry.action === 'delete' ? 'update' : entry.action,
-    field: entry.field,
-    oldValue: entry.oldValue,
-    newValue: entry.newValue,
-    byId: entry.byId,
-    at: new Date().toISOString(),
+async function appendAuditToTransitionalStore(entry: {
+  recordType: 'matter' | 'organisation' | 'person';
+  recordId: string;
+  action: 'create' | 'update' | 'delete';
+  field: string;
+  oldValue: string | null;
+  newValue: string | null;
+  byId: string;
+}): Promise<void> {
+  await withJsonStoreWriteLock(async () => {
+    const store = getStore();
+    store.audit.unshift({
+      id: nextId(store, 'AU'),
+      recordType: entry.recordType,
+      recordId: entry.recordId,
+      action: entry.action === 'delete' ? 'update' : entry.action,
+      field: entry.field,
+      oldValue: entry.oldValue,
+      newValue: entry.newValue,
+      byId: entry.byId,
+      at: new Date().toISOString(),
+    });
+    saveStore(store);
   });
 }
 
@@ -1000,7 +899,7 @@ export async function uploadTemplateDraftService(
     },
   });
 
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: 'matter',
     recordId: result.template.id,
     action: 'create',
@@ -1010,7 +909,6 @@ export async function uploadTemplateDraftService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return result;
 }
 
@@ -1041,7 +939,7 @@ export async function updateTemplateDraftService(
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
 
-  const result = updateDraftTemplateVersion({
+  return updateDraftTemplateVersion({
     ctx,
     repo,
     catalogue,
@@ -1053,9 +951,6 @@ export async function updateTemplateDraftService(
     templateMetadata: input.templateMetadata,
     changeNote: input.changeNote,
   });
-
-  persistRepositoryToStore(ctx, store, repo);
-  return result;
 }
 
 export async function submitTemplateVersionService(
@@ -1069,7 +964,7 @@ export async function submitTemplateVersionService(
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
 
-  const result = submitTemplateVersionForApproval({
+  const result = await submitTemplateVersionForApproval({
     ctx,
     repo,
     catalogue,
@@ -1080,7 +975,7 @@ export async function submitTemplateVersionService(
   });
 
   const activatedDirectly = result.version.status === 'Active';
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: 'matter',
     recordId: result.template.id,
     action: 'update',
@@ -1092,7 +987,6 @@ export async function submitTemplateVersionService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return result;
 }
 
@@ -1101,11 +995,13 @@ export async function approveTemplateVersionService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ) {
-  const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId, session);
+  const { ctx, user, config, repo } = await getInitializedDocGenContext(
+    userId,
+    session,
+  );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = approveTemplateVersion({
+  const result = await approveTemplateVersion({
     ctx,
     repo,
     actor,
@@ -1113,7 +1009,7 @@ export async function approveTemplateVersionService(
     versionId,
   });
 
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: 'matter',
     recordId: result.template.id,
     action: 'update',
@@ -1123,7 +1019,6 @@ export async function approveTemplateVersionService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return result;
 }
 
@@ -1133,11 +1028,13 @@ export async function rejectTemplateVersionService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ) {
-  const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId, session);
+  const { ctx, user, config, repo } = await getInitializedDocGenContext(
+    userId,
+    session,
+  );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = rejectTemplateVersion({
+  const result = await rejectTemplateVersion({
     ctx,
     repo,
     actor,
@@ -1146,7 +1043,7 @@ export async function rejectTemplateVersionService(
     rejectionReason,
   });
 
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: 'matter',
     recordId: result.template.id,
     action: 'update',
@@ -1156,7 +1053,6 @@ export async function rejectTemplateVersionService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return result;
 }
 
@@ -1165,11 +1061,13 @@ export async function retireTemplateService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ) {
-  const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId, session);
+  const { ctx, user, config, repo } = await getInitializedDocGenContext(
+    userId,
+    session,
+  );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = retireTemplate({
+  const result = await retireTemplate({
     ctx,
     repo,
     actor,
@@ -1177,7 +1075,7 @@ export async function retireTemplateService(
     templateId,
   });
 
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: 'matter',
     recordId: result.id,
     action: 'update',
@@ -1187,7 +1085,6 @@ export async function retireTemplateService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return result;
 }
 
@@ -1197,11 +1094,13 @@ export async function rollbackTemplateVersionService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ) {
-  const { store, ctx, user, config, repo } =
-    await getInitializedDocGenContext(userId, session);
+  const { ctx, user, config, repo } = await getInitializedDocGenContext(
+    userId,
+    session,
+  );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = rollbackTemplateToVersion({
+  const result = await rollbackTemplateToVersion({
     ctx,
     repo,
     actor,
@@ -1210,7 +1109,7 @@ export async function rollbackTemplateVersionService(
     targetVersionId,
   });
 
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: 'matter',
     recordId: result.template.id,
     action: 'update',
@@ -1220,7 +1119,6 @@ export async function rollbackTemplateVersionService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return result;
 }
 
@@ -1269,7 +1167,7 @@ export async function importTemplatePackageService(
     pkg,
   });
 
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: 'matter',
     recordId: result.template.id,
     action: 'create',
@@ -1279,7 +1177,6 @@ export async function importTemplatePackageService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return result;
 }
 
@@ -1367,7 +1264,6 @@ export async function previewTemplateService(
     outputFormat: input.outputFormat,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return {
     fileBase64: Buffer.from(res.outputBytes).toString('base64'),
     fileName: res.fileName,
@@ -1481,7 +1377,7 @@ export async function generateDocumentService(
   });
 
   if (res.status === 'generated' && res.document) {
-    appendAudit(store, {
+    await appendAuditToTransitionalStore({
       recordType: matter
         ? 'matter'
         : organisation
@@ -1496,7 +1392,6 @@ export async function generateDocumentService(
     });
   }
 
-  persistRepositoryToStore(ctx, store, repo);
   return {
     status: res.status,
     document: res.document,
@@ -1522,7 +1417,7 @@ export async function downloadGeneratedDocumentService(
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const doc = repo.getDocumentById(ctx, documentId);
+  const doc = await repo.getDocumentById(ctx, documentId);
   if (!doc || doc.isDeleted) {
     throw new Error('DOCUMENT_NOT_FOUND: Document not found.');
   }
@@ -1532,7 +1427,7 @@ export async function downloadGeneratedDocumentService(
     const m = store.matters.find((x) => x.id === doc.primaryMatterId);
     if (m) linkedMatters.push(toMatterAccessSubject(m)!);
   }
-  for (const link of repo.listLinksForDocument(ctx, doc.id)) {
+  for (const link of await repo.listLinksForDocument(ctx, doc.id)) {
     if (link.entityType === 'matter') {
       const m = store.matters.find((x) => x.id === link.entityId);
       if (m && !linkedMatters.some((x) => x.id === m.id)) {
@@ -1586,7 +1481,7 @@ export async function deleteGeneratedDocumentService(
     },
   });
 
-  appendAudit(store, {
+  await appendAuditToTransitionalStore({
     recordType: deleted.primaryMatterId ? 'matter' : 'organisation',
     recordId: deleted.primaryMatterId ?? deleted.primaryClientId ?? deleted.id,
     action: 'delete',
@@ -1596,7 +1491,6 @@ export async function deleteGeneratedDocumentService(
     byId: user.id,
   });
 
-  persistRepositoryToStore(ctx, store, repo);
   return deleted;
 }
 
@@ -1615,7 +1509,7 @@ export async function getTemplateUsageReportService(
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const report = queryTemplateUsageReport({
+  const report = await queryTemplateUsageReport({
     ctx,
     repo,
     actor,
@@ -1650,7 +1544,7 @@ export async function updateDocumentGenerationConfigService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<DocumentGenerationConfig> {
-  const { store, ctx, user, config } = await getInitializedDocGenContext(
+  const { ctx, user, config, repo } = await getInitializedDocGenContext(
     userId,
     session,
   );
@@ -1700,17 +1594,31 @@ export async function updateDocumentGenerationConfigService(
     merged,
   ) as DocumentGenerationConfig;
 
-  store.documentGenerationConfigOverride = validated;
-  appendAudit(store, {
-    recordType: 'matter',
-    recordId: 'FIRM-DOCGEN-CONFIG',
-    action: 'update',
-    field: 'Document Generation Configuration Updated',
-    oldValue: null,
-    newValue: `Storage: ${validated.storageProvider}, Default Format: ${validated.defaultOutputFormat}, Self-Approval: ${validated.approval.allowSelfApproval}`,
-    byId: user.id,
+  await withJsonStoreWriteLock(async (compensator) => {
+    const previousOverride = await repo.getDocumentGenerationTenantConfig(ctx);
+    await repo.putDocumentGenerationTenantConfig(ctx, validated, user.id);
+    compensator.register('documents.config_override', async () => {
+      await repo.putDocumentGenerationTenantConfig(
+        ctx,
+        previousOverride,
+        user.id,
+      );
+    });
+
+    const store = getStore();
+    store.audit.unshift({
+      id: nextId(store, 'AU'),
+      recordType: 'matter',
+      recordId: 'FIRM-DOCGEN-CONFIG',
+      action: 'update',
+      field: 'Document Generation Configuration Updated',
+      oldValue: null,
+      newValue: `Storage: ${validated.storageProvider}, Default Format: ${validated.defaultOutputFormat}, Self-Approval: ${validated.approval.allowSelfApproval}`,
+      byId: user.id,
+      at: new Date().toISOString(),
+    });
+    saveStore(store);
   });
-  saveStore(store);
 
   return validated;
 }

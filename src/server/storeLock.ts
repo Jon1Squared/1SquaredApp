@@ -12,9 +12,41 @@
  *    operation's store snapshot (`R406`).
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
-
 export type CompensationStep = () => Promise<void> | void;
+
+interface AsyncLocalStorageLike<T> {
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
+}
+
+let cachedStoreLockContextStorage:
+  | AsyncLocalStorageLike<ActiveStoreWriteLockContext>
+  | null
+  | undefined;
+
+function getStoreLockContextStorage(): AsyncLocalStorageLike<ActiveStoreWriteLockContext> | null {
+  if (cachedStoreLockContextStorage !== undefined) {
+    return cachedStoreLockContextStorage;
+  }
+  if (
+    typeof window !== 'undefined' ||
+    typeof process.getBuiltinModule !== 'function'
+  ) {
+    cachedStoreLockContextStorage = null;
+    return null;
+  }
+  try {
+    const asyncHooks = process.getBuiltinModule('node:async_hooks') as
+      | typeof import('node:async_hooks')
+      | undefined;
+    cachedStoreLockContextStorage = asyncHooks?.AsyncLocalStorage
+      ? new asyncHooks.AsyncLocalStorage<ActiveStoreWriteLockContext>()
+      : null;
+  } catch {
+    cachedStoreLockContextStorage = null;
+  }
+  return cachedStoreLockContextStorage;
+}
 
 export class RecordDeltaCompensator {
   private readonly undoSteps: Array<{
@@ -56,13 +88,10 @@ interface ActiveStoreWriteLockContext {
   depth: number;
 }
 
-const storeLockContextStorage =
-  new AsyncLocalStorage<ActiveStoreWriteLockContext>();
-
 let lockQueueTail: Promise<void> = Promise.resolve();
 
 export function getActiveRecordDeltaCompensator(): RecordDeltaCompensator | null {
-  return storeLockContextStorage.getStore()?.compensator ?? null;
+  return getStoreLockContextStorage()?.getStore()?.compensator ?? null;
 }
 
 /**
@@ -74,7 +103,8 @@ export function getActiveRecordDeltaCompensator(): RecordDeltaCompensator | null
 export async function withJsonStoreWriteLock<T>(
   fn: (compensator: RecordDeltaCompensator) => Promise<T> | T,
 ): Promise<T> {
-  const existing = storeLockContextStorage.getStore();
+  const lockStorage = getStoreLockContextStorage();
+  const existing = lockStorage?.getStore();
   if (existing) {
     existing.depth += 1;
     try {
@@ -101,9 +131,9 @@ export async function withJsonStoreWriteLock<T>(
   };
 
   try {
-    const result = await storeLockContextStorage.run(context, async () =>
-      fn(compensator),
-    );
+    const result = lockStorage
+      ? await lockStorage.run(context, async () => fn(compensator))
+      : await fn(compensator);
     compensator.clear();
     return result;
   } catch (err) {

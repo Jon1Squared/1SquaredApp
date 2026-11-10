@@ -115,15 +115,15 @@ function mockAnthropicSuccessResponse(overrides?: Record<string, unknown>) {
 }
 
 describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, and isolation', () => {
-  beforeEach(() => {
-    resetAllDemoData('P-000001');
+  beforeEach(async () => {
+    await resetAllDemoData('P-000001');
     clearMatterExtractionCacheForTesting();
     setActiveTenantConfigForTesting(null);
     setTestEntraSessionOverride(FEE_EARNER_SESSION);
     process.env.ANTHROPIC_API_KEY = 'test-anthropic-key-fixture';
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearMatterExtractionCacheForTesting();
     setActiveTenantConfigForTesting(null);
     setTestEntraSessionOverride(undefined);
@@ -134,7 +134,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     }
     globalThis.fetch = ORIGINAL_FETCH;
     vi.restoreAllMocks();
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
   });
 
   it('returns 403 FORBIDDEN when signed in without matter:create', async () => {

@@ -13,6 +13,13 @@ import {
   type TenantContext,
   type TenantMigrationDefinition,
 } from '@platform/core';
+import * as corePkg from '@platform/core';
+import * as tenantRuntimePkg from '@/platform/tenantRuntime';
+import { createSeedStore } from '@/server/store';
+import {
+  buildSystemImportTenantContext,
+  importFirmStoreModulesToPostgres,
+} from '@/server/storePostgresImport';
 import { runMigrateJobSweep } from '../../scripts/run-job';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
@@ -386,5 +393,127 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     } finally {
       await cleanPoolMgr.closeAllPools();
     }
+  });
+
+  it('deletes PostgresTenantCluster and JSON sync bridges, and imports Document Generation & Document Store metadata idempotently across double-runs (Owner Decisions 2 & 6, R405)', async () => {
+    expect('PostgresTenantCluster' in corePkg).toBe(false);
+    expect('getPlatformPostgresCluster' in tenantRuntimePkg).toBe(false);
+
+    const docGenSvcSrc = fs.readFileSync(
+      path.join(REPO_ROOT, 'src', 'server', 'documentGenerationServices.ts'),
+      'utf8',
+    );
+    const docStoreSvcSrc = fs.readFileSync(
+      path.join(REPO_ROOT, 'src', 'server', 'documentStoreServices.ts'),
+      'utf8',
+    );
+    expect(docGenSvcSrc).not.toContain('syncStoreToRepository');
+    expect(docGenSvcSrc).not.toContain('persistRepositoryToStore');
+    expect(docStoreSvcSrc).not.toContain('ensureRepositorySyncedWithStore');
+    expect(docStoreSvcSrc).not.toContain('persistRepositoryToStore');
+
+    const seed = createSeedStore();
+    const tenantConfig = tenantRuntimePkg.getActiveTenantConfiguration();
+    const ctx = buildSystemImportTenantContext(tenantConfig);
+
+    seed.documentTemplates = [
+      {
+        id: 'TPL-IMPORT-1',
+        tenantId: ctx.tenantId,
+        code: 'IMP-01',
+        name: 'Imported Template',
+        description: 'Idempotent import check',
+        category: 'General',
+        tags: ['import'],
+        outputDocumentType: 'letter',
+        filenamePattern: '{{matter.reference}} - Imported',
+        availabilityRules: { sourceContexts: ['matter'] },
+        activeVersionId: 'TPLV-IMPORT-1',
+        status: 'Active',
+        createdByUserId: 'P-000001',
+        createdAt: '2026-11-09T10:00:00.000Z',
+        updatedAt: '2026-11-09T10:00:00.000Z',
+      },
+    ];
+    seed.documentTemplateVersions = [
+      {
+        id: 'TPLV-IMPORT-1',
+        tenantId: ctx.tenantId,
+        templateId: 'TPL-IMPORT-1',
+        versionNumber: 1,
+        engine: 'basic-merge',
+        status: 'Active',
+        storageProvider: 'local-fs',
+        blobKey: 'templates/TPLV-IMPORT-1/imported.docx',
+        fileName: 'imported.docx',
+        fileSha256: 'abc123',
+        fileSizeBytes: 512,
+        scanStatus: 'clean',
+        extractedPlaceholders: [],
+        fieldMappings: {},
+        promptedFields: [],
+        createdByUserId: 'P-000001',
+        createdAt: '2026-11-09T10:00:00.000Z',
+      },
+    ];
+    seed.templateUsageEvents = [
+      {
+        id: 'TUE-IMPORT-1',
+        tenantId: ctx.tenantId,
+        templateId: 'TPL-IMPORT-1',
+        templateVersionId: 'TPLV-IMPORT-1',
+        versionNumber: 1,
+        eventType: 'generated',
+        occurredAt: '2026-11-09T11:00:00.000Z',
+        actorUserId: 'P-000001',
+        actorRoleKey: 'partner',
+        sourceEntityType: 'matter',
+        outputFormat: 'docx',
+        missingFieldKeys: [],
+        durationMs: 25,
+        correlationId: 'corr-imp-1',
+      },
+    ];
+    seed.documentStoreAuditEvents = [
+      {
+        id: 'DSAE-IMPORT-1',
+        tenantId: ctx.tenantId,
+        correlationId: 'corr-imp-ds-1',
+        occurredAt: '2026-11-09T11:05:00.000Z',
+        actorUserId: 'P-000001',
+        identityUsed: 'user',
+        triggerEvent: 'test.import',
+        action: 'document:listed',
+        matterId: 'M-000001',
+        storeId: 'default-sp',
+        libraryId: 'lib-1',
+        providerItemId: null,
+        outcome: 'succeeded',
+        errorCode: null,
+        metadata: {},
+      },
+    ];
+
+    const firstImport = await importFirmStoreModulesToPostgres({
+      store: seed,
+      tenantConfig,
+      modules: ['documents', 'document-store', 'key-dates'],
+      clearFirst: true,
+    });
+    const secondImport = await importFirmStoreModulesToPostgres({
+      store: seed,
+      tenantConfig,
+      modules: ['documents', 'document-store', 'key-dates'],
+      clearFirst: false,
+    });
+
+    expect(secondImport.counts).toEqual(firstImport.counts);
+
+    const docRepo = new corePkg.TenantDocumentRepository();
+    const docStoreRepo = new corePkg.TenantDocumentStoreRepository();
+    const summaries = await docRepo.listUsageSummaries(ctx);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]!.generatedCount).toBe(1);
+    expect(await docStoreRepo.listAuditEvents(ctx)).toHaveLength(1);
   });
 });

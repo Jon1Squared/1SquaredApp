@@ -14,7 +14,6 @@ import {
   CORE_VERSION,
   ExtensionHost,
   loadAndValidateTenantConfig,
-  PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
   validateExtensionManifest,
@@ -254,7 +253,6 @@ export interface ExtensionLoadError {
 let cachedHost: ExtensionHost | null = null;
 let cachedHostKey: string | null = null;
 let cachedHostLoadErrors: ExtensionLoadError[] = [];
-let cachedCluster: PostgresTenantCluster | null = null;
 
 export function getExtensionHostLoadErrors(): readonly ExtensionLoadError[] {
   if (!cachedHost) {
@@ -523,12 +521,6 @@ export function getPlatformExtensionHost(): ExtensionHost {
   return cachedHost;
 }
 
-export function getPlatformPostgresCluster(): PostgresTenantCluster {
-  if (!cachedCluster) {
-    cachedCluster = new PostgresTenantCluster();
-  }
-  return cachedCluster;
-}
 
 const ALLOWED_PLATFORM_ENVIRONMENTS = new Set<TenantConfiguration['environment']>([
   'dev',
@@ -724,6 +716,46 @@ export function resolveCurrentTenantContext(
           vaultUri: cfg.keyVault.vaultUri,
         }
       : undefined,
+  });
+}
+
+export function resolveSystemImportTenantContext(
+  tenantConfig: TenantConfiguration = getActiveTenantConfiguration(),
+  options?: {
+    postgresHostOverride?: string;
+    correlationId?: string;
+  },
+): TenantContext {
+  const configuredPostgresHost =
+    options?.postgresHostOverride?.trim() ||
+    tenantConfig.database?.dedicatedServerHost?.trim() ||
+    undefined;
+
+  return resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: 'system-store-import',
+      tenantId: tenantConfig.tenantId,
+      name: 'Platform Store Importer',
+      email: 'store-import@platform.example',
+      roles: ['admin'],
+      mfaVerified: true,
+    },
+    hostingMode: tenantConfig.hostingMode,
+    environment: tenantConfig.environment,
+    correlationId: resolveRequestCorrelationId(
+      options?.correlationId,
+      'corr-store-import',
+    ),
+    ...(configuredPostgresHost ? { configuredPostgresHost } : {}),
+    ...(tenantConfig.keyVault
+      ? {
+          configuredKeyVault: {
+            vaultName: tenantConfig.keyVault.vaultName,
+            vaultUri: tenantConfig.keyVault.vaultUri,
+          },
+        }
+      : {}),
   });
 }
 

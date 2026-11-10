@@ -311,6 +311,12 @@ runStep(
   ['dist/jobs/run-job.mjs', '--list'],
   liveBuildEnv,
 );
+runStep(
+  '10b2/12 Execute node dist/jobs/import-store.mjs --help',
+  process.execPath,
+  ['dist/jobs/import-store.mjs', '--help'],
+  liveBuildEnv,
+);
 const dockerInfoRes = spawnSync(isWin ? 'docker.exe' : 'docker', ['info'], {
   stdio: 'ignore',
   shell: false,

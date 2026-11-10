@@ -158,12 +158,12 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     }
   });
 
-  it('isolates KeyDate, ReminderState, CalendarSync, NotApplicable, and AuditEvent records between Tenant A and Tenant B, including tampered record IDs and cross-tenant writes (R30, R31)', () => {
+  it('isolates KeyDate, ReminderState, CalendarSync, NotApplicable, and AuditEvent records between Tenant A and Tenant B, including tampered record IDs and cross-tenant writes (R30, R31)', async () => {
     const repo = new TenantKeyDateRepository();
     const ctxA = createVerifiedTenantContext('tenant-alpha', 'P-ALPHA-1');
     const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
 
-    repo.setMatterRestriction(ctxA, {
+    await repo.setMatterRestriction(ctxA, {
       matterId: 'M-ALPHA-001',
       isRestricted: false,
       restrictedAccessUserIds: [],
@@ -174,8 +174,8 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       matterId: 'M-ALPHA-001',
       title: 'Alpha Limitation',
     });
-    repo.putKeyDate(ctxA, kdAlpha);
-    repo.putReminderState(ctxA, {
+    await repo.putKeyDate(ctxA, kdAlpha);
+    await repo.putReminderState(ctxA, {
       keyDateId: kdAlpha.id,
       taskId: 'TSK-ALPHA-001',
       idempotencyKey: `keydate-reminder:tenant-alpha:${kdAlpha.id}`,
@@ -185,11 +185,10 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       escalationLevel: 0,
       lastSkippedReason: 'no_permitted_assignees',
     });
-    expect(repo.getReminderState(ctxA, kdAlpha.id)?.lastSkippedReason).toBe(
+    expect((await repo.getReminderState(ctxA, kdAlpha.id))?.lastSkippedReason).toBe(
       'no_permitted_assignees',
     );
-    expect(() =>
-      repo.putReminderState(ctxA, {
+    await expect(repo.putReminderState(ctxA, {
         keyDateId: kdAlpha.id,
         taskId: 'TSK-ALPHA-001',
         idempotencyKey: `keydate-reminder:tenant-alpha:${kdAlpha.id}`,
@@ -198,23 +197,22 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
         stageEnteredAt: '2026-11-03T00:00:00.000Z',
         escalationLevel: 0,
         lastSkippedReason: 'forged_reason' as unknown as 'no_permitted_assignees',
-      }),
-    ).toThrow(/KEY_DATE_VALIDATION_ERROR/);
-    repo.putCalendarSync(ctxA, {
+      })).rejects.toThrow(/KEY_DATE_VALIDATION_ERROR/);
+    await repo.putCalendarSync(ctxA, {
       keyDateId: kdAlpha.id,
       externalEvents: [{ target: 'person:P-ALPHA-1', eventId: 'evt-alpha-1' }],
       state: 'synced',
       lastSyncedAt: '2026-11-03T00:00:00.000Z',
       attempts: 1,
     });
-    repo.putNotApplicable(ctxA, {
+    await repo.putNotApplicable(ctxA, {
       matterId: 'M-ALPHA-001',
       keyDateTypeId: 'undertaking',
       reason: 'No undertaking given on this matter',
       recordedById: 'P-ALPHA-1',
       recordedAt: '2026-11-03T00:00:00.000Z',
     });
-    repo.appendAuditEvent(ctxA, {
+    await repo.appendAuditEvent(ctxA, {
       id: 'AU-KD-ALPHA-1',
       keyDateId: kdAlpha.id,
       matterId: 'M-ALPHA-001',
@@ -225,16 +223,16 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     });
 
     // Tenant B attempting to fetch Tenant A's records by tampered ID gets null / empty
-    expect(repo.getKeyDateById(ctxB, 'KD-SHARED-ID-001')).toBeNull();
-    expect(repo.getReminderState(ctxB, 'KD-SHARED-ID-001')).toBeNull();
-    expect(repo.getCalendarSync(ctxB, 'KD-SHARED-ID-001')).toBeNull();
-    expect(repo.listKeyDatesForMatter(ctxB, 'M-ALPHA-001')).toEqual([]);
-    expect(repo.listNotApplicableForMatter(ctxB, 'M-ALPHA-001')).toEqual([]);
+    expect(await repo.getKeyDateById(ctxB, 'KD-SHARED-ID-001')).toBeNull();
+    expect(await repo.getReminderState(ctxB, 'KD-SHARED-ID-001')).toBeNull();
+    expect(await repo.getCalendarSync(ctxB, 'KD-SHARED-ID-001')).toBeNull();
+    expect(await repo.listKeyDatesForMatter(ctxB, 'M-ALPHA-001')).toEqual([]);
+    expect(await repo.listNotApplicableForMatter(ctxB, 'M-ALPHA-001')).toEqual([]);
     expect(
-      repo.listAuditEvents(ctxB, { keyDateId: 'KD-SHARED-ID-001' }),
+      await repo.listAuditEvents(ctxB, { keyDateId: 'KD-SHARED-ID-001' }),
     ).toEqual([]);
     expect(
-      repo.queryKeyDatesForDiary(ctxB, {
+      await repo.queryKeyDatesForDiary(ctxB, {
         teamIds: ['TM-000001'],
         from: '2026-01-01',
         to: '2028-12-31',
@@ -242,8 +240,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     ).toEqual([]);
 
     // Tenant B attempting to write ReminderState or CalendarSync referencing Tenant A's keyDateId or unregistered matter is rejected
-    expect(() =>
-      repo.putReminderState(ctxB, {
+    await expect(repo.putReminderState(ctxB, {
         keyDateId: 'KD-SHARED-ID-001',
         taskId: 'TSK-BRAVO-FORGED',
         idempotencyKey: 'keydate-reminder:tenant-bravo:KD-SHARED-ID-001',
@@ -251,33 +248,28 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
         currentStageDaysBefore: 30,
         stageEnteredAt: '2026-11-03T00:00:00.000Z',
         escalationLevel: 0,
-      }),
-    ).toThrow(/KEY_DATE_NOT_FOUND/);
-    expect(() =>
-      repo.putCalendarSync(ctxB, {
+      })).rejects.toThrow(/KEY_DATE_NOT_FOUND/);
+    await expect(repo.putCalendarSync(ctxB, {
         keyDateId: 'KD-SHARED-ID-001',
         externalEvents: [],
         state: 'disabled',
         attempts: 0,
-      }),
-    ).toThrow(/KEY_DATE_NOT_FOUND/);
-    expect(() =>
-      repo.putKeyDate(ctxB, {
+      })).rejects.toThrow(/KEY_DATE_NOT_FOUND/);
+    await expect(repo.putKeyDate(ctxB, {
         ...kdAlpha,
         title: 'Bravo Forged Overwrite',
-      }),
-    ).toThrow(/KEY_DATE_ACCESS_DENIED/);
+      })).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
 
     // Tenant A sees its own records
-    expect(repo.getKeyDateById(ctxA, 'KD-SHARED-ID-001')?.title).toBe(
+    expect((await repo.getKeyDateById(ctxA, 'KD-SHARED-ID-001'))?.title).toBe(
       'Alpha Limitation',
     );
-    expect(repo.getReminderState(ctxA, 'KD-SHARED-ID-001')?.taskId).toBe(
+    expect((await repo.getReminderState(ctxA, 'KD-SHARED-ID-001'))?.taskId).toBe(
       'TSK-ALPHA-001',
     );
-    expect(repo.getCalendarSync(ctxA, 'KD-SHARED-ID-001')?.state).toBe('synced');
+    expect((await repo.getCalendarSync(ctxA, 'KD-SHARED-ID-001'))?.state).toBe('synced');
     expect(
-      repo.listAuditEvents(ctxA, { keyDateId: 'KD-SHARED-ID-001' }),
+      await repo.listAuditEvents(ctxA, { keyDateId: 'KD-SHARED-ID-001' }),
     ).toHaveLength(1);
   });
 
@@ -330,7 +322,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     ).toThrow(/TENANCY_JOB_ERROR/);
   });
 
-  it('omits restricted (staff) matters at the data layer unless viewer is in matter.restrictedAccessUserIds', () => {
+  it('omits restricted (staff) matters at the data layer unless viewer is in matter.restrictedAccessUserIds', async () => {
     const repo = new TenantKeyDateRepository();
     const ctxAuthorised = createVerifiedTenantContext(
       'tenant-alpha',
@@ -343,7 +335,8 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       ['risk_compliance'],
     );
 
-    repo.setMatterRestriction(ctxAuthorised, {
+    await repo.clearTenantData(ctxAuthorised);
+    await repo.setMatterRestriction(ctxAuthorised, {
       matterId: 'M-STAFF-001',
       isRestricted: true,
       restrictedAccessUserIds: ['P-ALLOWED-PARTNER', 'P-ALLOWED-FE'],
@@ -355,12 +348,12 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       title: 'Restricted Staff Matter Deadline',
       teamId: 'TM-000001',
     });
-    repo.putKeyDate(ctxAuthorised, staffKeyDate);
+    await repo.putKeyDate(ctxAuthorised, staffKeyDate);
 
     // Authorised participant in restrictedAccessUserIds sees the key date
-    expect(repo.getKeyDateById(ctxAuthorised, 'KD-STAFF-001')).not.toBeNull();
+    expect(await repo.getKeyDateById(ctxAuthorised, 'KD-STAFF-001')).not.toBeNull();
     expect(
-      repo.queryKeyDatesForDiary(ctxAuthorised, {
+      await repo.queryKeyDatesForDiary(ctxAuthorised, {
         teamIds: ['TM-000001'],
         from: '2026-01-01',
         to: '2028-12-31',
@@ -369,13 +362,13 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
 
     // Unauthorised viewer (even with risk_compliance role) receives null / empty list with no placeholder
     expect(
-      repo.getKeyDateById(ctxUnauthorisedCompliance, 'KD-STAFF-001'),
+      await repo.getKeyDateById(ctxUnauthorisedCompliance, 'KD-STAFF-001'),
     ).toBeNull();
     expect(
-      repo.listKeyDatesForMatter(ctxUnauthorisedCompliance, 'M-STAFF-001'),
+      await repo.listKeyDatesForMatter(ctxUnauthorisedCompliance, 'M-STAFF-001'),
     ).toEqual([]);
     expect(
-      repo.queryKeyDatesForDiary(ctxUnauthorisedCompliance, {
+      await repo.queryKeyDatesForDiary(ctxUnauthorisedCompliance, {
         teamIds: ['TM-000001'],
         from: '2026-01-01',
         to: '2028-12-31',
@@ -383,25 +376,21 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     ).toEqual([]);
 
     // Unpermitted user in the same tenant calling putKeyDate on a staff-matter key date gets an error (R31)
-    expect(() =>
-      repo.putKeyDate(ctxUnauthorisedCompliance, {
+    await expect(repo.putKeyDate(ctxUnauthorisedCompliance, {
         ...staffKeyDate,
         title: 'Tampered Title',
-      }),
-    ).toThrow(/KEY_DATE_ACCESS_DENIED/);
+      })).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
 
     // Changing matterId on an existing KeyDate is rejected (R31)
-    repo.setMatterRestriction(ctxAuthorised, {
+    await repo.setMatterRestriction(ctxAuthorised, {
       matterId: 'M-OTHER-002',
       isRestricted: false,
       restrictedAccessUserIds: [],
     });
-    expect(() =>
-      repo.putKeyDate(ctxAuthorised, {
+    await expect(repo.putKeyDate(ctxAuthorised, {
         ...staffKeyDate,
         matterId: 'M-OTHER-002',
-      }),
-    ).toThrow(/KEY_DATE_ENTITY_IMMUTABLE/);
+      })).rejects.toThrow(/KEY_DATE_ENTITY_IMMUTABLE/);
   });
 
   it('rejects unpermitted callers across verify, resolve, reassign, acknowledge, and supersede services on a staff-matter key date with no state change (R30, R82)', async () => {

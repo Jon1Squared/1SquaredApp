@@ -828,7 +828,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         docxBytes,
       },
     });
-    const submitted = submitTemplateVersionForApproval({
+    const submitted = await submitTemplateVersionForApproval({
       ctx,
       repo,
       catalogue: CORE_FIELD_CATALOGUE,
@@ -867,7 +867,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         docxBytes,
       },
     });
-    const autoActivated = submitTemplateVersionForApproval({
+    const autoActivated = await submitTemplateVersionForApproval({
       ctx,
       repo,
       catalogue: CORE_FIELD_CATALOGUE,

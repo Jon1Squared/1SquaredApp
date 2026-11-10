@@ -23,7 +23,8 @@ import {
   KEY_DATES_MIGRATION_0003,
   loadAndValidateTenantConfig,
   PlatformTelemetryRecorder,
-  PostgresTenantCluster,
+  TenantDocumentRepository,
+  TenantDocumentStoreRepository,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
   runTenantBackgroundJob,
@@ -181,8 +182,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     mfaVerified: true,
   };
 
-  it('isolates data between two tenants and blocks tampered record IDs across tenants', () => {
-    const cluster = new PostgresTenantCluster();
+  it('isolates data between two tenants in real per-tenant PostgreSQL databases and blocks tampered record IDs across tenants', async () => {
+    const repo = new TenantDocumentRepository();
 
     const ctxA = resolveTenantFromVerifiedToken({
       verifiedToken: tenantAToken,
@@ -201,31 +202,53 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(ctxA.postgresDatabaseName).not.toBe(ctxB.postgresDatabaseName);
     expect(ctxA.blobContainerName).not.toBe(ctxB.blobContainerName);
 
-    cluster.putRecord(ctxA, {
-      id: 'MAT-0001',
+    await repo.offboardTenantData(ctxA);
+    await repo.offboardTenantData(ctxB);
+
+    const baseDoc = {
+      fileName: 'matter-note.docx',
+      documentType: 'letter',
+      outputFormat: 'docx' as const,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      fileSizeBytes: 256,
+      fileSha256: 'sha-iso-0001',
+      templateId: 'TPL-ISO',
+      templateName: 'Isolation Template',
+      templateVersionId: 'TPLV-ISO',
+      templateVersionNumber: 1,
+      storageProvider: 'local-fs' as const,
+      storageKey: 'blob-iso-0001',
+      generatedByUserId: 'user-a1',
+      generatedAt: new Date().toISOString(),
+      isDeleted: false,
+    };
+
+    await repo.putDocument(ctxA, {
+      ...baseDoc,
+      id: 'DOC-ISO-0001',
       tenantId: ctxA.tenantId,
       title: 'Tenant A Confidential Matter',
     });
 
-    cluster.putRecord(ctxB, {
-      id: 'MAT-0002',
+    await repo.putDocument(ctxB, {
+      ...baseDoc,
+      id: 'DOC-ISO-0002',
       tenantId: ctxB.tenantId,
       title: 'Tenant B Confidential Matter',
     });
 
-    // Tenant A can read its own record, but gets null when querying Tenant B's record ID
-    expect(cluster.getRecordById(ctxA, 'MAT-0001')?.id).toBe('MAT-0001');
-    expect(cluster.getRecordById(ctxA, 'MAT-0002')).toBeNull();
-    expect(cluster.listRecords(ctxA)).toHaveLength(1);
+    expect((await repo.getDocumentById(ctxA, 'DOC-ISO-0001'))?.id).toBe('DOC-ISO-0001');
+    expect(await repo.getDocumentById(ctxA, 'DOC-ISO-0002')).toBeNull();
+    expect(await repo.listDocuments(ctxA)).toHaveLength(1);
 
-    // Attempting to write a record with a forged/mismatched tenantId is rejected
-    expect(() =>
-      cluster.putRecord(ctxA, {
-        id: 'MAT-TAMPERED',
+    await expect(
+      repo.putDocument(ctxA, {
+        ...baseDoc,
+        id: 'DOC-TAMPERED',
         tenantId: ctxB.tenantId,
         title: 'Cross-tenant write attempt',
       }),
-    ).toThrow(/TENANCY_ISOLATION_ERROR/);
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
   });
 
   it('rejects unverified tokens and forged request tenant overrides', () => {
@@ -688,7 +711,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
 
     // R108 & R131: saveMatterRecord requires an authenticated request session, awaits beforeMatterOpen, blocks opening when allowProceed === false, and rolls back inline parties when vetoed
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
@@ -797,7 +820,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(gov?.allowProceed).toBe(true);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
 
     // R108 (3): Async beforeMatterOpen hook veto and hook timeout both block opening (allowProceed === false)
@@ -1075,7 +1098,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
 
     // R106: Domain helpers (syncHomeRolesWithEmployeeRoles, createDefaultMatterCostsConfig) succeed in browser window mode without reading tenant configuration
@@ -1477,7 +1500,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).not.toBe('Stale Overwrite Attempt');
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -1604,7 +1627,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -1845,7 +1868,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(kdTampered.error).toMatch(/Forbidden|not found/i);
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -1976,7 +1999,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toBe(true);
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -2244,7 +2267,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).not.toBe('01 Jan 1999');
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -2340,7 +2363,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(resaveNewEmp.matter?.isStaffMatter).toBe(true);
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -2443,11 +2466,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
-  it('R155: getStore preserves multi-role assignments in order for risk and compliance officers', () => {
+  it('R155: getStore preserves multi-role assignments in order for risk and compliance officers', async () => {
     try {
       const store = getStore();
       const multiRolePerson = store.people.find((p) => p.id === 'P-000009')!;
@@ -2463,7 +2486,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ]);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -2609,7 +2632,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   });
 
   it('R162: conflict search returns a redacted match on restricted matters and saveMatterRecord refuses submit_cleared', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
@@ -2905,13 +2928,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R164: conflictReview.assigneeTeamKey matches strictly by team ID or org team code, never by display name', async () => {
     const rawBaseCfg = getActiveTenantRawBaseConfig();
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       // Configure a schema-valid display name as assigneeTeamKey and null assigneeRoleKey so no role fallback rescues it
       setActiveTenantConfigForTesting({
@@ -2980,7 +3003,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(createdTask?.assignedPersonId).toBeNull();
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -3017,8 +3040,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     ).toThrow(/TENANT_MISMATCH/);
   });
 
-  it('R167: billing and credit-control actions leave unassigned when matter has no leadFeeEarnerId or responsiblePartnerId, and getStore does not overwrite firm when demo mode is off', () => {
-    resetAllDemoData('P-000001');
+  it('R167: billing and credit-control actions leave unassigned when matter has no leadFeeEarnerId or responsiblePartnerId, and getStore does not overwrite firm when demo mode is off', async () => {
+    await resetAllDemoData('P-000001');
     const prevDemoMode = process.env.ONESQUARED_DEMO_MODE;
     try {
       const store = getStore();
@@ -3078,7 +3101,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       } else {
         process.env.ONESQUARED_DEMO_MODE = prevDemoMode;
       }
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -3128,7 +3151,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   });
 
   it('R169: saveMatterRecord strips server-owned fieldValues, ignores caller conflictClearedById, preserves matterOpeningSnapshot on open matters, requires signOffMatterCostsRecord (matter:costs:sign_off), and resets sign-off if feeEstimateGbp changes', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -3385,12 +3408,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
-  it('R170: searchMatterConflicts redacts matches on restricted enquiries (converted to a staff matter or another user personal Draft)', () => {
-    resetAllDemoData('P-000001');
+  it('R170: searchMatterConflicts redacts matches on restricted enquiries (converted to a staff matter or another user personal Draft)', async () => {
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -3433,6 +3456,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         summary: 'Confidential disciplinary advice',
         convertedMatterId: 'M-R170-STAFF',
         createdById: partner.id,
+        createdAt: new Date().toISOString(),
         takenById: partner.id,
       });
 
@@ -3447,6 +3471,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         summary: 'Unpublished personal draft enquiry',
         convertedMatterId: null,
         createdById: partner.id,
+        createdAt: new Date().toISOString(),
         takenById: partner.id,
       });
 
@@ -3490,12 +3515,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(serialized).not.toContain('Unpublished personal draft enquiry');
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
-  it('R172: runMatterConflictSearchRecord logs count-only restricted conflict match audit entries and structured logs with no party or record names', () => {
-    resetAllDemoData('P-000001');
+  it('R172: runMatterConflictSearchRecord logs count-only restricted conflict match audit entries and structured logs with no party or record names', async () => {
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -3520,6 +3545,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         summary: 'Sensitive draft enquiry summary',
         convertedMatterId: null,
         createdById: partner.id,
+        createdAt: new Date().toISOString(),
         takenById: partner.id,
       });
 
@@ -3588,12 +3614,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R173: saveMatterRecord runs beforeMatterOpen on every non-draft save until the matter has opened, and updateMatterConflictRecord keeps referred matters Prospective until partner cost sign-off', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -3786,12 +3812,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(partnerSignOffRes.matter?.matterStatusId).toBe(activeStatusId);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
-  it('R174: getAppSnapshot conflict reviewer resolution uses stable team id/code and configured assigneeRoleKey without matching team display names or hard-coding risk_compliance', () => {
-    resetAllDemoData('P-000001');
+  it('R174: getAppSnapshot conflict reviewer resolution uses stable team id/code and configured assigneeRoleKey without matching team display names or hard-coding risk_compliance', async () => {
+    await resetAllDemoData('P-000001');
     const originalRawBase = getActiveTenantRawBaseConfig();
     try {
       const store = getStore();
@@ -3815,6 +3841,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         active: true,
         createdById: partner.id,
         createdAt: new Date().toISOString(),
+
         updatedById: partner.id,
         updatedAt: new Date().toISOString(),
       });
@@ -3843,6 +3870,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         active: true,
         createdById: partner.id,
         createdAt: new Date().toISOString(),
+
         updatedById: partner.id,
         updatedAt: new Date().toISOString(),
       });
@@ -3870,12 +3898,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toBe(nonRiskEmployee.id);
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R175: user with risk:view (and matter:create/edit) but without matter:restricted:access cannot submit_cleared on an unapproved restricted match unless recording status Approved', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     const originalRawBase = getActiveTenantRawBaseConfig();
     try {
       const store = getStore();
@@ -4067,12 +4095,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void originalRawBase;
       setRuntimeRbacConfigOverride(null);
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R176: saveMatterRecord builds ConflictCheckRecord on the server, preserving stored comments and runs and rejecting forged risk approvals', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -4214,7 +4242,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(storedRecord.runs.some((r) => r.id === 'forged')).toBe(false);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -4265,7 +4293,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   });
 
   it('R178: draft saves of unopened matters set matterOpeningGate.allowProceed to false, and signOffMatterCostsRecord fails closed when an enabled beforeMatterOpen extension fails to load', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     const originalRawBase = getActiveTenantRawBaseConfig();
     try {
       const store = getStore();
@@ -4507,12 +4535,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     } finally {
       setActiveTenantConfigForTesting(null);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R179: saveMatterRecord, updateMatterConflictRecord, and signOffMatterCostsRecord enforce evaluateMatterKeyDateOpeningGate when requiredKeyDateTypeIds are configured', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -4700,12 +4728,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(openWithKdRes.matter?.matterNumber).not.toBe('DRAFT');
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R181: saveMatterRecord enforces conflict-decision and opening gate on status transition out of Prospective, allows stage edits while Prospective, and saveMatterAction filters opts', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -4788,6 +4816,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         summary: 'Private draft enquiry belonging to partner',
         convertedMatterId: null,
         createdById: partner.id,
+        createdAt: new Date().toISOString(),
         takenById: partner.id,
       });
 
@@ -4960,12 +4989,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toBe(true);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R183: existing open matters without an opening snapshot can be edited and closed without triggering the opening gate, and backfill matterOpeningSnapshot with saveMode backfilled', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -5103,12 +5132,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(closeSuccessRes.matter?.matterStatusId).toBe(closedStatusId);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R184: legacy escalated conflict status maps to Referred with no fabricated approver, and once referred only Risk & Compliance can clear or approve a matter', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -5320,12 +5349,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R185: saveMatterRecord ignores conflictCheckRecord: null and caller conflictCheckStatus, preserves Referred status across two-save bypass attempts, and derives conflictCheckStatus from the server record', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       // Round-trip check: conflictStatusPillFromLegacy(legacyConflictStatusFromRecord(r)) returns r.status for every status
       const roundTripCases = [
@@ -5622,12 +5651,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R186: an open matter cannot be moved back to Prospective or saved as a draft, and submit_referred + Risk approval preserve open status and matterOpeningSnapshot', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     const store = getStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     const riskOfficer = store.people.find(
@@ -5897,12 +5926,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toEqual(initialOpenedSnapshot);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R187: a fee earner cannot set an open matter conflict check back to In progress or Not started via saveMatterRecord or updateMatterConflictRecord, while submit_referred still records Referred and keeps the matter Active', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     const store = getStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     expect(feeEarner).toBeDefined();
@@ -6078,12 +6107,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('R189: buildServerConflictCheckRecord derives outcomeLabel from the final status for fee earners without risk:view', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     const store = getStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     const templateMatter = store.matters.find((m) => m.id === 'M-000001')!;
@@ -6214,7 +6243,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toBe('Referred to risk for review');
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
@@ -6548,13 +6577,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('S0-04: an admin of tenant B cannot change tenant A lists, custom fields, teams, or PMS links via forged tenant claims or tampered record IDs', async () => {
     try {
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
       const store = getStore();
       const firstValue = structuredClone(store.values[0]!);
       const firstTeam = structuredClone(store.teams[0]!);
@@ -6674,13 +6703,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(tamperedPmsUnlink)).toBe(true);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('S0-05: rejects forged tenant claims and tampered record IDs across all 20 S0-05 record actions (with positive Tenant A controls and data-layer cluster checks)', async () => {
     try {
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
       const store = getStore();
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
@@ -7351,8 +7380,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         store.tasks.find((t) => t.id === validTask.id)?.assignedPersonId,
       ).toBe('P-000001');
 
-      // 4. Data-layer isolation check (PostgresTenantCluster, separate from the single-tenant ADR 0001 host store)
-      const cluster = new PostgresTenantCluster();
+      // 4. Data-layer isolation check (real PostgreSQL TenantDocumentRepository)
+      const pgDocRepo = new TenantDocumentRepository();
       const ctxA = resolveTenantFromVerifiedToken({
         verifiedToken: tenantAToken,
         hostingMode: 'multi_tenant',
@@ -7365,39 +7394,39 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         environment: 'dev',
         correlationId: 'corr-s005-b',
       });
-      cluster.putRecord(ctxB, {
+      await pgDocRepo.putDocument(ctxB, {
         id: tamperedIds.task,
         tenantId: ctxB.tenantId,
         title: 'Tenant B Confidential Task',
+        fileName: 'task.docx',
+        documentType: 'letter',
+        outputFormat: 'docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        fileSizeBytes: 128,
+        fileSha256: 'sha-s005-task',
+        templateId: 'TPL-B',
+        templateName: 'B',
+        templateVersionId: 'TPLV-B',
+        templateVersionNumber: 1,
+        storageProvider: 'local-fs',
+        storageKey: 'blob-s005-task',
+        generatedByUserId: 'user-b1',
+        generatedAt: new Date().toISOString(),
+        isDeleted: false,
       });
-      cluster.putRecord(ctxB, {
-        id: tamperedIds.org,
-        tenantId: ctxB.tenantId,
-        legalName: 'Pembroke Vaughan Holdings Ltd',
-      });
-      expect(
-        cluster.getRecordById<{ id: string; tenantId: string; title: string }>(
-          ctxB,
-          tamperedIds.task,
-        )?.title,
-      ).toBe('Tenant B Confidential Task');
-      expect(cluster.getRecordById(ctxA, tamperedIds.task)).toBeNull();
-      expect(
-        cluster.getRecordById<{ id: string; tenantId: string; legalName: string }>(
-          ctxB,
-          tamperedIds.org,
-        )?.legalName,
-      ).toBe('Pembroke Vaughan Holdings Ltd');
-      expect(cluster.getRecordById(ctxA, tamperedIds.org)).toBeNull();
+      expect((await pgDocRepo.getDocumentById(ctxB, tamperedIds.task))?.title).toBe(
+        'Tenant B Confidential Task',
+      );
+      expect(await pgDocRepo.getDocumentById(ctxA, tamperedIds.task)).toBeNull();
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('S0-07: rejects forged tenant claims and tampered IDs on conflict search and conversion actions (with positive Tenant A controls and data-layer cluster checks)', async () => {
     try {
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
       const store = getStore();
       const ctxA = resolveTenantFromVerifiedToken({
         verifiedToken: tenantAToken,
@@ -7550,7 +7579,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // 4. Domain and data-layer cluster checks (testing domain conflict helpers on separate stores and PostgresTenantCluster, not single-tenant store actions)
       const tenantBStore = createSeedStore();
-      const cluster = new PostgresTenantCluster();
+      const pgStoreRepo = new TenantDocumentStoreRepository();
       const tenantBPerson = {
         ...tenantBStore.people[0]!,
         id: 'P-TENANT-B-501',
@@ -7610,12 +7639,39 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       tenantBStore.enquiries.push(tenantBEnquiry);
       tenantBStore.quotes.push(tenantBQuote);
 
-      cluster.putRecord(ctxB, { ...tenantBPerson, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBOrg, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBLink, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBMatter, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBEnquiry, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBQuote, tenantId: ctxB.tenantId });
+      await pgStoreRepo.putMatterLocation(ctxB, {
+        id: 'LOC-TENANT-B-501',
+        tenantId: ctxB.tenantId,
+        matterId: tenantBMatter.id,
+        storeId: 'sp-b',
+        libraryId: 'lib-b',
+        providerSiteId: 'site-b',
+        providerDriveId: 'drive-b',
+        providerFolderItemId: 'item-b-501',
+        webUrl: 'https://contoso.sharepoint.com/sites/b/PV-999999',
+        relativePath: 'PV-999999',
+        linkMode: 'provisioned',
+        routingMismatchNote: null,
+        deltaSyncCursor: null,
+        lastJobId: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        provisionedAt: new Date().toISOString(),
+
+        templateId: 'tpl-default',
+        templateVersion: 1,
+        folderItemMap: {},
+        intendedGrants: [],
+        hasUniquePermissions: false,
+        uniqueScopeCount: 0,
+
+        provisioningStatus: 'provisioned',
+        retentionLabelId: null,
+
+
+
+        updatedAt: new Date().toISOString(),
+      });
 
       const matterSearchB = searchMatterConflicts(
         {
@@ -7727,23 +7783,18 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(enqSearchA.clientAgainstPartyMatches).toEqual([]);
       expect(enqSearchA.hasBlockingConflict).toBe(false);
 
-      expect(cluster.getRecordById(ctxA, tenantBMatter.id)).toBeNull();
-      expect(cluster.getRecordById(ctxA, tenantBEnquiry.id)).toBeNull();
-      expect(cluster.getRecordById(ctxA, tenantBQuote.id)).toBeNull();
+      expect(await pgStoreRepo.listMatterLocationsByMatterId(ctxA, tenantBMatter.id)).toEqual([]);
       expect(
-        cluster.getRecordById<{ id: string; tenantId: string }>(ctxB, tenantBEnquiry.id)?.id,
-      ).toBe(tenantBEnquiry.id);
-      expect(
-        cluster.getRecordById<{ id: string; tenantId: string }>(ctxB, tenantBQuote.id)?.id,
-      ).toBe(tenantBQuote.id);
+        (await pgStoreRepo.listMatterLocationsByMatterId(ctxB, tenantBMatter.id))[0]?.matterId,
+      ).toBe(tenantBMatter.id);
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('S0-09: rejects forged tenant claims and tampered IDs on mergeRecordsAction (with positive Tenant A controls and TenantDocumentRepository / cluster data-layer checks)', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const sA = savePersonRecord(
         { firstName: 'TenantA', surname: 'Survivor', isEmployee: false },
@@ -7875,36 +7926,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // 3. Data-layer isolation checks (TenantDocumentRepository and PostgresTenantCluster) + positive Tenant A merge controls
       const repo = getDocumentRepository();
-      const tenantBStore = createSeedStore();
-      const cluster = new PostgresTenantCluster();
-      const tenantBPersonSurv = {
-        ...tenantBStore.people[0]!,
-        id: tenantBPersonSurvId,
-        firstName: 'Owain',
-        surname: 'PembrokeSurvivor',
-        isEmployee: false,
-      };
-      const tenantBPersonMerg = {
-        ...tenantBStore.people[1]!,
-        id: tenantBPersonMergId,
-        firstName: 'Owain',
-        surname: 'PembrokeDuplicate',
-        isEmployee: false,
-      };
-      const tenantBOrgSurv = {
-        ...tenantBStore.organisations[0]!,
-        id: 'O-TENANT-B-SURV',
-        legalName: 'Pembroke Survivor Holdings Ltd',
-      };
-      const tenantBOrgMerg = {
-        ...tenantBStore.organisations[1]!,
-        id: 'O-TENANT-B-MERG',
-        legalName: 'Pembroke Duplicate Holdings Ltd',
-      };
-      cluster.putRecord(ctxB, { ...tenantBPersonSurv, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBPersonMerg, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBOrgSurv, tenantId: ctxB.tenantId });
-      cluster.putRecord(ctxB, { ...tenantBOrgMerg, tenantId: ctxB.tenantId });
+      await repo.offboardTenantData(ctxB);
 
       const docB = {
         id: 'DOC-TENANT-B-09',
@@ -7936,9 +7958,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         entityId: mA.id,
         linkRole: 'recipient_party' as const,
         createdAt: new Date().toISOString(),
+
       };
-      repo.putDocument(ctxB, docB);
-      repo.putDocumentLink(ctxB, linkB);
+      await repo.putDocument(ctxB, docB);
+      await repo.putDocumentLink(ctxB, linkB);
 
       // Positive controls: merging valid Tenant A person and organisation records succeeds
       const mergeARes = await mergeRecordsAction('person', sA.id, mA.id);
@@ -7954,35 +7977,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // Tenant B's document and link in TenantDocumentRepository and records in PostgresTenantCluster remain untouched
-      const fetchedDocB = repo.getDocumentById(ctxB, docB.id)!;
+      const fetchedDocB = (await repo.getDocumentById(ctxB, docB.id))!;
       expect(fetchedDocB.primaryClientId).toBe(tenantBPersonMergId);
       expect(fetchedDocB.recipientPartyId).toBe(mA.id);
-      expect(repo.listDocumentsForEntity(ctxB, 'person', mA.id).map((d) => d.id)).toEqual([
+      expect((await repo.listDocumentsForEntity(ctxB, 'person', mA.id)).map((d) => d.id)).toEqual([
         docB.id,
       ]);
-      expect(repo.listDocumentsForEntity(ctxA, 'person', mA.id)).toHaveLength(0);
-      expect(cluster.getRecordById(ctxA, tenantBPersonMerg.id)).toBeNull();
-      expect(cluster.getRecordById(ctxA, tenantBOrgMerg.id)).toBeNull();
-      expect(
-        cluster.getRecordById<{ id: string; tenantId: string; mergedIntoId?: string | null }>(
-          ctxB,
-          tenantBPersonMerg.id,
-        )?.mergedIntoId,
-      ).toBeFalsy();
-      expect(
-        cluster.getRecordById<{ id: string; tenantId: string; mergedIntoId?: string | null }>(
-          ctxB,
-          tenantBOrgMerg.id,
-        )?.mergedIntoId,
-      ).toBeFalsy();
+      expect(await repo.listDocumentsForEntity(ctxA, 'person', mA.id)).toHaveLength(0);
+      expect(await repo.getDocumentById(ctxA, docB.id)).toBeNull();
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 
   it('S0-10: enforces two-tenant isolation, tampered record ID rejection, and positive controls across all five finance loaders and three credit-control actions', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const validTenantASession = verifySignedEntraSessionCookie(
         createSignedEntraSessionCookie({
@@ -8301,11 +8311,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
     } finally {
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
   it('S0-30 (B13): rejects forged tenant claims on savePersonAction and Entra JWT sign-in verification, and rejects tampered person IDs on savePersonAction, savePersonRecord, and updatePersonPermissionOverrides, with positive Tenant A controls', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001');
     try {
       const store = getStore();
       const targetEmployeeA = store.people.find((p) => p.id === 'P-000002')!;
@@ -8580,7 +8590,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       clearJwksCache();
       vi.unstubAllGlobals();
       setTestEntraSessionOverride(undefined);
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001');
     }
   });
 

@@ -85,7 +85,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
 
   // 1. Check 1Squared RBAC permission
   if (!permSet.has(requiredPermission)) {
-    repository.appendAuditEvent(
+    await repository.appendAuditEvent(
       ctx,
       buildDocumentStoreAuditEvent({
         context: ctx,
@@ -114,7 +114,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
     !isUserOnRestrictedAllowlist &&
     !permSet.has('matter:restricted:access')
   ) {
-    repository.appendAuditEvent(
+    await repository.appendAuditEvent(
       ctx,
       buildDocumentStoreAuditEvent({
         context: ctx,
@@ -138,7 +138,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
 
   // 3. Check 1Squared matter access
   if (!canAccessMatterIn1Squared) {
-    repository.appendAuditEvent(
+    await repository.appendAuditEvent(
       ctx,
       buildDocumentStoreAuditEvent({
         context: ctx,
@@ -164,11 +164,11 @@ export async function executeUserMatterDocumentOperation<TResult>(
   const resolvedLocation =
     guard.location ??
     (guard.locationId
-      ? repository.getMatterLocationById(ctx, guard.locationId)
+      ? await repository.getMatterLocationById(ctx, guard.locationId)
       : null);
 
   if (!resolvedLocation || resolvedLocation.matterId !== matterId) {
-    repository.appendAuditEvent(
+    await repository.appendAuditEvent(
       ctx,
       buildDocumentStoreAuditEvent({
         context: ctx,
@@ -199,8 +199,8 @@ export async function executeUserMatterDocumentOperation<TResult>(
   );
 
   if (itemIdsToCheck.length > 0) {
-    const allLocations = repository.listAllMatterLocations(ctx);
-    const folderScopes = repository.listFolderScopes(ctx);
+    const allLocations = await repository.listAllMatterLocations(ctx);
+    const folderScopes = await repository.listFolderScopes(ctx);
     for (const candidateItemId of itemIdsToCheck) {
       const ownedByOtherMatter = allLocations.some(
         (otherLoc) =>
@@ -217,7 +217,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
           folderScopes.some((s) => s.providerItemId === candidateItemId));
 
       if (ownedByOtherMatter || isSharedScopeOutsideMatter) {
-        repository.appendAuditEvent(
+        await repository.appendAuditEvent(
           ctx,
           buildDocumentStoreAuditEvent({
             context: ctx,
@@ -278,7 +278,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
         isInsideTree = false;
       }
       if (!isInsideTree) {
-        repository.appendAuditEvent(
+        await repository.appendAuditEvent(
           ctx,
           buildDocumentStoreAuditEvent({
             context: ctx,
@@ -304,7 +304,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
 
   try {
     const result = await operation(userCtx);
-    repository.appendAuditEvent(
+    await repository.appendAuditEvent(
       ctx,
       buildDocumentStoreAuditEvent({
         context: ctx,
@@ -325,7 +325,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
 
     // Section 3: If 1Squared allows an action but the store denies it, record a reconciliation finding!
     if (code === 'access_denied') {
-      recordStoreAccessDeniedFinding({
+      await recordStoreAccessDeniedFinding({
         ctx,
         repository,
         storeId,
@@ -335,7 +335,7 @@ export async function executeUserMatterDocumentOperation<TResult>(
         operation: auditAction,
       });
     } else {
-      repository.appendAuditEvent(
+      await repository.appendAuditEvent(
         ctx,
         buildDocumentStoreAuditEvent({
           context: ctx,

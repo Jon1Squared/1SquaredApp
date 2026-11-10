@@ -11,6 +11,8 @@ import {
   writeCommittedSeedStoreSnapshot,
 } from '../src/seed/seedSnapshot';
 import { createSeedStore, type FirmStore } from '../src/server/store';
+import '../core/src/tenancy/pgNodePreload';
+import { importFirmStoreModulesToPostgres } from '../src/server/storePostgresImport';
 
 export interface SeedDemoTenantOptions {
   args?: string[];
@@ -67,9 +69,12 @@ function summarizeCounts(store: FirmStore): SeedDemoTenantResult['counts'] {
   };
 }
 
-export function runSeedDemoTenant(
+export async function runSeedDemoTenant(
   options: SeedDemoTenantOptions = {},
-): SeedDemoTenantResult {
+
+): Promise<SeedDemoTenantResult> {
+
+
   const args = options.args ?? process.argv.slice(2);
   const env = options.env ?? process.env;
   const rootDir = options.rootDir ?? process.cwd();
@@ -238,6 +243,12 @@ export function runSeedDemoTenant(
     throw writeErr;
   }
 
+  await importFirmStoreModulesToPostgres({
+    store: seedStore,
+    tenantConfig,
+    clearFirst: true,
+  });
+
   if (unboundPrivilegedPersonas > 0) {
     warn(
       JSON.stringify({
@@ -270,7 +281,15 @@ const isMainModule =
 
 if (isMainModule) {
   try {
-    runSeedDemoTenant();
+    void runSeedDemoTenant().catch((error: unknown) => {
+      console.error(
+        JSON.stringify({
+          event: 'seed.demo_tenant_failed',
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      process.exit(1);
+    });
   } catch (error) {
     console.error(
       JSON.stringify({

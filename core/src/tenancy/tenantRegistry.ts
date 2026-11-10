@@ -10,10 +10,27 @@
  *   exclusively from verified OIDC token claims).
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import type { HostingMode, PlatformEnvironment } from '../api/index';
+
+function getNodeFs(): typeof import('node:fs') {
+  if (
+    typeof window !== 'undefined' ||
+    typeof process.getBuiltinModule !== 'function'
+  ) {
+    throw new Error(
+      'TENANT_REGISTRY_BROWSER_FORBIDDEN: File-system tenant registry loading is server-only.',
+    );
+  }
+  const mod = process.getBuiltinModule('node:fs') as
+    | typeof import('node:fs')
+    | undefined;
+  if (!mod) {
+    throw new Error('TENANT_REGISTRY_ERROR: node:fs builtin unavailable.');
+  }
+  return mod;
+}
 
 export interface TenantRegistryEntry {
   readonly tenantId: string;
@@ -193,6 +210,7 @@ export function loadActiveTenantRegistry(options?: {
     return validateTenantRegistry(parsed);
   }
 
+  const fs = getNodeFs();
   const registryFilePath = process.env.PLATFORM_TENANT_REGISTRY_PATH?.trim();
   if (registryFilePath) {
     const absPath = path.resolve(options?.cwd ?? process.cwd(), registryFilePath);

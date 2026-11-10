@@ -14,7 +14,6 @@
  * 4. Enforces a row-level second check (`assertRowTenant`) and strips SQL text/parameters from errors.
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
 import type { TenantContext } from '../api/index';
 import {
   assertValidPostgresTenantContext,
@@ -46,8 +45,39 @@ interface ActiveTenantTransactionScope {
   readonly tx: TenantSqlClient;
 }
 
-const activeTenantTxStorage =
-  new AsyncLocalStorage<ActiveTenantTransactionScope>();
+interface AsyncLocalStorageLike<T> {
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
+}
+
+let cachedActiveTenantTxStorage:
+  | AsyncLocalStorageLike<ActiveTenantTransactionScope>
+  | null
+  | undefined;
+
+function getActiveTenantTxStorage(): AsyncLocalStorageLike<ActiveTenantTransactionScope> | null {
+  if (cachedActiveTenantTxStorage !== undefined) {
+    return cachedActiveTenantTxStorage;
+  }
+  if (
+    typeof window !== 'undefined' ||
+    typeof process.getBuiltinModule !== 'function'
+  ) {
+    cachedActiveTenantTxStorage = null;
+    return null;
+  }
+  try {
+    const asyncHooks = process.getBuiltinModule('node:async_hooks') as
+      | typeof import('node:async_hooks')
+      | undefined;
+    cachedActiveTenantTxStorage = asyncHooks?.AsyncLocalStorage
+      ? new asyncHooks.AsyncLocalStorage<ActiveTenantTransactionScope>()
+      : null;
+  } catch {
+    cachedActiveTenantTxStorage = null;
+  }
+  return cachedActiveTenantTxStorage;
+}
 
 function createSchemaNotReadyError(params: {
   tenantId: string;
@@ -135,7 +165,8 @@ export abstract class TenantScopedRepository {
   ): Promise<T> {
     assertValidPostgresTenantContext(ctx);
 
-    const existingScope = activeTenantTxStorage.getStore();
+    const txStorage = getActiveTenantTxStorage();
+    const existingScope = txStorage?.getStore();
     if (
       existingScope &&
       existingScope.poolManager === this.poolManager &&
@@ -234,16 +265,16 @@ export abstract class TenantScopedRepository {
         },
       };
 
-      const result = await activeTenantTxStorage.run(
-        {
-          poolManager: this.poolManager,
-          tenantId: ctx.tenantId,
-          databaseName: ctx.postgresDatabaseName,
-          readOnly,
-          tx: wrappedTx,
-        },
-        () => fn(wrappedTx),
-      );
+      const scope: ActiveTenantTransactionScope = {
+        poolManager: this.poolManager,
+        tenantId: ctx.tenantId,
+        databaseName: ctx.postgresDatabaseName,
+        readOnly,
+        tx: wrappedTx,
+      };
+      const result = txStorage
+        ? await txStorage.run(scope, () => fn(wrappedTx))
+        : await fn(wrappedTx);
 
       await rawClient.query('COMMIT');
       inTransaction = false;

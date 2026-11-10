@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -176,6 +177,24 @@ export default async function globalSetup(): Promise<void> {
 
   // Reset runtime store from seed data before the test run via the shared seed loader
   resetRuntimeStoreFromCommittedSeed({ rootDir });
+  execFileSync(
+    process.execPath,
+    [path.join(rootDir, 'dist', 'jobs', 'import-store.mjs'), '--clear'],
+    {
+      cwd: rootDir,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+        PLATFORM_ENVIRONMENT: 'test',
+        PLATFORM_POSTGRES_HOST:
+          process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1',
+        PLATFORM_POSTGRES_PORT: process.env.PLATFORM_POSTGRES_PORT || '5432',
+        PLATFORM_POSTGRES_MIGRATE_PORT:
+          process.env.PLATFORM_POSTGRES_MIGRATE_PORT || '5432',
+      },
+    },
+  );
 
   fs.mkdirSync(AUTH_DIR, { recursive: true });
 
