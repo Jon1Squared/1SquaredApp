@@ -592,6 +592,61 @@ ALTER TABLE documents
   ],
 };
 
+export const FIRM_AUDIT_LOG_MIGRATION_0007: TenantMigrationDefinition = {
+  version: '0007',
+  name: '0007_firm_audit_log_expand',
+  description:
+    'Expand-phase migration creating append-only firm-wide audit_entries table, per-tenant audit/key-date sequences, and record/chronological indexes with SELECT/INSERT-only tenant-role privileges (ADR 0028, S0-15, R413).',
+  tablesChanged: ['audit_entries'],
+  dependsOn: ['0006'],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS tenant_audit_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_key_date_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS audit_entries (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  seq BIGSERIAL NOT NULL,
+  record_type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  field TEXT NULL,
+  old_value TEXT NULL,
+  new_value TEXT NULL,
+  reason TEXT NULL,
+  by_id TEXT NOT NULL,
+  at TIMESTAMPTZ NOT NULL,
+  at_iso TEXT NOT NULL,
+  snapshot_json JSONB NULL,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_at
+  ON audit_entries (tenant_id, at DESC, seq DESC);
+
+CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_record
+  ON audit_entries (tenant_id, record_type, record_id, at DESC);
+
+DO $$
+DECLARE
+  v_role TEXT := 'role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$');
+BEGIN
+  IF v_role IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+    EXECUTE format('REVOKE ALL ON TABLE public.audit_entries FROM %I', v_role);
+    EXECUTE format('GRANT SELECT, INSERT ON TABLE public.audit_entries TO %I', v_role);
+    EXECUTE format('GRANT USAGE, SELECT, UPDATE ON SEQUENCE public.tenant_audit_id_seq, public.tenant_key_date_id_seq, public.audit_entries_seq_seq TO %I', v_role);
+  END IF;
+END $$;
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS idx_audit_entries_tenant_record;
+DROP INDEX IF EXISTS idx_audit_entries_tenant_at;
+DROP TABLE IF EXISTS audit_entries;
+DROP SEQUENCE IF EXISTS tenant_key_date_id_seq;
+DROP SEQUENCE IF EXISTS tenant_audit_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -599,6 +654,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
   KEY_DATES_MATTER_RESTRICTIONS_MIGRATION_0005,
   DOCUMENT_GENERATION_TENANT_CONFIG_MIGRATION_0006,
+  FIRM_AUDIT_LOG_MIGRATION_0007,
 ];
 
 export function validateMigrationCatalogueOrder(
@@ -677,7 +733,7 @@ export class TenantMigrationRunner {
           `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${tenantRoleIdent}`,
         );
         await client.query(
-          `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${tenantRoleIdent}`,
+          `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ${tenantRoleIdent}`,
         );
         await client.query(`
           CREATE TABLE IF NOT EXISTS tenant_schema_migrations (
@@ -782,7 +838,7 @@ export class TenantMigrationRunner {
             }
           }
           await client.query(
-            `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${tenantRoleIdent}`,
+            `GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO ${tenantRoleIdent}`,
           );
 
           const appliedAt = new Date().toISOString();

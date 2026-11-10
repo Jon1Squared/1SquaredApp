@@ -142,13 +142,13 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect(violations).toEqual([]);
   });
 
-  it('applies 0001-0006 idempotently, verifies checksums, rolls back failed SQL cleanly, and round-trips downSql -> upSql on real PostgreSQL 16', async () => {
+  it('applies 0001-0007 idempotently, verifies checksums, rolls back failed SQL cleanly, and round-trips downSql -> upSql on real PostgreSQL 16', async () => {
     await provisionPostgresClusterRolesAndDatabases({
       tenants: [{ tenantId: 'mig-roundtrip-firm', environment: 'test' }],
     });
     const ctx = makeTestTenantContext('mig-roundtrip-firm');
     const runner = new TenantMigrationRunner();
-    for (const v of ['0006', '0005', '0004', '0003', '0002', '0001']) {
+    for (const v of ['0007', '0006', '0005', '0004', '0003', '0002', '0001']) {
       await runner.rollbackVersion(ctx, v);
     }
 
@@ -160,6 +160,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       '0004',
       '0005',
       '0006',
+      '0007',
     ]);
 
     // Idempotent second run applies 0 migrations
@@ -187,7 +188,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0006 -> 0005 and re-apply
+    // Round-trip rollback 0007 -> 0006 -> 0005 and re-apply
+    expect(await runner.rollbackVersion(ctx, '0007')).toBe(true);
+    expect(await runner.getActiveTables(ctx)).not.toContain('audit_entries');
     expect(await runner.rollbackVersion(ctx, '0006')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0005')).toBe(true);
     expect(await runner.getActiveTables(ctx)).not.toContain(
@@ -198,7 +201,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     );
 
     const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-    expect(reapplied.map((m) => m.version)).toEqual(['0005', '0006']);
+    expect(reapplied.map((m) => m.version)).toEqual(['0005', '0006', '0007']);
+    expect(await runner.getActiveTables(ctx)).toContain('audit_entries');
   });
 
   it('fails closed with TENANCY_DB_CONFIG_ERROR when password auth has no password env var, and core holds no built-in passwords (R435)', async () => {
@@ -430,19 +434,19 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     });
 
     const failingFinalMigration: TenantMigrationDefinition = {
-      ...CORE_TENANT_MIGRATIONS[5]!,
+      ...CORE_TENANT_MIGRATIONS[6]!,
       upSql: 'SELECT * FROM nonexistent_relation_r403;',
     };
 
     const preCleanRunner = new TenantMigrationRunner();
-    for (const v of ['0006', '0005', '0004', '0003', '0002', '0001']) {
+    for (const v of ['0007', '0006', '0005', '0004', '0003', '0002', '0001']) {
       await preCleanRunner.rollbackVersion(makeTestTenantContext('mig-partial-fail-a'), v);
     }
     const summary = await runMigrateJobSweep({
       registry,
       migrationsByTenant: {
         'mig-partial-fail-a': [
-          ...CORE_TENANT_MIGRATIONS.slice(0, 5),
+          ...CORE_TENANT_MIGRATIONS.slice(0, 6),
           failingFinalMigration,
         ],
         'mig-partial-ok-b': CORE_TENANT_MIGRATIONS,

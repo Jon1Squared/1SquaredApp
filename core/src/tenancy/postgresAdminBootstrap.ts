@@ -15,9 +15,12 @@
  * nowhere else. Every credential comes from the environment; there are no built-in passwords.
  */
 
-import type { PlatformEnvironment } from '../api/index';
+import type { PlatformEnvironment, TenantContext } from '../api/index';
 import { loadPgModule } from './pgDriver';
-import { quotePgIdentifier } from './postgresPoolManager';
+import {
+  createDirectMigrationClient,
+  quotePgIdentifier,
+} from './postgresPoolManager';
 
 export interface ProvisionPostgresClusterOptions {
   readonly tenants: ReadonlyArray<{
@@ -186,4 +189,47 @@ export async function provisionPostgresClusterRolesAndDatabases(
   }
 
   return { databasesProvisioned };
+}
+
+/**
+ * Non-live test/demo reset helper for the append-only `audit_entries` table (`S0-15`, `R413`).
+ *
+ * Because `role_tenant_<slug>_<env>` strictly holds `SELECT, INSERT` ONLY on `audit_entries`
+ * (never `UPDATE`, `DELETE`, or `TRUNCATE`), non-live test suites, `seed:demo`, `resetAllDemoData`,
+ * and `clearAllDataToCleanDeployment` reset `audit_entries` via `migrate_login` on direct port `5432`.
+ * Refuses immediately if `ctx.environment === 'live'`.
+ */
+export async function resetNonLiveTenantAuditLogForTestingOrDemo(
+  ctx: TenantContext,
+): Promise<void> {
+  if (ctx.environment === 'live') {
+    throw new Error(
+      'LIVE_AUDIT_RESET_FORBIDDEN: Immutable audit_entries cannot be cleared in the live environment.',
+    );
+  }
+  const client = await createDirectMigrationClient({ ctx });
+  try {
+    const tableCheck = await client.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'audit_entries'`,
+    );
+    if (!tableCheck.rowCount) {
+      return;
+    }
+    await client.query('BEGIN');
+    try {
+      await client.query(
+        'DELETE FROM public.audit_entries WHERE tenant_id = $1',
+        [ctx.tenantId],
+      );
+      await client.query(
+        "SELECT setval('public.tenant_audit_id_seq', 1, false)",
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+  } finally {
+    await client.end().catch(() => {});
+  }
 }

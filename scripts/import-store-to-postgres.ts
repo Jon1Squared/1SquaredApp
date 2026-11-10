@@ -2,11 +2,11 @@
  * One-off JSON-store-to-PostgreSQL import job entry point (`scripts/import-store-to-postgres.ts` -> `dist/jobs/import-store.mjs`).
  *
  * Usage:
- *   npm run db:import -- --modules documents,document-store
- *   node dist/jobs/import-store.mjs --modules documents,document-store
+ *   npm run db:import -- --modules key-dates,audit [--store-path <path>]
+ *   node dist/jobs/import-store.mjs --modules key-dates,audit [--store-path <path>]
  *   node dist/jobs/import-store.mjs --help
  *
- * Follows `docs/runbooks/store-cut-over.md` (`R404`, `R405`, `R407`):
+ * Follows `docs/runbooks/store-cut-over.md` (`R404`, `R405`, `R407`, `R413`):
  * - Imports each specified module idempotently via `TenantScopedRepository` (`SET LOCAL ROLE` in every transaction).
  * - Verifies row counts on a fresh repository connection.
  * - Logs structured JSON containing only `correlationId`, `tenantId`, `environment`, `modules`, and counts.
@@ -24,9 +24,9 @@ import {
   type TenantConfiguration,
 } from '@platform/core';
 import { getActiveTenantConfiguration } from '../src/platform/tenantRuntime';
-import { getStore } from '../src/server/store';
+import { getStore, type FirmStore } from '../src/server/store';
 import {
-  DEFAULT_S014_IMPORT_MODULES,
+  DEFAULT_MIGRATED_POSTGRES_MODULES,
   importFirmStoreModulesToPostgres,
   type ImportableStoreModule,
 } from '../src/server/storePostgresImport';
@@ -36,18 +36,20 @@ const VALID_MODULES = new Set<ImportableStoreModule>([
   'documents',
   'document-store',
   'key-dates',
+  'audit',
 ]);
 
 function printUsage(): void {
   console.log(
     [
-      'Usage: import-store [--modules <csv>] [--clear] [--help]',
+      'Usage: import-store [--modules <csv>] [--store-path <path>] [--clear] [--help]',
       '',
       'Options:',
-      '  --modules <csv>  Comma-separated modules to import (default: documents,document-store)',
-      '                   Supported: documents, document-store, key-dates',
-      '  --clear          Clear target PostgreSQL module tables for the tenant before importing',
-      '  --help, -h       Print usage and exit 0',
+      '  --modules <csv>      Comma-separated modules to import (default: documents,document-store,key-dates,audit)',
+      '                       Supported: documents, document-store, key-dates, audit',
+      '  --store-path <path>  Optional JSON store file path to import instead of the active runtime store',
+      '  --clear              Clear target PostgreSQL module tables for the tenant before importing (non-live only for audit)',
+      '  --help, -h           Print usage and exit 0',
     ].join('\n'),
   );
 }
@@ -55,11 +57,13 @@ function printUsage(): void {
 export function parseStoreImportCliArgs(argv: readonly string[]): {
   help: boolean;
   clearFirst: boolean;
+  storePath: string | null;
   modules: ImportableStoreModule[];
 } {
   let help = false;
   let clearFirst = false;
   let rawModules: string | null = null;
+  let storePath: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -76,6 +80,18 @@ export function parseStoreImportCliArgs(argv: readonly string[]): {
       i += 1;
     } else if (arg?.startsWith('--modules=')) {
       rawModules = arg.slice('--modules='.length);
+    } else if (arg === '--store-path') {
+      const next = argv[i + 1];
+      if (!next || next.startsWith('--')) {
+        throw new Error('CLI_USAGE_ERROR: --store-path requires a file path.');
+      }
+      storePath = next.trim();
+      i += 1;
+    } else if (arg?.startsWith('--store-path=')) {
+      storePath = arg.slice('--store-path='.length).trim();
+      if (!storePath) {
+        throw new Error('CLI_USAGE_ERROR: --store-path requires a file path.');
+      }
     } else if (arg) {
       throw new Error(`CLI_USAGE_ERROR: Unknown argument "${arg}".`);
     }
@@ -94,13 +110,28 @@ export function parseStoreImportCliArgs(argv: readonly string[]): {
           }
           return m as ImportableStoreModule;
         })
-    : [...DEFAULT_S014_IMPORT_MODULES];
+    : [...DEFAULT_MIGRATED_POSTGRES_MODULES];
 
   if (modules.length === 0) {
     throw new Error('CLI_USAGE_ERROR: At least one module must be specified.');
   }
 
-  return { help, clearFirst, modules };
+  return { help, clearFirst, storePath, modules };
+}
+
+function loadStoreForImport(explicitStorePath: string | null): FirmStore {
+  if (!explicitStorePath) {
+    return getStore();
+  }
+  const absPath = path.resolve(process.cwd(), explicitStorePath);
+  if (!fs.existsSync(absPath)) {
+    throw new Error('STORE_IMPORT_FILE_NOT_FOUND: Specified --store-path does not exist.');
+  }
+  const parsed = JSON.parse(fs.readFileSync(absPath, 'utf8')) as FirmStore;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('STORE_IMPORT_INVALID_JSON: Store file root must be a JSON object.');
+  }
+  return parsed;
 }
 
 function loadTenantConfigurationFromPackageDir(
@@ -156,7 +187,7 @@ export async function runStoreImportCli(
           entry.environment,
           registry.hostingMode,
         );
-        const store = getStore();
+        const store = loadStoreForImport(parsed.storePath);
         const res = await importFirmStoreModulesToPostgres({
           ctx: buildSystemJobTenantContext({
             tenantConfig,
@@ -200,7 +231,7 @@ export async function runStoreImportCli(
   }
 
   const tenantConfig = getActiveTenantConfiguration();
-  const store = getStore();
+  const store = loadStoreForImport(parsed.storePath);
   const res = await importFirmStoreModulesToPostgres({
     ctx: buildSystemJobTenantContext({
       tenantConfig,

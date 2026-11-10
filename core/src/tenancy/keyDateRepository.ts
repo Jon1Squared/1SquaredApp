@@ -332,7 +332,40 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   // Key Dates (Never deleted in normal operation)
   // ============================================================================
 
-  public async putKeyDate(ctx: TenantContext, keyDate: KeyDate): Promise<KeyDate> {
+  public async allocateNextKeyDateId(ctx: TenantContext): Promise<string> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ seq_val: string | number }>(
+        "SELECT nextval('public.tenant_key_date_id_seq')::bigint AS seq_val",
+      );
+      const val = res.rows[0]?.seq_val ?? 1;
+      return `KD-${String(val).padStart(6, '0')}`;
+    });
+  }
+
+  public async allocateNextKeyDateIds(
+    ctx: TenantContext,
+    count: number,
+  ): Promise<string[]> {
+    const n = Math.max(0, Math.floor(count));
+    if (n === 0) return [];
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const ids: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const res = await tx.query<{ seq_val: string | number }>(
+          "SELECT nextval('public.tenant_key_date_id_seq')::bigint AS seq_val",
+        );
+        const val = res.rows[0]?.seq_val ?? 1;
+        ids.push(`KD-${String(val).padStart(6, '0')}`);
+      }
+      return ids;
+    });
+  }
+
+  public async putKeyDate(
+    ctx: TenantContext,
+    keyDate: KeyDate,
+    options?: { allowEntityRebindForCompensation?: boolean },
+  ): Promise<KeyDate> {
     if (
       (keyDate.matterId && keyDate.enquiryId) ||
       (!keyDate.matterId && !keyDate.enquiryId)
@@ -361,11 +394,21 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       const existing = existingRes.rows[0];
       if (existing) {
         this.assertRowTenant(ctx, existing.tenant_id, 'KeyDate');
-        if (
+        const entityChanged =
           (existing.matter_id ?? undefined) !==
             (keyDate.matterId ?? undefined) ||
           (existing.enquiry_id ?? undefined) !==
-            (keyDate.enquiryId ?? undefined)
+            (keyDate.enquiryId ?? undefined);
+        const isCarriedFromEnquiryConversion =
+          existing.enquiry_id !== null &&
+          existing.matter_id === null &&
+          Boolean(keyDate.matterId) &&
+          !keyDate.enquiryId &&
+          keyDate.source === 'carried_from_enquiry';
+        if (
+          entityChanged &&
+          !isCarriedFromEnquiryConversion &&
+          !options?.allowEntityRebindForCompensation
         ) {
           throw new Error(
             'KEY_DATE_ENTITY_IMMUTABLE: Cannot change matterId or enquiryId on an existing KeyDate.',
@@ -399,6 +442,8 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
            $14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18,$19,$20,$21,$22,$23,$24,$25,$26
          )
          ON CONFLICT (id) DO UPDATE SET
+           matter_id = EXCLUDED.matter_id,
+           enquiry_id = EXCLUDED.enquiry_id,
            key_date_type_id = EXCLUDED.key_date_type_id,
            category = EXCLUDED.category,
            title = EXCLUDED.title,
@@ -457,7 +502,100 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
         );
       }
       this.assertRowTenant(ctx, saved.tenant_id, 'KeyDate');
+      const kdMatch = /^KD-(\d+)$/.exec(keyDate.id);
+      if (kdMatch?.[1]) {
+        const kdNum = Number.parseInt(kdMatch[1], 10);
+        if (Number.isFinite(kdNum) && kdNum > 0) {
+          await tx.query(
+            `SELECT setval(
+               'public.tenant_key_date_id_seq',
+               GREATEST(
+                 CASE WHEN is_called THEN last_value ELSE 0 END,
+                 $1::bigint
+               ),
+               true
+             )
+             FROM public.tenant_key_date_id_seq`,
+            [kdNum],
+          );
+        }
+      }
       return mapKeyDateRow(saved);
+    });
+  }
+
+  public async deleteKeyDateByIdForCompensation(
+    ctx: TenantContext,
+    id: KeyDateId,
+  ): Promise<void> {
+    await this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'DELETE FROM key_date_calendar_syncs WHERE tenant_id = $1 AND key_date_id = $2',
+        [ctx.tenantId, id],
+      );
+      await tx.query(
+        'DELETE FROM key_date_reminder_states WHERE tenant_id = $1 AND key_date_id = $2',
+        [ctx.tenantId, id],
+      );
+      await tx.query(
+        'DELETE FROM key_dates WHERE tenant_id = $1 AND id = $2',
+        [ctx.tenantId, id],
+      );
+    });
+  }
+
+  public async listHiddenKeyDateIdsForMatters(
+    ctx: TenantContext,
+    hiddenMatterIds: ReadonlySet<string>,
+  ): Promise<ReadonlySet<string>> {
+    if (hiddenMatterIds.size === 0) {
+      return new Set<string>();
+    }
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ tenant_id: string; id: string }>(
+        `SELECT tenant_id, id
+         FROM key_dates
+         WHERE tenant_id = $1
+           AND matter_id = ANY($2::text[])`,
+        [ctx.tenantId, Array.from(hiddenMatterIds)],
+      );
+      const out = new Set<string>();
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'KeyDate');
+        out.add(row.id);
+      }
+      return out;
+    });
+  }
+
+  public async listKeyDatesForExceptionsReport(
+    ctx: TenantContext,
+    viewerId: string = ctx.actorId,
+    options?: { includeMissingMatterOrphans?: boolean },
+  ): Promise<KeyDate[]> {
+    if (!options?.includeMissingMatterOrphans) {
+      return this.listAllVisibleKeyDates(ctx, viewerId);
+    }
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbKeyDateRow>(
+        `SELECT kd.*
+         FROM key_dates kd
+         LEFT JOIN matter_restriction_metadata mrm
+           ON mrm.tenant_id = kd.tenant_id AND mrm.matter_id = kd.matter_id
+         WHERE kd.tenant_id = $1
+           AND (
+             kd.matter_id IS NULL
+             OR mrm.matter_id IS NULL
+             OR mrm.is_restricted = FALSE
+             OR mrm.restricted_access_user_ids ? $2
+           )
+         ORDER BY kd.due_date ASC, kd.id ASC`,
+        [ctx.tenantId, viewerId],
+      );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'KeyDate');
+        return mapKeyDateRow(r);
+      });
     });
   }
 
@@ -671,6 +809,37 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
          WHERE tenant_id = $1 AND matter_id = $2
          ORDER BY key_date_type_id ASC`,
         [ctx.tenantId, matterId],
+      );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'KeyDateNotApplicable');
+        return {
+          matterId: r.matter_id,
+          keyDateTypeId: r.key_date_type_id,
+          reason: r.reason,
+          recordedById: r.recorded_by_id,
+          recordedAt: toIsoString(r.recorded_at),
+        };
+      });
+    });
+  }
+
+  public async listAllVisibleNotApplicable(
+    ctx: TenantContext,
+    viewerId: string = ctx.actorId,
+  ): Promise<KeyDateNotApplicable[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbNotApplicableRow>(
+        `SELECT na.*
+         FROM key_date_not_applicable na
+         INNER JOIN matter_restriction_metadata mrm
+           ON mrm.tenant_id = na.tenant_id AND mrm.matter_id = na.matter_id
+         WHERE na.tenant_id = $1
+           AND (
+             mrm.is_restricted = FALSE
+             OR mrm.restricted_access_user_ids ? $2
+           )
+         ORDER BY na.matter_id ASC, na.key_date_type_id ASC`,
+        [ctx.tenantId, viewerId],
       );
       return res.rows.map((r) => {
         this.assertRowTenant(ctx, r.tenant_id, 'KeyDateNotApplicable');
@@ -921,6 +1090,75 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
+  public async listAllVisibleCalendarSyncs(
+    ctx: TenantContext,
+    viewerId: string = ctx.actorId,
+  ): Promise<KeyDateCalendarSync[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const visibleIds = new Set(
+        (await this.listAllVisibleKeyDates(ctx, viewerId)).map((kd) => kd.id),
+      );
+      if (visibleIds.size === 0) return [];
+      const res = await tx.query<DbCalendarSyncRow>(
+        'SELECT * FROM key_date_calendar_syncs WHERE tenant_id = $1 ORDER BY key_date_id ASC',
+        [ctx.tenantId],
+      );
+      const out: KeyDateCalendarSync[] = [];
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'KeyDateCalendarSync');
+        if (visibleIds.has(row.key_date_id)) {
+          out.push({
+            keyDateId: row.key_date_id,
+            state: row.state,
+            externalEvents: Array.isArray(row.external_events_json)
+              ? row.external_events_json.map((e) => ({ ...e }))
+              : [],
+            ...(row.last_synced_at !== null
+              ? { lastSyncedAt: toIsoString(row.last_synced_at) }
+              : {}),
+            ...(row.last_error !== null ? { lastError: row.last_error } : {}),
+            attempts: Number(row.attempts),
+          });
+        }
+      }
+      return out;
+    });
+  }
+
+  public async countAllTenantKeyDateRows(ctx: TenantContext): Promise<{
+    keyDates: number;
+    notApplicable: number;
+    reminderStates: number;
+    calendarSyncs: number;
+    hasConfigOverride: boolean;
+  }> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{
+        kd_cnt: number;
+        na_cnt: number;
+        rs_cnt: number;
+        cs_cnt: number;
+        cfg_cnt: number;
+      }>(
+        `SELECT
+           (SELECT COUNT(*)::int FROM key_dates WHERE tenant_id = $1) AS kd_cnt,
+           (SELECT COUNT(*)::int FROM key_date_not_applicable WHERE tenant_id = $1) AS na_cnt,
+           (SELECT COUNT(*)::int FROM key_date_reminder_states WHERE tenant_id = $1) AS rs_cnt,
+           (SELECT COUNT(*)::int FROM key_date_calendar_syncs WHERE tenant_id = $1) AS cs_cnt,
+           (SELECT COUNT(*)::int FROM key_dates_tenant_configs WHERE tenant_id = $1) AS cfg_cnt`,
+        [ctx.tenantId],
+      );
+      const row = res.rows[0];
+      return {
+        keyDates: Number(row?.kd_cnt ?? 0),
+        notApplicable: Number(row?.na_cnt ?? 0),
+        reminderStates: Number(row?.rs_cnt ?? 0),
+        calendarSyncs: Number(row?.cs_cnt ?? 0),
+        hasConfigOverride: Number(row?.cfg_cnt ?? 0) > 0,
+      };
+    });
+  }
+
   // ============================================================================
   // Immutable Key Date Audit Events
   // ============================================================================
@@ -1036,7 +1274,10 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       );
       await tx.query(
         'DELETE FROM key_dates_tenant_configs WHERE tenant_id = $1',
-        [ctx.tenantId],
+      [ctx.tenantId],
+      );
+      await tx.query(
+        "SELECT setval('public.tenant_key_date_id_seq', 1, false)",
       );
     });
   }
