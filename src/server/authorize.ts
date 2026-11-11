@@ -62,22 +62,38 @@ function logAuthorisationDenial(params: {
   code: string;
   requiredPermission?: string;
 }): void {
-  emitTenantTelemetryEvent({
-    eventName: 'authorisation.denied',
-    severity: 'warn',
-    tenantId: params.tenantId,
-    correlationId: resolveRequestCorrelationId(
-      params.correlationId,
-      'corr-auth',
-    ),
-    properties: {
-      action: params.action,
-      code: params.code,
-      ...(params.requiredPermission
-        ? { requiredPermission: params.requiredPermission }
-        : {}),
-    },
-  });
+  // Telemetry must never change the outcome of a denial: if the emitter throws
+  // (for example on an empty tenant), the caller still gets the original 401/403 (R432).
+  try {
+    emitTenantTelemetryEvent({
+      eventName: 'authorisation.denied',
+      severity: 'warn',
+      tenantId: params.tenantId,
+      correlationId: resolveRequestCorrelationId(
+        params.correlationId,
+        'corr-auth',
+      ),
+      properties: {
+        action: params.action,
+        code: params.code,
+        ...(params.requiredPermission
+          ? { requiredPermission: params.requiredPermission }
+          : {}),
+      },
+    });
+  } catch (telemetryError) {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'telemetry.emit_failed',
+        correlationId: params.correlationId,
+        tenantId: params.tenantId,
+        action: params.action,
+        errorName:
+          telemetryError instanceof Error ? telemetryError.name : 'Error',
+      }),
+    );
+  }
   console.warn(
     JSON.stringify({
       level: 'warn',

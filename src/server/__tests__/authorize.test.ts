@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getPlatformTelemetryRecorder } from '@platform/core';
 import { updateTenantRbacConfigAction } from '@/app/actions';
 import { GET as matterDocumentsGet } from '@/app/api/matters/[id]/documents/route';
 import { isActionDenied } from '@/domain/actionResult';
@@ -381,6 +382,39 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
     expect(parsed.action).toBe('updateTenantRbacConfigAction');
     expect(parsed.code).toBe('FORBIDDEN');
     expect(parsed.correlationId).toMatch(/^corr-act-/);
+  });
+
+  it('10. a telemetry emitter failure never turns a denial into a 500: the original FORBIDDEN still reaches the caller (R432)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unsubscribe = getPlatformTelemetryRecorder().subscribe((entry) => {
+      if (entry.eventName === 'authorisation.denied') {
+        throw new Error('TELEMETRY_SINK_DOWN: invented emitter failure');
+      }
+    });
+    try {
+      setTestEntraSessionOverride(makeSession());
+      const fn = vi.fn<() => { ok: boolean }>(() => ({ ok: true }));
+
+      const result = await guardedAction('updateTenantRbacConfigAction', fn);
+      expect(fn).not.toHaveBeenCalled();
+      expect(isActionDenied(result)).toBe(true);
+      if (isActionDenied(result)) {
+        expect(result.code).toBe('FORBIDDEN');
+        expect(result.error).toMatch(/^FORBIDDEN:/);
+        expect(result.error).toContain('rbac:manage_config');
+      }
+
+      // The denial log is still written, and the telemetry failure is logged without content
+      const events = warnSpy.mock.calls.map(
+        (call) => (JSON.parse(String(call[0])) as { event: string }).event,
+      );
+      expect(events).toEqual(['telemetry.emit_failed', 'authorisation.denied']);
+      expect(String(warnSpy.mock.calls[0]?.[0])).not.toContain(
+        'invented emitter failure',
+      );
+    } finally {
+      unsubscribe();
+    }
   });
 
   it('authorizeResource enforces restricted staff matter access via canAccessMatter', async () => {
