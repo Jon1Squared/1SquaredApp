@@ -23,6 +23,10 @@ import {
   type TenantSqlClient,
 } from './tenantScopedRepository';
 import { TenantAuditRepository } from './auditRepository';
+import {
+  syncPersonFirmWorkEmailInTx,
+  upsertPersonEmploymentAndPayrollInTx,
+} from './hrRbacRepository';
 
 export interface TenantEmailEntry {
   id: string;
@@ -274,8 +278,43 @@ interface DbPersonRow {
   dismissed_duplicate_ids_json: string[];
   custom_fields_json: Record<string, unknown>;
   profile_json: Record<string, unknown>;
-  employment_json: Record<string, unknown> | null;
+  joined_employment_json?: Record<string, unknown> | null;
+  joined_payroll_json?: Record<string, unknown> | null;
 }
+
+const PEOPLE_EXPLICIT_COLUMNS = `
+  tenant_id, id, first_name, preferred_name, other_names, surname,
+  title_id, date_of_birth, is_employee, employee_role_id, app_role,
+  entra_object_id, primary_email_lower, job_title, department_id,
+  office_id, supervisor_id, is_fee_earner, default_hourly_rate_gbp,
+  client_status_id, aml_status_id, id_verified_on, id_expiry_date,
+  created_from_enquiry_id, merged_into_id, created_at, updated_at,
+  emails_json, phones_json, addresses_json, relationship_role_ids_json,
+  roles_json, permission_overrides_json, dismissed_duplicate_ids_json,
+  custom_fields_json, profile_json
+`;
+
+const PEOPLE_JOINED_SELECT_COLUMNS = `
+  p.tenant_id, p.id, p.first_name, p.preferred_name, p.other_names, p.surname,
+  p.title_id, p.date_of_birth, p.is_employee, p.employee_role_id, p.app_role,
+  p.entra_object_id, p.primary_email_lower, p.job_title, p.department_id,
+  p.office_id, p.supervisor_id, p.is_fee_earner, p.default_hourly_rate_gbp,
+  p.client_status_id, p.aml_status_id, p.id_verified_on, p.id_expiry_date,
+  p.created_from_enquiry_id, p.merged_into_id, p.created_at, p.updated_at,
+  p.emails_json, p.phones_json, p.addresses_json, p.relationship_role_ids_json,
+  p.roles_json, p.permission_overrides_json, p.dismissed_duplicate_ids_json,
+  p.custom_fields_json, p.profile_json,
+  eer.employment_json AS joined_employment_json,
+  esr.payroll_json AS joined_payroll_json
+`;
+
+const PEOPLE_LEFT_JOIN_HR = `
+  FROM public.people p
+  LEFT JOIN public.employee_employment_records eer
+    ON eer.tenant_id = p.tenant_id AND eer.person_id = p.id
+  LEFT JOIN public.employee_sensitive_records esr
+    ON esr.tenant_id = p.tenant_id AND esr.person_id = p.id
+`;
 
 interface DbOrganisationRow {
   tenant_id: string;
@@ -458,11 +497,20 @@ function mapPersonRow<TPerson extends TenantPersonRecord = TenantPersonRecord>(
   if (prof.hasDateOfBirth !== false && (row.date_of_birth !== null || prof.hasDateOfBirth === true)) {
     out.dateOfBirth = row.date_of_birth;
   }
-  if (row.employment_json !== null || prof.hasEmployment === true) {
-    out.employment =
-      row.employment_json !== null
-        ? structuredClone(row.employment_json)
-        : null;
+  const joinedEmp = row.joined_employment_json ?? null;
+  if (joinedEmp !== null || prof.hasEmployment === true) {
+    if (joinedEmp !== null) {
+      const clonedEmp = structuredClone(joinedEmp);
+      if (
+        row.joined_payroll_json !== undefined &&
+        row.joined_payroll_json !== null
+      ) {
+        clonedEmp.payroll = structuredClone(row.joined_payroll_json);
+      }
+      out.employment = clonedEmp;
+    } else {
+      out.employment = null;
+    }
   }
   if (row.permission_overrides_json !== null || prof.hasPermissionOverrides === true) {
     out.permissionOverrides =
@@ -860,7 +908,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
     person: TenantPersonRecord,
   ): Promise<void> {
     await tx.query(
-      'DELETE FROM public.person_emails WHERE tenant_id = $1 AND person_id = $2',
+      "DELETE FROM public.person_emails WHERE tenant_id = $1 AND person_id = $2 AND source = 'contact_email'",
       [ctx.tenantId, person.id],
     );
 
@@ -899,29 +947,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
            active = EXCLUDED.active,
            updated_at = NOW()`,
         [ctx.tenantId, person.id, emailLower, meta.isPrimary, meta.active],
-      );
-    }
-
-    const employment = person.employment as
-      | {
-          status?: string;
-          systems?: { firmWorkEmail?: string | null } | null;
-        }
-      | null
-      | undefined;
-    const firmWorkEmailLower =
-      employment?.systems?.firmWorkEmail?.trim().toLowerCase() ?? '';
-    if (firmWorkEmailLower) {
-      const isActiveWorkEmail =
-        !isTombstoned && employment?.status !== 'Leaver';
-      await tx.query(
-        `INSERT INTO public.person_emails (
-           tenant_id, person_id, email_lower, source, is_primary, active, updated_at
-         ) VALUES ($1, $2, $3, 'firm_work_email', FALSE, $4, NOW())
-         ON CONFLICT (tenant_id, person_id, email_lower, source) DO UPDATE SET
-           active = EXCLUDED.active,
-           updated_at = NOW()`,
-        [ctx.tenantId, person.id, firmWorkEmailLower, isActiveWorkEmail],
       );
     }
   }
@@ -1022,17 +1047,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
     const cleanEntraOid = person.entraObjectId?.trim() || null;
 
     const res = await tx.query<DbPersonRow>(
-      `INSERT INTO public.people (
-         tenant_id, id, first_name, preferred_name, other_names, surname,
-         title_id, date_of_birth, is_employee, employee_role_id, app_role,
-         entra_object_id, primary_email_lower, job_title, department_id,
-         office_id, supervisor_id, is_fee_earner, default_hourly_rate_gbp,
-         client_status_id, aml_status_id, id_verified_on, id_expiry_date,
-         created_from_enquiry_id, merged_into_id, created_at, updated_at,
-         emails_json, phones_json, addresses_json, relationship_role_ids_json,
-         roles_json, permission_overrides_json, dismissed_duplicate_ids_json,
-         custom_fields_json, profile_json, employment_json
-       ) VALUES (
+      `INSERT INTO public.people (${PEOPLE_EXPLICIT_COLUMNS}) VALUES (
          $1, $2, $3, $4, $5, $6,
          $7, $8, $9, $10, $11,
          $12, $13, $14, $15,
@@ -1041,7 +1056,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
          $24, $25, $26::timestamptz, $27::timestamptz,
          $28::jsonb, $29::jsonb, $30::jsonb, $31::jsonb,
          $32::jsonb, $33::jsonb, $34::jsonb,
-         $35::jsonb, $36::jsonb, $37::jsonb
+         $35::jsonb, $36::jsonb
        )
        ON CONFLICT (tenant_id, id) DO UPDATE SET
          first_name = EXCLUDED.first_name,
@@ -1077,9 +1092,8 @@ export class TenantPartyRepository extends TenantScopedRepository {
          permission_overrides_json = EXCLUDED.permission_overrides_json,
          dismissed_duplicate_ids_json = EXCLUDED.dismissed_duplicate_ids_json,
          custom_fields_json = EXCLUDED.custom_fields_json,
-         profile_json = EXCLUDED.profile_json,
-         employment_json = EXCLUDED.employment_json
-       RETURNING *`,
+         profile_json = EXCLUDED.profile_json
+       RETURNING ${PEOPLE_EXPLICIT_COLUMNS}`,
       [
         ctx.tenantId,
         person.id,
@@ -1120,9 +1134,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
         JSON.stringify(person.notDuplicateOf ?? []),
         JSON.stringify(person.customFields ?? {}),
         JSON.stringify(profileJson),
-        person.employment !== undefined && person.employment !== null
-          ? JSON.stringify(person.employment)
-          : null,
       ],
     );
 
@@ -1134,6 +1145,64 @@ export class TenantPartyRepository extends TenantScopedRepository {
     }
     this.assertRowTenant(ctx, saved.tenant_id, 'Person');
     await this.syncPersonEmailsInTx(tx, ctx, person);
+
+    const isTombstoned = Boolean(person.mergedIntoId);
+    if (person.employment !== undefined && person.employment !== null) {
+      await upsertPersonEmploymentAndPayrollInTx(
+        tx,
+        ctx,
+        person.id,
+        person.employment as Record<string, unknown>,
+        {
+          updatedById: person.updatedById,
+          updatedAt: person.updatedAt,
+          isMergedOrTombstoned: isTombstoned,
+        },
+      );
+      const empObj = person.employment as Record<string, unknown>;
+      saved.joined_employment_json = structuredClone(empObj);
+      if (empObj.payroll && typeof empObj.payroll === 'object') {
+        saved.joined_payroll_json = structuredClone(
+          empObj.payroll as Record<string, unknown>,
+        );
+      }
+    } else if (person.employment === null) {
+      await syncPersonFirmWorkEmailInTx(tx, ctx, person.id, null, {
+        isMergedOrTombstoned: isTombstoned,
+      });
+      saved.joined_employment_json = null;
+    } else {
+      const hrRes = await tx.query<{
+        tenant_id: string;
+        employment_json: Record<string, unknown> | null;
+        payroll_json: Record<string, unknown> | null;
+      }>(
+        `SELECT eer.tenant_id, eer.employment_json, esr.payroll_json
+         FROM public.employee_employment_records eer
+         LEFT JOIN public.employee_sensitive_records esr
+           ON esr.tenant_id = eer.tenant_id AND esr.person_id = eer.person_id
+         WHERE eer.tenant_id = $1 AND eer.person_id = $2`,
+        [ctx.tenantId, person.id],
+      );
+      const hrRow = hrRes.rows[0];
+      if (hrRow) {
+        this.assertRowTenant(
+          ctx,
+          hrRow.tenant_id,
+          'employee_employment_records',
+        );
+        saved.joined_employment_json = hrRow.employment_json;
+        saved.joined_payroll_json = hrRow.payroll_json;
+        await syncPersonFirmWorkEmailInTx(
+          tx,
+          ctx,
+          person.id,
+          hrRow.employment_json,
+          { isMergedOrTombstoned: isTombstoned },
+        );
+      }
+    }
+
     return mapPersonRow<TPerson>(saved);
   }
 
@@ -1181,7 +1250,9 @@ export class TenantPartyRepository extends TenantScopedRepository {
   ): Promise<TPerson | null> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbPersonRow>(
-        'SELECT * FROM public.people WHERE tenant_id = $1 AND id = $2',
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE p.tenant_id = $1 AND p.id = $2`,
         [ctx.tenantId, id],
       );
       const row = res.rows[0];
@@ -1199,12 +1270,12 @@ export class TenantPartyRepository extends TenantScopedRepository {
     if (!cleanOid) return null;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbPersonRow>(
-        `SELECT *
-         FROM public.people
-         WHERE tenant_id = $1
-           AND lower(entra_object_id) = lower($2)
-           AND merged_into_id IS NULL
-         ORDER BY id ASC
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE p.tenant_id = $1
+           AND lower(p.entra_object_id) = lower($2)
+           AND p.merged_into_id IS NULL
+         ORDER BY p.id ASC
          LIMIT 1`,
         [ctx.tenantId, cleanOid],
       );
@@ -1223,8 +1294,8 @@ export class TenantPartyRepository extends TenantScopedRepository {
     if (!cleanLower) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbPersonRow>(
-        `SELECT p.*
-         FROM public.people p
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
          WHERE p.tenant_id = $1
            AND p.merged_into_id IS NULL
            AND EXISTS (
@@ -1287,18 +1358,18 @@ export class TenantPartyRepository extends TenantScopedRepository {
     const includeMerged = options?.includeMerged ?? true;
     const employeesOnly = options?.employeesOnly ?? false;
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const clauses = ['tenant_id = $1'];
+      const clauses = ['p.tenant_id = $1'];
       if (!includeMerged) {
-        clauses.push('merged_into_id IS NULL');
+        clauses.push('p.merged_into_id IS NULL');
       }
       if (employeesOnly) {
-        clauses.push('is_employee = TRUE');
+        clauses.push('p.is_employee = TRUE');
       }
       const res = await tx.query<DbPersonRow>(
-        `SELECT *
-         FROM public.people
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
          WHERE ${clauses.join(' AND ')}
-         ORDER BY id ASC`,
+         ORDER BY p.id ASC`,
         [ctx.tenantId],
       );
       return res.rows.map((row) => {
@@ -2490,7 +2561,117 @@ export class TenantPartyRepository extends TenantScopedRepository {
         );
       }
 
-      // 12. Record merge_history & audit_entries in the same transaction
+      // 12. Repoint teams, employee_employment_records, and employee_sensitive_records (`S0-17b`)
+      if (recordType === 'person') {
+        const teamRes = await tx.query<{
+          tenant_id: string;
+          id: string;
+          member_ids_json: string[] | null;
+          lead_ids_json: string[] | null;
+          payload_json: Record<string, unknown> | null;
+        }>(
+          `SELECT tenant_id, id, member_ids_json, lead_ids_json, payload_json
+           FROM public.teams
+           WHERE tenant_id = $1
+             AND (member_ids_json ? $2 OR lead_ids_json ? $2)
+           FOR UPDATE`,
+          [ctx.tenantId, mergedId],
+        );
+        for (const teamRow of teamRes.rows) {
+          this.assertRowTenant(ctx, teamRow.tenant_id, 'teams.executeMergeInTransaction');
+          const remapIds = (arr: string[] | null | undefined): string[] => {
+            if (!Array.isArray(arr)) return [];
+            const out: string[] = [];
+            for (const item of arr) {
+              const mapped = item === mergedId ? survivorId : item;
+              if (!out.includes(mapped)) out.push(mapped);
+            }
+            return out;
+          };
+          const nextMembers = remapIds(teamRow.member_ids_json);
+          const nextLeads = remapIds(teamRow.lead_ids_json);
+          const nextPayload: Record<string, unknown> =
+            teamRow.payload_json && typeof teamRow.payload_json === 'object'
+              ? { ...teamRow.payload_json, memberIds: nextMembers, leadIds: nextLeads }
+              : { id: teamRow.id, memberIds: nextMembers, leadIds: nextLeads };
+          await tx.query(
+            `UPDATE public.teams
+             SET member_ids_json = $3::jsonb,
+                 lead_ids_json = $4::jsonb,
+                 payload_json = $5::jsonb,
+                 updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $2`,
+            [
+              ctx.tenantId,
+              teamRow.id,
+              JSON.stringify(nextMembers),
+              JSON.stringify(nextLeads),
+              JSON.stringify(nextPayload),
+            ],
+          );
+        }
+
+        // Preserve merged person's sensitive HR / payroll onto survivor if survivor has none
+        await tx.query(
+          `INSERT INTO public.employee_sensitive_records (
+             tenant_id, person_id, updated_at, updated_by_id, payroll_json, sensitive_hr_json
+           )
+           SELECT
+             tenant_id, $2, NOW(), updated_by_id, payroll_json, sensitive_hr_json
+           FROM public.employee_sensitive_records
+           WHERE tenant_id = $1 AND person_id = $3
+           ON CONFLICT (tenant_id, person_id) DO UPDATE SET
+             payroll_json = COALESCE(public.employee_sensitive_records.payroll_json, EXCLUDED.payroll_json),
+             sensitive_hr_json = COALESCE(public.employee_sensitive_records.sensitive_hr_json, EXCLUDED.sensitive_hr_json),
+             updated_at = NOW()`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+
+        // Repoint manager / supervisor / approver person references inside employee_employment_records
+        const empRows = await tx.query<{
+          tenant_id: string;
+          person_id: string;
+          employment_json: Record<string, unknown> | null;
+        }>(
+          `SELECT tenant_id, person_id, employment_json
+           FROM public.employee_employment_records
+           WHERE tenant_id = $1
+           FOR UPDATE`,
+          [ctx.tenantId],
+        );
+        for (const empRow of empRows.rows) {
+          this.assertRowTenant(
+            ctx,
+            empRow.tenant_id,
+            'employee_employment_records.executeMergeInTransaction',
+          );
+          const emp = empRow.employment_json;
+          if (!emp || typeof emp !== 'object') continue;
+          let empChanged = false;
+          const nextEmp = structuredClone(emp) as Record<string, unknown>;
+          for (const key of [
+            'supervisorPersonId',
+            'lineManagerPersonId',
+            'approverPersonId',
+            'secondaryApproverPersonId',
+          ]) {
+            if (nextEmp[key] === mergedId) {
+              nextEmp[key] = survivorId;
+              empChanged = true;
+            }
+          }
+          if (empChanged) {
+            await tx.query(
+              `UPDATE public.employee_employment_records
+               SET employment_json = $3::jsonb, updated_at = NOW()
+               WHERE tenant_id = $1 AND person_id = $2`,
+              [ctx.tenantId, empRow.person_id, JSON.stringify(nextEmp)],
+            );
+          }
+        }
+      }
+
+      // 13. Record merge_history & audit_entries in the same transaction
       if (params.mergeHistory) {
         await this.upsertMergeHistoryInTx(tx, ctx, params.mergeHistory);
       }
@@ -2561,6 +2742,14 @@ export class TenantPartyRepository extends TenantScopedRepository {
       await tx.query('DELETE FROM public.person_emails WHERE tenant_id = $1', [
         ctx.tenantId,
       ]);
+      await tx.query(
+        'DELETE FROM public.employee_sensitive_records WHERE tenant_id = $1',
+        [ctx.tenantId],
+      );
+      await tx.query(
+        'DELETE FROM public.employee_employment_records WHERE tenant_id = $1',
+        [ctx.tenantId],
+      );
       await tx.query('DELETE FROM public.people WHERE tenant_id = $1', [
         ctx.tenantId,
       ]);
