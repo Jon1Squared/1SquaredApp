@@ -45,7 +45,7 @@ import {
 } from './entraAuth';
 import { canPersonAccessMatter, resolvePersonPermissionSet } from './rbacRuntime';
 import { getStore, type FirmStore } from './store';
-import { buildRecordVisibility } from './visibility';
+import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from './visibility';
 
 export type FinanceActorInput =
   | string
@@ -186,6 +186,7 @@ export function verifyFinanceActorAndPermission(
 
   const visibility = buildRecordVisibility(store, actor, {
     tokenRoles,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenMatterIds = visibility.hiddenMatterIds;
   const hiddenPmsMatterCodes = new Set(

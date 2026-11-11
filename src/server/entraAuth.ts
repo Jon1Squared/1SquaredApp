@@ -8,6 +8,7 @@ import {
   type VerifiedOidcTokenClaims,
 } from '@/domain/rbac';
 import {
+  getActiveTenantConfiguration,
   type UnbrandedSessionActorInput,
   type VerifiedSessionActorInput,
 } from '@/platform/tenantRuntime';
@@ -635,10 +636,21 @@ export function createSignInActorFromVerifiedOidcToken(
   verifiedToken: VerifiedOidcTokenClaims,
   params: { oid: string; email: string; correlationId?: string },
 ): VerifiedSessionActorInput {
+  if (verifiedToken?.__verifiedByOidcMiddleware !== true) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token must carry the __verifiedByOidcMiddleware brand.',
+    );
+  }
   const tenantId = (verifiedToken.tenantId ?? '').trim();
   if (!tenantId) {
     throw new Error(
       'TENANCY_AUTH_ERROR: Verified OIDC token is missing required tenantId claim.',
+    );
+  }
+  const activeTenantId = getActiveTenantConfiguration().tenantId;
+  if (tenantId !== activeTenantId) {
+    throw new Error(
+      `TENANCY_AUTH_ERROR: Verified OIDC token tenantId "${tenantId}" does not match active tenant "${activeTenantId}".`,
     );
   }
   const email = (params.email ?? '').trim();

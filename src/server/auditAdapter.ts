@@ -6,7 +6,7 @@
  * - While unmoved modules still persist primary records in `FirmStore` (`src/server/store.ts`),
  *   their audit entries write to PostgreSQL `public.audit_entries` (`TenantAuditRepository`) inside
  *   `withJsonStoreWriteLock`.
- * - NEVER restores a whole-store `structuredClone(store)` snapshot (`R406`). Instead,
+ * - NEVER restores a whole-store clone snapshot (`R406`). Instead,
  *   `captureJsonStoreBaseline` + `registerJsonStoreRecordDeltas` compute exact per-record ID deltas
  *   (`inserted`, `updated`, `deleted` items by ID, plus touched scalar settings keys) and register a
  *   record-level compensating callback onto `RecordDeltaCompensator`. If the PostgreSQL `audit_entries`
@@ -496,7 +496,8 @@ export function registerJsonStoreRecordDeltas(
           // ignore
         }
         const correlationId = resolveRequestCorrelationId(
-          getActiveActorSession()?.verifiedSession?.correlationId ?? null,
+          (getActiveActorSession() as { correlationId?: string } | null)
+            ?.correlationId ?? null,
           'corr-merge-rollback',
         );
         console.error(

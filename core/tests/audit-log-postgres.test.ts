@@ -20,6 +20,7 @@ import {
   type TenantContext,
 } from '../src/index';
 import {
+  executeMerge,
   getAppSnapshot,
   getKeyDatesConfig,
   listAuditEntriesForRecord,
@@ -546,7 +547,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       //     nested chain (R418, R456): on a forced PostgreSQL audit failure, neither the matter nor the automatic
       //     task nor the enquiry status change survives clearStoreMemoryCache(), and no audit rows exist on a fresh connection.
       const openEnquiry = getStore().enquiries.find(
-        (e) => e.status !== 'Converted to Matter' && e.status !== 'Closed - No Response',
+        (e) => e.status !== 'Converted' && e.status !== 'No response',
       )!;
       expect(openEnquiry).toBeDefined();
       const baseMatter = getStore().matters.find((m) => !m.isStaffMatter)!;
@@ -642,8 +643,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
               worksAtFirm: true,
               sensitiveSubmitted: {
                 ...(beforeSensitive ?? {}),
-                nationalInsuranceNumber: 'QQ123456C',
-                rightToWorkNotes: 'Invented R442 rollback note',
+                reasonableAdjustmentsNeeded: 'Invented R442 rollback adjustment',
               },
             },
           ),
@@ -729,12 +729,16 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       setTestEntraSessionOverride({
         tenantId: 'not-a-law-firm',
         personId: adminPerson.id,
-        entraObjectId: adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
-        entraTenantId: '11111111-2222-4333-8444-555555555555',
+        oid: adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-4333-8444-555555555555',
+        sub: adminPerson.id,
         email: adminPerson.emails?.[0]?.address ?? 'dafydd@notalawfirm.example.invalid',
         displayName: 'Dafydd Llewellyn',
+        entraRoles: resolveEmployeeRoles(adminPerson, store.teams),
         mappedRoles: resolveEmployeeRoles(adminPerson, store.teams),
+        entraGroups: [],
         mfaVerified: true,
+        amr: ['pwd', 'mfa'],
         authenticatedAt: new Date(nowMs).toISOString(),
         expiresAt: new Date(nowMs + 3600_000).toISOString(),
       });
@@ -1002,5 +1006,102 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       return Number(res.rows[0]!.n);
     });
     expect(crossTenantRows).toBe(0);
+  });
+
+  it('R443: executeMerge reverts only its own per-record deltas on failure without wiping a concurrent unrelated save', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const store = getStore();
+    const carys = store.people.find((p) => p.id === 'P-000001')!;
+    const unrelatedPerson = store.people.find(
+      (p) => !p.isEmployee && !p.mergedIntoId && p.id !== 'P-000001',
+    )!;
+    const candidates = store.people.filter(
+      (p) =>
+        !p.isEmployee &&
+        !p.mergedIntoId &&
+        p.id !== unrelatedPerson.id,
+    );
+    const survivor = candidates[0]!;
+    const merged = candidates[1]!;
+    const survivorBeforeName = survivor.surname;
+
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const verifiedSession = verifySignedEntraSessionCookie(
+      createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      }),
+    )!;
+    const actorSession = {
+      personId: carys.id,
+      tenantId: 'not-a-law-firm',
+      tokenRoles: verifiedSession.mappedRoles,
+      expiresAtMs: Date.parse(expiresAt),
+      verifiedSession,
+    };
+
+    try {
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.action === 'merge' || e.action === 'merged-into')) {
+          throw new Error('SIMULATED_AUDIT_FAILURE_MERGE');
+        }
+      });
+
+      const [unrelatedRes, mergeOutcome] = await Promise.allSettled([
+        runWithActiveActorSession(actorSession, async () =>
+          savePersonRecord(
+            {
+              ...unrelatedPerson,
+              surname: 'R443-Unrelated-Preserved',
+            },
+            { id: unrelatedPerson.id, byId: carys.id, mfaVerified: true },
+          ),
+        ),
+        runWithActiveActorSession(actorSession, async () =>
+          executeMerge('person', survivor.id, merged.id, carys.id),
+        ),
+      ]);
+
+      expect(unrelatedRes.status).toBe('fulfilled');
+      if (unrelatedRes.status === 'fulfilled') {
+        expect(unrelatedRes.value.errors).toBeUndefined();
+        expect(unrelatedRes.value.person?.surname).toBe('R443-Unrelated-Preserved');
+      }
+      expect(mergeOutcome.status).toBe('rejected');
+
+      setAuditAdapterFailureHookForTesting(null);
+      clearStoreMemoryCache();
+      const reloaded = getStore();
+      expect(
+        reloaded.people.find((p) => p.id === unrelatedPerson.id)?.surname,
+      ).toBe('R443-Unrelated-Preserved');
+      expect(
+        reloaded.people.find((p) => p.id === merged.id)?.mergedIntoId,
+      ).toBeFalsy();
+      expect(
+        reloaded.people.find((p) => p.id === survivor.id)?.surname,
+      ).toBe(survivorBeforeName);
+      expect(
+        reloaded.mergeHistory.some(
+          (mh) => mh.survivorId === survivor.id && mh.mergedId === merged.id,
+        ),
+      ).toBe(false);
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
   });
 });

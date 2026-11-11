@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CORE_API_VERSION,
   ExtensionHost,
@@ -484,7 +484,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         { mfaVerified: true },
       );
 
-      // R25 & R84: Scheduler accepts only { tenantCtx, byId, mfaVerified }, checks keydate:configure + MFA, and throws TENANCY_JOB_ERROR when called with no context
+      // R25, R84 & R449: Scheduler accepts only { tenantCtx, byId, mfaVerified }, checks keydate:configure + MFA before any repository read, rejects actor mismatch, and throws TENANCY_JOB_ERROR when called with no context
       await expect(runKeyDateReminderSchedulerRecord(null)).rejects.toThrow(
         /TENANCY_JOB_ERROR/,
       );
@@ -492,18 +492,51 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         // @ts-expect-error R84: Old positional/string arguments are rejected at compile time
         runKeyDateReminderSchedulerRecord('forged-tenant-id'),
       ).rejects.toThrow(/TENANCY_JOB_ERROR/);
-      expect(
-        (await runKeyDateReminderSchedulerRecord({
-          byId: feeEarner.id,
-          mfaVerified: true,
-        })).ok,
-      ).toBe(false);
-      expect(
-        (await runKeyDateReminderSchedulerRecord({
-          byId: admin.id,
-          mfaVerified: false,
-        })).ok,
-      ).toBe(false);
+
+      const repoCfgSpy = vi.spyOn(kdRepo, 'getKeyDatesTenantConfig');
+      const repoReadTxSpy = vi.spyOn(kdRepo, 'withTenantReadTransaction');
+      const repoGetByIdSpy = vi.spyOn(kdRepo, 'getKeyDateById');
+      const repoReminderSpy = vi.spyOn(kdRepo, 'listAllReminderStates');
+      try {
+        expect(
+          (await runKeyDateReminderSchedulerRecord({
+            byId: feeEarner.id,
+            mfaVerified: true,
+          })).ok,
+        ).toBe(false);
+        expect(
+          (await runKeyDateReminderSchedulerRecord({
+            byId: admin.id,
+            mfaVerified: false,
+          })).ok,
+        ).toBe(false);
+        // R449: Caller-supplied mfaVerified: true cannot override a context with mfaVerified: false
+        expect(
+          (await runKeyDateReminderSchedulerRecord({
+            tenantCtx: testTenantCtx(admin.id, { mfaVerified: false }),
+            byId: admin.id,
+            mfaVerified: true,
+          })).ok,
+        ).toBe(false);
+        // R449: Context actorId mismatch is rejected before any repository read
+        await expect(
+          runKeyDateReminderSchedulerRecord({
+            tenantCtx: testTenantCtx(feeEarner.id, { mfaVerified: true }),
+            byId: admin.id,
+            mfaVerified: true,
+          }),
+        ).rejects.toThrow(/TENANCY_ACTOR_MISMATCH/);
+
+        expect(repoCfgSpy).not.toHaveBeenCalled();
+        expect(repoReadTxSpy).not.toHaveBeenCalled();
+        expect(repoGetByIdSpy).not.toHaveBeenCalled();
+        expect(repoReminderSpy).not.toHaveBeenCalled();
+      } finally {
+        repoCfgSpy.mockRestore();
+        repoReadTxSpy.mockRestore();
+        repoGetByIdSpy.mockRestore();
+        repoReminderSpy.mockRestore();
+      }
       const signedAdminSession = verifySignedEntraSessionCookie(
         createSignedEntraSessionCookie({
           personId: admin.id,

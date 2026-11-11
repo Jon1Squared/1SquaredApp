@@ -156,7 +156,8 @@ export async function withJsonStoreWriteLock<T>(
         // Fallback when active tenant configuration is unavailable.
       }
       const correlationId = resolveRequestCorrelationId(
-        getActiveActorSession()?.verifiedSession?.correlationId ?? null,
+        (getActiveActorSession() as { correlationId?: string } | null)
+          ?.correlationId ?? null,
         'corr-comp',
       );
       if (

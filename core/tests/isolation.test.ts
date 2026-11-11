@@ -1340,7 +1340,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('R144: async saveMatterRecord never reissues IDs on veto and preserves concurrent conflict-record updates (rejecting stale concurrent matter saves)', async () => {
+  it('R144: async saveMatterRecord never reissues IDs on veto and serialises concurrent matter saves without losing either write', async () => {
     try {
       const store = getStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
@@ -1525,7 +1525,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'Updated concurrently while hook was waiting',
       );
 
-      // Now verify that when a hook allows proceed after 50ms, a concurrent update to the same matter causes saveMatterRecord to refuse with errors.conflict
+      // Now verify that when a hook allows proceed after 50ms, a concurrent update to the same matter queues behind saveMatterRecord on the FIFO lock so neither write is lost (R448)
       hookMode = 'allow_after_50ms';
       // Wait until the save is inside the hook (after it has read its baseline) rather than a fixed delay
       const staleHookEntered = new Promise<void>((resolve) => {
@@ -1535,7 +1535,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         saveMatterRecord(
           {
             ...refreshedTarget,
-            title: 'Stale Overwrite Attempt',
+            title: 'Concurrent Matter Save During Allow Hook',
           },
           { id: refreshedTarget.id, byId: carys.id, saveMode: 'submit_cleared' },
         ),
@@ -1551,6 +1551,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         refreshedTarget.id,
         {
           ...baseConflict,
+          status: 'Cleared',
           reviewerMessage: 'Second concurrent update during allow hook',
         },
         carys.id,
@@ -1565,13 +1566,20 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const queuedUpdateRes = await queuedUpdatePromise;
       expect(completionOrder).toEqual(['matter-save', 'conflict-update']);
       expect(staleSaveRes.errors).toBeUndefined();
-      // The queued update now sees the freshly opened matter and is evaluated against it
-      // (never against the stale pre-save baseline).
-      void queuedUpdateRes;
+      expect(staleSaveRes.matter?.title).toBe(
+        'Concurrent Matter Save During Allow Hook',
+      );
+      // The queued update now sees the freshly opened matter and succeeds against it,
+      // persisting its reviewerMessage on top of the opened matter (R448).
+      expect(queuedUpdateRes.errors).toBeUndefined();
+      expect(queuedUpdateRes.matter).not.toBeNull();
       const finalTarget = getStore().matters.find(
         (m) => m.id === refreshedTarget.id,
       )!;
-      expect(finalTarget.title).toBe('Stale Overwrite Attempt');
+      expect(finalTarget.title).toBe('Concurrent Matter Save During Allow Hook');
+      expect(finalTarget.conflictCheckRecord?.reviewerMessage).toBe(
+        'Second concurrent update during allow hook',
+      );
     } finally {
       setActiveTenantConfigForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());
@@ -1956,7 +1964,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('R144: hiring a matter client via savePersonRecord while beforeMatterOpen is awaiting returns errors.conflict and preserves isStaffMatter', async () => {
+  it('R144: hiring a matter client via savePersonRecord while beforeMatterOpen is awaiting serialises concurrent matter saves without losing either write', async () => {
     try {
       const store = getStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
@@ -2079,19 +2087,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
       );
       expect(hireRes.errors).toBeUndefined();
+      expect(hireRes.person?.isEmployee).toBe(true);
       // S0-15: savePersonRecord queues behind the in-flight saveMatterRecord on the FIFO
       // withJsonStoreWriteLock, so the matter save completes first and the hire is then
-      // applied on top; isStaffMatter must still end up true (no lost update).
+      // applied on top; both the opened matter title and isStaffMatter must persist (R448).
       const hireRaceSaveRes = await hireRaceSavePromise;
       expect(hireRaceSaveRes.errors).toBeUndefined();
-      expect(
-        getStore().matters.find((m) => m.id === draftMatter.id)!.isStaffMatter,
-      ).toBe(true);
+      expect(hireRaceSaveRes.matter?.title).toBe(
+        'R144 Concurrent Client Hire Matter Opened',
+      );
+      const finalDraftMatter = getStore().matters.find(
+        (m) => m.id === draftMatter.id,
+      )!;
+      expect(finalDraftMatter.title).toBe(
+        'R144 Concurrent Client Hire Matter Opened',
+      );
+      expect(finalDraftMatter.isStaffMatter).toBe(true);
     } finally {
       setActiveTenantConfigForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
+
+  it.todo('rejects a save based on a stale row_version (S0-16)');
 
   it('R153: updateMatterConflictRecord enforces risk:view, never opens a draft matter, never satisfies partnerSignOffCompleted via Cleared, and preserves stored comments and server timestamps', async () => {
     try {

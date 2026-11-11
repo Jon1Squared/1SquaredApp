@@ -263,7 +263,7 @@ import {
   resolveSuggestedConflictReviewer,
 } from './conflictReview';
 import { verifyFinanceActorAndPermission } from './financeServices';
-import { buildRecordVisibility } from './visibility';
+import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from './visibility';
 import type {
   Address,
   AnyRecord,
@@ -815,6 +815,7 @@ export async function listAuditEntriesForRecord(
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
     tokenRoles: options?.tokenRoles,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenMatterKeyDateIds =
     await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -900,6 +901,7 @@ export async function listFirmAuditEntriesPage(
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
     tokenRoles: options?.tokenRoles,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenMatterKeyDateIds =
     await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -1055,6 +1057,7 @@ async function getAppSnapshotInScope(
   // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
   const prelimVisibility = buildRecordVisibility(store, user, {
     tokenRoles: effectiveTokenRoles,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
     snapshotTenantCtx,
@@ -3265,7 +3268,9 @@ export async function addNoteToRecord(
     mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
 
   const target: (AnyRecord | Matter) | undefined =
     recordType === 'person'
@@ -4437,6 +4442,7 @@ export async function saveMatterRecord(
   const visibility = buildRecordVisibility(
     { ...store, people: allPeopleWithPending },
     actingUser,
+    { hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS },
   );
   const rawServerMatches = searchMatterConflicts(
     {
@@ -4929,6 +4935,7 @@ export async function saveMatterRecord(
     };
   }
 
+  // R448: superseded by S0-16 row_version
   if (existing) {
     const current = store.matters.find((m) => m.id === existing.id);
     if (!current || current.updatedAt !== existingUpdatedAt) {
@@ -5559,7 +5566,9 @@ export async function runMatterConflictSearchRecord(
     allPeople: store.people,
     teams: store.teams,
   });
-  const visibility = buildRecordVisibility(store, actingUser);
+  const visibility = buildRecordVisibility(store, actingUser, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const nowIso = new Date().toISOString();
   const actorDisplayName = personDisplayName(actingUser);
   const matches = searchMatterConflicts(
@@ -5675,7 +5684,9 @@ export async function updateMatterConflictRecord(
   const today = toIsoDate(new Date());
   const matter = store.matters.find((m) => m.id === matterId);
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actingUser);
+  const visibility = buildRecordVisibility(store, actingUser, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   if (
     !matter ||
     !actingUser ||
@@ -5983,7 +5994,9 @@ export async function signOffMatterCostsRecord(
     mutate: async (store): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[]; } & Partial<ActionDenied>> => {
   const matter = store.matters.find((m) => m.id === matterId) ?? null;
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actingUser);
+  const visibility = buildRecordVisibility(store, actingUser, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   if (
     !matter ||
     !actingUser ||
@@ -6308,12 +6321,8 @@ export async function executeMerge(
     'merged',
   )!.id;
 
-  const mergeBaseline = captureJsonStoreBaseline(store);
-  // R272/R309: restore the in-memory and persisted JSON store if any merge step throws.
-  const storeSnapshot = structuredClone(store);
-  try {
-    // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
-    let linksMoved = 0;
+  // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
+  let linksMoved = 0;
     const nextLinks: PersonOrganisationLink[] = [];
     for (const link of store.links) {
       if (recordType === 'person' && link.personId === merged.id) {
@@ -6707,41 +6716,7 @@ export async function executeMerge(
     });
 
     saveStore(store);
-    // Registered after a successful save so later failures (e.g. the audit append) can undo the
-    // merge, while a failed save above is rolled back once by the catch block (R309).
-    registerJsonStoreRecordDeltas(
-      mergeBaseline,
-      store,
-      compensator,
-      'executeMerge.record-delta',
-    );
     return history;
-  } catch (err) {
-    // Compensation errors must not mask the original failure.
-    await compensator.compensateAll().catch(() => undefined);
-    for (const key of Object.keys(store)) {
-      delete (store as unknown as Record<string, unknown>)[key];
-    }
-    Object.assign(store, storeSnapshot);
-    try {
-      saveStore(store);
-    } catch {
-      const tenantId = getActiveTenantConfiguration().tenantId;
-      const activeSession = getActiveActorSession();
-      const correlationId =
-        (activeSession as { correlationId?: string } | null)?.correlationId ??
-        `merge-rollback-${randomUUID()}`;
-      console.error(
-        JSON.stringify({
-          level: 'error',
-          event: 'merge.rollback_save_failed',
-          correlationId,
-          tenantId,
-        }),
-      );
-    }
-    throw err;
-  }
     },
   });
 }
@@ -7602,7 +7577,9 @@ export async function saveTaskRecord(
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const taskCtx = resolveDefaultServiceTenantContext(store, byId);
   await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
-  const prelimVis = buildRecordVisibility(store, actor);
+  const prelimVis = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
     taskCtx,
     prelimVis.hiddenMatterIds,
@@ -7994,7 +7971,9 @@ export async function takeTaskRecord(
     const actor = store.people.find((p) => p.id === byId) ?? null;
     const taskCtx = resolveDefaultServiceTenantContext(store, byId);
     await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
-    const prelimVis = buildRecordVisibility(store, actor);
+    const prelimVis = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
     const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
       taskCtx,
       prelimVis.hiddenMatterIds,
@@ -8051,7 +8030,9 @@ export async function addTaskCommentRecord(
   }
   const taskCtx = resolveDefaultServiceTenantContext(store, byId);
   await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
-  const prelimVis = buildRecordVisibility(store, actor);
+  const prelimVis = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
     taskCtx,
     prelimVis.hiddenMatterIds,
@@ -8282,7 +8263,9 @@ export async function saveEnquiryRecord(
   const store = getStore();
   const now = opts.now ?? new Date().toISOString();
   const actor = store.people.find((p) => p.id === opts.byId) ?? null;
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const existing = opts.id ? store.enquiries.find((e) => e.id === opts.id) ?? null : null;
   if (opts.id && !existing) {
     const msg = 'Enquiry not found.';
@@ -8804,7 +8787,9 @@ export async function assignEnquiryRecord(
     const msg = 'You do not have permission (enquiry:assign) to assign enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (
     !enq ||
@@ -8920,7 +8905,9 @@ export async function logEnquiryContactRecord(
     const msg = 'You do not have permission (enquiry:edit) to log contact on enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -9011,7 +8998,9 @@ export async function sendEnquiryEmailRecord(
     const msg = 'You do not have permission (enquiry:edit) to send enquiry emails.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -9085,7 +9074,9 @@ export async function closeEnquiryRecord(
     const msg = 'You do not have permission (enquiry:close) to close enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -9204,7 +9195,9 @@ export async function reopenEnquiryRecord(
     const msg = 'You do not have permission (enquiry:reopen) to reopen enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -9331,7 +9324,9 @@ export async function prepareEnquiryConversion(
       conflictReasons: [msg],
     };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq) return { ok: false, conflictReasons: ['Enquiry not found.'] };
   if (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) {
@@ -12310,7 +12305,9 @@ export async function saveQuoteRecord(
     const msg = 'You do not have permission (quote:edit) to create or edit quotes.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const now = new Date();
   const nowIso = now.toISOString();
 
@@ -12560,7 +12557,9 @@ export async function markQuoteSentRecord(
     const msg = 'You do not have permission (quote:edit) to mark a quote as sent.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -12629,7 +12628,9 @@ export async function logQuoteFollowUpRecord(
     const msg = 'You do not have permission (quote:edit) to log quote follow-ups.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -12721,7 +12722,9 @@ export async function reviseQuoteRecord(
     const msg = 'You do not have permission (quote:edit) to revise quotes.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -12871,7 +12874,9 @@ export async function recordQuoteOutcomeRecord(
     const msg = 'You do not have permission (quote:edit) to record a quote outcome.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -12980,7 +12985,9 @@ export async function prepareQuoteConversionRecord(
       conflictReasons: [msg],
     };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     return { ok: false, error: 'Quote not found.' };
@@ -15134,7 +15141,7 @@ export async function runKeyDateReminderSchedulerRecord(
     tenantCtx?: TenantContext | null;
     session?: VerifiedEntraSessionPayload | null;
     byId: string;
-    mfaVerified: boolean;
+    mfaVerified?: boolean;
   } | null,
 ): Promise<{
   ok: boolean;
@@ -15142,7 +15149,12 @@ export async function runKeyDateReminderSchedulerRecord(
   triggeredBy?: string;
   error?: string;
 }> {
-  if (!options || options.tenantCtx === null || (!options.tenantCtx && !options.byId)) {
+  if (
+    !options ||
+    typeof options !== 'object' ||
+    options.tenantCtx === null ||
+    (!options.tenantCtx && !options.byId && !options.session)
+  ) {
     runTenantBackgroundJob(
       {
         jobId: 'keydate-reminder-job:missing-context',
@@ -15154,26 +15166,25 @@ export async function runKeyDateReminderSchedulerRecord(
     );
   }
 
-  const prelimStore = getStore();
-  const byId = options?.byId ?? '';
+  const requestedById = (options?.byId ?? '').trim();
   const providedCtx = options?.tenantCtx ?? null;
-  const mfaVerified = options?.mfaVerified ?? providedCtx?.mfaVerified ?? false;
-
-  const actor = resolveActorForKeyDates(prelimStore, byId);
-  if (!actor) {
-    return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-  }
-
   const verifiedSession =
     options?.session ??
     (getActiveActorSession()?.verifiedSession as
       | VerifiedEntraSessionPayload
       | undefined);
-  if (verifiedSession && verifiedSession.personId !== actor.id) {
+
+  if (providedCtx && requestedById && providedCtx.actorId !== requestedById) {
     throw new Error(
-      `TENANCY_ACTOR_MISMATCH: Verified session personId "${verifiedSession.personId}" does not match requested actor "${actor.id}".`,
+      `TENANCY_ACTOR_MISMATCH: Tenant context actorId "${providedCtx.actorId}" does not match requested actor "${requestedById}".`,
     );
   }
+  if (verifiedSession && requestedById && verifiedSession.personId !== requestedById) {
+    throw new Error(
+      `TENANCY_ACTOR_MISMATCH: Verified session personId "${verifiedSession.personId}" does not match requested actor "${requestedById}".`,
+    );
+  }
+
   const effectiveTenantCtx =
     providedCtx ??
     (verifiedSession
@@ -15182,19 +15193,40 @@ export async function runKeyDateReminderSchedulerRecord(
         )
       : null);
 
-  // Resolve config for the permission check without requiring an explicit job context first,
-  // so unpermitted / non-MFA callers receive a structured denial (R25, R27). The fallback resolver
-  // still fails closed (UNAUTHENTICATED) outside tests when no verified session is present.
-  const config = await getKeyDatesConfig({
-    ctx: effectiveTenantCtx ?? undefined,
-    userId: actor.id,
-  });
+  if (
+    effectiveTenantCtx &&
+    requestedById &&
+    effectiveTenantCtx.actorId !== requestedById
+  ) {
+    throw new Error(
+      `TENANCY_ACTOR_MISMATCH: Tenant context actorId "${effectiveTenantCtx.actorId}" does not match requested actor "${requestedById}".`,
+    );
+  }
 
+  const actorId = effectiveTenantCtx?.actorId ?? requestedById;
+  // Take MFA from the verified context when present; never let a caller flag override a non-MFA context (R449).
+  const mfaVerified = effectiveTenantCtx
+    ? effectiveTenantCtx.mfaVerified === true && options?.mfaVerified !== false
+    : options?.mfaVerified === true;
+
+  const prelimStore = getStore();
+  const actor = resolveActorForKeyDates(prelimStore, actorId);
+  if (!actor) {
+    return { ok: false, error: `Unknown or unauthenticated user "${actorId}".` };
+  }
+
+  // Evaluate permission and MFA before reading any key-date repository or configuration rows from PostgreSQL (R449).
+  const inMemoryKeyDatesConfig =
+    prelimStore.keyDatesConfigOverride ??
+    (getActiveTenantConfiguration().keyDates as KeyDatesConfig | undefined);
   if (
     !hasKeyDatePermission(actor, 'keydate:configure', {
-      config,
+      config: inMemoryKeyDatesConfig,
       allPeople: prelimStore.people,
       teams: prelimStore.teams,
+      rbac: effectiveTenantCtx
+        ? { tokenRoles: effectiveTenantCtx.actorRoles }
+        : undefined,
     })
   ) {
     return {
@@ -15227,6 +15259,24 @@ export async function runKeyDateReminderSchedulerRecord(
 
   return withJsonStoreWriteLock(async (compensator) => {
     const store = getStore();
+    const config = await getKeyDatesConfig({
+      ctx: effectiveTenantCtx!,
+      userId: actor.id,
+    });
+    if (
+      !hasKeyDatePermission(actor, 'keydate:configure', {
+        config,
+        allPeople: store.people,
+        teams: store.teams,
+        rbac: { tokenRoles: effectiveTenantCtx!.actorRoles },
+      })
+    ) {
+      return {
+        ok: false,
+        error:
+          'KEY_DATE_PERMISSION_DENIED: You need "keydate:configure" permission to trigger the key date reminder scheduler.',
+      };
+    }
     const nowIso = new Date().toISOString();
     const todayIso = toIsoDate(new Date());
 

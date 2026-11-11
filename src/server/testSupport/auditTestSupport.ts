@@ -68,11 +68,14 @@ export function setAuditAdapterFailureHookForTesting(
   global.__oneSquaredAuditRepo = stub;
 }
 
-export function testTenantCtx(actorId = 'P-000001'): TenantContext {
+export function testTenantCtx(
+  actorId = 'P-000001',
+  overrides?: { mfaVerified?: boolean; roles?: readonly string[] },
+): TenantContext {
   return resolveDirectTestServiceTenantContext({
     actorId,
-    roles: ['admin'],
-    mfaVerified: true,
+    roles: overrides?.roles ?? ['admin'],
+    mfaVerified: overrides?.mfaVerified ?? true,
   });
 }
 

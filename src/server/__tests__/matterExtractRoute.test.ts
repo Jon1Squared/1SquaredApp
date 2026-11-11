@@ -9,7 +9,7 @@ import {
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
 import { resetAllDemoData } from '@/server/services';
 import { getStore } from '@/server/store';
-import { buildRecordVisibility } from '@/server/visibility';
+import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from '@/server/visibility';
 import { testDataResetContext } from '@/test/testTenantContexts';
 
 const ORIGINAL_ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
@@ -448,7 +448,9 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     // Push the hidden-enquiry person BEFORE the visible-enquiry person so an unfiltered .find() would pick the hidden one
     store.people.push(hiddenEnqPerson, sameNameHiddenPerson, sameNameVisiblePerson);
 
-    const visibility = buildRecordVisibility(store, feeEarner);
+    const visibility = buildRecordVisibility(store, feeEarner, {
+      hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    });
     expect(visibility.canViewEnquiry(hiddenEnq)).toBe(false);
     expect(visibility.canViewEnquiry(visibleEnq)).toBe(true);
 

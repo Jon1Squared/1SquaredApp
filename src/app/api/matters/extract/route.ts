@@ -26,7 +26,7 @@ import {
 } from '@/server/services';
 import { readServerSecret } from '@/server/serverSecrets';
 import { getStore } from '@/server/store';
-import { buildRecordVisibility } from '@/server/visibility';
+import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from '@/server/visibility';
 
 export const dynamic = 'force-dynamic';
 
@@ -2527,7 +2527,9 @@ export const POST = guardedRoute(
 
       const store = getStore();
       const actorPerson = store.people.find((p) => p.id === byId) ?? null;
-      const visibility = buildRecordVisibility(store, actorPerson);
+      const visibility = buildRecordVisibility(store, actorPerson, {
+        hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+      });
       const visiblePeople = store.people.filter(
         (p) =>
           !p.mergedIntoId &&
@@ -2701,7 +2703,9 @@ export const POST = guardedRoute(
       }
 
       const latestStore = getStore();
-      const latestVisibility = buildRecordVisibility(latestStore, actorPerson);
+      const latestVisibility = buildRecordVisibility(latestStore, actorPerson, {
+        hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+      });
       const returnedOrganisations = latestStore.organisations.filter(
         (o) => matchedOrgIds.has(o.id) && !o.mergedIntoId,
       );

@@ -5,6 +5,7 @@ import {
   clearJwksCache,
   createPkceChallenge,
   createSignedEntraSessionCookie,
+  createSignInActorFromVerifiedOidcToken,
   ENTRA_PKCE_COOKIE,
   ENTRA_SESSION_COOKIE,
   exchangeCodeForVerifiedEntraClaims,
@@ -758,5 +759,63 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     }
 
     await resetAllDemoData('P-000001', testDataResetContext());
+  });
+
+  it('R462: createSignInActorFromVerifiedOidcToken asserts __verifiedByOidcMiddleware === true and tenantId matches the active tenant', () => {
+    expect(() =>
+      createSignInActorFromVerifiedOidcToken(
+        {
+          // @ts-expect-error testing unbranded token rejection
+          __verifiedByOidcMiddleware: false,
+          sub: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          name: 'Carys Hughes',
+          email: 'carys.hughes@notalawfirm.example',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        {
+          oid: '00000000-0000-4000-8000-000000000001',
+          email: 'carys.hughes@notalawfirm.example',
+        },
+      ),
+    ).toThrow(/TENANCY_AUTH_ERROR.*__verifiedByOidcMiddleware/);
+
+    expect(() =>
+      createSignInActorFromVerifiedOidcToken(
+        {
+          __verifiedByOidcMiddleware: true,
+          sub: 'P-000001',
+          tenantId: 'other-tenant-id',
+          name: 'Carys Hughes',
+          email: 'carys.hughes@notalawfirm.example',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        {
+          oid: '00000000-0000-4000-8000-000000000001',
+          email: 'carys.hughes@notalawfirm.example',
+        },
+      ),
+    ).toThrow(/TENANCY_AUTH_ERROR.*does not match active tenant/);
+
+    const validActor = createSignInActorFromVerifiedOidcToken(
+      {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'not-a-law-firm',
+        name: 'Carys Hughes',
+        email: 'carys.hughes@notalawfirm.example',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      {
+        oid: '00000000-0000-4000-8000-000000000001',
+        email: 'carys.hughes@notalawfirm.example',
+        correlationId: 'corr-r462',
+      },
+    );
+    expect(validActor.tenantId).toBe('not-a-law-firm');
+    expect(validActor.sub).toBe('P-000001');
   });
 });
