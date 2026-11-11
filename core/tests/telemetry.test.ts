@@ -175,6 +175,39 @@ describe('S0-13b: Core Application Insights / OpenTelemetry telemetry emitter & 
     ).toEqual({ safeCount: 3 });
   });
 
+  it('strips special-category HR, network identifier, file/message content and search input keys at every depth (R427)', () => {
+    const newlyDeniedKeys = {
+      ethnicity: 'invented-value',
+      religion: 'invented-value',
+      disability: 'invented-value',
+      health: 'invented-value',
+      medical: 'invented-value',
+      gender: 'invented-value',
+      sexualOrientation: 'invented-value',
+      nationality: 'invented-value',
+      ip: '203.0.113.7',
+      ipAddress: '203.0.113.7',
+      fileName: 'Invented Client Letter.docx',
+      filename: 'Invented Client Letter.docx',
+      subject: 'Invented email subject',
+      content: 'Invented message content',
+      html: '<p>Invented body</p>',
+      search: 'invented search',
+      searchTerm: 'invented search',
+      q: 'invented query',
+    };
+    for (const [key, value] of Object.entries(newlyDeniedKeys)) {
+      expect(
+        sanitizeTelemetryProperties({ [key]: value, safeCount: 1 }),
+        key,
+      ).toEqual({ safeCount: 1 });
+      expect(
+        sanitizeTelemetryProperties({ nested: [{ [key]: value, step: 'ok' }] }),
+        `nested ${key}`,
+      ).toEqual({ nested: [{ step: 'ok' }] });
+    }
+  });
+
   it('handles start-up lifecycle events without a user request via emitPlatformStartupTelemetry and performs zero network calls when APPLICATIONINSIGHTS_CONNECTION_STRING is unset (R413)', async () => {
     const recorder = new PlatformTelemetryRecorder();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');

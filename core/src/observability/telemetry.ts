@@ -96,6 +96,27 @@ const PERSONAL_DATA_AND_CONTENT_DENY_SET = new Set<string>([
   'apikey',
   'password',
   'connectionstring',
+  // Special-category HR data (R427)
+  'ethnicity',
+  'religion',
+  'disability',
+  'health',
+  'medical',
+  'gender',
+  'sexualorientation',
+  'nationality',
+  // Network identifiers (R427)
+  'ip',
+  'ipaddress',
+  // File and message content (R427)
+  'filename',
+  'subject',
+  'content',
+  'html',
+  // Search input (R427)
+  'search',
+  'searchterm',
+  'q',
 ]);
 
 const EMAIL_IN_TEXT_REGEX =
