@@ -168,6 +168,10 @@ var acrPullRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 )
+var monitoringMetricsPublisherRoleDefinitionId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  '3913510d-42f4-4f42-8a64-420c390055eb'
+)
 
 var platformTags = {
   scope: 'platform'
@@ -450,6 +454,28 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
+// Local (instrumentation-key) auth is disabled, so telemetry must authenticate with
+// Entra ID: each identity that emits telemetry needs Monitoring Metrics Publisher (R422).
+resource runtimeAppInsightsMetricsPublisherRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(appInsights.id, runtimeIdentity.id, '3913510d-42f4-4f42-8a64-420c390055eb')
+  scope: appInsights
+  properties: {
+    roleDefinitionId: monitoringMetricsPublisherRoleDefinitionId
+    principalId: runtimeIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource migrateAppInsightsMetricsPublisherRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(appInsights.id, migrateIdentity.id, '3913510d-42f4-4f42-8a64-420c390055eb')
+  scope: appInsights
+  properties: {
+    roleDefinitionId: monitoringMetricsPublisherRoleDefinitionId
+    principalId: migrateIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: jobFailureAlertRuleName
   location: location
@@ -699,6 +725,10 @@ var runtimeCommonEnv = [
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: appInsights.properties.ConnectionString
   }
+  {
+    name: 'AZURE_CLIENT_ID'
+    value: runtimeIdentity.properties.clientId
+  }
 ]
 
 var webSecretEnv = [
@@ -875,6 +905,7 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = {
   dependsOn: [
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
     platformKeyVaultDnsZoneGroup
     pgBouncerPoolMode
   ]
@@ -964,6 +995,10 @@ resource migrateJob 'Microsoft.App/jobs@2025-07-01' = {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
               value: appInsights.properties.ConnectionString
             }
+            {
+              name: 'AZURE_CLIENT_ID'
+              value: migrateIdentity.properties.clientId
+            }
           ]
           resources: {
             cpu: json('0.5')
@@ -975,6 +1010,7 @@ resource migrateJob 'Microsoft.App/jobs@2025-07-01' = {
   }
   dependsOn: [
     migrateAcrPullRole
+    migrateAppInsightsMetricsPublisherRole
     sharedPostgresEntraAdmin
   ]
 }
@@ -1030,6 +1066,7 @@ resource storeImportJob 'Microsoft.App/jobs@2025-07-01' = if (enableStoreImportJ
   dependsOn: [
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
     pgBouncerPoolMode
   ]
 }
@@ -1087,6 +1124,7 @@ resource keyDateRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (enableSchedul
   dependsOn: [
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
     pgBouncerPoolMode
   ]
 }
@@ -1143,6 +1181,7 @@ resource usageRetentionPurgeJob 'Microsoft.App/jobs@2025-07-01' = if (enableSche
   dependsOn: [
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
     pgBouncerPoolMode
   ]
 }
@@ -1199,6 +1238,7 @@ resource enquiryAnonymisationJob 'Microsoft.App/jobs@2025-07-01' = if (enableSch
   dependsOn: [
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
     pgBouncerPoolMode
   ]
 }

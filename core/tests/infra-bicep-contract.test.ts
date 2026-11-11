@@ -258,6 +258,61 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     ).toBe('error');
   });
 
+  it('grants Monitoring Metrics Publisher on Application Insights to both identities and exposes AZURE_CLIENT_ID, because local auth is disabled (R422)', () => {
+    expect(platformBicep).toContain('DisableLocalAuth: true');
+    expect(platformBicep).toContain("'3913510d-42f4-4f42-8a64-420c390055eb'");
+    for (const [roleName, identity] of [
+      ['runtimeAppInsightsMetricsPublisherRole', 'runtimeIdentity'],
+      ['migrateAppInsightsMetricsPublisherRole', 'migrateIdentity'],
+    ] as const) {
+      const start = platformNoComments.indexOf(`resource ${roleName} `);
+      expect(start, roleName).toBeGreaterThan(-1);
+      const block = platformNoComments.slice(
+        start,
+        platformNoComments.indexOf('\n}', start),
+      );
+      expect(block).toContain('scope: appInsights');
+      expect(block).toContain(
+        'roleDefinitionId: monitoringMetricsPublisherRoleDefinitionId',
+      );
+      expect(block).toContain(`principalId: ${identity}.properties.principalId`);
+    }
+
+    const runtimeEnvBlock = platformBicep.slice(
+      platformBicep.indexOf('var runtimeCommonEnv ='),
+      platformBicep.indexOf('var webSecretEnv ='),
+    );
+    expect(runtimeEnvBlock).toMatch(
+      /name: 'AZURE_CLIENT_ID'\s+value: runtimeIdentity\.properties\.clientId/,
+    );
+
+    const resourceBlock = (name: string, next: string) =>
+      platformNoComments.slice(
+        platformNoComments.indexOf(`resource ${name} `),
+        platformNoComments.indexOf(`resource ${next} `),
+      );
+    const migrateJobBlock = resourceBlock('migrateJob', 'storeImportJob');
+    expect(migrateJobBlock).toMatch(
+      /name: 'AZURE_CLIENT_ID'\s+value: migrateIdentity\.properties\.clientId/,
+    );
+    expect(migrateJobBlock).toContain('migrateAppInsightsMetricsPublisherRole');
+    for (const [name, next] of [
+      ['webContainerApp', 'migrateJob'],
+      ['storeImportJob', 'keyDateRemindersJob'],
+      ['keyDateRemindersJob', 'usageRetentionPurgeJob'],
+      ['usageRetentionPurgeJob', 'enquiryAnonymisationJob'],
+    ] as const) {
+      expect(resourceBlock(name, next), name).toContain(
+        'runtimeAppInsightsMetricsPublisherRole',
+      );
+    }
+    expect(
+      platformNoComments.slice(
+        platformNoComments.indexOf('resource enquiryAnonymisationJob '),
+      ),
+    ).toContain('runtimeAppInsightsMetricsPublisherRole');
+  });
+
   it('compiles main.bicep into a valid ARM template with zero Bicep errors or warnings when Bicep CLI is installed', () => {
     const bicepBin = resolveOptionalBicepBinary();
     if (!bicepBin) {
