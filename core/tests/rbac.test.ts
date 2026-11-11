@@ -112,6 +112,7 @@ import {
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
   withPageActor,
+  listAuditEntriesForRecord,
 } from '../../src/server/services';
 import {
   flushDocumentLifecycleSyncForTesting,
@@ -131,6 +132,7 @@ import {
 import { getPmsSource } from '../../src/pms/pmsSource';
 import { attentionList } from '../../src/domain/attention';
 import { clearStoreMemoryCache, getStore, resetStore } from '../../src/server/store';
+import { auditEntriesWrittenSince } from '../../src/server/testSupport/auditTestSupport';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -278,8 +280,15 @@ function makeTestPerson(overrides: Partial<Person> = {}): Person {
 }
 
 describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
+  // S0-15: firm audit lives in PostgreSQL audit_entries; each test only inspects entries written
+  // after it started. A time window is used because resetAllDemoData re-imports audit_entries and
+  // restarts the AU- sequence, so ID-based marks taken before a reset are not reliable.
+  let rbacAuditMark = 0;
+  const auditSinceTestStart = () => auditEntriesWrittenSince(rbacAuditMark);
+  const auditSinceIds = (at: string) => Date.parse(at) >= rbacAuditMark;
   beforeEach(() => {
     clearPermissionRequestCache();
+    rbacAuditMark = Date.now();
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
@@ -1192,12 +1201,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   describe('10. Server Services: Audited Per-Person Overrides & Tenant RBAC Config Updates', () => {
     it('enforces self-modification & unheld-grant blocks and logs before/after audit entries', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const snap0 = getAppSnapshot('P-000001');
+      const snap0 = await getAppSnapshot('P-000001');
       const adamAdmin = snap0.people.find((p) => p.roles?.includes('admin'))!;
       expect(adamAdmin).toBeDefined();
 
       // 1. Self-modification is blocked on the server service
-      const selfAttempt = updatePersonPermissionOverrides(
+      const selfAttempt = await updatePersonPermissionOverrides(
         adamAdmin.id,
         {
           grant: ['finance:view'],
@@ -1211,7 +1220,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(selfAttempt.error).toMatch(/cannot modify their own/i);
 
       // 1b. Admin without MFA is rejected with MFA_REQUIRED (R53)
-      const noMfaAttempt = updatePersonPermissionOverrides(
+      const noMfaAttempt = await updatePersonPermissionOverrides(
         'P-000002',
         {
           grant: ['risk:view'],
@@ -1224,7 +1233,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(noMfaAttempt.code).toBe('MFA_REQUIRED');
 
       // 2. Admin grants risk:view and revokes finance:view_matter on Dafydd Evans (P-000002) with Entra Object ID binding
-      const validOverride = updatePersonPermissionOverrides(
+      const validOverride = await updatePersonPermissionOverrides(
         'P-000002',
         {
           grant: ['risk:view'],
@@ -1237,7 +1246,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
       expect(validOverride.ok).toBe(true);
 
-      const dafyddSnap = getAppSnapshot('P-000002');
+      const dafyddSnap = await getAppSnapshot('P-000002');
       expect(dafyddSnap.currentUserPermissions).toContain('risk:view');
       expect(dafyddSnap.currentUserPermissions).not.toContain(
         'finance:view_matter',
@@ -1247,7 +1256,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
 
       // Audit entry recorded with before/after JSON
-      const auditEntry = dafyddSnap.audit.find(
+      const auditEntry = (await auditSinceTestStart()).find(
         (a) =>
           a.recordId === 'P-000002' &&
           a.field === 'Permission overrides & Entra ID binding',
@@ -1256,7 +1265,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(auditEntry?.newValue).toContain('Temporary secondment');
 
       // 3. Updating Tenant RBAC Config by non-admin is rejected; by admin without MFA is rejected; by admin with MFA succeeds and audits
-      const unauthConfigAttempt = updateTenantRbacConfig(
+      const unauthConfigAttempt = await updateTenantRbacConfig(
         {
           departmentGrants: {
             'DEPT-HR': ['employee:view_core'],
@@ -1268,7 +1277,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(unauthConfigAttempt.ok).toBe(false);
       expect(unauthConfigAttempt.error).toContain('rbac:manage_config');
 
-      const noMfaConfigAttempt = updateTenantRbacConfig(
+      const noMfaConfigAttempt = await updateTenantRbacConfig(
         {
           departmentGrants: {
             'DEPT-HR': ['employee:view_core'],
@@ -1280,7 +1289,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(noMfaConfigAttempt.ok).toBe(false);
       expect(noMfaConfigAttempt.code).toBe('MFA_REQUIRED');
 
-      const adminConfigUpdate = updateTenantRbacConfig(
+      const adminConfigUpdate = await updateTenantRbacConfig(
         {
           identityMapping: {
             ...dafyddSnap.rbacConfig.identityMapping,
@@ -1306,7 +1315,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
 
       // R52: resolveOrProvisionEntraEmployee with roles: [] creates a person without admin and without admin:access
-      const unmappedProvision = resolveOrProvisionEntraEmployee({
+      const unmappedProvision = await resolveOrProvisionEntraEmployee({
         oid: '00000000-0000-4000-8000-000000000502',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-unmapped-502',
@@ -1319,7 +1328,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(unmappedProvision.person.roles).toEqual([]);
       expect(unmappedProvision.person.roles).not.toContain('admin');
       expect(unmappedProvision.person.departmentId).toBeNull();
-      const unmappedSnap = getAppSnapshot(unmappedProvision.person.id);
+      const unmappedSnap = await getAppSnapshot(unmappedProvision.person.id);
       expect(unmappedSnap.currentUserPermissions).not.toContain('admin:access');
 
       // R53: updateTenantRbacConfigAction with mfaVerified: false returns MFA_REQUIRED
@@ -1346,14 +1355,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       setTestEntraSessionOverride(undefined);
 
       // R54: A fee earner giving themselves roles: ['admin'] gets ok: false; admin without MFA is rejected
-      const feeEarnerSelfEscalation = updateEmployeeRolesAndSupports(
+      const feeEarnerSelfEscalation = await updateEmployeeRolesAndSupports(
         'P-000002',
         { roles: ['admin'] },
         'P-000002',
         { mfaVerified: true },
       );
       expect(feeEarnerSelfEscalation.ok).toBe(false);
-      const adminNoMfaRoleChange = updateEmployeeRolesAndSupports(
+      const adminNoMfaRoleChange = await updateEmployeeRolesAndSupports(
         'P-000002',
         { roles: ['partner', 'fee_earner'] },
         'P-000004',
@@ -1361,7 +1370,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
       expect(adminNoMfaRoleChange.ok).toBe(false);
       expect(adminNoMfaRoleChange.code).toBe('MFA_REQUIRED');
-      const feeEarnerAppRoleEscalation = updateEmployeeRoleSetting(
+      const feeEarnerAppRoleEscalation = await updateEmployeeRoleSetting(
         'P-000002',
         'admin',
         'P-000002',
@@ -1399,7 +1408,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
 
       // R61: Under token_only, a person who signs in with 1Squared.Admin and then again with no roles loses admin
-      updateTenantRbacConfig(
+      await updateTenantRbacConfig(
         {
           identityMapping: {
             ...getDefaultTenantRbacConfig().identityMapping,
@@ -1409,7 +1418,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         'P-000004',
         { mfaVerified: true },
       );
-      const firstTokenSignIn = resolveOrProvisionEntraEmployee({
+      const firstTokenSignIn = await resolveOrProvisionEntraEmployee({
         oid: '00000000-0000-4000-8000-000000000601',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-601',
@@ -1419,7 +1428,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         amr: ['pwd', 'mfa'],
       });
       expect(firstTokenSignIn.person.roles).toContain('admin');
-      const secondTokenSignIn = resolveOrProvisionEntraEmployee({
+      const secondTokenSignIn = await resolveOrProvisionEntraEmployee({
         oid: '00000000-0000-4000-8000-000000000601',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-601',
@@ -1430,12 +1439,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(secondTokenSignIn.person.roles).toEqual([]);
       expect(secondTokenSignIn.person.roles).not.toContain('admin');
-      const tokenOnlySnap = getAppSnapshot(secondTokenSignIn.person.id);
+      const tokenOnlySnap = await getAppSnapshot(secondTokenSignIn.person.id);
       expect(tokenOnlySnap.currentUserPermissions).not.toContain('admin:access');
 
       // R61 (hybrid mode): Under hybrid authorityMode, token-derived roles apply for the current session
       // without mutating the stored person.roles on the employee record.
-      updateTenantRbacConfig(
+      await updateTenantRbacConfig(
         {
           identityMapping: {
             ...getDefaultTenantRbacConfig().identityMapping,
@@ -1445,15 +1454,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         'P-000004',
         { mfaVerified: true },
       );
-      runWithActiveActorSession(
+      await runWithActiveActorSession(
         {
           tenantId: 'not-a-law-firm',
           personId: 'P-000002',
           tokenRoles: [],
           expiresAtMs: Date.now() + 3600_000,
         },
-        () => {
-          const hybridSignIn = resolveOrProvisionEntraEmployee({
+        async () => {
+          const hybridSignIn = await resolveOrProvisionEntraEmployee({
             oid: '00000000-0000-4000-8000-000000000002',
             tid: '00000000-0000-4000-8000-000000000099',
             sub: 'sub-002',
@@ -1467,18 +1476,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           // Stored employee roles remain ['fee_earner'] and do not permanently gain 'risk_compliance'
           expect(hybridSignIn.person.roles).toEqual(['fee_earner']);
           // Yet the active session permission set includes risk_compliance permissions (e.g. 'risk:view')
-          const hybridSnap = runWithActiveActorSession(
+          const hybridSnap = await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
               tokenRoles: hybridSignIn.verifiedToken.roles,
               expiresAtMs: Date.now() + 3600_000,
             },
-            () => getAppSnapshot('P-000002'),
+            async () => getAppSnapshot('P-000002'),
           );
           expect(hybridSnap.currentUserPermissions).toContain('risk:view');
           // When the subsequent session has no token roles, the user falls back to stored ['fee_earner'] roles only
-          const subsequentSignIn = resolveOrProvisionEntraEmployee({
+          const subsequentSignIn = await resolveOrProvisionEntraEmployee({
             oid: '00000000-0000-4000-8000-000000000002',
             tid: '00000000-0000-4000-8000-000000000099',
             sub: 'sub-002',
@@ -1487,14 +1496,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             roles: [],
             amr: ['pwd', 'mfa'],
           });
-          const hybridAfterSnap = runWithActiveActorSession(
+          const hybridAfterSnap = await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
               tokenRoles: subsequentSignIn.verifiedToken.roles,
               expiresAtMs: Date.now() + 3600_000,
             },
-            () => getAppSnapshot('P-000002'),
+            async () => getAppSnapshot('P-000002'),
           );
           expect(hybridAfterSnap.currentUserPermissions).not.toContain(
             'risk:view',
@@ -1503,12 +1512,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
 
       // R63: getAppSnapshot(riskUser).employeeSensitiveRecords is empty; per-person read writes a view-sensitive audit entry
-      const riskSnap = getAppSnapshot('P-000003');
+      const riskSnap = await getAppSnapshot('P-000003');
       expect(riskSnap.employeeSensitiveRecords).toEqual({});
-      logEmployeeRestrictedAccess('P-000002', 'sensitive', 'P-000004', 'Viewed sensitive HR tab');
-      const afterSensitiveAuditSnap = getAppSnapshot('P-000004');
+      await logEmployeeRestrictedAccess('P-000002', 'sensitive', 'P-000004', 'Viewed sensitive HR tab');
+      const afterSensitiveAudit = (
+        await listAuditEntriesForRecord('employee_sensitive', 'P-000002', 'P-000004', { limit: 1000 })
+      ).filter((a) => auditSinceIds(a.at));
       expect(
-        afterSensitiveAuditSnap.audit.some(
+        afterSensitiveAudit.some(
           (a) => a.recordId === 'P-000002' && a.action === 'view-sensitive',
         ),
       ).toBe(true);
@@ -1554,7 +1565,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(feeEarnerSaveHomeRes.ok).toBe(false);
       expect(feeEarnerSaveHomeRes.code).toBe('FORBIDDEN');
-      expect(getAppSnapshot('P-000002').homePagesConfig.firmSettings.demoMode).toBe(
+      expect((await getAppSnapshot('P-000002')).homePagesConfig.firmSettings.demoMode).toBe(
         false,
       );
       const feeEarnerResetHomeRes = await resetHomePagesConfigAction();
@@ -1608,7 +1619,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('enforces R100 request/tenant-scoped token roles without cross-tenant, post-logout, or cross-user leakage', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
 
-      updateTenantRbacConfig(
+      await updateTenantRbacConfig(
         {
           identityMapping: {
             ...getDefaultTenantRbacConfig().identityMapping,
@@ -1646,8 +1657,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setActiveTenantConfigForTesting(null);
       }
 
-      const dafydd = getAppSnapshot('P-000002').people.find((p) => p.id === 'P-000002')!;
-      const carys = getAppSnapshot('P-000001').people.find((p) => p.id === 'P-000001')!;
+      const dafydd = (await getAppSnapshot('P-000002')).people.find((p) => p.id === 'P-000002')!;
+      const carys = (await getAppSnapshot('P-000001')).people.find((p) => p.id === 'P-000001')!;
       expect(dafydd.roles).toEqual(['fee_earner']);
 
       // 1a. Outside runWithActiveActorSession, resolvePersonPermissions(person) returns stored roles only
@@ -1703,7 +1714,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 2. Two overlapping async requests (A and B, with an await between setting and checking) see only their own token roles
       const [overlapA, overlapB] = await Promise.all([
-        runWithActiveActorSession(
+        await runWithActiveActorSession(
           {
             tenantId: 'not-a-law-firm',
             personId: 'P-000002',
@@ -1718,7 +1729,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             };
           },
         ),
-        runWithActiveActorSession(
+        await runWithActiveActorSession(
           {
             tenantId: 'not-a-law-firm',
             personId: 'P-000001',
@@ -1752,7 +1763,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // 2b. Two concurrent sessions for the SAME person (P-000002) with different roles (['admin'] vs ['fee_earner']) each see only their own roles without overwriting each other
       const [samePersonAdminSession, samePersonFeeEarnerSession] =
         await Promise.all([
-          runWithActiveActorSession(
+          await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
@@ -1764,7 +1775,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
               return resolvePersonPermissions(dafydd);
             },
           ),
-          runWithActiveActorSession(
+          await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
@@ -1879,7 +1890,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
 
       const { person, verifiedToken, rbacConfig } =
-        resolveOrProvisionEntraEmployee({
+        await resolveOrProvisionEntraEmployee({
           oid: '99999999-aaaa-bbbb-cccc-000000000001',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-demo-dev',
@@ -1919,7 +1930,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(signedCookie).toContain('.');
 
       // Subsequent sign-in with the same oid resolves the existing employee record
-      const secondSignIn = resolveOrProvisionEntraEmployee({
+      const secondSignIn = await resolveOrProvisionEntraEmployee({
         oid: '99999999-aaaa-bbbb-cccc-000000000001',
         tid: '11111111-2222-3333-4444-000000000000',
         name: 'Dev Admin User',
@@ -2050,8 +2061,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         store.tasks.push(unassignedCorpTask);
 
         // R123: Partner P-000001 holds task:claim_any and sees canTakeByTaskId['TSK-R123-CLAIM-ANY'] === true even though not in corpTeam; Fee Earner P-000002 does not hold task:claim_any and sees false
-        const partnerSnap = getAppSnapshot('P-000001');
-        const feeEarnerSnap = getAppSnapshot('P-000002');
+        const partnerSnap = await getAppSnapshot('P-000001');
+        const feeEarnerSnap = await getAppSnapshot('P-000002');
         expect(partnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(true);
         expect(feeEarnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(false);
 
@@ -2069,18 +2080,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           RightToWorkStatus: 'Verified',
         } as unknown as (typeof store.employeeSensitiveRecords)[string];
 
-        const deniedRead = getEmployeeDetailsForUser('P-000002', 'P-000006', {
+        const deniedRead = await getEmployeeDetailsForUser('P-000002', 'P-000006', {
           logViewSensitive: true,
         });
         expect(deniedRead.sensitive).toBeNull();
         expect(deniedRead.errors?.sensitivePermission).toBeDefined();
 
-        const unauditedRead = getEmployeeDetailsForUser('P-000002', 'P-000004', {
+        const unauditedRead = await getEmployeeDetailsForUser('P-000002', 'P-000004', {
           logViewSensitive: false,
         });
         expect(unauditedRead.sensitive).toBeNull();
 
-        const auditedRead = getEmployeeDetailsForUser('P-000002', 'P-000004', {
+        const auditedRead = await getEmployeeDetailsForUser('P-000002', 'P-000004', {
           logViewSensitive: true,
         });
         expect(auditedRead.sensitive).not.toBeNull();
@@ -2397,8 +2408,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         });
         const okReset = await resetDemoDataAction();
         expect(isActionDenied(okReset)).toBe(false);
-        const storeAfterReset = getStore();
-        const resetAudit = storeAfterReset.audit.find(
+        const resetAudit = (await auditSinceTestStart()).find(
           (a) => a.action === 'data-reset',
         );
         expect(resetAudit).toBeDefined();
@@ -2409,7 +2419,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(okClear)).toBe(false);
         const storeAfterClear = getStore();
         expect(storeAfterClear.people).toHaveLength(0);
-        const clearAudit = storeAfterClear.audit.find(
+        const clearAudit = (await auditSinceTestStart()).find(
           (a) => a.action === 'data-cleared',
         );
         expect(clearAudit).toBeDefined();
@@ -2426,11 +2436,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const store = getStore();
       // SO-000001: requestedById P-000002, assignedPartnerId P-000001, matterId M-000002, status Pending
       // 1. Fee earner (P-000002) lacks signoff:approve
-      const feApprove = approveSignOff('SO-000001', 'P-000002');
+      const feApprove = await approveSignOff('SO-000001', 'P-000002');
       expect(isActionDenied(feApprove)).toBe(true);
 
       // 2. Partner who is NOT assignedPartnerId (P-000005 is another partner) is denied when assignedPartnerId is set
-      const otherPartnerApprove = approveSignOff('SO-000001', 'P-000005');
+      const otherPartnerApprove = await approveSignOff('SO-000001', 'P-000005');
       expect(isActionDenied(otherPartnerApprove)).toBe(true);
       if (isActionDenied(otherPartnerApprove)) {
         expect(otherPartnerApprove.message).toMatch(/assigned partner/i);
@@ -2439,12 +2449,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // 3. No self-approval even when actor holds signoff:approve and assignedPartnerId matches or is null
       const item1 = store.signOffs.find((s) => s.id === 'SO-000001')!;
       item1.requestedById = 'P-000001';
-      const selfApprove = approveSignOff('SO-000001', 'P-000001');
+      const selfApprove = await approveSignOff('SO-000001', 'P-000001');
       expect(isActionDenied(selfApprove)).toBe(true);
       if (isActionDenied(selfApprove)) {
         expect(selfApprove.message).toMatch(/self-approval/i);
       }
-      const selfDiscuss = discussSignOff('SO-000001', 'Self note', 'P-000001');
+      const selfDiscuss = await discussSignOff('SO-000001', 'Self note', 'P-000001');
       expect(isActionDenied(selfDiscuss)).toBe(true);
       item1.requestedById = 'P-000002';
 
@@ -2456,7 +2466,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       linkedMatter.supervisingPartnerId = 'P-000005';
       linkedMatter.leadFeeEarnerId = 'P-000005';
       linkedMatter.teamMemberIds = ['P-000005'];
-      const wallDenied = approveSignOff('SO-000001', 'P-000001');
+      const wallDenied = await approveSignOff('SO-000001', 'P-000001');
       expect(isActionDenied(wallDenied)).toBe(true);
       if (isActionDenied(wallDenied)) {
         expect(wallDenied.message).toMatch(/matter/i);
@@ -2467,10 +2477,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       linkedMatter.supervisingPartnerId = 'P-000001';
 
       // 5. discussSignOff writes an audit entry and transitions status to Discussing
-      const discRes = discussSignOff('SO-000001', 'Need client confirmation first', 'P-000001');
+      const discRes = await discussSignOff('SO-000001', 'Need client confirmation first', 'P-000001');
       expect(isActionDenied(discRes)).toBe(false);
       expect(item1.status).toBe('Discussing');
-      const discAudit = store.audit.find(
+      const discAudit = (await auditSinceTestStart()).find(
         (a) =>
           a.field === 'Partner sign-off' &&
           a.newValue?.includes('Discussing: Write-off'),
@@ -2479,21 +2489,21 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 6. When assignedPartnerId is null, any holder of signoff:approve (who is not requestedById and can access the matter) may approve
       item1.assignedPartnerId = null;
-      const unassignedApprove = approveSignOff('SO-000001', 'P-000038');
+      const unassignedApprove = await approveSignOff('SO-000001', 'P-000038');
       expect(isActionDenied(unassignedApprove)).toBe(false);
       expect(item1.status).toBe('Approved');
 
       // 7. Re-approving or discussing an already Approved sign-off is denied
-      const reApprove = approveSignOff('SO-000001', 'P-000038');
+      const reApprove = await approveSignOff('SO-000001', 'P-000038');
       expect(isActionDenied(reApprove)).toBe(true);
-      const reDiscuss = discussSignOff('SO-000001', 'Too late', 'P-000038');
+      const reDiscuss = await discussSignOff('SO-000001', 'Too late', 'P-000038');
       expect(isActionDenied(reDiscuss)).toBe(true);
     });
 
     it('1c (B3). anonymiseExpiredEnquiries requires enquiry:anonymise and enforces isReadyForRetentionAnonymisation for single enquiries as well as bulk', async () => {
       const store = getStore();
       // Fee earner (P-000002) is denied enquiry:anonymise
-      expect(() => anonymiseExpiredEnquiries('P-000002')).toThrow(AuthorisationError);
+      await expect(anonymiseExpiredEnquiries('P-000002')).rejects.toThrow(AuthorisationError);
 
       // Find a closed unconverted enquiry that is RECENT (not past retentionMonths)
       const closedEnq = store.enquiries.find(
@@ -2503,7 +2513,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const origFirstName = closedEnq.firstName;
 
       // Single-enquiry call with Risk & Compliance (P-000003) must NOT anonymise a recent closed enquiry (B3 regression)
-      const prematureCount = anonymiseExpiredEnquiries('P-000003', closedEnq.id);
+      const prematureCount = await anonymiseExpiredEnquiries('P-000003', closedEnq.id);
       expect(prematureCount).toBe(0);
       expect(closedEnq.firstName).toBe(origFirstName);
       expect(closedEnq.anonymisedAt).toBeNull();
@@ -2512,19 +2522,19 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const twoYearsAgo = new Date();
       twoYearsAgo.setMonth(twoYearsAgo.getMonth() - 24);
       closedEnq.receivedAt = twoYearsAgo.toISOString();
-      const expiredCount = anonymiseExpiredEnquiries('P-000003', closedEnq.id);
+      const expiredCount = await anonymiseExpiredEnquiries('P-000003', closedEnq.id);
       expect(expiredCount).toBe(1);
       expect(closedEnq.firstName).toBe('Anonymised');
       expect(closedEnq.anonymisedAt).toBeTruthy();
     });
 
-    it('1d. remindTeamLeadOverdueCompliance requires risk:view', () => {
+    it('1d. remindTeamLeadOverdueCompliance requires risk:view', async () => {
       // Fee earner (P-000002) lacks risk:view
-      const denied = remindTeamLeadOverdueCompliance('TM-000001', 'P-000002');
+      const denied = await remindTeamLeadOverdueCompliance('TM-000001', 'P-000002');
       expect(isActionDenied(denied)).toBe(true);
 
       // Risk & compliance (P-000003) has risk:view
-      const allowed = remindTeamLeadOverdueCompliance('TM-000001', 'P-000003');
+      const allowed = await remindTeamLeadOverdueCompliance('TM-000001', 'P-000003');
       expect(isActionDenied(allowed)).toBe(false);
       expect(allowed.ok).toBe(true);
     });
@@ -2534,7 +2544,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
 
       // 1. A fee earner cannot add admin to their own roles by saving their person record
-      const selfEscalateRes = savePersonRecord(
+      const selfEscalateRes = await savePersonRecord(
         {
           firstName: feeEarner.firstName,
           surname: feeEarner.surname,
@@ -2548,7 +2558,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       ).not.toContain('admin');
 
       // Also rejected when spreading existing person and mutating roles or permissionOverrides
-      const spreadEscalateRes = savePersonRecord(
+      const spreadEscalateRes = await savePersonRecord(
         {
           ...feeEarner,
           permissionOverrides: { grant: ['admin:access'], revoke: [] },
@@ -2558,7 +2568,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(isActionDenied(spreadEscalateRes)).toBe(true);
 
       // 2. worksAtFirm: false without employee:edit_core is denied
-      const leaverWithoutPermRes = savePersonRecord(
+      const leaverWithoutPermRes = await savePersonRecord(
         {
           firstName: feeEarner.firstName,
           surname: feeEarner.surname,
@@ -2569,7 +2579,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(leaverWithoutPermRes.errors?.permission).toMatch(/employee:edit_core/);
 
       // Legacy isEmployee: true without rawEmpInput and without employee:edit_core is also denied
-      const legacyEmpCreateDenied = savePersonRecord(
+      const legacyEmpCreateDenied = await savePersonRecord(
         {
           firstName: 'Unauthorised',
           surname: 'Hire',
@@ -2581,7 +2591,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(isActionDenied(legacyEmpCreateDenied)).toBe(true);
 
       // 3. Contact create without contact:create (Finance P-000009 lacks contact:create and contact:edit) is denied
-      const finCreateContact = savePersonRecord(
+      const finCreateContact = await savePersonRecord(
         {
           firstName: 'Invented',
           surname: 'Prospect',
@@ -2593,7 +2603,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // Contact edit without contact:edit is denied
       const existingContact = store.people.find((p) => !p.isEmployee && !p.employment)!;
-      const finEditContact = savePersonRecord(
+      const finEditContact = await savePersonRecord(
         {
           firstName: existingContact.firstName,
           surname: 'ChangedByFinance',
@@ -2605,7 +2615,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 4. entraObjectId survives a save
       feeEarner.entraObjectId = '00000000-0000-4000-8000-000000000002';
-      const partnerUpdateRes = savePersonRecord(
+      const partnerUpdateRes = await savePersonRecord(
         {
           firstName: feeEarner.firstName,
           surname: feeEarner.surname,
@@ -3008,7 +3018,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         wallMatter.teamMemberIds = [];
 
         // Create a task linked to that restricted matter
-        const createRes = saveTaskRecord(
+        const createRes = await saveTaskRecord(
           {
             title: 'Confidential wall task',
             dueAt: '2026-12-01',
@@ -3021,11 +3031,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const wallTask = createRes.task!;
 
         // Fee earner P-000002 (not on allowlist) cannot see the task in getAppSnapshot
-        const snapFeeEarner = getAppSnapshot('P-000002');
+        const snapFeeEarner = await getAppSnapshot('P-000002');
         expect(snapFeeEarner.tasks.some((t) => t.id === wallTask.id)).toBe(false);
 
         // B9: P-000002 cannot comment on a task linked to a restricted matter
-        const commentDenied = addTaskCommentRecord(
+        const commentDenied = await addTaskCommentRecord(
           wallTask.id,
           'Attempted comment on restricted matter task',
           'P-000002',
@@ -3033,7 +3043,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(commentDenied)).toBe(true);
 
         // P-000002 cannot link a new task to the restricted matter
-        const linkRestrictedDenied = saveTaskRecord(
+        const linkRestrictedDenied = await saveTaskRecord(
           {
             title: 'Probe restricted matter',
             dueAt: '2026-12-01',
@@ -3046,7 +3056,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // Non-lead fee earner (P-000002) cannot reassign a task created by and assigned to P-000001
         const teamWithoutP2Lead = store.teams.find((t) => !t.leadIds.includes('P-000002'))!;
-        const normalTaskRes = saveTaskRecord(
+        const normalTaskRes = await saveTaskRecord(
           {
             title: 'Normal team task',
             dueAt: '2026-12-01',
@@ -3056,7 +3066,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           'P-000001',
         );
         const normalTask = normalTaskRes.task!;
-        const reassignDenied = saveTaskRecord(
+        const reassignDenied = await saveTaskRecord(
           {
             id: normalTask.id,
             title: normalTask.title,
@@ -3079,13 +3089,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
 
         // 1. Reopening an already-open enquiry is denied
-        const reopenOpenDenied = reopenEnquiryRecord(openEnq.id, 'P-000001');
+        const reopenOpenDenied = await reopenEnquiryRecord(openEnq.id, 'P-000001');
         expect(isActionDenied(reopenOpenDenied)).toBe(true);
 
         // 2. Reopening a Converted enquiry is denied
         const convertedEnq = store.enquiries.find((e) => e.status === 'Converted') ?? openEnq;
         convertedEnq.status = 'Converted';
-        const reopenConvertedDenied = reopenEnquiryRecord(convertedEnq.id, 'P-000001');
+        const reopenConvertedDenied = await reopenEnquiryRecord(convertedEnq.id, 'P-000001');
         expect(isActionDenied(reopenConvertedDenied)).toBe(true);
 
         // 3. Prepare a closed (Declined) enquiry with assignedToId = null on team 0
@@ -3113,7 +3123,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: ['enquiry:reopen'],
           revoke: [],
         };
-        const reopenByNonLead = reopenEnquiryRecord(closedEnq.id, nonLeadFeeEarner.id);
+        const reopenByNonLead = await reopenEnquiryRecord(closedEnq.id, nonLeadFeeEarner.id);
         expect(isActionDenied(reopenByNonLead)).toBe(true);
 
         // Team lead with enquiry:reopen revoked is refused (R267)
@@ -3122,12 +3132,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: [],
           revoke: ['enquiry:reopen'],
         };
-        const reopenNoPerm = reopenEnquiryRecord(closedEnq.id, teamLeadId);
+        const reopenNoPerm = await reopenEnquiryRecord(closedEnq.id, teamLeadId);
         expect(isActionDenied(reopenNoPerm)).toBe(true);
         teamLeadPerson.permissionOverrides = undefined;
 
         // Team lead reopens unassigned closed enquiry -> status becomes 'New' and assignedToId stays null (B8)
-        const reopenedRes = reopenEnquiryRecord(closedEnq.id, teamLeadId);
+        const reopenedRes = await reopenEnquiryRecord(closedEnq.id, teamLeadId);
         expect(isActionDenied(reopenedRes)).toBe(false);
         expect(reopenedRes.enquiry?.status).toBe('New');
         expect(reopenedRes.enquiry?.assignedToId).toBeNull();
@@ -3146,7 +3156,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(financeUser).toBeDefined();
 
         // Finance user does not hold quote:view -> getAppSnapshot returns empty quotes
-        const snap = getAppSnapshot(financeUser.id);
+        const snap = await getAppSnapshot(financeUser.id);
         expect(snap.currentUserPermissions).not.toContain('quote:view');
         expect(snap.currentUserPermissions).not.toContain('quote:edit');
         expect(snap.quotes).toEqual([]);
@@ -3173,7 +3183,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         quoteOnHiddenEnquiry.linkedEnquiryId = hiddenEnq.id;
         quoteOnHiddenEnquiry.convertedMatterId = null;
 
-        const feeEarnerSnap = getAppSnapshot('P-000002');
+        const feeEarnerSnap = await getAppSnapshot('P-000002');
         expect(feeEarnerSnap.currentUserPermissions).toContain('quote:view');
         expect(
           feeEarnerSnap.quotes.some((q) => q.id === quoteOnRestrictedMatter.id),
@@ -3185,7 +3195,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const existingQuote = store.quotes[0]!;
         expect(
           isActionDenied(
-            saveQuoteRecord(
+            await saveQuoteRecord(
               {
                 clientType: 'prospect',
                 prospectName: 'Test Prospect',
@@ -3198,10 +3208,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             ),
           ),
         ).toBe(true);
-        expect(isActionDenied(markQuoteSentRecord(existingQuote.id, financeUser.id))).toBe(true);
+        expect(isActionDenied(await markQuoteSentRecord(existingQuote.id, financeUser.id))).toBe(true);
         expect(
           isActionDenied(
-            logQuoteFollowUpRecord(
+            await logQuoteFollowUpRecord(
               existingQuote.id,
               { method: 'Phone', note: 'Follow up', nextFollowUpDate: '2026-12-01' },
               financeUser.id,
@@ -3210,7 +3220,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
         expect(
           isActionDenied(
-            reviseQuoteRecord(
+            await reviseQuoteRecord(
               existingQuote.id,
               {
                 feeBasis: 'Fixed fee',
@@ -3223,7 +3233,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
         expect(
           isActionDenied(
-            recordQuoteOutcomeRecord(
+            await recordQuoteOutcomeRecord(
               existingQuote.id,
               { outcome: 'Accepted' },
               financeUser.id,
@@ -3265,7 +3275,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setTestEntraSessionOverride(verifiedActorSession);
 
         // 1. Rejects when source person is still an active employee (not a leaver)
-        const notLeaverRes = reassignLeaverOwnedRecords(
+        const notLeaverRes = await reassignLeaverOwnedRecords(
           activeEmp.id,
           replacementEmp.id,
           actor.id,
@@ -3291,7 +3301,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         };
         expect(
           isActionDenied(
-            reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+            await reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
           ),
         ).toBe(true);
 
@@ -3301,7 +3311,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         };
         expect(
           isActionDenied(
-            reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+            await reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
           ),
         ).toBe(true);
 
@@ -3347,8 +3357,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         openEnq.status = 'Assigned';
         openEnq.assignedToId = activeEmp.id;
 
-        const auditCountBefore = store.audit.length;
-        const okRes = runWithActiveActorSession(
+        const leaverAuditMark = Date.now();
+        const okRes = await runWithActiveActorSession(
           {
             personId: actor.id,
             tenantId: 'not-a-law-firm',
@@ -3356,7 +3366,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expiresAtMs: Date.now() + 3_600_000,
             verifiedSession: verifiedActorSession,
           },
-          () => reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+          async () => reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
         );
         await flushDocumentLifecycleSyncForTesting();
         expect(isActionDenied(okRes)).toBe(false);
@@ -3402,7 +3412,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(openEnq.assignedToId).toBe(replacementEmp.id);
 
         // Per-record audit entries written for moved matter, task, and open enquiry
-        const newAuditEntries = store.audit.slice(0, store.audit.length - auditCountBefore);
+        const newAuditEntries = await auditEntriesWrittenSince(leaverAuditMark);
         expect(
           newAuditEntries.some(
             (a) => a.recordType === 'matter' && a.recordId === restrictedMatter.id,
@@ -3437,7 +3447,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // 1. saveOrganisationRecord, createOrUpdateLink, and deleteLink enforce contact:create / contact:edit
         expect(
           isActionDenied(
-            saveOrganisationRecord(
+            await saveOrganisationRecord(
               { legalName: 'Denied Org' },
               { byId: financeUser.id },
             ),
@@ -3445,20 +3455,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
         expect(
           isActionDenied(
-            saveOrganisationRecord(
+            await saveOrganisationRecord(
               { legalName: 'Denied Org Edit' },
               { id: existingOrg.id, byId: financeUser.id },
             ),
           ),
         ).toBe(true);
 
-        const createdOrgRes = saveOrganisationRecord(
+        const createdOrgRes = await saveOrganisationRecord(
           { legalName: 'Allowed Org Ltd' },
           { byId: feeEarner.id },
         );
         expect(isActionDenied(createdOrgRes)).toBe(false);
 
-        const linkDeniedCreate = createOrUpdateLink(
+        const linkDeniedCreate = await createOrUpdateLink(
           {
             personId: existingContact.id,
             organisationId: existingOrg.id,
@@ -3476,7 +3486,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(linkDeniedCreate)).toBe(true);
 
-        const linkCreated = createOrUpdateLink(
+        const linkCreated = await createOrUpdateLink(
           {
             personId: existingContact.id,
             organisationId: createdOrgRes.organisation.id,
@@ -3496,7 +3506,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         if (!isActionDenied(linkCreated)) {
           expect(
             isActionDenied(
-              createOrUpdateLink(
+              await createOrUpdateLink(
                 {
                   id: linkCreated.id,
                   personId: existingContact.id,
@@ -3515,8 +3525,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
               ),
             ),
           ).toBe(true);
-          expect(isActionDenied(deleteLink(linkCreated.id, financeUser.id))).toBe(true);
-          expect(isActionDenied(deleteLink(linkCreated.id, feeEarner.id))).toBe(false);
+          expect(isActionDenied(await deleteLink(linkCreated.id, financeUser.id))).toBe(true);
+          expect(isActionDenied(await deleteLink(linkCreated.id, feeEarner.id))).toBe(false);
         }
 
         // 2 (R252). saveOrganisationAction strips internalSystemStep so a user with contact:edit only cannot create an org
@@ -3551,13 +3561,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         riskOfficer.permissionOverrides = undefined;
 
         // 3. record:merge on dismissDuplicateMatch and executeMerge
-        const secondOrgRes = saveOrganisationRecord(
+        const secondOrgRes = await saveOrganisationRecord(
           { legalName: 'Duplicate Org Ltd' },
           { byId: feeEarner.id },
         );
         expect(
           isActionDenied(
-            dismissDuplicateMatch(
+            await dismissDuplicateMatch(
               'organisation',
               createdOrgRes.organisation.id,
               secondOrgRes.organisation.id,
@@ -3577,7 +3587,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
         expect(
           isActionDenied(
-            dismissDuplicateMatch(
+            await dismissDuplicateMatch(
               'organisation',
               createdOrgRes.organisation.id,
               secondOrgRes.organisation.id,
@@ -3593,12 +3603,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           revoke: ['enquiry:assign'],
         };
         expect(
-          isActionDenied(assignEnquiryRecord(openEnq.id, feeEarner.id, null, financeUser.id)),
+          isActionDenied(await assignEnquiryRecord(openEnq.id, feeEarner.id, null, financeUser.id)),
         ).toBe(true);
         financeUser.permissionOverrides = undefined;
         expect(
           isActionDenied(
-            closeEnquiryRecord(
+            await closeEnquiryRecord(
               openEnq.id,
               { targetStatus: 'Declined', closeNotes: 'Denied close' },
               financeUser.id,
@@ -3607,7 +3617,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
         expect(
           isActionDenied(
-            logEnquiryContactRecord(
+            await logEnquiryContactRecord(
               openEnq.id,
               { method: 'Phone', outcome: 'Spoke', note: 'Denied log' },
               financeUser.id,
@@ -3616,7 +3626,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
         expect(
           isActionDenied(
-            sendEnquiryEmailRecord(
+            await sendEnquiryEmailRecord(
               openEnq.id,
               {
                 to: 'prospect@notalawfirm.example',
@@ -3640,7 +3650,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: ['enquiry:edit', 'enquiry:close', 'enquiry:assign'],
           revoke: ['enquiry:reopen'],
         };
-        const bypassReopenRes = saveEnquiryRecord(
+        const bypassReopenRes = await saveEnquiryRecord(
           { status: 'Assigned', summary: closedEnq.summary },
           { id: closedEnq.id, byId: feeEarner.id },
         );
@@ -3655,7 +3665,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:assign'],
           revoke: ['enquiry:close'],
         };
-        const bypassCloseRes = saveEnquiryRecord(
+        const bypassCloseRes = await saveEnquiryRecord(
           { status: 'Declined', summary: openEnq.summary },
           { id: openEnq.id, byId: feeEarner.id },
         );
@@ -3670,7 +3680,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:close'],
           revoke: ['enquiry:assign'],
         };
-        const bypassAssignUserRes = saveEnquiryRecord(
+        const bypassAssignUserRes = await saveEnquiryRecord(
           { assignedToId: 'P-000001', summary: openEnq.summary },
           { id: openEnq.id, byId: feeEarner.id },
         );
@@ -3679,7 +3689,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(bypassAssignUserRes.code).toBe('FORBIDDEN');
           expect(bypassAssignUserRes.message).toMatch(/Use the assign, close, or reopen actions/i);
         }
-        const bypassAssignTeamRes = saveEnquiryRecord(
+        const bypassAssignTeamRes = await saveEnquiryRecord(
           { assignedTeamId: 'TM-999999', summary: openEnq.summary },
           { id: openEnq.id, byId: feeEarner.id },
         );
@@ -3691,7 +3701,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         feeEarner.permissionOverrides = undefined;
 
         // 5d (R292 positive control). A Draft enquiry can still be routed through saveEnquiryRecord with asDraft: false, status, assignedToId, and assignedTeamId
-        const draftToRouteCreateRes = saveEnquiryRecord(
+        const draftToRouteCreateRes = await saveEnquiryRecord(
           {
             firstName: 'Route',
             lastName: 'FromDraft',
@@ -3709,7 +3719,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(draftToRouteCreateRes)).toBe(false);
         expect(draftToRouteCreateRes.enquiry?.status).toBe('Draft');
         const targetTeamId = store.teams[0]!.id;
-        const routedFromDraftRes = saveEnquiryRecord(
+        const routedFromDraftRes = await saveEnquiryRecord(
           {
             status: 'Assigned',
             assignedToId: feeEarner.id,
@@ -3723,12 +3733,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(routedFromDraftRes.enquiry?.assignedTeamId).toBe(targetTeamId);
 
         // 6 (R267, R268, R293, R299). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft and closed enquiries
-        const draftEnqRes = saveEnquiryRecord(
+        const draftEnqRes = await saveEnquiryRecord(
           { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
           { asDraft: true, byId: feeEarner.id },
         );
         const draftEnq = draftEnqRes.enquiry!;
-        const draftTaskRes = saveTaskRecord(
+        const draftTaskRes = await saveTaskRecord(
           {
             title: 'Task on draft enquiry',
             dueAt: '2026-12-01',
@@ -3748,7 +3758,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293, R299)
         closedEnq.status = 'Declined';
         closedEnq.assignedToId = null;
-        const closedTaskRes = saveTaskRecord(
+        const closedTaskRes = await saveTaskRecord(
           {
             title: 'Task on declined enquiry',
             dueAt: '2026-12-01',
@@ -3774,7 +3784,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: [],
           revoke: ['enquiry:assign'],
         };
-        saveTaskRecord(
+        await saveTaskRecord(
           {
             title: 'Task without enquiry:assign',
             dueAt: '2026-12-01',
@@ -3788,7 +3798,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // Actor with enquiry:assign auto-assigns the routed New enquiry
         feeEarner.permissionOverrides = undefined;
-        saveTaskRecord(
+        await saveTaskRecord(
           {
             title: 'Task with enquiry:assign',
             dueAt: '2026-12-01',
@@ -3818,7 +3828,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         wallMatter.teamMemberIds = [];
 
         // Fee earner P-000002 holds matter:edit and contact:edit, but cannot view wallMatter or edit employees
-        const noteOnRestrictedMatter = addNoteToRecord(
+        const noteOnRestrictedMatter = await addNoteToRecord(
           'matter',
           wallMatter.id,
           'Should fail on walled matter',
@@ -3826,7 +3836,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(noteOnRestrictedMatter)).toBe(true);
 
-        const noteOnEmployeeWithoutHrPerm = addNoteToRecord(
+        const noteOnEmployeeWithoutHrPerm = await addNoteToRecord(
           'person',
           'P-000001',
           'Should fail on employee record without employee:edit_core',
@@ -3874,7 +3884,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         if (isActionDenied(enqActionRes)) {
           expect(enqActionRes.code).toBe('FORBIDDEN');
         }
-        const enqSvcRes = prepareEnquiryConversion(
+        const enqSvcRes = await prepareEnquiryConversion(
           enqId,
           { createForBusiness: true },
           'P-000009',
@@ -3884,7 +3894,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const quoteId = store.quotes[0]!.id;
         const quoteActionRes = await prepareQuoteConversionAction(quoteId);
         expect(isActionDenied(quoteActionRes)).toBe(true);
-        const quoteSvcRes = prepareQuoteConversionRecord(quoteId, 'P-000009');
+        const quoteSvcRes = await prepareQuoteConversionRecord(quoteId, 'P-000009');
         expect(isActionDenied(quoteSvcRes)).toBe(true);
 
         expect(store.people.length).toBe(peopleBefore);
@@ -3912,7 +3922,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         )!;
 
         // 1. Create a prospect quote for that opposing party
-        const blockedQuoteRes = saveQuoteRecord(
+        const blockedQuoteRes = await saveQuoteRecord(
           {
             clientType: 'prospect',
             prospectName: 'Gareth OpponentContact',
@@ -3932,7 +3942,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const orgsBeforeBlock = store.organisations.length;
         const linksBeforeBlock = store.links.length;
 
-        const blockedConv = prepareQuoteConversionRecord(blockedQuote.id, 'P-000001');
+        const blockedConv = await prepareQuoteConversionRecord(blockedQuote.id, 'P-000001');
         expect(blockedConv.ok).toBe(false);
         expect(blockedConv.conflictBlocked).toBe(true);
         expect(blockedConv.conflictReasons?.length).toBeGreaterThan(0);
@@ -3942,7 +3952,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(store.links.length).toBe(linksBeforeBlock);
 
         // 2. Create a clean prospect quote -> creates person, organisation (Cleared), conflictDecision, and audit entry
-        const cleanQuoteRes = saveQuoteRecord(
+        const cleanQuoteRes = await saveQuoteRecord(
           {
             clientType: 'prospect',
             prospectName: 'Seren CleanProspect',
@@ -3956,7 +3966,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000001' },
         );
         const cleanQuote = cleanQuoteRes.quote!;
-        const cleanConv = prepareQuoteConversionRecord(cleanQuote.id, 'P-000001');
+        const cleanConv = await prepareQuoteConversionRecord(cleanQuote.id, 'P-000001');
         expect(cleanConv.ok).toBe(true);
         expect(cleanConv.clientId).toBeDefined();
         expect(cleanConv.instructingContactId).toBeDefined();
@@ -3970,7 +3980,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ...CONFLICT_SEARCHED_SOURCES,
         ]);
         expect(
-          store.audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordType === 'organisation' &&
               a.recordId === createdOrg.id &&
@@ -3983,17 +3993,17 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const declinedStatusId = 'conflict_status.conflict_declined';
         const clearedWithConsentStatusId = 'conflict_status.cleared_with_consent';
 
-        const declinedOrg = saveOrganisationRecord(
+        const declinedOrg = (await saveOrganisationRecord(
           {
             legalName: 'Declined Existing Org Ltd',
             conflictStatusId: declinedStatusId,
             conflictReference: 'CR-KEEP-DECLINED',
           },
           { byId: 'P-000001' },
-        ).organisation!;
+        )).organisation!;
         expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
 
-        const declinedOrgQuote = saveQuoteRecord(
+        const declinedOrgQuote = (await saveQuoteRecord(
           {
             clientType: 'existing',
             linkedOrganisationId: declinedOrg.id,
@@ -4003,23 +4013,23 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             feeAmountExVat: 1800,
           },
           { byId: 'P-000001' },
-        ).quote!;
-        const declinedOrgConv = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
+        )).quote!;
+        const declinedOrgConv = await prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
         expect(declinedOrgConv.ok).toBe(false);
         expect(declinedOrgConv.conflictBlocked).toBe(true);
         expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
         expect(declinedOrg.conflictReference).toBe('CR-KEEP-DECLINED');
 
         // 2c. R254: An existing organisation set to "Cleared with consent" keeps its status after a successful quote conversion
-        const consentOrg = saveOrganisationRecord(
+        const consentOrg = (await saveOrganisationRecord(
           {
             legalName: 'Consent Existing Org Ltd',
             conflictStatusId: clearedWithConsentStatusId,
             conflictReference: 'CR-KEEP-CONSENT',
           },
           { byId: 'P-000001' },
-        ).organisation!;
-        const consentOrgQuote = saveQuoteRecord(
+        )).organisation!;
+        const consentOrgQuote = (await saveQuoteRecord(
           {
             clientType: 'existing',
             linkedOrganisationId: consentOrg.id,
@@ -4029,13 +4039,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             feeAmountExVat: 2200,
           },
           { byId: 'P-000001' },
-        ).quote!;
-        const consentOrgConv = prepareQuoteConversionRecord(consentOrgQuote.id, 'P-000001');
+        )).quote!;
+        const consentOrgConv = await prepareQuoteConversionRecord(consentOrgQuote.id, 'P-000001');
         expect(consentOrgConv.ok).toBe(true);
         expect(consentOrg.conflictStatusId).toBe(clearedWithConsentStatusId);
         expect(consentOrg.conflictReference).toBe('CR-KEEP-CONSENT');
         expect(
-          store.audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordType === 'quote' &&
               a.recordId === consentOrgQuote.id &&
@@ -4045,13 +4055,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // 2d. R255: A quote with a non-blocking amber warning (private client whose employer is an existing client) converts without blocking
         const existingClientOrgId = matterWithOpponent.clientId;
-        const privateClientEmployee = savePersonRecord(
+        const privateClientEmployee = (await savePersonRecord(
           {
             firstName: 'Nia',
             surname: 'AmberWarningClient',
           },
           { byId: 'P-000001' },
-        ).person!;
+        )).person!;
         store.links.push({
           id: 'L-R255-AMBER',
           personId: privateClientEmployee.id,
@@ -4070,7 +4080,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           updatedById: 'P-000001',
           updatedAt: '2025-01-01T09:00:00Z',
         });
-        const amberQuote = saveQuoteRecord(
+        const amberQuote = (await saveQuoteRecord(
           {
             clientType: 'existing',
             linkedPersonId: privateClientEmployee.id,
@@ -4080,13 +4090,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             feeAmountExVat: 1500,
           },
           { byId: 'P-000001' },
-        ).quote!;
-        const amberConv = prepareQuoteConversionRecord(amberQuote.id, 'P-000001');
+        )).quote!;
+        const amberConv = await prepareQuoteConversionRecord(amberQuote.id, 'P-000001');
         expect(amberConv.ok).toBe(true);
         expect(amberConv.conflictBlocked).toBeFalsy();
         expect(amberConv.conflictWarnings?.length).toBeGreaterThan(0);
         expect(amberConv.conflictWarnings?.[0]).toContain('linked to');
-        const amberAudit = store.audit.find(
+        const amberAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordType === 'quote' &&
             a.recordId === amberQuote.id &&
@@ -4098,14 +4108,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // 2e. R297: A quote matching a declined organisation by name (without linkedOrganisationId) does NOT block,
         // emits the non-blocking warning even when the declined organisation is listed second among same-named organisations,
         // and sets the new prospect organisation's conflictDecision.outcome to 'Potential conflict'
-        const clearedSameNameOrg = saveOrganisationRecord(
+        const clearedSameNameOrg = (await saveOrganisationRecord(
           {
             legalName: 'Declined Existing Org Ltd',
             conflictStatusId: 'conflict_status.cleared',
             conflictReference: 'CR-CLEARED-FIRST',
           },
           { byId: 'P-000001' },
-        ).organisation!;
+        )).organisation!;
         // Move clearedSameNameOrg before declinedOrg so declinedOrg is listed second among same-named organisations
         const clearedIdx = store.organisations.findIndex((o) => o.id === clearedSameNameOrg.id);
         if (clearedIdx >= 0) {
@@ -4114,7 +4124,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const declinedIdx = store.organisations.findIndex((o) => o.id === declinedOrg.id);
         store.organisations.splice(declinedIdx, 0, clearedSameNameOrg);
 
-        const declinedByNameQuote = saveQuoteRecord(
+        const declinedByNameQuote = (await saveQuoteRecord(
           {
             clientType: 'prospect',
             prospectName: 'Dafydd NameMatch',
@@ -4125,8 +4135,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             feeAmountExVat: 1900,
           },
           { byId: 'P-000001' },
-        ).quote!;
-        const declinedByNameConv = prepareQuoteConversionRecord(
+        )).quote!;
+        const declinedByNameConv = await prepareQuoteConversionRecord(
           declinedByNameQuote.id,
           'P-000001',
         );
@@ -4149,7 +4159,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
 
         // Linked declined organisation still hard-blocks
-        const linkedDeclinedRecheck = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
+        const linkedDeclinedRecheck = await prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
         expect(linkedDeclinedRecheck.ok).toBe(false);
         expect(linkedDeclinedRecheck.conflictBlocked).toBe(true);
 
@@ -4157,7 +4167,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
 
         // 3a. R307: An enquiry linked to a declined organisation is blocked on conversion, while an unlinked enquiry matching a declined organisation by name converts with the warning in conflictWarnings
-        const linkedDeclinedEnq = saveEnquiryRecord(
+        const linkedDeclinedEnq = (await saveEnquiryRecord(
           {
             channelId: templateEnq.channelId,
             firstName: 'Owain',
@@ -4176,8 +4186,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             privacyNoticeGiven: true,
           },
           { byId: 'P-000001', asDraft: false },
-        ).enquiry!;
-        const linkedDeclinedEnqConv = prepareEnquiryConversion(
+        )).enquiry!;
+        const linkedDeclinedEnqConv = await prepareEnquiryConversion(
           linkedDeclinedEnq.id,
           { useOrganisationId: declinedOrg.id, createForBusiness: true },
           'P-000001',
@@ -4188,7 +4198,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           'Client organisation has conflict status "Conflict – declined".',
         );
         expect(
-          store.audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordType === 'enquiry' &&
               a.recordId === linkedDeclinedEnq.id &&
@@ -4197,15 +4207,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ),
         ).toBe(true);
 
-        const declinedEnqOrg = saveOrganisationRecord(
+        const declinedEnqOrg = (await saveOrganisationRecord(
           {
             legalName: 'Declined Enquiry Org Ltd',
             conflictStatusId: declinedStatusId,
             conflictReference: 'CR-ENQ-DECLINED',
           },
           { byId: 'P-000001' },
-        ).organisation!;
-        const unlinkedDeclinedNameEnq = saveEnquiryRecord(
+        )).organisation!;
+        const unlinkedDeclinedNameEnq = (await saveEnquiryRecord(
           {
             channelId: templateEnq.channelId,
             firstName: 'Carys',
@@ -4223,8 +4233,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             privacyNoticeGiven: true,
           },
           { byId: 'P-000001', asDraft: false },
-        ).enquiry!;
-        const unlinkedDeclinedNameEnqConv = prepareEnquiryConversion(
+        )).enquiry!;
+        const unlinkedDeclinedNameEnqConv = await prepareEnquiryConversion(
           unlinkedDeclinedNameEnq.id,
           { createForBusiness: true },
           'P-000001',
@@ -4252,7 +4262,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         restrictedMatter.teamMemberIds = [];
         unlinkedDeclinedNameEnq.convertedMatterId = restrictedMatter.id;
         try {
-          const nonParticipantSnap = getAppSnapshot('P-000002');
+          const nonParticipantSnap = await getAppSnapshot('P-000002');
           const resolvedEnquiryForNonParticipant = nonParticipantSnap.enquiries.find(
             (e) => e.id === unlinkedDeclinedNameEnq.id,
           );
@@ -4290,7 +4300,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ]),
         ).toEqual(['First warning', 'Second warning']);
 
-        const cleanEnqRes = saveEnquiryRecord(
+        const cleanEnqRes = await saveEnquiryRecord(
           {
             channelId: templateEnq.channelId,
             firstName: 'Idris',
@@ -4310,7 +4320,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000001', asDraft: false },
         );
         const cleanEnq = cleanEnqRes.enquiry!;
-        const enqConv = prepareEnquiryConversion(
+        const enqConv = await prepareEnquiryConversion(
           cleanEnq.id,
           { createForBusiness: true },
           'P-000001',
@@ -4324,7 +4334,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ...CONFLICT_SEARCHED_SOURCES,
         ]);
         expect(
-          store.audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordType === 'organisation' &&
               a.recordId === enqCreatedOrg.id &&
@@ -4348,7 +4358,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           authenticatedAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 3600_000).toISOString(),
         });
-        const convertedMatterRes = await withPageActor(() =>
+        const convertedMatterRes = await withPageActor(async () =>
           saveMatterRecord(
             {
               title: 'Meridian Clear Converted Matter',
@@ -4372,7 +4382,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(convertedMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(cleanEnq.id);
 
         // R308: Quote conversion conflictDecision is also carried onto matter.conflictDecision when opening a matter from a converted quote
-        const convertedFromQuoteMatterRes = await withPageActor(() =>
+        const convertedFromQuoteMatterRes = await withPageActor(async () =>
           saveMatterRecord(
             {
               title: 'Solaris Clean Quote Converted Matter',
@@ -4408,20 +4418,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const store = getStore();
 
         // Create dedicated test records for the 4 new search sources
-        const instrPerson = savePersonRecord(
+        const instrPerson = (await savePersonRecord(
           { firstName: 'Iolo', surname: 'InstructingHit' },
           { byId: 'P-000001' },
-        ).person;
-        const billPerson = savePersonRecord(
+        )).person;
+        const billPerson = (await savePersonRecord(
           { firstName: 'Bryn', surname: 'BillingHit' },
           { byId: 'P-000001' },
-        ).person;
+        )).person;
         const addlClientOrg = store.organisations[1]!;
         const employerOrg = store.organisations[2]!;
-        const linkedEmployeePerson = savePersonRecord(
+        const linkedEmployeePerson = (await savePersonRecord(
           { firstName: 'Ceri', surname: 'LinkedToOpponentOrg' },
           { byId: 'P-000001' },
-        ).person;
+        )).person;
 
         // Link Ceri to employerOrg
         store.links.push({
@@ -4629,7 +4639,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ];
 
         const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
-        const blockedEnqRes = saveEnquiryRecord(
+        const blockedEnqRes = await saveEnquiryRecord(
           {
             channelId: templateEnq.channelId,
             firstName: 'Evan',
@@ -4650,7 +4660,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         const blockedEnq = blockedEnqRes.enquiry!;
         // R280 (R258 follow-up): Quick conflict check recorded audit entry uses action 'conflict-decision' in both main and draft paths
-        const mainQuickAudit = store.audit.find(
+        const mainQuickAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordType === 'enquiry' &&
             a.recordId === blockedEnq.id &&
@@ -4659,7 +4669,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(mainQuickAudit).toBeDefined();
         expect(mainQuickAudit?.action).toBe('conflict-decision');
 
-        const draftCheckEnq = saveEnquiryRecord(
+        const draftCheckEnq = (await saveEnquiryRecord(
           {
             channelId: templateEnq.channelId,
             firstName: 'Draft',
@@ -4669,8 +4679,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             urgencyId: templateEnq.urgencyId,
           },
           { byId: 'P-000002', asDraft: true },
-        ).enquiry!;
-        const draftQuickAudit = store.audit.find(
+        )).enquiry!;
+        const draftQuickAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordType === 'enquiry' &&
             a.recordId === draftCheckEnq.id &&
@@ -4749,7 +4759,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
 
         // Fee earner P-000002 cannot view restrictedMatter
-        const convDenied = prepareEnquiryConversion(blockedEnq.id, {}, 'P-000002');
+        const convDenied = await prepareEnquiryConversion(blockedEnq.id, {}, 'P-000002');
         expect(convDenied.ok).toBe(false);
         expect(convDenied.conflictBlocked).toBe(true);
         const combinedReasons = (convDenied.conflictReasons ?? []).join(' | ');
@@ -4790,14 +4800,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('denies merge without record:merge, refuses active employees, firm staff, or leavers, and fails closed without a verified session (R271)', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
-        const s1 = savePersonRecord(
+        const s1 = (await savePersonRecord(
           { firstName: 'Gareth', surname: 'Survivor', isEmployee: false },
           { byId: 'P-000001' },
-        ).person!;
-        const m1 = savePersonRecord(
+        )).person!;
+        const m1 = (await savePersonRecord(
           { firstName: 'Gareth', surname: 'Duplicate', isEmployee: false },
           { byId: 'P-000001' },
-        ).person!;
+        )).person!;
 
         // 1. Denied without record:merge (fee earner P-000002 lacks record:merge)
         const deniedNoPerm = await executeMerge('person', s1.id, m1.id, 'P-000002');
@@ -4843,22 +4853,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MatterSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MatterDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Matter Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Matter Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -4984,22 +4994,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'EnqSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'EnqDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Enq Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Enq Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const enq = store.enquiries[0]!;
@@ -5091,22 +5101,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'QuoteSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'QuoteDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Quote Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Quote Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const quote = getStore().quotes[0]!;
         quote.linkedOrganisationId = mergedOrg.id;
@@ -5128,22 +5138,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'TaskSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'TaskDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Task Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Task Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const task = getStore().tasks[0]!;
         task.linkedRecords = [
@@ -5170,25 +5180,25 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'LinkSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'LinkDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Link Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const secondOrg = saveOrganisationRecord(
+        )).organisation!;
+        const secondOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Second Counterpart Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         // Survivor has a PAST non-primary link to survivorOrg; merged record has a CURRENT primary link with earlier startDate
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId: survivorPerson.id,
             organisationId: survivorOrg.id,
@@ -5204,7 +5214,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
           'P-000004',
         );
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId: mergedPerson.id,
             organisationId: survivorOrg.id,
@@ -5220,7 +5230,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
           'P-000004',
         );
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId: mergedPerson.id,
             organisationId: secondOrg.id,
@@ -5264,27 +5274,27 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorOrg = saveOrganisationRecord(
+        const survivorOrg = (await saveOrganisationRecord(
           {
             legalName: 'Bryn Parent Survivor Ltd',
             relationshipPartnerId: 'P-000001',
           },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           {
             legalName: 'Bryn Parent Duplicate Ltd',
             relationshipPartnerId: 'P-000003',
           },
           { byId: 'P-000004' },
-        ).organisation!;
-        const childOrg = saveOrganisationRecord(
+        )).organisation!;
+        const childOrg = (await saveOrganisationRecord(
           {
             legalName: 'Bryn Subsidiary Ltd',
             parentOrganisationId: mergedOrg.id,
           },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
 
@@ -5303,26 +5313,26 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'PmsSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'PmsDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Pms Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Pms Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
-        linkPmsRecord('person', mergedPerson.id, 'PMS-PER-MERGED', 'P-000004');
-        linkPmsRecord('organisation', survivorOrg.id, 'PMS-ORG-SURV', 'P-000004');
-        linkPmsRecord('organisation', mergedOrg.id, 'PMS-ORG-MERG', 'P-000004');
+        await linkPmsRecord('person', mergedPerson.id, 'PMS-PER-MERGED', 'P-000004');
+        await linkPmsRecord('organisation', survivorOrg.id, 'PMS-ORG-SURV', 'P-000004');
+        await linkPmsRecord('organisation', mergedOrg.id, 'PMS-ORG-MERG', 'P-000004');
 
         await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
         const orgMergeHistory = await executeMerge(
@@ -5354,7 +5364,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { keptPmsCode: 'PMS-ORG-SURV', discardedPmsCode: 'PMS-ORG-MERG' },
         ]);
         expect(
-          updatedStore.audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordId === survivorOrg.id &&
               a.action === 'merge' &&
@@ -5373,22 +5383,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'DocSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'DocDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Doc Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Doc Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -5499,28 +5509,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MiscSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MiscDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Misc Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Misc Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const storeMergedPerson = store.people.find((p) => p.id === mergedPerson.id)!;
         storeMergedPerson.createdFromEnquiryId = 'ENQ-ORIGIN-99';
 
-        addNoteToRecord('person', mergedPerson.id, 'Merged person note', 'P-000004');
+        await addNoteToRecord('person', mergedPerson.id, 'Merged person note', 'P-000004');
         store.recentlyViewed['P-000001'] = [mergedPerson.id, survivorPerson.id, mergedOrg.id];
         store.notifications.push({
           id: 'NTF-MERGE-1',
@@ -5535,7 +5545,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           byId: 'P-000004',
         });
 
-        const preMergeAuditIdsForMergedPerson = store.audit
+        const preMergeAuditIdsForMergedPerson = (await auditSinceTestStart())
           .filter((a) => a.recordId === mergedPerson.id)
           .map((a) => a.id);
         expect(preMergeAuditIdsForMergedPerson.length).toBeGreaterThan(0);
@@ -5568,8 +5578,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(updatedNotif.recordId).toBe(survivorPerson.id);
         expect(updatedNotif.href).toBe(`/people/${survivorPerson.id}`);
 
+        const postMergeMergedPersonAudit = await auditSinceTestStart();
         for (const auditId of preMergeAuditIdsForMergedPerson) {
-          const entry = updatedStore.audit.find((a) => a.id === auditId)!;
+          const entry = postMergeMergedPersonAudit.find((a) => a.id === auditId)!;
           expect(entry.recordId).toBe(mergedPerson.id);
         }
       } finally {
@@ -5584,14 +5595,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackMerged', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -5741,14 +5752,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const origRepoint = repo.repointMergedEntityWithDelta.bind(repo);
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackSurvivorCase2', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackMergedCase2', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -5802,14 +5813,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackSurvivorCase3', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackMergedCase3', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
 
         const priorSavedJson = global.__oneSquaredLastSavedStoreJson;
         let saveAttempts = 0;
@@ -5860,24 +5871,24 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const sPerson = savePersonRecord(
+        const sPerson = (await savePersonRecord(
           { firstName: 'Nia', surname: 'Survivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mPerson = savePersonRecord(
+        )).person!;
+        const mPerson = (await savePersonRecord(
           { firstName: 'Nia', surname: 'Merged', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
         await executeMerge('person', sPerson.id, mPerson.id, 'P-000004');
 
-        const sOrg = saveOrganisationRecord(
+        const sOrg = (await saveOrganisationRecord(
           { legalName: 'Nia Survivor Co' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mOrg = (await saveOrganisationRecord(
           { legalName: 'Nia Merged Co' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
         await executeMerge('organisation', sOrg.id, mOrg.id, 'P-000004');
 
         const captureRedirect = async (fn: () => Promise<unknown>): Promise<string> => {
@@ -5981,7 +5992,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       ];
 
       for (const { id, expected } of roleTestUsers) {
-        const snap = getAppSnapshot(id);
+        const snap = await getAppSnapshot(id);
         for (const removedKey of REMOVED_SNAPSHOT_FINANCE_KEYS) {
           expect(
             removedKey in (snap as unknown as Record<string, unknown>),
@@ -5998,7 +6009,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         grant: ['risk:view'],
         revoke: ['finance:view', 'finance:view_matter', 'finance:credit_control'],
       };
-      const riskSnap = getAppSnapshot('P-000003');
+      const riskSnap = await getAppSnapshot('P-000003');
       expect(riskSnap.finance).toEqual({
         canViewFirm: false,
         canViewMatter: false,
@@ -6008,7 +6019,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('2. canUserViewFinance(null) is false and attentionList hides PMS financial alerts by default or without capability', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const snap = getAppSnapshot('P-000001');
+      const snap = await getAppSnapshot('P-000001');
       expect(canUserViewFinance(null, snap.teams, snap.values)).toBe(false);
       expect(canUserViewFinance(undefined, snap.teams, snap.values)).toBe(false);
 
@@ -6028,7 +6039,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(itemsDefault.some((i) => i.kind.startsWith('pms_'))).toBe(false);
 
       // Support staff / enquiries coordinator snapshot attention list has no PMS financial alerts
-      const supportSnap = getAppSnapshot('P-000010');
+      const supportSnap = await getAppSnapshot('P-000010');
       expect(
         supportSnap.attention.some((i) => i.kind.startsWith('pms_')),
       ).toBe(false);
@@ -6844,7 +6855,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const originalPrimaryAddr = targetEmployee.emails[0]!.address;
 
         // 1a. A contact:edit-only actor (fee_earner P-000002) changing an employee's primary email gets FORBIDDEN (code and message), and reloaded store is unchanged
-        const forbiddenRes = savePersonRecord(
+        const forbiddenRes = await savePersonRecord(
           {
             firstName: targetEmployee.firstName,
             surname: targetEmployee.surname,
@@ -6876,7 +6887,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           status: 'Leaver',
         };
         const leaverEmailsBefore = JSON.stringify(leaverPerson.emails);
-        const forbiddenLeaverRes = savePersonRecord(
+        const forbiddenLeaverRes = await savePersonRecord(
           {
             firstName: leaverPerson.firstName,
             surname: leaverPerson.surname,
@@ -6904,7 +6915,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(leaverEmailsBefore);
 
         // Also denied if attempting to inject a new work email via employmentSubmitted.systems.firmWorkEmail
-        const forbiddenSysEmailRes = savePersonRecord(
+        const forbiddenSysEmailRes = await savePersonRecord(
           {
             firstName: targetEmployee.firstName,
             surname: targetEmployee.surname,
@@ -6958,7 +6969,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             active: false,
           },
         ];
-        const reorderRes = savePersonRecord(
+        const reorderRes = await savePersonRecord(
           {
             firstName: targetEmployee.firstName,
             surname: targetEmployee.surname,
@@ -6974,7 +6985,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(reorderRes)).toBe(false);
         expect(reorderRes.errors).toBeUndefined();
         expect(
-          getStore().audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordId === targetEmployee.id &&
               a.field === 'Employee sign-in email',
@@ -6982,7 +6993,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(false);
 
         // R384: Saving an existing employee with an employment payload (hasEmploymentPayload === true) still requires employee:edit_core
-        const empPayloadWithoutPermRes = savePersonRecord(
+        const empPayloadWithoutPermRes = await savePersonRecord(
           {
             firstName: targetEmployee.firstName,
             surname: targetEmployee.surname,
@@ -6998,7 +7009,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // 1c. A contact:edit actor can still change a non-employee contact's email (positive control)
         const nonEmployee = store.people.find((p) => !p.isEmployee && !p.employment)!;
-        const contactEmailRes = savePersonRecord(
+        const contactEmailRes = await savePersonRecord(
           {
             firstName: nonEmployee.firstName,
             surname: nonEmployee.surname,
@@ -7028,7 +7039,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const targetBeforeNoMfaJson = JSON.stringify(
           getStore().people.find((p) => p.id === targetEmployee.id)!,
         );
-        const noMfaReplaceRes = savePersonRecord(
+        const noMfaReplaceRes = await savePersonRecord(
           {
             firstName: targetEmployee.firstName,
             surname: targetEmployee.surname,
@@ -7057,7 +7068,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const reloadedTargetForAdd = getStore().people.find(
           (p) => p.id === targetEmployee.id,
         )!;
-        const noMfaAddRes = savePersonRecord(
+        const noMfaAddRes = await savePersonRecord(
           {
             firstName: reloadedTargetForAdd.firstName,
             surname: reloadedTargetForAdd.surname,
@@ -7084,7 +7095,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const reloadedTargetForFirmWork = getStore().people.find(
           (p) => p.id === targetEmployee.id,
         )!;
-        const noMfaFirmWorkChangeRes = savePersonRecord(
+        const noMfaFirmWorkChangeRes = await savePersonRecord(
           {
             firstName: reloadedTargetForFirmWork.firstName,
             surname: reloadedTargetForFirmWork.surname,
@@ -7135,7 +7146,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(primaryOnlyEmails).toHaveLength(1);
 
-        const removeSecondaryForbiddenRes = savePersonRecord(
+        const removeSecondaryForbiddenRes = await savePersonRecord(
           {
             firstName: targetWithSecondary.firstName,
             surname: targetWithSecondary.surname,
@@ -7151,7 +7162,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(removeSecondaryForbiddenRes)).toBe(true);
         expect(removeSecondaryForbiddenRes.code).toBe('FORBIDDEN');
 
-        const removeSecondaryWithoutMfaRes = savePersonRecord(
+        const removeSecondaryWithoutMfaRes = await savePersonRecord(
           {
             firstName: targetWithSecondary.firstName,
             surname: targetWithSecondary.surname,
@@ -7170,7 +7181,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             .filter((e) => e.active !== false)
             .map((e) => e.address.trim().toLowerCase()),
         ).toEqual([originalPrimaryAddr.toLowerCase()]);
-        const removeSecondaryAudit = getStore().audit.find(
+        const removeSecondaryAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === targetEmployee.id &&
             a.action === 'update' &&
@@ -7197,7 +7208,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           leaverCandidate.emails.some((e) => e.active !== false),
         ).toBe(true);
 
-        const markLeaverWithoutMfaRes = savePersonRecord(
+        const markLeaverWithoutMfaRes = await savePersonRecord(
           {
             firstName: leaverCandidate.firstName,
             surname: leaverCandidate.surname,
@@ -7219,7 +7230,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(
           markLeaverWithoutMfaRes.person.employment?.systems?.firmWorkEmail,
         ).toBe(candidateOriginalFirmWorkEmail);
-        const leaverEmailAudit = getStore().audit.find(
+        const leaverEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === leaverCandidate.id &&
             a.action === 'update' &&
@@ -7232,7 +7243,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(leaverEmailAudit?.newValue).toBeNull();
 
         // R398: Clearing firmWorkEmail without adding a new address needs employee:edit_core and NO MFA, and is audited
-        const clearFirmWorkWithoutMfaRes = savePersonRecord(
+        const clearFirmWorkWithoutMfaRes = await savePersonRecord(
           {
             firstName: leaverCandidate.firstName,
             surname: leaverCandidate.surname,
@@ -7261,7 +7272,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           (p) => p.id === nonEmployee.id,
         )!;
         const nonEmployeeBeforePromoteJson = JSON.stringify(reloadedNonEmployee);
-        const promoteWithoutMfaRes = savePersonRecord(
+        const promoteWithoutMfaRes = await savePersonRecord(
           {
             firstName: reloadedNonEmployee.firstName,
             surname: reloadedNonEmployee.surname,
@@ -7284,7 +7295,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(nonEmployeeBeforePromoteJson);
 
         // Promoting that contact to an employee WITH MFA succeeds and writes the Employee sign-in email audit entry (including both existing and synthesised firm emails, R393)
-        const promoteWithMfaRes = savePersonRecord(
+        const promoteWithMfaRes = await savePersonRecord(
           {
             firstName: reloadedNonEmployee.firstName,
             surname: reloadedNonEmployee.surname,
@@ -7296,7 +7307,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(promoteWithMfaRes)).toBe(false);
         expect(promoteWithMfaRes.person.isEmployee).toBe(true);
-        const promoteEmailAudit = getStore().audit.find(
+        const promoteEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === nonEmployee.id &&
             a.action === 'update' &&
@@ -7311,7 +7322,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // R393: Promoting a contact with NO emails to an employee synthesises first.surname@<primaryDomain>:
         // without MFA -> denied with MFA_REQUIRED and reloaded store unchanged; with MFA -> audit entry includes the synthesised address
-        const createdNoEmailContact = savePersonRecord(
+        const createdNoEmailContact = await savePersonRecord(
           {
             firstName: 'Ceri',
             surname: 'Noemail',
@@ -7326,7 +7337,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           getStore().people.find((p) => p.id === noEmailContactId)!,
         );
 
-        const promoteNoEmailsWithoutMfaRes = savePersonRecord(
+        const promoteNoEmailsWithoutMfaRes = await savePersonRecord(
           {
             firstName: 'Ceri',
             surname: 'Noemail',
@@ -7346,14 +7357,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           JSON.stringify(getStore().people.find((p) => p.id === noEmailContactId)!),
         ).toBe(noEmailContactBeforeJson);
         expect(
-          getStore().audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordId === noEmailContactId &&
               a.field === 'Employee sign-in email',
           ),
         ).toBe(false);
 
-        const promoteNoEmailsWithMfaRes = savePersonRecord(
+        const promoteNoEmailsWithMfaRes = await savePersonRecord(
           {
             firstName: 'Ceri',
             surname: 'Noemail',
@@ -7365,7 +7376,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(promoteNoEmailsWithMfaRes)).toBe(false);
         expect(promoteNoEmailsWithMfaRes.person.isEmployee).toBe(true);
-        const synthesisedEmailAudit = getStore().audit.find(
+        const synthesisedEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === noEmailContactId &&
             a.action === 'update' &&
@@ -7459,7 +7470,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(allowedRes.person.entraObjectId).toBe(
           '00000000-0000-4000-8000-000000000005',
         );
-        const emailAudit = getStore().audit.find(
+        const emailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === targetEmployee.id &&
             a.action === 'update' &&
@@ -7503,7 +7514,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const pmsEmpRes = await createRecordFromPmsAction('employee', 'FE001');
         expect(pmsEmpRes.ok).toBe(true);
         expect(pmsEmpRes.createdId).toBeDefined();
-        const pmsEmpEmailAudit = getStore().audit.find(
+        const pmsEmpEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === pmsEmpRes.createdId &&
             a.action === 'update' &&
@@ -7533,7 +7544,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const feeEarnerEmail = feeEarner.emails[0]!.address;
 
         // 2a. Unverified email claim alone (no preferred_username/upn and no xms_edov, or string xms_edov: "true") does NOT link, and does not store the unverified email on the provisioned record (R387, R389)
-        const unverifiedEmailAttempt = resolveOrProvisionEntraEmployee({
+        const unverifiedEmailAttempt = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000201',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-unverified-201',
@@ -7548,7 +7559,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
         ).toBeUndefined();
 
-        const stringEdovAttempt = resolveOrProvisionEntraEmployee({
+        const stringEdovAttempt = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000202',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-string-edov-202',
@@ -7565,7 +7576,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBeUndefined();
 
         // 2b. Sign-in with preferred_username in the tenant's linking domain binds ordinary unbound employee P-000002 and writes an entra-link audit entry
-        const linkedOrd = resolveOrProvisionEntraEmployee(
+        const linkedOrd = await resolveOrProvisionEntraEmployee(
           {
             oid: '11111111-0000-4000-8000-000000000002',
             tid: '11111111-2222-3333-4444-000000000000',
@@ -7585,7 +7596,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(
           getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
         ).toBe('11111111-0000-4000-8000-000000000002');
-        const linkAudit = getStore().audit.find(
+        const linkAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === feeEarner.id &&
             a.action === 'entra-link' &&
@@ -7596,7 +7607,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(linkAudit?.newValue).not.toContain(
           '11111111-0000-4000-8000-000000000002',
         );
-        const signInAudit = getStore().audit.find(
+        const signInAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === feeEarner.id &&
             a.action === 'update' &&
@@ -7621,7 +7632,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // Also verify verified email claim (xms_edov: true) when preferred_username/upn is absent binds an ordinary unbound employee (P-000009 Finance), and unsafe correlationId options are sanitised (R399)
         const financeUser = getStore().people.find((p) => p.id === 'P-000009')!;
         const financeEmail = financeUser.emails[0]!.address;
-        const linkedViaVerifiedEmail = resolveOrProvisionEntraEmployee(
+        const linkedViaVerifiedEmail = await resolveOrProvisionEntraEmployee(
           {
             oid: '11111111-0000-4000-8000-000000000009',
             tid: '11111111-2222-3333-4444-000000000009',
@@ -7638,7 +7649,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(linkedViaVerifiedEmail.person.entraObjectId).toBe(
           '11111111-0000-4000-8000-000000000009',
         );
-        const financeSignInAudit = getStore().audit.find(
+        const financeSignInAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === financeUser.id &&
             a.action === 'update' &&
@@ -7660,7 +7671,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             active: true,
           },
         ];
-        const outsideDomainSignIn = resolveOrProvisionEntraEmployee({
+        const outsideDomainSignIn = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000010',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-nia-010',
@@ -7678,8 +7689,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const adminPerson = getStore().people.find((p) => p.id === 'P-000004')!;
         const adminEmail = adminPerson.emails[0]!.address;
         const peopleCountBeforePrivRefusal = getStore().people.length;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '11111111-0000-4000-8000-000000000004',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-admin-004',
@@ -7689,8 +7699,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             xms_edov: true,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         clearStoreMemoryCache();
         expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
         expect(
@@ -7701,7 +7710,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000004',
           ),
         ).toBe(false);
-        const privRefusalAudit = getStore().audit.find(
+        const privRefusalAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === 'P-000004' &&
             a.action === 'entra-link' &&
@@ -7719,8 +7728,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         managingPartner.roles = ['admin'];
         saveStore(getStore());
         const mpEmail = managingPartner.emails[0]!.address;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '11111111-0000-4000-8000-000000000038',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-mp-038',
@@ -7730,8 +7738,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             xms_edov: true,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         clearStoreMemoryCache();
         expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
         expect(
@@ -7772,8 +7779,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ];
         saveStore(getStore());
         const peopleCountBeforeAmbigRefusal = getStore().people.length;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '11111111-0000-4000-8000-000000000067',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-dup-067',
@@ -7781,8 +7787,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             preferred_username: sharedAddr,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         clearStoreMemoryCache();
         expect(getStore().people.length).toBe(peopleCountBeforeAmbigRefusal);
         expect(
@@ -7796,7 +7801,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000067',
           ),
         ).toBe(false);
-        const ambigAudit = getStore().audit.find(
+        const ambigAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.action === 'entra-link' &&
             a.field === 'Entra ID Email Link Ambiguous',
@@ -7813,7 +7818,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         unboundIntake.roles = ['intake'];
         unboundIntake.employeeRoleId = 'employee_role.enquiries_coordinator';
         const intakeEmail = unboundIntake.emails[0]!.address;
-        updateTenantRbacConfig(
+        await updateTenantRbacConfig(
           {
             identityMapping: {
               ...getDefaultTenantRbacConfig().identityMapping,
@@ -7826,7 +7831,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           'P-000004',
           { mfaVerified: true },
         );
-        const disabledEmailLinkAttempt = resolveOrProvisionEntraEmployee({
+        const disabledEmailLinkAttempt = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000008',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-intake-008',
@@ -7841,7 +7846,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBeUndefined();
 
         // Existing oid binding on feeEarner (P-000002) still resolves P-000002 even when emailLinking.enabled is false
-        const existingOidSignIn = resolveOrProvisionEntraEmployee({
+        const existingOidSignIn = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000002',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-dafydd-002',
@@ -7853,7 +7858,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(existingOidSignIn.person.id).toBe(feeEarner.id);
 
         // Re-enable emailLinking for the end-to-end R373 attack test
-        updateTenantRbacConfig(
+        await updateTenantRbacConfig(
           {
             identityMapping: {
               ...getDefaultTenantRbacConfig().identityMapping,
@@ -7870,7 +7875,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // 2g. End-to-end R373 attack:
         // Step 1: Fee earner P-000002 tries to edit admin P-000004's email -> denied with FORBIDDEN
         const currentAdmin = getStore().people.find((p) => p.id === 'P-000004')!;
-        const attackerEditAttempt = savePersonRecord(
+        const attackerEditAttempt = await savePersonRecord(
           {
             firstName: currentAdmin.firstName,
             surname: currentAdmin.surname,
@@ -7905,8 +7910,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         delete currentAdmin.entraObjectId;
 
         const peopleCountBeforeAttackerSignIn = getStore().people.length;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '99999999-0000-4000-8000-999999999999',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-attacker-999',
@@ -7916,8 +7920,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             xms_edov: true,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         expect(getStore().people.length).toBe(peopleCountBeforeAttackerSignIn);
         expect(
           getStore().people.find((p) => p.id === 'P-000004')?.entraObjectId,
@@ -7934,7 +7937,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('3. validates rbac.identityMapping.emailLinking in TenantConfigurationSchema and updateTenantRbacConfig', () => {
+    it('3. validates rbac.identityMapping.emailLinking in TenantConfigurationSchema and updateTenantRbacConfig', async () => {
       const validCfg = structuredClone(notALawFirmBaseConfig) as Record<
         string,
         unknown
@@ -7984,7 +7987,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       ).toBe(false);
 
       // Also rejects invalid domain in updateTenantRbacConfig service
-      const badServiceUpdate = updateTenantRbacConfig(
+      const badServiceUpdate = await updateTenantRbacConfig(
         {
           identityMapping: {
             ...getDefaultTenantRbacConfig().identityMapping,
@@ -8002,7 +8005,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // R386: Rejects non-boolean emailLinking.enabled ("false" or null) in updateTenantRbacConfig and leaves stored configuration unchanged
       const configBeforeBadEnabled = JSON.stringify(getDefaultTenantRbacConfig());
-      const stringEnabledUpdate = updateTenantRbacConfig(
+      const stringEnabledUpdate = await updateTenantRbacConfig(
         {
           identityMapping: {
             ...getDefaultTenantRbacConfig().identityMapping,
@@ -8023,7 +8026,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         configBeforeBadEnabled,
       );
 
-      const nullEnabledUpdate = updateTenantRbacConfig(
+      const nullEnabledUpdate = await updateTenantRbacConfig(
         {
           identityMapping: {
             ...getDefaultTenantRbacConfig().identityMapping,

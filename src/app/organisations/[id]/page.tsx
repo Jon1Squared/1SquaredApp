@@ -5,6 +5,7 @@ import {
   findCandidateDuplicatesForRecord,
   getAppSnapshot,
   getClientPmsViewBundle,
+  listAuditEntriesForRecord,
   recordRecentlyViewed,
   withPageActor,
 } from '@/server/services';
@@ -23,7 +24,7 @@ export default async function OrganisationProfilePage({
   const { tab, mergedFrom } = await searchParams;
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
 
     const organisation = snap.organisations.find((o) => o.id === id);
     if (!organisation) notFound();
@@ -32,7 +33,7 @@ export default async function OrganisationProfilePage({
       redirect(`/organisations/${organisation.mergedIntoId}?mergedFrom=${organisation.id}`);
     }
 
-    recordRecentlyViewed(userId, organisation.id);
+    await recordRecentlyViewed(userId, organisation.id);
 
     const explicitMatches = organisation.possibleMatchIds
       .map((mid) => snap.organisations.find((o) => o.id === mid))
@@ -45,8 +46,11 @@ export default async function OrganisationProfilePage({
     const notes = snap.notes.filter(
       (n) => n.recordType === 'organisation' && n.recordId === organisation.id,
     );
-    const audit = snap.audit.filter(
-      (a) => a.recordType === 'organisation' && a.recordId === organisation.id,
+    const audit = await listAuditEntriesForRecord(
+      'organisation',
+      organisation.id,
+      userId,
+      { limit: 200 },
     );
     const merges = snap.mergeHistory.filter(
       (m) =>

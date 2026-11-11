@@ -32,5 +32,7 @@ Users with the \`keydate:configure\` permission (by default \`admin\` and \`risk
 ## Schema validation and immutable audit logging
 
 Every configuration save is validated against \`keyDates.config.schema.json\` (rejecting unknown keys) and requires an explicit **audit reason**. The platform records a \`keydate-config-change\` entry in the immutable audit log containing the actor, timestamp, reason, and complete \`before\` and \`after\` configuration snapshots.
+
+The saved configuration and its \`keydate-config-change\` audit entry are written to the firm's PostgreSQL database in the same transaction. If the audit entry cannot be written, the configuration change is not saved either, and you will see an error asking you to try again. The firm audit log is append-only: the application's database role can add entries but has no permission to change or delete them.
 `,
 };

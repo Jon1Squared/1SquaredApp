@@ -487,7 +487,7 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
       const routableEnquiry = store.enquiries.find(
         (e) => e.status !== 'Draft' && e.status !== 'Converted',
       )!;
-      const prepRes = prepareEnquiryConversion(
+      const prepRes = await prepareEnquiryConversion(
         routableEnquiry.id,
         {},
         'P-000001',

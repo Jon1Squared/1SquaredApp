@@ -62,6 +62,12 @@ Key date permissions are granted to roles through tenant configuration (\`keyDat
 | \`keydate:override_calculation\` | Override a calculated limitation date with a mandatory reason |
 | \`keydate:configure\` | Configure key date types, matter types, reminder schedules, rule sets, and calendars (requires MFA) |
 
+## Where key dates are stored
+
+Key dates, "not applicable" records, reminder stages, Outlook sync state, and the firm's key-date configuration are held in the firm's own PostgreSQL database (one database per firm), not in the application's local working file. Every change to a key date and the matching entry in the firm audit log are saved together in a single database transaction: if either part fails, neither is saved, so the audit log can never disagree with the key date itself.
+
+Staff matters and ethical walls are enforced in the database layer as well as on screen, so a key date on a restricted matter is never returned to someone outside the matter's access list.
+
 ## Related articles in this section
 
 - [Adding, editing, superseding, and recording "not applicable"](/docs/key-dates-managing)

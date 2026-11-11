@@ -11,7 +11,7 @@ export default async function NewTaskPage({
 }) {
   const sp = await searchParams;
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
 
     const validTypes: TaskLinkedRecordType[] = [
       'enquiry',

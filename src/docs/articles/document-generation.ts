@@ -6,7 +6,7 @@ export const documentGenerationArticle: DocArticle = {
   section: 'documents-dms',
   summary:
     'How to author .docx precedent templates, map Field Catalogue placeholders, approve template versions with separation of duties, generate merged documents, and review template usage.',
-  updated: '2026-11-09',
+  updated: '2026-11-10',
   body: `
 1Squared includes a built-in **Document Generation & Precedent Management** engine that merges live client, matter, party, fee earner, and financial data into Word (\`.docx\`) templates while enforcing role-based field permissions, restricted-matter controls, and two-person template approval.
 
@@ -51,5 +51,9 @@ To prevent unreviewed precedent changes from reaching fee earners, template vers
 - Users with \`document_template:view_usage\` can inspect aggregate 30-day and 90-day generation counts, output format breakdowns, low-use retirement candidates, and blocked-field diagnostics.
 - Viewing per-user generation breakdowns requires both \`document_template:view_usage_by_user\` and \`documentGeneration.usage.showUserLevelDetail: true\` in the tenant configuration.
 - Modifying tenant-level document generation settings requires \`document_template:configure\` with MFA.
+
+## Audit trail
+
+Template uploads, submissions, approvals, rejections, retirements, rollbacks, imports, generated documents, deletions and settings changes each write a firm audit entry in the same database transaction as the change. If the audit entry cannot be saved, the change is not saved either. Audit entries are append-only.
 `,
 };

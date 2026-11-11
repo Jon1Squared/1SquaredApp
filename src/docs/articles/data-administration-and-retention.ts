@@ -6,7 +6,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How non-live demo data reset and clean-deployment clear operations are protected by admin-only MFA permissions and audited, and how unconverted enquiry retention anonymisation is enforced.',
-  updated: '2026-11-08',
+  updated: '2026-11-10',
   body: `
 1Squared separates destructive environment data administration from routine firm configuration and enforces strict retention eligibility rules before personal data on closed enquiries can be anonymised.
 
@@ -36,5 +36,12 @@ All administrative configuration mutations in the \`/admin\` console require mul
 - **Teams & self-escalation guard (\`admin:access\` + MFA)**: Creating or updating operational teams (\`saveTeamAction\`) requires \`admin:access\` with MFA. Because team leadership (\`leadIds\`) grants relationship permissions (including \`employee:edit_core\`), \`saveTeamRecord\` also enforces the self-modification rule (\`SELF_MODIFICATION_FORBIDDEN\`): an administrator cannot add themselves as a team lead.
 - **Firm settings, organisation structure, party taxonomy & matter costs (\`admin:access\` + MFA)**: Saving enquiry settings, automatic task templates, the organisation structure catalogue, matter party relationships/capacities/work-type profiles, and matter costs rate cards (or syncing rates from the PMS) all require \`admin:access\` with MFA.
 - **PMS record linking & creation (\`finance:manage_links\` / \`admin:access\` + MFA)**: Linking, unlinking, and re-running automatic PMS matching require \`finance:manage_links\` with MFA; creating a 1Squared record from the PMS (\`createRecordFromPmsAction\`) requires \`admin:access\` with MFA plus \`employee:edit_core\` (for employees), \`matter:create\` (for matters), or \`contact:create\` (for people and organisations).
+
+## 4. The firm audit log
+
+- **Append-only**: Audit entries are stored in the tenant's own PostgreSQL database. The application role may only insert and read them; any attempt to edit or delete an entry is refused by the database.
+- **Written with the change it describes**: An audit entry is saved in the same transaction as the change it records (for example key-date and Document Generation changes). If either fails, neither is saved.
+- **Scoped views**: The **Admin** audit page shows the most recent 250 entries you are allowed to see. Entries about restricted staff matters and sensitive or payroll HR records are hidden from people without access.
+- **Demo reset**: Loading the demo dataset reloads the audit log from the demo data, so audit reference numbers (\`AU-…\`) start again from the demo sequence.
 `,
 };

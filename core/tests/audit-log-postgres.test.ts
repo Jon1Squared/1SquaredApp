@@ -1,0 +1,601 @@
+/**
+ * S0-15 — firm audit log and key dates on PostgreSQL (`docs/roadmap/slices/s0-15-key-dates-and-audit-log.md`, Tests).
+ *
+ * Covers:
+ * - Append-only `audit_entries` (R413): the tenant role has SELECT, INSERT only.
+ * - Scoped audit queries (R413) and `getAppSnapshot().audit === []`.
+ * - Same-transaction atomicity for key-date and Document Generation writes (Owner Decision 4, R405).
+ * - Concurrent interleaving with per-record delta compensation (R406).
+ * - Nested re-entrancy of `withJsonStoreWriteLock` without deadlock (R418).
+ * - Idempotent `key-dates` / `audit` import with AU- sequence continuation.
+ * - Two-tenant isolation of `TenantAuditRepository` (positive control, forged claim, tampered IDs, SET LOCAL ROLE).
+ *
+ * All fixtures are invented (the invented demo tenant seed data and synthetic `firm-alpha` / `firm-beta` tenants).
+ */
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  resolveTenantFromVerifiedToken,
+  TenantAuditRepository,
+  type TenantContext,
+} from '../src/index';
+import {
+  getAppSnapshot,
+  getKeyDatesConfig,
+  listAuditEntriesForRecord,
+  listFirmAuditEntriesPage,
+  logEmployeeRestrictedAccess,
+  resetAllDemoData,
+  saveKeyDatesConfigRecord,
+  takeTaskRecord,
+  updatePersonPermissionOverrides,
+} from '../../src/server/services';
+import {
+  getAuditRepository,
+  runUnmigratedJsonMutationWithAudit,
+  setAuditAdapterFailureHookForTesting,
+  stageUnmigratedAuditEntry,
+} from '../../src/server/auditAdapter';
+import { withJsonStoreWriteLock } from '../../src/server/storeLock';
+import { uploadTemplateDraftService } from '../../src/server/documentGenerationServices';
+import { buildValidDocxArchive } from '@platform/core';
+import { getDocumentRepository } from '../../src/server/documentGenerationServices';
+import { importFirmStoreModulesToPostgres } from '../../src/server/storePostgresImport';
+import { clearStoreMemoryCache, getStore, saveStore } from '../../src/server/store';
+import { canUserTakeTask } from '../../src/server/rbacRuntime';
+import { runWithActiveActorSession } from '../../src/domain/rbac';
+import { resolveEmployeeRoles } from '../../src/domain/homeConfig';
+import { getActiveTenantConfiguration } from '../../src/platform/tenantRuntime';
+import {
+  createSignedEntraSessionCookie,
+  verifySignedEntraSessionCookie,
+} from '../../src/server/entraAuth';
+import {
+  auditEntriesWrittenSince,
+  getKeyDateRepository,
+  testTenantCtx,
+} from '../../src/server/testSupport/auditTestSupport';
+
+function runAsTestEmployee<T>(personId: string, fn: () => T): T {
+  const store = getStore();
+  const tenantId = getActiveTenantConfiguration().tenantId;
+  const emp = store.people.find((p) => p.id === personId)!;
+  const nowIso = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+  const roles = resolveEmployeeRoles(emp, store.teams);
+  const verified = verifySignedEntraSessionCookie(
+    createSignedEntraSessionCookie({
+      personId: emp.id,
+      oid:
+        emp.entraObjectId ??
+        `00000000-0000-4000-8000-${emp.id.replace(/\D/g, '').padStart(12, '0')}`,
+      tid: '00000000-0000-4000-8000-000000000099',
+      tenantId,
+      sub: emp.id,
+      email: emp.emails?.[0]?.address ?? `${emp.id.toLowerCase()}@notalawfirm.example`,
+      displayName: `${emp.firstName ?? ''} ${emp.surname ?? ''}`.trim() || emp.id,
+      entraRoles: roles,
+      mappedRoles: roles,
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: nowIso,
+      expiresAt,
+    }),
+  )!;
+  return runWithActiveActorSession(
+    {
+      personId: emp.id,
+      tenantId,
+      tokenRoles: roles,
+      expiresAtMs: Date.parse(expiresAt),
+      verifiedSession: verified,
+    },
+    fn,
+  );
+}
+
+function makeTenantCtx(tenantId: string, actorId = 'user-1'): TenantContext {
+  return resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: actorId,
+      tenantId,
+      name: `Actor ${actorId}`,
+      email: `${actorId}@${tenantId}.example.invalid`,
+      roles: ['admin'],
+      mfaVerified: true,
+    },
+    hostingMode: 'multi_tenant',
+    environment: 'test',
+    correlationId: `corr-audit-${tenantId}-${actorId}`,
+  });
+}
+
+function auditInput(recordId: string, field: string, recordType = 'matter') {
+  return {
+    recordType,
+    recordId,
+    action: 'update',
+    field,
+    oldValue: null,
+    newValue: 'invented value',
+    byId: 'user-1',
+    at: new Date().toISOString(),
+  } as const;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`DEADLOCK_TIMEOUT: ${label} exceeded ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
+describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
+  afterEach(() => {
+    setAuditAdapterFailureHookForTesting(null);
+  });
+
+  it('R413: audit_entries is append-only — UPDATE and DELETE as role_tenant_* fail with SQLSTATE 42501', async () => {
+    const repo = new TenantAuditRepository();
+    const ctx = makeTenantCtx('firm-alpha');
+    const appended = await repo.appendAuditEntry(ctx, auditInput('M-ALPHA-IMMUTABLE', 'Immutable row'));
+
+    // Positive control: SELECT and INSERT are permitted for the tenant role
+    const readBack = await repo.listAuditEntriesForRecord(ctx, 'matter', 'M-ALPHA-IMMUTABLE');
+    expect(readBack.map((r) => r.id)).toContain(appended.id);
+
+    await expect(
+      repo.withTenantTransaction(ctx, (tx) =>
+        tx.query("UPDATE public.audit_entries SET field = 'tampered' WHERE tenant_id = $1 AND id = $2", [
+          ctx.tenantId,
+          appended.id,
+        ]),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    await expect(
+      repo.withTenantTransaction(ctx, (tx) =>
+        tx.query('DELETE FROM public.audit_entries WHERE tenant_id = $1 AND id = $2', [
+          ctx.tenantId,
+          appended.id,
+        ]),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    const afterAttempts = await repo.listAuditEntriesForRecord(ctx, 'matter', 'M-ALPHA-IMMUTABLE');
+    const row = afterAttempts.find((r) => r.id === appended.id);
+    expect(row?.field).toBe('Immutable row');
+  });
+
+  it('R413: listAuditEntriesForRecord returns only the matching (record_type, record_id) rows bounded by limit', async () => {
+    const repo = new TenantAuditRepository();
+    const ctx = makeTenantCtx('firm-alpha');
+    const suffix = Date.now().toString(36);
+    const target = `M-SCOPED-${suffix}`;
+    const other = `M-OTHER-${suffix}`;
+    await repo.appendAuditEntries(ctx, [
+      auditInput(target, 'First'),
+      auditInput(target, 'Second'),
+      auditInput(target, 'Third'),
+      auditInput(other, 'Unrelated'),
+      auditInput(target, 'Wrong type', 'task'),
+    ]);
+
+    const all = await repo.listAuditEntriesForRecord(ctx, 'matter', target);
+    expect(all).toHaveLength(3);
+    expect(all.every((r) => r.recordType === 'matter' && r.recordId === target)).toBe(true);
+
+    const bounded = await repo.listAuditEntriesForRecord(ctx, 'matter', target, { limit: 2 });
+    expect(bounded).toHaveLength(2);
+    expect(bounded.every((r) => r.recordId === target)).toBe(true);
+  });
+
+  it('R413: scoped service queries redact staff-matter and HR rows for unauthorised viewers, and getAppSnapshot returns audit = []', async () => {
+    await resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      const staffMatter = store.matters.find((m) => m.id === 'M-000014')!;
+      staffMatter.isStaffMatter = true;
+      staffMatter.responsiblePartnerId = 'P-000004';
+      staffMatter.supervisingPartnerId = 'P-000004';
+      staffMatter.leadFeeEarnerId = 'P-000004';
+      staffMatter.teamMemberIds = ['P-000004'];
+      staffMatter.restrictedAccessUserIds = ['P-000004'];
+      saveStore(store);
+
+      await getAuditRepository().appendAuditEntry(testTenantCtx('P-000004'), {
+        recordType: 'matter',
+        recordId: 'M-000014',
+        action: 'update',
+        field: 'Staff matter note',
+        oldValue: null,
+        newValue: 'Invented staff matter change',
+        byId: 'P-000004',
+        at: new Date().toISOString(),
+      });
+
+      // Authorised viewer (restricted access list) sees the row; fee earner outside the list gets []
+      const allowed = await listAuditEntriesForRecord('matter', 'M-000014', 'P-000004', { limit: 200 });
+      expect(allowed.some((a) => a.field === 'Staff matter note')).toBe(true);
+      const denied = await listAuditEntriesForRecord('matter', 'M-000014', 'P-000002', { limit: 200 });
+      expect(denied).toEqual([]);
+      const deniedFirmPage = await listFirmAuditEntriesPage('P-000002', { limit: 2000 });
+      expect(deniedFirmPage.entries.some((a) => a.recordId === 'M-000014')).toBe(false);
+
+      // HR sensitive access audit: visible to the HR-permitted admin, redacted for a fee earner
+      const hrLog = await logEmployeeRestrictedAccess('P-000003', 'sensitive', 'P-000004', 'Viewed sensitive tab');
+      expect(hrLog.error).toBeUndefined();
+      const hrAllowed = await listAuditEntriesForRecord('employee_sensitive', 'P-000003', 'P-000004', { limit: 200 });
+      expect(hrAllowed.some((a) => a.action === 'view-sensitive')).toBe(true);
+      const hrDenied = await listAuditEntriesForRecord('employee_sensitive', 'P-000003', 'P-000002', { limit: 200 });
+      expect(hrDenied).toEqual([]);
+
+      // getAppSnapshot no longer loads the firm-wide audit table
+      const snap = await getAppSnapshot('P-000004');
+      expect(snap.audit).toEqual([]);
+    } finally {
+      await resetAllDemoData('P-000001');
+    }
+  });
+
+  it('Owner Decision 4: a forced failure during a key-date config write commits neither the config nor audit_entries', async () => {
+    await resetAllDemoData('P-000001');
+    const kdRepo = getKeyDateRepository();
+    const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx());
+    try {
+      const current = structuredClone(await getKeyDatesConfig(getStore()));
+      expect((current.limitationRuleSets ?? []).length).toBeGreaterThan(0);
+      const next = structuredClone(current);
+      const firstRuleSet = next.limitationRuleSets![0]!;
+      next.limitationRuleSets![0] = { ...firstRuleSet, version: firstRuleSet.version + 1 };
+
+      const startedAt = Date.now();
+      let keyDateHookFired = false;
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.recordId === 'FIRM-KEY-DATES-CONFIG')) {
+          keyDateHookFired = true;
+          throw new Error('SIMULATED_AUDIT_FAILURE_KEY_DATES');
+        }
+      });
+      // The service either rethrows or returns a structured failure; either way nothing may commit
+      const outcome = await saveKeyDatesConfigRecord(next, 'Forced failure test', 'P-000004', {
+        mfaVerified: true,
+      }).catch((err: unknown) => ({ ok: false as const, error: String(err) }));
+      expect(outcome.ok).toBe(false);
+      // The failure was the forced audit failure inside the transaction, not an earlier validation error
+      expect(keyDateHookFired).toBe(true);
+      setAuditAdapterFailureHookForTesting(null);
+
+      const overrideAfter = await kdRepo.getKeyDatesTenantConfig(testTenantCtx());
+      expect(overrideAfter).toEqual(originalOverride);
+      const writtenAudit = await auditEntriesWrittenSince(startedAt);
+      expect(writtenAudit.some((a) => a.recordId === 'FIRM-KEY-DATES-CONFIG')).toBe(false);
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      if (originalOverride) {
+        await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), originalOverride, 'P-000004');
+      }
+      await resetAllDemoData('P-000001');
+    }
+  });
+
+  it('Owner Decision 4 / R405: a forced failure during a Document Generation template write commits neither the template nor audit_entries', async () => {
+    await resetAllDemoData('P-000001');
+    const docRepo = getDocumentRepository();
+    const ctx = testTenantCtx('P-000004');
+    const code = 'TPL-S015-ATOMIC';
+    expect(await docRepo.getTemplateByCode(ctx, code)).toBeNull();
+    const docxBase64 = Buffer.from(
+      buildValidDocxArchive({ paragraphs: [{ text: 'Dear {{client.name}}, ref {{matter.reference}}.' }] }),
+    ).toString('base64');
+    const startedAt = Date.now();
+    let hookFired = false;
+    try {
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => String(e.field ?? '').startsWith('Document Template Draft Uploaded'))) {
+          hookFired = true;
+          throw new Error('SIMULATED_AUDIT_FAILURE_DOCGEN');
+        }
+      });
+      await expect(
+        runAsTestEmployee('P-000004', () =>
+          uploadTemplateDraftService(
+            {
+              code,
+              name: 'Atomicity Test Template',
+              description: 'Invented template for S0-15 atomicity test',
+              category: 'General',
+              outputDocumentType: 'Letter',
+              filenamePattern: '{matter.reference}-atomic',
+              availabilityRules: { sourceContexts: ['matter'] },
+              fileName: 'atomic.docx',
+              docxBase64,
+            },
+            'P-000004',
+          ),
+        ),
+      ).rejects.toThrow();
+      setAuditAdapterFailureHookForTesting(null);
+      expect(hookFired).toBe(true);
+
+      expect(await docRepo.getTemplateByCode(ctx, code)).toBeNull();
+      const writtenAudit = await auditEntriesWrittenSince(startedAt);
+      expect(
+        writtenAudit.some((a) => String(a.field ?? '').startsWith('Document Template Draft Uploaded')),
+      ).toBe(false);
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R406: concurrent opA (audit append fails) and opB (succeeds) — opB JSON and audit survive, only opA delta is reverted', async () => {
+    await resetAllDemoData('P-000001');
+    try {
+      const startedAt = Date.now();
+      const beforeA = structuredClone(getStore().people.find((p) => p.id === 'P-000002')!);
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.recordId === 'P-000002')) {
+          throw new Error('SIMULATED_AUDIT_FAILURE_OP_A');
+        }
+      });
+
+      const [opA, opB] = await Promise.allSettled([
+        updatePersonPermissionOverrides(
+          'P-000002',
+          { grant: ['risk:view'], revoke: [], reason: 'Operation A (forced to fail)' },
+          'P-000004',
+          { mfaVerified: true },
+        ),
+        updatePersonPermissionOverrides(
+          'P-000005',
+          { grant: ['risk:view'], revoke: [], reason: 'Operation B (succeeds)' },
+          'P-000004',
+          { mfaVerified: true },
+        ),
+      ]);
+      setAuditAdapterFailureHookForTesting(null);
+
+      expect(opA.status).toBe('rejected');
+      expect(opB.status).toBe('fulfilled');
+      if (opB.status === 'fulfilled') expect(opB.value.ok).toBe(true);
+
+      // Re-read from the persisted JSON store, not the in-memory cache
+      clearStoreMemoryCache();
+      const reloaded = getStore();
+      const afterA = reloaded.people.find((p) => p.id === 'P-000002')!;
+      const afterB = reloaded.people.find((p) => p.id === 'P-000005')!;
+      expect(afterA.permissionOverrides ?? null).toEqual(beforeA.permissionOverrides ?? null);
+      expect(afterA.updatedAt).toBe(beforeA.updatedAt);
+      expect(afterB.permissionOverrides?.grant).toContain('risk:view');
+      expect(afterB.permissionOverrides?.reason).toBe('Operation B (succeeds)');
+
+      const written = await auditEntriesWrittenSince(startedAt);
+      expect(written.some((a) => a.recordId === 'P-000005')).toBe(true);
+      expect(written.some((a) => a.recordId === 'P-000002')).toBe(false);
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001');
+    }
+  });
+
+  it('R418: nested locked calls (takeTaskRecord -> saveTaskRecord, nested runUnmigratedJsonMutationWithAudit) complete under 2s and roll back cleanly on forced failure', async () => {
+    await resetAllDemoData('P-000001');
+    try {
+      const store = getStore();
+      let pick: { taskId: string; personId: string } | null = null;
+      for (const task of store.tasks) {
+        if (task.assignedPersonId) continue;
+        const taker = store.people.find(
+          (p) => p.isEmployee && canUserTakeTask(p.id, task, store.teams, store.people, store.values),
+        );
+        if (taker) {
+          pick = { taskId: task.id, personId: taker.id };
+          break;
+        }
+      }
+      expect(pick).not.toBeNull();
+      const { taskId, personId } = pick!;
+
+      // (a) Forced PostgreSQL audit failure: outer (take) and inner (save) deltas are both reverted
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.recordId === taskId)) {
+          throw new Error('SIMULATED_AUDIT_FAILURE_NESTED');
+        }
+      });
+      await expect(
+        withTimeout(takeTaskRecord(taskId, personId), 2000, 'takeTaskRecord (forced failure)'),
+      ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_NESTED/);
+      setAuditAdapterFailureHookForTesting(null);
+      clearStoreMemoryCache();
+      expect(getStore().tasks.find((t) => t.id === taskId)?.assignedPersonId ?? null).toBeNull();
+
+      // (b) Same nested call succeeds without deadlock
+      const taken = await withTimeout(takeTaskRecord(taskId, personId), 2000, 'takeTaskRecord');
+      expect(taken.error).toBeUndefined();
+      expect(taken.task?.assignedPersonId).toBe(personId);
+
+      // (c) Explicit nested runUnmigratedJsonMutationWithAudit inside withJsonStoreWriteLock re-enters
+      //     the same lock and compensator; a forced inner audit failure reverts outer and inner deltas.
+      const startedAt = Date.now();
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.recordId === 'NESTED-INNER')) {
+          throw new Error('SIMULATED_AUDIT_FAILURE_INNER');
+        }
+      });
+      const outerNoteText = 'R418 outer invented note';
+      const innerNoteText = 'R418 inner invented note';
+      await expect(
+        withTimeout(
+          withJsonStoreWriteLock(async () =>
+            runUnmigratedJsonMutationWithAudit({
+              label: 'r418-outer',
+              resolveCtx: () => testTenantCtx('P-000004'),
+              mutate: async (outerStore) => {
+                outerStore.notes.unshift({
+                  id: 'N-R418-OUTER',
+                  recordType: 'person',
+                  recordId: 'P-000002',
+                  text: outerNoteText,
+                  byId: 'P-000004',
+                  at: new Date().toISOString(),
+                } as unknown as (typeof outerStore.notes)[number]);
+                await runUnmigratedJsonMutationWithAudit({
+                  label: 'r418-inner',
+                  resolveCtx: () => testTenantCtx('P-000004'),
+                  mutate: async (innerStore) => {
+                    innerStore.notes.unshift({
+                      id: 'N-R418-INNER',
+                      recordType: 'person',
+                      recordId: 'P-000002',
+                      text: innerNoteText,
+                      byId: 'P-000004',
+                      at: new Date().toISOString(),
+                    } as unknown as (typeof innerStore.notes)[number]);
+                    stageUnmigratedAuditEntry({
+                      recordType: 'person',
+                      recordId: 'NESTED-INNER',
+                      action: 'update',
+                      field: 'Inner',
+                      oldValue: null,
+                      newValue: 'inner',
+                      byId: 'P-000004',
+                    });
+                    saveStore(innerStore);
+                  },
+                });
+                saveStore(outerStore);
+              },
+            }),
+          ),
+          2000,
+          'nested runUnmigratedJsonMutationWithAudit',
+        ),
+      ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_INNER/);
+      setAuditAdapterFailureHookForTesting(null);
+      const liveNotes = getStore().notes;
+      expect(liveNotes.some((n) => n.id === 'N-R418-OUTER')).toBe(false);
+      expect(liveNotes.some((n) => n.id === 'N-R418-INNER')).toBe(false);
+      const written = await auditEntriesWrittenSince(startedAt);
+      expect(written.some((a) => a.recordId === 'NESTED-INNER')).toBe(false);
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001');
+    }
+  });
+
+  it('Import idempotency: importFirmStoreModulesToPostgres([key-dates, audit]) run twice gives identical counts and the AU- sequence continues', async () => {
+    await resetAllDemoData('P-000001');
+    try {
+      const ctx = testTenantCtx();
+      const auditRepo = getAuditRepository();
+      const kdRepo = getKeyDateRepository();
+
+      const first = await importFirmStoreModulesToPostgres({
+        store: getStore(),
+        modules: ['key-dates', 'audit'],
+        correlationId: 'corr-import-idempotency-1',
+      });
+      const auditCountAfterFirst = await auditRepo.countAuditEntries(ctx);
+      const keyDatesAfterFirst = (await kdRepo.listAllVisibleKeyDates(ctx)).length;
+
+      const second = await importFirmStoreModulesToPostgres({
+        store: getStore(),
+        modules: ['key-dates', 'audit'],
+        correlationId: 'corr-import-idempotency-2',
+      });
+      const auditCountAfterSecond = await auditRepo.countAuditEntries(ctx);
+      const keyDatesAfterSecond = (await kdRepo.listAllVisibleKeyDates(ctx)).length;
+
+      expect(second.counts.keyDates).toBe(first.counts.keyDates);
+      expect(second.counts.keyDateNotApplicable).toBe(first.counts.keyDateNotApplicable);
+      expect(second.counts.keyDateReminderStates).toBe(first.counts.keyDateReminderStates);
+      expect(second.counts.keyDateCalendarSyncs).toBe(first.counts.keyDateCalendarSyncs);
+      expect(second.counts.auditEntries).toBe(first.counts.auditEntries);
+      expect(auditCountAfterSecond).toBe(auditCountAfterFirst);
+      expect(keyDatesAfterSecond).toBe(keyDatesAfterFirst);
+
+      // AU- sequence continues beyond every imported ID (no reuse after re-import)
+      const importedMax = Math.max(
+        0,
+        ...(getStore().audit ?? []).map((a) => Number.parseInt(a.id.replace(/^AU-/, ''), 10) || 0),
+      );
+      const appended = await auditRepo.appendAuditEntry(ctx, {
+        recordType: 'matter',
+        recordId: 'M-IMPORT-SEQUENCE',
+        action: 'update',
+        field: 'Sequence continuation',
+        oldValue: null,
+        newValue: 'invented',
+        byId: 'P-000001',
+        at: new Date().toISOString(),
+      });
+      const appendedNum = Number.parseInt(appended.id.replace(/^AU-/, ''), 10);
+      expect(appendedNum).toBeGreaterThan(importedMax);
+      expect(await auditRepo.countAuditEntries(ctx)).toBe(auditCountAfterSecond + 1);
+    } finally {
+      await resetAllDemoData('P-000001');
+    }
+  });
+
+  it('Two-tenant isolation: TenantAuditRepository positive control, forged tenant claim, tampered record IDs and SET LOCAL ROLE per tenant', async () => {
+    const repo = new TenantAuditRepository();
+    const ctxA = makeTenantCtx('firm-alpha', 'user-a');
+    const ctxB = makeTenantCtx('firm-beta', 'user-b');
+    const recordA = `M-ALPHA-${Date.now().toString(36)}`;
+
+    // (a) Positive control: Tenant A reads its own row
+    const rowA = await repo.appendAuditEntry(ctxA, auditInput(recordA, 'Tenant A only'));
+    const ownRead = await repo.listAuditEntriesForRecord(ctxA, 'matter', recordA);
+    expect(ownRead.map((r) => r.id)).toContain(rowA.id);
+    expect(ownRead.every((r) => r.recordId === recordA)).toBe(true);
+
+    // (b) Forged tenant claim is rejected before any repository access
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'user-a',
+          tenantId: 'firm-alpha',
+          name: 'Actor user-a',
+          email: 'user-a@firm-alpha.example.invalid',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-audit-forged',
+        untrustedRequestTenantOverride: 'firm-beta',
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    // (c) Tenant B with Tenant A's tampered record ID gets [] (record and firm page)
+    expect(await repo.listAuditEntriesForRecord(ctxB, 'matter', recordA)).toEqual([]);
+    const pageB = await repo.listFirmAuditEntriesPage(ctxB, { limit: 2000 });
+    expect(pageB.entries.some((r) => r.id === rowA.id && r.recordId === recordA)).toBe(false);
+
+    // (d) SET LOCAL ROLE: each transaction runs as its own tenant role, which reverts on commit
+    const roleA = await repo.withTenantReadTransaction(ctxA, async (tx) => {
+      const res = await tx.query<{ role: string }>('SELECT current_user AS role');
+      return res.rows[0]!.role;
+    });
+    const roleB = await repo.withTenantReadTransaction(ctxB, async (tx) => {
+      const res = await tx.query<{ role: string }>('SELECT current_user AS role');
+      return res.rows[0]!.role;
+    });
+    expect(roleA).toMatch(/^role_tenant_/);
+    expect(roleB).toMatch(/^role_tenant_/);
+    expect(roleA).not.toBe(roleB);
+    const crossTenantRows = await repo.withTenantReadTransaction(ctxB, async (tx) => {
+      const res = await tx.query<{ n: string }>(
+        'SELECT count(*)::text AS n FROM public.audit_entries WHERE tenant_id = $1',
+        ['firm-alpha'],
+      );
+      return Number(res.rows[0]!.n);
+    });
+    expect(crossTenantRows).toBe(0);
+  });
+});

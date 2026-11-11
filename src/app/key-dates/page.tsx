@@ -12,12 +12,12 @@ export const dynamic = 'force-dynamic';
 export default async function KeyDatesPage() {
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
     const effectivePersonId = snap.effectiveWorkPerson.id;
     const userDefaultTeamIds = userTeams(effectivePersonId, snap.teams).map((t) => t.id);
     const canViewAnyTeam = snap.currentUserKeyDatePermissions.includes('keydate:view_any_team');
 
-    const initialDiaryEntries = queryKeyDatesTeamDiaryRecord(
+    const initialDiaryEntries = await queryKeyDatesTeamDiaryRecord(
       {
         teamIds: canViewAnyTeam ? snap.teams.map((t) => t.id) : userDefaultTeamIds,
       },
@@ -25,7 +25,7 @@ export default async function KeyDatesPage() {
     );
 
     const initialExceptions = canViewAnyTeam
-      ? getKeyDateExceptionsReportRecord({}, userId)
+      ? await getKeyDateExceptionsReportRecord({}, userId)
       : [];
 
     const todayIso = new Date().toISOString().slice(0, 10);

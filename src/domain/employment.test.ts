@@ -36,6 +36,7 @@ import { getStore, resetStore } from '../server/store';
 import {
   getAppSnapshot,
   getEmployeeDetailsForUser,
+  listAuditEntriesForRecord,
   logEmployeeRestrictedAccess,
   reassignLeaverOwnedRecords,
   saveMatterRecord,
@@ -278,7 +279,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
   });
 
   describe('4. Four conversion paths & single Person record rule', () => {
-    it('Path A & B (Contact / Client -> Employee): keeps single person record, preserves external contact jobTitle, detects open matter party conflict, and flags to Risk for an information barrier', () => {
+    it('Path A & B (Contact / Client -> Employee): keeps single person record, preserves external contact jobTitle, detects open matter party conflict, and flags to Risk for an information barrier', async () => {
       const store = getStore();
       // Find a non-employee person who is a party or instructing contact on an open matter
       const nonEmployeeParty = store.people.find(
@@ -294,7 +295,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(conflicts.length).toBeGreaterThan(0);
 
       // Save this existing contact/client as joining the firm (Employee) via System Admin P-000004
-      const res = savePersonRecord(
+      const res = await savePersonRecord(
         {
           ...nonEmployeeParty,
           firstName: nonEmployeeParty.firstName,
@@ -432,7 +433,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
           expiresAtMs: Date.now() + 3600_000,
           verifiedSession,
         },
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'Residential purchase for staff member',
@@ -458,7 +459,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(canUserAccessMatter(matterRes.matter!, 'P-000005', p5)).toBe(false);
     });
 
-    it('Path D (Employee -> Leaver -> Contact): sets status to Leaver, deactivates firm-issued email/extension, keeps personal contact details & marketing consent, hides from employee selectors, and supports reassigning owned records', () => {
+    it('Path D (Employee -> Leaver -> Contact): sets status to Leaver, deactivates firm-issued email/extension, keeps personal contact details & marketing consent, hides from employee selectors, and supports reassigning owned records', async () => {
       const store = getStore();
       const target = store.people.find((p) => p.id === 'P-000005')!;
       const personalEmail = {
@@ -470,7 +471,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         active: true,
       };
 
-      const saveRes = savePersonRecord(
+      const saveRes = await savePersonRecord(
         {
           ...target,
           firstName: target.firstName,
@@ -523,7 +524,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         firmIssued: false,
         active: true,
       };
-      const secondLeaverSave = savePersonRecord(
+      const secondLeaverSave = await savePersonRecord(
         {
           ...leaverUpdated,
           emails: [...leaverUpdated.emails, unflaggedFirmDomainEmail],
@@ -569,7 +570,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       );
       expect(ownedBefore.length).toBeGreaterThan(0);
 
-      const reassignRes = reassignLeaverOwnedRecords(
+      const reassignRes = await reassignLeaverOwnedRecords(
         leaverUpdated.id,
         'P-000001',
         'P-000004',
@@ -591,7 +592,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
   });
 
   describe('5. API & UI permissions and audit logging', () => {
-    it('enforces employee:view_core, employee:edit_core, employee:hr_restricted, employee:payroll, and employee:sensitive at the API level and logs views/updates', () => {
+    it('enforces employee:view_core, employee:edit_core, employee:hr_restricted, employee:payroll, and employee:sensitive at the API level and logs views/updates', async () => {
       const store = getStore();
       // P-000004 is System Administrator / HR Admin (all 5 permissions)
       const adminUser = store.people.find((p) => p.id === 'P-000004')!;
@@ -628,23 +629,30 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(filteredForBasic?.emergencyContacts).toBeUndefined();
 
       // Snapshot for non-payroll/non-sensitive user P-000002 omits sensitive records and payroll
-      const snapshotForP2 = getAppSnapshot('P-000002');
+      const snapshotForP2 = await getAppSnapshot('P-000002');
       expect(Object.keys(snapshotForP2.employeeSensitiveRecords)).toHaveLength(0);
       const p1InSnapshot = snapshotForP2.people.find((p) => p.id === 'P-000001')!;
       expect(p1InSnapshot.employment?.payroll).toBeUndefined();
 
       // Audit logging when viewing payroll or sensitive details via getEmployeeDetailsForUser & logEmployeeRestrictedAccess
-      const auditCountBefore = store.audit.length;
-      const detailsRes = getEmployeeDetailsForUser('P-000002', 'P-000004', {
+      const hrAudit = async () => [
+        ...(await listAuditEntriesForRecord('employee_payroll', 'P-000002', 'P-000004', { limit: 1000 })),
+        ...(await listAuditEntriesForRecord('employee_sensitive', 'P-000002', 'P-000004', { limit: 1000 })),
+      ];
+      const auditBefore = await hrAudit();
+      const payrollViewsBefore = auditBefore.filter((a) => a.action === 'view-payroll').length;
+      const sensitiveViewsBefore = auditBefore.filter((a) => a.action === 'view-sensitive').length;
+      const detailsRes = await getEmployeeDetailsForUser('P-000002', 'P-000004', {
         logViewPayroll: true,
         logViewSensitive: true,
       });
       expect(detailsRes.errors).toBeUndefined();
-      expect(store.audit.length).toBeGreaterThan(auditCountBefore);
-      expect(store.audit.some((a) => a.action === 'view-payroll')).toBe(true);
-      expect(store.audit.some((a) => a.action === 'view-sensitive')).toBe(true);
+      const auditAfter = await hrAudit();
+      expect(auditAfter.length).toBeGreaterThan(auditBefore.length);
+      expect(auditAfter.filter((a) => a.action === 'view-payroll').length).toBe(payrollViewsBefore + 1);
+      expect(auditAfter.filter((a) => a.action === 'view-sensitive').length).toBe(sensitiveViewsBefore + 1);
 
-      const logRes = logEmployeeRestrictedAccess(
+      const logRes = await logEmployeeRestrictedAccess(
         'P-000002',
         'payroll',
         'P-000004',
@@ -654,12 +662,12 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(logRes.auditEntry?.action).toBe('view-payroll');
     });
 
-    it('preserves existing employeeSensitiveRecords[id] when saving a person without sensitiveSubmitted (R76)', () => {
+    it('preserves existing employeeSensitiveRecords[id] when saving a person without sensitiveSubmitted (R76)', async () => {
       const store = getStore();
       const target = store.people.find((p) => p.id === 'P-000002')!;
 
       // First save a sensitive record on P-000002 as HR Admin P-000004
-      savePersonRecord(
+      await savePersonRecord(
         {
           ...target,
           firstName: target.firstName,
@@ -679,9 +687,11 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
       ).toBe('Ergonomic standing desk and dual monitors');
 
-      const sensitiveAuditCountBefore = store.audit.filter(
-        (a) => a.recordId === target.id && a.action === 'update-sensitive',
-      ).length;
+      const countSensitiveAudit = async (action: string) =>
+        (
+          await listAuditEntriesForRecord('employee_sensitive', target.id, 'P-000004', { limit: 1000 })
+        ).filter((a) => a.recordId === target.id && a.action === action).length;
+      const sensitiveAuditCountBefore = await countSensitiveAudit('update-sensitive');
 
       // Form helper sends null unless the sensitive section was both revealed and edited
       expect(
@@ -720,7 +730,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
 
       // Server enforcement: even if a caller sends a blank sensitiveSubmitted payload without opening/editing
       // the sensitive section, savePersonRecord refuses to overwrite the existing sensitive record
-      const uneditedServerAttempt = savePersonRecord(
+      const uneditedServerAttempt = await savePersonRecord(
         {
           ...target,
           firstName: target.firstName,
@@ -746,7 +756,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       ).toBe('Ergonomic standing desk and dual monitors');
 
       // Now save P-000002 again (e.g. updating preferredName) without revealing/submitting sensitive section
-      const updateRes = savePersonRecord(
+      const updateRes = await savePersonRecord(
         {
           ...target,
           firstName: target.firstName,
@@ -765,13 +775,11 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(
         store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
       ).toBe('Ergonomic standing desk and dual monitors');
-      const sensitiveAuditCountAfter = store.audit.filter(
-        (a) => a.recordId === target.id && a.action === 'update-sensitive',
-      ).length;
+      const sensitiveAuditCountAfter = await countSensitiveAudit('update-sensitive');
       expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);
 
       // When both sensitiveSectionOpened and sensitiveSectionEdited are true, server applies the update
-      savePersonRecord(
+      await savePersonRecord(
         {
           ...target,
           firstName: target.firstName,
@@ -791,33 +799,27 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       );
 
       // R103 & R76: Calling getEmployeeDetailsForUser without logViewSensitive: true returns sensitive: null and writes no view-sensitive audit entry
-      const viewAuditCountBefore = store.audit.filter(
-        (a) => a.recordId === target.id && a.action === 'view-sensitive',
-      ).length;
-      const unrevealed = getEmployeeDetailsForUser(target.id, 'P-000004');
+      const viewAuditCountBefore = await countSensitiveAudit('view-sensitive');
+      const unrevealed = await getEmployeeDetailsForUser(target.id, 'P-000004');
       expect(unrevealed.sensitive).toBeNull();
-      const viewAuditCountAfterUnrevealed = store.audit.filter(
-        (a) => a.recordId === target.id && a.action === 'view-sensitive',
-      ).length;
+      const viewAuditCountAfterUnrevealed = await countSensitiveAudit('view-sensitive');
       expect(viewAuditCountAfterUnrevealed).toBe(viewAuditCountBefore);
 
       // Revealing on demand via getEmployeeDetailsForUser with logViewSensitive: true returns the preserved record and logs view-sensitive
-      const revealed = getEmployeeDetailsForUser(target.id, 'P-000004', {
+      const revealed = await getEmployeeDetailsForUser(target.id, 'P-000004', {
         logViewSensitive: true,
       });
       expect(revealed.sensitive?.reasonableAdjustmentsNeeded).toBe(
         'Ergonomic standing desk and dual monitors',
       );
-      const viewAuditCountAfterRevealed = store.audit.filter(
-        (a) => a.recordId === target.id && a.action === 'view-sensitive',
-      ).length;
+      const viewAuditCountAfterRevealed = await countSensitiveAudit('view-sensitive');
       expect(viewAuditCountAfterRevealed).toBe(viewAuditCountBefore + 1);
     });
   });
 
   describe('6. New Matter department pre-selection and department-scoped dropdowns', () => {
-    it('pre-selects Department, Responsible Partner (from Supervising Partner), and Fee Earner for a fee earner in a legal department', () => {
-      const snap = getAppSnapshot('P-000002'); // Dafydd Evans (Real Estate Fee Earner)
+    it('pre-selects Department, Responsible Partner (from Supervising Partner), and Fee Earner for a fee earner in a legal department', async () => {
+      const snap = await getAppSnapshot('P-000002'); // Dafydd Evans (Real Estate Fee Earner)
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
@@ -834,8 +836,8 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(defaults.leadFeeEarnerId).toBe('P-000002'); // Dafydd Evans (logged-in fee earner)
     });
 
-    it('pre-selects Department and Responsible Partner but leaves Fee Earner blank for support staff in a legal department', () => {
-      const snap = getAppSnapshot('P-000010'); // Nia Edwards (Real Estate Legal Secretary)
+    it('pre-selects Department and Responsible Partner but leaves Fee Earner blank for support staff in a legal department', async () => {
+      const snap = await getAppSnapshot('P-000010'); // Nia Edwards (Real Estate Legal Secretary)
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
@@ -852,8 +854,8 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(defaults.leadFeeEarnerId).toBeNull();
     });
 
-    it('does not pre-select Department, Responsible Partner, or Fee Earner when logged-in user is in a Business Services department', () => {
-      const snap = getAppSnapshot('P-000009'); // Gethin Powell (Finance)
+    it('does not pre-select Department, Responsible Partner, or Fee Earner when logged-in user is in a Business Services department', async () => {
+      const snap = await getAppSnapshot('P-000009'); // Gethin Powell (Finance)
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
@@ -870,8 +872,8 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(defaults.leadFeeEarnerId).toBeNull();
     });
 
-    it('filters Responsible Partner and Fee Earner dropdown options strictly to people in the relevant department', () => {
-      const snap = getAppSnapshot('P-000001');
+    it('filters Responsible Partner and Fee Earner dropdown options strictly to people in the relevant department', async () => {
+      const snap = await getAppSnapshot('P-000001');
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );

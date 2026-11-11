@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 export default async function NewEnquiryPage() {
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
 
     return (
       <EnquiryFormClient

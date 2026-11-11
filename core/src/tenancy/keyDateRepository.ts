@@ -984,6 +984,26 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
+  public async listAllReminderStates(
+    ctx: TenantContext,
+    viewerId: string = ctx.actorId,
+  ): Promise<KeyDateReminderState[]> {
+    return this.listReminderStates(ctx, viewerId);
+  }
+
+  public async removeReminderState(
+    ctx: TenantContext,
+    keyDateId: KeyDateId,
+  ): Promise<boolean> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query(
+        'DELETE FROM key_date_reminder_states WHERE tenant_id = $1 AND key_date_id = $2',
+        [ctx.tenantId, keyDateId],
+      );
+      return (res.rowCount ?? 0) > 0;
+    });
+  }
+
   // ============================================================================
   // Calendar Sync State
   // ============================================================================

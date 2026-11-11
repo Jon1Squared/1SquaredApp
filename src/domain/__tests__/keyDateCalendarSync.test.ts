@@ -15,6 +15,7 @@ import {
 } from '../keyDateCalendarSync';
 import { reassignKeyDateTeamRecord } from '@/server/services';
 import { getStore, resetStore } from '@/server/store';
+import { getKeyDateRepository, testTenantCtx } from '@/server/testSupport/auditTestSupport';
 
 const config = exampleConfig as unknown as KeyDatesConfig;
 
@@ -238,7 +239,9 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
     // Reassignment via reassignKeyDateTeamRecord calls syncKeyDateToOutlookCalendar and deletes the old owner's event
     resetStore();
     const store = getStore();
-    const confirmedKd = store.keyDates!.find((k) => k.status === 'confirmed')!;
+    const allKeyDates = await getKeyDateRepository().listAllVisibleKeyDates(testTenantCtx());
+    const confirmedKd = allKeyDates.find((k) => k.status === 'confirmed' && Boolean(k.matterId))!;
+    expect(confirmedKd).toBeDefined();
     const oldOwnerId = confirmedKd.responsiblePersonIds[0]!;
     const newOwner = store.people.find(
       (p) =>
@@ -250,17 +253,15 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
       (p) => p.isEmployee && p.roles?.includes('managing_partner'),
     )!;
 
-    store.keyDateCalendarSyncs = [
-      {
-        keyDateId: confirmedKd.id,
-        externalEvents: [
-          { target: `person:${oldOwnerId}`, eventId: 'evt-old-owner-1' },
-        ],
-        state: 'synced',
-        lastSyncedAt: '2026-02-01T10:00:00Z',
-        attempts: 1,
-      },
-    ];
+    await getKeyDateRepository().putCalendarSync(testTenantCtx(), {
+      keyDateId: confirmedKd.id,
+      externalEvents: [
+        { target: `person:${oldOwnerId}`, eventId: 'evt-old-owner-1' },
+      ],
+      state: 'synced',
+      lastSyncedAt: '2026-02-01T10:00:00Z',
+      attempts: 1,
+    });
 
     const deletedEvents: Array<{ target: string; eventId: string }> = [];
     const upsertedEvents: Array<{ target: string; eventId: string }> = [];

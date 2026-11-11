@@ -94,6 +94,8 @@ import {
   getKeyDateExceptionsReportRecord,
   getMatterPmsViewBundle,
   liftMatterRestriction,
+  listAuditEntriesForRecord,
+  listFirmAuditEntriesPage,
   markEngagementLetterDrafted,
   queryKeyDatesTeamDiaryRecord,
   recordInvoiceCreditControlAction,
@@ -162,6 +164,7 @@ import {
   saveStore,
 } from '../../src/server/store';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
+import { auditEntriesForRecord, auditEntriesSince, getKeyDateRepository, markAuditPosition, testTenantCtx } from '../../src/server/testSupport/auditTestSupport';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
@@ -767,7 +770,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
 
       // (a) Outside a signed-in request scope, saveMatterRecord refuses with UNAUTHENTICATED and runs no extension hooks
-      const unauthSaveRes = await runWithActiveActorSession(null, () =>
+      const unauthSaveRes = await runWithActiveActorSession(null, async () =>
         saveMatterRecord(
           {
             ...baseMatter,
@@ -811,7 +814,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           expiresAtMs: Date.parse(expiresAt),
           verifiedSession,
         },
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...baseMatter,
@@ -845,7 +848,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           expiresAtMs: Date.parse(expiresAt),
           verifiedSession,
         },
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...baseMatter,
@@ -1059,7 +1062,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           expiresAtMs: Date.parse(expiresAt),
           verifiedSession,
         },
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...baseMatter,
@@ -1126,7 +1129,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             expiresAtMs: Date.parse(expiresAt),
             verifiedSession,
           },
-          () =>
+          async () =>
             saveMatterRecord(
               {
                 ...baseMatter,
@@ -1376,6 +1379,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
       const activeHost = getPlatformExtensionHost();
       let hookMode: 'veto_after_50ms' | 'allow_after_50ms' = 'veto_after_50ms';
+      let onHookEntered: (() => void) | null = null;
       activeHost.registerExtension({
         manifest: {
           id: 'nalf-slow-concurrency-ext',
@@ -1388,6 +1392,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
         hooks: {
           beforeMatterOpen: async () => {
+            onHookEntered?.();
             await new Promise((r) => setTimeout(r, 50));
             return {
               allowProceed: hookMode === 'allow_after_50ms',
@@ -1402,7 +1407,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
 
       // Start slow vetoed save that allocates an inline party ID before awaiting the hook
-      const slowVetoPromise = runWithActiveActorSession(actorSession, () =>
+      const slowVetoPromise = runWithActiveActorSession(actorSession, async () =>
         saveMatterRecord(
           {
             ...targetMatter,
@@ -1427,7 +1432,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedTargetId;
       const concurrentNewMatterRes = await runWithActiveActorSession(
         actorSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...newMatterTemplate,
@@ -1467,7 +1472,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         comments: [],
         runs: [],
       };
-      const concurrentConflictUpdate = updateMatterConflictRecord(
+      const concurrentConflictUpdate = await updateMatterConflictRecord(
         targetMatter.id,
         {
           ...baseConflict,
@@ -1483,7 +1488,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // Create another matter after the veto and verify no Matter or Person ID was issued twice
       const postVetoMatterRes = await runWithActiveActorSession(
         actorSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...newMatterTemplate,
@@ -1522,7 +1527,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // Now verify that when a hook allows proceed after 50ms, a concurrent update to the same matter causes saveMatterRecord to refuse with errors.conflict
       hookMode = 'allow_after_50ms';
-      const staleSavePromise = runWithActiveActorSession(actorSession, () =>
+      // Wait until the save is inside the hook (after it has read its baseline) rather than a fixed delay
+      const staleHookEntered = new Promise<void>((resolve) => {
+        onHookEntered = resolve;
+      });
+      const staleSavePromise = runWithActiveActorSession(actorSession, async () =>
         saveMatterRecord(
           {
             ...refreshedTarget,
@@ -1531,23 +1540,38 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           { id: refreshedTarget.id, byId: carys.id, saveMode: 'submit_cleared' },
         ),
       );
-      await new Promise((r) => setTimeout(r, 15));
-      updateMatterConflictRecord(
+      await staleHookEntered;
+      onHookEntered = null;
+      // S0-15: saveMatterRecord and updateMatterConflictRecord now both run inside the
+      // FIFO withJsonStoreWriteLock, so the concurrent update queues behind the save
+      // instead of racing it. The no-lost-update guarantee is now provided by
+      // serialisation: the update must complete after the save and both must persist.
+      const completionOrder: string[] = [];
+      const queuedUpdatePromise = updateMatterConflictRecord(
         refreshedTarget.id,
         {
           ...baseConflict,
           reviewerMessage: 'Second concurrent update during allow hook',
         },
         carys.id,
-      );
-      const staleSaveRes = await staleSavePromise;
-      expect(staleSaveRes.matter).toBeNull();
-      expect(staleSaveRes.errors?.conflict).toMatch(
-        /changed by someone else while you were saving/i,
-      );
-      expect(
-        store.matters.find((m) => m.id === refreshedTarget.id)!.title,
-      ).not.toBe('Stale Overwrite Attempt');
+      ).then((res) => {
+        completionOrder.push('conflict-update');
+        return res;
+      });
+      const staleSaveRes = await staleSavePromise.then((res) => {
+        completionOrder.push('matter-save');
+        return res;
+      });
+      const queuedUpdateRes = await queuedUpdatePromise;
+      expect(completionOrder).toEqual(['matter-save', 'conflict-update']);
+      expect(staleSaveRes.errors).toBeUndefined();
+      // The queued update now sees the freshly opened matter and is evaluated against it
+      // (never against the stale pre-save baseline).
+      void queuedUpdateRes;
+      const finalTarget = getStore().matters.find(
+        (m) => m.id === refreshedTarget.id,
+      )!;
+      expect(finalTarget.title).toBe('Stale Overwrite Attempt');
     } finally {
       setActiveTenantConfigForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());
@@ -1598,7 +1622,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
       const unconfiguredRes = await runWithActiveActorSession(
         actorSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...baseMatter,
@@ -1638,7 +1662,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedBaseId;
       const staffReferredRes = await runWithActiveActorSession(
         actorSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...staffMatterTemplate,
@@ -1729,7 +1753,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
 
       // Create a staff matter and an ethical-wall matter owned by Carys (outsiderFeeEarner is NOT a participant)
-      const staffRes = await runWithActiveActorSession(carysSession, () =>
+      const staffRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -1748,7 +1772,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(staffRes.matter?.isStaffMatter).toBe(true);
       const staffMatterId = staffRes.matter!.id;
 
-      const wallRes = await runWithActiveActorSession(carysSession, () =>
+      const wallRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -1808,7 +1832,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const wallMatterId = wallRes.matter!.id;
 
       // Participant (Carys) sees both matters in getAppSnapshot
-      const carysSnap = runWithActiveActorSession(carysSession, () =>
+      const carysSnap = await runWithActiveActorSession(carysSession, async () =>
         getAppSnapshot(carys.id),
       );
       expect(carysSnap.matters.some((m) => m.id === staffMatterId)).toBe(true);
@@ -1844,7 +1868,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession: outsiderVerified,
       };
 
-      const outsiderSnap = runWithActiveActorSession(outsiderSession, () =>
+      const outsiderSnap = await runWithActiveActorSession(outsiderSession, async () =>
         getAppSnapshot(outsiderFeeEarner.id),
       );
       expect(outsiderSnap.matters.some((m) => m.id === staffMatterId)).toBe(
@@ -1860,8 +1884,18 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           ),
         ),
       ).toBe(false);
+      for (const restrictedId of [staffMatterId, wallMatterId]) {
+        expect(
+          await runWithActiveActorSession(outsiderSession, async () =>
+            listAuditEntriesForRecord('matter', restrictedId, outsiderFeeEarner.id),
+          ),
+        ).toEqual([]);
+      }
+      const outsiderFirmAudit = await runWithActiveActorSession(outsiderSession, async () =>
+        listFirmAuditEntriesPage(outsiderFeeEarner.id, { limit: 2000 }),
+      );
       expect(
-        outsiderSnap.audit.some(
+        outsiderFirmAudit.entries.some(
           (a) => a.recordId === staffMatterId || a.recordId === wallMatterId,
         ),
       ).toBe(false);
@@ -1887,21 +1921,21 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(outsiderPmsView.code).toBe('FORBIDDEN');
       }
       expect(
-        runWithActiveActorSession(outsiderSession, () =>
+        (await runWithActiveActorSession(outsiderSession, async () =>
           markEngagementLetterDrafted(staffMatterId, outsiderFeeEarner.id),
-        ).matter,
+        )).matter,
       ).toBeNull();
       expect(
-        runWithActiveActorSession(outsiderSession, () =>
+        (await runWithActiveActorSession(outsiderSession, async () =>
           liftMatterRestriction(
             staffMatterId,
             'staff_matter',
             'Tampered ID attempt',
             outsiderFeeEarner.id,
           ),
-        ).matter,
+        )).matter,
       ).toBeNull();
-      const kdTampered = await runWithActiveActorSession(outsiderSession, () =>
+      const kdTampered = await runWithActiveActorSession(outsiderSession, async () =>
         createOrProposeKeyDateRecord(
           {
             matterId: staffMatterId,
@@ -1959,7 +1993,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const { id: _omittedId, ...matterTemplate } = baseMatter;
       void _omittedId;
-      const draftRes = await runWithActiveActorSession(carysSession, () =>
+      const draftRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -1981,6 +2015,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ...rawBaseCfg,
         enabledExtensions: ['nalf-slow-hire-race-ext'],
       });
+      let hireHookEnteredResolve: (() => void) | null = null;
+      const hireHookEntered = new Promise<void>((resolve) => {
+        hireHookEnteredResolve = resolve;
+      });
       getPlatformExtensionHost().registerExtension({
         manifest: {
           id: 'nalf-slow-hire-race-ext',
@@ -1993,6 +2031,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
         hooks: {
           beforeMatterOpen: async () => {
+            hireHookEnteredResolve?.();
             await new Promise((r) => setTimeout(r, 50));
             return {
               allowProceed: true,
@@ -2002,7 +2041,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           },
         },
       });
-      const hireRaceSavePromise = runWithActiveActorSession(carysSession, () =>
+      const hireRaceSavePromise = runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...draftMatter,
@@ -2011,8 +2050,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           { id: draftMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
         ),
       );
-      await new Promise((r) => setTimeout(r, 15));
-      const hireRes = savePersonRecord(
+      // Wait until the save is inside the hook rather than a fixed delay
+      await hireHookEntered;
+      const hireRes = await savePersonRecord(
         {
           ...externalClient,
           firstName: externalClient.firstName,
@@ -2039,13 +2079,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
       );
       expect(hireRes.errors).toBeUndefined();
+      // S0-15: savePersonRecord queues behind the in-flight saveMatterRecord on the FIFO
+      // withJsonStoreWriteLock, so the matter save completes first and the hire is then
+      // applied on top; isStaffMatter must still end up true (no lost update).
       const hireRaceSaveRes = await hireRaceSavePromise;
-      expect(hireRaceSaveRes.matter).toBeNull();
-      expect(hireRaceSaveRes.errors?.conflict).toMatch(
-        /changed by someone else while you were saving/i,
-      );
+      expect(hireRaceSaveRes.errors).toBeUndefined();
       expect(
-        store.matters.find((m) => m.id === draftMatter.id)!.isStaffMatter,
+        getStore().matters.find((m) => m.id === draftMatter.id)!.isStaffMatter,
       ).toBe(true);
     } finally {
       setActiveTenantConfigForTesting(null);
@@ -2123,7 +2163,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const { id: _omittedId, ...matterTemplate } = baseMatter;
       void _omittedId;
-      const draftRes = await runWithActiveActorSession(carysSession, () =>
+      const draftRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -2144,7 +2184,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(draftMatter.matterNumber).toMatch(/^DRAFT/);
 
       // (a) A fee earner without risk:view cannot set status to 'Approved' or 'Declined'
-      const unauthorizedApprove = runWithActiveActorSession(feSession, () =>
+      const unauthorizedApprove = await runWithActiveActorSession(feSession, async () =>
         updateMatterConflictRecord(
           draftMatter.id,
           {
@@ -2173,7 +2213,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(unauthorizedApprove.errors?.permission).toMatch(/risk:view/i);
 
       // (b) A fee earner without risk:view sets status: 'Cleared' via updateMatterConflictRecord, then tries to open the matter above the extension threshold (50,000 GBP) without partnerCostSignOffCompleted -> beforeMatterOpen blocks opening
-      const feClearedRes = runWithActiveActorSession(feSession, () =>
+      const feClearedRes = await runWithActiveActorSession(feSession, async () =>
         updateMatterConflictRecord(
           draftMatter.id,
           {
@@ -2223,7 +2263,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const highFeeOpenAttempt = await runWithActiveActorSession(
         feSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...feClearedRes.matter!,
@@ -2241,7 +2281,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(highFeeOpenAttempt.errors?.costsGovernance).toBeDefined();
 
       // (c) Authorised reviewer (Carys) approves the conflict check: existing comment is preserved verbatim even if the caller edits or omits it, and approvedAtDisplay is server-stamped
-      const authorizedApprove = runWithActiveActorSession(carysSession, () =>
+      const authorizedApprove = await runWithActiveActorSession(carysSession, async () =>
         updateMatterConflictRecord(
           draftMatter.id,
           {
@@ -2361,7 +2401,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const { id: _omittedId, ...matterTemplate } = baseMatter;
       void _omittedId;
-      const staffMatterRes = await runWithActiveActorSession(carysSession, () =>
+      const staffMatterRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -2380,7 +2420,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const staffMatter = staffMatterRes.matter!;
       expect(staffMatter.isStaffMatter).toBe(true);
 
-      const liftedRes = runWithActiveActorSession(carysSession, () =>
+      const liftedRes = await runWithActiveActorSession(carysSession, async () =>
         liftMatterRestriction(
           staffMatter.id,
           'staff_matter',
@@ -2390,7 +2430,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(liftedRes.matter?.isStaffMatter).toBe(false);
 
-      const resaveSameEmp = await runWithActiveActorSession(carysSession, () =>
+      const resaveSameEmp = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...liftedRes.matter!,
@@ -2401,7 +2441,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(resaveSameEmp.matter?.isStaffMatter).toBe(false);
 
-      const resaveNewEmp = await runWithActiveActorSession(carysSession, () =>
+      const resaveNewEmp = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...resaveSameEmp.matter!,
@@ -2493,7 +2533,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           ),
         ).toBe(true);
 
-        const blockedRes = await runWithActiveActorSession(carysSession, () =>
+        const blockedRes = await runWithActiveActorSession(carysSession, async () =>
           saveMatterRecord(
             {
               ...baseMatter,
@@ -2757,7 +2797,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
 
       // Carys opens a restricted staff matter where staffClient is the client and feeEarner is NOT a participant
-      const staffRes = await runWithActiveActorSession(carysSession, () =>
+      const staffRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -2781,7 +2821,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const restrictedPartyName = `${staffClient.firstName} ${staffClient.surname}`;
 
       // P-000004 (fee earner without access to restrictedMatter) runs conflict search against staffClient
-      const searchResult = runWithActiveActorSession(feSession, () =>
+      const searchResult = await runWithActiveActorSession(feSession, async () =>
         runMatterConflictSearchRecord(
           {
             parties: [
@@ -2813,7 +2853,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
 
       // Calling saveMatterRecord with saveMode: 'submit_cleared' and forged disposition: 'not_the_same' is rejected
-      const clearedAttempt = await runWithActiveActorSession(feSession, () =>
+      const clearedAttempt = await runWithActiveActorSession(feSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -2857,7 +2897,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // Calling saveMatterRecord with saveMode: 'submit_referred' succeeds and refers the matter to Risk
-      const referredAttempt = await runWithActiveActorSession(feSession, () =>
+      const referredAttempt = await runWithActiveActorSession(feSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -2896,7 +2936,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // Risk & Compliance (Carys) approves the referred conflict check; server records approvedRestrictedMatchIds
       const referredMatter = referredAttempt.matter!;
-      const riskApproveRes = runWithActiveActorSession(carysSession, () =>
+      const riskApproveRes = await runWithActiveActorSession(carysSession, async () =>
         updateMatterConflictRecord(
           referredMatter.id,
           {
@@ -2921,7 +2961,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           p.id !== staffClient.id &&
           Boolean(p.employment),
       )!;
-      const secondStaffRes = await runWithActiveActorSession(carysSession, () =>
+      const secondStaffRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -2943,7 +2983,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // (even attempting to forge approvedRestrictedMatchIds in conflictCheckRecord)
       const secondPartyClearedAttempt = await runWithActiveActorSession(
         feSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referredMatter,
@@ -3029,7 +3069,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const { id: _omittedId, ...matterTemplate } = baseMatter;
       void _omittedId;
 
-      const result = await runWithActiveActorSession(feSession, () =>
+      const result = await runWithActiveActorSession(feSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -3100,7 +3140,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       targetMatter.responsiblePartnerId = null;
       targetMatter.supervisingPartnerId = null;
 
-      const billRes = requestMatterBill(targetMatter.matterNumber, 'P-000001');
+      const billRes = await requestMatterBill(targetMatter.matterNumber, 'P-000001');
       expect(isActionDenied(billRes)).toBe(false);
       if (!isActionDenied(billRes)) {
         expect(billRes.ok).toBe(true);
@@ -3109,7 +3149,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(billingTask?.assignedPersonId).toBeNull();
       }
 
-      const writeOffRes = flagMatterWriteOff(
+      const writeOffRes = await flagMatterWriteOff(
         targetMatter.matterNumber,
         1500,
         'P-000001',
@@ -3122,7 +3162,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(signOff?.assignedPartnerId).toBeNull();
       }
 
-      const ccRes = recordInvoiceCreditControlAction(
+      const ccRes = await recordInvoiceCreditControlAction(
         {
           invoiceNumber: 'PV/2026/0040',
           matterCode: targetMatter.matterNumber,
@@ -3155,7 +3195,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('R168: buildDefaultOrgStructure requires options.legalName and derives entity codes from shortCode or cleaned legalName', () => {
+  it('R168: buildDefaultOrgStructure requires options.legalName and derives entity codes from shortCode or cleaned legalName', async () => {
     expect(() => buildDefaultOrgStructure({ legalName: '   ' })).toThrow(
       /ORG_STRUCTURE_CONFIG_ERROR/,
     );
@@ -3176,7 +3216,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(fromShortCode.legalEntities[1]?.code).toBe('ACMSRV');
 
     const store = getStore();
-    const snap = getAppSnapshot('P-000001');
+    const snap = await getAppSnapshot('P-000001');
     expect(snap.suggestedMatterGovernanceAssignees).toBeDefined();
     expect(snap.suggestedMatterGovernanceAssignees.riskReviewerId).toBeTruthy();
     expect(
@@ -3202,6 +3242,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R169: saveMatterRecord strips server-owned fieldValues, ignores caller conflictClearedById, preserves matterOpeningSnapshot on open matters, requires signOffMatterCostsRecord (matter:costs:sign_off), and resets sign-off if feeEstimateGbp changes', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
+    const r169AuditMark = await markAuditPosition();
     try {
       const store = getStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -3375,7 +3416,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // 4. Partner with matter:costs:sign_off signs off £75,000
         const partnerSignOff = await runWithActiveActorSession(
           partnerSession,
-          () =>
+          async () =>
             signOffMatterCostsRecord(
               matterId,
               partner.id,
@@ -3416,7 +3457,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(validOpenRes.errors).toBeUndefined();
         expect(validOpenRes.matter?.conflictClearedById).toBeNull();
         expect(
-          store.audit.some(
+          (await auditEntriesForRecord('matter', matterId, r169AuditMark)).some(
             (a) =>
               a.recordId === matterId && a.field === 'Partner cost sign-off',
           ),
@@ -3525,7 +3566,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         takenById: partner.id,
       });
 
-      const res = runMatterConflictSearchRecord(
+      const res = await runMatterConflictSearchRecord(
         {
           currentMatterId: null,
           parties: [
@@ -3599,11 +3640,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         takenById: partner.id,
       });
 
-      const auditCountBefore = store.audit.length;
+      const r172AuditMark = await markAuditPosition();
       const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
       try {
         // 1. Unsaved matter (currentMatterId: null) writes the structured log only, not store.audit
-        const unsavedRes = runMatterConflictSearchRecord(
+        const unsavedRes = await runMatterConflictSearchRecord(
           {
             currentMatterId: null,
             parties: [
@@ -3620,10 +3661,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         );
         expect(unsavedRes.errors).toBeUndefined();
         expect(unsavedRes.matches.some((m) => m.restricted)).toBe(true);
-        expect(store.audit.length).toBe(auditCountBefore);
+        expect(await auditEntriesSince(r172AuditMark)).toHaveLength(0);
 
         // 2. Saved matter (currentMatterId: 'M-000001') writes both the count-only audit entry and structured log
-        const res = runMatterConflictSearchRecord(
+        const res = await runMatterConflictSearchRecord(
           {
             currentMatterId: 'M-000001',
             parties: [
@@ -3641,8 +3682,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(res.errors).toBeUndefined();
         expect(res.matches.some((m) => m.restricted)).toBe(true);
 
-        expect(store.audit.length).toBe(auditCountBefore + 1);
-        const latestAudit = store.audit[0]!;
+        const r172NewAudit = await auditEntriesSince(r172AuditMark);
+        expect(r172NewAudit).toHaveLength(1);
+        const latestAudit = r172NewAudit[0]!;
         expect(latestAudit.recordId).toBe('M-000001');
         expect(latestAudit.field).toBe('Conflict check restricted match');
         expect(latestAudit.newValue).toContain('Restricted conflict match count: 1');
@@ -3749,7 +3791,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const fixtureM16 = store.matters.find((m) => m.id === 'M-000016')!;
       const fixtureM16ReferHigh = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...fixtureM16,
@@ -3766,7 +3808,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const referLowRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R173 Referred Matter',
@@ -3790,7 +3832,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 2. Saving the referred matter with a £75,000 estimate and saveMode: 'submit_referred' runs beforeMatterOpen and returns errors.costsGovernance
       const referHighRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referLowRes.matter!,
@@ -3807,7 +3849,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 3. Raising the estimate to £75,000 on a draft save updates matterOpeningGate.allowProceed to false; Risk approval then keeps the matter in prospectiveStatus until a partner signs off
       const draftHighRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referLowRes.matter!,
@@ -3827,9 +3869,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         )?.allowProceed,
       ).toBe(false);
 
-      const riskApproveBeforeSignOff = runWithActiveActorSession(
+      const riskApproveBeforeSignOff = await runWithActiveActorSession(
         riskSession,
-        () =>
+        async () =>
           updateMatterConflictRecord(
             matterId,
             {
@@ -3851,7 +3893,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 4. Once a partner signs off the £75,000 estimate, the matter transitions to Active
       const partnerSignOffRes = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           signOffMatterCostsRecord(
             matterId,
             partner.id,
@@ -3902,7 +3944,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeTeamKey: 'custom-team-key-by-name',
         },
       });
-      const snapByName = getAppSnapshot(partner.id);
+      const snapByName = await getAppSnapshot(partner.id);
       expect(
         snapByName.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBeNull();
@@ -3931,7 +3973,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
         },
       });
-      const snapRoleOutsideTeam = getAppSnapshot(partner.id);
+      const snapRoleOutsideTeam = await getAppSnapshot(partner.id);
       expect(
         snapRoleOutsideTeam.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBeNull();
@@ -3942,7 +3984,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
         },
       });
-      const snapCustomRole = getAppSnapshot(partner.id);
+      const snapCustomRole = await getAppSnapshot(partner.id);
       expect(
         snapCustomRole.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBe(nonRiskEmployee.id);
@@ -4046,7 +4088,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 1. Attempting submit_cleared with conflictCheckRecord.status === 'Cleared' is refused because the restricted match is unapproved
       const clearedAttempt = await runWithActiveActorSession(
         reviewerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R175 Matter With Restricted Hit',
@@ -4092,7 +4134,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 2. Saving with conflictCheckRecord.status === 'Approved' succeeds and records the restricted match ID in approvedRestrictedMatchIds
       const approvedAttempt = await runWithActiveActorSession(
         reviewerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R175 Matter With Restricted Hit',
@@ -4198,7 +4240,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // Seed a draft matter with an existing comment and server run
       const initialSave = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R176 Audit Integrity Matter',
@@ -4244,7 +4286,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // Fee earner now attempts to forge status: 'Approved', approvedById: riskOfficer.id, wipe comments: [], and inject runs: [{ id: 'forged' }]
       const forgedSave = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...initialSave.matter!,
@@ -4420,7 +4462,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const fixtureM8 = store.matters.find((m) => m.id === 'M-000008')!;
       const fixtureM8Draft = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...fixtureM8,
@@ -4438,7 +4480,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         )?.allowProceed,
       ).toBe(false);
 
-      const referRes = await runWithActiveActorSession(feeEarnerSession, () =>
+      const referRes = await runWithActiveActorSession(feeEarnerSession, async () =>
         saveMatterRecord(
           {
             title: 'R178 Draft Gate Reset Matter',
@@ -4467,7 +4509,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const draftSaveAfterRefer = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referRes.matter!,
@@ -4487,9 +4529,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         )?.allowProceed,
       ).toBe(false);
 
-      const riskApproveAfterDraft = runWithActiveActorSession(
+      const riskApproveAfterDraft = await runWithActiveActorSession(
         riskSession,
-        () =>
+        async () =>
           updateMatterConflictRecord(
             matterId,
             {
@@ -4553,7 +4595,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         const signOffUnderLoadErr = await runWithActiveActorSession(
           partnerSession,
-          () =>
+          async () =>
             signOffMatterCostsRecord(
               matterId,
               partner.id,
@@ -4651,7 +4693,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const fixtureM8 = store.matters.find((m) => m.id === 'M-000008')!;
       const fixtureM8OpenWithoutKd = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...fixtureM8,
@@ -4667,7 +4709,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const newOpenWithoutKd = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R179 Litigation Matter Requiring Limitation Date',
@@ -4691,7 +4733,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // 2. Saving as a draft succeeds; attempting to open the saved draft without the required key date is refused with errors.keyDates
-      const draftRes = await runWithActiveActorSession(partnerSession, () =>
+      const draftRes = await runWithActiveActorSession(partnerSession, async () =>
         saveMatterRecord(
           {
             title: 'R179 Litigation Matter Requiring Limitation Date',
@@ -4714,7 +4756,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const draftOpenWithoutKd = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...draftRes.matter!,
@@ -4729,7 +4771,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // 3. Risk approval on a draft/referred matter missing its required key date keeps matterStatusId as Prospective
-      const riskApproveWithoutKd = runWithActiveActorSession(riskSession, () =>
+      const riskApproveWithoutKd = await runWithActiveActorSession(riskSession, async () =>
         updateMatterConflictRecord(
           draftId,
           {
@@ -4747,7 +4789,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(riskApproveWithoutKd.warnings?.[0]).toMatch(/required key dates/i);
 
       // 4. Recording the required key date as Not applicable (or adding it) allows saveMatterRecord(submit_cleared) to open the matter
-      const naRes = recordKeyDateNotApplicableRecord(
+      const naRes = await recordKeyDateNotApplicableRecord(
         {
           matterId: draftId,
           keyDateTypeId: 'limitation',
@@ -4761,7 +4803,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const openWithKdRes = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...draftRes.matter!,
@@ -4873,7 +4915,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 1. Refer a matter with a restricted match, then attempt to open it by setting matterStatusId: Active with no saveMode
       const referredRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R181 Referred Restricted Match Matter',
@@ -4905,7 +4947,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const bypassOpenRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referredRes.matter!,
@@ -4925,7 +4967,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 2. Edit while waiting for Risk: a referred matter above the £50,000 sign-off threshold with no sign-off allows a stage change (no saveMode) while keeping the matter Prospective and matterOpeningGate.allowProceed === false
       const highEstimateDraftRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referredRes.matter!,
@@ -4939,7 +4981,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const stageChangeRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...highEstimateDraftRes.matter!,
@@ -4964,7 +5006,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const fixtureM6 = store.matters.find((m) => m.id === 'M-000006')!;
       const fixtureM6StageRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...fixtureM6,
@@ -5011,9 +5053,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // 4. Server-only PMS import (opts.source === 'pms_import') opens the imported matter and writes a 'matter-imported-open' audit entry
+      const pmsImportAuditMark = await markAuditPosition();
       const pmsImportRes = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               matterNumber: 'PMS-R181-0001',
@@ -5031,7 +5074,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(pmsImportRes.errors).toBeUndefined();
       expect(pmsImportRes.matter?.matterStatusId).toBe(activeStatusId);
       expect(
-        getStore().audit.some(
+        (await auditEntriesSince(pmsImportAuditMark)).some(
           (a) =>
             a.recordId === pmsImportRes.matter?.id &&
             a.action === 'matter-imported-open',
@@ -5095,7 +5138,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       };
 
       // 1. Stage change on M-000003 (£145,000, Active, no opening snapshot) and M-000001 (£8,500) with no saveMode succeeds and writes a backfilled snapshot
-      const m3StageRes = await runWithActiveActorSession(partnerSession, () =>
+      const m3StageRes = await runWithActiveActorSession(partnerSession, async () =>
         saveMatterRecord(
           {
             ...fixtureM3,
@@ -5119,7 +5162,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(backfilledSnap.capturedAt).not.toBe(fixtureM3.openedAt);
       expect(backfilledSnap.captureNote).toMatch(/Recorded after opening/i);
 
-      const m1StageRes = await runWithActiveActorSession(partnerSession, () =>
+      const m1StageRes = await runWithActiveActorSession(partnerSession, async () =>
         saveMatterRecord(
           {
             ...fixtureM1,
@@ -5148,7 +5191,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const closeBlockedByKd = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...m3StageRes.matter!,
@@ -5163,13 +5206,17 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(closeBlockedByKd.errors?.costsGovernance).toBeUndefined();
 
-      // Remove the open key date and verify M-000003 closes cleanly despite £145,000 fee estimate without partner sign-off
-      getStore().keyDates = (getStore().keyDates ?? []).filter(
-        (kd) => kd.matterId !== fixtureM3.id,
-      );
+      // Resolve the open key date(s) (key dates are never deleted) and verify M-000003 closes cleanly despite £145,000 fee estimate without partner sign-off
+      const r183KdCtx = testTenantCtx(partner.id);
+      for (const kd of await getKeyDateRepository().listKeyDatesForMatter(
+        r183KdCtx,
+        fixtureM3.id,
+      )) {
+        await getKeyDateRepository().putKeyDate(r183KdCtx, { ...kd, status: 'met' });
+      }
       const closeSuccessRes = await runWithActiveActorSession(
         partnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...m3StageRes.matter!,
@@ -5264,7 +5311,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 2. Saving M-000006 as feeEarner P-000002 with no saveMode, matterStatusId: Active, and estimate lowered to £10,000 is refused with errors.conflict and M-000006 stays Prospective
       const m6OpenAttempt = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...fixtureM6,
@@ -5286,7 +5333,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 3. Refer a new matter as feeEarner, then attempt submit_cleared with status: 'Cleared' as feeEarner -> refused with errors.conflict and stays Referred & Prospective
       const referNewRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R184 Referred Matter Cannot Self-Clear',
@@ -5310,7 +5357,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const feeEarnerSelfClearRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referNewRes.matter!,
@@ -5338,9 +5385,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(storedAfterSelfClear.matterStatusId).toBe(prospectiveStatusId);
 
       // Also verify updateMatterConflictRecord refuses status: 'Cleared' by a non-Risk caller on a referred matter
-      const updateSelfClearRes = runWithActiveActorSession(
+      const updateSelfClearRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           updateMatterConflictRecord(
             referredMatterId,
             {
@@ -5357,7 +5404,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // 4. After a Risk user records Approved, the fee earner's submit_cleared succeeds
-      const riskApproveRes = runWithActiveActorSession(riskSession, () =>
+      const riskApproveRes = await runWithActiveActorSession(riskSession, async () =>
         updateMatterConflictRecord(
           referredMatterId,
           {
@@ -5375,7 +5422,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const postApprovalSubmitRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...riskApproveRes.matter!,
@@ -5502,7 +5549,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const m6Save1Res = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...fixtureM6,
@@ -5523,7 +5570,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const m6Save2Res = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...m6Save1Res.matter!,
@@ -5548,7 +5595,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
       const referNewRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R185 Newly Referred Matter',
@@ -5574,7 +5621,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const newRefSave1 = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referNewRes.matter!,
@@ -5592,7 +5639,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const newRefSave2 = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...newRefSave1.matter!,
@@ -5612,7 +5659,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 3. Forged Risk approval: saving with conflictCheckStatus: 'Approved with conditions' and conflictCheckRecord: null keeps the stored record as Referred, and a later plain save with matterStatusId: Active is refused
       const forgedApprovalSave1 = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...newRefSave1.matter!,
@@ -5635,7 +5682,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const forgedApprovalSave2 = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...forgedApprovalSave1.matter!,
@@ -5653,9 +5700,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toBe(prospectiveStatusId);
 
       // 4. After a Risk user records Approved through updateMatterConflictRecord, matter.conflictCheckStatus is set to match, and the fee earner can then open the matter
-      const riskApproveWithConditions = runWithActiveActorSession(
+      const riskApproveWithConditions = await runWithActiveActorSession(
         riskSession,
-        () =>
+        async () =>
           updateMatterConflictRecord(
             fixtureM6.id,
             {
@@ -5676,7 +5723,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const feeEarnerOpenM6Res = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...riskApproveWithConditions.matter!,
@@ -5779,7 +5826,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // (a) draft save on an open matter is refused and leaves the matter Active
         const draftSaveRes = await runWithActiveActorSession(
           feeEarnerSession,
-          () =>
+          async () =>
             saveMatterRecord(
               { ...fixtureOpen },
               {
@@ -5802,7 +5849,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // (b) plain save with matterStatusId set to Prospective is refused and leaves the matter Active
         const prospectiveSaveRes = await runWithActiveActorSession(
           feeEarnerSession,
-          () =>
+          async () =>
             saveMatterRecord(
               {
                 ...fixtureOpen,
@@ -5827,7 +5874,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // (c) submit_referred save on an open matter succeeds, records Referred, and keeps the matter Active
         const referSaveRes = await runWithActiveActorSession(
           feeEarnerSession,
-          () =>
+          async () =>
             saveMatterRecord(
               { ...fixtureOpen },
               {
@@ -5854,7 +5901,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(snapshotBeforeRiskApproval).toBeDefined();
 
         // (d) Risk user approves through updateMatterConflictRecord; matter stays Active and matterOpeningSnapshot is unchanged
-        const riskApproveRes = runWithActiveActorSession(riskSession, () =>
+        const riskApproveRes = await runWithActiveActorSession(riskSession, async () =>
           updateMatterConflictRecord(
             openMatterId,
             {
@@ -5885,7 +5932,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       )!;
       const newOpenedRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R186 Newly Opened Matter',
@@ -5914,7 +5961,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const newDraftAttempt = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             { ...newOpenedRes.matter! },
             { id: newOpenId, byId: feeEarner.id, saveMode: 'draft' },
@@ -5927,7 +5974,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const newProspectiveAttempt = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...newOpenedRes.matter!,
@@ -5943,7 +5990,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const newReferRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             { ...newOpenedRes.matter! },
             { id: newOpenId, byId: feeEarner.id, saveMode: 'submit_referred' },
@@ -5956,7 +6003,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         newReferRes.matter?.fieldValues?.['matterOpeningSnapshot'],
       ).toEqual(initialOpenedSnapshot);
 
-      const newRiskApproveRes = runWithActiveActorSession(riskSession, () =>
+      const newRiskApproveRes = await runWithActiveActorSession(riskSession, async () =>
         updateMatterConflictRecord(
           newOpenId,
           {
@@ -6027,7 +6074,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // Save 1: plain save backfills conflictCheckRecord as Cleared
         const save1Res = await runWithActiveActorSession(
           feeEarnerSession,
-          () =>
+          async () =>
             saveMatterRecord(
               { ...fixtureOpen },
               { id: openMatterId, byId: feeEarner.id },
@@ -6045,7 +6092,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // Save 2a: plain save attempting to set conflictCheckRecord.status back to 'In progress' / 'Pending'
         const saveInProgressRes = await runWithActiveActorSession(
           feeEarnerSession,
-          () =>
+          async () =>
             saveMatterRecord(
               {
                 ...save1Res.matter!,
@@ -6072,7 +6119,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // Save 2b: repeat with 'Not started' / 'Pending'
         const saveNotStartedRes = await runWithActiveActorSession(
           feeEarnerSession,
-          () =>
+          async () =>
             saveMatterRecord(
               {
                 ...save1Res.matter!,
@@ -6098,9 +6145,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         // Direct updateMatterConflictRecord attempt to reset to 'In progress' or 'Not started' is refused with errors.conflict
         for (const resetStatus of ['In progress', 'Not started'] as const) {
-          const updateResetRes = runWithActiveActorSession(
+          const updateResetRes = await runWithActiveActorSession(
             feeEarnerSession,
-            () =>
+            async () =>
               updateMatterConflictRecord(
                 openMatterId,
                 {
@@ -6127,7 +6174,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         // submit_referred on the open matter still gives Referred and keeps the matter Active
         const referRes = await runWithActiveActorSession(
           feeEarnerSession,
-          () =>
+          async () =>
             saveMatterRecord(
               {
                 ...save1Res.matter!,
@@ -6199,7 +6246,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 1. Probe E2: new matter saved as a draft, then submit_cleared with the draft's outcomeLabel: 'Pending' (and status 'Cleared' + outcomeLabel: 'Pending') stores 'Cleared by fee earner'
       const draftRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R189 Draft Then Submit Cleared Matter',
@@ -6222,7 +6269,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const submitClearedFromDraftRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...draftRes.matter!,
@@ -6250,7 +6297,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 2. Fee earner plain save with status: 'Referred' and outcomeLabel: 'Cleared by fee earner' stores 'Referred to risk for review'
       const referredMismatchRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               title: 'R189 Referred Outcome Mismatch Matter',
@@ -6268,7 +6315,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(referredMismatchRes.errors).toBeUndefined();
       const plainSaveReferredRes = await runWithActiveActorSession(
         feeEarnerSession,
-        () =>
+        async () =>
           saveMatterRecord(
             {
               ...referredMismatchRes.matter!,
@@ -6501,7 +6548,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession: verifiedNamedSession,
       };
 
-      const wallSaveRes = await runWithActiveActorSession(namedSession, () =>
+      const wallSaveRes = await runWithActiveActorSession(namedSession, async () =>
         saveMatterRecord(
           {
             ...matterTemplate,
@@ -6527,7 +6574,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       wallMatter.restrictedAccessUserIds = [];
 
       // Create a key date and a sign-off linked to wallMatter
-      await runWithActiveActorSession(namedSession, () =>
+      await runWithActiveActorSession(namedSession, async () =>
         createOrProposeKeyDateRecord(
           {
             matterId: wallMatter.id,
@@ -6561,7 +6608,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       };
 
       for (const excludedActor of [unnamedPartner, unnamedFeeEarner, adminPerson]) {
-        const snap = getAppSnapshot(excludedActor.id);
+        const snap = await getAppSnapshot(excludedActor.id);
         expect(snap.matters.some((m) => m.id === wallMatter.id)).toBe(false);
         expect(
           snap.searchIndex.some(
@@ -6572,12 +6619,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ).toBe(false);
         expect(snap.keyDates.some((kd) => kd.matterId === wallMatter.id)).toBe(false);
 
-        const diary = queryKeyDatesTeamDiaryRecord({}, excludedActor.id);
+        const diary = await queryKeyDatesTeamDiaryRecord({}, excludedActor.id);
         expect(diary.some((e) => e.matterId === wallMatter.id)).toBe(false);
       }
 
       // Reports also exclude the walled matter for an actor without matter:restricted:access
-      const partnerExceptions = getKeyDateExceptionsReportRecord({}, unnamedPartner.id);
+      const partnerExceptions = await getKeyDateExceptionsReportRecord({}, unnamedPartner.id);
       expect(
         partnerExceptions.some((ex) => ex.matterId === wallMatter.id),
       ).toBe(false);
@@ -6591,11 +6638,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       if (isActionDenied(tamperedPmsView)) {
         expect(tamperedPmsView.code).toBe('FORBIDDEN');
       }
-      const tamperedSignOffApprove = approveSignOff('SO-WALLED-01', unnamedPartner.id);
+      const tamperedSignOffApprove = await approveSignOff('SO-WALLED-01', unnamedPartner.id);
       expect(isActionDenied(tamperedSignOffApprove)).toBe(true);
-      const tamperedSignOffId = approveSignOff('SO-NONEXISTENT-999', unnamedPartner.id);
+      const tamperedSignOffId = await approveSignOff('SO-NONEXISTENT-999', unnamedPartner.id);
       expect(isActionDenied(tamperedSignOffId)).toBe(true);
-      const tamperedDiscuss = discussSignOff('SO-WALLED-01', 'Probe', unnamedPartner.id);
+      const tamperedDiscuss = await discussSignOff('SO-WALLED-01', 'Probe', unnamedPartner.id);
       expect(isActionDenied(tamperedDiscuss)).toBe(true);
 
       // Forged cross-tenant session is rejected by guardedAction on S0-03 actions
@@ -7162,7 +7209,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           ?.contactLog.some((c) => c.note === 'Tenant A valid contact log note'),
       ).toBe(true);
 
-      const auditBeforeEmail = store.audit.length;
+      const auditMarkBeforeEmail = await markAuditPosition();
       const validEnqEmail = await sendEnquiryEmailAction(validEnqId, {
         to: 'tenanta.control@notalawfirm.example',
         subject: 'Tenant A Valid Follow-up Email',
@@ -7170,9 +7217,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         bodyText: 'Tenant A email body',
       });
       expect(isActionDenied(validEnqEmail)).toBe(false);
-      expect(store.audit.length).toBeGreaterThan(auditBeforeEmail);
+      const auditAfterEmail = await auditEntriesSince(auditMarkBeforeEmail);
+      expect(auditAfterEmail.length).toBeGreaterThan(0);
       expect(
-        store.audit.some(
+        auditAfterEmail.some(
           (a) =>
             a.recordType === 'enquiry' &&
             a.recordId === validEnqId &&
@@ -7846,14 +7894,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('S0-09: rejects forged tenant claims and tampered IDs on mergeRecordsAction (with positive Tenant A controls and TenantDocumentRepository / cluster data-layer checks)', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const sA = savePersonRecord(
+      const sA = (await savePersonRecord(
         { firstName: 'TenantA', surname: 'Survivor', isEmployee: false },
         { byId: 'P-000004' },
-      ).person!;
-      const mA = savePersonRecord(
+      )).person!;
+      const mA = (await savePersonRecord(
         { firstName: 'TenantA', surname: 'Merged', isEmployee: false },
         { byId: 'P-000004' },
-      ).person!;
+      )).person!;
 
       const ctxA = resolveTenantFromVerifiedToken({
         verifiedToken: tenantAToken,
@@ -8535,7 +8583,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedActionRes.message).toBe('Person record not found.');
       }
 
-      const tamperedServiceRes = savePersonRecord(
+      const tamperedServiceRes = await savePersonRecord(
         {
           firstName: 'Tampered',
           surname: 'TenantBPerson',
@@ -8556,7 +8604,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(tamperedServiceRes.message).toBe('Person record not found.');
 
       const peopleCountBeforeTamperedEnq = getStore().people.length;
-      const tamperedEnqServiceRes = savePersonRecord(
+      const tamperedEnqServiceRes = await savePersonRecord(
         {
           firstName: 'Tampered',
           surname: 'EnquiryCaller',
@@ -8568,7 +8616,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(tamperedEnqServiceRes.message).toBe('Person record not found.');
       expect(getStore().people.length).toBe(peopleCountBeforeTamperedEnq);
 
-      const tamperedBindRes = updatePersonPermissionOverrides(
+      const tamperedBindRes = await updatePersonPermissionOverrides(
         tamperedPersonId,
         {
           grant: [],
@@ -8627,7 +8675,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         clientId,
         expectedNonce: nonce,
       });
-      const validSignInBind = resolveOrProvisionEntraEmployee(verifiedTenantAClaims);
+      const validSignInBind = await resolveOrProvisionEntraEmployee(verifiedTenantAClaims);
       expect(validSignInBind.person.id).toBe(targetEmployeeA.id);
       expect(validSignInBind.person.entraObjectId).toBe(
         '33333333-0000-4000-8000-000000000002',

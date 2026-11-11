@@ -12,7 +12,7 @@ export default async function EditOrganisationPage({
   const { id } = await params;
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
 
     const organisation = snap.organisations.find((o) => o.id === id);
     if (!organisation) notFound();

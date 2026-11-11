@@ -2367,7 +2367,7 @@ Important rules for speed and accuracy:
   return finalResult;
 }
 
-function ensureContactInCrm(
+async function ensureContactInCrm(
   contact: NonNullable<MatterAiExtractionResult['instructingContact']>,
   orgId: string | undefined,
   byId: string,
@@ -2395,7 +2395,7 @@ function ensureContactInCrm(
         typeId: vid('phone_type', 'Mobile'),
       });
     }
-    const created = savePersonRecord(
+    const created = await savePersonRecord(
       {
         firstName,
         surname,
@@ -2439,7 +2439,7 @@ function ensureContactInCrm(
         l.isCurrent,
     );
     if (!hasLink) {
-      createOrUpdateLink(
+      await createOrUpdateLink(
         {
           personId: contact.matchedPersonId,
           organisationId: orgId,
@@ -2574,7 +2574,7 @@ export const POST = guardedRoute(
       // 1. If the extracted client does not exist in the CRM store yet, create it only when actor holds contact:create
       if (enriched.client && !enriched.client.matchedRecordId && canCreateContacts) {
         if (enriched.client.entityType === 'organisation') {
-          const createdOrg = saveOrganisationRecord(
+          const createdOrg = await saveOrganisationRecord(
             {
               legalName: enriched.client.name.trim(),
               companyNumber: enriched.client.companyNumber?.trim() || '',
@@ -2608,7 +2608,7 @@ export const POST = guardedRoute(
           const parts = enriched.client.name.trim().split(/\s+/);
           const firstName = parts.slice(0, -1).join(' ') || parts[0] || 'Client';
           const surname = parts.length > 1 ? parts[parts.length - 1] : 'Record';
-          const createdPer = savePersonRecord(
+          const createdPer = await savePersonRecord(
             {
               firstName,
               surname,
@@ -2650,7 +2650,7 @@ export const POST = guardedRoute(
 
       // 2. Ensure Instructing Contact exists and is linked to Client Organisation (requires contact:create)
       if (enriched.instructingContact) {
-        ensureContactInCrm(
+        await ensureContactInCrm(
           enriched.instructingContact,
           clientOrgId,
           byId,
@@ -2661,7 +2661,7 @@ export const POST = guardedRoute(
 
       // 3. Ensure Billing Contact exists and is linked to Client Organisation (requires contact:create)
       if (enriched.billingContact) {
-        ensureContactInCrm(
+        await ensureContactInCrm(
           enriched.billingContact,
           clientOrgId,
           byId,

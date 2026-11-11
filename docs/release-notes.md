@@ -1,5 +1,18 @@
 # 1Squared — Release Notes
 
+## Unreleased — Key Dates and Firm Audit Log on PostgreSQL (`s0-15-key-dates-and-audit-log`)
+
+### Change Classification (Platform Architecture Standard Section 14)
+- **Core tenancy and data layer (`core/src/tenancy/`, `src/server/auditAdapter.ts`, `src/server/storePostgresImport.ts`, `src/server/services.ts`, `src/server/documentGenerationServices.ts`, `src/docs/`, `docs/`):**
+  - **Append-only firm audit log (R413):** migration `0007` adds `audit_entries`; `role_tenant_*` has `SELECT, INSERT` only, so UPDATE and DELETE fail with SQLSTATE `42501`. `TenantAuditRepository` provides scoped record and paginated firm queries. `getAppSnapshot` no longer ships the audit log (`audit = []`); staff-matter and sensitive HR entries are redacted for unauthorised viewers.
+  - **Same-transaction audit (Owner Decision 4, R405):** key-date and Document Generation writes append their audit entries in the same tenant transaction, so a failed audit write rolls back the change.
+  - **Write lock (R406, R418):** JSON-store mutations with audit run under the FIFO, re-entrant `withJsonStoreWriteLock`. A failed operation reverts only its own record deltas; nested locked calls complete without deadlock. This pre-empts the earlier R144 stale-write conflict path. Fix: `runUnmigratedJsonMutationWithAudit` now registers its record deltas when the mutation throws, so a nested failure also reverts the outer operation's changes.
+  - **Idempotent import:** `--modules key-dates,audit` can be re-run with identical counts; the `AU-` sequence continues after the highest imported number. A demo reset reloads the audit log, so `AU-` numbering restarts from the demo sequence.
+  - **Tests:** `core/tests/audit-log-postgres.test.ts` (append-only, scoping and redaction, atomicity, R406, R418, import idempotency, two-tenant isolation).
+  - **Hosting models:** identical in single-tenant and hosted modes (database per tenant). **Rollback:** `0007` is expand-only; roll back by redeploying the previous revision. Manual blocker (`stage-0-plan.md` §8): Azure cut-over execution.
+
+---
+
 ## Unreleased — Per-Tenant PostgreSQL Data Layer, Role Isolation, Migration Runner, and Document Metadata Cut-Over (`s0-14-tenant-database`)
 
 ### Change Classification (Platform Architecture Standard Section 14)

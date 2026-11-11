@@ -1,7 +1,11 @@
 import { notFound } from 'next/navigation';
 import { TaskDetailClient } from '@/components/TaskDetailClient';
 import { canUserReassignTask, canUserTakeTask } from '@/server/rbacRuntime';
-import { getAppSnapshot, withPageActor } from '@/server/services';
+import {
+  getAppSnapshot,
+  listAuditEntriesForRecord,
+  withPageActor,
+} from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,11 +16,16 @@ export default async function TaskDetailPage({
 }) {
   const { id } = await params;
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
     const task = snap.tasks.find((t) => t.id === id);
     if (!task) notFound();
 
-    const audit = snap.audit.filter((a) => a.recordType === 'task' && a.recordId === task.id);
+    const audit = await listAuditEntriesForRecord(
+      'task',
+      task.id,
+      actor.personId,
+      { limit: 200 },
+    );
     const canTake = canUserTakeTask(
       snap.currentUserId,
       task,

@@ -17,7 +17,10 @@ export interface RecordVisibility {
 export function buildRecordVisibility(
   store: FirmStore,
   user: Person | null | undefined,
-  opts: { tokenRoles?: readonly string[] } = {},
+  opts: {
+    tokenRoles?: readonly string[];
+    hiddenMatterKeyDateIds?: ReadonlySet<string>;
+  } = {},
 ): RecordVisibility {
   const userId = user?.id ?? '';
   const canViewMatter = (m: Matter): boolean =>
@@ -86,12 +89,8 @@ export function buildRecordVisibility(
     }
   }
 
-  const hiddenMatterKeyDateIds = new Set<string>();
-  for (const kd of store.keyDates ?? []) {
-    if (kd.matterId && hiddenMatterIds.has(kd.matterId)) {
-      hiddenMatterKeyDateIds.add(kd.id);
-    }
-  }
+  const hiddenMatterKeyDateIds =
+    opts.hiddenMatterKeyDateIds ?? new Set<string>();
 
   const canViewTask = (t: Task): boolean => {
     if (!userId) return false;

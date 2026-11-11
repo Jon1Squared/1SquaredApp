@@ -46,6 +46,12 @@ import {
 import { validateKeyDateManualEntry } from '../../src/domain/keyDates';
 import { isActionDenied } from '../../src/domain/actionResult';
 import { getStore, saveStore } from '../../src/server/store';
+import {
+  auditEntriesForRecord,
+  getKeyDateRepository,
+  markAuditPosition,
+  testTenantCtx,
+} from '../../src/server/testSupport/auditTestSupport';
 import { runWithActiveActorSession } from '../../src/server/rbacRuntime';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
 
@@ -984,10 +990,10 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         },
       });
 
-      expect(() => saveMatterCostsConfig(sampleConfig, 'P-0001')).toThrow(
+      await expect(saveMatterCostsConfig(sampleConfig, 'P-0001')).rejects.toThrow(
         AuthorisationError,
       );
-      expect(() => syncMatterCostsRatesFromPms('P-0001')).toThrow(
+      await expect(syncMatterCostsRatesFromPms('P-0001')).rejects.toThrow(
         AuthorisationError,
       );
 
@@ -1012,7 +1018,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
             expiresAt: new Date(Date.now() + 60_000).toISOString(),
           },
         },
-        () =>
+        async () =>
           signOffMatterCostsRecord(
             targetMatter.id,
             'P-0001',
@@ -1034,6 +1040,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
   it('audits submitTemplateVersionService accurately under requireApproval true vs false (R287)', async () => {
     const store = getStore();
     const snapshot = structuredClone(store);
+    const templateAuditMark = await markAuditPosition();
     try {
       const docxBase64 = Buffer.from(
         buildValidDocxArchive({
@@ -1098,7 +1105,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         sessionPayload,
       );
       expect(submitReq.version.status).toBe('Submitted');
-      const submittedAudit = getStore().audit.find(
+      const submittedAudit = (
+        await auditEntriesForRecord('matter', draftReq.template.id, templateAuditMark)
+      ).find(
         (a) =>
           a.recordId === draftReq.template.id &&
           a.field === 'Document Template Submitted for Approval (TPL-SVC-REQ v1)',
@@ -1140,7 +1149,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         sessionPayload,
       );
       expect(submitAuto.version.status).toBe('Active');
-      const activatedAudit = getStore().audit.find(
+      const activatedAudit = (
+        await auditEntriesForRecord('matter', draftAuto.template.id, templateAuditMark)
+      ).find(
         (a) =>
           a.recordId === draftAuto.template.id &&
           a.field ===
@@ -1154,13 +1165,14 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     }
   });
 
-  it('enforces server-side reviewedBy and reviewedOn from the authenticated actor and rejects invalid reviewStatus in saveKeyDatesConfigRecord (R284, R295)', () => {
+  it('enforces server-side reviewedBy and reviewedOn from the authenticated actor and rejects invalid reviewStatus in saveKeyDatesConfigRecord (R284, R295)', async () => {
     const store = getStore();
     const snapshot = structuredClone(store);
+    const kdRepo = getKeyDateRepository();
+    const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx());
     try {
-      const current = structuredClone(getKeyDatesConfig(store));
+      const current = structuredClone(await getKeyDatesConfig(store));
       expect((current.limitationRuleSets ?? []).length).toBeGreaterThan(0);
-
       // Prepare rule set 0 as newly reviewed, attempting to spoof reviewedBy as P-000001 and backdate reviewedOn to 2020-01-01 while saving as P-000004 (admin)
       const firstRuleSet = current.limitationRuleSets![0]!;
       const todayIso = new Date().toISOString().slice(0, 10);
@@ -1173,7 +1185,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         reviewedOn: '2020-01-01',
       };
 
-      const savedReviewed = saveKeyDatesConfigRecord(
+      const savedReviewed = await saveKeyDatesConfigRecord(
         nextForReview,
         'Mark rule set reviewed in test',
         'P-000004',
@@ -1197,8 +1209,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         reviewedBy: 'P-000001',
         reviewedOn: '2025-05-10',
       };
-      store.keyDatesConfigOverride = storedWithPastReview;
-      saveStore(store);
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), storedWithPastReview);
 
       const unchangedReviewedPayload = structuredClone(storedWithPastReview);
       unchangedReviewedPayload.limitationRuleSets![0] = {
@@ -1207,7 +1218,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         reviewedBy: 'P-000004',
         reviewedOn: '2020-01-01',
       };
-      const savedUnchangedReviewed = saveKeyDatesConfigRecord(
+      const savedUnchangedReviewed = await saveKeyDatesConfigRecord(
         unchangedReviewedPayload,
         'Save config without changing reviewed rule set version',
         'P-000004',
@@ -1228,7 +1239,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
           reviewStatus: string;
         }
       ).reviewStatus = 'invalid_status';
-      const rejectedInvalidStatus = saveKeyDatesConfigRecord(
+      const rejectedInvalidStatus = await saveKeyDatesConfigRecord(
         invalidStatusConfig,
         'Attempt invalid reviewStatus',
         'P-000004',
@@ -1246,7 +1257,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         reviewedOn: '2020-01-01',
       };
 
-      const savedUnreviewed = saveKeyDatesConfigRecord(
+      const savedUnreviewed = await saveKeyDatesConfigRecord(
         nextUnreviewed,
         'Unmark rule set review status in test',
         'P-000004',
@@ -1264,21 +1275,23 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       ).toBeUndefined();
     } finally {
       saveStore(snapshot);
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), originalOverride);
     }
   });
 
   it('returns structured ActionDenied (without throwing) when allowManualEntry is false on manual creation, supersede, or spoofed system source (R285, R294)', async () => {
     const store = getStore();
     const snapshot = structuredClone(store);
+    const kdRepo = getKeyDateRepository();
+    const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx());
     try {
-      const current = structuredClone(getKeyDatesConfig(store));
+      const current = structuredClone(await getKeyDatesConfig(store));
       const targetType = current.keyDateTypes![0]!;
       current.keyDateTypes![0] = {
         ...targetType,
         allowManualEntry: false,
       };
-      store.keyDatesConfigOverride = current;
-      saveStore(store);
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), current);
 
       const directDenied = validateKeyDateManualEntry(
         current,
@@ -1370,13 +1383,12 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
 
       const createdKd = calculatedAttempt.keyDate!;
       createdKd.status = 'confirmed';
-      saveStore(getStore());
+      await kdRepo.putKeyDate(testTenantCtx(), createdKd);
 
       // R294: Superseding into a manual date on a type with allowManualEntry: false is denied with ActionDenied
-      const configWithoutRuleSets = structuredClone(getKeyDatesConfig(getStore()));
+      const configWithoutRuleSets = structuredClone(await getKeyDatesConfig(getStore()));
       configWithoutRuleSets.limitationRuleSets = [];
-      getStore().keyDatesConfigOverride = configWithoutRuleSets;
-      saveStore(getStore());
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), configWithoutRuleSets);
 
       const supersedeToManualAttempt = await supersedeConfirmedKeyDateRecord(
         createdKd.id,
@@ -1403,8 +1415,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       carriedKd.calculation = undefined;
       carriedKd.dueDate = '2027-06-01';
       carriedKd.status = 'confirmed';
-      getStore().keyDates!.push(carriedKd);
-      saveStore(getStore());
+      await kdRepo.putKeyDate(testTenantCtx(), carriedKd);
 
       const supersedeCarriedDenied = await supersedeConfirmedKeyDateRecord(
         carriedKd.id,
@@ -1425,13 +1436,12 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       }
 
       // R306: The same supersede on a type that allows manual entry succeeds and stores source: 'manual'
-      const configAllowingManual = structuredClone(getKeyDatesConfig(getStore()));
+      const configAllowingManual = structuredClone(await getKeyDatesConfig(getStore()));
       configAllowingManual.keyDateTypes![0] = {
         ...configAllowingManual.keyDateTypes![0]!,
         allowManualEntry: true,
       };
-      getStore().keyDatesConfigOverride = configAllowingManual;
-      saveStore(getStore());
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), configAllowingManual);
 
       const supersedeCarriedAllowed = await supersedeConfirmedKeyDateRecord(
         carriedKd.id,
@@ -1449,6 +1459,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       );
     } finally {
       saveStore(snapshot);
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), originalOverride);
     }
   });
   it('validates optional keyVault.vaultName and keyVault.vaultUri deployment outputs including 24-character truncated vault names and rejects cross-tenant kv:// references (S0-13b, R413)', () => {

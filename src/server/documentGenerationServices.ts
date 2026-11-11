@@ -87,16 +87,12 @@ import {
   getTestEntraSessionOverride,
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
+import { appendUnmigratedModuleAuditEntries } from './auditAdapter';
 import {
   getStore,
-  nextId,
-  saveStore,
   type FirmStore,
 } from './store';
-import {
-  withJsonStoreWriteLock,
-  type RecordDeltaCompensator,
-} from './storeLock';
+import type { RecordDeltaCompensator } from './storeLock';
 
 void findUnmappedPlaceholders;
 void hasPermission;
@@ -816,19 +812,20 @@ export async function getDocumentGenerationSnapshotForUser(
   };
 }
 
-async function appendAuditToTransitionalStore(entry: {
-  recordType: 'matter' | 'organisation' | 'person';
-  recordId: string;
-  action: 'create' | 'update' | 'delete';
-  field: string;
-  oldValue: string | null;
-  newValue: string | null;
-  byId: string;
-}): Promise<void> {
-  await withJsonStoreWriteLock(async () => {
-    const store = getStore();
-    store.audit.unshift({
-      id: nextId(store, 'AU'),
+async function appendDocGenAuditInTransaction(
+  ctx: TenantContext,
+  entry: {
+    recordType: 'matter' | 'organisation' | 'person';
+    recordId: string;
+    action: 'create' | 'update' | 'delete';
+    field: string;
+    oldValue: string | null;
+    newValue: string | null;
+    byId: string;
+  },
+): Promise<void> {
+  await appendUnmigratedModuleAuditEntries(ctx, [
+    {
       recordType: entry.recordType,
       recordId: entry.recordId,
       action: entry.action === 'delete' ? 'update' : entry.action,
@@ -837,9 +834,8 @@ async function appendAuditToTransitionalStore(entry: {
       newValue: entry.newValue,
       byId: entry.byId,
       at: new Date().toISOString(),
-    });
-    saveStore(store);
-  });
+    },
+  ]);
 }
 
 export async function uploadTemplateDraftService(
@@ -873,43 +869,48 @@ export async function uploadTemplateDraftService(
   const buf = Buffer.from(input.docxBase64, 'base64');
   const docxBytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 
-  const result = await createOrUploadDraftTemplateVersion({
-    ctx,
-    repo,
-    storage,
-    engine,
-    catalogue,
-    actor,
-    config,
-    input: {
-      templateId: input.templateId,
-      code: input.code,
-      name: input.name,
-      description: input.description,
-      category: input.category,
-      tags: input.tags,
-      outputDocumentType: input.outputDocumentType,
-      filenamePattern: input.filenamePattern,
-      availabilityRules: input.availabilityRules,
-      fileName: input.fileName,
-      docxBytes,
-      fieldMappings: input.fieldMappings,
-      promptedFields: input.promptedFields,
-      changeNote: input.changeNote,
-    },
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const result = await createOrUploadDraftTemplateVersion({
+      ctx,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor,
+      config,
+      input: {
+        templateId: input.templateId,
+        code: input.code,
+        name: input.name,
+        description: input.description,
+        category: input.category,
+        tags: input.tags,
+        outputDocumentType: input.outputDocumentType,
+        filenamePattern: input.filenamePattern,
+        availabilityRules: input.availabilityRules,
+        fileName: input.fileName,
+        docxBytes,
+        fieldMappings: input.fieldMappings,
+        promptedFields: input.promptedFields,
+        changeNote: input.changeNote,
+      },
+    });
 
-  await appendAuditToTransitionalStore({
-    recordType: 'matter',
-    recordId: result.template.id,
-    action: 'create',
-    field: `Document Template Draft Uploaded (${result.template.code} v${result.version.versionNumber})`,
-    oldValue: null,
-    newValue: `${result.template.name} · ${result.version.extractedPlaceholders.length} placeholders (${result.unmappedPlaceholders.length} unmapped)`,
-    byId: user.id,
-  });
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: 'matter',
+      recordId: result.template.id,
+      action: 'create',
+      field: `Document Template Draft Uploaded (${result.template.code} v${result.version.versionNumber})`,
+      oldValue: null,
+      newValue: `${result.template.name} · ${result.version.extractedPlaceholders.length} placeholders (${result.version.extractedPlaceholders.length > 0 ? result.unmappedPlaceholders.length : 0} unmapped)`.replace(
+        `${result.version.extractedPlaceholders.length > 0 ? result.unmappedPlaceholders.length : 0} unmapped`,
+        `${result.unmappedPlaceholders.length} unmapped`,
+      ),
+      byId: user.id,
+    });
 
-  return result;
+    return result;
+  });
 }
 
 export async function updateTemplateDraftService(
@@ -964,30 +965,32 @@ export async function submitTemplateVersionService(
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
 
-  const result = await submitTemplateVersionForApproval({
-    ctx,
-    repo,
-    catalogue,
-    actor,
-    config,
-    versionId,
-    changeNote,
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const result = await submitTemplateVersionForApproval({
+      ctx,
+      repo,
+      catalogue,
+      actor,
+      config,
+      versionId,
+      changeNote,
+    });
 
-  const activatedDirectly = result.version.status === 'Active';
-  await appendAuditToTransitionalStore({
-    recordType: 'matter',
-    recordId: result.template.id,
-    action: 'update',
-    field: activatedDirectly
-      ? `Document Template Activated (approval not required) (${result.template.code} v${result.version.versionNumber})`
-      : `Document Template Submitted for Approval (${result.template.code} v${result.version.versionNumber})`,
-    oldValue: 'Draft',
-    newValue: result.version.status,
-    byId: user.id,
-  });
+    const activatedDirectly = result.version.status === 'Active';
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: 'matter',
+      recordId: result.template.id,
+      action: 'update',
+      field: activatedDirectly
+        ? `Document Template Activated (approval not required) (${result.template.code} v${result.version.versionNumber})`
+        : `Document Template Submitted for Approval (${result.template.code} v${result.version.versionNumber})`,
+      oldValue: 'Draft',
+      newValue: result.version.status,
+      byId: user.id,
+    });
 
-  return result;
+    return result;
+  });
 }
 
 export async function approveTemplateVersionService(
@@ -1001,25 +1004,27 @@ export async function approveTemplateVersionService(
   );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = await approveTemplateVersion({
-    ctx,
-    repo,
-    actor,
-    config,
-    versionId,
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const result = await approveTemplateVersion({
+      ctx,
+      repo,
+      actor,
+      config,
+      versionId,
+    });
 
-  await appendAuditToTransitionalStore({
-    recordType: 'matter',
-    recordId: result.template.id,
-    action: 'update',
-    field: `Document Template Approved (${result.template.code} v${result.version.versionNumber})`,
-    oldValue: 'Submitted',
-    newValue: 'Active',
-    byId: user.id,
-  });
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: 'matter',
+      recordId: result.template.id,
+      action: 'update',
+      field: `Document Template Approved (${result.template.code} v${result.version.versionNumber})`,
+      oldValue: 'Submitted',
+      newValue: 'Active',
+      byId: user.id,
+    });
 
-  return result;
+    return result;
+  });
 }
 
 export async function rejectTemplateVersionService(
@@ -1034,26 +1039,28 @@ export async function rejectTemplateVersionService(
   );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = await rejectTemplateVersion({
-    ctx,
-    repo,
-    actor,
-    config,
-    versionId,
-    rejectionReason,
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const result = await rejectTemplateVersion({
+      ctx,
+      repo,
+      actor,
+      config,
+      versionId,
+      rejectionReason,
+    });
 
-  await appendAuditToTransitionalStore({
-    recordType: 'matter',
-    recordId: result.template.id,
-    action: 'update',
-    field: `Document Template Rejected (${result.template.code} v${result.version.versionNumber})`,
-    oldValue: 'Submitted',
-    newValue: `Rejected: ${rejectionReason}`,
-    byId: user.id,
-  });
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: 'matter',
+      recordId: result.template.id,
+      action: 'update',
+      field: `Document Template Rejected (${result.template.code} v${result.version.versionNumber})`,
+      oldValue: 'Submitted',
+      newValue: `Rejected: ${rejectionReason}`,
+      byId: user.id,
+    });
 
-  return result;
+    return result;
+  });
 }
 
 export async function retireTemplateService(
@@ -1067,25 +1074,27 @@ export async function retireTemplateService(
   );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = await retireTemplate({
-    ctx,
-    repo,
-    actor,
-    config,
-    templateId,
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const result = await retireTemplate({
+      ctx,
+      repo,
+      actor,
+      config,
+      templateId,
+    });
 
-  await appendAuditToTransitionalStore({
-    recordType: 'matter',
-    recordId: result.id,
-    action: 'update',
-    field: `Document Template Retired (${result.code})`,
-    oldValue: 'Active',
-    newValue: 'Retired',
-    byId: user.id,
-  });
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: 'matter',
+      recordId: result.id,
+      action: 'update',
+      field: `Document Template Retired (${result.code})`,
+      oldValue: 'Active',
+      newValue: 'Retired',
+      byId: user.id,
+    });
 
-  return result;
+    return result;
+  });
 }
 
 export async function rollbackTemplateVersionService(
@@ -1100,26 +1109,28 @@ export async function rollbackTemplateVersionService(
   );
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const result = await rollbackTemplateToVersion({
-    ctx,
-    repo,
-    actor,
-    config,
-    templateId,
-    targetVersionId,
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const result = await rollbackTemplateToVersion({
+      ctx,
+      repo,
+      actor,
+      config,
+      templateId,
+      targetVersionId,
+    });
 
-  await appendAuditToTransitionalStore({
-    recordType: 'matter',
-    recordId: result.template.id,
-    action: 'update',
-    field: `Document Template Rolled Back (${result.template.code} -> v${result.activeVersion.versionNumber})`,
-    oldValue: null,
-    newValue: `Active v${result.activeVersion.versionNumber}`,
-    byId: user.id,
-  });
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: 'matter',
+      recordId: result.template.id,
+      action: 'update',
+      field: `Document Template Rolled Back (${result.template.code} -> v${result.activeVersion.versionNumber})`,
+      oldValue: null,
+      newValue: `Active v${result.activeVersion.versionNumber}`,
+      byId: user.id,
+    });
 
-  return result;
+    return result;
+  });
 }
 
 export async function exportTemplatePackageService(
@@ -1156,28 +1167,30 @@ export async function importTemplatePackageService(
     maxTemplateSizeMb: config.documentGeneration.maxTemplateSizeMb,
   });
 
-  const result = await importTemplatePackage({
-    ctx,
-    repo,
-    storage,
-    engine,
-    catalogue,
-    actor,
-    config,
-    pkg,
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const result = await importTemplatePackage({
+      ctx,
+      repo,
+      storage,
+      engine,
+      catalogue,
+      actor,
+      config,
+      pkg,
+    });
 
-  await appendAuditToTransitionalStore({
-    recordType: 'matter',
-    recordId: result.template.id,
-    action: 'create',
-    field: `Template Package Imported as Draft (${result.template.code} v${result.version.versionNumber})`,
-    oldValue: null,
-    newValue: result.template.name,
-    byId: user.id,
-  });
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: 'matter',
+      recordId: result.template.id,
+      action: 'create',
+      field: `Template Package Imported as Draft (${result.template.code} v${result.version.versionNumber})`,
+      oldValue: null,
+      newValue: result.template.name,
+      byId: user.id,
+    });
 
-  return result;
+    return result;
+  });
 }
 
 export async function previewTemplateService(
@@ -1352,45 +1365,49 @@ export async function generateDocumentService(
     },
   });
 
-  const res = await generateDocumentFromTemplate({
-    ctx,
-    repo,
-    storage,
-    engine,
-    pdfConverter,
-    catalogue,
-    actor,
-    config,
-    templateId: input.templateId,
-    sourceEntityType: input.sourceEntityType,
-    matterAccessSubject: matter ? toMatterAccessSubject(matter) : null,
-    primaryClientId,
-    primaryClientEntityType,
-    recipientPartyId: input.recipientPartyId ?? primaryClientId,
-    recipientPartyEntityType:
-      input.recipientPartyEntityType ?? primaryClientEntityType,
-    practiceAreaId: practiceAreaLabel,
-    matterTypeId: matterTypeLabel,
-    teamId: userTeam?.name ?? null,
-    outputFormat: input.outputFormat,
-    resolutionContext,
-  });
-
-  if (res.status === 'generated' && res.document) {
-    await appendAuditToTransitionalStore({
-      recordType: matter
-        ? 'matter'
-        : organisation
-          ? 'organisation'
-          : 'person',
-      recordId: matter?.id ?? primaryClientId ?? res.document.id,
-      action: 'create',
-      field: `Document Generated (${res.document.templateName} v${res.document.templateVersionNumber})`,
-      oldValue: null,
-      newValue: `${res.document.fileName} (${res.document.outputFormat.toUpperCase()})`,
-      byId: user.id,
+  const res = await repo.withTenantTransaction(ctx, async () => {
+    const generated = await generateDocumentFromTemplate({
+      ctx,
+      repo,
+      storage,
+      engine,
+      pdfConverter,
+      catalogue,
+      actor,
+      config,
+      templateId: input.templateId,
+      sourceEntityType: input.sourceEntityType,
+      matterAccessSubject: matter ? toMatterAccessSubject(matter) : null,
+      primaryClientId,
+      primaryClientEntityType,
+      recipientPartyId: input.recipientPartyId ?? primaryClientId,
+      recipientPartyEntityType:
+        input.recipientPartyEntityType ?? primaryClientEntityType,
+      practiceAreaId: practiceAreaLabel,
+      matterTypeId: matterTypeLabel,
+      teamId: userTeam?.name ?? null,
+      outputFormat: input.outputFormat,
+      resolutionContext,
     });
-  }
+
+    if (generated.status === 'generated' && generated.document) {
+      await appendDocGenAuditInTransaction(ctx, {
+        recordType: matter
+          ? 'matter'
+          : organisation
+            ? 'organisation'
+            : 'person',
+        recordId: matter?.id ?? primaryClientId ?? generated.document.id,
+        action: 'create',
+        field: `Document Generated (${generated.document.templateName} v${generated.document.templateVersionNumber})`,
+        oldValue: null,
+        newValue: `${generated.document.fileName} (${generated.document.outputFormat.toUpperCase()})`,
+        byId: user.id,
+      });
+    }
+
+    return generated;
+  });
 
   return {
     status: res.status,
@@ -1468,30 +1485,32 @@ export async function deleteGeneratedDocumentService(
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
 
-  const deleted = await deleteGeneratedDocument({
-    ctx,
-    repo,
-    storage,
-    actor,
-    config,
-    documentId,
-    resolveMatterSubject: (matterId) => {
-      const m = store.matters.find((x) => x.id === matterId);
-      return m ? toMatterAccessSubject(m) : null;
-    },
-  });
+  return repo.withTenantTransaction(ctx, async () => {
+    const deleted = await deleteGeneratedDocument({
+      ctx,
+      repo,
+      storage,
+      actor,
+      config,
+      documentId,
+      resolveMatterSubject: (matterId) => {
+        const m = store.matters.find((x) => x.id === matterId);
+        return m ? toMatterAccessSubject(m) : null;
+      },
+    });
 
-  await appendAuditToTransitionalStore({
-    recordType: deleted.primaryMatterId ? 'matter' : 'organisation',
-    recordId: deleted.primaryMatterId ?? deleted.primaryClientId ?? deleted.id,
-    action: 'delete',
-    field: 'Generated Document Deleted',
-    oldValue: deleted.fileName,
-    newValue: 'Deleted',
-    byId: user.id,
-  });
+    await appendDocGenAuditInTransaction(ctx, {
+      recordType: deleted.primaryMatterId ? 'matter' : 'organisation',
+      recordId: deleted.primaryMatterId ?? deleted.primaryClientId ?? deleted.id,
+      action: 'delete',
+      field: 'Generated Document Deleted',
+      oldValue: deleted.fileName,
+      newValue: 'Deleted',
+      byId: user.id,
+    });
 
-  return deleted;
+    return deleted;
+  });
 }
 
 export interface EnrichedTemplateUsageReportResult
@@ -1594,20 +1613,9 @@ export async function updateDocumentGenerationConfigService(
     merged,
   ) as DocumentGenerationConfig;
 
-  await withJsonStoreWriteLock(async (compensator) => {
-    const previousOverride = await repo.getDocumentGenerationTenantConfig(ctx);
+  await repo.withTenantTransaction(ctx, async () => {
     await repo.putDocumentGenerationTenantConfig(ctx, validated, user.id);
-    compensator.register('documents.config_override', async () => {
-      await repo.putDocumentGenerationTenantConfig(
-        ctx,
-        previousOverride,
-        user.id,
-      );
-    });
-
-    const store = getStore();
-    store.audit.unshift({
-      id: nextId(store, 'AU'),
+    await appendDocGenAuditInTransaction(ctx, {
       recordType: 'matter',
       recordId: 'FIRM-DOCGEN-CONFIG',
       action: 'update',
@@ -1615,9 +1623,7 @@ export async function updateDocumentGenerationConfigService(
       oldValue: null,
       newValue: `Storage: ${validated.storageProvider}, Default Format: ${validated.defaultOutputFormat}, Self-Approval: ${validated.approval.allowSelfApproval}`,
       byId: user.id,
-      at: new Date().toISOString(),
     });
-    saveStore(store);
   });
 
   return validated;

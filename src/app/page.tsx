@@ -20,7 +20,7 @@ export default async function HomePage({
     return null;
   }
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
     const resolvedParams = searchParams ? await searchParams : {};
 
     const matterFinanceRes = snap.finance.canViewMatter

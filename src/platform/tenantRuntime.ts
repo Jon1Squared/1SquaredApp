@@ -719,6 +719,59 @@ export function resolveCurrentTenantContext(
   });
 }
 
+/**
+ * Test-only helper for Vitest unit tests that invoke host service functions directly
+ * without an outer HTTP/action cookie session (`NODE_ENV === "test"` only).
+ * Throws immediately outside `NODE_ENV === "test"`.
+ */
+export function resolveDirectTestServiceTenantContext(params: {
+  actorId: string;
+  actorName?: string;
+  actorEmail?: string;
+  roles?: readonly string[];
+  mfaVerified?: boolean;
+  correlationId?: string;
+  tenantConfig?: TenantConfiguration;
+}): TenantContext {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: resolveDirectTestServiceTenantContext is only permitted when NODE_ENV === "test".',
+    );
+  }
+  const tenantConfig = params.tenantConfig ?? getActiveTenantConfiguration();
+  const actorId = params.actorId.trim() || 'test-system-actor';
+  return resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: actorId,
+      tenantId: tenantConfig.tenantId,
+      name: params.actorName?.trim() || `Test Actor ${actorId}`,
+      email:
+        params.actorEmail?.trim() ||
+        `${actorId.toLowerCase().replace(/[^a-z0-9._-]/g, '-')}@${tenantConfig.branding.primaryDomain}`,
+      roles: params.roles ? [...params.roles] : [],
+      mfaVerified: params.mfaVerified ?? true,
+    },
+    hostingMode: tenantConfig.hostingMode,
+    environment: tenantConfig.environment,
+    correlationId: resolveRequestCorrelationId(
+      params.correlationId,
+      'corr-test-svc',
+    ),
+    ...(tenantConfig.database?.dedicatedServerHost
+      ? { configuredPostgresHost: tenantConfig.database.dedicatedServerHost }
+      : {}),
+    ...(tenantConfig.keyVault
+      ? {
+          configuredKeyVault: {
+            vaultName: tenantConfig.keyVault.vaultName,
+            vaultUri: tenantConfig.keyVault.vaultUri,
+          },
+        }
+      : {}),
+  });
+}
+
 export function getPlatformArchitectureSnapshot(
   actor: VerifiedSessionActorInput,
 ): PlatformArchitectureSnapshot {

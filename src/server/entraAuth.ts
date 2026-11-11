@@ -625,4 +625,48 @@ export function createVerifiedSessionActorFromEntraSession(
   });
 }
 
+/**
+ * Mints a `VerifiedSessionActorInput` for the OIDC callback sign-in path from claims that were
+ * already signature-, issuer-, audience- and nonce-verified by `exchangeCodeForVerifiedEntraClaims`
+ * and mapped by `mapEntraTokenClaimsToVerifiedOidcToken`. Used before a session cookie exists, so
+ * sign-in audit entries can be written through the tenant-scoped data layer (S0-15).
+ */
+export function createSignInActorFromVerifiedOidcToken(
+  verifiedToken: VerifiedOidcTokenClaims,
+  params: { oid: string; email: string; correlationId?: string },
+): VerifiedSessionActorInput {
+  const tenantId = (verifiedToken.tenantId ?? '').trim();
+  if (!tenantId) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token is missing required tenantId claim.',
+    );
+  }
+  const email = (params.email ?? '').trim();
+  if (!email) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token is missing required email/UPN claim.',
+    );
+  }
+  const oid = (params.oid ?? '').trim();
+  if (!oid) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token is missing required Entra Object ID (oid) claim.',
+    );
+  }
+  return brandVerifiedSessionActor({
+    id: verifiedToken.sub,
+    sub: verifiedToken.sub,
+    name: verifiedToken.name,
+    email,
+    upn: email,
+    roles: [...verifiedToken.roles],
+    groups: verifiedToken.groups ? [...verifiedToken.groups] : [],
+    entraObjectId: oid,
+    entraTenantId: verifiedToken.entraTenantId,
+    mfaVerified: verifiedToken.mfaVerified,
+    tenantId,
+    correlationId: params.correlationId,
+  });
+}
+
 export { mapEntraTokenClaimsToVerifiedOidcToken };

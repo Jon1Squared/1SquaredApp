@@ -22,6 +22,10 @@ import {
   queryTeamDiaryEntries,
 } from '../../src/domain/keyDateDiary';
 import { getStore, resetStore } from '../../src/server/store';
+import {
+  getKeyDateRepository,
+  testTenantCtx,
+} from '../../src/server/testSupport/auditTestSupport';
 
 function createVerifiedTenantContext(
   tenantId: string,
@@ -455,7 +459,17 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       teamId: activeTeam.id,
       responsiblePersonIds: [staffPartner.id, unpermittedPartner.id],
     });
-    store.keyDates = [awaitingKd, confirmedKd, ...(store.keyDates ?? [])];
+    const kdRepo = getKeyDateRepository();
+    const staffCtx = testTenantCtx(staffPartner.id);
+    await kdRepo.setMatterRestriction(staffCtx, {
+      matterId: staffMatter.id,
+      isRestricted: true,
+      restrictedAccessUserIds: [staffPartner.id],
+    });
+    await kdRepo.putKeyDate(staffCtx, awaitingKd);
+    await kdRepo.putKeyDate(staffCtx, confirmedKd);
+    const readStatus = async (id: string) =>
+      (await kdRepo.getKeyDateById(staffCtx, id, staffPartner.id))?.status;
 
     const verifyRes = await verifyProposedKeyDateRecord(
       awaitingKd.id,
@@ -463,7 +477,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     );
     expect(verifyRes.ok).toBe(false);
     expect(verifyRes.error).toMatch(/Matter not found or restricted/i);
-    expect(awaitingKd.status).toBe('awaiting_verification');
+    expect(await readStatus(awaitingKd.id)).toBe('awaiting_verification');
 
     const resolveRes = await resolveKeyDateOutcomeRecord(
       confirmedKd.id,
@@ -472,7 +486,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     );
     expect(resolveRes.ok).toBe(false);
     expect(resolveRes.error).toMatch(/Matter not found or restricted/i);
-    expect(confirmedKd.status).toBe('confirmed');
+    expect(await readStatus(confirmedKd.id)).toBe('confirmed');
 
     const reassignRes = await reassignKeyDateTeamRecord(
       confirmedKd.id,
@@ -486,7 +500,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(reassignRes.ok).toBe(false);
     expect(reassignRes.error).toMatch(/Matter not found or restricted/i);
 
-    const ackRes = acknowledgeKeyDateReminderRecord(
+    const ackRes = await acknowledgeKeyDateReminderRecord(
       confirmedKd.id,
       unpermittedPartner.id,
     );
@@ -501,7 +515,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     );
     expect(supersedeRes.ok).toBe(false);
     expect(supersedeRes.error).toMatch(/Matter not found or restricted/i);
-    expect(confirmedKd.status).toBe('confirmed');
+    expect(await readStatus(confirmedKd.id)).toBe('confirmed');
 
     // R82: A KeyDate referencing a missing matterId fails closed in services, diary, and exceptions
     const orphanKd: KeyDate = makeSampleKeyDate({
@@ -512,7 +526,21 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       teamId: activeTeam.id,
       responsiblePersonIds: [staffPartner.id],
     });
-    store.keyDates.push(orphanKd);
+    // The repository only accepts writes for matters it has restriction metadata for, so register the
+    // orphan matter id as unrestricted metadata; it remains absent from the matter store.
+    await kdRepo.setMatterRestriction(staffCtx, {
+      matterId: 'M-DOES-NOT-EXIST',
+      isRestricted: false,
+      restrictedAccessUserIds: [],
+    });
+    await kdRepo.putKeyDate(staffCtx, orphanKd);
+    expect(store.matters.some((m) => m.id === 'M-DOES-NOT-EXIST')).toBe(false);
+    const allKeyDates = await kdRepo.listKeyDatesForExceptionsReport(
+      staffCtx,
+      staffPartner.id,
+      { includeMissingMatterOrphans: true },
+    );
+    expect(allKeyDates.some((k) => k.id === orphanKd.id)).toBe(true);
 
     const orphanResolve = await resolveKeyDateOutcomeRecord(
       orphanKd.id,
@@ -527,7 +555,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       query: {},
       todayIso: '2026-11-01',
       config: { enabled: true },
-      keyDates: store.keyDates,
+      keyDates: allKeyDates,
       matters: store.matters,
       people: store.people,
       teams: store.teams,
@@ -538,7 +566,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       viewer: unpermittedPartner,
       todayIso: '2026-11-01',
       config: { enabled: true },
-      keyDates: store.keyDates,
+      keyDates: allKeyDates,
       matters: store.matters,
       people: store.people,
       teams: store.teams,
@@ -549,7 +577,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       viewer: staffPartner,
       todayIso: '2026-11-01',
       config: { enabled: true },
-      keyDates: store.keyDates,
+      keyDates: allKeyDates,
       matters: store.matters,
       people: store.people,
       teams: store.teams,

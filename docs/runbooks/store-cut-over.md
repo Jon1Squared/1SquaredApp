@@ -70,11 +70,12 @@ az containerapp job start \
 - `import-store.mjs` connects through PgBouncer (`6432`) under **`runtimeIdentity`** (`id-runtime-<env>`, `NOINHERIT`), running every upsert inside an explicit transaction starting with `SET LOCAL ROLE role_tenant_<slug>_<env>`.
 - Re-running the import is safe and idempotent (`ON CONFLICT ... DO UPDATE` / `DO NOTHING` with single-increment guard on `template_usage_daily_summaries`).
 - Local equivalent: `npm run db:import -- --modules documents,document-store`.
+- **S0-15** (`--modules key-dates,audit`): the import is idempotent. Running it twice leaves identical `key_dates*` and `audit_entries` counts, and the tenant `AU-` sequence is advanced past the highest imported number, so new entries continue the sequence. `audit_entries` is append-only for `role_tenant_*` (INSERT/SELECT only); the import inserts with `ON CONFLICT DO NOTHING` and never updates existing audit rows. Covered by `core/tests/audit-log-postgres.test.ts`.
 
 ### Step 4 — Verify Row Counts and `CORE_REQUIRED_SCHEMA_VERSION`
 
 1. Inspect the Container Apps job logs (`Log Analytics`) for `"event":"store_import.tenant_succeeded"` on every enabled tenant and confirm zero `"store_import.tenant_failed"` entries. Note that `import-store.mjs` automatically verifies imported row counts on a fresh repository connection before logging `store_import.tenant_succeeded`.
-2. Confirm `public.tenant_schema_migrations` in each tenant database includes `CORE_REQUIRED_SCHEMA_VERSION` (`0006` in `S0-14`). Any tenant below `CORE_REQUIRED_SCHEMA_VERSION` will immediately refuse web traffic with `TENANT_SCHEMA_NOT_READY`.
+2. Confirm `public.tenant_schema_migrations` in each tenant database includes `CORE_REQUIRED_SCHEMA_VERSION` (`0006` in `S0-14`, `0007` in `S0-15`). Any tenant below `CORE_REQUIRED_SCHEMA_VERSION` will immediately refuse web traffic with `TENANT_SCHEMA_NOT_READY`.
 
 ### Step 5 — Scale Up and Route Traffic to the New Web Revision
 

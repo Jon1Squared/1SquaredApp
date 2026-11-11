@@ -302,7 +302,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     ]);
   });
 
-  it('saveEnquiryRecord rejects non-draft saves without privacyNoticeGiven while leaving store.enquiries unchanged, allows draft saves to store privacyNoticeGiven = false, and allows legacy non-draft enquiries with privacyNoticeGiven = false to be edited and fixed (R362, R376, R380)', () => {
+  it('saveEnquiryRecord rejects non-draft saves without privacyNoticeGiven while leaving store.enquiries unchanged, allows draft saves to store privacyNoticeGiven = false, and allows legacy non-draft enquiries with privacyNoticeGiven = false to be edited and fixed (R362, R376, R380)', async () => {
     const store = getStore();
     const channelId =
       valueBySystemKey(store.values, 'enquiry_channel', 'phone')?.id ??
@@ -317,7 +317,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     const beforeEnquiriesSnapshot = structuredClone(store.enquiries);
 
     // 1. Non-draft save with privacyNoticeGiven omitted is rejected on the server and leaves store.enquiries unchanged
-    const omittedNonDraft = saveEnquiryRecord(
+    const omittedNonDraft = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Elin',
@@ -337,7 +337,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     expect(getStore().enquiries).toEqual(beforeEnquiriesSnapshot);
 
     // 2. Non-draft save with privacyNoticeGiven: false is rejected on the server and leaves store.enquiries unchanged
-    const falseNonDraft = saveEnquiryRecord(
+    const falseNonDraft = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Elin',
@@ -358,7 +358,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     expect(getStore().enquiries).toEqual(beforeEnquiriesSnapshot);
 
     // 3. Draft save with privacyNoticeGiven omitted succeeds and stores privacyNoticeGiven: false
-    const draftSaved = saveEnquiryRecord(
+    const draftSaved = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Elin',
@@ -378,7 +378,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
 
     // 4. Routing that draft to non-draft without privacyNoticeGiven: true is rejected and leaves store.enquiries unchanged
     const afterDraftSnapshot = structuredClone(getStore().enquiries);
-    const routeDraftWithoutPrivacy = saveEnquiryRecord(
+    const routeDraftWithoutPrivacy = await saveEnquiryRecord(
       {
         notes: 'Attempting to route draft without privacy notice.',
         privacyNoticeGiven: false,
@@ -401,7 +401,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     };
     getStore().enquiries.unshift(legacyEnquiry);
 
-    const editedLegacy = saveEnquiryRecord(
+    const editedLegacy = await saveEnquiryRecord(
       {
         notes: 'Updated notes on legacy enquiry before confirming privacy notice.',
         privacyNoticeGiven: false,
@@ -414,7 +414,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     );
     expect(editedLegacy.enquiry?.privacyNoticeGiven).toBe(false);
 
-    const fixedLegacy = saveEnquiryRecord(
+    const fixedLegacy = await saveEnquiryRecord(
       {
         notes: 'Updated notes and confirmed privacy notice given.',
         privacyNoticeGiven: true,
@@ -426,7 +426,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
 
     // Once privacyNoticeGiven is true, unsetting it back to false is rejected and leaves store.enquiries unchanged
     const afterFixedSnapshot = structuredClone(getStore().enquiries);
-    const revertPrivacy = saveEnquiryRecord(
+    const revertPrivacy = await saveEnquiryRecord(
       {
         privacyNoticeGiven: false,
       },

@@ -185,6 +185,10 @@ interface Props {
   currentUserKeyDatePermissions?: KeyDatePermission[];
   entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
   entraEnvStatus?: import('@/server/entraAuth').EntraEnvStatus;
+  firmAuditPage?: {
+    entries: import('@/domain/types').AuditEntry[];
+    nextBeforeSeq: number | null;
+  };
   authError?: string;
   authSuccess?: boolean;
   firmName?: string;
