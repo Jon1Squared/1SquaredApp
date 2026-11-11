@@ -70,7 +70,6 @@ export function assertTenantOwnsKeyVaultSecretRef(
     'tenantId' | 'environment' | 'keyVaultSecretPrefix' | 'configuredKeyVault'
   >,
   secretRef: string,
-  configuredVault?: TenantKeyVaultConfig,
 ): { vaultName: string; secretName: string } {
   const tenantId = ctx?.tenantId?.trim().toLowerCase() ?? '';
   if (!tenantId) {
@@ -91,9 +90,7 @@ export function assertTenantOwnsKeyVaultSecretRef(
     );
   }
 
-  const expectedConfiguredVault = parseConfiguredVaultName(
-    configuredVault ?? ctx.configuredKeyVault,
-  );
+  const expectedConfiguredVault = parseConfiguredVaultName(ctx.configuredKeyVault);
   if (expectedConfiguredVault) {
     if (parsedVaultName !== expectedConfiguredVault) {
       throw createCrossTenantVaultError(

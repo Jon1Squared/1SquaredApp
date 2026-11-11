@@ -1970,7 +1970,6 @@ export const TenantConfigurationSchema = z
         assertTenantOwnsKeyVaultSecretRef(
           configVaultContext,
           check.ref,
-          cfg.keyVault,
         );
       } catch (err) {
         ctx.addIssue({

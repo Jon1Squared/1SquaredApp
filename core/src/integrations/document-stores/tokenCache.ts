@@ -20,7 +20,6 @@ import type {
   DocumentStoreErrorReason,
   ProvisioningAccessContext,
   TenantContext,
-  TenantKeyVaultConfig,
   UserAccessContext,
 } from '../../api/index';
 import {
@@ -471,7 +470,6 @@ export class DocumentStoreTokenService {
     storeId: string;
     authConfig: DocumentStoreAuthConfig;
     scope?: string;
-    configuredKeyVault?: TenantKeyVaultConfig;
   }): Promise<string> {
     const { accessContext, storeId, authConfig } = params;
     if (!accessContext || accessContext.kind !== 'user') {
@@ -504,7 +502,6 @@ export class DocumentStoreTokenService {
       assertTenantOwnsKeyVaultSecretRef(
         accessContext.tenantContext,
         authConfig.certificateKeyVaultSecretRef,
-        params.configuredKeyVault,
       );
     }
 
@@ -625,7 +622,6 @@ export class DocumentStoreTokenService {
     storeId: string;
     authConfig: DocumentStoreAuthConfig;
     scope?: string;
-    configuredKeyVault?: TenantKeyVaultConfig;
   }): Promise<string> {
     const { accessContext, storeId, authConfig } = params;
     if (!accessContext || accessContext.kind !== 'provisioning') {
@@ -641,7 +637,6 @@ export class DocumentStoreTokenService {
       assertTenantOwnsKeyVaultSecretRef(
         accessContext.tenantContext,
         authConfig.certificateKeyVaultSecretRef,
-        params.configuredKeyVault,
       );
     }
 
