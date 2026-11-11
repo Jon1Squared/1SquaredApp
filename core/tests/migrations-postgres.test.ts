@@ -321,6 +321,29 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect(summary.exitCode).toBe(1);
   });
 
+  it('never evicts an idle-timed-out pool that still has a checked-out client (R441)', async () => {
+    const ctx = makeTestTenantContext('tenant-a');
+    const poolMgr = new TenantPostgresPoolManager({ poolIdleEvictionMs: 0 });
+    try {
+      const { pool } = await poolMgr.getPoolForTenant(ctx);
+      const held = await pool.connect();
+      try {
+        poolMgr.evictIdlePools(Date.now() + 60_000);
+        const again = await poolMgr.getPoolForTenant(ctx);
+        expect(again.pool).toBe(pool);
+        expect((await held.query('SELECT 1 AS ok')).rows[0]).toEqual({ ok: 1 });
+      } finally {
+        held.release();
+      }
+      // Control: once every client is idle the pool is evicted and a new one is created.
+      poolMgr.evictIdlePools(Date.now() + 60_000);
+      const replaced = await poolMgr.getPoolForTenant(ctx);
+      expect(replaced.pool).not.toBe(pool);
+    } finally {
+      await poolMgr.closeAllPools();
+    }
+  });
+
   it('restores both documents template foreign keys when 0006 is rolled back (R434)', async () => {
     await provisionPostgresClusterRolesAndDatabases({
       tenants: [{ tenantId: 'mig-fk-restore', environment: 'test' }],

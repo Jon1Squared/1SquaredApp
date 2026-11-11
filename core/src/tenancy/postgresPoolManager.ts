@@ -375,7 +375,10 @@ export class TenantPostgresPoolManager {
       this.options.poolIdleEvictionMs ??
       Number(process.env.PLATFORM_POSTGRES_POOL_EVICTION_MS || 10 * 60 * 1000);
     for (const [key, entry] of this.pools.entries()) {
-      if (nowMs - entry.lastUsedAtMs > evictionMs && entry.pool.waitingCount === 0) {
+      if (nowMs - entry.lastUsedAtMs > evictionMs && entry.pool.waitingCount === 0 &&
+        // R441: never end a pool that still has checked-out clients.
+        entry.pool.totalCount === entry.pool.idleCount
+      ) {
         this.pools.delete(key);
         void entry.pool.end().catch(() => {});
       }
