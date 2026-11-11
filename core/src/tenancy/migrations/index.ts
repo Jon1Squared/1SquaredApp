@@ -631,16 +631,6 @@ export function computeMigrationChecksum(
 }
 
 export class TenantMigrationRunner {
-  private readonly hostOverride?: string;
-  private readonly portOverride?: number;
-
-  public constructor(options?: {
-    hostOverride?: string;
-    portOverride?: number;
-  }) {
-    this.hostOverride = options?.hostOverride;
-    this.portOverride = options?.portOverride;
-  }
 
   private ensureContext(ctx: TenantContext): void {
     if (!ctx?.tenantId || !ctx?.postgresDatabaseName) {
@@ -666,11 +656,7 @@ export class TenantMigrationRunner {
     const migrateIdent = quotePgIdentifier(migrateUser);
     const dbIdent = quotePgIdentifier(ctx.postgresDatabaseName);
 
-    const client = await createDirectMigrationClient({
-      ctx,
-      hostOverride: this.hostOverride,
-      portOverride: this.portOverride,
-    });
+    const client = await createDirectMigrationClient({ ctx });
 
     try {
       // Ensure schema_migrations ledger & R402 baseline privileges under advisory transaction lock
@@ -843,11 +829,7 @@ export class TenantMigrationRunner {
     migrations: readonly TenantMigrationDefinition[] = CORE_TENANT_MIGRATIONS,
   ): Promise<boolean> {
     this.ensureContext(ctx);
-    const client = await createDirectMigrationClient({
-      ctx,
-      hostOverride: this.hostOverride,
-      portOverride: this.portOverride,
-    });
+    const client = await createDirectMigrationClient({ ctx });
 
     try {
       await client.query('BEGIN');
@@ -929,11 +911,7 @@ export class TenantMigrationRunner {
     ctx: TenantContext,
   ): Promise<AppliedTenantMigrationRecord[]> {
     this.ensureContext(ctx);
-    const client = await createDirectMigrationClient({
-      ctx,
-      hostOverride: this.hostOverride,
-      portOverride: this.portOverride,
-    });
+    const client = await createDirectMigrationClient({ ctx });
     try {
       const tableCheck = await client.query(
         `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'tenant_schema_migrations'`,
@@ -972,11 +950,7 @@ export class TenantMigrationRunner {
 
   public async getActiveTables(ctx: TenantContext): Promise<string[]> {
     this.ensureContext(ctx);
-    const client = await createDirectMigrationClient({
-      ctx,
-      hostOverride: this.hostOverride,
-      portOverride: this.portOverride,
-    });
+    const client = await createDirectMigrationClient({ ctx });
     try {
       const res = await client.query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name ASC`,

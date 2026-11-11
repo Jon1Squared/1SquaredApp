@@ -9,6 +9,10 @@
  *   each `role_tenant_<slug>_<env>`, with ZERO direct schema/table/sequence privileges.
  * - Each `pg_tenant_<slug>_<env>`: `REVOKE ALL ON DATABASE ... FROM PUBLIC`, `REVOKE CREATE, USAGE ON SCHEMA public FROM PUBLIC`,
  *   `GRANT USAGE ON SCHEMA public TO role_tenant_<slug>_<env>`.
+ *
+ * Local and CI tooling only (R435): not exported from `@platform/core`. Scripts and tests import
+ * this module by path. It stays inside `core/src/tenancy/` because Owner Decision 2 allows `pg`
+ * nowhere else. Every credential comes from the environment; there are no built-in passwords.
  */
 
 import type { PlatformEnvironment } from '../api/index';
@@ -16,18 +20,22 @@ import { loadPgModule } from './pgDriver';
 import { quotePgIdentifier } from './postgresPoolManager';
 
 export interface ProvisionPostgresClusterOptions {
-  readonly host?: string;
-  readonly adminPort?: number;
-  readonly adminUser?: string;
-  readonly adminPassword?: string;
-  readonly migrateUser?: string;
-  readonly migratePassword?: string;
-  readonly runtimeUser?: string;
-  readonly runtimePassword?: string;
   readonly tenants: ReadonlyArray<{
     readonly tenantId: string;
     readonly environment: PlatformEnvironment;
   }>;
+}
+
+function requireBootstrapEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    const err = new Error(
+      `TENANCY_DB_CONFIG_ERROR: ${name} must be set to provision local or CI PostgreSQL.`,
+    ) as Error & { code: string };
+    err.code = 'TENANCY_DB_CONFIG_ERROR';
+    throw err;
+  }
+  return value;
 }
 
 export async function provisionPostgresClusterRolesAndDatabases(
@@ -35,37 +43,21 @@ export async function provisionPostgresClusterRolesAndDatabases(
 ): Promise<{ databasesProvisioned: string[] }> {
   const pg = await loadPgModule();
   const host =
-    options.host?.trim() ||
     process.env.PLATFORM_POSTGRES_MIGRATE_HOST?.trim() ||
-    process.env.PLATFORM_POSTGRES_HOST?.trim() ||
-    '127.0.0.1';
-  const port =
-    options.adminPort ??
-    Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
-  const adminUser =
-    options.adminUser?.trim() ||
-    process.env.PLATFORM_POSTGRES_ADMIN_USER?.trim() ||
-    'postgres';
-  const adminPassword =
-    options.adminPassword ??
-    process.env.PLATFORM_POSTGRES_ADMIN_PASSWORD ??
-    'postgres';
+    requireBootstrapEnv('PLATFORM_POSTGRES_HOST');
+  const port = Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
+  const adminUser = requireBootstrapEnv('PLATFORM_POSTGRES_ADMIN_USER');
+  const adminPassword = requireBootstrapEnv('PLATFORM_POSTGRES_ADMIN_PASSWORD');
   const migrateUser =
-    options.migrateUser?.trim() ||
-    process.env.PLATFORM_POSTGRES_MIGRATE_USER?.trim() ||
-    'migrate_login';
-  const migratePassword =
-    options.migratePassword ??
-    process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD ??
-    'onesquared_local_migrate';
+    process.env.PLATFORM_POSTGRES_MIGRATE_USER?.trim() || 'migrate_login';
+  const migratePassword = requireBootstrapEnv(
+    'PLATFORM_POSTGRES_MIGRATE_PASSWORD',
+  );
   const runtimeUser =
-    options.runtimeUser?.trim() ||
-    process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() ||
-    'runtime_login';
-  const runtimePassword =
-    options.runtimePassword ??
-    process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ??
-    'onesquared_local_runtime';
+    process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
+  const runtimePassword = requireBootstrapEnv(
+    'PLATFORM_POSTGRES_RUNTIME_PASSWORD',
+  );
 
   const migrateIdent = quotePgIdentifier(migrateUser);
   const runtimeIdent = quotePgIdentifier(runtimeUser);

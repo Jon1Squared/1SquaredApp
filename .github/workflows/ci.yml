@@ -41,6 +41,12 @@ jobs:
       PLATFORM_POSTGRES_HOST: 127.0.0.1
       PLATFORM_POSTGRES_PORT: '6432'
       PLATFORM_POSTGRES_MIGRATE_PORT: '5432'
+      PLATFORM_HOSTING_MODE: multi_tenant
+      # Throwaway CI cluster credentials (R435): core has no built-in passwords.
+      PLATFORM_POSTGRES_ADMIN_USER: postgres
+      PLATFORM_POSTGRES_ADMIN_PASSWORD: postgres
+      PLATFORM_POSTGRES_RUNTIME_PASSWORD: onesquared_local_runtime
+      PLATFORM_POSTGRES_MIGRATE_PASSWORD: onesquared_local_migrate
 
     steps:
       - name: Checkout repository
@@ -163,6 +169,12 @@ jobs:
       PLATFORM_POSTGRES_HOST: 127.0.0.1
       PLATFORM_POSTGRES_PORT: '6432'
       PLATFORM_POSTGRES_MIGRATE_PORT: '5432'
+      PLATFORM_HOSTING_MODE: multi_tenant
+      # Throwaway CI cluster credentials (R435): core has no built-in passwords.
+      PLATFORM_POSTGRES_ADMIN_USER: postgres
+      PLATFORM_POSTGRES_ADMIN_PASSWORD: postgres
+      PLATFORM_POSTGRES_RUNTIME_PASSWORD: onesquared_local_runtime
+      PLATFORM_POSTGRES_MIGRATE_PASSWORD: onesquared_local_migrate
 
     steps:
       - name: Checkout repository

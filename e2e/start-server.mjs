@@ -13,6 +13,15 @@ const serverEnv = {
   PLATFORM_POSTGRES_PORT: process.env.PLATFORM_POSTGRES_PORT || '5432',
   PLATFORM_POSTGRES_MIGRATE_PORT:
     process.env.PLATFORM_POSTGRES_MIGRATE_PORT || '5432',
+  PLATFORM_HOSTING_MODE: process.env.PLATFORM_HOSTING_MODE || 'multi_tenant',
+  // Throwaway local/CI cluster credentials (R435): core has no built-in passwords.
+  PLATFORM_POSTGRES_ADMIN_USER: process.env.PLATFORM_POSTGRES_ADMIN_USER || 'postgres',
+  PLATFORM_POSTGRES_ADMIN_PASSWORD:
+    process.env.PLATFORM_POSTGRES_ADMIN_PASSWORD || 'postgres',
+  PLATFORM_POSTGRES_RUNTIME_PASSWORD:
+    process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD || 'onesquared_local_runtime',
+  PLATFORM_POSTGRES_MIGRATE_PASSWORD:
+    process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD || 'onesquared_local_migrate',
 };
 
 // 1. Ensure local / CI PostgreSQL 16 is running, provisioned, and migrated

@@ -31,7 +31,6 @@ export * from './keyVaultSecrets';
 export * from './tenantRegistry';
 export * from './postgresPoolManager';
 export * from './tenantScopedRepository';
-export * from './postgresAdminBootstrap';
 export * from './keyDateRepository';
 
 export {

@@ -39,11 +39,6 @@ export interface TenantPostgresPoolManagerOptions {
   readonly idleTimeoutMillis?: number;
   readonly connectionTimeoutMillis?: number;
   readonly poolIdleEvictionMs?: number;
-  readonly hostOverride?: string;
-  readonly portOverride?: number;
-  readonly databaseNameOverride?: string;
-  readonly runtimeUserOverride?: string;
-  readonly runtimePasswordOverride?: string;
 }
 
 interface ManagedPoolEntry {
@@ -206,6 +201,26 @@ function isLocalPostgresHost(host: string): boolean {
   return lower === 'localhost' || lower === '127.0.0.1' || lower === '::1' || lower === 'postgres' || lower === 'pgbouncer';
 }
 
+/**
+ * Password authentication never falls back to a built-in password (rule 5, fail closed).
+ * Local `.env` files and CI set the variable explicitly.
+ */
+export function requirePostgresPasswordEnv(
+  name:
+    | 'PLATFORM_POSTGRES_RUNTIME_PASSWORD'
+    | 'PLATFORM_POSTGRES_MIGRATE_PASSWORD',
+): string {
+  const value = process.env[name];
+  if (!value) {
+    const err = new Error(
+      `TENANCY_DB_CONFIG_ERROR: ${name} must be set when PostgreSQL password authentication is used.`,
+    ) as Error & { code: string };
+    err.code = 'TENANCY_DB_CONFIG_ERROR';
+    throw err;
+  }
+  return value;
+}
+
 async function ensurePgParsersInitialised(): Promise<typeof PgTypes> {
   const pg = await loadPgModule();
   if (!pgTypeParsersConfigured && pg.types?.setTypeParser) {
@@ -230,18 +245,14 @@ export class TenantPostgresPoolManager {
   ): ResolvedTenantPostgresRuntimeTarget {
     assertValidPostgresTenantContext(ctx);
     const configuredHost =
-      this.options.hostOverride?.trim() ||
       ctx.configuredPostgresHost?.trim() ||
       process.env.PLATFORM_POSTGRES_HOST?.trim() ||
       (ctx.hostingMode === 'single_tenant'
         ? `${ctx.tenantId}-pg-${ctx.environment}.postgres.database.azure.com`
         : `platform-shared-pool-${ctx.environment}.postgres.database.azure.com`);
 
-    const port =
-      this.options.portOverride ??
-      Number(process.env.PLATFORM_POSTGRES_PORT || 6432);
-    const databaseName =
-      this.options.databaseNameOverride?.trim() || ctx.postgresDatabaseName;
+    const port = Number(process.env.PLATFORM_POSTGRES_PORT || 6432);
+    const databaseName = ctx.postgresDatabaseName;
     const tenantRoleName = resolveTenantPostgresRoleName(ctx);
     const useTls =
       process.env.PLATFORM_POSTGRES_SSL === 'true' ||
@@ -275,15 +286,12 @@ export class TenantPostgresPoolManager {
     }
 
     const runtimeUser =
-      this.options.runtimeUserOverride?.trim() ||
-      process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() ||
-      'runtime_login';
+      process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
     const authMode = process.env.PLATFORM_POSTGRES_AUTH_MODE?.trim();
     const useEntraAuth =
       authMode === 'entra_managed_identity' ||
       (!authMode &&
         !isLocalPostgresHost(target.host) &&
-        !this.options.runtimePasswordOverride &&
         !process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD);
 
     const passwordConfig: string | (() => Promise<string>) = useEntraAuth
@@ -293,9 +301,7 @@ export class TenantPostgresPoolManager {
               process.env.AZURE_CLIENT_ID?.trim() ||
               undefined,
           )
-      : (this.options.runtimePasswordOverride ??
-        process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ??
-        'onesquared_local_runtime');
+      : requirePostgresPasswordEnv('PLATFORM_POSTGRES_RUNTIME_PASSWORD');
 
     const pool = new pg.Pool({
       host: target.host,
@@ -403,19 +409,18 @@ export async function createDirectMigrationClient(params: {
     | 'postgresDatabaseName'
     | 'configuredPostgresHost'
   >;
-  hostOverride?: string;
-  portOverride?: number;
 }): Promise<PgTypes.Client> {
   const pg = await ensurePgParsersInitialised();
   const host =
-    params.hostOverride?.trim() ||
     params.ctx.configuredPostgresHost?.trim() ||
     process.env.PLATFORM_POSTGRES_MIGRATE_HOST?.trim() ||
-    process.env.PLATFORM_POSTGRES_HOST?.trim() ||
-    '127.0.0.1';
-  const port =
-    params.portOverride ??
-    Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
+    process.env.PLATFORM_POSTGRES_HOST?.trim();
+  if (!host) {
+    throw new Error(
+      'TENANCY_DB_CONFIG_ERROR: PLATFORM_POSTGRES_MIGRATE_HOST or PLATFORM_POSTGRES_HOST must be set for migration connections.',
+    );
+  }
+  const port = Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
   const migrateUser =
     process.env.PLATFORM_POSTGRES_MIGRATE_USER?.trim() || 'migrate_login';
   const authMode = process.env.PLATFORM_POSTGRES_AUTH_MODE?.trim();
@@ -431,8 +436,7 @@ export async function createDirectMigrationClient(params: {
           process.env.AZURE_CLIENT_ID?.trim() ||
           undefined,
       )
-    : (process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD ??
-      'onesquared_local_migrate');
+    : requirePostgresPasswordEnv('PLATFORM_POSTGRES_MIGRATE_PASSWORD');
 
   const useTls =
     process.env.PLATFORM_POSTGRES_SSL === 'true' ||

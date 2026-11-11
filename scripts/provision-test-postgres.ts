@@ -8,12 +8,13 @@
 
 import {
   CORE_TENANT_MIGRATIONS,
-  provisionPostgresClusterRolesAndDatabases,
   resolveTenantFromVerifiedToken,
   TenantMigrationRunner,
   type PlatformEnvironment,
 } from '@platform/core';
 import '../core/src/tenancy/pgNodePreload';
+// Local/CI provisioning helper; deliberately not exported from @platform/core (R435).
+import { provisionPostgresClusterRolesAndDatabases } from '../core/src/tenancy/postgresAdminBootstrap';
 
 const TEST_CLUSTER_TENANTS: ReadonlyArray<{
   readonly tenantId: string;

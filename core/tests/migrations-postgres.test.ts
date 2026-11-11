@@ -5,7 +5,6 @@ import {
   CORE_REQUIRED_SCHEMA_VERSION,
   CORE_TENANT_MIGRATIONS,
   createDirectMigrationClient,
-  provisionPostgresClusterRolesAndDatabases,
   resolveTenantFromVerifiedToken,
   TenantMigrationRunner,
   TenantPostgresPoolManager,
@@ -15,6 +14,7 @@ import {
   type TenantMigrationDefinition,
 } from '@platform/core';
 import * as corePkg from '@platform/core';
+import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import * as tenantRuntimePkg from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/server/store';
 import {
@@ -199,6 +199,43 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
 
     const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
     expect(reapplied.map((m) => m.version)).toEqual(['0005', '0006']);
+  });
+
+  it('fails closed with TENANCY_DB_CONFIG_ERROR when password auth has no password env var, and core holds no built-in passwords (R435)', async () => {
+    const saved = {
+      runtime: process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD,
+      migrate: process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD,
+    };
+    const ctx = makeTestTenantContext('tenant-a');
+    const poolMgr = new TenantPostgresPoolManager();
+    try {
+      delete process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD;
+      delete process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD;
+      await expect(poolMgr.getPoolForTenant(ctx)).rejects.toMatchObject({
+        code: 'TENANCY_DB_CONFIG_ERROR',
+        message:
+          'TENANCY_DB_CONFIG_ERROR: PLATFORM_POSTGRES_RUNTIME_PASSWORD must be set when PostgreSQL password authentication is used.',
+      });
+      await expect(createDirectMigrationClient({ ctx })).rejects.toMatchObject({
+        code: 'TENANCY_DB_CONFIG_ERROR',
+        message:
+          'TENANCY_DB_CONFIG_ERROR: PLATFORM_POSTGRES_MIGRATE_PASSWORD must be set when PostgreSQL password authentication is used.',
+      });
+    } finally {
+      process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD = saved.runtime;
+      process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD = saved.migrate;
+      await poolMgr.closeAllPools();
+    }
+    // Positive control: with the variables restored, tenant A connects.
+    const client = await createDirectMigrationClient({ ctx });
+    await client.end();
+
+    const coreSources = collectSourceFiles(path.join(REPO_ROOT, 'core', 'src'));
+    const offenders = coreSources.filter((file) =>
+      /onesquared_local_|databaseNameOverride/.test(fs.readFileSync(file, 'utf8')),
+    );
+    expect(offenders).toEqual([]);
+    expect('provisionPostgresClusterRolesAndDatabases' in corePkg).toBe(false);
   });
 
   it('restores both documents template foreign keys when 0006 is rolled back (R434)', async () => {
@@ -406,24 +443,29 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await singleConnPoolMgr.closeAllPools();
     }
 
-    // 2. Real-pool wrong-database routing test (R402b):
-    // Pointing TenantPostgresPoolManager for Tenant A's context at `pg_tenant_tenant_b_test`
-    // fails closed with PostgreSQL permission denied (`42501`) via the real pool code path!
-    const misroutedPoolMgr = new TenantPostgresPoolManager({
-      databaseNameOverride: 'pg_tenant_tenant_b_test',
+    // 2. Real-pool wrong-database routing test (R402b, R435):
+    // A real Tenant A context whose database entry points at Tenant B's database (as a
+    // misconfigured registry entry would) fails closed with PostgreSQL permission denied (`42501`).
+    const misroutedCtxA: TenantContext = Object.freeze({
+      ...ctxA,
+      postgresDatabaseName: ctxB.postgresDatabaseName,
     });
+    const misroutedPoolMgr = new TenantPostgresPoolManager();
     try {
       const misroutedRepo = new DiagnosticProbeRepository({
         poolManager: misroutedPoolMgr,
       });
       await expect(
         misroutedRepo.insertDiagnosticTemplateRow(
-          ctxA,
+          misroutedCtxA,
           'TPL-SHOULD-FAIL',
           'FAIL-CODE',
         ),
       ).rejects.toMatchObject({
         code: '42501',
+        message: expect.stringMatching(
+          /^TENANCY_DATABASE_PERMISSION_DENIED: PostgreSQL permission denied during .+ \(SQLSTATE 42501\)\.$/,
+        ),
       });
     } finally {
       await misroutedPoolMgr.closeAllPools();
