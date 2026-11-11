@@ -12,6 +12,7 @@ import {
   validateTenantRegistry,
   type TenantContext,
   type TenantMigrationDefinition,
+  type TenantRegistry,
 } from '@platform/core';
 import * as corePkg from '@platform/core';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
@@ -278,6 +279,46 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await freshPoolMgr.closeAllPools();
       await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
     }
+  });
+
+  it('runMigrateJobSweep refuses a registry entry whose database does not match the tenant ID (R440)', async () => {
+    const host = process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1';
+    const entry = (tenantId: string, slug: string, databaseSlug: string) => ({
+      tenantId,
+      slug,
+      environment: 'test' as const,
+      postgresHost: host,
+      postgresDatabaseName: `pg_tenant_${databaseSlug}_test`,
+      postgresRoleName: `role_tenant_${slug}_test`,
+      keyVaultUri: 'https://kv-registrycheck-test.vault.azure.net/',
+      packageDir: 'client-not-a-law-firm',
+      timeZone: 'Europe/London',
+      enabled: true,
+    });
+    // validateTenantRegistry already rejects this shape, so the sweep's own check (defence in depth)
+    // is exercised with an unvalidated registry object, as a corrupted in-memory registry would be.
+    validateTenantRegistry({
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [entry('tenant-b', 'tenant_b', 'tenant_b')],
+    });
+    const registry: TenantRegistry = Object.freeze({
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        entry('tenant-a', 'tenant_a', 'tenant_b'),
+        entry('tenant-b', 'tenant_b', 'tenant_b'),
+      ],
+    });
+    const summary = await runMigrateJobSweep({ registry });
+    expect(summary.failedTenants).toEqual([
+      { tenantId: 'tenant-a', errorCode: 'TENANT_REGISTRY_DATABASE_MISMATCH' },
+    ]);
+    // Positive control: the correctly configured tenant still migrates.
+    expect(summary.succeededTenants).toEqual(['tenant-b']);
+    expect(summary.exitCode).toBe(1);
   });
 
   it('restores both documents template foreign keys when 0006 is rolled back (R434)', async () => {

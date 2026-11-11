@@ -81,6 +81,24 @@ export async function runMigrateJobSweep(options?: {
       },
     });
 
+    // R440: refuse to migrate a database other than the one derived from the tenant ID.
+    if (entry.postgresDatabaseName !== ctx.postgresDatabaseName) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: 'TENANT_REGISTRY_DATABASE_MISMATCH',
+      });
+      emitTenantTelemetryException({
+        eventName: 'job.migrate.tenant_failed',
+        tenantId: entry.tenantId,
+        correlationId,
+        error: new Error(
+          'TENANT_REGISTRY_DATABASE_MISMATCH: Registry postgresDatabaseName does not match the database derived from the tenant ID.',
+        ),
+        properties: { databaseName: entry.postgresDatabaseName },
+      });
+      continue;
+    }
+
     const tenantMigrations =
       options?.migrationsByTenant?.[entry.tenantId] ?? CORE_TENANT_MIGRATIONS;
 
