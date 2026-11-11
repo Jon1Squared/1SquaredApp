@@ -110,20 +110,29 @@ GRANT USAGE ON SCHEMA public TO :"tenant_role";
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, :"runtime_login";
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, :"runtime_login";
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO :"tenant_role";
+-- Every table except the append-only audit_entries gets read/write (R438).
+-- psql substitutes :'tenant_role' here because it is outside a dollar-quoted body; \gexec runs each generated statement.
+SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO %I', tablename, :'tenant_role')
+  FROM pg_tables
+ WHERE schemaname = 'public' AND tablename <> 'audit_entries'
+\gexec
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"tenant_role";
 
--- 5. Preserve append-only immutability on firm audit_entries (migration 0007+)
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name = 'audit_entries'
-  ) THEN
-    EXECUTE format('REVOKE UPDATE, DELETE ON TABLE public.audit_entries FROM %I', :'tenant_role');
-    EXECUTE format('GRANT SELECT, INSERT ON TABLE public.audit_entries TO %I', :'tenant_role');
-  END IF;
-END $$;
+-- 5. Preserve append-only immutability on firm audit_entries (migration 0007+).
+-- Generates nothing when the table does not exist yet.
+SELECT format('REVOKE UPDATE, DELETE, TRUNCATE ON TABLE public.audit_entries FROM %I', :'tenant_role'),
+       format('GRANT SELECT, INSERT ON TABLE public.audit_entries TO %I', :'tenant_role')
+  FROM pg_tables
+ WHERE schemaname = 'public' AND tablename = 'audit_entries'
+\gexec
+
+-- 5b. Check the grants. Expect true, true, false, false, false (or no row before 0007).
+SELECT has_table_privilege(:'tenant_role', 'public.audit_entries', 'SELECT')   AS can_select,
+       has_table_privilege(:'tenant_role', 'public.audit_entries', 'INSERT')   AS can_insert,
+       has_table_privilege(:'tenant_role', 'public.audit_entries', 'UPDATE')   AS can_update,
+       has_table_privilege(:'tenant_role', 'public.audit_entries', 'DELETE')   AS can_delete,
+       has_table_privilege(:'tenant_role', 'public.audit_entries', 'TRUNCATE') AS can_truncate
+ WHERE to_regclass('public.audit_entries') IS NOT NULL;
 
 -- 6. Restore default privileges for future expand migrations run by migrate_login
 ALTER DEFAULT PRIVILEGES FOR ROLE :"migrate_login" IN SCHEMA public
