@@ -27,6 +27,11 @@ export interface TenantMigrationDefinition {
   readonly downSql: string;
   readonly tablesChanged: readonly string[];
   readonly dependsOn?: readonly string[];
+  /**
+   * Checksums recorded by earlier releases of this same migration whose `upSql` is
+   * unchanged and only `downSql` was corrected. Never list a checksum whose `upSql` differs.
+   */
+  readonly acceptedPriorChecksums?: readonly string[];
 }
 
 export interface AppliedTenantMigrationRecord {
@@ -566,10 +571,25 @@ ALTER TABLE documents
   DROP CONSTRAINT IF EXISTS documents_template_id_fkey,
   DROP CONSTRAINT IF EXISTS documents_template_version_id_fkey;
 `.trim(),
+  // R434: the upSql drops the documents -> template foreign keys, so the downSql restores them.
+  // NOT VALID keeps the rollback safe when rows written after 0006 no longer satisfy them.
   downSql: `
 DROP TABLE IF EXISTS document_store_tenant_configs;
 DROP TABLE IF EXISTS document_generation_tenant_configs;
+
+ALTER TABLE documents
+  DROP CONSTRAINT IF EXISTS documents_template_id_fkey,
+  DROP CONSTRAINT IF EXISTS documents_template_version_id_fkey;
+ALTER TABLE documents
+  ADD CONSTRAINT documents_template_id_fkey
+    FOREIGN KEY (template_id) REFERENCES document_templates(id) NOT VALID,
+  ADD CONSTRAINT documents_template_version_id_fkey
+    FOREIGN KEY (template_version_id) REFERENCES document_template_versions(id) NOT VALID;
 `.trim(),
+  // Checksum recorded before R434 corrected the downSql (the upSql is unchanged).
+  acceptedPriorChecksums: [
+    'a2f39b9403c1dbd0e15f81f52150b804fec75196bcd5e352b6db8d4a3424cf54',
+  ],
 };
 
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
@@ -718,7 +738,13 @@ export class TenantMigrationRunner {
           );
 
           if (appliedMap.has(migration.version)) {
-            if (appliedMap.get(migration.version) !== checksum) {
+            const recordedChecksum = appliedMap.get(migration.version);
+            if (
+              recordedChecksum !== checksum &&
+              !(migration.acceptedPriorChecksums ?? []).includes(
+                recordedChecksum ?? '',
+              )
+            ) {
               throw new Error(
                 `TENANCY_MIGRATION_CHECKSUM_MISMATCH: Migration ${migration.version} was modified after being applied to ${ctx.postgresDatabaseName}.`,
               );

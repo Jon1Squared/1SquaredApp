@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CORE_REQUIRED_SCHEMA_VERSION,
   CORE_TENANT_MIGRATIONS,
+  createDirectMigrationClient,
   provisionPostgresClusterRolesAndDatabases,
   resolveTenantFromVerifiedToken,
   TenantMigrationRunner,
@@ -198,6 +199,51 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
 
     const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
     expect(reapplied.map((m) => m.version)).toEqual(['0005', '0006']);
+  });
+
+  it('restores both documents template foreign keys when 0006 is rolled back (R434)', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'mig-fk-restore', environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext('mig-fk-restore');
+    const runner = new TenantMigrationRunner();
+    for (const v of ['0006', '0005', '0004', '0003', '0002', '0001']) {
+      await runner.rollbackVersion(ctx, v);
+    }
+
+    const readTemplateFks = async (): Promise<string[]> => {
+      // Fresh direct connection for every read.
+      const client = await createDirectMigrationClient({ ctx });
+      try {
+        const res = await client.query<{ conname: string }>(
+          `SELECT conname FROM pg_constraint
+            WHERE conrelid = 'public.documents'::regclass
+              AND contype = 'f'
+              AND conname IN ('documents_template_id_fkey', 'documents_template_version_id_fkey')
+            ORDER BY conname`,
+        );
+        return res.rows.map((r) => r.conname);
+      } finally {
+        await client.end();
+      }
+    };
+    const bothKeys = [
+      'documents_template_id_fkey',
+      'documents_template_version_id_fkey',
+    ];
+
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS.slice(0, 5));
+    expect(await readTemplateFks()).toEqual(bothKeys);
+
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(await readTemplateFks()).toEqual([]);
+
+    expect(await runner.rollbackVersion(ctx, '0006')).toBe(true);
+    expect(await readTemplateFks()).toEqual(bothKeys);
+
+    const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(reapplied.map((m) => m.version)).toEqual(['0006']);
+    expect(await readTemplateFks()).toEqual([]);
   });
 
   it('isolates per-tenant migration failures in runMigrateJobSweep and refuses unmigrated tenants at runtime with TENANT_SCHEMA_NOT_READY (R403)', async () => {
