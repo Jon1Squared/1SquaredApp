@@ -37,6 +37,7 @@ export * from './partyRepository';
 export * from './matterRepository';
 export * from './intakeQuoteRepository';
 export * from './taskWorkflowRepository';
+export * from './hrRbacRepository';
 
 export {
   isEntraMfaVerified,
