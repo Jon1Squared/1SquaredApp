@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  assertTenantOwnsKeyVaultSecretRef,
   buildTenantCacheKey,
    collectConfigDeprecationWarnings,
   ConflictReviewConfigSubSchema,
@@ -8665,6 +8666,44 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     );
     expect(JSON.stringify(entriesB)).not.toContain('fictionalchambers.co.uk');
     expect(JSON.stringify(entriesB)).not.toContain('Bernard Sterling');
+  });
+
+  it('restricts derived Key Vault names to the context environment, so a test context cannot resolve a live vault reference (S0-13b, R425)', () => {
+    const ctxTest = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantAToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-kv-env-r425',
+    });
+    expect(ctxTest.configuredKeyVault).toBeUndefined();
+
+    let caught: unknown;
+    try {
+      assertTenantOwnsKeyVaultSecretRef(
+        ctxTest,
+        `kv://kv-${ctxTest.tenantId}-live/sp-provisioning-cert`,
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as { code?: string }).code).toBe(
+      'TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED',
+    );
+    expect((caught as Error).message).toBe(
+      `TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED: Tenant "${ctxTest.tenantId}" is not permitted to access Key Vault "kv-${ctxTest.tenantId}-live".`,
+    );
+
+    // Positive tenant-A control: the same tenant's vault for its own environment resolves
+    expect(
+      assertTenantOwnsKeyVaultSecretRef(
+        ctxTest,
+        `kv://kv-${ctxTest.tenantId}-test/sp-provisioning-cert`,
+      ),
+    ).toEqual({
+      vaultName: `kv-${ctxTest.tenantId}-test`,
+      secretName: 'sp-provisioning-cert',
+    });
   });
 
   it('enforces two-tenant Key Vault secret-reference isolation in DocumentStoreTokenService including 24-character truncated vault names (S0-13b, ADR 0024 AG3, R411, R413)', async () => {

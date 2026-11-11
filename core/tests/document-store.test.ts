@@ -2872,6 +2872,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             nonDevEnv === undefined
               ? ({ ...baseNonDevCtx, environment: undefined } as unknown as TenantContext)
               : baseNonDevCtx;
+          // Each context references its own environment's vault (R425), so the
+          // rejection below proves the mock-handler guard, not the vault boundary.
+          const envAuthCfg = {
+            ...liveAuthCfg,
+            certificateKeyVaultSecretRef: `kv://${baseNonDevCtx.keyVaultSecretPrefix}/sp-provisioning-cert`,
+          };
           await expect(
             liveTokenService.acquireDelegatedUserToken({
               accessContext: {
@@ -2883,7 +2889,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
                 userAssertionToken: 'live-assertion',
               },
               storeId: 'sp-live',
-              authConfig: liveAuthCfg,
+              authConfig: envAuthCfg,
             }),
           ).rejects.toMatchObject({ code: 'misconfigured' });
           await expect(
@@ -2895,7 +2901,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
                 triggerEvent: 'r90.test',
               },
               storeId: 'sp-live',
-              authConfig: liveAuthCfg,
+              authConfig: envAuthCfg,
             }),
           ).rejects.toMatchObject({ code: 'misconfigured' });
         }
@@ -3081,8 +3087,17 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         // R20: Sample document seeding runs when enableDemoMode is true in non-live, and is skipped when enableDemoMode is false
         const cfgSnapshot = store.documentStoreConfigOverride;
         const tenantRuntime = await import('@/platform/tenantRuntime');
+        // Keep the test environment overlay (its document stores reference the test
+        // vault, R425) and only switch the demo-mode flag.
+        const testEnvOverlay = JSON.parse(
+          fs.readFileSync(
+            tenantRuntime.getActiveTenantEnvironmentOverlayPath('test'),
+            'utf8',
+          ),
+        ) as Record<string, unknown>;
         try {
           tenantRuntime.setActiveTenantConfigForTesting(null, {
+            ...testEnvOverlay,
             featureFlags: { enableDemoMode: true },
           });
           const m4 = store.matters.find((m) => m.id === 'M-000004')!;
@@ -3113,6 +3128,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           expect(filesInM4.length).toBeGreaterThan(0);
 
           tenantRuntime.setActiveTenantConfigForTesting(null, {
+            ...testEnvOverlay,
             featureFlags: { enableDemoMode: false },
           });
           const m3 = store.matters.find((m) => m.id === 'M-000003')!;

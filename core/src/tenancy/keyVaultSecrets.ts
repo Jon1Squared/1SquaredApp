@@ -105,9 +105,12 @@ export function assertTenantOwnsKeyVaultSecretRef(
   if (ctx.keyVaultSecretPrefix?.trim()) {
     allowedPrefixes.add(ctx.keyVaultSecretPrefix.trim().toLowerCase());
   }
-  for (const env of VALID_PLATFORM_ENVIRONMENTS) {
-    allowedPrefixes.add(`kv-${tenantId}-${env}`);
-    allowedPrefixes.add(`kv-${compactSlug}-${env}`);
+  // Only the context's own environment is allowed: a `test` context must never resolve a
+  // `kv-<tenant>-live` reference (Rule 5, ADR 0024, R425). An unknown environment adds nothing.
+  const environment = ctx.environment?.trim().toLowerCase() ?? '';
+  if (VALID_PLATFORM_ENVIRONMENTS.has(environment)) {
+    allowedPrefixes.add(`kv-${tenantId}-${environment}`);
+    allowedPrefixes.add(`kv-${compactSlug}-${environment}`);
   }
 
   if (!allowedPrefixes.has(parsedVaultName)) {

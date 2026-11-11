@@ -8,5 +8,34 @@
     "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-demo/pms-connection-string",
     "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-demo/companies-house-api-key",
     "aiProviderChoice": "anthropic"
-  }
+  },
+  "documentStores": [
+    {
+      "storeId": "nalf-sharepoint-primary",
+      "displayName": "Not A Law Firm SharePoint DMS",
+      "providerType": "sharepoint",
+      "isDefault": true,
+      "enabled": true,
+      "auth": {
+        "entraTenantId": "11111111-2222-3333-4444-555555555555",
+        "credentialMode": "client_certificate",
+        "clientId": "22222222-3333-4444-5555-666666666666",
+        "certificateKeyVaultSecretRef": "kv://kv-notalawfirm-demo/sp-provisioning-cert",
+        "delegatedPermissionScope": "Sites.Selected"
+      },
+      "sharepoint": {
+        "hostname": "1squared1.sharepoint.com",
+        "siteRelativePath": "/sites/NotALawFirm",
+        "siteId": "1squared1.sharepoint.com,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,ffffffff-0000-1111-2222-333333333333",
+        "libraries": [
+          {
+            "libraryId": "nalf-doc-repo",
+            "displayName": "Not A Law Firm Document Repository",
+            "libraryUrlSegment": "Not A Law Firm Document Repository",
+            "driveId": "b!nalf-document-repository-drive-001"
+          }
+        ]
+      }
+    }
+  ]
 }
