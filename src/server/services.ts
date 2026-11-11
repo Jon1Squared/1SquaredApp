@@ -6539,7 +6539,10 @@ export function reorderCustomField(id: string, direction: -1 | 1, byId: string):
   saveStore(store);
 }
 
-export async function resetAllDemoData(byId: string): Promise<void> {
+export async function resetAllDemoData(
+  byId: string,
+  ctx: TenantContext,
+): Promise<void> {
   await withJsonStoreWriteLock(async () => {
   const prevStore = getStore();
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
@@ -6578,11 +6581,14 @@ export async function resetAllDemoData(byId: string): Promise<void> {
     byId,
   });
   saveStore(fresh);
-  await importFirmStoreModulesToPostgres({ store: fresh, clearFirst: true });
+  await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
   });
 }
 
-export async function clearAllDataToCleanDeployment(byId: string = 'system'): Promise<void> {
+export async function clearAllDataToCleanDeployment(
+  byId: string,
+  ctx: TenantContext,
+): Promise<void> {
   await withJsonStoreWriteLock(async () => {
   const prevStore = getStore();
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
@@ -6598,7 +6604,7 @@ export async function clearAllDataToCleanDeployment(byId: string = 'system'): Pr
     byId,
   });
   saveStore(clean);
-  await clearMigratedPostgresModulesForTenant();
+  await clearMigratedPostgresModulesForTenant({ ctx });
   });
 }
 

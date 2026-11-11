@@ -23,6 +23,7 @@ import {
 } from '@/server/services';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import { getStore } from '@/server/store';
+import { testDataResetContext } from '@/test/testTenantContexts';
 
 function buildVerifiedActorSession(personId = 'P-000001') {
   const store = getStore();
@@ -61,7 +62,7 @@ function buildVerifiedActorSession(personId = 'P-000001') {
 
 describe('S0-08: Matter risk assessment answers kept and scored on the server (B1, Item 4)', () => {
   beforeEach(async () => {
-    await resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
   });
 
   it('1. New matter: stores entered questionnaire answers and sets overallRisk and riskRatingId from server scoring (ignoring client riskRatingId and forged snapshot fields)', async () => {

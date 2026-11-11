@@ -30,6 +30,7 @@ import {
   importFirmStoreModulesToPostgres,
   type ImportableStoreModule,
 } from '../src/server/storePostgresImport';
+import { buildSystemJobTenantContext } from './lib/systemJobTenantContext';
 
 const VALID_MODULES = new Set<ImportableStoreModule>([
   'documents',
@@ -157,12 +158,15 @@ export async function runStoreImportCli(
         );
         const store = getStore();
         const res = await importFirmStoreModulesToPostgres({
+          ctx: buildSystemJobTenantContext({
+            tenantConfig,
+            jobKey: 'store-import',
+            correlationId: tenantCorrelationId,
+            configuredPostgresHost: entry.postgresHost,
+          }),
           store,
-          tenantConfig,
-          postgresHostOverride: entry.postgresHost,
           modules: parsed.modules,
           clearFirst: parsed.clearFirst,
-          correlationId: tenantCorrelationId,
         });
         console.log(
           JSON.stringify({
@@ -198,11 +202,14 @@ export async function runStoreImportCli(
   const tenantConfig = getActiveTenantConfiguration();
   const store = getStore();
   const res = await importFirmStoreModulesToPostgres({
+    ctx: buildSystemJobTenantContext({
+      tenantConfig,
+      jobKey: 'store-import',
+      correlationId,
+    }),
     store,
-    tenantConfig,
     modules: parsed.modules,
     clearFirst: parsed.clearFirst,
-    correlationId,
   });
   console.log(
     JSON.stringify({

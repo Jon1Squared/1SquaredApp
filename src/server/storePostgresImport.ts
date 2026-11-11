@@ -13,13 +13,8 @@ import {
   TenantDocumentRepository,
   TenantDocumentStoreRepository,
   TenantKeyDateRepository,
-  type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
-import {
-  getActiveTenantConfiguration,
-  resolveSystemImportTenantContext,
-} from '@/platform/tenantRuntime';
 import { getStore, type FirmStore } from './store';
 
 export type ImportableStoreModule =
@@ -33,12 +28,15 @@ export const DEFAULT_S014_IMPORT_MODULES: readonly ImportableStoreModule[] = [
 ];
 
 export interface ImportStoreModulesOptions {
+  /**
+   * The caller's verified tenant context (R433): the signed-in user's context from
+   * `guardedAction`, or a job entry point's system context (`scripts/`, ADR 0030 §3).
+   * There is no default tenant.
+   */
+  ctx: TenantContext;
   store?: FirmStore;
-  tenantConfig?: TenantConfiguration;
-  postgresHostOverride?: string;
   modules?: readonly ImportableStoreModule[];
   clearFirst?: boolean;
-  correlationId?: string;
 }
 
 export interface ImportStoreModulesResult {
@@ -66,28 +64,12 @@ export interface ImportStoreModulesResult {
   };
 }
 
-export function buildSystemImportTenantContext(
-  tenantConfig: TenantConfiguration = getActiveTenantConfiguration(),
-  options?: {
-    postgresHostOverride?: string;
-    correlationId?: string;
-  },
-): TenantContext {
-  return resolveSystemImportTenantContext(tenantConfig, options);
-}
-
-export async function clearMigratedPostgresModulesForTenant(options?: {
-  tenantConfig?: TenantConfiguration;
-  postgresHostOverride?: string;
+export async function clearMigratedPostgresModulesForTenant(options: {
+  ctx: TenantContext;
   modules?: readonly ImportableStoreModule[];
-  correlationId?: string;
 }): Promise<void> {
-  const tenantConfig = options?.tenantConfig ?? getActiveTenantConfiguration();
-  const modules = options?.modules ?? DEFAULT_S014_IMPORT_MODULES;
-  const ctx = buildSystemImportTenantContext(tenantConfig, {
-    postgresHostOverride: options?.postgresHostOverride,
-    correlationId: options?.correlationId,
-  });
+  const { ctx } = options;
+  const modules = options.modules ?? DEFAULT_S014_IMPORT_MODULES;
 
   if (modules.includes('documents')) {
     const docRepo = new TenantDocumentRepository();
@@ -104,26 +86,16 @@ export async function clearMigratedPostgresModulesForTenant(options?: {
 }
 
 export async function importFirmStoreModulesToPostgres(
-  options: ImportStoreModulesOptions = {},
+  options: ImportStoreModulesOptions,
 ): Promise<ImportStoreModulesResult> {
-  const tenantConfig = options.tenantConfig ?? getActiveTenantConfiguration();
+  const { ctx } = options;
   const store = options.store ?? getStore();
   const modules: ImportableStoreModule[] = [
     ...(options.modules ?? DEFAULT_S014_IMPORT_MODULES),
   ];
 
-  const ctx = buildSystemImportTenantContext(tenantConfig, {
-    postgresHostOverride: options.postgresHostOverride,
-    correlationId: options.correlationId,
-  });
-
   if (options.clearFirst) {
-    await clearMigratedPostgresModulesForTenant({
-      tenantConfig,
-      postgresHostOverride: options.postgresHostOverride,
-      modules,
-      correlationId: ctx.correlationId,
-    });
+    await clearMigratedPostgresModulesForTenant({ ctx, modules });
   }
 
   const counts: ImportStoreModulesResult['counts'] = {

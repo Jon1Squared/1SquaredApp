@@ -502,7 +502,7 @@ export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
 }
 
 export async function resetDemoDataAction() {
-  return guardedAction('resetDemoDataAction', async ({ personId: byId }) => {
+  return guardedAction('resetDemoDataAction', async ({ personId: byId, tenantContext }) => {
     if (!isDataResetAllowedEnvironment()) {
       const env = getActiveTenantConfiguration().environment;
       return buildActionDenied(
@@ -512,14 +512,14 @@ export async function resetDemoDataAction() {
           : 'Demo data reset is disabled when enableDemoMode is false.',
       );
     }
-    await resetAllDemoData(byId);
+    await resetAllDemoData(byId, tenantContext);
     revalidateAll();
     return { ok: true as const };
   });
 }
 
 export async function clearAllDataAction() {
-  return guardedAction('clearAllDataAction', async ({ personId: byId }) => {
+  return guardedAction('clearAllDataAction', async ({ personId: byId, tenantContext }) => {
     if (!isDataResetAllowedEnvironment()) {
       const env = getActiveTenantConfiguration().environment;
       return buildActionDenied(
@@ -529,7 +529,7 @@ export async function clearAllDataAction() {
           : 'Clearing all data is disabled when enableDemoMode is false.',
       );
     }
-    await clearAllDataToCleanDeployment(byId);
+    await clearAllDataToCleanDeployment(byId, tenantContext);
     revalidateAll();
     return { ok: true as const };
   });

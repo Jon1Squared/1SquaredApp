@@ -18,10 +18,8 @@ import * as corePkg from '@platform/core';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import * as tenantRuntimePkg from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/server/store';
-import {
-  buildSystemImportTenantContext,
-  importFirmStoreModulesToPostgres,
-} from '@/server/storePostgresImport';
+import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
+import { buildSystemJobTenantContext } from '../../scripts/lib/systemJobTenantContext';
 import { runMigrateJobSweep } from '../../scripts/run-job';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
@@ -608,7 +606,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
 
     const seed = createSeedStore();
     const tenantConfig = tenantRuntimePkg.getActiveTenantConfiguration();
-    const ctx = buildSystemImportTenantContext(tenantConfig);
+    const ctx = buildSystemJobTenantContext({ tenantConfig, jobKey: 'store-import' });
 
     seed.documentTemplates = [
       {
@@ -689,14 +687,14 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     ];
 
     const firstImport = await importFirmStoreModulesToPostgres({
+      ctx,
       store: seed,
-      tenantConfig,
       modules: ['documents', 'document-store', 'key-dates'],
       clearFirst: true,
     });
     const secondImport = await importFirmStoreModulesToPostgres({
+      ctx,
       store: seed,
-      tenantConfig,
       modules: ['documents', 'document-store', 'key-dates'],
       clearFirst: false,
     });

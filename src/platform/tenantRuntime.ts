@@ -719,46 +719,6 @@ export function resolveCurrentTenantContext(
   });
 }
 
-export function resolveSystemImportTenantContext(
-  tenantConfig: TenantConfiguration = getActiveTenantConfiguration(),
-  options?: {
-    postgresHostOverride?: string;
-    correlationId?: string;
-  },
-): TenantContext {
-  const configuredPostgresHost =
-    options?.postgresHostOverride?.trim() ||
-    tenantConfig.database?.dedicatedServerHost?.trim() ||
-    undefined;
-
-  return resolveTenantFromVerifiedToken({
-    verifiedToken: {
-      __verifiedByOidcMiddleware: true,
-      sub: 'system-store-import',
-      tenantId: tenantConfig.tenantId,
-      name: 'Platform Store Importer',
-      email: 'store-import@platform.example',
-      roles: ['admin'],
-      mfaVerified: true,
-    },
-    hostingMode: tenantConfig.hostingMode,
-    environment: tenantConfig.environment,
-    correlationId: resolveRequestCorrelationId(
-      options?.correlationId,
-      'corr-store-import',
-    ),
-    ...(configuredPostgresHost ? { configuredPostgresHost } : {}),
-    ...(tenantConfig.keyVault
-      ? {
-          configuredKeyVault: {
-            vaultName: tenantConfig.keyVault.vaultName,
-            vaultUri: tenantConfig.keyVault.vaultUri,
-          },
-        }
-      : {}),
-  });
-}
-
 export function getPlatformArchitectureSnapshot(
   actor: VerifiedSessionActorInput,
 ): PlatformArchitectureSnapshot {

@@ -32,6 +32,7 @@ import {
   saveStore,
 } from '@/server/store';
 import { runSeedDemoTenant } from '../../../scripts/seed-demo-tenant';
+import { testDataResetContext } from '@/test/testTenantContexts';
 
 describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo command', () => {
   afterEach(() => {
@@ -374,7 +375,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
       clearStoreMemoryCache();
 
-      await resetAllDemoData('P-000004');
+      await resetAllDemoData('P-000004', testDataResetContext());
 
       const afterReset = getStore();
       const p1 = afterReset.people.find((p) => p.id === 'P-000001');
@@ -444,7 +445,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       clearStoreMemoryCache();
 
       // Step 1: Clear all data to a clean deployment
-      await clearAllDataToCleanDeployment('P-000004');
+      await clearAllDataToCleanDeployment('P-000004', testDataResetContext());
       const cleared = getStore();
       expect(cleared.isCleanDeployment).toBe(true);
       expect(cleared.people).toHaveLength(0);
@@ -479,7 +480,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       clearStoreMemoryCache();
 
       // Step 3: Also test when isCleanDeployment was flipped to false but P-000004 is still a different person (different email)
-      await resetAllDemoData('P-000004');
+      await resetAllDemoData('P-000004', testDataResetContext());
 
       const afterReset = getStore();
       const p4 = afterReset.people.find((p) => p.id === 'P-000004');
@@ -514,7 +515,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       saveStore(nonCleanMutated);
       clearStoreMemoryCache();
 
-      await resetAllDemoData('P-000004');
+      await resetAllDemoData('P-000004', testDataResetContext());
       const afterSecondReset = getStore();
       expect(afterSecondReset.people.find((p) => p.id === 'P-000004')?.entraObjectId).toBeUndefined();
     } finally {

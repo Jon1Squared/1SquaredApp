@@ -13,6 +13,7 @@ import {
 import { createSeedStore, type FirmStore } from '../src/server/store';
 import '../core/src/tenancy/pgNodePreload';
 import { importFirmStoreModulesToPostgres } from '../src/server/storePostgresImport';
+import { buildSystemJobTenantContext } from './lib/systemJobTenantContext';
 
 export interface SeedDemoTenantOptions {
   args?: string[];
@@ -244,8 +245,8 @@ export async function runSeedDemoTenant(
   }
 
   await importFirmStoreModulesToPostgres({
+    ctx: buildSystemJobTenantContext({ tenantConfig, jobKey: 'seed-demo' }),
     store: seedStore,
-    tenantConfig,
     clearFirst: true,
   });
 

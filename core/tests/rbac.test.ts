@@ -203,6 +203,7 @@ import {
 } from '../../src/domain/enquiries';
 import { canActorAccessMatterRecord } from '../src/domain/document-generation/permissions';
 import type { ChoiceValue, Matter, Person, Task, Team } from '../../src/domain/types';
+import { testDataResetContext } from '../../src/test/testTenantContexts';
 
 function makeBaseTenantConfig(tenantId = 'tenant-alpha'): TenantConfiguration {
   return loadAndValidateTenantConfig({
@@ -1190,7 +1191,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
   describe('10. Server Services: Audited Per-Person Overrides & Tenant RBAC Config Updates', () => {
     it('enforces self-modification & unheld-grant blocks and logs before/after audit entries', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const snap0 = getAppSnapshot('P-000001');
       const adamAdmin = snap0.people.find((p) => p.roles?.includes('admin'))!;
       expect(adamAdmin).toBeDefined();
@@ -1302,7 +1303,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('enforces R52, R53, R54, R55, R60, R61, R62, R63, R70 and R71 security invariants', async () => {
       resetStore();
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
 
       // R52: resolveOrProvisionEntraEmployee with roles: [] creates a person without admin and without admin:access
       const unmappedProvision = resolveOrProvisionEntraEmployee({
@@ -1601,11 +1602,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setTestEntraSessionOverride(undefined);
       }
 
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     });
 
     it('enforces R100 request/tenant-scoped token roles without cross-tenant, post-logout, or cross-user leakage', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
 
       updateTenantRbacConfig(
         {
@@ -1871,11 +1872,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       setRuntimeRbacConfigOverride(null, 'tenant-a');
       setRuntimeRbacConfigOverride(null, 'tenant-b');
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     });
 
     it('provisions or links an employee on Entra ID OIDC callback and creates a signed session cookie', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
 
       const { person, verifiedToken, rbacConfig } =
         resolveOrProvisionEntraEmployee({
@@ -1928,11 +1929,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(secondSignIn.person.id).toBe(person.id);
 
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     });
 
     it('refuses Demo Mode persona switching to an employee with access to a restricted/staff matter not accessible to the signed-in actor (R104)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const rawBase = getActiveTenantRawBaseConfig();
       setActiveTenantConfigForTesting({
         ...rawBase,
@@ -1984,7 +1985,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       } finally {
         setTestEntraSessionOverride(undefined);
         setActiveTenantConfigForTesting(null);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
@@ -2021,7 +2022,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('enforces R106, R123, and R130: server-computed snapshot maps (canTakeByTaskId, permissionsByPersonId, firmPrimaryDomain) and audited sensitive employee reads', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         const store = getStore();
         // Create an unassigned open task on a team (TM-000004 Corporate) that P-000001 (Real Estate Partner with task:claim_any) is not a member of, while P-000002 (Real Estate Fee Earner without task:claim_any) is also not a member of
@@ -2147,7 +2148,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(previewInvalidConfig.ok).toBe(false);
         expect(previewInvalidConfig.error).toMatch(/RBAC_CONFIG_INVALID/);
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
@@ -2264,7 +2265,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
   describe('12. Slice S0-03: Destructive Actions, Sign-Off Approvals, Enquiry Anonymisation (B3), Person Save (B11) & Ethical Walls (B12)', () => {
     beforeEach(async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       setTestEntraSessionOverride(undefined);
       setActiveTenantConfigForTesting(null);
     });
@@ -2292,6 +2293,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(mpReset)).toBe(true);
         if (isActionDenied(mpReset)) {
           expect(mpReset.code).toBe('FORBIDDEN');
+          expect(mpReset.message).toBe(
+            "[FORBIDDEN] Permission 'admin:data_reset' is required to resetDemoDataAction.",
+          );
         }
 
         // Admin (P-000004) without MFA is denied with MFA_REQUIRED
@@ -2315,6 +2319,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(noMfaClear)).toBe(true);
         if (isActionDenied(noMfaClear)) {
           expect(noMfaClear.code).toBe('MFA_REQUIRED');
+          expect(noMfaClear.message).toBe(
+            "[MFA_REQUIRED] Multi-factor authentication (MFA) is required for administrative permission 'admin:data_reset' (clearAllDataAction).",
+          );
         }
 
         // Admin with MFA in live environment is denied with FORBIDDEN
@@ -2409,7 +2416,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(clearAudit?.byId).toBe('P-000004');
         expect(clearAudit?.newValue).toContain('Huw Pritchard');
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         setTestEntraSessionOverride(undefined);
         setActiveTenantConfigForTesting(null);
       }
@@ -2755,7 +2762,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   describe('S0-04: Admin saves and PMS link actions require admin:access or finance:manage_links with MFA, plus PMS creation and team self-escalation guards', () => {
     it('denies all 22 S0-04 actions without permission or without MFA, and allows them with MFA', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const orgStructure = store.orgStructure!;
         const taskSettings = store.taskSettings;
@@ -2900,13 +2907,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('enforces employee:edit_core and matter:create on createRecordFromPmsAction and prevents self-escalation into team leadIds', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const adminPerson = store.people.find((p) => p.id === 'P-000004')!;
 
@@ -2981,7 +2988,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(store.matters.length).toBe(mattersCountBefore);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
   });
@@ -2989,7 +2996,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   describe('20. S0-05 Record Actions: Tasks, Enquiries, Quotes, Notes, and Leaver Reassignment (B8, B9, Item 13)', () => {
     it('denies task comment, task save, and task reassign on restricted matters or when not a team lead (B9)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         // Create an ethical wall matter visible only to P-000001
         const wallMatter = store.matters.find((m) => m.id === 'M-000001')!;
@@ -3061,13 +3068,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(reassignDenied)).toBe(true);
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('enforces reopenEnquiryRecord rules and preserves unassigned status as New when unassigned (B8)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
 
@@ -3125,13 +3132,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(reopenedRes.enquiry?.status).toBe('New');
         expect(reopenedRes.enquiry?.assignedToId).toBeNull();
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('denies quote viewing and editing for the finance role, and hides quotes linked to hidden enquiries or restricted matters (quote:view, quote:edit, R267)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const financeUser = store.people.find(
           (p) => p.isEmployee && p.roles?.includes('finance') && !p.roles?.includes('partner'),
@@ -3224,13 +3231,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ),
         ).toBe(true);
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('enforces dual permissions, leaver check, restricted matter allowlist update, SharePoint lifecycle sync, assignedPersonIds, open-only enquiries, and per-record audit on reassignLeaverOwnedRecords (Item 13, R266, R270)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const actor = store.people.find((p) => p.id === 'P-000001')!;
         const activeEmp = store.people.find((p) => p.id === 'P-000002')!;
@@ -3413,13 +3420,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
       } finally {
         setTestEntraSessionOverride(null);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('enforces contact:create, contact:edit, internalSystemStep stripping on saveOrganisationAction (R252), record:merge on duplicates, enquiry permissions, R264 status/assignment lock, and R268 automatic enquiry assignment in saveTaskRecord (R267)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const financeUser = store.people.find((p) => p.id === 'P-000009')!;
         const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
@@ -3794,13 +3801,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(routedNewEnq.status).toBe('Assigned');
       } finally {
         setTestEntraSessionOverride(null);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('enforces target-specific permissions on addNoteToRecord (restricted matter and employee record)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const wallMatter = store.matters[0]!;
         wallMatter.hasEthicalWall = true;
@@ -3827,7 +3834,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(noteOnEmployeeWithoutHrPerm)).toBe(true);
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
   });
@@ -3835,7 +3842,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   describe('21. S0-07 Conflict Fixes: Quote Conversion (B5), Enquiry Conversion, and Extended Conflict Search (B7, Item 1a)', () => {
     it('denies enquiry conversion and quote conversion without matter:create and creates nothing', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         const peopleBefore = store.people.length;
         const orgsBefore = store.organisations.length;
@@ -3885,13 +3892,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(store.links.length).toBe(linksBefore);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('blocks quote conversion on a high-severity conflict hit (creating nothing), and when clear creates records with outcome-derived conflict status, conflictDecision, and audit entry (B5)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
         // Find an opposing party on an existing matter to trigger a high-severity hit
         const matterWithOpponent = store.matters.find(
@@ -4391,13 +4398,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('finds hits from instructingContactId, billingContactId, additionalClientIds, and person–organisation links in both searches, records searchedSources, and redacts restricted matters in blocked reasons (B7)', async () => {
       try {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
 
         // Create dedicated test records for the 4 new search sources
@@ -4750,7 +4757,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(combinedReasons).not.toContain(restrictedMatter.matterNumber);
         expect(combinedReasons).not.toContain('Ultra Secret Restricted Acquisition');
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
   });
@@ -4781,7 +4788,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     }
 
     it('denies merge without record:merge, refuses active employees, firm staff, or leavers, and fails closed without a verified session (R271)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         const s1 = savePersonRecord(
           { firstName: 'Gareth', surname: 'Survivor', isEmployee: false },
@@ -4828,12 +4835,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         await expect(executeMerge('person', s1.id, m1.id, 'P-000004')).rejects.toThrow(/UNAUTHENTICATED/);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('1. Matter: repoints clientId, additionalClientIds (de-duplicated), instructingContactId, billingContactId, referrerContactId, parties[].linkedRecordId, and conflictCheckRecord parties/matches (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -4969,12 +4976,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(survivorOrg.id);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('2. Enquiry: repoints linkedOrganisationId, referrerPersonId, linkedPersonId, referredToOrganisationId, and conflictSnapshot conflicts/knownPeople/knownOrganisations (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5076,12 +5083,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ]);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('3. Quote: repoints linkedOrganisationId and linkedPersonId (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5113,12 +5120,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(updatedQuote.linkedPersonId).toBe(survivorPerson.id);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('4. Task: repoints and de-duplicates linkedRecords[].recordId (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5155,12 +5162,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ]);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('5. Person–organisation links (store.links): repoints non-colliding links and on collision keeps survivor link while carrying over isCurrent, primary-contact status, and dates (R273, R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5249,12 +5256,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('6. Organisation: repoints parentOrganisationId on subsidiaries while leaving relationshipPartnerId unchanged (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorOrg = saveOrganisationRecord(
@@ -5288,12 +5295,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(updatedSurvivorOrg.relationshipPartnerId).toBe('P-000001');
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('7. PMS links (store.pmsLinks): repoints non-colliding links and on collision keeps survivor link, records pmsLinkConflicts, and writes audit entry (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5358,12 +5365,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(true);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('8. Generated documents and documentLinks: repoints primaryClientId, recipientPartyId, and documentLinks in both store and TenantDocumentRepository (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5484,12 +5491,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(await repo.listDocumentsForEntity(ctx, 'organisation', mergedOrg.id)).toHaveLength(0);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('9. Notes, Person.createdFromEnquiryId, recentlyViewed, notifications, and untouched pre-existing audit recordIds (R275)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = savePersonRecord(
@@ -5567,12 +5574,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('10. Atomic rollback (R272, R282, R296, R406): rolls back both PostgreSQL TenantDocumentRepository and JSON store via RecordDeltaCompensator when saveStore fails after PostgreSQL repointing', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const repo = getDocumentRepository();
       const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
@@ -5724,12 +5731,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           value: savedJsonValue,
         });
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('10b. Atomic rollback Case 2 (R272, R282, R296): rolls back in-memory and persisted store when PostgreSQL repointMergedEntityWithDelta throws before saveStore', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const repo = getDocumentRepository();
       const origRepoint = repo.repointMergedEntityWithDelta.bind(repo);
       try {
@@ -5785,12 +5792,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       } finally {
         repo.repointMergedEntityWithDelta = origRepoint;
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('10c. Atomic rollback Case 3 (R309): when both the first saveStore and the rollback saveStore throw, logs rollback failure with correlationId and tenantId only and rethrows the original error', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
@@ -5845,12 +5852,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         });
         errorSpy.mockRestore();
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('redirects merged person and organisation tombstone pages and edit pages to the survivor', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
         const sPerson = savePersonRecord(
@@ -5918,7 +5925,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(orgEditRedirect).toContain(`/organisations/${sOrg.id}/edit`);
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
   });
@@ -5945,7 +5952,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     ] as const;
 
     it('1. getAppSnapshot for any role contains none of the removed finance fields and exposes capabilities only', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const roleTestUsers = [
         {
           id: 'P-000001',
@@ -6000,7 +6007,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('2. canUserViewFinance(null) is false and attentionList hides PMS financial alerts by default or without capability', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const snap = getAppSnapshot('P-000001');
       expect(canUserViewFinance(null, snap.teams, snap.values)).toBe(false);
       expect(canUserViewFinance(undefined, snap.teams, snap.values)).toBe(false);
@@ -6028,7 +6035,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('3. each finance loader returns FORBIDDEN when its permission key is removed and returns data when granted, and fee earner gets FORBIDDEN from getFirmFinance', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         const store = getStore();
         const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -6227,12 +6234,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(okFirm.pmsMonthlyFeesBilled.yearToDateTotal).toBe(181673.48);
         }
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('4. restricted matters (1 staff matter and 1 ethical-wall matter in PMS) are excluded from every firm, client, and fee-earner rollup total with exact row-sum deltas', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
         const round1 = (n: number) => Math.round((n + Number.EPSILON) * 10) / 10;
@@ -6559,12 +6566,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(deniedWallRows.message).toBe('Matter not found or access denied.');
         }
       } finally {
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('5. the three credit-control actions are denied without finance:credit_control, denied on an inaccessible matter, and allowed otherwise', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         const store = getStore();
         const partner = store.people.find((p) => p.id === 'P-000001')!;
@@ -6813,13 +6820,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
   });
   describe('S0-30 (B13, R373): Employee identity binding — person email save protection and verified-domain non-privileged sign-in linking', () => {
     it('1. requires employee:edit_core for any employee/leaver email change and mfaVerified === true only when adding or changing an address, allows leaver deactivation and secondary address removal without MFA (auditing both), allows contact:edit on non-employees, and ignores reordering/label/case/whitespace edits (R398)', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       try {
         const store = getStore();
         const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
@@ -7507,12 +7514,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(pmsEmpEmailAudit?.newValue).toBeTruthy();
       } finally {
         setTestEntraSessionOverride(undefined);
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
     it('2. links only non-privileged single-match employees in allowed linking domains on sign-in, writes an entra-link audit entry without logging PII, refuses privileged and ambiguous links without provisioning, and blocks R373 end-to-end takeover', async () => {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
       const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
@@ -7923,7 +7930,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       } finally {
         infoSpy.mockRestore();
         warnSpy.mockRestore();
-        await resetAllDemoData('P-000001');
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
