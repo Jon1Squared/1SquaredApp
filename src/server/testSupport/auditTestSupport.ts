@@ -28,9 +28,9 @@ function auditNumber(id: string): number {
 }
 
 /**
- * Returns the number of the last audit entry written so far; every entry written afterwards has a
- * strictly greater number. `allocateNextAuditId` peeks (it does not reserve), so the next entry
- * written receives exactly that ID — hence the `- 1`.
+ * Advances `tenant_audit_id_seq` by one via `allocateNextAuditId` (`nextval`) and returns the number
+ * immediately preceding that reserved sequence value (`id - 1`), so every entry written afterwards
+ * has a strictly greater `AU-` number.
  */
 export async function markAuditPosition(): Promise<number> {
   const id = await getAuditRepository().allocateNextAuditId(testTenantCtx());

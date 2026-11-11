@@ -111,6 +111,25 @@ export class TenantAuditRepository extends TenantScopedRepository {
     ctx: TenantContext,
     entries: readonly FirmAuditEntryInput[],
   ): Promise<FirmAuditEntryRecord[]> {
+    return this.insertAuditEntriesInternal(ctx, entries, false);
+  }
+
+  /**
+   * Idempotent seed/migration import path (R455). Uses ON CONFLICT DO NOTHING so re-running
+   * seed or cut-over import does not fail on previously imported audit entries.
+   */
+  public async importAuditEntries(
+    ctx: TenantContext,
+    entries: readonly FirmAuditEntryInput[],
+  ): Promise<FirmAuditEntryRecord[]> {
+    return this.insertAuditEntriesInternal(ctx, entries, true);
+  }
+
+  private async insertAuditEntriesInternal(
+    ctx: TenantContext,
+    entries: readonly FirmAuditEntryInput[],
+    allowConflictSkip: boolean,
+  ): Promise<FirmAuditEntryRecord[]> {
     if (entries.length === 0) {
       return [];
     }
@@ -141,35 +160,57 @@ export class TenantAuditRepository extends TenantScopedRepository {
         const snapshotParam =
           entry.snapshot !== undefined ? JSON.stringify(entry.snapshot) : null;
 
-        const insertRes = await tx.query<DbAuditEntryRow>(
-          `INSERT INTO public.audit_entries (
-             tenant_id, id, record_type, record_id, action, field,
-             old_value, new_value, reason, by_id, at, at_iso, snapshot_json
-           ) VALUES (
-             $1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11::timestamptz, $12, $13::jsonb
-           )
-           ON CONFLICT (tenant_id, id) DO NOTHING
-           RETURNING *`,
-          [
-            ctx.tenantId,
-            id,
-            entry.recordType,
-            entry.recordId,
-            entry.action,
-            entry.field ?? null,
-            entry.oldValue ?? null,
-            entry.newValue ?? null,
-            entry.reason ?? null,
-            entry.byId,
-            safePgTimestampIso,
-            atIso,
-            snapshotParam,
-          ],
-        );
+        let insertRes: { rows: DbAuditEntryRow[] };
+        try {
+          insertRes = await tx.query<DbAuditEntryRow>(
+            allowConflictSkip
+              ? `INSERT INTO public.audit_entries (
+                   tenant_id, id, record_type, record_id, action, field,
+                   old_value, new_value, reason, by_id, at, at_iso, snapshot_json
+                 ) VALUES (
+                   $1, $2, $3, $4, $5, $6,
+                   $7, $8, $9, $10, $11::timestamptz, $12, $13::jsonb
+                 )
+                 ON CONFLICT (tenant_id, id) DO NOTHING
+                 RETURNING *`
+              : `INSERT INTO public.audit_entries (
+                   tenant_id, id, record_type, record_id, action, field,
+                   old_value, new_value, reason, by_id, at, at_iso, snapshot_json
+                 ) VALUES (
+                   $1, $2, $3, $4, $5, $6,
+                   $7, $8, $9, $10, $11::timestamptz, $12, $13::jsonb
+                 )
+                 RETURNING *`,
+            [
+              ctx.tenantId,
+              id,
+              entry.recordType,
+              entry.recordId,
+              entry.action,
+              entry.field ?? null,
+              entry.oldValue ?? null,
+              entry.newValue ?? null,
+              entry.reason ?? null,
+              entry.byId,
+              safePgTimestampIso,
+              atIso,
+              snapshotParam,
+            ],
+          );
+        } catch (pgErr) {
+          const sqlState = (pgErr as { code?: unknown })?.code;
+          if (sqlState === '23505') {
+            const dupErr = new Error(
+              'TENANCY_AUDIT_WRITE_ERROR: Duplicate or invalid firm audit entry could not be recorded.',
+            ) as Error & { code: string };
+            dupErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
+            throw dupErr;
+          }
+          throw pgErr;
+        }
 
         let row = insertRes.rows[0];
-        if (!row) {
+        if (!row && allowConflictSkip) {
           const existingRes = await tx.query<DbAuditEntryRow>(
             'SELECT * FROM public.audit_entries WHERE tenant_id = $1 AND id = $2',
             [ctx.tenantId, id],
@@ -177,9 +218,11 @@ export class TenantAuditRepository extends TenantScopedRepository {
           row = existingRes.rows[0];
         }
         if (!row) {
-          throw new Error(
+          const writeErr = new Error(
             'TENANCY_AUDIT_WRITE_ERROR: Audit entry could not be persisted or verified.',
-          );
+          ) as Error & { code: string };
+          writeErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
+          throw writeErr;
         }
         this.assertRowTenant(ctx, row.tenant_id, 'FirmAuditEntry');
         persisted.push(mapAuditRow(row));
@@ -251,7 +294,7 @@ export class TenantAuditRepository extends TenantScopedRepository {
              FROM public.audit_entries
              WHERE tenant_id = $1
                AND seq < $2::bigint
-             ORDER BY at DESC, seq DESC
+             ORDER BY seq DESC
              LIMIT $3`,
             [ctx.tenantId, Math.floor(options!.beforeSeq!), safeLimit + 1],
           )
@@ -259,7 +302,7 @@ export class TenantAuditRepository extends TenantScopedRepository {
             `SELECT *
              FROM public.audit_entries
              WHERE tenant_id = $1
-             ORDER BY at DESC, seq DESC
+             ORDER BY seq DESC
              LIMIT $2`,
             [ctx.tenantId, safeLimit + 1],
           );

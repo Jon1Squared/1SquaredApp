@@ -656,15 +656,26 @@ export const NON_LIVE_AUDIT_RESET_MIGRATION_0008: TenantMigrationDefinition = {
   version: '0008',
   name: '0008_non_live_audit_reset_function',
   description:
-    'Expand-phase migration adding the SECURITY DEFINER public.reset_non_live_audit_log(text) function in non-live tenant databases only, executable by the tenant role, so demo reset never needs the migrate identity (S0-15, R453).',
+    'Expand-phase migration adding the SECURITY DEFINER public.reset_non_live_audit_log(text) function in non-live tenant databases only, executable by the tenant role, so demo reset never needs the migrate identity, plus idx_audit_entries_tenant_seq and sequence privilege tightening (S0-15, R451, R453, R460).',
   tablesChanged: [],
   dependsOn: ['0007'],
+  acceptedPriorChecksums: [
+    'ee6d64d00491d8ec88618161273cdce5206997c711e387d3b93c5888acd48dc0',
+  ],
   upSql: `
+CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_seq
+  ON public.audit_entries (tenant_id, seq DESC);
+
 DO $do$
 DECLARE
   v_suffix TEXT := substring(current_database() from '^pg_tenant_(.+)$');
   v_role TEXT := 'role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$');
 BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+    EXECUTE format('REVOKE UPDATE ON ALL SEQUENCES IN SCHEMA public FROM %I', v_role);
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', v_role);
+    EXECUTE format('GRANT UPDATE ON SEQUENCE public.tenant_audit_id_seq TO %I', v_role);
+  END IF;
   IF v_suffix IS NULL OR right(v_suffix, 5) = '_live' THEN
     RETURN;
   END IF;
@@ -694,6 +705,7 @@ $do$;
 `.trim(),
   downSql: `
 DROP FUNCTION IF EXISTS public.reset_non_live_audit_log(TEXT);
+DROP INDEX IF EXISTS public.idx_audit_entries_tenant_seq;
 `.trim(),
 };
 
@@ -784,7 +796,10 @@ export class TenantMigrationRunner {
           `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${tenantRoleIdent}`,
         );
         await client.query(
-          `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ${tenantRoleIdent}`,
+          `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC, ${runtimeIdent}, ${tenantRoleIdent}`,
+        );
+        await client.query(
+          `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${tenantRoleIdent}`,
         );
         await client.query(`
           CREATE TABLE IF NOT EXISTS tenant_schema_migrations (
@@ -889,8 +904,19 @@ export class TenantMigrationRunner {
             }
           }
           await client.query(
-            `GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO ${tenantRoleIdent}`,
+            `REVOKE UPDATE ON ALL SEQUENCES IN SCHEMA public FROM ${tenantRoleIdent}`,
           );
+          await client.query(
+            `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${tenantRoleIdent}`,
+          );
+          const auditSeqCheck = await client.query(
+            `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'tenant_audit_id_seq' AND c.relkind = 'S'`,
+          );
+          if (auditSeqCheck.rowCount && auditSeqCheck.rowCount > 0) {
+            await client.query(
+              `GRANT UPDATE ON SEQUENCE public.tenant_audit_id_seq TO ${tenantRoleIdent}`,
+            );
+          }
 
           const appliedAt = new Date().toISOString();
           await client.query(

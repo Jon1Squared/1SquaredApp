@@ -333,13 +333,8 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   // ============================================================================
 
   public async allocateNextKeyDateId(ctx: TenantContext): Promise<string> {
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const res = await tx.query<{ seq_val: string | number }>(
-        "SELECT nextval('public.tenant_key_date_id_seq')::bigint AS seq_val",
-      );
-      const val = res.rows[0]?.seq_val ?? 1;
-      return `KD-${String(val).padStart(6, '0')}`;
-    });
+    const ids = await this.allocateNextKeyDateIds(ctx, 1);
+    return ids[0]!;
   }
 
   public async allocateNextKeyDateIds(
@@ -349,12 +344,25 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     const n = Math.max(0, Math.floor(count));
     if (n === 0) return [];
     return this.withTenantTransaction(ctx, async (tx) => {
+      const maxRes = await tx.query<{ max_id: string | number }>(
+        `SELECT COALESCE(
+           MAX(CASE WHEN id ~ '^KD-[0-9]+$' THEN SUBSTRING(id FROM 4)::bigint ELSE 0 END),
+           0
+         )::bigint AS max_id
+         FROM key_dates
+         WHERE tenant_id = $1`,
+        [ctx.tenantId],
+      );
+      const maxExisting = Number(maxRes.rows[0]?.max_id ?? 0);
       const ids: string[] = [];
       for (let i = 0; i < n; i++) {
-        const res = await tx.query<{ seq_val: string | number }>(
-          "SELECT nextval('public.tenant_key_date_id_seq')::bigint AS seq_val",
-        );
-        const val = res.rows[0]?.seq_val ?? 1;
+        let val = 0;
+        do {
+          const res = await tx.query<{ seq_val: string | number }>(
+            "SELECT nextval('public.tenant_key_date_id_seq')::bigint AS seq_val",
+          );
+          val = Number(res.rows[0]?.seq_val ?? 1);
+        } while (val <= maxExisting);
         ids.push(`KD-${String(val).padStart(6, '0')}`);
       }
       return ids;
@@ -502,24 +510,6 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
         );
       }
       this.assertRowTenant(ctx, saved.tenant_id, 'KeyDate');
-      const kdMatch = /^KD-(\d+)$/.exec(keyDate.id);
-      if (kdMatch?.[1]) {
-        const kdNum = Number.parseInt(kdMatch[1], 10);
-        if (Number.isFinite(kdNum) && kdNum > 0) {
-          await tx.query(
-            `SELECT setval(
-               'public.tenant_key_date_id_seq',
-               GREATEST(
-                 CASE WHEN is_called THEN last_value ELSE 0 END,
-                 $1::bigint
-               ),
-               true
-             )
-             FROM public.tenant_key_date_id_seq`,
-            [kdNum],
-          );
-        }
-      }
       return mapKeyDateRow(saved);
     });
   }
@@ -1295,9 +1285,6 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       await tx.query(
         'DELETE FROM key_dates_tenant_configs WHERE tenant_id = $1',
       [ctx.tenantId],
-      );
-      await tx.query(
-        "SELECT setval('public.tenant_key_date_id_seq', 1, false)",
       );
     });
   }

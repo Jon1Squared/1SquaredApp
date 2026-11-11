@@ -523,7 +523,7 @@ export async function importFirmStoreModulesToPostgres(
       });
     }
 
-    await auditRepo.appendAuditEntries(ctx, chronologicalEntries);
+    await auditRepo.importAuditEntries(ctx, chronologicalEntries);
     counts.auditEntries = chronologicalEntries.length;
 
     const verifyAuditRepo = new TenantAuditRepository();

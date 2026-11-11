@@ -194,6 +194,119 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     expect(bounded.every((r) => r.recordId === target)).toBe(true);
   });
 
+  it('R451: listFirmAuditEntriesPage orders by seq DESC alone so entries with earlier client-supplied at timestamps are never skipped across pages', async () => {
+    const repo = new TenantAuditRepository();
+    const ctx = makeTenantCtx('firm-alpha');
+    const suffix = Date.now().toString(36);
+
+    const [entry1] = await repo.appendAuditEntries(ctx, [
+      {
+        ...auditInput(`M-R451-1-${suffix}`, 'Later timestamp, earlier seq'),
+        at: '2026-04-12T10:05:00.000Z',
+      },
+    ]);
+    const [entry2] = await repo.appendAuditEntries(ctx, [
+      {
+        ...auditInput(`M-R451-2-${suffix}`, 'Earlier timestamp, later seq'),
+        at: '2026-04-12T10:00:00.000Z',
+      },
+    ]);
+    expect(entry1!.seq).toBeDefined();
+    expect(entry2!.seq).toBeDefined();
+    expect(entry2!.seq!).toBeGreaterThan(entry1!.seq!);
+
+    const page1 = await repo.listFirmAuditEntriesPage(ctx, { limit: 1 });
+    expect(page1.entries).toHaveLength(1);
+    expect(page1.entries[0]!.id).toBe(entry2!.id);
+    expect(page1.entries[0]!.seq).toBe(entry2!.seq);
+    expect(page1.nextBeforeSeq).toBe(entry2!.seq);
+
+    const page2 = await repo.listFirmAuditEntriesPage(ctx, {
+      limit: 1,
+      beforeSeq: page1.nextBeforeSeq!,
+    });
+    expect(page2.entries).toHaveLength(1);
+    expect(page2.entries[0]!.id).toBe(entry1!.id);
+    expect(page2.entries[0]!.seq).toBe(entry1!.seq);
+  });
+
+  it('R455: runtime appendAuditEntry rejects duplicate audit IDs with TENANCY_AUDIT_WRITE_ERROR while importAuditEntries remains idempotent', async () => {
+    const repo = new TenantAuditRepository();
+    const ctx = makeTenantCtx('firm-alpha');
+    const explicitId = await repo.allocateNextAuditId(ctx);
+    const recordId = `M-R455-${Date.now().toString(36)}`;
+
+    const first = await repo.appendAuditEntry(ctx, {
+      id: explicitId,
+      recordType: 'matter',
+      recordId,
+      action: 'create',
+      field: 'Original field',
+      oldValue: null,
+      newValue: 'Invented original value',
+      byId: 'P-000001',
+      at: '2026-04-12T10:00:00.000Z',
+    });
+    expect(first.id).toBe(explicitId);
+
+    let duplicateErr: (Error & { code?: string }) | null = null;
+    try {
+      await repo.appendAuditEntry(ctx, {
+        id: explicitId,
+        recordType: 'matter',
+        recordId,
+        action: 'delete',
+        field: 'Tampered field',
+        oldValue: 'Invented original value',
+        newValue: 'Invented forged replacement',
+        byId: 'P-000001',
+        at: '2026-04-12T10:01:00.000Z',
+      });
+    } catch (err) {
+      duplicateErr = err as Error & { code?: string };
+    }
+    expect(duplicateErr).not.toBeNull();
+    expect(duplicateErr?.code).toBe('TENANCY_AUDIT_WRITE_ERROR');
+    expect(duplicateErr?.message).toContain('Duplicate or invalid firm audit entry');
+    expect(duplicateErr?.message).not.toContain(explicitId);
+    expect(duplicateErr?.message).not.toContain('Invented forged replacement');
+
+    const freshRepo = new TenantAuditRepository();
+    const rows = await freshRepo.listAuditEntriesForRecord(ctx, 'matter', recordId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).toBe(explicitId);
+    expect(rows[0]!.action).toBe('create');
+    expect(rows[0]!.newValue).toBe('Invented original value');
+  });
+
+  it('R460: tenant role has UPDATE privilege on tenant_audit_id_seq only and cannot call setval on other sequences', async () => {
+    const repo = new TenantAuditRepository();
+    const ctx = makeTenantCtx('firm-alpha');
+
+    const privs = await repo.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<{
+        audit_update: boolean;
+        kd_update: boolean;
+        kd_usage: boolean;
+      }>(
+        `SELECT
+           has_sequence_privilege(current_user, 'public.tenant_audit_id_seq', 'UPDATE') AS audit_update,
+           has_sequence_privilege(current_user, 'public.tenant_key_date_id_seq', 'UPDATE') AS kd_update,
+           has_sequence_privilege(current_user, 'public.tenant_key_date_id_seq', 'USAGE') AS kd_usage`,
+      );
+      return res.rows[0]!;
+    });
+    expect(privs.audit_update).toBe(true);
+    expect(privs.kd_update).toBe(false);
+    expect(privs.kd_usage).toBe(true);
+
+    await expect(
+      repo.withTenantTransaction(ctx, (tx) =>
+        tx.query("SELECT setval('public.tenant_key_date_id_seq', 1, false)"),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
   it('R413: scoped service queries redact staff-matter and HR rows for unauthorised viewers, and getAppSnapshot returns audit = []', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
