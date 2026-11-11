@@ -353,7 +353,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     });
     const ctx = makeTestTenantContext('mig-fk-restore');
     const runner = new TenantMigrationRunner();
-    for (const v of ['0006', '0005', '0004', '0003', '0002', '0001']) {
+    const versionsDesc = CORE_TENANT_MIGRATIONS.map((m) => m.version).reverse();
+    const versionsAfter0006 = versionsDesc.filter((v) => v > '0006');
+    for (const v of versionsDesc) {
       await runner.rollbackVersion(ctx, v);
     }
 
@@ -384,11 +386,17 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
     expect(await readTemplateFks()).toEqual([]);
 
+    for (const v of versionsAfter0006) {
+      expect(await runner.rollbackVersion(ctx, v)).toBe(true);
+    }
     expect(await runner.rollbackVersion(ctx, '0006')).toBe(true);
     expect(await readTemplateFks()).toEqual(bothKeys);
 
     const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-    expect(reapplied.map((m) => m.version)).toEqual(['0006']);
+    expect(reapplied.map((m) => m.version)).toEqual([
+      '0006',
+      ...[...versionsAfter0006].reverse(),
+    ]);
     expect(await readTemplateFks()).toEqual([]);
   });
 

@@ -40,6 +40,7 @@ import { uploadTemplateDraftService } from '../../src/server/documentGenerationS
 import { buildValidDocxArchive } from '@platform/core';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import { importFirmStoreModulesToPostgres } from '../../src/server/storePostgresImport';
+import { testDataResetContext } from '../../src/test/testTenantContexts';
 import { clearStoreMemoryCache, getStore, saveStore } from '../../src/server/store';
 import { canUserTakeTask } from '../../src/server/rbacRuntime';
 import { runWithActiveActorSession } from '../../src/domain/rbac';
@@ -194,7 +195,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
   });
 
   it('R413: scoped service queries redact staff-matter and HR rows for unauthorised viewers, and getAppSnapshot returns audit = []', async () => {
-    await resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const store = getStore();
       const staffMatter = store.matters.find((m) => m.id === 'M-000014')!;
@@ -237,12 +238,12 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       const snap = await getAppSnapshot('P-000004');
       expect(snap.audit).toEqual([]);
     } finally {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 
   it('Owner Decision 4: a forced failure during a key-date config write commits neither the config nor audit_entries', async () => {
-    await resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
     const kdRepo = getKeyDateRepository();
     const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx());
     try {
@@ -278,12 +279,12 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       if (originalOverride) {
         await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), originalOverride, 'P-000004');
       }
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 
   it('Owner Decision 4 / R405: a forced failure during a Document Generation template write commits neither the template nor audit_entries', async () => {
-    await resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
     const docRepo = getDocumentRepository();
     const ctx = testTenantCtx('P-000004');
     const code = 'TPL-S015-ATOMIC';
@@ -328,12 +329,12 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       ).toBe(false);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 
   it('R406: concurrent opA (audit append fails) and opB (succeeds) — opB JSON and audit survive, only opA delta is reverted', async () => {
-    await resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const startedAt = Date.now();
       const beforeA = structuredClone(getStore().people.find((p) => p.id === 'P-000002')!);
@@ -378,12 +379,12 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(written.some((a) => a.recordId === 'P-000002')).toBe(false);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 
   it('R418: nested locked calls (takeTaskRecord -> saveTaskRecord, nested runUnmigratedJsonMutationWithAudit) complete under 2s and roll back cleanly on forced failure', async () => {
-    await resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const store = getStore();
       let pick: { taskId: string; personId: string } | null = null;
@@ -483,29 +484,29 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(written.some((a) => a.recordId === 'NESTED-INNER')).toBe(false);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 
   it('Import idempotency: importFirmStoreModulesToPostgres([key-dates, audit]) run twice gives identical counts and the AU- sequence continues', async () => {
-    await resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const ctx = testTenantCtx();
       const auditRepo = getAuditRepository();
       const kdRepo = getKeyDateRepository();
 
       const first = await importFirmStoreModulesToPostgres({
+        ctx,
         store: getStore(),
         modules: ['key-dates', 'audit'],
-        correlationId: 'corr-import-idempotency-1',
       });
       const auditCountAfterFirst = await auditRepo.countAuditEntries(ctx);
       const keyDatesAfterFirst = (await kdRepo.listAllVisibleKeyDates(ctx)).length;
 
       const second = await importFirmStoreModulesToPostgres({
+        ctx,
         store: getStore(),
         modules: ['key-dates', 'audit'],
-        correlationId: 'corr-import-idempotency-2',
       });
       const auditCountAfterSecond = await auditRepo.countAuditEntries(ctx);
       const keyDatesAfterSecond = (await kdRepo.listAllVisibleKeyDates(ctx)).length;
@@ -537,7 +538,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(appendedNum).toBeGreaterThan(importedMax);
       expect(await auditRepo.countAuditEntries(ctx)).toBe(auditCountAfterSecond + 1);
     } finally {
-      await resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 
