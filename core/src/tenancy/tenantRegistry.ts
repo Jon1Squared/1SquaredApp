@@ -32,6 +32,30 @@ function getNodeFs(): typeof import('node:fs') {
   return mod;
 }
 
+const PLATFORM_ENVIRONMENTS: readonly PlatformEnvironment[] = [
+  'dev',
+  'test',
+  'training',
+  'demo',
+  'live',
+];
+
+function registryError(message: string): Error & { code: string } {
+  const err = new Error(message) as Error & { code: string };
+  err.code = 'TENANT_REGISTRY_ERROR';
+  return err;
+}
+
+function requireRegistryEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw registryError(
+      `TENANT_REGISTRY_ERROR: ${name} must be set to load the single-package tenant registry.`,
+    );
+  }
+  return value;
+}
+
 export interface TenantRegistryEntry {
   readonly tenantId: string;
   readonly slug: string;
@@ -183,20 +207,14 @@ function extractVaultUriFromPackageConfig(
 
 /**
  * Loads and validates the active environment's `TenantRegistry` from:
- * 1. `options.registryOverride` (for unit/migration tests), or
- * 2. `PLATFORM_TENANT_REGISTRY_JSON` (inline JSON string from Container Apps secret/env), or
- * 3. `PLATFORM_TENANT_REGISTRY_PATH` (file path), or
- * 4. Single-package fallback from `PLATFORM_TENANT_PACKAGE_DIR` + `PLATFORM_ENVIRONMENT`
+ * 1. `PLATFORM_TENANT_REGISTRY_JSON` (inline JSON string from Container Apps secret/env), or
+ * 2. `PLATFORM_TENANT_REGISTRY_PATH` (file path), or
+ * 3. Single-package fallback from `PLATFORM_TENANT_PACKAGE_DIR` + `PLATFORM_ENVIRONMENT`
  *    (Model A / local development & CI single-tenant package).
  */
 export function loadActiveTenantRegistry(options?: {
-  registryOverride?: unknown;
   cwd?: string;
 }): TenantRegistry {
-  if (options?.registryOverride !== undefined) {
-    return validateTenantRegistry(options.registryOverride);
-  }
-
   const inlineJson = process.env.PLATFORM_TENANT_REGISTRY_JSON?.trim();
   if (inlineJson) {
     let parsed: unknown;
@@ -226,20 +244,22 @@ export function loadActiveTenantRegistry(options?: {
     return validateTenantRegistry(parsed);
   }
 
-  const packageDir = (
-    process.env.PLATFORM_TENANT_PACKAGE_DIR ?? 'client-not-a-law-firm'
-  ).trim();
-  const rawEnv = process.env.PLATFORM_ENVIRONMENT?.trim();
-  if (process.env.NODE_ENV === 'production' && !rawEnv) {
-    throw new Error(
-      'TENANT_CONFIG_ERROR: PLATFORM_ENVIRONMENT must be explicitly set when NODE_ENV=production.',
+  // R436: no defaults for the package, environment, hosting mode or host (rule 1; fail closed).
+  const packageDir = requireRegistryEnv('PLATFORM_TENANT_PACKAGE_DIR');
+  const rawEnv = requireRegistryEnv('PLATFORM_ENVIRONMENT');
+  if (!PLATFORM_ENVIRONMENTS.includes(rawEnv as PlatformEnvironment)) {
+    throw registryError(
+      `TENANT_REGISTRY_ERROR: PLATFORM_ENVIRONMENT "${rawEnv}" is not a supported environment.`,
     );
   }
-  const environment = (rawEnv || 'dev') as PlatformEnvironment;
-  const hostingMode: HostingMode =
-    process.env.PLATFORM_HOSTING_MODE === 'single_tenant'
-      ? 'single_tenant'
-      : 'multi_tenant';
+  const environment = rawEnv as PlatformEnvironment;
+  const rawHostingMode = requireRegistryEnv('PLATFORM_HOSTING_MODE');
+  if (rawHostingMode !== 'single_tenant' && rawHostingMode !== 'multi_tenant') {
+    throw registryError(
+      `TENANT_REGISTRY_ERROR: PLATFORM_HOSTING_MODE "${rawHostingMode}" must be single_tenant or multi_tenant.`,
+    );
+  }
+  const hostingMode: HostingMode = rawHostingMode;
 
   const rootDir = options?.cwd ?? process.cwd();
   const basePath = path.join(rootDir, packageDir, 'config', 'base.json');
@@ -272,9 +292,7 @@ export function loadActiveTenantRegistry(options?: {
     ''
   ).trim();
   const postgresHost =
-    dedicatedHost ||
-    process.env.PLATFORM_POSTGRES_HOST?.trim() ||
-    '127.0.0.1';
+    dedicatedHost || requireRegistryEnv('PLATFORM_POSTGRES_HOST');
 
   return validateTenantRegistry({
     schemaVersion: '1.0.0',
