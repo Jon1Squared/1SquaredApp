@@ -340,6 +340,9 @@ export function MatterProfileClient({
     ConflictCheckRecord['runs']
   >([]);
   const [docAssemblyOpen, setDocAssemblyOpen] = useState(false);
+  const [matterRowVersion, setMatterRowVersion] = useState<number>(
+    matter.rowVersion ?? 1,
+  );
 
   const nameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -510,13 +513,17 @@ export function MatterProfileClient({
           practiceAreaId: matter.practiceAreaId,
           workTypeSubcategoryId: matter.workTypeSubcategoryId,
           stageId: matchingStage.id,
+          rowVersion: matterRowVersion,
         },
-        { id: matter.id },
+        { id: matter.id, expectedRowVersion: matterRowVersion },
       );
       if (res.errors && Object.keys(res.errors).length > 0) {
         setCurrentStageIdx(prevIdx);
         showToast(Object.values(res.errors)[0] ?? 'Could not update matter stage');
         return;
+      }
+      if (res.matter?.rowVersion != null) {
+        setMatterRowVersion(res.matter.rowVersion);
       }
       router.refresh();
     }

@@ -218,6 +218,7 @@ declare global {
   var __oneSquaredStore: FirmStore | undefined;
   var __oneSquaredStoreMtimeMs: number | undefined;
   var __oneSquaredLastSavedStoreJson: string | undefined;
+  var __oneSquaredStoreResetGeneration: number | undefined;
 }
 
 /**
@@ -1109,12 +1110,20 @@ export function resetStore(): FirmStore {
   const includeSyntheticEntraOids =
     getActiveTenantConfiguration().environment === 'test';
   const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
+  global.__oneSquaredStoreResetGeneration =
+    (global.__oneSquaredStoreResetGeneration ?? 0) + 1;
+  (global as Record<string, unknown>).__oneSquaredLastResetAtWriteSeq =
+    global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0;
   saveStore(fresh);
   return fresh;
 }
 
 export function clearStoreToCleanDeployment(): FirmStore {
   const clean = createCleanDeploymentStore(new Date());
+  global.__oneSquaredStoreResetGeneration =
+    (global.__oneSquaredStoreResetGeneration ?? 0) + 1;
+  (global as Record<string, unknown>).__oneSquaredLastResetAtWriteSeq =
+    global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0;
   saveStore(clean);
   return clean;
 }

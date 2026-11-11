@@ -2119,7 +2119,91 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it.todo('rejects a save based on a stale row_version (S0-16)');
+  it('rejects a save based on a stale row_version (S0-16)', async () => {
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+      const carysSession = {
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession,
+      };
+
+      const initialRowVersion = baseMatter.rowVersion ?? 1;
+
+      // Save 1 succeeds and increments rowVersion
+      const save1Res = await runWithActiveActorSession(carysSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseMatter,
+            title: 'R448 Save 1 Updated Title',
+          },
+          {
+            id: baseMatter.id,
+            byId: carys.id,
+            expectedRowVersion: initialRowVersion,
+          },
+        ),
+      );
+      expect(save1Res.errors).toBeUndefined();
+      expect(save1Res.matter).not.toBeNull();
+      expect(save1Res.matter!.rowVersion).toBe(initialRowVersion + 1);
+
+      // Save 2 with stale initialRowVersion is rejected with both code and message
+      const staleSaveRes = await runWithActiveActorSession(
+        carysSession,
+        async () =>
+          saveMatterRecord(
+            {
+              ...baseMatter,
+              title: 'R448 Stale Save Should Fail',
+            },
+            {
+              id: baseMatter.id,
+              byId: carys.id,
+              expectedRowVersion: initialRowVersion,
+            },
+          ),
+      );
+      expect(staleSaveRes.matter).toBeNull();
+      expect(staleSaveRes).toMatchObject({
+        code: 'MATTER_CONCURRENCY_CONFLICT',
+        message: expect.stringMatching(/MATTER_CONCURRENCY_CONFLICT:.*changed by someone else/i),
+      });
+      expect(staleSaveRes.errors?.conflict).toMatch(
+        /MATTER_CONCURRENCY_CONFLICT:.*changed by someone else/i,
+      );
+
+      // Verify the winning title from Save 1 remains intact
+      const afterStale = getStore().matters.find((m) => m.id === baseMatter.id)!;
+      expect(afterStale.title).toBe('R448 Save 1 Updated Title');
+      expect(afterStale.rowVersion).toBe(initialRowVersion + 1);
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
 
   it('R153: updateMatterConflictRecord enforces risk:view, never opens a draft matter, never satisfies partnerSignOffCompleted via Cleared, and preserves stored comments and server timestamps', async () => {
     try {
@@ -4848,7 +4932,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         async () =>
           saveMatterRecord(
             {
-              ...draftRes.matter!,
+              ...riskApproveWithoutKd.matter!,
               title: 'R179 Litigation Matter Requiring Limitation Date',
             },
             { id: draftId, byId: partner.id, saveMode: 'submit_cleared' },
@@ -6166,9 +6250,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           async () =>
             saveMatterRecord(
               {
-                ...save1Res.matter!,
+                ...saveInProgressRes.matter!,
                 conflictCheckRecord: {
-                  ...save1Res.matter!.conflictCheckRecord!,
+                  ...saveInProgressRes.matter!.conflictCheckRecord!,
                   status: 'Not started',
                   outcomeLabel: 'Pending',
                 },
@@ -6221,9 +6305,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           async () =>
             saveMatterRecord(
               {
-                ...save1Res.matter!,
+                ...saveNotStartedRes.matter!,
                 conflictCheckRecord: {
-                  ...save1Res.matter!.conflictCheckRecord!,
+                  ...saveNotStartedRes.matter!.conflictCheckRecord!,
                   status: 'Referred',
                   outcomeLabel: 'Referred to risk for review',
                 },

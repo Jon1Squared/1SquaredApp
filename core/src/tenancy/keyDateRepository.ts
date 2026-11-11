@@ -50,11 +50,12 @@ export interface KeyDateAuditEventRecord {
   correlationId: string;
 }
 
-interface DbMatterRestrictionRow {
+interface DbMatterRestrictionFromMattersRow {
   tenant_id: string;
-  matter_id: string;
-  is_restricted: boolean;
-  restricted_access_user_ids: string[];
+  id: string;
+  is_staff_matter: boolean;
+  has_ethical_wall: boolean;
+  restricted_access_user_ids_json: string[];
 }
 
 interface DbKeyDateRow {
@@ -253,7 +254,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   }
 
   // ============================================================================
-  // Matter Restriction Metadata (`matter_restriction_metadata`, 0005)
+  // Matter Restriction Resolution via `public.matters` (0009, R408, R417)
   // ============================================================================
 
   private async checkMatterVisibleInTx(
@@ -263,16 +264,19 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     viewerId: string,
   ): Promise<boolean> {
     if (!matterId) return true;
-    const res = await tx.query<DbMatterRestrictionRow>(
-      'SELECT * FROM matter_restriction_metadata WHERE tenant_id = $1 AND matter_id = $2',
+    const res = await tx.query<DbMatterRestrictionFromMattersRow>(
+      `SELECT tenant_id, id, is_staff_matter, has_ethical_wall, restricted_access_user_ids_json
+       FROM matters
+       WHERE tenant_id = $1 AND id = $2`,
       [ctx.tenantId, matterId],
     );
     const row = res.rows[0];
     if (!row) return false;
-    this.assertRowTenant(ctx, row.tenant_id, 'MatterRestrictionMetadata');
-    if (!row.is_restricted) return true;
-    const allowIds = Array.isArray(row.restricted_access_user_ids)
-      ? row.restricted_access_user_ids
+    this.assertRowTenant(ctx, row.tenant_id, 'Matter');
+    const isRestricted = Boolean(row.is_staff_matter) || Boolean(row.has_ethical_wall);
+    if (!isRestricted) return true;
+    const allowIds = Array.isArray(row.restricted_access_user_ids_json)
+      ? row.restricted_access_user_ids_json
       : [];
     return allowIds.includes(viewerId);
   }
@@ -282,19 +286,37 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     metadata: MatterRestrictionMetadata,
   ): Promise<void> {
     await this.withTenantTransaction(ctx, async (tx) => {
+      const restrictedIds = [...metadata.restrictedAccessUserIds];
+      const isRestricted = Boolean(metadata.isRestricted);
       await tx.query(
-        `INSERT INTO matter_restriction_metadata (
-           tenant_id, matter_id, is_restricted, restricted_access_user_ids, updated_at
-         ) VALUES ($1, $2, $3, $4::jsonb, NOW())
-         ON CONFLICT (tenant_id, matter_id) DO UPDATE SET
-           is_restricted = EXCLUDED.is_restricted,
-           restricted_access_user_ids = EXCLUDED.restricted_access_user_ids,
+        `INSERT INTO public.matters (
+           tenant_id, id, row_version, matter_number, title,
+           client_type, client_id, is_staff_matter, has_ethical_wall,
+           restricted_access_user_ids_json, created_at, updated_at
+         ) VALUES (
+           $1, $2, 1, 'DRAFT', $2,
+           'organisation', 'O-KEYDATE-STUB', $3, FALSE,
+           $4::jsonb, NOW(), NOW()
+         )
+         ON CONFLICT (tenant_id, id) DO UPDATE SET
+           is_staff_matter = CASE
+             WHEN public.matters.client_id = 'O-KEYDATE-STUB' THEN EXCLUDED.is_staff_matter
+             WHEN EXCLUDED.is_staff_matter = FALSE THEN FALSE
+             WHEN public.matters.has_ethical_wall = TRUE THEN public.matters.is_staff_matter
+             ELSE TRUE
+           END,
+           has_ethical_wall = CASE
+             WHEN public.matters.client_id = 'O-KEYDATE-STUB' THEN FALSE
+             WHEN EXCLUDED.is_staff_matter = FALSE THEN FALSE
+             ELSE public.matters.has_ethical_wall
+           END,
+           restricted_access_user_ids_json = EXCLUDED.restricted_access_user_ids_json,
            updated_at = NOW()`,
         [
           ctx.tenantId,
           metadata.matterId,
-          Boolean(metadata.isRestricted),
-          JSON.stringify([...metadata.restrictedAccessUserIds]),
+          isRestricted,
+          JSON.stringify(restrictedIds),
         ],
       );
     });
@@ -317,14 +339,16 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   ): Promise<boolean> {
     if (!matterId) return false;
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = await tx.query<DbMatterRestrictionRow>(
-        'SELECT * FROM matter_restriction_metadata WHERE tenant_id = $1 AND matter_id = $2',
+      const res = await tx.query<DbMatterRestrictionFromMattersRow>(
+        `SELECT tenant_id, id, is_staff_matter, has_ethical_wall, restricted_access_user_ids_json
+         FROM matters
+         WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, matterId],
       );
       const row = res.rows[0];
       if (!row) return false;
-      this.assertRowTenant(ctx, row.tenant_id, 'MatterRestrictionMetadata');
-      return Boolean(row.is_restricted);
+      this.assertRowTenant(ctx, row.tenant_id, 'Matter');
+      return Boolean(row.is_staff_matter) || Boolean(row.has_ethical_wall);
     });
   }
 
@@ -570,14 +594,14 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       const res = await tx.query<DbKeyDateRow>(
         `SELECT kd.*
          FROM key_dates kd
-         LEFT JOIN matter_restriction_metadata mrm
-           ON mrm.tenant_id = kd.tenant_id AND mrm.matter_id = kd.matter_id
+         LEFT JOIN matters m
+           ON m.tenant_id = kd.tenant_id AND m.id = kd.matter_id
          WHERE kd.tenant_id = $1
            AND (
              kd.matter_id IS NULL
-             OR mrm.matter_id IS NULL
-             OR mrm.is_restricted = FALSE
-             OR mrm.restricted_access_user_ids ? $2
+             OR m.id IS NULL
+             OR (m.is_staff_matter = FALSE AND m.has_ethical_wall = FALSE)
+             OR m.restricted_access_user_ids_json ? $2
            )
          ORDER BY kd.due_date ASC, kd.id ASC`,
         [ctx.tenantId, viewerId],
@@ -656,16 +680,16 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       const res = await tx.query<DbKeyDateRow>(
         `SELECT kd.*
          FROM key_dates kd
-         LEFT JOIN matter_restriction_metadata mrm
-           ON mrm.tenant_id = kd.tenant_id AND mrm.matter_id = kd.matter_id
+         LEFT JOIN matters m
+           ON m.tenant_id = kd.tenant_id AND m.id = kd.matter_id
          WHERE kd.tenant_id = $1
            AND (
              kd.matter_id IS NULL
              OR (
-               mrm.matter_id IS NOT NULL
+               m.id IS NOT NULL
                AND (
-                 mrm.is_restricted = FALSE
-                 OR mrm.restricted_access_user_ids ? $2
+                 (m.is_staff_matter = FALSE AND m.has_ethical_wall = FALSE)
+                 OR m.restricted_access_user_ids_json ? $2
                )
              )
            )
@@ -821,12 +845,12 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       const res = await tx.query<DbNotApplicableRow>(
         `SELECT na.*
          FROM key_date_not_applicable na
-         INNER JOIN matter_restriction_metadata mrm
-           ON mrm.tenant_id = na.tenant_id AND mrm.matter_id = na.matter_id
+         INNER JOIN matters m
+           ON m.tenant_id = na.tenant_id AND m.id = na.matter_id
          WHERE na.tenant_id = $1
            AND (
-             mrm.is_restricted = FALSE
-             OR mrm.restricted_access_user_ids ? $2
+             (m.is_staff_matter = FALSE AND m.has_ethical_wall = FALSE)
+             OR m.restricted_access_user_ids_json ? $2
            )
          ORDER BY na.matter_id ASC, na.key_date_type_id ASC`,
         [ctx.tenantId, viewerId],
@@ -1279,12 +1303,12 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
         ctx.tenantId,
       ]);
       await tx.query(
-        'DELETE FROM matter_restriction_metadata WHERE tenant_id = $1',
+        "DELETE FROM matters WHERE tenant_id = $1 AND client_id = 'O-KEYDATE-STUB'",
         [ctx.tenantId],
       );
       await tx.query(
         'DELETE FROM key_dates_tenant_configs WHERE tenant_id = $1',
-      [ctx.tenantId],
+        [ctx.tenantId],
       );
     });
   }

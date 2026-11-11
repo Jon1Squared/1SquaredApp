@@ -901,10 +901,10 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     }
   });
 
-  it('R446: nested runUnmigratedJsonMutationWithAudit where outer inserts note X, inner updates X, and outer audit append fails leaves X absent after clearStoreMemoryCache() and commits no inner audit row', async () => {
+  it('R446: nested runUnmigratedJsonMutationWithAudit where outer inserts notification X, inner updates X, and outer audit append fails leaves X absent after clearStoreMemoryCache() and commits no inner audit row', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const noteId = 'N-R446-OVERLAP';
+      const notifId = 'NTF-R446-OVERLAP';
       const startedAt = Date.now();
 
       setAuditAdapterFailureHookForTesting(({ entries }) => {
@@ -918,30 +918,33 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
           label: 'r446-outer',
           resolveCtx: () => testTenantCtx('P-000004'),
           mutate: async (outerStore) => {
-            outerStore.notes.unshift({
-              id: noteId,
-              recordType: 'person',
+            outerStore.notifications.unshift({
+              id: notifId,
+              recipientId: 'P-000002',
+              kind: 'task_assigned',
+              title: 'Inserted by outer frame',
+              detail: 'Outer notification detail',
+              href: '/tasks',
               recordId: 'P-000002',
-              body: 'Inserted by outer frame',
-              createdById: 'P-000004',
               createdAt: new Date().toISOString(),
-            } as unknown as (typeof outerStore.notes)[number]);
+              read: false,
+            } as unknown as (typeof outerStore.notifications)[number]);
             saveStore(outerStore);
 
             await runUnmigratedJsonMutationWithAudit({
               label: 'r446-inner',
               resolveCtx: () => testTenantCtx('P-000004'),
               mutate: async (innerStore) => {
-                const target = innerStore.notes.find((n) => n.id === noteId) as
+                const target = innerStore.notifications.find((n) => n.id === notifId) as
                   | Record<string, unknown>
                   | undefined;
                 expect(target).toBeDefined();
-                target!.body = 'Updated by inner frame';
+                target!.title = 'Updated by inner frame';
                 stageUnmigratedAuditEntry({
                   recordType: 'person',
-                  recordId: noteId,
+                  recordId: notifId,
                   action: 'update',
-                  field: 'Inner note update',
+                  field: 'Inner notification update',
                   oldValue: 'Inserted by outer frame',
                   newValue: 'Updated by inner frame',
                   byId: 'P-000004',
@@ -954,9 +957,9 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
               recordType: 'person',
               recordId: 'R446-OUTER-TRIGGER',
               action: 'create',
-              field: 'Outer note trigger',
+              field: 'Outer notification trigger',
               oldValue: null,
-              newValue: noteId,
+              newValue: notifId,
               byId: 'P-000004',
             });
           },
@@ -965,13 +968,13 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       setAuditAdapterFailureHookForTesting(null);
 
       clearStoreMemoryCache();
-      expect(getStore().notes.some((n) => n.id === noteId)).toBe(false);
+      expect(getStore().notifications.some((n) => n.id === notifId)).toBe(false);
 
       const freshRepo = new TenantAuditRepository();
       const innerRows = await freshRepo.listAuditEntriesForRecord(
         testTenantCtx('P-000004'),
         'person',
-        noteId,
+        notifId,
       );
       expect(innerRows.filter((r) => Date.parse(r.at) >= startedAt)).toEqual([]);
     } finally {

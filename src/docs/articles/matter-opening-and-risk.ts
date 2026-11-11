@@ -6,9 +6,9 @@ export const matterOpeningAndRiskArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the five-step Matter Opening wizard works, how the seven-section risk questionnaire is scored, and how the server validates answers and derives the matter risk rating.',
-  updated: '2026-11-07',
+  updated: '2026-11-11',
   body: `
-This guide explains the **Matter Opening wizard** (\`/matters/new\` and \`/matters/[id]/edit\`), how the **Matter Risk Assessment** questionnaire is structured and completed, and how the server validates answers, calculates the risk snapshot, and sets the matter's risk rating.
+This guide explains the **Matter Opening wizard** (\`/matters/new\` and \`/matters/[id]/edit\`), how the **Matter Risk Assessment** questionnaire is structured and completed, how the server validates answers, calculates the risk snapshot, and sets the matter's risk rating, and how matter numbers and optimistic concurrency (\`row_version\`) are enforced in PostgreSQL (\`S0-16\`).
 
 ## 1. The Matter Opening wizard steps
 
@@ -19,6 +19,11 @@ Opening a new matter (requires \`matter:create\`) or editing a matter in progres
 3. **Matter risk assessment**: Seven-section risk questionnaire covering instruction rationale, Money Laundering Regulations (MLR) scope, client relationship and due diligence, geography, funds and payments, delivery and resourcing, fees and liability, and reputation, regulation, and data.
 4. **Parties & conflict check**: Structured party capture (with relationship and capacity codes) and a server-side conflict search across all tenant matters and enquiries. Matches must be reviewed with a disposition and explanation before submission; potential conflicts or matches on restricted records are referred to Risk & Compliance (\`risk:view\`).
 5. **Declaration & submission**: Confirmation that all known parties have been searched and recorded, allowing the fee earner to **Save draft**, **Open matter** (\`submit_cleared\`), or **Refer to Risk** (\`submit_referred\`).
+
+### Monotonic per-tenant matter numbering (\`B6\`) and optimistic concurrency (\`row_version\`, \`R409\`, \`R448\`)
+
+- **Monotonic matter numbers (\`B6\`)**: When a matter transitions out of \`DRAFT\`, \`generateMatterNumber\` allocates the next reference from PostgreSQL \`public.matter_number_sequences\` via \`TenantMatterRepository.allocateNextMatterNumber(ctx, prefix)\` (\`INSERT ... ON CONFLICT (tenant_id, prefix_key) DO UPDATE SET last_value = public.matter_number_sequences.last_value + 1 RETURNING last_value\`). Allocation runs on an autonomous per-tenant transaction (\`withAutonomousTenantTransaction\`) and seed/store imports advance the high-water mark with \`GREATEST(...)\`, so a matter number is never reissued even if a matter opening is rolled back, a matter is deleted, or non-live demo data is reset (\`resetAllDemoData\`).
+- **Optimistic concurrency (\`row_version\`)**: Every matter row in PostgreSQL \`public.matters\` carries an integer \`row_version\` (\`DEFAULT 1\`) incremented on every update across all eight matter writers (\`saveMatterRecord\`, \`updateMatterConflictRecord\`, \`signOffMatterCostsRecord\`, \`markMatterEngagementLetterDraftedRecord\`, \`liftMatterRestriction\`, \`executeMerge\`, \`reassignLeaverOwnedRecords\`, and \`createRecordFromPms\`). \`MatterProfileClient\` and \`MatterFormClient\` pass the loaded \`rowVersion\` to \`saveMatterAction\` / \`saveMatterRecord\`; if another user or background action has updated the matter in the meantime, \`TenantMatterRepository.updateMatter\` updates zero rows and rejects the stale save with \`MATTER_CONCURRENCY_CONFLICT\` (\`errors.conflict: "MATTER_CONCURRENCY_CONFLICT: This matter was changed by someone else while you were saving. Please reload and try again."\`).
 
 ## 2. How the risk assessment questionnaire works
 

@@ -16,7 +16,7 @@ This runbook defines the mandatory release cut-over and rollback sequence when m
    |---|---|---|---|
    | **S0-14** | `0001`–`0006` | `documents,document-store` | JSON store (`documentTemplates`, `documentTemplateVersions`, `documents`, `documentLinks`, `templateUsageEvents`, `documentGenerationConfigOverride`, `matterDocumentLocations`, `documentStoreFolderScopes`, `documentLifecycleJobs`, `documentReconciliationFindings`, `documentStoreAuditEvents`, `documentStoreConfigOverride`, `people[].entraObjectId`) |
    | **S0-15** | `0007`–`0008` | `key-dates,audit` | JSON store (`matters` restriction metadata, `keyDatesConfigOverride`, 2-pass `keyDates`, `keyDateNotApplicable`, `keyDateReminderStates`, `keyDateCalendarSyncs`, `audit`) |
-   | **S0-16** | `0009` | `directory-and-matters` | JSON store (`organisations`, `people` including transitional `employment_json`, `links`, `matters`, `notes`, `mergeHistory`, `matterPartyMigrationReport`) |
+   | **S0-16** | `0009` | `parties,matters` | JSON store (`organisations`, `people` including transitional `employment_json` and `person_emails`, `links`, `matters` including `row_version` and `matter_parties`, `notes`, `mergeHistory`, `matter_number_sequences`) |
    | **S0-17a** | `0010` | `intake-and-workflows` | JSON store (`enquiries`, `quotes`, `tasks`, `notifications`, `signOffs`, `recentlyViewed`, `enquirySettings`, `taskSettings`) |
    | **S0-17b** | `0011` | `hr-and-rbac` | **Hybrid (`R421`):** `employment` and `employment.payroll` are read from PostgreSQL `people.employment_json` (live since `S0-16`), while `employeeSensitiveRecords`, `employeeMigrationReport`, `teams`, and `rbacConfigOverride` are read from the JSON store |
    | **S0-17c** | `0012` | `firm-config` | JSON store (`firm`, `lists`, `values`, `customFields`, `orgStructure`, `matterPartyTaxonomy`, `homePagesConfig`, `matterCostsConfig`, `counters`) |
@@ -71,11 +71,12 @@ az containerapp job start \
 - Re-running the import is safe and idempotent (`ON CONFLICT ... DO UPDATE` / `DO NOTHING` with single-increment guard on `template_usage_daily_summaries`).
 - Local equivalent: `npm run db:import -- --modules documents,document-store`.
 - **S0-15** (`--modules key-dates,audit`): the import is idempotent. Running it twice leaves identical `key_dates*` and `audit_entries` counts, and the tenant `AU-` sequence is advanced past the highest imported number, so new entries continue the sequence. `audit_entries` is append-only for `role_tenant_*` (INSERT/SELECT only); the import inserts with `ON CONFLICT DO NOTHING` and never updates existing audit rows. Covered by `core/tests/audit-log-postgres.test.ts`.
+- **S0-16** (`--modules parties,matters`): the import is idempotent. Running it twice leaves identical `people`, `person_emails`, `organisations`, `person_organisation_links`, `notes`, `merge_history`, `matters`, and `matter_parties` counts, preserves existing `matters.row_version` on re-import (`COALESCE(public.matters.row_version, 1)`), advances `tenant_record_sequences` (`P`, `O`, `L`, `N`, `MRG`, `M`) past the highest imported IDs, and advances `matter_number_sequences` via `GREATEST(...)` (`B6`). Covered by `core/tests/parties-matters-postgres.test.ts`.
 
 ### Step 4 — Verify Row Counts and `CORE_REQUIRED_SCHEMA_VERSION`
 
 1. Inspect the Container Apps job logs (`Log Analytics`) for `"event":"store_import.tenant_succeeded"` on every enabled tenant and confirm zero `"store_import.tenant_failed"` entries. Note that `import-store.mjs` automatically verifies imported row counts on a fresh repository connection before logging `store_import.tenant_succeeded`.
-2. Confirm `public.tenant_schema_migrations` in each tenant database includes `CORE_REQUIRED_SCHEMA_VERSION` (`0006` in `S0-14`, `0008` in `S0-15`). Any tenant below `CORE_REQUIRED_SCHEMA_VERSION` will immediately refuse web traffic with `TENANT_SCHEMA_NOT_READY`.
+2. Confirm `public.tenant_schema_migrations` in each tenant database includes `CORE_REQUIRED_SCHEMA_VERSION` (`0006` in `S0-14`, `0008` in `S0-15`, `0009` in `S0-16`). Any tenant below `CORE_REQUIRED_SCHEMA_VERSION` will immediately refuse web traffic with `TENANT_SCHEMA_NOT_READY`.
 
 ### Step 5 — Scale Up and Route Traffic to the New Web Revision
 

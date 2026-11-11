@@ -13,11 +13,21 @@ import {
 import {
   appendUnmigratedModuleAuditEntries,
   captureJsonStoreBaseline,
+  getActiveCompensatorOrNull,
   getAuditRepository,
+  getMatterRepository,
+  getPartyRepository,
+  markPartiesAndMattersSyncedWithStore,
   registerJsonStoreRecordDeltas,
   runUnmigratedJsonMutationWithAudit,
   stageUnmigratedAuditEntry,
+  syncAndHydratePartiesAndMattersFromPostgres,
 } from './auditAdapter';
+export {
+  getMatterRepository,
+  getPartyRepository,
+  syncAndHydratePartiesAndMattersFromPostgres,
+};
 import {
   clearMigratedPostgresModulesForTenant,
   computeMatterRestrictionMetadataForStore,
@@ -192,6 +202,8 @@ import {
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
+  MATTER_CONCURRENCY_CONFLICT_CODE,
+  MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   runTenantBackgroundJob,
   TenantKeyDateRepository,
   validateKeyDatesConfig,
@@ -373,6 +385,17 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
     });
   }
   const store = getStore();
+  try {
+    const authCtx = resolveCurrentTenantContext(
+      createVerifiedSessionActorFromEntraSession(entraSession, {
+        correlationId: 'auth-check',
+      }),
+      getActiveTenantConfiguration(),
+    );
+    await syncAndHydratePartiesAndMattersFromPostgres(store, authCtx);
+  } catch {
+    // Session tenant mismatches are handled by downstream actor checks
+  }
   const person = store.people.find(
     (p) => p.id === entraSession.personId && p.isEmployee && !p.mergedIntoId,
   );
@@ -664,45 +687,50 @@ async function syncMatterRestrictionInPostgres(
   previousMatter?: Matter | null,
 ): Promise<void> {
   const tenantConfig = getActiveTenantConfiguration();
-  const repo = getKeyDateRepository();
   const nextMeta = computeMatterRestrictionMetadataForStore(
     matter,
     store.people,
     store.teams,
     tenantConfig,
   );
-  if (compensator) {
-    if (previousMatter) {
-      const prevMeta = computeMatterRestrictionMetadataForStore(
+  const prevMeta = previousMatter
+    ? computeMatterRestrictionMetadataForStore(
         previousMatter,
         store.people,
         store.teams,
         tenantConfig,
-      );
-      compensator.register(`keydates.matter_restriction:${matter.id}`, async () => {
-        await repo.setMatterRestriction(ctx, prevMeta);
-        getMatterRestrictionDigestCache().delete(`${ctx.postgresDatabaseName}:${matter.id}`);
-      });
-    } else {
-      compensator.register(`keydates.matter_restriction:${matter.id}`, async () => {
-        await repo.setMatterRestriction(ctx, {
-          matterId: matter.id,
-          isRestricted: false,
-          restrictedAccessUserIds: [],
-        });
-        getMatterRestrictionDigestCache().delete(`${ctx.postgresDatabaseName}:${matter.id}`);
-      });
-    }
-  }
-  await repo.setMatterRestriction(ctx, nextMeta);
+      )
+    : null;
   const cacheKey = `${ctx.postgresDatabaseName}:${matter.id}`;
+  const repo = getKeyDateRepository();
+  await repo.setMatterRestriction(ctx, nextMeta);
   getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(nextMeta));
+  const activeComp = compensator ?? getActiveCompensatorOrNull();
+  if (activeComp) {
+    activeComp.register(
+      `keydates.matter_restriction:${matter.id}`,
+      async () => {
+        if (prevMeta) {
+          await repo.setMatterRestriction(ctx, prevMeta);
+        } else {
+          await repo.withTenantTransaction(ctx, async (tx) => {
+            await tx.query(
+              "DELETE FROM public.matters WHERE tenant_id = $1 AND id = $2 AND client_id = 'O-KEYDATE-STUB'",
+              [ctx.tenantId, matter.id],
+            );
+          });
+        }
+        getMatterRestrictionDigestCache().delete(cacheKey);
+      },
+    );
+  }
 }
 
 async function ensureStoreMattersRestrictedMetadataSynced(
   ctx: TenantContext,
   store: FirmStore,
 ): Promise<void> {
+  await syncAndHydratePartiesAndMattersFromPostgres(store, ctx);
   const tenantConfig = getActiveTenantConfiguration();
   const repo = getKeyDateRepository();
   const digestCache = getMatterRestrictionDigestCache();
@@ -780,6 +808,12 @@ export async function listAuditEntriesForRecord(
   options?: { limit?: number; tokenRoles?: readonly string[] },
 ): Promise<AuditEntry[]> {
   const store = getStore();
+  try {
+    const prelimCtx = resolveDefaultServiceTenantContext(store, viewerId);
+    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
+  } catch {
+    // Handled below if viewer is missing or session is unauthenticated
+  }
   const viewer = store.people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
   );
@@ -873,6 +907,12 @@ export async function listFirmAuditEntriesPage(
   { entries: AuditEntry[]; nextBeforeSeq: number | null } & Partial<ActionDenied>
 > {
   const store = getStore();
+  try {
+    const prelimCtx = resolveDefaultServiceTenantContext(store, viewerId);
+    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
+  } catch {
+    // Handled below if viewer is missing or session is unauthenticated
+  }
   const viewer = store.people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
   );
@@ -1042,6 +1082,12 @@ async function getAppSnapshotInScope(
 ): Promise<AppSnapshot> {
   const store = getStore();
   const now = new Date();
+  try {
+    const prelimCtx = resolveDefaultServiceTenantContext(store, userId);
+    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
+  } catch {
+    // Handled below if user is missing or session is unauthenticated
+  }
   const user = store.people.find(
     (p) => p.id === userId && !p.mergedIntoId,
   );
@@ -3411,7 +3457,11 @@ export async function addNoteToRecord(
   });
 }
 
-export function generateMatterNumber(store: FirmStore, clientId: string): string {
+export async function generateMatterNumber(
+  store: FirmStore,
+  clientId: string,
+  ctx?: TenantContext,
+): Promise<string> {
   const org = store.organisations.find((o) => o.id === clientId);
   const person = store.people.find((p) => p.id === clientId);
   let prefix = 'MAT001';
@@ -3422,17 +3472,9 @@ export function generateMatterNumber(store: FirmStore, clientId: string): string
   } else if (person) {
     prefix = person.surname.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X') + '001';
   }
-  const existingForClient = store.matters.filter((m) => m.clientId === clientId || m.matterNumber.startsWith(`${prefix}-`));
-  let maxSeq = existingForClient.length;
-  for (const m of existingForClient) {
-    const match = m.matterNumber.match(/-(\d+)$/);
-    if (match) {
-      const n = parseInt(match[1], 10);
-      if (!Number.isNaN(n) && n > maxSeq) maxSeq = n;
-    }
-  }
-  const nextSeq = maxSeq + 1;
-  return `${prefix}-${String(nextSeq).padStart(4, '0')}`;
+  const effectiveCtx = ctx ?? resolveDefaultServiceTenantContext(store);
+  await syncAndHydratePartiesAndMattersFromPostgres(store, effectiveCtx);
+  return getMatterRepository().allocateNextMatterNumber(effectiveCtx, prefix);
 }
 
 function resolveMatterSignOffEstimateGbp(
@@ -3862,8 +3904,14 @@ export async function saveMatterRecord(
     byId: string;
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
     source?: 'pms_import';
+    expectedRowVersion?: number;
   },
-): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
+): Promise<{
+  matter: Matter | null;
+  code?: string;
+  message?: string;
+  errors?: Record<string, string>;
+}> {
   let resolvedMatterCtx: TenantContext | null = null;
   return runUnmigratedJsonMutationWithAudit({
     label: 'saveMatterRecord',
@@ -3872,7 +3920,7 @@ export async function saveMatterRecord(
     mutate: async (store, compensator) => {
   const existingRef = opts.id ? store.matters.find((m) => m.id === opts.id) ?? null : null;
   const existing = existingRef ? structuredClone(existingRef) : null;
-  const existingUpdatedAt = existing?.updatedAt ?? null;
+  const existingRowVersion = existing?.rowVersion ?? 1;
   const now = nextMonotonicIsoTimestamp(existing?.updatedAt);
   const today = toIsoDate(new Date());
   const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
@@ -3947,6 +3995,26 @@ export async function saveMatterRecord(
         matter: null,
         errors: {
           permission: 'You do not have permission (matter:edit) to edit matters.',
+        },
+      };
+    }
+    const suppliedExpectedVersion =
+      opts.expectedRowVersion !== undefined
+        ? opts.expectedRowVersion
+        : input.rowVersion;
+    if (
+      suppliedExpectedVersion !== undefined &&
+      (typeof suppliedExpectedVersion !== 'number' ||
+        !Number.isInteger(suppliedExpectedVersion) ||
+        suppliedExpectedVersion < 1 ||
+        suppliedExpectedVersion !== existingRowVersion)
+    ) {
+      return {
+        matter: null,
+        code: MATTER_CONCURRENCY_CONFLICT_CODE,
+        message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+        errors: {
+          conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
         },
       };
     }
@@ -4214,11 +4282,18 @@ export async function saveMatterRecord(
     promoteEnquiryPersonId(
       input.clientId !== undefined ? input.clientId : existing?.clientId,
     ) ?? '';
-  const rawMatterNumber = (input.matterNumber ?? existing?.matterNumber ?? '').trim();
+  const rawMatterNumberInput = (input.matterNumber ?? existing?.matterNumber ?? '').trim();
+  const rawMatterNumber =
+    !existing &&
+    rawMatterNumberInput &&
+    rawMatterNumberInput !== 'DRAFT' &&
+    store.matters.some((m) => m.matterNumber === rawMatterNumberInput)
+      ? ''
+      : rawMatterNumberInput;
   const matterNumber = isDraftSave
     ? rawMatterNumber || 'DRAFT'
     : !rawMatterNumber || rawMatterNumber === 'DRAFT'
-      ? generateMatterNumber(store, effectiveClientId)
+      ? await generateMatterNumber(store, effectiveClientId, extensionCtx)
       : rawMatterNumber;
 
   // Auto-create new contacts/organisations on save for any party added by typing a new name
@@ -4737,9 +4812,10 @@ export async function saveMatterRecord(
         )
       : [];
 
-  const matter: Matter = {
+  let matter: Matter = {
     id: existing?.id ?? nextId(store, 'M'),
     recordType: 'matter',
+    rowVersion: existing?.rowVersion ?? 1,
     recordOwnerId: input.leadFeeEarnerId || input.responsiblePartnerId || existing?.recordOwnerId || opts.byId,
     recordStatusId: nextStatusId,
     createdById: existing?.createdById ?? opts.byId,
@@ -4980,15 +5056,15 @@ export async function saveMatterRecord(
     };
   }
 
-  // R448: superseded by S0-16 row_version
   if (existing) {
     const current = store.matters.find((m) => m.id === existing.id);
-    if (!current || current.updatedAt !== existingUpdatedAt) {
+    if (!current || (current.rowVersion ?? 1) !== existingRowVersion) {
       return {
         matter: null,
+        code: MATTER_CONCURRENCY_CONFLICT_CODE,
+        message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
         errors: {
-          conflict:
-            'This matter was changed by someone else while you were saving. Please reload and try again.',
+          conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
         },
       };
     }
@@ -5154,15 +5230,27 @@ export async function saveMatterRecord(
         compensator,
       );
     }
-  } else {
-    const idx = store.matters.findIndex((m) => m.id === existing.id);
-    store.matters[idx] = matter;
+  }
+  let previousMatterSnapshot: Matter | undefined;
+  if (existing && existingRef) {
+    previousMatterSnapshot = existing;
+    const idx = store.matters.findIndex((m) => m.id === existingRef.id);
+    for (const k of Object.keys(existingRef)) {
+      if (!Object.prototype.hasOwnProperty.call(matter, k)) {
+        delete (existingRef as unknown as Record<string, unknown>)[k];
+      }
+    }
+    Object.assign(existingRef, matter);
+    matter = existingRef;
+    if (idx >= 0) {
+      store.matters[idx] = existingRef;
+    }
     writeAudit(store, {
       recordType: 'matter',
       recordId: matter.id,
       action: 'update',
       field: 'Matter details & type-specific fields',
-      oldValue: existing.title,
+      oldValue: previousMatterSnapshot.title,
       newValue: `${matter.matterNumber} — ${matter.title}`,
       byId: opts.byId,
       at: now,
@@ -5188,7 +5276,7 @@ export async function saveMatterRecord(
       store,
       matter,
       compensator,
-      existing,
+      previousMatterSnapshot,
     );
     if (matter.sourceEnquiryId) {
       await finalizeEnquiryConversionToMatter(
@@ -5329,12 +5417,12 @@ export async function saveMatterRecord(
 
   saveStore(store);
 
-  if (existing) {
+  if (previousMatterSnapshot) {
     const syncCorrelationId = `corr-lifecycle-sync-${matter.id}-${Date.now()}`;
     try {
       void syncMatterLifecycleOnSaveSync({
         matter,
-        previousMatter: existing,
+        previousMatter: previousMatterSnapshot,
         userId: opts.byId,
         correlationId: syncCorrelationId,
         store,
@@ -5579,6 +5667,7 @@ export async function runMatterConflictSearchRecord(
 ): Promise<{
   matches: ConflictCheckMatch[];
   run?: ConflictCheckRunAudit;
+  matter?: Matter | null;
   errors?: Record<string, string>;
 }> {
   return runUnmigratedJsonMutationWithAudit({
@@ -5670,6 +5759,7 @@ export async function runMatterConflictSearchRecord(
     savedMatter.conflictCheckRecord.lastRunAtDisplay = displayNow;
     savedMatter.conflictCheckRecord.lastRunById = byId;
     savedMatter.conflictCheckRecord.lastRunByName = actorDisplayName;
+    touchMatter(savedMatter, byId);
     storeModified = true;
   }
   const restrictedCount = matches.filter((m) => m.restricted).length;
@@ -5707,7 +5797,7 @@ export async function runMatterConflictSearchRecord(
   if (storeModified) {
     saveStore(store);
   }
-  return { matches, run };
+  return { matches, run, ...(savedMatter ? { matter: savedMatter } : {}) };
 
     },
   });
@@ -6710,8 +6800,10 @@ export async function executeMerge(
     merged.updatedAt = now;
     merged.updatedById = byId;
 
+    const activeMergeCtx = mergeCtx ?? resolveDefaultServiceTenantContext(store, byId);
+    const mergeHistoryId = await getPartyRepository().allocateNextMergeHistoryId(activeMergeCtx);
     const history: MergeHistory = {
-      id: nextId(store, 'M'),
+      id: mergeHistoryId,
       recordType,
       survivorId: survivor.id,
       mergedId: merged.id,
@@ -7251,6 +7343,8 @@ export async function resetAllDemoData(
   saveStore(fresh);
   getMatterRestrictionDigestCache().clear();
   await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
+  saveStore(fresh);
+  markPartiesAndMattersSyncedWithStore(fresh, ctx);
   await appendUnmigratedModuleAuditEntries(ctx, [
     {
       recordType: 'system',
@@ -7278,6 +7372,7 @@ export async function clearAllDataToCleanDeployment(
   saveStore(clean);
   getMatterRestrictionDigestCache().clear();
   await clearMigratedPostgresModulesForTenant({ ctx });
+  markPartiesAndMattersSyncedWithStore(clean, ctx);
   await appendUnmigratedModuleAuditEntries(ctx, [
     {
       recordType: 'system',
@@ -13612,8 +13707,6 @@ export async function resolveOrProvisionEntraEmployee(
   const prelimStore = getStore();
   const rbacConfig = getDefaultTenantRbacConfig(activeTenantId);
   const {
-    ambiguousEmailMatchPersonIds,
-    refusedPrivilegedEmailLinkPersonId,
     verifiedToken,
   } = resolvePersonForEntraClaims({
     claims,
@@ -13642,6 +13735,21 @@ export async function resolveOrProvisionEntraEmployee(
     }),
     activeTenantConfig,
   );
+  await syncAndHydratePartiesAndMattersFromPostgres(prelimStore, signInCtx);
+  if (claimEmail) {
+    await getPartyRepository().findActivePeopleByEmail(signInCtx, claimEmail);
+  }
+  const {
+    ambiguousEmailMatchPersonIds,
+    refusedPrivilegedEmailLinkPersonId,
+  } = resolvePersonForEntraClaims({
+    claims,
+    people: prelimStore.people,
+    teams: prelimStore.teams,
+    tenantId: activeTenantId,
+    rbacConfig,
+    primaryDomain: activeTenantConfig.branding.primaryDomain,
+  });
   const authorityMode = rbacConfig.identityMapping?.authorityMode ?? 'hybrid';
 
   if (refusedPrivilegedEmailLinkPersonId) {
@@ -13951,6 +14059,12 @@ export async function getMatterKeyDatesSnapshot(
   canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
 }> {
   const store = getStore();
+  try {
+    const prelimCtx = resolveDefaultServiceTenantContext(store, userId);
+    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
+  } catch {
+    // Handled below if user is missing or session is unauthenticated
+  }
   const user = resolveActorForKeyDates(store, userId);
   if (!user) {
     return {

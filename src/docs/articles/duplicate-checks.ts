@@ -6,9 +6,9 @@ export const duplicateChecks: DocArticle = {
   section: 'people-organisations',
   summary:
     'How the People and Organisation forms warn you about records that may already exist, and how merging duplicate records repoints every reference.',
-  updated: '2026-11-07',
+  updated: '2026-11-11',
   body: `
-When you add or edit a person or organisation, 1Squared checks for existing records that might be the same. Matches appear in a warning above the form, so you can open the existing record instead of creating a duplicate.
+When you add or edit a person or organisation, 1Squared checks for existing records in the per-tenant PostgreSQL directory (\`TenantPartyRepository\`: \`public.people\`, \`public.person_emails\`, \`public.organisations\`, \`public.person_organisation_links\`, \`public.notes\`, and \`public.merge_history\`, \`S0-16\`) that might be the same. Matches appear in a warning above the form, so you can open the existing record instead of creating a duplicate.
 
 ## What is compared
 
@@ -63,6 +63,6 @@ In a single operation, the merge copies missing profile fields, emails, phone nu
 
 ### Tombstone redirect and audit trail
 
-The merged record is not deleted: it is marked as **Merged** with \`mergedIntoId\` pointing to the surviving record. Opening the old record's profile or edit URL automatically redirects to the surviving record, and existing audit entries keep their original \`recordId\` so the historical audit trail remains intact.
+The merged record is not deleted: it is marked as **Merged** with \`mergedIntoId\` pointing to the surviving record, and all PostgreSQL directory, matter (incrementing \`row_version\`), link, note, \`merge_history\`, and \`audit_entries\` writes commit atomically in a single tenant transaction alongside per-record delta compensation for unmoved JSON collections (\`S0-16\`, \`R405\`, \`R406\`, \`R409\`). Opening the old record's profile or edit URL automatically redirects to the surviving record, and existing audit entries keep their original \`recordId\` so the historical audit trail remains intact.
 `,
 };

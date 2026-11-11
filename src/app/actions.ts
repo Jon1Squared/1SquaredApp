@@ -1,6 +1,10 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import {
+  MATTER_CONCURRENCY_CONFLICT_CODE,
+  MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+} from '@platform/core';
 import type {
   AppRole,
   AutoTaskTrigger,
@@ -299,12 +303,34 @@ export async function saveMatterAction(
   opts: {
     id?: string;
     saveMode?: 'draft' | 'submit_cleared' | 'submit_referred';
+    expectedRowVersion?: number;
   } = {},
 ) {
   return guardedAction('saveMatterAction', async ({ personId: byId }) => {
+    const expectedRowVersion =
+      opts.expectedRowVersion !== undefined
+        ? opts.expectedRowVersion
+        : payload.rowVersion;
+    if (opts.id) {
+      if (
+        typeof expectedRowVersion !== 'number' ||
+        !Number.isInteger(expectedRowVersion) ||
+        expectedRowVersion < 1
+      ) {
+        return {
+          matter: null,
+          code: MATTER_CONCURRENCY_CONFLICT_CODE,
+          message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+          errors: {
+            conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+          },
+        };
+      }
+    }
     const res = await saveMatterRecord(payload, {
       id: opts.id,
       saveMode: opts.saveMode,
+      expectedRowVersion,
       byId,
     });
     revalidateAll();

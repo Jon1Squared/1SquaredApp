@@ -33,6 +33,8 @@ export * from './postgresPoolManager';
 export * from './tenantScopedRepository';
 export * from './keyDateRepository';
 export * from './auditRepository';
+export * from './partyRepository';
+export * from './matterRepository';
 
 export {
   isEntraMfaVerified,

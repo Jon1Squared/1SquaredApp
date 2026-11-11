@@ -23,7 +23,7 @@ import {
   type TenantPostgresPoolManager,
 } from './postgresPoolManager';
 
-export const CORE_REQUIRED_SCHEMA_VERSION = '0008';
+export const CORE_REQUIRED_SCHEMA_VERSION = '0009';
 
 export interface TenantQueryResult<TRow = Record<string, unknown>> {
   readonly rows: TRow[];
@@ -163,25 +163,33 @@ export abstract class TenantScopedRepository {
     ctx: TenantContext,
     fn: (tx: TenantSqlClient) => Promise<T>,
   ): Promise<T> {
-    return this.executeTransaction(ctx, true, fn);
+    return this.executeTransaction(ctx, true, fn, true);
   }
 
   public async withTenantTransaction<T>(
     ctx: TenantContext,
     fn: (tx: TenantSqlClient) => Promise<T>,
   ): Promise<T> {
-    return this.executeTransaction(ctx, false, fn);
+    return this.executeTransaction(ctx, false, fn, true);
+  }
+
+  public async withAutonomousTenantTransaction<T>(
+    ctx: TenantContext,
+    fn: (tx: TenantSqlClient) => Promise<T>,
+  ): Promise<T> {
+    return this.executeTransaction(ctx, false, fn, false);
   }
 
   private async executeTransaction<T>(
     ctx: TenantContext,
     readOnly: boolean,
     fn: (tx: TenantSqlClient) => Promise<T>,
+    joinExistingScope = true,
   ): Promise<T> {
     assertValidPostgresTenantContext(ctx);
 
     const txStorage = getActiveTenantTxStorage();
-    const existingScope = txStorage?.getStore();
+    const existingScope = joinExistingScope ? txStorage?.getStore() : undefined;
     if (
       existingScope &&
       existingScope.poolManager === this.poolManager &&

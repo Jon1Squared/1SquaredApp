@@ -14,22 +14,45 @@ import {
   TenantDocumentRepository,
   TenantDocumentStoreRepository,
   TenantKeyDateRepository,
+  TenantMatterRepository,
+  TenantPartyRepository,
   type FirmAuditEntryInput,
   type MatterRestrictionMetadata,
   type TenantConfiguration,
   type TenantContext,
+  type TenantMatterRecord,
+  type TenantMergeHistoryRecord,
+  type TenantNoteRecord,
+  type TenantOrganisationRecord,
+  type TenantPersonOrganisationLinkRecord,
+  type TenantPersonRecord,
 } from '@platform/core';
 import { isMatterRestrictedForKeyDates } from '@/domain/keyDates';
 import type { Matter, Person, Team } from '@/domain/types';
 import { canPersonAccessMatter } from './rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import {
+  invalidatePartiesAndMattersSyncCache,
+  markPartiesAndMattersSyncedWithStore,
+} from './auditAdapter';
 import { getStore, type FirmStore } from './store';
 
 export type ImportableStoreModule =
+  | 'parties'
+  | 'matters'
   | 'documents'
   | 'document-store'
   | 'key-dates'
   | 'audit';
+
+export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
+  'parties',
+  'matters',
+  'documents',
+  'document-store',
+  'key-dates',
+  'audit',
+];
 
 export const DEFAULT_S014_IMPORT_MODULES: readonly ImportableStoreModule[] = [
   'documents',
@@ -37,7 +60,7 @@ export const DEFAULT_S014_IMPORT_MODULES: readonly ImportableStoreModule[] = [
 ];
 
 export const DEFAULT_MIGRATED_POSTGRES_MODULES: readonly ImportableStoreModule[] =
-  ['documents', 'document-store', 'key-dates', 'audit'];
+  ALL_IMPORTABLE_MODULES;
 
 export interface ImportStoreModulesOptions {
   /**
@@ -58,6 +81,15 @@ export interface ImportStoreModulesResult {
   environment: string;
   modules: ImportableStoreModule[];
   counts: {
+    people: number;
+    personEmails: number;
+    organisations: number;
+    links: number;
+    notes: number;
+    mergeHistory: number;
+    matters: number;
+    matterParties: number;
+    matterNumberSequences: number;
     documentTemplates: number;
     documentTemplateVersions: number;
     documents: number;
@@ -121,6 +153,7 @@ export function computeMatterRestrictionMetadataForStore(
 export async function clearMigratedPostgresModulesForTenant(options: {
   ctx: TenantContext;
   modules?: readonly ImportableStoreModule[];
+  resetMatterNumberSequences?: boolean;
 }): Promise<void> {
   const { ctx } = options;
   const modules = options.modules ?? DEFAULT_MIGRATED_POSTGRES_MODULES;
@@ -136,6 +169,20 @@ export async function clearMigratedPostgresModulesForTenant(options: {
   if (modules.includes('key-dates')) {
     const keyDateRepo = new TenantKeyDateRepository();
     await keyDateRepo.clearTenantData(ctx);
+  }
+  if (modules.includes('matters')) {
+    const matterRepo = new TenantMatterRepository();
+    await matterRepo.clearTenantData(ctx, {
+      ...(options.resetMatterNumberSequences !== undefined
+        ? { resetMatterNumberSequences: options.resetMatterNumberSequences }
+        : {}),
+    });
+    global.__oneSquaredPartiesMattersSyncByDb?.delete(ctx.postgresDatabaseName);
+  }
+  if (modules.includes('parties')) {
+    const partyRepo = new TenantPartyRepository();
+    await partyRepo.clearTenantData(ctx);
+    global.__oneSquaredPartiesMattersSyncByDb?.delete(ctx.postgresDatabaseName);
   }
   if (modules.includes('audit')) {
     // R453: runs under the caller's tenant role through the non-live reset function (0008).
@@ -163,6 +210,15 @@ export async function importFirmStoreModulesToPostgres(
   }
 
   const counts: ImportStoreModulesResult['counts'] = {
+    people: 0,
+    personEmails: 0,
+    organisations: 0,
+    links: 0,
+    notes: 0,
+    mergeHistory: 0,
+    matters: 0,
+    matterParties: 0,
+    matterNumberSequences: 0,
     documentTemplates: 0,
     documentTemplateVersions: 0,
     documents: 0,
@@ -182,6 +238,112 @@ export async function importFirmStoreModulesToPostgres(
     hasKeyDatesConfigOverride: false,
     auditEntries: 0,
   };
+
+  if (modules.includes('parties')) {
+    const partyRepo = new TenantPartyRepository();
+    const people = (store.people ?? []) as unknown as TenantPersonRecord[];
+    const organisations = (store.organisations ??
+      []) as unknown as TenantOrganisationRecord[];
+    const links = (store.links ??
+      []) as unknown as TenantPersonOrganisationLinkRecord[];
+    const notes = (store.notes ?? []) as unknown as TenantNoteRecord[];
+    const mergeHistory = (store.mergeHistory ??
+      []) as unknown as TenantMergeHistoryRecord[];
+
+    await partyRepo.withTenantTransaction(ctx, async () => {
+      for (const person of people) {
+        await partyRepo.putPerson(ctx, person);
+        counts.people += 1;
+      }
+      for (const org of organisations) {
+        await partyRepo.putOrganisation(ctx, org);
+        counts.organisations += 1;
+      }
+      for (const link of links) {
+        await partyRepo.putLink(ctx, link);
+        counts.links += 1;
+      }
+      for (const note of notes) {
+        await partyRepo.putNote(ctx, note);
+        counts.notes += 1;
+      }
+      for (const mh of mergeHistory) {
+        await partyRepo.putMergeHistory(ctx, mh);
+        counts.mergeHistory += 1;
+      }
+    });
+
+    const verifyPartyRepo = new TenantPartyRepository();
+    const verifiedPartyCounts =
+      await verifyPartyRepo.countAllTenantPartyRows(ctx);
+    counts.personEmails = verifiedPartyCounts.personEmails;
+    if (
+      verifiedPartyCounts.people < counts.people ||
+      verifiedPartyCounts.organisations < counts.organisations ||
+      verifiedPartyCounts.links < counts.links ||
+      verifiedPartyCounts.notes < counts.notes ||
+      verifiedPartyCounts.mergeHistory < counts.mergeHistory
+    ) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection parties row counts did not match imported totals.',
+      );
+    }
+  }
+
+  if (modules.includes('matters')) {
+    const matterRepo = new TenantMatterRepository();
+    const people = store.people ?? [];
+    const teams = store.teams ?? [];
+    const matters = (store.matters ?? []) as unknown as TenantMatterRecord[];
+    const sqlRestrictions = new Map<string, readonly string[]>();
+    for (const m of store.matters ?? []) {
+      const meta = computeMatterRestrictionMetadataForStore(
+        m,
+        people,
+        teams,
+        tenantConfig,
+      );
+      sqlRestrictions.set(m.id, meta.restrictedAccessUserIds);
+    }
+
+    await matterRepo.withTenantTransaction(ctx, async () => {
+      const importedMatters = await matterRepo.importMatters(ctx, matters, {
+        sqlRestrictedAccessUserIdsByMatterId: sqlRestrictions,
+      });
+      const rvMap = new Map<string, number>();
+      for (const im of importedMatters) {
+        rvMap.set(im.id, im.rowVersion ?? 1);
+      }
+      for (const m of store.matters ?? []) {
+        m.rowVersion = rvMap.get(m.id) ?? m.rowVersion ?? 1;
+      }
+    });
+    counts.matters = matters.length;
+    global.__oneSquaredPartiesMattersSyncByDb?.delete(ctx.postgresDatabaseName);
+
+    const verifyMatterRepo = new TenantMatterRepository();
+    const verifiedMatterCounts =
+      await verifyMatterRepo.countAllTenantMatterRows(ctx);
+    counts.matterParties = verifiedMatterCounts.matterParties;
+    counts.matterNumberSequences = verifiedMatterCounts.matterNumberSequences;
+    if (verifiedMatterCounts.matters < counts.matters) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection matters row count did not match imported total.',
+      );
+    }
+  }
+
+  if (modules.includes('parties') || modules.includes('matters')) {
+    if (
+      store === global.__oneSquaredStore &&
+      modules.includes('parties') &&
+      modules.includes('matters')
+    ) {
+      markPartiesAndMattersSyncedWithStore(store, ctx);
+    } else {
+      invalidatePartiesAndMattersSyncCache(ctx.postgresDatabaseName);
+    }
+  }
 
   if (modules.includes('documents')) {
     const docRepo = new TenantDocumentRepository();
