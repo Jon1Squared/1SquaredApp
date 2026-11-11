@@ -9,10 +9,64 @@
  * These helpers read through the tenant-scoped repositories with a test tenant context built by
  * `resolveDirectTestServiceTenantContext` (which throws outside `NODE_ENV === "test"`).
  */
-import type { FirmAuditEntryRecord, TenantContext } from '../../../core/src/api/index';
+import {
+  TenantAuditRepository,
+  type FirmAuditEntryInput,
+  type FirmAuditEntryRecord,
+  type TenantContext,
+} from '@platform/core';
 import { resolveDirectTestServiceTenantContext } from '../../platform/tenantRuntime';
 import { getAuditRepository } from '../auditAdapter';
 import { getKeyDateRepository } from '../services';
+
+export type AuditAdapterTestFailureHook = (params: {
+  ctx: TenantContext;
+  entries: readonly FirmAuditEntryInput[];
+}) => Promise<void> | void;
+
+let baseAuditRepoBeforeTestStub: TenantAuditRepository | null = null;
+
+/**
+ * Test-only helper (`R450`) that replaces `global.__oneSquaredAuditRepo` with a delegating
+ * `TenantAuditRepository` stub whose `appendAuditEntries` / `appendAuditEntry` run `hook`
+ * before delegating to the real repository, and restores the real repository when passed `null`.
+ */
+export function setAuditAdapterFailureHookForTesting(
+  hook: AuditAdapterTestFailureHook | null,
+): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setAuditAdapterFailureHookForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  if (!hook) {
+    if (baseAuditRepoBeforeTestStub) {
+      global.__oneSquaredAuditRepo = baseAuditRepoBeforeTestStub;
+      baseAuditRepoBeforeTestStub = null;
+    }
+    return;
+  }
+  const delegate =
+    baseAuditRepoBeforeTestStub ?? getAuditRepository();
+  baseAuditRepoBeforeTestStub = delegate;
+
+  const stub = Object.create(delegate) as TenantAuditRepository;
+  stub.appendAuditEntries = async (
+    ctx: TenantContext,
+    entries: readonly FirmAuditEntryInput[],
+  ): Promise<FirmAuditEntryRecord[]> => {
+    await hook({ ctx, entries });
+    return delegate.appendAuditEntries(ctx, entries);
+  };
+  stub.appendAuditEntry = async (
+    ctx: TenantContext,
+    entry: FirmAuditEntryInput,
+  ): Promise<FirmAuditEntryRecord> => {
+    await hook({ ctx, entries: [entry] });
+    return delegate.appendAuditEntry(ctx, entry);
+  };
+  global.__oneSquaredAuditRepo = stub;
+}
 
 export function testTenantCtx(actorId = 'P-000001'): TenantContext {
   return resolveDirectTestServiceTenantContext({

@@ -12,6 +12,11 @@
  *    operation's store snapshot (`R406`).
  */
 
+import { getActiveActorSession } from '@/domain/rbac';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import { resolveRequestCorrelationId } from './correlationId';
+import { emitTenantTelemetryEvent } from './telemetry';
+
 export type CompensationStep = () => Promise<void> | void;
 
 interface AsyncLocalStorageLike<T> {
@@ -94,11 +99,15 @@ export function getActiveRecordDeltaCompensator(): RecordDeltaCompensator | null
   return getStoreLockContextStorage()?.getStore()?.compensator ?? null;
 }
 
+export function getStoreWriteLockDepth(): number {
+  return getStoreLockContextStorage()?.getStore()?.depth ?? 0;
+}
+
 /**
  * Acquires the process-wide FIFO JSON store write lock (or re-enters immediately if already held
  * in the current `AsyncLocalStorage` async call chain, `R418`), running `fn(compensator)`.
  * If the outermost locked call throws, runs all registered `RecordDeltaCompensator` undo callbacks
- * in LIFO order before rethrowing (`R406`).
+ * in LIFO order before rethrowing (`R406`, `R447`).
  */
 export async function withJsonStoreWriteLock<T>(
   fn: (compensator: RecordDeltaCompensator) => Promise<T> | T,
@@ -137,7 +146,47 @@ export async function withJsonStoreWriteLock<T>(
     compensator.clear();
     return result;
   } catch (err) {
-    await compensator.compensateAll().catch(() => {});
+    try {
+      await compensator.compensateAll();
+    } catch (compErr) {
+      let tenantId = 'unknown';
+      try {
+        tenantId = getActiveTenantConfiguration().tenantId || 'unknown';
+      } catch {
+        // Fallback when active tenant configuration is unavailable.
+      }
+      const correlationId = resolveRequestCorrelationId(
+        getActiveActorSession()?.verifiedSession?.correlationId ?? null,
+        'corr-comp',
+      );
+      if (
+        !(
+          compErr &&
+          typeof compErr === 'object' &&
+          (compErr as { __alreadyLoggedCompensationFailure?: boolean })
+            .__alreadyLoggedCompensationFailure === true
+        )
+      ) {
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'store.compensation_failed',
+            tenantId,
+            correlationId,
+          }),
+        );
+      }
+      try {
+        emitTenantTelemetryEvent({
+          eventName: 'store.compensation_failed',
+          severity: 'error',
+          tenantId,
+          correlationId,
+        });
+      } catch {
+        // Never allow telemetry failure to mask the original mutation error.
+      }
+    }
     throw err;
   } finally {
     releaseMutex();

@@ -12,8 +12,9 @@
  *
  * All fixtures are invented (the invented demo tenant seed data and synthetic `firm-alpha` / `firm-beta` tenants).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getPlatformTelemetryRecorder,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
   type TenantContext,
@@ -26,13 +27,16 @@ import {
   logEmployeeRestrictedAccess,
   resetAllDemoData,
   saveKeyDatesConfigRecord,
+  saveMatterRecord,
+  savePersonRecord,
+  switchUserInDemoMode,
   takeTaskRecord,
   updatePersonPermissionOverrides,
+  updateTenantRbacConfig,
 } from '../../src/server/services';
 import {
   getAuditRepository,
   runUnmigratedJsonMutationWithAudit,
-  setAuditAdapterFailureHookForTesting,
   stageUnmigratedAuditEntry,
 } from '../../src/server/auditAdapter';
 import { withJsonStoreWriteLock } from '../../src/server/storeLock';
@@ -45,14 +49,20 @@ import { clearStoreMemoryCache, getStore, saveStore } from '../../src/server/sto
 import { canUserTakeTask } from '../../src/server/rbacRuntime';
 import { runWithActiveActorSession } from '../../src/domain/rbac';
 import { resolveEmployeeRoles } from '../../src/domain/homeConfig';
-import { getActiveTenantConfiguration } from '../../src/platform/tenantRuntime';
+import {
+  getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
+  setActiveTenantConfigForTesting,
+} from '../../src/platform/tenantRuntime';
 import {
   createSignedEntraSessionCookie,
+  setTestEntraSessionOverride,
   verifySignedEntraSessionCookie,
 } from '../../src/server/entraAuth';
 import {
   auditEntriesWrittenSince,
   getKeyDateRepository,
+  setAuditAdapterFailureHookForTesting,
   testTenantCtx,
 } from '../../src/server/testSupport/auditTestSupport';
 
@@ -532,72 +542,353 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(taken.error).toBeUndefined();
       expect(taken.task?.assignedPersonId).toBe(personId);
 
-      // (c) Explicit nested runUnmigratedJsonMutationWithAudit inside withJsonStoreWriteLock re-enters
-      //     the same lock and compensator; a forced inner audit failure reverts outer and inner deltas.
+      // (c) Real saveMatterRecord (with sourceEnquiryId) -> finalizeEnquiryConversionToMatter -> raiseAutomaticTask
+      //     nested chain (R418, R456): on a forced PostgreSQL audit failure, neither the matter nor the automatic
+      //     task nor the enquiry status change survives clearStoreMemoryCache(), and no audit rows exist on a fresh connection.
+      const openEnquiry = getStore().enquiries.find(
+        (e) => e.status !== 'Converted to Matter' && e.status !== 'Closed - No Response',
+      )!;
+      expect(openEnquiry).toBeDefined();
+      const baseMatter = getStore().matters.find((m) => !m.isStaffMatter)!;
+      const { id: _omittedMatterId, ...matterTemplate } = baseMatter;
+      void _omittedMatterId;
+      const conversionTitle = `R456 Enquiry Conversion Matter ${Date.now().toString(36)}`;
+      const preTasksCount = getStore().tasks.length;
+      const preEnquiryStatus = openEnquiry.status;
       const startedAt = Date.now();
+
       setAuditAdapterFailureHookForTesting(({ entries }) => {
-        if (entries.some((e) => e.recordId === 'NESTED-INNER')) {
-          throw new Error('SIMULATED_AUDIT_FAILURE_INNER');
+        if (entries.some((e) => e.recordId === openEnquiry.id || String(e.newValue ?? '').includes(conversionTitle))) {
+          throw new Error('SIMULATED_AUDIT_FAILURE_ENQUIRY_CONVERSION');
         }
       });
-      const outerNoteText = 'R418 outer invented note';
-      const innerNoteText = 'R418 inner invented note';
+
       await expect(
         withTimeout(
-          withJsonStoreWriteLock(async () =>
-            runUnmigratedJsonMutationWithAudit({
-              label: 'r418-outer',
-              resolveCtx: () => testTenantCtx('P-000004'),
-              mutate: async (outerStore) => {
-                outerStore.notes.unshift({
-                  id: 'N-R418-OUTER',
-                  recordType: 'person',
-                  recordId: 'P-000002',
-                  text: outerNoteText,
-                  byId: 'P-000004',
-                  at: new Date().toISOString(),
-                } as unknown as (typeof outerStore.notes)[number]);
-                await runUnmigratedJsonMutationWithAudit({
-                  label: 'r418-inner',
-                  resolveCtx: () => testTenantCtx('P-000004'),
-                  mutate: async (innerStore) => {
-                    innerStore.notes.unshift({
-                      id: 'N-R418-INNER',
-                      recordType: 'person',
-                      recordId: 'P-000002',
-                      text: innerNoteText,
-                      byId: 'P-000004',
-                      at: new Date().toISOString(),
-                    } as unknown as (typeof innerStore.notes)[number]);
-                    stageUnmigratedAuditEntry({
-                      recordType: 'person',
-                      recordId: 'NESTED-INNER',
-                      action: 'update',
-                      field: 'Inner',
-                      oldValue: null,
-                      newValue: 'inner',
-                      byId: 'P-000004',
-                    });
-                    saveStore(innerStore);
-                  },
-                });
-                saveStore(outerStore);
+          runAsTestEmployee('P-000004', () =>
+            saveMatterRecord(
+              {
+                ...matterTemplate,
+                matterNumber: 'DRAFT',
+                openedAt: null,
+                fieldValues: {},
+                title: conversionTitle,
+                sourceEnquiryId: openEnquiry.id,
+                agreedFeeCapGbp: 5000,
+                feeEstimateGbp: 5000,
               },
-            }),
+              { byId: 'P-000004', saveMode: 'submit_cleared' },
+            ),
           ),
           2000,
-          'nested runUnmigratedJsonMutationWithAudit',
+          'saveMatterRecord -> finalizeEnquiryConversionToMatter -> raiseAutomaticTask (forced failure)',
         ),
-      ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_INNER/);
+      ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_ENQUIRY_CONVERSION/);
       setAuditAdapterFailureHookForTesting(null);
-      const liveNotes = getStore().notes;
-      expect(liveNotes.some((n) => n.id === 'N-R418-OUTER')).toBe(false);
-      expect(liveNotes.some((n) => n.id === 'N-R418-INNER')).toBe(false);
+
+      clearStoreMemoryCache();
+      const reloadedStore = getStore();
+      expect(reloadedStore.matters.some((m) => m.title === conversionTitle)).toBe(false);
+      expect(reloadedStore.tasks.length).toBe(preTasksCount);
+      expect(reloadedStore.enquiries.find((e) => e.id === openEnquiry.id)?.status).toBe(preEnquiryStatus);
+
+      const freshAuditRepo = new TenantAuditRepository();
+      const freshEnquiryAudit = await freshAuditRepo.listAuditEntriesForRecord(
+        testTenantCtx('P-000004'),
+        'enquiry',
+        openEnquiry.id,
+      );
+      expect(freshEnquiryAudit.some((a) => Date.parse(a.at) >= startedAt)).toBe(false);
       const written = await auditEntriesWrittenSince(startedAt);
-      expect(written.some((a) => a.recordId === 'NESTED-INNER')).toBe(false);
+      expect(written.some((a) => String(a.newValue ?? '').includes(conversionTitle))).toBe(false);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R442: forced PostgreSQL audit failure during savePersonRecord (sensitive HR update) and updateTenantRbacConfig reverts employeeSensitiveRecords and rbacConfigOverride after clearStoreMemoryCache()', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    try {
+      const targetEmployeeId = 'P-000002';
+      const initialStore = getStore();
+      const targetPerson = structuredClone(
+        initialStore.people.find((p) => p.id === targetEmployeeId)!,
+      );
+      const beforeSensitive = structuredClone(
+        initialStore.employeeSensitiveRecords[targetEmployeeId],
+      );
+
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.action === 'update-sensitive')) {
+          throw new Error('SIMULATED_AUDIT_FAILURE_SENSITIVE_HR');
+        }
+      });
+
+      await expect(
+        runAsTestEmployee('P-000004', () =>
+          savePersonRecord(
+            {
+              ...targetPerson,
+              firstName: targetPerson.firstName,
+              surname: targetPerson.surname,
+              dateOfBirth: targetPerson.dateOfBirth || '1985-06-15',
+              isEmployee: true,
+            },
+            {
+              id: targetEmployeeId,
+              byId: 'P-000004',
+              mfaVerified: true,
+              worksAtFirm: true,
+              sensitiveSubmitted: {
+                ...(beforeSensitive ?? {}),
+                nationalInsuranceNumber: 'QQ123456C',
+                rightToWorkNotes: 'Invented R442 rollback note',
+              },
+            },
+          ),
+        ),
+      ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_SENSITIVE_HR/);
+      setAuditAdapterFailureHookForTesting(null);
+
+      clearStoreMemoryCache();
+      expect(getStore().employeeSensitiveRecords[targetEmployeeId]).toEqual(beforeSensitive);
+
+      // Part 2: RBAC configuration override rollback
+      const beforeRbacOverride = structuredClone(getStore().rbacConfigOverride);
+      const snap = await getAppSnapshot('P-000004');
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.recordId === 'TENANT-RBAC-CONFIG')) {
+          throw new Error('SIMULATED_AUDIT_FAILURE_RBAC_OVERRIDE');
+        }
+      });
+
+      await expect(
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...snap.rbacConfig.identityMapping,
+              entraGroupToRoleKey: {
+                ...snap.rbacConfig.identityMapping.entraGroupToRoleKey,
+                '22222222-3333-4444-5555-666666666666': ['partner'],
+              },
+            },
+          },
+          'P-000004',
+          { mfaVerified: true },
+        ),
+      ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_RBAC_OVERRIDE/);
+      setAuditAdapterFailureHookForTesting(null);
+
+      clearStoreMemoryCache();
+      expect(getStore().rbacConfigOverride).toEqual(beforeRbacOverride);
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R444: stageUnmigratedAuditEntry outside an active staging scope throws TENANCY_AUDIT_WRITE_ERROR, and switchUserInDemoMode writes an audit_entries row readable on a fresh connection', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    try {
+      let outsideErr: (Error & { code?: string }) | null = null;
+      try {
+        stageUnmigratedAuditEntry({
+          recordType: 'person',
+          recordId: 'P-000002',
+          action: 'update',
+          field: 'Unscoped test',
+          oldValue: null,
+          newValue: 'invented',
+          byId: 'P-000004',
+        });
+      } catch (err) {
+        outsideErr = err as Error & { code?: string };
+      }
+      expect(outsideErr).not.toBeNull();
+      expect(outsideErr?.code).toBe('TENANCY_AUDIT_WRITE_ERROR');
+      expect(outsideErr?.message).toContain('outside an active audit staging scope');
+
+      // Part 2: switchUserInDemoMode persists an audit_entries row on a fresh connection
+      const rawBaseCfg = getActiveTenantRawBaseConfig();
+      setActiveTenantConfigForTesting({
+        ...rawBaseCfg,
+        featureFlags: {
+          ...(rawBaseCfg.featureFlags as Record<string, unknown>),
+          enableDemoMode: true,
+        },
+      });
+      const store = getStore();
+      const adminPerson = store.people.find((p) => p.id === 'P-000001')!;
+      const targetDemoPerson = store.people.find(
+        (p) => p.isEmployee && p.demo && p.id !== 'P-000001' && !p.mergedIntoId,
+      )!;
+      expect(targetDemoPerson).toBeDefined();
+
+      const nowMs = Date.now();
+      setTestEntraSessionOverride({
+        tenantId: 'not-a-law-firm',
+        personId: adminPerson.id,
+        entraObjectId: adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        entraTenantId: '11111111-2222-4333-8444-555555555555',
+        email: adminPerson.emails?.[0]?.address ?? 'dafydd@notalawfirm.example.invalid',
+        displayName: 'Dafydd Llewellyn',
+        mappedRoles: resolveEmployeeRoles(adminPerson, store.teams),
+        mfaVerified: true,
+        authenticatedAt: new Date(nowMs).toISOString(),
+        expiresAt: new Date(nowMs + 3600_000).toISOString(),
+      });
+
+      const startedAt = Date.now();
+      const switched = await runAsTestEmployee(adminPerson.id, () =>
+        switchUserInDemoMode(targetDemoPerson.id),
+      );
+      expect(switched.ok).toBe(true);
+      expect(switched.personId).toBe(targetDemoPerson.id);
+
+      const freshRepo = new TenantAuditRepository();
+      const rows = await freshRepo.listAuditEntriesForRecord(
+        testTenantCtx(adminPerson.id),
+        'person',
+        targetDemoPerson.id,
+      );
+      expect(
+        rows.some(
+          (r) =>
+            r.field === 'Demo user switch' &&
+            r.oldValue === adminPerson.id &&
+            r.newValue === targetDemoPerson.id &&
+            Date.parse(r.at) >= startedAt,
+        ),
+      ).toBe(true);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R446: nested runUnmigratedJsonMutationWithAudit where outer inserts note X, inner updates X, and outer audit append fails leaves X absent after clearStoreMemoryCache() and commits no inner audit row', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    try {
+      const noteId = 'N-R446-OVERLAP';
+      const startedAt = Date.now();
+
+      setAuditAdapterFailureHookForTesting(({ entries }) => {
+        if (entries.some((e) => e.recordId === 'R446-OUTER-TRIGGER')) {
+          throw new Error('SIMULATED_R446_OUTER_AUDIT_FAILURE');
+        }
+      });
+
+      await expect(
+        runUnmigratedJsonMutationWithAudit({
+          label: 'r446-outer',
+          resolveCtx: () => testTenantCtx('P-000004'),
+          mutate: async (outerStore) => {
+            outerStore.notes.unshift({
+              id: noteId,
+              recordType: 'person',
+              recordId: 'P-000002',
+              body: 'Inserted by outer frame',
+              createdById: 'P-000004',
+              createdAt: new Date().toISOString(),
+            } as unknown as (typeof outerStore.notes)[number]);
+            saveStore(outerStore);
+
+            await runUnmigratedJsonMutationWithAudit({
+              label: 'r446-inner',
+              resolveCtx: () => testTenantCtx('P-000004'),
+              mutate: async (innerStore) => {
+                const target = innerStore.notes.find((n) => n.id === noteId) as
+                  | Record<string, unknown>
+                  | undefined;
+                expect(target).toBeDefined();
+                target!.body = 'Updated by inner frame';
+                stageUnmigratedAuditEntry({
+                  recordType: 'person',
+                  recordId: noteId,
+                  action: 'update',
+                  field: 'Inner note update',
+                  oldValue: 'Inserted by outer frame',
+                  newValue: 'Updated by inner frame',
+                  byId: 'P-000004',
+                });
+                saveStore(innerStore);
+              },
+            });
+
+            stageUnmigratedAuditEntry({
+              recordType: 'person',
+              recordId: 'R446-OUTER-TRIGGER',
+              action: 'create',
+              field: 'Outer note trigger',
+              oldValue: null,
+              newValue: noteId,
+              byId: 'P-000004',
+            });
+          },
+        }),
+      ).rejects.toThrow(/SIMULATED_R446_OUTER_AUDIT_FAILURE/);
+      setAuditAdapterFailureHookForTesting(null);
+
+      clearStoreMemoryCache();
+      expect(getStore().notes.some((n) => n.id === noteId)).toBe(false);
+
+      const freshRepo = new TenantAuditRepository();
+      const innerRows = await freshRepo.listAuditEntriesForRecord(
+        testTenantCtx('P-000004'),
+        'person',
+        noteId,
+      );
+      expect(innerRows.filter((r) => Date.parse(r.at) >= startedAt)).toEqual([]);
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R447: when a RecordDeltaCompensator undo callback throws inside withJsonStoreWriteLock, logs and emits store.compensation_failed with tenantId and correlationId (no content) and rethrows the original error', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const recorder = getPlatformTelemetryRecorder();
+    const beforeCount = recorder.getRecentEntries().length;
+    try {
+      await expect(
+        runAsTestEmployee('P-000004', () =>
+          withJsonStoreWriteLock(async (compensator) => {
+            compensator.register('r447-failing-undo', () => {
+              throw new Error('SENSITIVE_UNDO_SECRET_PAYLOAD_SHOULD_NOT_LEAK');
+            });
+            throw new Error('ORIGINAL_MUTATION_ERROR_R447');
+          }),
+        ),
+      ).rejects.toThrow('ORIGINAL_MUTATION_ERROR_R447');
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const loggedRaw = String(errorSpy.mock.calls[0]?.[0] ?? '');
+      const parsed = JSON.parse(loggedRaw) as {
+        level?: string;
+        event?: string;
+        tenantId?: string;
+        correlationId?: string;
+      };
+      expect(parsed.level).toBe('error');
+      expect(parsed.event).toBe('store.compensation_failed');
+      expect(parsed.tenantId).toBe('not-a-law-firm');
+      expect(parsed.correlationId).toBeTruthy();
+      expect(loggedRaw).not.toContain('SENSITIVE_UNDO_SECRET_PAYLOAD_SHOULD_NOT_LEAK');
+
+      const newTelemetry = recorder.getRecentEntries().slice(beforeCount);
+      const compEvents = newTelemetry.filter(
+        (e) => e.eventName === 'store.compensation_failed',
+      );
+      expect(compEvents).toHaveLength(1);
+      expect(compEvents[0]!.tenantId).toBe('not-a-law-firm');
+      expect(compEvents[0]!.correlationId).toBe(parsed.correlationId);
+      expect(JSON.stringify(compEvents[0])).not.toContain(
+        'SENSITIVE_UNDO_SECRET_PAYLOAD_SHOULD_NOT_LEAK',
+      );
+    } finally {
+      errorSpy.mockRestore();
     }
   });
 

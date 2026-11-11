@@ -538,18 +538,24 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     expiresAt: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
   };
 
-  await persistEntraSessionCookie(nextSession);
-
-  writeAudit(store, {
-    recordType: 'person',
-    recordId: targetPerson.id,
-    action: 'update',
-    field: 'Demo user switch',
-    oldValue: actor.personId,
-    newValue: targetPerson.id,
-    byId: actor.personId,
+  await runUnmigratedJsonMutationWithAudit({
+    label: 'switchUserInDemoMode',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, actor.personId),
+    mutate: async (lockedStore) => {
+      writeAudit(lockedStore, {
+        recordType: 'person',
+        recordId: targetPerson.id,
+        action: 'update',
+        field: 'Demo user switch',
+        oldValue: actor.personId,
+        newValue: targetPerson.id,
+        byId: actor.personId,
+      });
+      saveStore(lockedStore);
+    },
   });
-  saveStore(store);
+
+  await persistEntraSessionCookie(nextSession);
 
   return { ok: true, personId: targetPerson.id };
 }
@@ -689,17 +695,28 @@ async function syncMatterRestrictionInPostgres(
     store.teams,
     tenantConfig,
   );
-  if (compensator && previousMatter) {
-    const prevMeta = computeMatterRestrictionMetadataForStore(
-      previousMatter,
-      store.people,
-      store.teams,
-      tenantConfig,
-    );
-    compensator.register(`keydates.matter_restriction:${matter.id}`, async () => {
-      await repo.setMatterRestriction(ctx, prevMeta);
-      getMatterRestrictionDigestCache().delete(`${ctx.postgresDatabaseName}:${matter.id}`);
-    });
+  if (compensator) {
+    if (previousMatter) {
+      const prevMeta = computeMatterRestrictionMetadataForStore(
+        previousMatter,
+        store.people,
+        store.teams,
+        tenantConfig,
+      );
+      compensator.register(`keydates.matter_restriction:${matter.id}`, async () => {
+        await repo.setMatterRestriction(ctx, prevMeta);
+        getMatterRestrictionDigestCache().delete(`${ctx.postgresDatabaseName}:${matter.id}`);
+      });
+    } else {
+      compensator.register(`keydates.matter_restriction:${matter.id}`, async () => {
+        await repo.setMatterRestriction(ctx, {
+          matterId: matter.id,
+          isRestricted: false,
+          restrictedAccessUserIds: [],
+        });
+        getMatterRestrictionDigestCache().delete(`${ctx.postgresDatabaseName}:${matter.id}`);
+      });
+    }
   }
   await repo.setMatterRestriction(ctx, nextMeta);
   const cacheKey = `${ctx.postgresDatabaseName}:${matter.id}`;

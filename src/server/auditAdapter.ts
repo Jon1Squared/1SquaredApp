@@ -29,7 +29,10 @@ import {
   type FirmAuditEntryRecord,
   type TenantContext,
 } from '@platform/core';
-import type { AuditEntry } from '@/domain/types';
+import { getActiveActorSession } from '@/domain/rbac';
+import type { AuditEntry, EmployeeSensitiveRecord } from '@/domain/types';
+import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import { resolveRequestCorrelationId } from './correlationId';
 import { getStore, saveStore, type FirmStore } from './store';
 import {
   getActiveRecordDeltaCompensator,
@@ -86,26 +89,33 @@ export function getAuditRepository(): TenantAuditRepository {
   return global.__oneSquaredAuditRepo;
 }
 
-export type AuditAdapterTestFailureHook = (params: {
-  ctx: TenantContext;
-  entries: readonly FirmAuditEntryInput[];
-}) => Promise<void> | void;
+/**
+ * Keys on `FirmStore` that have already moved to PostgreSQL (or are monotonic sequence counters)
+ * and are therefore excluded from JSON store delta compensation (`R442`).
+ */
+export type MovedToPostgresKeys =
+  | 'audit'
+  | 'counters'
+  | 'documentTemplates'
+  | 'documentTemplateVersions'
+  | 'documents'
+  | 'documentLinks'
+  | 'templateUsageEvents'
+  | 'matterDocumentLocations'
+  | 'documentStoreFolderScopes'
+  | 'documentLifecycleJobs'
+  | 'documentReconciliationFindings'
+  | 'documentStoreAuditEvents'
+  | 'keyDates'
+  | 'keyDateNotApplicable'
+  | 'keyDateReminderStates'
+  | 'keyDateCalendarSyncs'
+  | 'keyDatesConfigOverride';
 
-let testAuditFailureHook: AuditAdapterTestFailureHook | null = null;
-
-export function setAuditAdapterFailureHookForTesting(
-  hook: AuditAdapterTestFailureHook | null,
-): void {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error(
-      'SECURITY_ERROR: setAuditAdapterFailureHookForTesting is only permitted when NODE_ENV === "test".',
-    );
-  }
-  testAuditFailureHook = hook;
-}
+export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>;
 
 /**
- * Unmoved ID-keyed array collections in `FirmStore` tracked for per-record delta compensation (`R406`).
+ * Unmoved ID-keyed array collections in `FirmStore` tracked for per-record delta compensation (`R406`, `R442`).
  */
 const ID_KEYED_ARRAY_COLLECTIONS = [
   { name: 'lists', keyField: 'key' },
@@ -127,7 +137,15 @@ const ID_KEYED_ARRAY_COLLECTIONS = [
 ] as const;
 
 /**
- * Unmoved scalar / map properties on `FirmStore` tracked individually (never as a whole store).
+ * Unmoved per-key map properties on `FirmStore` tracked per entry (`R442`).
+ */
+const PER_KEY_MAP_KEYS = [
+  'recentlyViewed',
+  'employeeSensitiveRecords',
+] as const;
+
+/**
+ * Unmoved scalar / configuration properties on `FirmStore` tracked individually (`R442`).
  */
 const SCALAR_CONFIG_KEYS = [
   'firmId',
@@ -139,9 +157,29 @@ const SCALAR_CONFIG_KEYS = [
   'orgStructure',
   'matterPartyTaxonomy',
   'matterPartyMigrationReport',
+  'employeeMigrationReport',
   'matterCostsConfig',
-  'rbacConfig',
+  'rbacConfigOverride',
+  'documentGenerationConfigOverride',
+  'documentStoreConfigOverride',
 ] as const;
+
+type RepresentedTrackedFirmStoreKey =
+  | (typeof ID_KEYED_ARRAY_COLLECTIONS)[number]['name']
+  | (typeof PER_KEY_MAP_KEYS)[number]
+  | (typeof SCALAR_CONFIG_KEYS)[number];
+
+const _exhaustiveTrackedFirmStoreCheck = {
+  missingFromTracked: undefined as Exclude<
+    TrackedFirmStoreKeys,
+    RepresentedTrackedFirmStoreKey
+  >,
+  extraInTracked: undefined as Exclude<
+    RepresentedTrackedFirmStoreKey,
+    TrackedFirmStoreKeys
+  >,
+} satisfies { missingFromTracked: never; extraInTracked: never };
+void _exhaustiveTrackedFirmStoreCheck;
 
 interface CapturedItemEntry {
   readonly json: string;
@@ -151,6 +189,7 @@ interface CapturedItemEntry {
 export interface JsonStoreBaseline {
   readonly arraysByCollection: Map<string, Map<string, CapturedItemEntry>>;
   readonly recentlyViewedByUser: Map<string, string>;
+  readonly employeeSensitiveByPerson: Map<string, string>;
   readonly countersByPrefix: Map<string, number>;
   readonly scalarConfigsByKey: Map<string, { hadKey: boolean; json: string }>;
 }
@@ -181,6 +220,16 @@ export function captureJsonStoreBaseline(store: FirmStore): JsonStoreBaseline {
     }
   }
 
+  const employeeSensitiveByPerson = new Map<string, string>();
+  if (
+    store.employeeSensitiveRecords &&
+    typeof store.employeeSensitiveRecords === 'object'
+  ) {
+    for (const [pid, rec] of Object.entries(store.employeeSensitiveRecords)) {
+      employeeSensitiveByPerson.set(pid, JSON.stringify(rec));
+    }
+  }
+
   const countersByPrefix = new Map<string, number>();
   if (store.counters && typeof store.counters === 'object') {
     for (const [prefix, val] of Object.entries(store.counters)) {
@@ -206,6 +255,7 @@ export function captureJsonStoreBaseline(store: FirmStore): JsonStoreBaseline {
   return {
     arraysByCollection,
     recentlyViewedByUser,
+    employeeSensitiveByPerson,
     countersByPrefix,
     scalarConfigsByKey,
   };
@@ -311,6 +361,24 @@ export function registerJsonStoreRecordDeltas(
     }
   }
 
+  const sensitiveChanges: Array<{
+    personId: string;
+    beforeJson: string | null;
+  }> = [];
+  const afterSensitive = afterStore.employeeSensitiveRecords ?? {};
+  const allSensitivePersons = new Set<string>([
+    ...baseline.employeeSensitiveByPerson.keys(),
+    ...Object.keys(afterSensitive),
+  ]);
+  for (const pid of allSensitivePersons) {
+    const beforeJson = baseline.employeeSensitiveByPerson.get(pid) ?? null;
+    const hasAfter = Object.prototype.hasOwnProperty.call(afterSensitive, pid);
+    const afterJson = hasAfter ? JSON.stringify(afterSensitive[pid]) : null;
+    if (beforeJson !== afterJson) {
+      sensitiveChanges.push({ personId: pid, beforeJson });
+    }
+  }
+
   const scalarChanges: Array<{
     key: string;
     hadBefore: boolean;
@@ -332,6 +400,7 @@ export function registerJsonStoreRecordDeltas(
   const hasAnyDelta =
     arrayDeltas.length > 0 ||
     recentChanges.length > 0 ||
+    sensitiveChanges.length > 0 ||
     scalarChanges.length > 0;
 
   if (!hasAnyDelta) {
@@ -394,6 +463,20 @@ export function registerJsonStoreRecordDeltas(
       }
     }
 
+    if (sensitiveChanges.length > 0) {
+      liveStore.employeeSensitiveRecords =
+        liveStore.employeeSensitiveRecords ?? {};
+      for (const sc of sensitiveChanges) {
+        if (sc.beforeJson === null) {
+          delete liveStore.employeeSensitiveRecords[sc.personId];
+        } else {
+          liveStore.employeeSensitiveRecords[sc.personId] = JSON.parse(
+            sc.beforeJson,
+          ) as EmployeeSensitiveRecord;
+        }
+      }
+    }
+
     for (const sc of scalarChanges) {
       if (!sc.hadBefore || sc.beforeJson === 'undefined') {
         delete liveRecord[sc.key];
@@ -402,19 +485,57 @@ export function registerJsonStoreRecordDeltas(
       }
     }
 
-    saveStore(liveStore);
+    try {
+      saveStore(liveStore);
+    } catch (saveErr) {
+      if (label === 'executeMerge') {
+        let tenantId = 'unknown';
+        try {
+          tenantId = getActiveTenantConfiguration().tenantId || 'unknown';
+        } catch {
+          // ignore
+        }
+        const correlationId = resolveRequestCorrelationId(
+          getActiveActorSession()?.verifiedSession?.correlationId ?? null,
+          'corr-merge-rollback',
+        );
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'merge.rollback_save_failed',
+            correlationId,
+            tenantId,
+          }),
+        );
+        if (saveErr && typeof saveErr === 'object') {
+          (
+            saveErr as { __alreadyLoggedCompensationFailure?: boolean }
+          ).__alreadyLoggedCompensationFailure = true;
+        }
+      }
+      throw saveErr;
+    }
   });
 
   return true;
 }
 
 /**
- * Stages an audit entry inside an active unmoved-module mutation scope without touching `store.audit`.
- * Provisional `id` is replaced with the sequence-allocated `AU-NNNNNN` ID when persisted to PostgreSQL.
+ * Stages an audit entry inside an active unmoved-module mutation scope without touching `store.audit` (`R444`).
+ * Throws `TENANCY_AUDIT_WRITE_ERROR` if called outside an active `runUnmigratedJsonMutationWithAudit` scope.
  */
 export function stageUnmigratedAuditEntry(
   entry: Omit<AuditEntry, 'id' | 'at'> & { id?: string; at?: string },
 ): AuditEntry {
+  const activeScope = getAuditStagingStorage()?.getStore();
+  if (!activeScope) {
+    const err = new Error(
+      'TENANCY_AUDIT_WRITE_ERROR: writeAudit was called outside an active audit staging scope.',
+    ) as Error & { code: string };
+    err.code = 'TENANCY_AUDIT_WRITE_ERROR';
+    throw err;
+  }
+
   const atIso = entry.at ?? new Date().toISOString();
   const stagedInput: FirmAuditEntryInput = {
     ...(entry.id ? { id: entry.id } : {}),
@@ -430,10 +551,7 @@ export function stageUnmigratedAuditEntry(
     ...(entry.snapshot !== undefined ? { snapshot: entry.snapshot } : {}),
   };
 
-  const activeScope = getAuditStagingStorage()?.getStore();
-  if (activeScope) {
-    activeScope.stagedEntries.push(stagedInput);
-  }
+  activeScope.stagedEntries.push(stagedInput);
 
   return {
     id: entry.id ?? 'AU-PENDING',
@@ -460,20 +578,18 @@ export async function appendUnmigratedModuleAuditEntries(
   if (entries.length === 0) {
     return [];
   }
-  if (testAuditFailureHook) {
-    await testAuditFailureHook({ ctx, entries });
-  }
   const repo = getAuditRepository();
   return repo.appendAuditEntries(ctx, entries);
 }
 
 /**
- * Runs an unmoved-module JSON store mutation inside `withJsonStoreWriteLock` (`R406`, `R418`):
- * - Captures per-record baseline before executing `fn`,
- * - Stages any `stageUnmigratedAuditEntry` (`writeAudit`) calls made during `fn`,
- * - Registers exact per-record JSON delta compensation onto `RecordDeltaCompensator` (`R406`),
- * - Persists `audit_entries` to PostgreSQL via `appendUnmigratedModuleAuditEntries` (reverting
- *   this operation's per-record JSON delta if PostgreSQL throws!).
+ * Runs an unmoved-module JSON store mutation inside `withJsonStoreWriteLock` (`R406`, `R418`, `R446`):
+ * - Only the outermost `runUnmigratedJsonMutationWithAudit` frame captures the JSON store baseline,
+ *   registers the single per-record delta undo step, and appends all staged `audit_entries` in one
+ *   PostgreSQL transaction.
+ * - Nested frames push their staged entries onto the outer scope and skip baseline/undo/append so
+ *   overlapping record mutations revert cleanly to the pre-outer state and never commit inner audit
+ *   rows before the outer frame succeeds (`R446`).
  */
 export async function runUnmigratedJsonMutationWithAudit<T>(params: {
   resolveCtx: (store: FirmStore, result: T) => TenantContext | null;
@@ -483,10 +599,17 @@ export async function runUnmigratedJsonMutationWithAudit<T>(params: {
   ) => Promise<T>;
   label?: string;
 }): Promise<T> {
+  const stagingStorage = getAuditStagingStorage();
+  const outerScope = stagingStorage?.getStore();
+  if (outerScope) {
+    return withJsonStoreWriteLock(async (compensator) =>
+      params.mutate(getStore(), compensator),
+    );
+  }
+
   return withJsonStoreWriteLock(async (compensator) => {
     const store = getStore();
     const baseline = captureJsonStoreBaseline(store);
-    const stagingStorage = getAuditStagingStorage();
     const stagedEntries: FirmAuditEntryInput[] = [];
 
     const executeMutate = async () => params.mutate(store, compensator);
@@ -496,8 +619,6 @@ export async function runUnmigratedJsonMutationWithAudit<T>(params: {
         ? await stagingStorage.run({ stagedEntries }, executeMutate)
         : await executeMutate();
     } catch (err) {
-      // A nested locked call (R418) may fail after this operation has already changed records;
-      // register this operation's own delta so the outermost frame reverts it (R406).
       registerJsonStoreRecordDeltas(
         baseline,
         store,
