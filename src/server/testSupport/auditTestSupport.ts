@@ -1,13 +1,11 @@
 /**
  * Test-only helpers for asserting against the PostgreSQL firm audit log (`audit_entries`, S0-15)
- * and the tenant key-date repository from Vitest suites.
+ * and the tenant key-date repository from Vitest suites, and for setting explicit verified actor
+ * sessions in unit and integration tests (`R445`).
  *
  * `audit_entries` is append-only and shared across test runs, so assertions must never assume an
  * empty table. `markAuditPosition()` records the last audit number written so far; every entry written
  * afterwards has a strictly greater `AU-` number, which lets tests isolate the rows a single action produced.
- *
- * These helpers read through the tenant-scoped repositories with a test tenant context built by
- * `resolveDirectTestServiceTenantContext` (which throws outside `NODE_ENV === "test"`).
  */
 import {
   TenantAuditRepository,
@@ -15,9 +13,24 @@ import {
   type FirmAuditEntryRecord,
   type TenantContext,
 } from '@platform/core';
-import { resolveDirectTestServiceTenantContext } from '../../platform/tenantRuntime';
+import { resolveEmployeeRoles } from '../../domain/homeConfig';
+import { personDisplayName } from '../../domain/names';
+import {
+  getActiveTenantConfiguration,
+  resolveCurrentTenantContext,
+} from '../../platform/tenantRuntime';
+import { runWithActiveActorSession } from '../rbacRuntime';
 import { getAuditRepository } from '../auditAdapter';
+import {
+  createSignedEntraSessionCookie,
+  createVerifiedSessionActorFromEntraSession,
+  setTestEntraSessionOverride,
+  verifySignedEntraSessionCookie,
+  type EntraSessionPayload,
+  type VerifiedEntraSessionPayload,
+} from '../entraAuth';
 import { getKeyDateRepository } from '../services';
+import { getStore } from '../store';
 
 export type AuditAdapterTestFailureHook = (params: {
   ctx: TenantContext;
@@ -25,6 +38,14 @@ export type AuditAdapterTestFailureHook = (params: {
 }) => Promise<void> | void;
 
 let baseAuditRepoBeforeTestStub: TenantAuditRepository | null = null;
+
+function assertTestEnvironment(callerName: string): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      `SECURITY_ERROR: ${callerName} is only permitted when NODE_ENV === "test".`,
+    );
+  }
+}
 
 /**
  * Test-only helper (`R450`) that replaces `global.__oneSquaredAuditRepo` with a delegating
@@ -34,11 +55,7 @@ let baseAuditRepoBeforeTestStub: TenantAuditRepository | null = null;
 export function setAuditAdapterFailureHookForTesting(
   hook: AuditAdapterTestFailureHook | null,
 ): void {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error(
-      'SECURITY_ERROR: setAuditAdapterFailureHookForTesting is only permitted when NODE_ENV === "test".',
-    );
-  }
+  assertTestEnvironment('setAuditAdapterFailureHookForTesting');
   if (!hook) {
     if (baseAuditRepoBeforeTestStub) {
       global.__oneSquaredAuditRepo = baseAuditRepoBeforeTestStub;
@@ -68,15 +85,140 @@ export function setAuditAdapterFailureHookForTesting(
   global.__oneSquaredAuditRepo = stub;
 }
 
+export interface TestActorSessionOptions {
+  mfaVerified?: boolean;
+  roles?: readonly string[];
+  tenantId?: string;
+  email?: string;
+  displayName?: string;
+  oid?: string;
+  correlationId?: string;
+}
+
+/**
+ * Builds a test `EntraSessionPayload` for an explicit `actorId` (`R445`).
+ * Roles are resolved from the employee's record in `getStore()` unless explicitly overridden;
+ * unknown actors receive `[]` (never a fallback `['admin']`).
+ */
+export function buildTestEntraSessionPayload(
+  actorId: string,
+  options?: TestActorSessionOptions,
+): EntraSessionPayload {
+  assertTestEnvironment('buildTestEntraSessionPayload');
+  const cleanActorId = actorId?.trim();
+  if (!cleanActorId) {
+    throw new Error(
+      'TEST_ACTOR_REQUIRED: buildTestEntraSessionPayload requires an explicit non-empty actorId (R445).',
+    );
+  }
+  const tenantConfig = getActiveTenantConfiguration();
+  const store = getStore();
+  const person = store.people.find((p) => p.id === cleanActorId) ?? null;
+  const roles = options?.roles
+    ? [...options.roles]
+    : person
+      ? resolveEmployeeRoles(person, store.teams)
+      : [];
+  const email =
+    options?.email?.trim() ||
+    person?.emails?.find((e) => e.isPrimary)?.address ||
+    person?.emails?.[0]?.address ||
+    `${cleanActorId.toLowerCase().replace(/[^a-z0-9._-]/g, '-')}@${tenantConfig.branding.primaryDomain}`;
+  const displayName =
+    options?.displayName?.trim() ||
+    (person ? personDisplayName(person) : cleanActorId);
+  const hexSuffix = cleanActorId
+    .replace(/[^a-fA-F0-9]/g, '0')
+    .padStart(12, '0')
+    .slice(-12);
+  const oid =
+    options?.oid?.trim() ||
+    person?.entraObjectId?.trim() ||
+    `00000000-0000-4000-8000-${hexSuffix}`;
+  const mfaVerified = options?.mfaVerified ?? true;
+  const now = Date.now();
+  return {
+    personId: cleanActorId,
+    tenantId: options?.tenantId?.trim() || tenantConfig.tenantId,
+    oid,
+    tid: '11111111-2222-3333-4444-555555555555',
+    sub: cleanActorId,
+    email,
+    displayName,
+    entraRoles: roles,
+    mappedRoles: roles,
+    entraGroups: [],
+    mfaVerified,
+    amr: mfaVerified ? ['pwd', 'mfa'] : ['pwd'],
+    authenticatedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
+  };
+}
+
+export function makeVerifiedTestEntraSession(
+  actorId: string,
+  options?: TestActorSessionOptions,
+): VerifiedEntraSessionPayload {
+  const payload = buildTestEntraSessionPayload(actorId, options);
+  const signed = createSignedEntraSessionCookie(payload);
+  const verified = verifySignedEntraSessionCookie(signed);
+  if (!verified) {
+    throw new Error(
+      `Failed to verify signed test Entra session cookie for actor "${actorId}".`,
+    );
+  }
+  return verified;
+}
+
+export function setTestActorSession(
+  actorId: string | null,
+  options?: TestActorSessionOptions,
+): void {
+  assertTestEnvironment('setTestActorSession');
+  if (actorId === null) {
+    setTestEntraSessionOverride(null);
+    return;
+  }
+  setTestEntraSessionOverride(buildTestEntraSessionPayload(actorId, options));
+}
+
+export function runAsTestActor<R>(
+  actorId: string,
+  fn: () => Promise<R> | R,
+  options?: TestActorSessionOptions,
+): Promise<R> | R {
+  const verifiedSession = makeVerifiedTestEntraSession(actorId, options);
+  return runWithActiveActorSession(
+    {
+      tenantId: verifiedSession.tenantId,
+      personId: verifiedSession.personId,
+      tokenRoles: verifiedSession.mappedRoles,
+      expiresAtMs: new Date(verifiedSession.expiresAt).getTime(),
+      verifiedSession,
+      ...(options?.correlationId ? { correlationId: options.correlationId } : {}),
+    },
+    fn,
+  );
+}
+
 export function testTenantCtx(
-  actorId = 'P-000001',
+  actorId: string,
   overrides?: { mfaVerified?: boolean; roles?: readonly string[] },
 ): TenantContext {
-  return resolveDirectTestServiceTenantContext({
-    actorId,
-    roles: overrides?.roles ?? ['admin'],
-    mfaVerified: overrides?.mfaVerified ?? true,
-  });
+  const verifiedSession = makeVerifiedTestEntraSession(actorId, overrides);
+  return resolveCurrentTenantContext(
+    createVerifiedSessionActorFromEntraSession(verifiedSession),
+  );
+}
+
+function auditInspectorTenantCtx(): TenantContext {
+  const verifiedSession = makeVerifiedTestEntraSession(
+    'system:audit-test-inspector',
+    { roles: [], mfaVerified: false },
+  );
+  return resolveCurrentTenantContext(
+    createVerifiedSessionActorFromEntraSession(verifiedSession),
+  );
 }
 
 function auditNumber(id: string): number {
@@ -90,7 +232,9 @@ function auditNumber(id: string): number {
  * has a strictly greater `AU-` number.
  */
 export async function markAuditPosition(): Promise<number> {
-  const id = await getAuditRepository().allocateNextAuditId(testTenantCtx());
+  const id = await getAuditRepository().allocateNextAuditId(
+    auditInspectorTenantCtx(),
+  );
   return auditNumber(id) - 1;
 }
 
@@ -101,7 +245,7 @@ export async function auditEntriesForRecord(
   since?: number,
 ): Promise<FirmAuditEntryRecord[]> {
   const rows = await getAuditRepository().listAuditEntriesForRecord(
-    testTenantCtx(),
+    auditInspectorTenantCtx(),
     recordType,
     recordId,
     { limit: 1000 },
@@ -111,10 +255,10 @@ export async function auditEntriesForRecord(
 
 /** Firm-wide audit entries written after `since` (unfiltered by viewer permissions). */
 export async function auditEntriesSince(since: number): Promise<FirmAuditEntryRecord[]> {
-  const ctx = testTenantCtx();
+  const ctx = auditInspectorTenantCtx();
   const out: FirmAuditEntryRecord[] = [];
   let beforeSeq: number | undefined;
-  // Entries are ordered by `at`, which may be a faked historical time, so scan pages fully.
+  // Entries are ordered by `seq DESC` (R451), so scan pages fully.
   for (let i = 0; i < 50; i++) {
     const page = await getAuditRepository().listFirmAuditEntriesPage(ctx, {
       limit: 2000,
@@ -133,7 +277,7 @@ export async function auditEntriesSince(since: number): Promise<FirmAuditEntryRe
  * `audit_entries` and restarts the AU- sequence, which invalidates ID-based marks.
  */
 export async function auditEntriesWrittenSince(sinceMs: number): Promise<FirmAuditEntryRecord[]> {
-  const ctx = testTenantCtx();
+  const ctx = auditInspectorTenantCtx();
   const out: FirmAuditEntryRecord[] = [];
   let beforeSeq: number | undefined;
   for (let i = 0; i < 50; i++) {

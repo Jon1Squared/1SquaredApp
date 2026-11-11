@@ -190,7 +190,6 @@ import {
   getPlatformExtensionHost,
   isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
-  resolveDirectTestServiceTenantContext,
 } from '@/platform/tenantRuntime';
 import {
   runTenantBackgroundJob,
@@ -540,7 +539,10 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
 
   await runUnmigratedJsonMutationWithAudit({
     label: 'switchUserInDemoMode',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, actor.personId),
+    resolveCtx: (s) =>
+      resolveDefaultServiceTenantContext(s, actor.personId, {
+        session: actor.session,
+      }),
     mutate: async (lockedStore) => {
       writeAudit(lockedStore, {
         recordType: 'person',
@@ -605,7 +607,7 @@ function getMatterRestrictionDigestCache(): Map<string, string> {
 }
 
 function resolveDefaultServiceTenantContext(
-  store: FirmStore,
+  _store: FirmStore,
   preferredActorId?: string | null,
   options?: {
     tenantCtx?: TenantContext | null;
@@ -620,7 +622,11 @@ function resolveDefaultServiceTenantContext(
   const activeActorSession = getActiveActorSession()?.verifiedSession as
     | VerifiedEntraSessionPayload
     | undefined;
-  const candidateSession = options?.session ?? activeActorSession;
+  const candidateSession =
+    options?.session ??
+    activeActorSession ??
+    getTestEntraSessionOverride() ??
+    undefined;
 
   if (candidateSession) {
     const cleanActor = preferredActorId?.trim();
@@ -629,9 +635,11 @@ function resolveDefaultServiceTenantContext(
       cleanActor !== 'system' &&
       candidateSession.personId !== cleanActor
     ) {
-      throw new Error(
+      const err = new Error(
         `TENANCY_ACTOR_MISMATCH: Verified session personId "${candidateSession.personId}" does not match requested actor "${cleanActor}".`,
-      );
+      ) as Error & { code: string };
+      err.code = 'TENANCY_ACTOR_MISMATCH';
+      throw err;
     }
     return resolveCurrentTenantContext(
       createVerifiedSessionActorFromEntraSession(candidateSession, {
@@ -641,43 +649,11 @@ function resolveDefaultServiceTenantContext(
     );
   }
 
-  const testOverride = getTestEntraSessionOverride();
-  if (
-    testOverride &&
-    (!preferredActorId ||
-      preferredActorId === 'system' ||
-      testOverride.personId === preferredActorId)
-  ) {
-    return resolveCurrentTenantContext(
-      createVerifiedSessionActorFromEntraSession(testOverride, {
-        correlationId: options?.correlationId,
-      }),
-      activeTenantConfig,
-    );
-  }
-
-  if (process.env.NODE_ENV === 'test') {
-    const actorId = preferredActorId?.trim() || 'P-000001';
-    const person = store.people.find((p) => p.id === actorId) ?? null;
-    const roles = person ? resolveEmployeeRoles(person, store.teams) : ['admin'];
-    const email =
-      person?.emails?.find((e) => e.isPrimary)?.address ||
-      person?.emails?.[0]?.address ||
-      undefined;
-    return resolveDirectTestServiceTenantContext({
-      actorId,
-      actorName: person ? personDisplayName(person) : undefined,
-      actorEmail: email,
-      roles,
-      mfaVerified: true,
-      correlationId: options?.correlationId,
-      tenantConfig: activeTenantConfig,
-    });
-  }
-
-  throw new Error(
+  const err = new Error(
     'UNAUTHENTICATED: Verified Entra ID session is required for tenant data access.',
-  );
+  ) as Error & { code: string };
+  err.code = 'UNAUTHENTICATED';
+  throw err;
 }
 
 async function syncMatterRestrictionInPostgres(
@@ -14291,35 +14267,17 @@ export async function proposeProvisionalKeyDateRecord(
       const nowIso = new Date().toISOString();
       const todayIso = toIsoDate(new Date());
 
-      await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        store,
+        keyDateId,
+        actor,
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd, matter, enquiry } = loaded;
       const keyDateRepo = getKeyDateRepository();
-      const kd = await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
-      if (!kd) {
-        const restrictedCheck = await keyDateRepo.isMatterRestricted(ctx, undefined);
-        void restrictedCheck;
-        const rawCheck = await keyDateRepo.getKeyDateById(
-          resolveDefaultServiceTenantContext(store, store.people.find((p) => p.roles?.includes('admin'))?.id ?? actor.id),
-          keyDateId,
-        ).catch(() => null);
-        if (rawCheck?.matterId) {
-          return { ok: false, error: 'Matter not found or restricted.' };
-        }
-        return { ok: false, error: 'Key date not found.' };
-      }
-
-      const matter = kd.matterId
-        ? store.matters.find((m) => m.id === kd.matterId) ?? null
-        : null;
-      const enquiry = kd.enquiryId
-        ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
-        : null;
-
-      if (
-        kd.matterId &&
-        (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
-      ) {
-        return { ok: false, error: 'Matter not found or restricted.' };
-      }
 
       const stagedAudit: AuditEntry[] = [];
       let pendingIdx = 0;

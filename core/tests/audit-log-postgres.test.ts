@@ -346,24 +346,36 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       });
 
       // Authorised viewer (restricted access list) sees the row; fee earner outside the list gets []
-      const allowed = await listAuditEntriesForRecord('matter', 'M-000014', 'P-000004', { limit: 200 });
+      const allowed = await runAsTestEmployee('P-000004', () =>
+        listAuditEntriesForRecord('matter', 'M-000014', 'P-000004', { limit: 200 }),
+      );
       expect(allowed.some((a) => a.field === 'Staff matter note')).toBe(true);
-      const denied = await listAuditEntriesForRecord('matter', 'M-000014', 'P-000002', { limit: 200 });
+      const denied = await runAsTestEmployee('P-000002', () =>
+        listAuditEntriesForRecord('matter', 'M-000014', 'P-000002', { limit: 200 }),
+      );
       expect(denied).toEqual([]);
-      const deniedFirmPage = await listFirmAuditEntriesPage('P-000002', { limit: 2000 });
+      const deniedFirmPage = await runAsTestEmployee('P-000002', () =>
+        listFirmAuditEntriesPage('P-000002', { limit: 2000 }),
+      );
       expect(deniedFirmPage.code).toBe('FORBIDDEN');
       expect(deniedFirmPage.entries).toEqual([]);
 
       // HR sensitive access audit: visible to the HR-permitted admin, redacted for a fee earner
-      const hrLog = await logEmployeeRestrictedAccess('P-000003', 'sensitive', 'P-000004', 'Viewed sensitive tab');
+      const hrLog = await runAsTestEmployee('P-000004', () =>
+        logEmployeeRestrictedAccess('P-000003', 'sensitive', 'P-000004', 'Viewed sensitive tab'),
+      );
       expect(hrLog.error).toBeUndefined();
-      const hrAllowed = await listAuditEntriesForRecord('employee_sensitive', 'P-000003', 'P-000004', { limit: 200 });
+      const hrAllowed = await runAsTestEmployee('P-000004', () =>
+        listAuditEntriesForRecord('employee_sensitive', 'P-000003', 'P-000004', { limit: 200 }),
+      );
       expect(hrAllowed.some((a) => a.action === 'view-sensitive')).toBe(true);
-      const hrDenied = await listAuditEntriesForRecord('employee_sensitive', 'P-000003', 'P-000002', { limit: 200 });
+      const hrDenied = await runAsTestEmployee('P-000002', () =>
+        listAuditEntriesForRecord('employee_sensitive', 'P-000003', 'P-000002', { limit: 200 }),
+      );
       expect(hrDenied).toEqual([]);
 
       // getAppSnapshot no longer loads the firm-wide audit table
-      const snap = await getAppSnapshot('P-000004');
+      const snap = await runAsTestEmployee('P-000004', () => getAppSnapshot('P-000004'));
       expect(snap.audit).toEqual([]);
     } finally {
       await resetAllDemoData('P-000001', testDataResetContext());
@@ -373,9 +385,11 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
   it('Owner Decision 4: a forced failure during a key-date config write commits neither the config nor audit_entries', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     const kdRepo = getKeyDateRepository();
-    const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx());
+    const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx('P-000004'));
     try {
-      const current = structuredClone(await getKeyDatesConfig(getStore()));
+      const current = structuredClone(
+        await runAsTestEmployee('P-000004', () => getKeyDatesConfig(getStore())),
+      );
       expect((current.limitationRuleSets ?? []).length).toBeGreaterThan(0);
       const next = structuredClone(current);
       const firstRuleSet = next.limitationRuleSets![0]!;
@@ -390,22 +404,24 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
         }
       });
       // The service either rethrows or returns a structured failure; either way nothing may commit
-      const outcome = await saveKeyDatesConfigRecord(next, 'Forced failure test', 'P-000004', {
-        mfaVerified: true,
-      }).catch((err: unknown) => ({ ok: false as const, error: String(err) }));
+      const outcome = await runAsTestEmployee('P-000004', () =>
+        saveKeyDatesConfigRecord(next, 'Forced failure test', 'P-000004', {
+          mfaVerified: true,
+        }),
+      ).catch((err: unknown) => ({ ok: false as const, error: String(err) }));
       expect(outcome.ok).toBe(false);
       // The failure was the forced audit failure inside the transaction, not an earlier validation error
       expect(keyDateHookFired).toBe(true);
       setAuditAdapterFailureHookForTesting(null);
 
-      const overrideAfter = await kdRepo.getKeyDatesTenantConfig(testTenantCtx());
+      const overrideAfter = await kdRepo.getKeyDatesTenantConfig(testTenantCtx('P-000004'));
       expect(overrideAfter).toEqual(originalOverride);
       const writtenAudit = await auditEntriesWrittenSince(startedAt);
       expect(writtenAudit.some((a) => a.recordId === 'FIRM-KEY-DATES-CONFIG')).toBe(false);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
       if (originalOverride) {
-        await kdRepo.putKeyDatesTenantConfig(testTenantCtx(), originalOverride, 'P-000004');
+        await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000004'), originalOverride, 'P-000004');
       }
       await resetAllDemoData('P-000001', testDataResetContext());
     }
@@ -473,17 +489,21 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       });
 
       const [opA, opB] = await Promise.allSettled([
-        updatePersonPermissionOverrides(
-          'P-000002',
-          { grant: ['risk:view'], revoke: [], reason: 'Operation A (forced to fail)' },
-          'P-000004',
-          { mfaVerified: true },
+        runAsTestEmployee('P-000004', () =>
+          updatePersonPermissionOverrides(
+            'P-000002',
+            { grant: ['risk:view'], revoke: [], reason: 'Operation A (forced to fail)' },
+            'P-000004',
+            { mfaVerified: true },
+          ),
         ),
-        updatePersonPermissionOverrides(
-          'P-000005',
-          { grant: ['risk:view'], revoke: [], reason: 'Operation B (succeeds)' },
-          'P-000004',
-          { mfaVerified: true },
+        runAsTestEmployee('P-000004', () =>
+          updatePersonPermissionOverrides(
+            'P-000005',
+            { grant: ['risk:view'], revoke: [], reason: 'Operation B (succeeds)' },
+            'P-000004',
+            { mfaVerified: true },
+          ),
         ),
       ]);
       setAuditAdapterFailureHookForTesting(null);
@@ -536,14 +556,22 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
         }
       });
       await expect(
-        withTimeout(takeTaskRecord(taskId, personId), 2000, 'takeTaskRecord (forced failure)'),
+        withTimeout(
+          runAsTestEmployee(personId, () => takeTaskRecord(taskId, personId)),
+          2000,
+          'takeTaskRecord (forced failure)',
+        ),
       ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_NESTED/);
       setAuditAdapterFailureHookForTesting(null);
       clearStoreMemoryCache();
       expect(getStore().tasks.find((t) => t.id === taskId)?.assignedPersonId ?? null).toBeNull();
 
       // (b) Same nested call succeeds without deadlock
-      const taken = await withTimeout(takeTaskRecord(taskId, personId), 2000, 'takeTaskRecord');
+      const taken = await withTimeout(
+        runAsTestEmployee(personId, () => takeTaskRecord(taskId, personId)),
+        2000,
+        'takeTaskRecord',
+      );
       expect(taken.error).toBeUndefined();
       expect(taken.task?.assignedPersonId).toBe(personId);
 
@@ -660,7 +688,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       // Part 2: RBAC configuration override rollback
       const beforeRbacOverride = structuredClone(getStore().rbacConfigOverride);
-      const snap = await getAppSnapshot('P-000004');
+      const snap = await runAsTestEmployee('P-000004', () => getAppSnapshot('P-000004'));
       setAuditAdapterFailureHookForTesting(({ entries }) => {
         if (entries.some((e) => e.recordId === 'TENANT-RBAC-CONFIG')) {
           throw new Error('SIMULATED_AUDIT_FAILURE_RBAC_OVERRIDE');
@@ -668,18 +696,20 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       });
 
       await expect(
-        updateTenantRbacConfig(
-          {
-            identityMapping: {
-              ...snap.rbacConfig.identityMapping,
-              entraGroupToRoleKey: {
-                ...snap.rbacConfig.identityMapping.entraGroupToRoleKey,
-                '22222222-3333-4444-5555-666666666666': ['partner'],
+        runAsTestEmployee('P-000004', () =>
+          updateTenantRbacConfig(
+            {
+              identityMapping: {
+                ...snap.rbacConfig.identityMapping,
+                entraGroupToRoleKey: {
+                  ...snap.rbacConfig.identityMapping.entraGroupToRoleKey,
+                  '22222222-3333-4444-5555-666666666666': ['partner'],
+                },
               },
             },
-          },
-          'P-000004',
-          { mfaVerified: true },
+            'P-000004',
+            { mfaVerified: true },
+          ),
         ),
       ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_RBAC_OVERRIDE/);
       setAuditAdapterFailureHookForTesting(null);
@@ -903,7 +933,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
   it('Import idempotency: importFirmStoreModulesToPostgres([key-dates, audit]) run twice gives identical counts and the AU- sequence continues', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const ctx = testTenantCtx();
+      const ctx = testTenantCtx('P-000004');
       const auditRepo = getAuditRepository();
       const kdRepo = getKeyDateRepository();
 
@@ -1163,7 +1193,9 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       }
       await getAuditRepository().appendAuditEntries(ctx, [...extraVisible, ...batch300]);
 
-      const page1 = await listFirmAuditEntriesPage('P-000004', { limit: 250 });
+      const page1 = await runAsTestEmployee('P-000004', () =>
+        listFirmAuditEntriesPage('P-000004', { limit: 250 }),
+      );
       expect(page1.code).toBeUndefined();
       expect(page1.entries).toHaveLength(250);
       expect(page1.entries.some((e) => e.recordId === staffMatter.id)).toBe(false);
@@ -1234,40 +1266,40 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       });
 
       // 1. Non-admin call returns FORBIDDEN with code and message
-      const feeEarnerPage = await listFirmAuditEntriesPage('P-000002', { limit: 50 });
+      const feeEarnerPage = await runAsTestEmployee('P-000002', () =>
+        listFirmAuditEntriesPage('P-000002', { limit: 50 }),
+      );
       expect(feeEarnerPage.code).toBe('FORBIDDEN');
       expect(feeEarnerPage.message).toContain('admin:access');
       expect(feeEarnerPage.entries).toEqual([]);
 
       // 2. Staff-matter audit row is hidden from an admin who is not in restrictedAccessUserIds (P-000004)
-      const nonRestrictedAdminRecord = await listAuditEntriesForRecord(
-        'matter',
-        staffMatter.id,
-        'P-000004',
-        { limit: 50 },
+      const nonRestrictedAdminRecord = await runAsTestEmployee('P-000004', () =>
+        listAuditEntriesForRecord('matter', staffMatter.id, 'P-000004', { limit: 50 }),
       );
       expect(nonRestrictedAdminRecord).toEqual([]);
-      const nonRestrictedAdminPage = await listFirmAuditEntriesPage('P-000004', {
-        limit: 50,
-      });
+      const nonRestrictedAdminPage = await runAsTestEmployee('P-000004', () =>
+        listFirmAuditEntriesPage('P-000004', {
+          limit: 50,
+        }),
+      );
       expect(nonRestrictedAdminPage.code).toBeUndefined();
       expect(
         nonRestrictedAdminPage.entries.some((e) => e.field === staffMarkerField),
       ).toBe(false);
 
       // 3. Admin control on restrictedAccessUserIds (P-000001) sees the staff-matter audit row in both record and firm queries
-      const restrictedAdminRecord = await listAuditEntriesForRecord(
-        'matter',
-        staffMatter.id,
-        'P-000001',
-        { limit: 50 },
+      const restrictedAdminRecord = await runAsTestEmployee('P-000001', () =>
+        listAuditEntriesForRecord('matter', staffMatter.id, 'P-000001', { limit: 50 }),
       );
       expect(
         restrictedAdminRecord.some((e) => e.field === staffMarkerField),
       ).toBe(true);
-      const restrictedAdminPage = await listFirmAuditEntriesPage('P-000001', {
-        limit: 50,
-      });
+      const restrictedAdminPage = await runAsTestEmployee('P-000001', () =>
+        listFirmAuditEntriesPage('P-000001', {
+          limit: 50,
+        }),
+      );
       expect(restrictedAdminPage.code).toBeUndefined();
       expect(
         restrictedAdminPage.entries.some((e) => e.field === staffMarkerField),
@@ -1312,5 +1344,33 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     } finally {
       await resetAllDemoData('P-000001', testDataResetContext());
     }
+  });
+
+  it('R445: service functions reject with UNAUTHENTICATED when called without a verified Entra ID session or test override, and succeed with an explicit actor session', async () => {
+    setTestEntraSessionOverride(undefined);
+    await expect(getAppSnapshot('P-000001')).rejects.toMatchObject({
+      code: 'UNAUTHENTICATED',
+      message: 'UNAUTHENTICATED: Verified Entra ID session is required for tenant data access.',
+    });
+
+    const targetPerson = structuredClone(
+      getStore().people.find((p) => !p.isEmployee && !p.mergedIntoId)!,
+    );
+    await expect(
+      savePersonRecord(
+        {
+          ...targetPerson,
+          surname: 'R445-Unauthenticated-Rejected',
+        },
+        { id: targetPerson.id, byId: 'P-000001', mfaVerified: true },
+      ),
+    ).rejects.toMatchObject({
+      code: 'UNAUTHENTICATED',
+      message: 'UNAUTHENTICATED: Verified Entra ID session is required for tenant data access.',
+    });
+
+    // Positive control: explicit verified session for P-000001 succeeds
+    const snap = await runAsTestEmployee('P-000001', () => getAppSnapshot('P-000001'));
+    expect(snap.people.length).toBeGreaterThan(0);
   });
 });

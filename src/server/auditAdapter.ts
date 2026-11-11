@@ -629,21 +629,23 @@ export async function runUnmigratedJsonMutationWithAudit<T>(params: {
       throw err;
     }
 
-    registerJsonStoreRecordDeltas(
+    const storeMutated = registerJsonStoreRecordDeltas(
       baseline,
       store,
       compensator,
       params.label ?? 'json-store.record-delta',
     );
 
-    if (stagedEntries.length > 0) {
+    if (stagedEntries.length > 0 || storeMutated) {
       const ctx = params.resolveCtx(store, result);
       if (!ctx) {
         throw new Error(
           'TENANCY_AUTH_ERROR: Cannot write firm audit entries without a resolved TenantContext.',
         );
       }
-      await appendUnmigratedModuleAuditEntries(ctx, stagedEntries);
+      if (stagedEntries.length > 0) {
+        await appendUnmigratedModuleAuditEntries(ctx, stagedEntries);
+      }
     }
 
     return result;

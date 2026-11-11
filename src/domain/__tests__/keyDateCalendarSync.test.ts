@@ -15,7 +15,7 @@ import {
 } from '../keyDateCalendarSync';
 import { reassignKeyDateTeamRecord } from '@/server/services';
 import { getStore, resetStore } from '@/server/store';
-import { getKeyDateRepository, testTenantCtx } from '@/server/testSupport/auditTestSupport';
+import { getKeyDateRepository, runAsTestActor, testTenantCtx } from '@/server/testSupport/auditTestSupport';
 
 const config = exampleConfig as unknown as KeyDatesConfig;
 
@@ -239,7 +239,7 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
     // Reassignment via reassignKeyDateTeamRecord calls syncKeyDateToOutlookCalendar and deletes the old owner's event
     resetStore();
     const store = getStore();
-    const allKeyDates = await getKeyDateRepository().listAllVisibleKeyDates(testTenantCtx());
+    const allKeyDates = await getKeyDateRepository().listAllVisibleKeyDates(testTenantCtx('P-000001'));
     const confirmedKd = allKeyDates.find((k) => k.status === 'confirmed' && Boolean(k.matterId))!;
     expect(confirmedKd).toBeDefined();
     const oldOwnerId = confirmedKd.responsiblePersonIds[0]!;
@@ -253,7 +253,7 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
       (p) => p.isEmployee && p.roles?.includes('managing_partner'),
     )!;
 
-    await getKeyDateRepository().putCalendarSync(testTenantCtx(), {
+    await getKeyDateRepository().putCalendarSync(testTenantCtx(supervisor.id), {
       keyDateId: confirmedKd.id,
       externalEvents: [
         { target: `person:${oldOwnerId}`, eventId: 'evt-old-owner-1' },
@@ -278,15 +278,17 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
       },
     };
 
-    const res = await reassignKeyDateTeamRecord(
-      confirmedKd.id,
-      {
-        teamId: confirmedKd.teamId,
-        responsiblePersonIds: [newOwner.id],
-        reason: 'Reassigning to new owner',
-      },
-      supervisor.id,
-      { calendarAdapter: spyAdapter },
+    const res = await runAsTestActor(supervisor.id, () =>
+      reassignKeyDateTeamRecord(
+        confirmedKd.id,
+        {
+          teamId: confirmedKd.teamId,
+          responsiblePersonIds: [newOwner.id],
+          reason: 'Reassigning to new owner',
+        },
+        supervisor.id,
+        { calendarAdapter: spyAdapter },
+      ),
     );
     expect(res.ok).toBe(true);
     expect(deletedEvents).toEqual([

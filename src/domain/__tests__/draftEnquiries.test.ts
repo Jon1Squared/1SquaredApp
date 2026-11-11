@@ -25,15 +25,22 @@ import {
   saveEnquiryRecord,
 } from '@/server/services';
 import { createSeedStore, getStore } from '@/server/store';
-import { auditEntriesForRecord, markAuditPosition } from '@/server/testSupport/auditTestSupport';
+import {
+  auditEntriesForRecord,
+  markAuditPosition,
+  runAsTestActor,
+  setTestActorSession,
+} from '@/server/testSupport/auditTestSupport';
 
 describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   beforeEach(() => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
     global.__oneSquaredStore = createSeedStore(new Date('2026-10-18T09:00:00Z'));
+    setTestActorSession('P-000018');
   });
 
   afterEach(() => {
+    setTestActorSession(null);
     vi.restoreAllMocks();
   });
 
@@ -480,10 +487,14 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(draftActions).toEqual(['Decline', 'Save changes', 'Save and route enquiry']);
 
     // Server actions also reject Assign and Convert to matter on a Draft
-    const assignAttempt = await assignEnquiryRecord(draft.id, 'P-000012', null, 'P-000012');
+    const assignAttempt = await runAsTestActor('P-000012', () =>
+      assignEnquiryRecord(draft.id, 'P-000012', null, 'P-000012'),
+    );
     expect(assignAttempt.error).toMatch(/Cannot assign a draft/i);
 
-    const convertAttempt = await prepareEnquiryConversion(draft.id, {}, 'P-000012');
+    const convertAttempt = await runAsTestActor('P-000012', () =>
+      prepareEnquiryConversion(draft.id, {}, 'P-000012'),
+    );
     expect(convertAttempt.ok).toBe(false);
     expect(convertAttempt.conflictReasons?.[0]).toMatch(/Cannot convert a draft enquiry/i);
   });
@@ -604,7 +615,9 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     );
 
     // 2. Convert the enquiry -> creates a Person record and removes the duplicate enquiry-stage row
-    const conv = await prepareEnquiryConversion(enq1.id, {}, 'P-000001');
+    const conv = await runAsTestActor('P-000001', () =>
+      prepareEnquiryConversion(enq1.id, {}, 'P-000001'),
+    );
     expect(conv.ok).toBe(true);
     expect(enq1.linkedPersonId).toBeTruthy();
     expect(store.people.some((p) => p.id === enq1.linkedPersonId)).toBe(true);
@@ -633,10 +646,12 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       ),
     ).toBe(true);
 
-    await closeEnquiryRecord(
-      savedDecline.id,
-      { targetStatus: 'Declined', closeReasonId: declineReasonId },
-      'P-000001',
+    await runAsTestActor('P-000001', () =>
+      closeEnquiryRecord(
+        savedDecline.id,
+        { targetStatus: 'Declined', closeReasonId: declineReasonId },
+        'P-000001',
+      ),
     );
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
@@ -665,10 +680,12 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       ),
     ).toBe(true);
 
-    await closeEnquiryRecord(
-      savedRefer.id,
-      { targetStatus: 'Referred out', referredToName: 'Cardiff Defence Chambers' },
-      'P-000001',
+    await runAsTestActor('P-000001', () =>
+      closeEnquiryRecord(
+        savedRefer.id,
+        { targetStatus: 'Referred out', referredToName: 'Cardiff Defence Chambers' },
+        'P-000001',
+      ),
     );
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
@@ -691,17 +708,19 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       { byId: 'P-000018', asDraft: false },
     )).enquiry!;
 
-    await logEnquiryContactRecord(
-      savedNoResp.id,
-      { method: 'Phone', outcome: 'No answer', note: 'Attempt 1' },
-      'P-000001',
-    );
-    await logEnquiryContactRecord(
-      savedNoResp.id,
-      { method: 'Phone', outcome: 'Left Voicemail', note: 'Attempt 2' },
-      'P-000001',
-    );
-    await closeEnquiryRecord(savedNoResp.id, { targetStatus: 'No response' }, 'P-000001');
+    await runAsTestActor('P-000001', async () => {
+      await logEnquiryContactRecord(
+        savedNoResp.id,
+        { method: 'Phone', outcome: 'No answer', note: 'Attempt 1' },
+        'P-000001',
+      );
+      await logEnquiryContactRecord(
+        savedNoResp.id,
+        { method: 'Phone', outcome: 'Left Voicemail', note: 'Attempt 2' },
+        'P-000001',
+      );
+      await closeEnquiryRecord(savedNoResp.id, { targetStatus: 'No response' }, 'P-000001');
+    });
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
         (p) => p.enquiryId === savedNoResp.id,

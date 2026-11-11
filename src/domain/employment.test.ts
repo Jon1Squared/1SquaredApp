@@ -47,6 +47,7 @@ import {
   verifySignedEntraSessionCookie,
 } from '../server/entraAuth';
 import { runWithActiveActorSession } from './rbac';
+import { runAsTestActor } from '../server/testSupport/auditTestSupport';
 import type { EmploymentRecord, Person } from './types';
 
 describe('Employee section, conversion paths, migration & permissions', () => {
@@ -295,76 +296,78 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(conflicts.length).toBeGreaterThan(0);
 
       // Save this existing contact/client as joining the firm (Employee) via System Admin P-000004
-      const res = await savePersonRecord(
-        {
-          ...nonEmployeeParty,
-          firstName: nonEmployeeParty.firstName,
-          surname: nonEmployeeParty.surname,
-          dateOfBirth: nonEmployeeParty.dateOfBirth || '1985-06-15',
-          isEmployee: true,
-        },
-        {
-          id: nonEmployeeParty.id,
-          byId: 'P-000004',
-          mfaVerified: true,
-          worksAtFirm: true,
-          employmentSubmitted: {
-            engagementType: 'Employee',
-            status: 'Pre-start',
-            employeeNumber: 'EMP-99881',
-            employingEntityId: 'LE-PV-LLP',
-            jobTitle: 'Associate',
-            gradeOrBand: 'Band 3',
-            roleType: 'Fee earner',
-            divisionId: 'DIV-LEGAL',
-            departmentId: 'DEPT-RE',
-            teamOrPracticeGroupId: 'TEAM-RE-COMM',
-            officeId: 'OFF-CDF',
-            costCentreId: 'CC-RE',
-            profitCentreId: 'PC-RE',
-            isTopOfHierarchy: false,
-            lineManagerId: 'P-000001',
-            supervisingPartnerId: 'P-000001',
-            timesheetApproverId: 'P-000001',
-            holidayApproverId: 'P-000001',
-            onboardingBuddyId: null,
-            effectiveFrom: '2026-06-01',
-            effectiveTo: null,
-            contract: {
-              startDate: '2026-06-01',
-              continuousServiceDate: '2026-06-01',
-              contractType: 'Permanent',
-              fixedTermEndDate: null,
-              fte: 1.0,
-              workingPattern: 'Full-time',
-              workingPatternNotes: '',
-              workLocationArrangement: 'Hybrid',
-              probationPeriodMonths: 6,
-              probationEndDate: '2026-12-01',
-              probationEndDateOverridden: false,
-              probationOutcome: 'Pending',
-              noticePeriod: '3 months',
-              holidayEntitlementDays: 25,
-              leavingDate: null,
-              leavingReasonId: null,
-              eligibleForRehire: 'Yes',
-              keepAsContactOnLeave: true,
-              hrRetentionUntil: null,
-            },
-            feeEarner: {
-              timekeeperCode: 'FE-NEW99881',
-              chargeOutRateGbp: 275,
-              chargeOutRateEffectiveFrom: '2026-06-01',
-              chargeOutRateHistory: [],
-              chargeableHoursTarget: 1400,
-              billingApprovalLimitGbp: 2500,
-              sraNumber: 'SRA-99881',
-              practisingCertificateStatus: 'Current',
-              practisingCertificateRenewalDate: '2026-10-31',
-              admissionDate: '2020-09-01',
+      const res = await runAsTestActor('P-000004', () =>
+        savePersonRecord(
+          {
+            ...nonEmployeeParty,
+            firstName: nonEmployeeParty.firstName,
+            surname: nonEmployeeParty.surname,
+            dateOfBirth: nonEmployeeParty.dateOfBirth || '1985-06-15',
+            isEmployee: true,
+          },
+          {
+            id: nonEmployeeParty.id,
+            byId: 'P-000004',
+            mfaVerified: true,
+            worksAtFirm: true,
+            employmentSubmitted: {
+              engagementType: 'Employee',
+              status: 'Pre-start',
+              employeeNumber: 'EMP-99881',
+              employingEntityId: 'LE-PV-LLP',
+              jobTitle: 'Associate',
+              gradeOrBand: 'Band 3',
+              roleType: 'Fee earner',
+              divisionId: 'DIV-LEGAL',
+              departmentId: 'DEPT-RE',
+              teamOrPracticeGroupId: 'TEAM-RE-COMM',
+              officeId: 'OFF-CDF',
+              costCentreId: 'CC-RE',
+              profitCentreId: 'PC-RE',
+              isTopOfHierarchy: false,
+              lineManagerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              timesheetApproverId: 'P-000001',
+              holidayApproverId: 'P-000001',
+              onboardingBuddyId: null,
+              effectiveFrom: '2026-06-01',
+              effectiveTo: null,
+              contract: {
+                startDate: '2026-06-01',
+                continuousServiceDate: '2026-06-01',
+                contractType: 'Permanent',
+                fixedTermEndDate: null,
+                fte: 1.0,
+                workingPattern: 'Full-time',
+                workingPatternNotes: '',
+                workLocationArrangement: 'Hybrid',
+                probationPeriodMonths: 6,
+                probationEndDate: '2026-12-01',
+                probationEndDateOverridden: false,
+                probationOutcome: 'Pending',
+                noticePeriod: '3 months',
+                holidayEntitlementDays: 25,
+                leavingDate: null,
+                leavingReasonId: null,
+                eligibleForRehire: 'Yes',
+                keepAsContactOnLeave: true,
+                hrRetentionUntil: null,
+              },
+              feeEarner: {
+                timekeeperCode: 'FE-NEW99881',
+                chargeOutRateGbp: 275,
+                chargeOutRateEffectiveFrom: '2026-06-01',
+                chargeOutRateHistory: [],
+                chargeableHoursTarget: 1400,
+                billingApprovalLimitGbp: 2500,
+                sraNumber: 'SRA-99881',
+                practisingCertificateStatus: 'Current',
+                practisingCertificateRenewalDate: '2026-10-31',
+                admissionDate: '2020-09-01',
+              },
             },
           },
-        },
+        ),
       );
 
       expect(res.errors).toBeUndefined();
@@ -460,134 +463,136 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('Path D (Employee -> Leaver -> Contact): sets status to Leaver, deactivates firm-issued email/extension, keeps personal contact details & marketing consent, hides from employee selectors, and supports reassigning owned records', async () => {
-      const store = getStore();
-      const target = store.people.find((p) => p.id === 'P-000005')!;
-      const personalEmail = {
-        id: 'em-personal-5',
-        address: 'personal.contact@example.com',
-        typeId: 'email_type.personal',
-        isPrimary: false,
-        firmIssued: false,
-        active: true,
-      };
+      await runAsTestActor('P-000004', async () => {
+        const store = getStore();
+        const target = store.people.find((p) => p.id === 'P-000005')!;
+        const personalEmail = {
+          id: 'em-personal-5',
+          address: 'personal.contact@example.com',
+          typeId: 'email_type.personal',
+          isPrimary: false,
+          firmIssued: false,
+          active: true,
+        };
 
-      const saveRes = await savePersonRecord(
-        {
-          ...target,
-          firstName: target.firstName,
-          surname: target.surname,
-          emails: [...target.emails, personalEmail],
-          marketingConsentId: 'marketing_consent.opted_in',
-        },
-        {
-          id: target.id,
-          byId: 'P-000004',
-          mfaVerified: true,
-          worksAtFirm: true,
-          keepAsContactOnLeave: true,
-          employmentSubmitted: {
-            ...target.employment!,
-            status: 'Leaver',
-            effectiveTo: '2026-08-31',
-            contract: {
-              ...target.employment!.contract!,
-              leavingDate: '2026-08-31',
-              leavingReasonId: 'leaving_reason.resignation',
-              keepAsContactOnLeave: true,
+        const saveRes = await savePersonRecord(
+          {
+            ...target,
+            firstName: target.firstName,
+            surname: target.surname,
+            emails: [...target.emails, personalEmail],
+            marketingConsentId: 'marketing_consent.opted_in',
+          },
+          {
+            id: target.id,
+            byId: 'P-000004',
+            mfaVerified: true,
+            worksAtFirm: true,
+            keepAsContactOnLeave: true,
+            employmentSubmitted: {
+              ...target.employment!,
+              status: 'Leaver',
+              effectiveTo: '2026-08-31',
+              contract: {
+                ...target.employment!.contract!,
+                leavingDate: '2026-08-31',
+                leavingReasonId: 'leaving_reason.resignation',
+                keepAsContactOnLeave: true,
+              },
             },
           },
-        },
-      );
+        );
 
-      expect(saveRes.errors).toBeUndefined();
-      const leaverUpdated = saveRes.person;
-      expect(leaverUpdated.isEmployee).toBe(false);
-      expect(leaverUpdated.employment?.status).toBe('Leaver');
-      expect(leaverUpdated.employment?.effectiveTo).toBe('2026-08-31');
-      expect(leaverUpdated.employment?.contract?.hrRetentionUntil).toBe('2032-08-31');
+        expect(saveRes.errors).toBeUndefined();
+        const leaverUpdated = saveRes.person;
+        expect(leaverUpdated.isEmployee).toBe(false);
+        expect(leaverUpdated.employment?.status).toBe('Leaver');
+        expect(leaverUpdated.employment?.effectiveTo).toBe('2026-08-31');
+        expect(leaverUpdated.employment?.contract?.hrRetentionUntil).toBe('2032-08-31');
 
-      // Firm-issued work email & phone are marked inactive; personal email & marketing consent remain active
-      const firmEmail = leaverUpdated.emails.find((e) => e.firmIssued);
-      const keptPersonal = leaverUpdated.emails.find(
-        (e) => e.address === 'personal.contact@example.com',
-      );
-      expect(firmEmail?.active).toBe(false);
-      expect(keptPersonal?.active).toBe(true);
-      expect(leaverUpdated.marketingConsentId).toBe('marketing_consent.opted_in');
-
-      // R154: An email on the configured primaryDomain is deactivated on leave even if firmIssued was false, whereas a personal domain is never inferred as the firm's
-      const unflaggedFirmDomainEmail = {
-        id: 'em-unflagged-firm-5',
-        address: 'unflagged.work@notalawfirm.example',
-        typeId: 'email_type.other',
-        isPrimary: false,
-        firmIssued: false,
-        active: true,
-      };
-      const secondLeaverSave = await savePersonRecord(
-        {
-          ...leaverUpdated,
-          emails: [...leaverUpdated.emails, unflaggedFirmDomainEmail],
-        },
-        {
-          id: target.id,
-          byId: 'P-000004',
-          worksAtFirm: true,
-          keepAsContactOnLeave: true,
-          employmentSubmitted: {
-            ...leaverUpdated.employment!,
-            status: 'Leaver',
-          },
-        },
-      );
-      expect(
-        secondLeaverSave.person.emails.find(
-          (e) => e.address === 'unflagged.work@notalawfirm.example',
-        )?.active,
-      ).toBe(false);
-      expect(
-        secondLeaverSave.person.emails.find(
+        // Firm-issued work email & phone are marked inactive; personal email & marketing consent remain active
+        const firmEmail = leaverUpdated.emails.find((e) => e.firmIssued);
+        const keptPersonal = leaverUpdated.emails.find(
           (e) => e.address === 'personal.contact@example.com',
-        )?.active,
-      ).toBe(true);
+        );
+        expect(firmEmail?.active).toBe(false);
+        expect(keptPersonal?.active).toBe(true);
+        expect(leaverUpdated.marketingConsentId).toBe('marketing_consent.opted_in');
 
-      // Selector rules: Leaver is no longer selectable, and existing references show "Left"
-      expect(isSelectableInEmployeeDropdown(leaverUpdated)).toBe(false);
-      expect(isLeaverPerson(leaverUpdated)).toBe(true);
-      expect(formatEmployeeSelectorOptionLabel(leaverUpdated, store.values)).toContain(
-        'Left',
-      );
+        // R154: An email on the configured primaryDomain is deactivated on leave even if firmIssued was false, whereas a personal domain is never inferred as the firm's
+        const unflaggedFirmDomainEmail = {
+          id: 'em-unflagged-firm-5',
+          address: 'unflagged.work@notalawfirm.example',
+          typeId: 'email_type.other',
+          isPrimary: false,
+          firmIssued: false,
+          active: true,
+        };
+        const secondLeaverSave = await savePersonRecord(
+          {
+            ...leaverUpdated,
+            emails: [...leaverUpdated.emails, unflaggedFirmDomainEmail],
+          },
+          {
+            id: target.id,
+            byId: 'P-000004',
+            worksAtFirm: true,
+            keepAsContactOnLeave: true,
+            employmentSubmitted: {
+              ...leaverUpdated.employment!,
+              status: 'Leaver',
+            },
+          },
+        );
+        expect(
+          secondLeaverSave.person.emails.find(
+            (e) => e.address === 'unflagged.work@notalawfirm.example',
+          )?.active,
+        ).toBe(false);
+        expect(
+          secondLeaverSave.person.emails.find(
+            (e) => e.address === 'personal.contact@example.com',
+          )?.active,
+        ).toBe(true);
 
-      // Assign a person record to this leaver and test reassignment
-      store.people[0].relationshipOwnerId = leaverUpdated.id;
-      const ownedBefore = findRecordsOwnedByLeavers(
-        store.people,
-        store.organisations,
-        store.matters,
-        store.tasks,
-        store.enquiries,
-        leaverUpdated.id,
-      );
-      expect(ownedBefore.length).toBeGreaterThan(0);
+        // Selector rules: Leaver is no longer selectable, and existing references show "Left"
+        expect(isSelectableInEmployeeDropdown(leaverUpdated)).toBe(false);
+        expect(isLeaverPerson(leaverUpdated)).toBe(true);
+        expect(formatEmployeeSelectorOptionLabel(leaverUpdated, store.values)).toContain(
+          'Left',
+        );
 
-      const reassignRes = await reassignLeaverOwnedRecords(
-        leaverUpdated.id,
-        'P-000001',
-        'P-000004',
-      );
-      expect(reassignRes.errors).toBeUndefined();
-      expect(reassignRes.reassignedCount).toBeGreaterThan(0);
+        // Assign a person record to this leaver and test reassignment
+        store.people[0].relationshipOwnerId = leaverUpdated.id;
+        const ownedBefore = findRecordsOwnedByLeavers(
+          store.people,
+          store.organisations,
+          store.matters,
+          store.tasks,
+          store.enquiries,
+          leaverUpdated.id,
+        );
+        expect(ownedBefore.length).toBeGreaterThan(0);
 
-      const ownedAfter = findRecordsOwnedByLeavers(
-        store.people,
-        store.organisations,
-        store.matters,
-        store.tasks,
-        store.enquiries,
-        leaverUpdated.id,
-      );
-      expect(ownedAfter.length).toBe(0);
-      resetStore();
+        const reassignRes = await reassignLeaverOwnedRecords(
+          leaverUpdated.id,
+          'P-000001',
+          'P-000004',
+        );
+        expect(reassignRes.errors).toBeUndefined();
+        expect(reassignRes.reassignedCount).toBeGreaterThan(0);
+
+        const ownedAfter = findRecordsOwnedByLeavers(
+          store.people,
+          store.organisations,
+          store.matters,
+          store.tasks,
+          store.enquiries,
+          leaverUpdated.id,
+        );
+        expect(ownedAfter.length).toBe(0);
+        resetStore();
+      });
     });
   });
 
@@ -629,197 +634,205 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(filteredForBasic?.emergencyContacts).toBeUndefined();
 
       // Snapshot for non-payroll/non-sensitive user P-000002 omits sensitive records and payroll
-      const snapshotForP2 = await getAppSnapshot('P-000002');
+      const snapshotForP2 = await runAsTestActor('P-000002', () =>
+        getAppSnapshot('P-000002'),
+      );
       expect(Object.keys(snapshotForP2.employeeSensitiveRecords)).toHaveLength(0);
       const p1InSnapshot = snapshotForP2.people.find((p) => p.id === 'P-000001')!;
       expect(p1InSnapshot.employment?.payroll).toBeUndefined();
 
-      // Audit logging when viewing payroll or sensitive details via getEmployeeDetailsForUser & logEmployeeRestrictedAccess
-      const hrAudit = async () => [
-        ...(await listAuditEntriesForRecord('employee_payroll', 'P-000002', 'P-000004', { limit: 1000 })),
-        ...(await listAuditEntriesForRecord('employee_sensitive', 'P-000002', 'P-000004', { limit: 1000 })),
-      ];
-      const auditBefore = await hrAudit();
-      const payrollViewsBefore = auditBefore.filter((a) => a.action === 'view-payroll').length;
-      const sensitiveViewsBefore = auditBefore.filter((a) => a.action === 'view-sensitive').length;
-      const detailsRes = await getEmployeeDetailsForUser('P-000002', 'P-000004', {
-        logViewPayroll: true,
-        logViewSensitive: true,
-      });
-      expect(detailsRes.errors).toBeUndefined();
-      const auditAfter = await hrAudit();
-      expect(auditAfter.length).toBeGreaterThan(auditBefore.length);
-      expect(auditAfter.filter((a) => a.action === 'view-payroll').length).toBe(payrollViewsBefore + 1);
-      expect(auditAfter.filter((a) => a.action === 'view-sensitive').length).toBe(sensitiveViewsBefore + 1);
+      await runAsTestActor('P-000004', async () => {
+        // Audit logging when viewing payroll or sensitive details via getEmployeeDetailsForUser & logEmployeeRestrictedAccess
+        const hrAudit = async () => [
+          ...(await listAuditEntriesForRecord('employee_payroll', 'P-000002', 'P-000004', { limit: 1000 })),
+          ...(await listAuditEntriesForRecord('employee_sensitive', 'P-000002', 'P-000004', { limit: 1000 })),
+        ];
+        const auditBefore = await hrAudit();
+        const payrollViewsBefore = auditBefore.filter((a) => a.action === 'view-payroll').length;
+        const sensitiveViewsBefore = auditBefore.filter((a) => a.action === 'view-sensitive').length;
+        const detailsRes = await getEmployeeDetailsForUser('P-000002', 'P-000004', {
+          logViewPayroll: true,
+          logViewSensitive: true,
+        });
+        expect(detailsRes.errors).toBeUndefined();
+        const auditAfter = await hrAudit();
+        expect(auditAfter.length).toBeGreaterThan(auditBefore.length);
+        expect(auditAfter.filter((a) => a.action === 'view-payroll').length).toBe(payrollViewsBefore + 1);
+        expect(auditAfter.filter((a) => a.action === 'view-sensitive').length).toBe(sensitiveViewsBefore + 1);
 
-      const logRes = await logEmployeeRestrictedAccess(
-        'P-000002',
-        'payroll',
-        'P-000004',
-        'Revealed masked NI and bank details in UI',
-      );
-      expect(logRes.error).toBeUndefined();
-      expect(logRes.auditEntry?.action).toBe('view-payroll');
+        const logRes = await logEmployeeRestrictedAccess(
+          'P-000002',
+          'payroll',
+          'P-000004',
+          'Revealed masked NI and bank details in UI',
+        );
+        expect(logRes.error).toBeUndefined();
+        expect(logRes.auditEntry?.action).toBe('view-payroll');
+      });
     });
 
     it('preserves existing employeeSensitiveRecords[id] when saving a person without sensitiveSubmitted (R76)', async () => {
-      const store = getStore();
-      const target = store.people.find((p) => p.id === 'P-000002')!;
+      await runAsTestActor('P-000004', async () => {
+        const store = getStore();
+        const target = store.people.find((p) => p.id === 'P-000002')!;
 
-      // First save a sensitive record on P-000002 as HR Admin P-000004
-      await savePersonRecord(
-        {
-          ...target,
-          firstName: target.firstName,
-          surname: target.surname,
-        },
-        {
-          id: target.id,
-          byId: 'P-000004',
-          worksAtFirm: true,
-          employmentSubmitted: target.employment,
-          sensitiveSubmitted: {
-            reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
+        // First save a sensitive record on P-000002 as HR Admin P-000004
+        await savePersonRecord(
+          {
+            ...target,
+            firstName: target.firstName,
+            surname: target.surname,
           },
-        },
-      );
-      expect(
-        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
-      ).toBe('Ergonomic standing desk and dual monitors');
+          {
+            id: target.id,
+            byId: 'P-000004',
+            worksAtFirm: true,
+            employmentSubmitted: target.employment,
+            sensitiveSubmitted: {
+              reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
+            },
+          },
+        );
+        expect(
+          store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+        ).toBe('Ergonomic standing desk and dual monitors');
 
-      const countSensitiveAudit = async (action: string) =>
-        (
-          await listAuditEntriesForRecord('employee_sensitive', target.id, 'P-000004', { limit: 1000 })
-        ).filter((a) => a.recordId === target.id && a.action === action).length;
-      const sensitiveAuditCountBefore = await countSensitiveAudit('update-sensitive');
+        const countSensitiveAudit = async (action: string) =>
+          (
+            await listAuditEntriesForRecord('employee_sensitive', target.id, 'P-000004', { limit: 1000 })
+          ).filter((a) => a.recordId === target.id && a.action === action).length;
+        const sensitiveAuditCountBefore = await countSensitiveAudit('update-sensitive');
 
-      // Form helper sends null unless the sensitive section was both revealed and edited
-      expect(
-        buildSensitiveSubmissionPayload({
-          isEmployee: true,
-          canSensitive: true,
-          sensitiveRevealed: false,
-          sensitiveEdited: false,
-          reasonableAdjustments: '',
-          diversityAnswers: emptyDiversityAnswers(),
-        }),
-      ).toBeNull();
-      expect(
-        buildSensitiveSubmissionPayload({
-          isEmployee: true,
-          canSensitive: true,
-          sensitiveRevealed: true,
-          sensitiveEdited: false,
-          reasonableAdjustments: 'Opened but not edited',
-          diversityAnswers: emptyDiversityAnswers(),
-        }),
-      ).toBeNull();
-      expect(
-        buildSensitiveSubmissionPayload({
-          isEmployee: true,
-          canSensitive: true,
-          sensitiveRevealed: true,
-          sensitiveEdited: true,
-          reasonableAdjustments: 'Screen reader licence',
-          diversityAnswers: emptyDiversityAnswers(),
-        }),
-      ).toEqual({
-        reasonableAdjustmentsNeeded: 'Screen reader licence',
-        diversity: emptyDiversityAnswers(),
+        // Form helper sends null unless the sensitive section was both revealed and edited
+        expect(
+          buildSensitiveSubmissionPayload({
+            isEmployee: true,
+            canSensitive: true,
+            sensitiveRevealed: false,
+            sensitiveEdited: false,
+            reasonableAdjustments: '',
+            diversityAnswers: emptyDiversityAnswers(),
+          }),
+        ).toBeNull();
+        expect(
+          buildSensitiveSubmissionPayload({
+            isEmployee: true,
+            canSensitive: true,
+            sensitiveRevealed: true,
+            sensitiveEdited: false,
+            reasonableAdjustments: 'Opened but not edited',
+            diversityAnswers: emptyDiversityAnswers(),
+          }),
+        ).toBeNull();
+        expect(
+          buildSensitiveSubmissionPayload({
+            isEmployee: true,
+            canSensitive: true,
+            sensitiveRevealed: true,
+            sensitiveEdited: true,
+            reasonableAdjustments: 'Screen reader licence',
+            diversityAnswers: emptyDiversityAnswers(),
+          }),
+        ).toEqual({
+          reasonableAdjustmentsNeeded: 'Screen reader licence',
+          diversity: emptyDiversityAnswers(),
+        });
+
+        // Server enforcement: even if a caller sends a blank sensitiveSubmitted payload without opening/editing
+        // the sensitive section, savePersonRecord refuses to overwrite the existing sensitive record
+        const uneditedServerAttempt = await savePersonRecord(
+          {
+            ...target,
+            firstName: target.firstName,
+            surname: target.surname,
+            preferredName: 'Daf',
+          },
+          {
+            id: target.id,
+            byId: 'P-000004',
+            worksAtFirm: true,
+            employmentSubmitted: target.employment,
+            sensitiveSubmitted: {
+              reasonableAdjustmentsNeeded: '',
+              diversity: emptyDiversityAnswers(),
+            },
+            sensitiveSectionOpened: false,
+            sensitiveSectionEdited: false,
+          },
+        );
+        expect(uneditedServerAttempt.errors).toBeUndefined();
+        expect(
+          store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+        ).toBe('Ergonomic standing desk and dual monitors');
+
+        // Now save P-000002 again (e.g. updating preferredName) without revealing/submitting sensitive section
+        const updateRes = await savePersonRecord(
+          {
+            ...target,
+            firstName: target.firstName,
+            surname: target.surname,
+            preferredName: 'Daf',
+          },
+          {
+            id: target.id,
+            byId: 'P-000004',
+            worksAtFirm: true,
+            employmentSubmitted: target.employment,
+            sensitiveSubmitted: null,
+          },
+        );
+        expect(updateRes.errors).toBeUndefined();
+        expect(
+          store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+        ).toBe('Ergonomic standing desk and dual monitors');
+        const sensitiveAuditCountAfter = await countSensitiveAudit('update-sensitive');
+        expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);
+
+        // When both sensitiveSectionOpened and sensitiveSectionEdited are true, server applies the update
+        await savePersonRecord(
+          {
+            ...target,
+            firstName: target.firstName,
+            surname: target.surname,
+          },
+          {
+            id: target.id,
+            byId: 'P-000004',
+            worksAtFirm: true,
+            employmentSubmitted: target.employment,
+            sensitiveSubmitted: {
+              reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
+            },
+            sensitiveSectionOpened: true,
+            sensitiveSectionEdited: true,
+          },
+        );
+
+        // R103 & R76: Calling getEmployeeDetailsForUser without logViewSensitive: true returns sensitive: null and writes no view-sensitive audit entry
+        const viewAuditCountBefore = await countSensitiveAudit('view-sensitive');
+        const unrevealed = await getEmployeeDetailsForUser(target.id, 'P-000004');
+        expect(unrevealed.sensitive).toBeNull();
+        const viewAuditCountAfterUnrevealed = await countSensitiveAudit('view-sensitive');
+        expect(viewAuditCountAfterUnrevealed).toBe(viewAuditCountBefore);
+
+        // Revealing on demand via getEmployeeDetailsForUser with logViewSensitive: true returns the preserved record and logs view-sensitive
+        const revealed = await getEmployeeDetailsForUser(target.id, 'P-000004', {
+          logViewSensitive: true,
+        });
+        expect(revealed.sensitive?.reasonableAdjustmentsNeeded).toBe(
+          'Ergonomic standing desk and dual monitors',
+        );
+        const viewAuditCountAfterRevealed = await countSensitiveAudit('view-sensitive');
+        expect(viewAuditCountAfterRevealed).toBe(viewAuditCountBefore + 1);
       });
-
-      // Server enforcement: even if a caller sends a blank sensitiveSubmitted payload without opening/editing
-      // the sensitive section, savePersonRecord refuses to overwrite the existing sensitive record
-      const uneditedServerAttempt = await savePersonRecord(
-        {
-          ...target,
-          firstName: target.firstName,
-          surname: target.surname,
-          preferredName: 'Daf',
-        },
-        {
-          id: target.id,
-          byId: 'P-000004',
-          worksAtFirm: true,
-          employmentSubmitted: target.employment,
-          sensitiveSubmitted: {
-            reasonableAdjustmentsNeeded: '',
-            diversity: emptyDiversityAnswers(),
-          },
-          sensitiveSectionOpened: false,
-          sensitiveSectionEdited: false,
-        },
-      );
-      expect(uneditedServerAttempt.errors).toBeUndefined();
-      expect(
-        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
-      ).toBe('Ergonomic standing desk and dual monitors');
-
-      // Now save P-000002 again (e.g. updating preferredName) without revealing/submitting sensitive section
-      const updateRes = await savePersonRecord(
-        {
-          ...target,
-          firstName: target.firstName,
-          surname: target.surname,
-          preferredName: 'Daf',
-        },
-        {
-          id: target.id,
-          byId: 'P-000004',
-          worksAtFirm: true,
-          employmentSubmitted: target.employment,
-          sensitiveSubmitted: null,
-        },
-      );
-      expect(updateRes.errors).toBeUndefined();
-      expect(
-        store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
-      ).toBe('Ergonomic standing desk and dual monitors');
-      const sensitiveAuditCountAfter = await countSensitiveAudit('update-sensitive');
-      expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);
-
-      // When both sensitiveSectionOpened and sensitiveSectionEdited are true, server applies the update
-      await savePersonRecord(
-        {
-          ...target,
-          firstName: target.firstName,
-          surname: target.surname,
-        },
-        {
-          id: target.id,
-          byId: 'P-000004',
-          worksAtFirm: true,
-          employmentSubmitted: target.employment,
-          sensitiveSubmitted: {
-            reasonableAdjustmentsNeeded: 'Ergonomic standing desk and dual monitors',
-          },
-          sensitiveSectionOpened: true,
-          sensitiveSectionEdited: true,
-        },
-      );
-
-      // R103 & R76: Calling getEmployeeDetailsForUser without logViewSensitive: true returns sensitive: null and writes no view-sensitive audit entry
-      const viewAuditCountBefore = await countSensitiveAudit('view-sensitive');
-      const unrevealed = await getEmployeeDetailsForUser(target.id, 'P-000004');
-      expect(unrevealed.sensitive).toBeNull();
-      const viewAuditCountAfterUnrevealed = await countSensitiveAudit('view-sensitive');
-      expect(viewAuditCountAfterUnrevealed).toBe(viewAuditCountBefore);
-
-      // Revealing on demand via getEmployeeDetailsForUser with logViewSensitive: true returns the preserved record and logs view-sensitive
-      const revealed = await getEmployeeDetailsForUser(target.id, 'P-000004', {
-        logViewSensitive: true,
-      });
-      expect(revealed.sensitive?.reasonableAdjustmentsNeeded).toBe(
-        'Ergonomic standing desk and dual monitors',
-      );
-      const viewAuditCountAfterRevealed = await countSensitiveAudit('view-sensitive');
-      expect(viewAuditCountAfterRevealed).toBe(viewAuditCountBefore + 1);
     });
   });
 
   describe('6. New Matter department pre-selection and department-scoped dropdowns', () => {
     it('pre-selects Department, Responsible Partner (from Supervising Partner), and Fee Earner for a fee earner in a legal department', async () => {
-      const snap = await getAppSnapshot('P-000002'); // Dafydd Evans (Real Estate Fee Earner)
+      const snap = await runAsTestActor('P-000002', () =>
+        getAppSnapshot('P-000002'),
+      ); // Dafydd Evans (Real Estate Fee Earner)
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
@@ -837,7 +850,9 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('pre-selects Department and Responsible Partner but leaves Fee Earner blank for support staff in a legal department', async () => {
-      const snap = await getAppSnapshot('P-000010'); // Nia Edwards (Real Estate Legal Secretary)
+      const snap = await runAsTestActor('P-000010', () =>
+        getAppSnapshot('P-000010'),
+      ); // Nia Edwards (Real Estate Legal Secretary)
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
@@ -855,7 +870,9 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('does not pre-select Department, Responsible Partner, or Fee Earner when logged-in user is in a Business Services department', async () => {
-      const snap = await getAppSnapshot('P-000009'); // Gethin Powell (Finance)
+      const snap = await runAsTestActor('P-000009', () =>
+        getAppSnapshot('P-000009'),
+      ); // Gethin Powell (Finance)
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
@@ -873,7 +890,9 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('filters Responsible Partner and Fee Earner dropdown options strictly to people in the relevant department', async () => {
-      const snap = await getAppSnapshot('P-000001');
+      const snap = await runAsTestActor('P-000001', () =>
+        getAppSnapshot('P-000001'),
+      );
       const practiceAreas = snap.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );

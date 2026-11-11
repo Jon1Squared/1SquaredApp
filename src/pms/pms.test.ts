@@ -681,8 +681,9 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { canUserViewFinance } = await import('@/domain/pms');
     const { getMatterFinanceRows } = await import('@/server/financeServices');
     const { getAppSnapshot } = await import('@/server/services');
+    const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
 
-    const snap = await getAppSnapshot('P-000001');
+    const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
     const matterRows = getMatterFinanceRows('P-000001');
     expect(isActionDenied(matterRows)).toBe(false);
     if (isActionDenied(matterRows)) return;
@@ -728,8 +729,9 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { getMatterFinanceRows } = await import('@/server/financeServices');
     const { getAppSnapshot } = await import('@/server/services');
     const { getActiveTenantConfiguration } = await import('@/platform/tenantRuntime');
+    const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
 
-    const snap = await getAppSnapshot('P-000001');
+    const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
     const matterRows = getMatterFinanceRows('P-000001');
     expect(isActionDenied(matterRows)).toBe(false);
     if (isActionDenied(matterRows)) return;
@@ -818,7 +820,8 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     }
 
     const { getAppSnapshot } = await import('@/server/services');
-    const snap = await getAppSnapshot('P-000001');
+    const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
+    const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
     for (const p of snap.people) {
       for (const em of p.emails) {
         expect(em.address.trim()).toMatch(allowedDomainRegex);

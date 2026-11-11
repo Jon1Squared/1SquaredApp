@@ -69,6 +69,28 @@ const child = spawn(process.execPath, [nextBin, 'start', '-p', String(port)], {
   },
 });
 
+function terminateChild() {
+  if (!child.killed) {
+    try {
+      child.kill();
+    } catch {
+      // Ignore if already exited
+    }
+  }
+}
+
+process.on('SIGINT', () => {
+  terminateChild();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  terminateChild();
+  process.exit(0);
+});
+process.on('exit', () => {
+  terminateChild();
+});
+
 child.on('exit', (code) => {
   process.exit(code ?? 0);
 });

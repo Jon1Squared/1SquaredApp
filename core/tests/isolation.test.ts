@@ -164,7 +164,7 @@ import {
   saveStore,
 } from '../../src/server/store';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
-import { auditEntriesForRecord, auditEntriesSince, getKeyDateRepository, markAuditPosition, testTenantCtx } from '../../src/server/testSupport/auditTestSupport';
+import { auditEntriesForRecord, auditEntriesSince, getKeyDateRepository, markAuditPosition, runAsTestActor, testTenantCtx } from '../../src/server/testSupport/auditTestSupport';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
@@ -1472,13 +1472,17 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         comments: [],
         runs: [],
       };
-      const concurrentConflictUpdate = await updateMatterConflictRecord(
-        targetMatter.id,
-        {
-          ...baseConflict,
-          reviewerMessage: 'Updated concurrently while hook was waiting',
-        },
-        carys.id,
+      const concurrentConflictUpdate = await runWithActiveActorSession(
+        actorSession,
+        async () =>
+          updateMatterConflictRecord(
+            targetMatter.id,
+            {
+              ...baseConflict,
+              reviewerMessage: 'Updated concurrently while hook was waiting',
+            },
+            carys.id,
+          ),
       );
       expect(concurrentConflictUpdate.matter).not.toBeNull();
 
@@ -1547,14 +1551,18 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // instead of racing it. The no-lost-update guarantee is now provided by
       // serialisation: the update must complete after the save and both must persist.
       const completionOrder: string[] = [];
-      const queuedUpdatePromise = updateMatterConflictRecord(
-        refreshedTarget.id,
-        {
-          ...baseConflict,
-          status: 'Cleared',
-          reviewerMessage: 'Second concurrent update during allow hook',
-        },
-        carys.id,
+      const queuedUpdatePromise = runWithActiveActorSession(
+        actorSession,
+        async () =>
+          updateMatterConflictRecord(
+            refreshedTarget.id,
+            {
+              ...baseConflict,
+              status: 'Cleared',
+              reviewerMessage: 'Second concurrent update during allow hook',
+            },
+            carys.id,
+          ),
       ).then((res) => {
         completionOrder.push('conflict-update');
         return res;
@@ -2060,31 +2068,33 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       // Wait until the save is inside the hook rather than a fixed delay
       await hireHookEntered;
-      const hireRes = await savePersonRecord(
-        {
-          ...externalClient,
-          firstName: externalClient.firstName,
-          surname: externalClient.surname,
-          dateOfBirth: externalClient.dateOfBirth || '1988-04-10',
-          isEmployee: true,
-        },
-        {
-          id: externalClient.id,
-          byId: 'P-000004',
-          mfaVerified: true,
-          worksAtFirm: true,
-          employmentSubmitted: {
-            ...carys.employment!,
-            employeeNumber: 'EMP-HIRE-144',
-            status: 'Active',
-            feeEarner: carys.employment?.feeEarner
-              ? {
-                  ...carys.employment.feeEarner,
-                  timekeeperCode: 'FE-HIRE-144',
-                }
-              : null,
+      const hireRes = await runAsTestActor('P-000004', () =>
+        savePersonRecord(
+          {
+            ...externalClient,
+            firstName: externalClient.firstName,
+            surname: externalClient.surname,
+            dateOfBirth: externalClient.dateOfBirth || '1988-04-10',
+            isEmployee: true,
           },
-        },
+          {
+            id: externalClient.id,
+            byId: 'P-000004',
+            mfaVerified: true,
+            worksAtFirm: true,
+            employmentSubmitted: {
+              ...carys.employment!,
+              employeeNumber: 'EMP-HIRE-144',
+              status: 'Active',
+              feeEarner: carys.employment?.feeEarner
+                ? {
+                    ...carys.employment.feeEarner,
+                    timekeeperCode: 'FE-HIRE-144',
+                  }
+                : null,
+            },
+          },
+        ),
       );
       expect(hireRes.errors).toBeUndefined();
       expect(hireRes.person?.isEmployee).toBe(true);
@@ -3158,7 +3168,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       targetMatter.responsiblePartnerId = null;
       targetMatter.supervisingPartnerId = null;
 
-      const billRes = await requestMatterBill(targetMatter.matterNumber, 'P-000001');
+      const billRes = await runAsTestActor('P-000001', () =>
+        requestMatterBill(targetMatter.matterNumber, 'P-000001'),
+      );
       expect(isActionDenied(billRes)).toBe(false);
       if (!isActionDenied(billRes)) {
         expect(billRes.ok).toBe(true);
@@ -3167,10 +3179,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(billingTask?.assignedPersonId).toBeNull();
       }
 
-      const writeOffRes = await flagMatterWriteOff(
-        targetMatter.matterNumber,
-        1500,
-        'P-000001',
+      const writeOffRes = await runAsTestActor('P-000001', () =>
+        flagMatterWriteOff(targetMatter.matterNumber, 1500, 'P-000001'),
       );
       expect(isActionDenied(writeOffRes)).toBe(false);
       if (!isActionDenied(writeOffRes)) {
@@ -3180,15 +3190,17 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(signOff?.assignedPartnerId).toBeNull();
       }
 
-      const ccRes = await recordInvoiceCreditControlAction(
-        {
-          invoiceNumber: 'PV/2026/0040',
-          matterCode: targetMatter.matterNumber,
-          clientCode: 'HAR001',
-          actionType: 'escalate',
-          note: 'Escalating overdue invoice without fallback partner ID',
-        },
-        'P-000001',
+      const ccRes = await runAsTestActor('P-000001', () =>
+        recordInvoiceCreditControlAction(
+          {
+            invoiceNumber: 'PV/2026/0040',
+            matterCode: targetMatter.matterNumber,
+            clientCode: 'HAR001',
+            actionType: 'escalate',
+            note: 'Escalating overdue invoice without fallback partner ID',
+          },
+          'P-000001',
+        ),
       );
       expect(isActionDenied(ccRes)).toBe(false);
       if (!isActionDenied(ccRes)) {
@@ -3234,7 +3246,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(fromShortCode.legalEntities[1]?.code).toBe('ACMSRV');
 
     const store = getStore();
-    const snap = await getAppSnapshot('P-000001');
+    const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
     expect(snap.suggestedMatterGovernanceAssignees).toBeDefined();
     expect(snap.suggestedMatterGovernanceAssignees.riskReviewerId).toBeTruthy();
     expect(
@@ -3662,40 +3674,44 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
       try {
         // 1. Unsaved matter (currentMatterId: null) writes the structured log only, not store.audit
-        const unsavedRes = await runMatterConflictSearchRecord(
-          {
-            currentMatterId: null,
-            parties: [
-              {
-                id: 'pty-r172-1',
-                name: 'SecretDraft CallerName',
-                entityType: 'person',
-                role: 'Opponent',
-                linkedRecordId: null,
-              },
-            ],
-          },
-          feeEarner.id,
+        const unsavedRes = await runAsTestActor(feeEarner.id, () =>
+          runMatterConflictSearchRecord(
+            {
+              currentMatterId: null,
+              parties: [
+                {
+                  id: 'pty-r172-1',
+                  name: 'SecretDraft CallerName',
+                  entityType: 'person',
+                  role: 'Opponent',
+                  linkedRecordId: null,
+                },
+              ],
+            },
+            feeEarner.id,
+          ),
         );
         expect(unsavedRes.errors).toBeUndefined();
         expect(unsavedRes.matches.some((m) => m.restricted)).toBe(true);
         expect(await auditEntriesSince(r172AuditMark)).toHaveLength(0);
 
         // 2. Saved matter (currentMatterId: 'M-000001') writes both the count-only audit entry and structured log
-        const res = await runMatterConflictSearchRecord(
-          {
-            currentMatterId: 'M-000001',
-            parties: [
-              {
-                id: 'pty-r172-1',
-                name: 'SecretDraft CallerName',
-                entityType: 'person',
-                role: 'Opponent',
-                linkedRecordId: null,
-              },
-            ],
-          },
-          feeEarner.id,
+        const res = await runAsTestActor(feeEarner.id, () =>
+          runMatterConflictSearchRecord(
+            {
+              currentMatterId: 'M-000001',
+              parties: [
+                {
+                  id: 'pty-r172-1',
+                  name: 'SecretDraft CallerName',
+                  entityType: 'person',
+                  role: 'Opponent',
+                  linkedRecordId: null,
+                },
+              ],
+            },
+            feeEarner.id,
+          ),
         );
         expect(res.errors).toBeUndefined();
         expect(res.matches.some((m) => m.restricted)).toBe(true);
@@ -3962,7 +3978,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeTeamKey: 'custom-team-key-by-name',
         },
       });
-      const snapByName = await getAppSnapshot(partner.id);
+      const snapByName = await runAsTestActor(partner.id, () =>
+        getAppSnapshot(partner.id),
+      );
       expect(
         snapByName.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBeNull();
@@ -3991,7 +4009,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
         },
       });
-      const snapRoleOutsideTeam = await getAppSnapshot(partner.id);
+      const snapRoleOutsideTeam = await runAsTestActor(partner.id, () =>
+        getAppSnapshot(partner.id),
+      );
       expect(
         snapRoleOutsideTeam.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBeNull();
@@ -4002,7 +4022,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
         },
       });
-      const snapCustomRole = await getAppSnapshot(partner.id);
+      const snapCustomRole = await runAsTestActor(partner.id, () =>
+        getAppSnapshot(partner.id),
+      );
       expect(
         snapCustomRole.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBe(nonRiskEmployee.id);
@@ -4807,14 +4829,16 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(riskApproveWithoutKd.warnings?.[0]).toMatch(/required key dates/i);
 
       // 4. Recording the required key date as Not applicable (or adding it) allows saveMatterRecord(submit_cleared) to open the matter
-      const naRes = await recordKeyDateNotApplicableRecord(
-        {
-          matterId: draftId,
-          keyDateTypeId: 'limitation',
-          reason:
-            'Declaratory relief only; statutory limitation period does not apply.',
-        },
-        partner.id,
+      const naRes = await runWithActiveActorSession(partnerSession, () =>
+        recordKeyDateNotApplicableRecord(
+          {
+            matterId: draftId,
+            keyDateTypeId: 'limitation',
+            reason:
+              'Declaratory relief only; statutory limitation period does not apply.',
+          },
+          partner.id,
+        ),
       );
       expect(naRes.ok).toBe(true);
       expect(naRes.error).toBeUndefined();
@@ -5193,17 +5217,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(m1StageRes.matter?.matterStatusId).toBe(activeStatusId);
 
       // 2. Closing M-000003 follows only the key dates closure check (not the £145,000 opening gate)
-      const kdRes = await createOrProposeKeyDateRecord(
-        {
-          matterId: fixtureM3.id,
-          keyDateTypeId: 'limitation',
-          title: 'R183 Open Key Date Blocking Closure',
-          dueDate: '2027-06-01',
-          source: 'manual',
-          responsiblePersonIds: [partner.id],
-          teamId: 'TM-000001',
-        },
-        partner.id,
+      const kdRes = await runWithActiveActorSession(partnerSession, () =>
+        createOrProposeKeyDateRecord(
+          {
+            matterId: fixtureM3.id,
+            keyDateTypeId: 'limitation',
+            title: 'R183 Open Key Date Blocking Closure',
+            dueDate: '2027-06-01',
+            source: 'manual',
+            responsiblePersonIds: [partner.id],
+            teamId: 'TM-000001',
+          },
+          partner.id,
+        ),
       );
       expect(kdRes.ok).toBe(true);
 
@@ -6626,7 +6652,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       };
 
       for (const excludedActor of [unnamedPartner, unnamedFeeEarner, adminPerson]) {
-        const snap = await getAppSnapshot(excludedActor.id);
+        const snap = await runAsTestActor(excludedActor.id, () =>
+          getAppSnapshot(excludedActor.id),
+        );
         expect(snap.matters.some((m) => m.id === wallMatter.id)).toBe(false);
         expect(
           snap.searchIndex.some(
@@ -6637,30 +6665,39 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ).toBe(false);
         expect(snap.keyDates.some((kd) => kd.matterId === wallMatter.id)).toBe(false);
 
-        const diary = await queryKeyDatesTeamDiaryRecord({}, excludedActor.id);
+        const diary = await runAsTestActor(excludedActor.id, () =>
+          queryKeyDatesTeamDiaryRecord({}, excludedActor.id),
+        );
         expect(diary.some((e) => e.matterId === wallMatter.id)).toBe(false);
       }
 
       // Reports also exclude the walled matter for an actor without matter:restricted:access
-      const partnerExceptions = await getKeyDateExceptionsReportRecord({}, unnamedPartner.id);
+      const partnerExceptions = await runAsTestActor(unnamedPartner.id, () =>
+        getKeyDateExceptionsReportRecord({}, unnamedPartner.id),
+      );
       expect(
         partnerExceptions.some((ex) => ex.matterId === wallMatter.id),
       ).toBe(false);
 
       // Tampered matterId / signOffId attempts by unnamedPartner and unnamedFeeEarner are denied
-      const tamperedPmsView = getMatterPmsViewBundle(
-        wallMatter.id,
-        unnamedPartner.id,
+      const tamperedPmsView = runAsTestActor(unnamedPartner.id, () =>
+        getMatterPmsViewBundle(wallMatter.id, unnamedPartner.id),
       );
       expect(isActionDenied(tamperedPmsView)).toBe(true);
       if (isActionDenied(tamperedPmsView)) {
         expect(tamperedPmsView.code).toBe('FORBIDDEN');
       }
-      const tamperedSignOffApprove = await approveSignOff('SO-WALLED-01', unnamedPartner.id);
+      const tamperedSignOffApprove = await runAsTestActor(unnamedPartner.id, () =>
+        approveSignOff('SO-WALLED-01', unnamedPartner.id),
+      );
       expect(isActionDenied(tamperedSignOffApprove)).toBe(true);
-      const tamperedSignOffId = await approveSignOff('SO-NONEXISTENT-999', unnamedPartner.id);
+      const tamperedSignOffId = await runAsTestActor(unnamedPartner.id, () =>
+        approveSignOff('SO-NONEXISTENT-999', unnamedPartner.id),
+      );
       expect(isActionDenied(tamperedSignOffId)).toBe(true);
-      const tamperedDiscuss = await discussSignOff('SO-WALLED-01', 'Probe', unnamedPartner.id);
+      const tamperedDiscuss = await runAsTestActor(unnamedPartner.id, () =>
+        discussSignOff('SO-WALLED-01', 'Probe', unnamedPartner.id),
+      );
       expect(isActionDenied(tamperedDiscuss)).toBe(true);
 
       // Forged cross-tenant session is rejected by guardedAction on S0-03 actions
@@ -7912,13 +7949,17 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('S0-09: rejects forged tenant claims and tampered IDs on mergeRecordsAction (with positive Tenant A controls and TenantDocumentRepository / cluster data-layer checks)', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const sA = (await savePersonRecord(
-        { firstName: 'TenantA', surname: 'Survivor', isEmployee: false },
-        { byId: 'P-000004' },
+      const sA = (await runAsTestActor('P-000004', () =>
+        savePersonRecord(
+          { firstName: 'TenantA', surname: 'Survivor', isEmployee: false },
+          { byId: 'P-000004' },
+        ),
       )).person!;
-      const mA = (await savePersonRecord(
-        { firstName: 'TenantA', surname: 'Merged', isEmployee: false },
-        { byId: 'P-000004' },
+      const mA = (await runAsTestActor('P-000004', () =>
+        savePersonRecord(
+          { firstName: 'TenantA', surname: 'Merged', isEmployee: false },
+          { byId: 'P-000004' },
+        ),
       )).person!;
 
       const ctxA = resolveTenantFromVerifiedToken({

@@ -25,6 +25,7 @@ import {
   auditEntriesForRecord,
   getKeyDateRepository,
   markAuditPosition,
+  runAsTestActor,
   testTenantCtx,
 } from '@/server/testSupport/auditTestSupport';
 
@@ -826,10 +827,12 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       (p) => p.isEmployee && p.roles?.includes('managing_partner'),
     )!;
     const exportAuditMark = await markAuditPosition();
-    const exportRes = await exportKeyDateExceptionsReportRecord(
-      { format: 'csv' },
-      managingPartner.id,
-      todayIso,
+    const exportRes = await runAsTestActor(managingPartner.id, () =>
+      exportKeyDateExceptionsReportRecord(
+        { format: 'csv' },
+        managingPartner.id,
+        todayIso,
+      ),
     );
     expect(exportRes.ok).toBe(true);
     const exportAudit = await auditEntriesForRecord(
@@ -885,9 +888,11 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       },
     });
     const verifyAuditMark = await markAuditPosition();
-    const verifyStaffRes = await verifyProposedKeyDateRecord(
-      'KD-R29-NO-ASSIGNEE',
-      managingPartner.id,
+    const verifyStaffRes = await runAsTestActor(managingPartner.id, () =>
+      verifyProposedKeyDateRecord(
+        'KD-R29-NO-ASSIGNEE',
+        managingPartner.id,
+      ),
     );
     expect(verifyStaffRes.ok).toBe(true);
     expect(
@@ -898,10 +903,12 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
           a.newValue === 'no_permitted_assignees',
       ),
     ).toBe(true);
-    const exceptionsForPartner = await getKeyDateExceptionsReportRecord(
-      {},
-      managingPartner.id,
-      todayIso,
+    const exceptionsForPartner = await runAsTestActor(managingPartner.id, () =>
+      getKeyDateExceptionsReportRecord(
+        {},
+        managingPartner.id,
+        todayIso,
+      ),
     );
     expect(
       exceptionsForPartner.some(
@@ -939,7 +946,9 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       teamId: otherTeam.id,
       title: 'Other Team Key Date',
     });
-    const snap = await getAppSnapshot(feeEarner.id);
+    const snap = await runAsTestActor(feeEarner.id, () =>
+      getAppSnapshot(feeEarner.id),
+    );
     expect(snap.keyDates.some((kd) => kd.id === 'KD-OTHER-TEAM-999')).toBe(
       false,
     );

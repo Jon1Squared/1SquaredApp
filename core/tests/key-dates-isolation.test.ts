@@ -24,6 +24,7 @@ import {
 import { getStore, resetStore } from '../../src/server/store';
 import {
   getKeyDateRepository,
+  runAsTestActor,
   testTenantCtx,
 } from '../../src/server/testSupport/auditTestSupport';
 
@@ -474,47 +475,57 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     const readStatus = async (id: string) =>
       (await kdRepo.getKeyDateById(staffCtx, id, staffPartner.id))?.status;
 
-    const verifyRes = await verifyProposedKeyDateRecord(
-      awaitingKd.id,
-      unpermittedPartner.id,
+    const verifyRes = await runAsTestActor(unpermittedPartner.id, () =>
+      verifyProposedKeyDateRecord(
+        awaitingKd.id,
+        unpermittedPartner.id,
+      ),
     );
     expect(verifyRes.ok).toBe(false);
     expect(verifyRes.error).toMatch(/Matter not found or restricted/i);
     expect(await readStatus(awaitingKd.id)).toBe('awaiting_verification');
 
-    const resolveRes = await resolveKeyDateOutcomeRecord(
-      confirmedKd.id,
-      { kind: 'met', note: 'Attempted by outsider' },
-      unpermittedPartner.id,
+    const resolveRes = await runAsTestActor(unpermittedPartner.id, () =>
+      resolveKeyDateOutcomeRecord(
+        confirmedKd.id,
+        { kind: 'met', note: 'Attempted by outsider' },
+        unpermittedPartner.id,
+      ),
     );
     expect(resolveRes.ok).toBe(false);
     expect(resolveRes.error).toMatch(/Matter not found or restricted/i);
     expect(await readStatus(confirmedKd.id)).toBe('confirmed');
 
-    const reassignRes = await reassignKeyDateTeamRecord(
-      confirmedKd.id,
-      {
-        teamId: activeTeam.id,
-        responsiblePersonIds: [staffPartner.id, unpermittedPartner.id],
-        reason: 'Attempted by outsider',
-      },
-      unpermittedPartner.id,
+    const reassignRes = await runAsTestActor(unpermittedPartner.id, () =>
+      reassignKeyDateTeamRecord(
+        confirmedKd.id,
+        {
+          teamId: activeTeam.id,
+          responsiblePersonIds: [staffPartner.id, unpermittedPartner.id],
+          reason: 'Attempted by outsider',
+        },
+        unpermittedPartner.id,
+      ),
     );
     expect(reassignRes.ok).toBe(false);
     expect(reassignRes.error).toMatch(/Matter not found or restricted/i);
 
-    const ackRes = await acknowledgeKeyDateReminderRecord(
-      confirmedKd.id,
-      unpermittedPartner.id,
+    const ackRes = await runAsTestActor(unpermittedPartner.id, () =>
+      acknowledgeKeyDateReminderRecord(
+        confirmedKd.id,
+        unpermittedPartner.id,
+      ),
     );
     expect(ackRes.ok).toBe(false);
     expect(ackRes.error).toMatch(/Matter not found or restricted/i);
 
-    const supersedeRes = await supersedeConfirmedKeyDateRecord(
-      confirmedKd.id,
-      { dueDate: '2028-01-01' },
-      'Attempted by outsider',
-      unpermittedPartner.id,
+    const supersedeRes = await runAsTestActor(unpermittedPartner.id, () =>
+      supersedeConfirmedKeyDateRecord(
+        confirmedKd.id,
+        { dueDate: '2028-01-01' },
+        'Attempted by outsider',
+        unpermittedPartner.id,
+      ),
     );
     expect(supersedeRes.ok).toBe(false);
     expect(supersedeRes.error).toMatch(/Matter not found or restricted/i);
@@ -545,10 +556,12 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     );
     expect(allKeyDates.some((k) => k.id === orphanKd.id)).toBe(true);
 
-    const orphanResolve = await resolveKeyDateOutcomeRecord(
-      orphanKd.id,
-      { kind: 'met', note: 'Attempted on orphan matter' },
-      staffPartner.id,
+    const orphanResolve = await runAsTestActor(staffPartner.id, () =>
+      resolveKeyDateOutcomeRecord(
+        orphanKd.id,
+        { kind: 'met', note: 'Attempted on orphan matter' },
+        staffPartner.id,
+      ),
     );
     expect(orphanResolve.ok).toBe(false);
     expect(orphanResolve.error).toMatch(/Matter not found or restricted/i);
