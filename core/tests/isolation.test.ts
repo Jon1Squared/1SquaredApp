@@ -24,6 +24,7 @@ import {
   loadAndValidateTenantConfig,
   PlatformTelemetryRecorder,
   TenantDocumentRepository,
+  TenantPostgresPoolManager,
   TenantDocumentStoreRepository,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
@@ -248,7 +249,44 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         tenantId: ctxB.tenantId,
         title: 'Cross-tenant write attempt',
       }),
-    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    ).rejects.toMatchObject({
+      code: 'TENANCY_ISOLATION_ERROR',
+      message: expect.stringMatching(
+        /^TENANCY_ISOLATION_ERROR: Cannot write or access \S+ belonging to tenant "fictional-chambers-uk" under tenant "not-a-law-firm"\.$/,
+      ),
+    });
+
+    // R439: re-read on a fresh pool manager (fresh connections) — the tampered row never landed
+    // in either database, and tenant A's own row is still there (positive control).
+    const freshPoolMgr = new TenantPostgresPoolManager();
+    try {
+      const freshRepo = new TenantDocumentRepository({ poolManager: freshPoolMgr });
+      expect(await freshRepo.getDocumentById(ctxA, 'DOC-TAMPERED')).toBeNull();
+      expect(await freshRepo.getDocumentById(ctxB, 'DOC-TAMPERED')).toBeNull();
+      expect((await freshRepo.getDocumentById(ctxA, 'DOC-ISO-0001'))?.title).toBe(
+        'Tenant A Confidential Matter',
+      );
+      expect((await freshRepo.getDocumentById(ctxB, 'DOC-ISO-0002'))?.title).toBe(
+        'Tenant B Confidential Matter',
+      );
+
+      // R439: a forged tenant claim sent through a real repository call. The context claims
+      // tenant B but still points at tenant A's database. Tenant B's role has no USAGE on tenant A's
+      // public schema, so PostgreSQL cannot even see the table (SQLSTATE 42P01) and the call fails closed.
+      const forgedCtx = Object.freeze({ ...ctxA, tenantId: ctxB.tenantId });
+      await expect(
+        freshRepo.getDocumentById(forgedCtx, 'DOC-ISO-0001'),
+      ).rejects.toMatchObject({
+        code: '42P01',
+        message: 'TENANCY_DATABASE_ERROR: Database operation "query" failed (SQLSTATE 42P01).',
+      });
+      // Positive control next to the negative case: the genuine tenant A context still reads.
+      expect((await freshRepo.getDocumentById(ctxA, 'DOC-ISO-0001'))?.id).toBe(
+        'DOC-ISO-0001',
+      );
+    } finally {
+      await freshPoolMgr.closeAllPools();
+    }
   });
 
   it('rejects unverified tokens and forged request tenant overrides', () => {
@@ -260,7 +298,18 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         correlationId: 'corr-forgery-001',
         untrustedRequestTenantOverride: 'fictional-chambers-uk',
       }),
-    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+    ).toThrow(
+      'TENANCY_FORGERY_DETECTED: Request attempted to override authenticated token tenantId.',
+    );
+    // Positive control: the same token without the forged override resolves tenant A.
+    expect(
+      resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'dev',
+        correlationId: 'corr-forgery-001',
+      }).tenantId,
+    ).toBe(tenantAToken.tenantId);
 
     // R55: resolveCurrentTenantContext() with no argument throws TENANCY_AUTH_ERROR
     expect(() => resolveCurrentTenantContext()).toThrow(/TENANCY_AUTH_ERROR/);

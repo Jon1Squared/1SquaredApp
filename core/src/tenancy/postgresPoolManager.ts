@@ -284,7 +284,9 @@ export class TenantPostgresPoolManager {
     const existing = this.pools.get(poolKey);
     if (existing) {
       existing.lastUsedAtMs = now;
-      return { pool: existing.pool, target: existing.target };
+      // R439: the role always comes from this call's context, never from whichever context
+      // first opened the shared pool for this database.
+      return { pool: existing.pool, target };
     }
 
     const runtimeUser =

@@ -289,7 +289,9 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
         environment: 'test',
         correlationId: 'corr-forged',
       }),
-    ).toThrow(/TENANCY_CLAIM_ERROR/);
+    ).toThrow(
+      'TENANCY_CLAIM_ERROR: Authenticated token is missing a valid tenantId claim.',
+    );
 
     expect(() =>
       resolveTenantFromVerifiedToken({
@@ -307,7 +309,9 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
         correlationId: 'corr-forged-override',
         untrustedRequestTenantOverride: 'tenant-bravo',
       }),
-    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+    ).toThrow(
+      'TENANCY_FORGERY_DETECTED: Request attempted to override authenticated token tenantId.',
+    );
 
     expect(() =>
       runTenantBackgroundJob(
@@ -319,7 +323,9 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
         },
         () => 'should-not-run',
       ),
-    ).toThrow(/TENANCY_JOB_ERROR/);
+    ).toThrow(
+      'TENANCY_JOB_ERROR: Background job refused to run without a valid tenantId.',
+    );
   });
 
   it('omits restricted (staff) matters at the data layer unless viewer is in matter.restrictedAccessUserIds', async () => {
