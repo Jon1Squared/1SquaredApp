@@ -23,11 +23,19 @@ export default async function AdminCatchAllPage({
     section?: string;
     authError?: string;
     authSuccess?: string;
+    auditBeforeSeq?: string;
     beforeSeq?: string;
   }>;
 }) {
   const { slug } = await params;
-  const { list, section, authError, authSuccess, beforeSeq } = await searchParams;
+  const {
+    list,
+    section,
+    authError,
+    authSuccess,
+    auditBeforeSeq,
+    beforeSeq,
+  } = await searchParams;
   return withPageActor(async (actor) => {
     const snap = await getAppSnapshot(actor.personId);
 
@@ -41,7 +49,8 @@ export default async function AdminCatchAllPage({
       redirect('/');
     }
 
-    const parsedBeforeSeq = beforeSeq ? Number.parseInt(beforeSeq, 10) : NaN;
+    const rawBeforeSeq = auditBeforeSeq ?? beforeSeq;
+    const parsedBeforeSeq = rawBeforeSeq ? Number.parseInt(rawBeforeSeq, 10) : NaN;
     const firmAuditPage = await listFirmAuditEntriesPage(actor.personId, {
       limit: 250,
       ...(Number.isFinite(parsedBeforeSeq) ? { beforeSeq: parsedBeforeSeq } : {}),

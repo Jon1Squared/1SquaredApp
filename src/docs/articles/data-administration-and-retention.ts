@@ -41,7 +41,7 @@ All administrative configuration mutations in the \`/admin\` console require mul
 
 - **Append-only**: Audit entries are stored in the tenant's own PostgreSQL database. The application role may only insert and read them; any attempt to edit or delete an entry is refused by the database.
 - **Written with the change it describes**: An audit entry is saved in the same transaction as the change it records (for example key-date and Document Generation changes). If either fails, neither is saved.
-- **Scoped views**: The **Admin** audit page shows the most recent 250 entries you are allowed to see. Entries about restricted staff matters and sensitive or payroll HR records are hidden from people without access.
+- **Scoped views**: The **Firm audit log** section in **Admin** requires \`admin:access\` and shows up to 250 visible entries per page in reverse sequence order, with a **Next** cursor link (\`?auditBeforeSeq=…\`) to page through older entries. Entries about restricted staff matters and sensitive or payroll HR records are filtered out before filling each page for viewers without access.
 - **Demo reset**: Loading the demo dataset reloads the audit log from the demo data, so audit reference numbers (\`AU-…\`) start again from the demo sequence.
 `,
 };

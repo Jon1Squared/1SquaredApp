@@ -15,12 +15,12 @@ This runbook defines the mandatory release cut-over and rollback sequence when m
    | Slice | PostgreSQL Migrations | `store-import --modules` | Live Source Read at Cut-Over |
    |---|---|---|---|
    | **S0-14** | `0001`–`0006` | `documents,document-store` | JSON store (`documentTemplates`, `documentTemplateVersions`, `documents`, `documentLinks`, `templateUsageEvents`, `documentGenerationConfigOverride`, `matterDocumentLocations`, `documentStoreFolderScopes`, `documentLifecycleJobs`, `documentReconciliationFindings`, `documentStoreAuditEvents`, `documentStoreConfigOverride`, `people[].entraObjectId`) |
-   | **S0-15** | `0007` | `key-dates,audit` | JSON store (`matters` restriction metadata, `keyDatesConfigOverride`, 2-pass `keyDates`, `keyDateNotApplicable`, `keyDateReminderStates`, `keyDateCalendarSyncs`, `audit`) |
-   | **S0-16** | `0008` | `directory-and-matters` | JSON store (`organisations`, `people` including transitional `employment_json`, `links`, `matters`, `notes`, `mergeHistory`, `matterPartyMigrationReport`) |
-   | **S0-17a** | `0009` | `intake-and-workflows` | JSON store (`enquiries`, `quotes`, `tasks`, `notifications`, `signOffs`, `recentlyViewed`, `enquirySettings`, `taskSettings`) |
-   | **S0-17b** | `0010` | `hr-and-rbac` | **Hybrid (`R421`):** `employment` and `employment.payroll` are read from PostgreSQL `people.employment_json` (live since `S0-16`), while `employeeSensitiveRecords`, `employeeMigrationReport`, `teams`, and `rbacConfigOverride` are read from the JSON store |
-   | **S0-17c** | `0011` | `firm-config` | JSON store (`firm`, `lists`, `values`, `customFields`, `orgStructure`, `matterPartyTaxonomy`, `homePagesConfig`, `matterCostsConfig`, `counters`) |
-   | **S0-18** | `0012` | `pms` | Global SQLite `data/pms/pms-demo.sqlite` (for demo/training tenants only) + JSON store (`pmsLinks`) |
+   | **S0-15** | `0007`–`0008` | `key-dates,audit` | JSON store (`matters` restriction metadata, `keyDatesConfigOverride`, 2-pass `keyDates`, `keyDateNotApplicable`, `keyDateReminderStates`, `keyDateCalendarSyncs`, `audit`) |
+   | **S0-16** | `0009` | `directory-and-matters` | JSON store (`organisations`, `people` including transitional `employment_json`, `links`, `matters`, `notes`, `mergeHistory`, `matterPartyMigrationReport`) |
+   | **S0-17a** | `0010` | `intake-and-workflows` | JSON store (`enquiries`, `quotes`, `tasks`, `notifications`, `signOffs`, `recentlyViewed`, `enquirySettings`, `taskSettings`) |
+   | **S0-17b** | `0011` | `hr-and-rbac` | **Hybrid (`R421`):** `employment` and `employment.payroll` are read from PostgreSQL `people.employment_json` (live since `S0-16`), while `employeeSensitiveRecords`, `employeeMigrationReport`, `teams`, and `rbacConfigOverride` are read from the JSON store |
+   | **S0-17c** | `0012` | `firm-config` | JSON store (`firm`, `lists`, `values`, `customFields`, `orgStructure`, `matterPartyTaxonomy`, `homePagesConfig`, `matterCostsConfig`, `counters`) |
+   | **S0-18** | `0013` | `pms` | Global SQLite `data/pms/pms-demo.sqlite` (for demo/training tenants only) + JSON store (`pmsLinks`) |
 
 ---
 
@@ -75,7 +75,7 @@ az containerapp job start \
 ### Step 4 — Verify Row Counts and `CORE_REQUIRED_SCHEMA_VERSION`
 
 1. Inspect the Container Apps job logs (`Log Analytics`) for `"event":"store_import.tenant_succeeded"` on every enabled tenant and confirm zero `"store_import.tenant_failed"` entries. Note that `import-store.mjs` automatically verifies imported row counts on a fresh repository connection before logging `store_import.tenant_succeeded`.
-2. Confirm `public.tenant_schema_migrations` in each tenant database includes `CORE_REQUIRED_SCHEMA_VERSION` (`0006` in `S0-14`, `0007` in `S0-15`). Any tenant below `CORE_REQUIRED_SCHEMA_VERSION` will immediately refuse web traffic with `TENANT_SCHEMA_NOT_READY`.
+2. Confirm `public.tenant_schema_migrations` in each tenant database includes `CORE_REQUIRED_SCHEMA_VERSION` (`0006` in `S0-14`, `0008` in `S0-15`). Any tenant below `CORE_REQUIRED_SCHEMA_VERSION` will immediately refuse web traffic with `TENANT_SCHEMA_NOT_READY`.
 
 ### Step 5 — Scale Up and Route Traffic to the New Web Revision
 
@@ -100,5 +100,12 @@ While there is no live client data in Stage 0 (Owner Decision 9, ADR 0028 §5):
 
 1. **Stop writes:** Scale `ca-web-<env>` to `0` replicas so no further writes occur.
 2. **Revert application revision:** Point `ca-web-<env>` and the job definitions back to the previous known-good container image digest.
-3. **Optional schema rollback (`downSql`):** All Stage 0 migrations are additive expand migrations, so the previous revision can run alongside the expanded tables. If schema rollback is explicitly required, run `TenantMigrationRunner.rollbackVersion(ctx, migration)` on port `5432` in reverse order (`0006` down to the target version).
+3. **Optional schema rollback (`downSql`, `R454`):** All Stage 0 migrations are additive expand migrations, so the previous revision can run alongside the expanded tables without running `downSql`.
+   - **CRITICAL (`R454` — `0007_firm_audit_log_expand`):** Rolling back migration `0007` executes `DROP TABLE IF EXISTS public.audit_entries` and `DROP SEQUENCE IF EXISTS public.tenant_audit_id_seq`, which **permanently destroys the append-only firm audit log** in that tenant database.
+   - **Forbidden in `live`:** Running `0007` `downSql` in `live` is **strictly forbidden** without the product owner's explicit written sign-off.
+   - **Mandatory export before any `0007` rollback:** Before rolling back `0007` in any environment, export `public.audit_entries` to JSON Lines using `psql` on direct port `5432`:
+     ```bash
+     psql "$TENANT_DIRECT_PG_URL" -c "\copy (SELECT row_to_json(a) FROM public.audit_entries a WHERE tenant_id = '<tenantId>' ORDER BY seq ASC) TO 'audit_entries_backup_<tenantId>.jsonl'"
+     ```
+   - If schema rollback is explicitly required after exporting `audit_entries`, run `TenantMigrationRunner.rollbackVersion(ctx, migration)` on port `5432` in reverse order (`0008` down to the target version).
 4. **Re-seed / resume from JSON store:** Because there is no dual-writing, writes made to PostgreSQL after Step 3 of cut-over are not mirrored back into the JSON store. In non-live/demo environments, re-run `npm run seed:demo -- --force` (which resets both the JSON store and migrated PostgreSQL tables cleanly) before scaling `ca-web-<env>` back up.

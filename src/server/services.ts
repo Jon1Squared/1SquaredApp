@@ -805,16 +805,20 @@ export async function listAuditEntriesForRecord(
 ): Promise<AuditEntry[]> {
   const store = getStore();
   const viewer = store.people.find(
-    (p) => p.id === viewerId && p.isEmployee && !p.mergedIntoId,
+    (p) => p.id === viewerId && !p.mergedIntoId,
   );
   if (!viewer) {
     return [];
   }
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    options?.tokenRoles ??
+    (activeSession?.personId === viewer.id ? activeSession.tokenRoles : undefined);
   const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
   await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
-    tokenRoles: options?.tokenRoles,
+    tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenMatterKeyDateIds =
@@ -823,7 +827,7 @@ export async function listAuditEntriesForRecord(
       prelimVisibility.hiddenMatterIds,
     );
   const visibility = buildRecordVisibility(store, viewer, {
-    tokenRoles: options?.tokenRoles,
+    tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
 
@@ -878,8 +882,9 @@ export async function listAuditEntriesForRecord(
 }
 
 /**
- * Paginated firm-wide audit query for Admin (R413), hitting idx_audit_entries_tenant_at
- * and redacting restricted matters, hidden tasks/enquiries/quotes/key-dates, and unpermitted HR audit rows.
+ * Paginated firm-wide audit query for Admin (R413, R451, R452, R457), hitting idx_audit_entries_tenant_seq,
+ * enforcing admin:access, and filling each page with visible entries after redacting restricted matters,
+ * hidden tasks/enquiries/quotes/key-dates, and unpermitted HR audit rows.
  */
 export async function listFirmAuditEntriesPage(
   viewerId: string,
@@ -888,19 +893,41 @@ export async function listFirmAuditEntriesPage(
     beforeSeq?: number;
     tokenRoles?: readonly string[];
   },
-): Promise<{ entries: AuditEntry[]; nextBeforeSeq: number | null }> {
+): Promise<
+  { entries: AuditEntry[]; nextBeforeSeq: number | null } & Partial<ActionDenied>
+> {
   const store = getStore();
   const viewer = store.people.find(
-    (p) => p.id === viewerId && p.isEmployee && !p.mergedIntoId,
+    (p) => p.id === viewerId && !p.mergedIntoId,
   );
-  if (!viewer) {
-    return { entries: [], nextBeforeSeq: null };
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    options?.tokenRoles ??
+    (viewer && activeSession?.personId === viewer.id
+      ? activeSession.tokenRoles
+      : undefined);
+  if (
+    !viewer ||
+    !hasPersonPermission(viewer, 'admin:access', {
+      allPeople: store.people,
+      teams: store.teams,
+      tokenRoles: effectiveTokenRoles,
+    })
+  ) {
+    return {
+      ...buildActionDenied(
+        'FORBIDDEN',
+        'You need "admin:access" permission to view the firm audit log.',
+      ),
+      entries: [],
+      nextBeforeSeq: null,
+    };
   }
   const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
   await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
-    tokenRoles: options?.tokenRoles,
+    tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenMatterKeyDateIds =
@@ -909,7 +936,7 @@ export async function listFirmAuditEntriesPage(
       prelimVisibility.hiddenMatterIds,
     );
   const visibility = buildRecordVisibility(store, viewer, {
-    tokenRoles: options?.tokenRoles,
+    tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
   const hiddenTaskIds = new Set(
@@ -928,43 +955,85 @@ export async function listFirmAuditEntriesPage(
     store.teams,
   );
 
-  const page = await getAuditRepository().listFirmAuditEntriesPage(ctx, {
-    limit: options?.limit ?? 250,
-    beforeSeq: options?.beforeSeq,
-  });
+  const isVisibleAuditRow = (a: FirmAuditEntryRecord): boolean => {
+    if (a.recordType === 'matter' && visibility.hiddenMatterIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'task' && hiddenTaskIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'enquiry' && visibility.hiddenEnquiryIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'quote' && visibility.hiddenQuoteIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'key_date') {
+      if (hiddenMatterKeyDateIds.has(a.recordId)) return false;
+      const prefix = a.recordId.split(':')[0];
+      if (prefix && visibility.hiddenMatterIds.has(prefix)) return false;
+    }
+    if (a.recordType === 'employee_payroll' && !canPayroll) {
+      return false;
+    }
+    if (a.recordType === 'employee_sensitive' && !canSensitive) {
+      return false;
+    }
+    return true;
+  };
 
-  const filtered = page.entries
-    .filter((a) => {
-      if (a.recordType === 'matter' && visibility.hiddenMatterIds.has(a.recordId)) {
-        return false;
+  const targetLimit = Math.min(
+    2000,
+    Math.max(1, Math.floor(options?.limit ?? 250)),
+  );
+  const collected: FirmAuditEntryRecord[] = [];
+  let cursor = options?.beforeSeq;
+  let hasMoreAfterCollected = false;
+
+  while (collected.length < targetLimit) {
+    const page = await getAuditRepository().listFirmAuditEntriesPage(ctx, {
+      limit: Math.max(targetLimit, 250),
+      beforeSeq: cursor,
+    });
+    if (page.entries.length === 0) {
+      hasMoreAfterCollected = false;
+      break;
+    }
+    let stoppedMidBatch = false;
+    for (let i = 0; i < page.entries.length; i++) {
+      const a = page.entries[i]!;
+      if (!isVisibleAuditRow(a)) continue;
+      if (collected.length < targetLimit) {
+        collected.push(a);
+      } else {
+        hasMoreAfterCollected = true;
+        stoppedMidBatch = true;
+        break;
       }
-      if (a.recordType === 'task' && hiddenTaskIds.has(a.recordId)) {
-        return false;
-      }
-      if (a.recordType === 'enquiry' && visibility.hiddenEnquiryIds.has(a.recordId)) {
-        return false;
-      }
-      if (a.recordType === 'quote' && visibility.hiddenQuoteIds.has(a.recordId)) {
-        return false;
-      }
-      if (a.recordType === 'key_date') {
-        if (hiddenMatterKeyDateIds.has(a.recordId)) return false;
-        const prefix = a.recordId.split(':')[0];
-        if (prefix && visibility.hiddenMatterIds.has(prefix)) return false;
-      }
-      if (a.recordType === 'employee_payroll' && !canPayroll) {
-        return false;
-      }
-      if (a.recordType === 'employee_sensitive' && !canSensitive) {
-        return false;
-      }
-      return true;
-    })
-    .map(mapFirmAuditRecordToAuditEntry);
+    }
+    if (stoppedMidBatch) {
+      break;
+    }
+    if (page.nextBeforeSeq === null) {
+      hasMoreAfterCollected = false;
+      break;
+    }
+    if (collected.length >= targetLimit) {
+      hasMoreAfterCollected = true;
+      break;
+    }
+    cursor = page.nextBeforeSeq;
+  }
+
+  const lastVisible = collected.at(-1);
+  const nextBeforeSeq =
+    hasMoreAfterCollected && lastVisible?.seq !== undefined
+      ? lastVisible.seq
+      : null;
 
   return {
-    entries: filtered,
-    nextBeforeSeq: page.nextBeforeSeq,
+    entries: collected.map(mapFirmAuditRecordToAuditEntry),
+    nextBeforeSeq,
   };
 }
 

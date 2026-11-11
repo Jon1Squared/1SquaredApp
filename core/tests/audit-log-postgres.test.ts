@@ -13,10 +13,13 @@
  * All fixtures are invented (the invented demo tenant seed data and synthetic `firm-alpha` / `firm-beta` tenants).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
+import AdminCatchAllPage from '../../src/app/admin/[[...slug]]/page';
 import {
   getPlatformTelemetryRecorder,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
+  type FirmAuditEntryInput,
   type TenantContext,
 } from '../src/index';
 import {
@@ -348,7 +351,8 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       const denied = await listAuditEntriesForRecord('matter', 'M-000014', 'P-000002', { limit: 200 });
       expect(denied).toEqual([]);
       const deniedFirmPage = await listFirmAuditEntriesPage('P-000002', { limit: 2000 });
-      expect(deniedFirmPage.entries.some((a) => a.recordId === 'M-000014')).toBe(false);
+      expect(deniedFirmPage.code).toBe('FORBIDDEN');
+      expect(deniedFirmPage.entries).toEqual([]);
 
       // HR sensitive access audit: visible to the HR-permitted admin, redacted for a fee earner
       const hrLog = await logEmployeeRestrictedAccess('P-000003', 'sensitive', 'P-000004', 'Viewed sensitive tab');
@@ -1101,6 +1105,211 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       ).toBe(false);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R452: listFirmAuditEntriesPage keeps fetching until 250 visible rows are collected when 300 rows include 100 restricted rows, and AdminCatchAllPage renders the Firm audit log section with Next link', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    try {
+      const store = getStore();
+      // Admin viewer P-000004 has admin:access without matter:restricted:access and is NOT on restrictedAccessUserIds for staff matter M-000014
+      const adminViewer = store.people.find((p) => p.id === 'P-000004')!;
+      adminViewer.permissionOverrides = {
+        grant: ['admin:access'],
+        revoke: ['matter:restricted:access'],
+      };
+      const staffMatter = store.matters.find((m) => m.id === 'M-000014')!;
+      staffMatter.isStaffMatter = true;
+      staffMatter.responsiblePartnerId = 'P-000001';
+      staffMatter.supervisingPartnerId = 'P-000001';
+      staffMatter.leadFeeEarnerId = 'P-000001';
+      staffMatter.teamMemberIds = ['P-000001'];
+      staffMatter.restrictedAccessUserIds = ['P-000001'];
+      const visibleMatter = store.matters.find(
+        (m) => m.id !== 'M-000014' && !m.isStaffMatter && !m.hasEthicalWall,
+      )!;
+      saveStore(store);
+
+      const ctx = testTenantCtx('P-000001');
+      const batch300: FirmAuditEntryInput[] = [];
+      // Append 200 visible matter audit rows and 100 restricted staff-matter audit rows (300 total)
+      for (let i = 0; i < 300; i++) {
+        const isRestricted = i % 3 === 0 && batch300.filter((x) => x.recordId === staffMatter.id).length < 100;
+        batch300.push({
+          recordType: 'matter',
+          recordId: isRestricted ? staffMatter.id : visibleMatter.id,
+          action: 'update',
+          field: isRestricted ? `R452-restricted-${i}` : `R452-visible-${i}`,
+          oldValue: null,
+          newValue: `Invented batch value ${i}`,
+          byId: 'P-000001',
+          at: new Date(Date.now() + i).toISOString(),
+        });
+      }
+      // Also ensure at least 50 more visible rows exist so 300 rows (with 100 restricted) plus earlier visible rows fill 250 visible rows on page 1
+      const extraVisible: FirmAuditEntryInput[] = [];
+      for (let i = 0; i < 60; i++) {
+        extraVisible.push({
+          recordType: 'matter',
+          recordId: visibleMatter.id,
+          action: 'update',
+          field: `R452-extra-visible-${i}`,
+          oldValue: null,
+          newValue: `Invented extra value ${i}`,
+          byId: 'P-000001',
+          at: new Date(Date.now() - 10_000 + i).toISOString(),
+        });
+      }
+      await getAuditRepository().appendAuditEntries(ctx, [...extraVisible, ...batch300]);
+
+      const page1 = await listFirmAuditEntriesPage('P-000004', { limit: 250 });
+      expect(page1.code).toBeUndefined();
+      expect(page1.entries).toHaveLength(250);
+      expect(page1.entries.some((e) => e.recordId === staffMatter.id)).toBe(false);
+      expect(page1.nextBeforeSeq).not.toBeNull();
+
+      // Verify AdminCatchAllPage renders the Firm audit log section and Next pagination link
+      const adminPerson = store.people.find((p) => p.id === 'P-000004')!;
+      const nowMs = Date.now();
+      setTestEntraSessionOverride({
+        tenantId: 'not-a-law-firm',
+        personId: adminPerson.id,
+        oid: adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+        tid: '11111111-2222-4333-8444-555555555555',
+        sub: adminPerson.id,
+        email: adminPerson.emails?.[0]?.address ?? 'sian@notalawfirm.example.invalid',
+        displayName: 'Siân Phillips',
+        entraRoles: ['admin'],
+        mappedRoles: ['admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date(nowMs).toISOString(),
+        expiresAt: new Date(nowMs + 3600_000).toISOString(),
+      });
+
+      const pageEl = await AdminCatchAllPage({
+        params: Promise.resolve({}),
+        searchParams: Promise.resolve({}),
+      });
+      const html = renderToStaticMarkup(pageEl);
+      expect(html).toContain('Firm audit log');
+      expect(html).toContain('data-testid="admin-firm-audit-log"');
+      expect(html).toContain(`?auditBeforeSeq=${page1.nextBeforeSeq}`);
+    } finally {
+      setTestEntraSessionOverride(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R457: listFirmAuditEntriesPage returns FORBIDDEN for non-admins, honours active session tokenRoles, and hides staff-matter rows from non-restricted viewers while showing them to an authorised admin control', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    try {
+      const store = getStore();
+      const nonRestrictedAdmin = store.people.find((p) => p.id === 'P-000004')!;
+      nonRestrictedAdmin.permissionOverrides = {
+        grant: ['admin:access'],
+        revoke: ['matter:restricted:access'],
+      };
+      const staffMatter = store.matters.find((m) => m.id === 'M-000014')!;
+      staffMatter.isStaffMatter = true;
+      staffMatter.responsiblePartnerId = 'P-000001';
+      staffMatter.supervisingPartnerId = 'P-000001';
+      staffMatter.leadFeeEarnerId = 'P-000001';
+      staffMatter.teamMemberIds = ['P-000001'];
+      staffMatter.restrictedAccessUserIds = ['P-000001'];
+      saveStore(store);
+
+      const staffMarkerField = `R457-staff-audit-${Date.now().toString(36)}`;
+      await getAuditRepository().appendAuditEntry(testTenantCtx('P-000001'), {
+        recordType: 'matter',
+        recordId: staffMatter.id,
+        action: 'update',
+        field: staffMarkerField,
+        oldValue: null,
+        newValue: 'Invented restricted staff matter update',
+        byId: 'P-000001',
+        at: new Date().toISOString(),
+      });
+
+      // 1. Non-admin call returns FORBIDDEN with code and message
+      const feeEarnerPage = await listFirmAuditEntriesPage('P-000002', { limit: 50 });
+      expect(feeEarnerPage.code).toBe('FORBIDDEN');
+      expect(feeEarnerPage.message).toContain('admin:access');
+      expect(feeEarnerPage.entries).toEqual([]);
+
+      // 2. Staff-matter audit row is hidden from an admin who is not in restrictedAccessUserIds (P-000004)
+      const nonRestrictedAdminRecord = await listAuditEntriesForRecord(
+        'matter',
+        staffMatter.id,
+        'P-000004',
+        { limit: 50 },
+      );
+      expect(nonRestrictedAdminRecord).toEqual([]);
+      const nonRestrictedAdminPage = await listFirmAuditEntriesPage('P-000004', {
+        limit: 50,
+      });
+      expect(nonRestrictedAdminPage.code).toBeUndefined();
+      expect(
+        nonRestrictedAdminPage.entries.some((e) => e.field === staffMarkerField),
+      ).toBe(false);
+
+      // 3. Admin control on restrictedAccessUserIds (P-000001) sees the staff-matter audit row in both record and firm queries
+      const restrictedAdminRecord = await listAuditEntriesForRecord(
+        'matter',
+        staffMatter.id,
+        'P-000001',
+        { limit: 50 },
+      );
+      expect(
+        restrictedAdminRecord.some((e) => e.field === staffMarkerField),
+      ).toBe(true);
+      const restrictedAdminPage = await listFirmAuditEntriesPage('P-000001', {
+        limit: 50,
+      });
+      expect(restrictedAdminPage.code).toBeUndefined();
+      expect(
+        restrictedAdminPage.entries.some((e) => e.field === staffMarkerField),
+      ).toBe(true);
+
+      // 4. Active session tokenRoles are honoured when options.tokenRoles is omitted
+      const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const verifiedSession = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: feeEarner.id,
+          tenantId: 'not-a-law-firm',
+          oid: feeEarner.entraObjectId ?? '00000000-0000-4000-8000-000000000002',
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: feeEarner.id,
+          email: feeEarner.emails[0]?.address ?? 'fee@notalawfirm.example',
+          displayName: 'Fee Earner',
+          entraRoles: ['admin', 'risk_compliance'],
+          mappedRoles: ['admin', 'risk_compliance'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        }),
+      )!;
+      const sessionElevatedPage = await runWithActiveActorSession(
+        {
+          personId: feeEarner.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: ['admin', 'risk_compliance'],
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession,
+        },
+        () => listFirmAuditEntriesPage(feeEarner.id, { limit: 50 }),
+      );
+      expect(sessionElevatedPage.code).toBeUndefined();
+      expect(
+        sessionElevatedPage.entries.some((e) => e.field === staffMarkerField),
+      ).toBe(true);
+    } finally {
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
