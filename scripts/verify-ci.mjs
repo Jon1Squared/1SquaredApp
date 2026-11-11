@@ -308,7 +308,14 @@ if (dockerInfoRes.status === 0) {
   runStep(
     '10c/12 Build standalone container image (docker build)',
     isWin ? 'docker.exe' : 'docker',
-    ['build', '-t', 'onesquared-ci:test', '.'],
+    [
+      'build',
+      '--build-arg',
+      `PLATFORM_TENANT_PACKAGE_DIR=${liveBuildEnv.PLATFORM_TENANT_PACKAGE_DIR}`,
+      '-t',
+      'onesquared-ci:test',
+      '.',
+    ],
     liveBuildEnv,
   );
   runStep(

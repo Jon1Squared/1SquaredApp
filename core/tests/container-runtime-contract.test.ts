@@ -35,6 +35,43 @@ describe('S0-13b: Standalone Dockerfile, .dockerignore, and bundled dist/jobs en
     expect(dockerignoreText).toContain('.next');
   });
 
+  it('requires PLATFORM_TENANT_PACKAGE_DIR as a build argument with no default and never hard-codes a client package (R426)', () => {
+    const dockerfileText = fs.readFileSync(
+      path.join(REPO_ROOT, 'Dockerfile'),
+      'utf8',
+    );
+    expect(dockerfileText).not.toContain('client-not-a-law-firm');
+    expect(dockerfileText).not.toMatch(/ARG PLATFORM_TENANT_PACKAGE_DIR=/);
+
+    const runnerStage = dockerfileText.slice(
+      dockerfileText.indexOf('FROM node:24-bookworm-slim AS runner'),
+    );
+    const builderStage = dockerfileText.slice(
+      0,
+      dockerfileText.indexOf('FROM node:24-bookworm-slim AS runner'),
+    );
+    for (const [label, stage] of [
+      ['builder', builderStage],
+      ['runner', runnerStage],
+    ] as const) {
+      expect(stage, label).toMatch(/^ARG PLATFORM_TENANT_PACKAGE_DIR\r?$/m);
+      expect(stage, label).toContain(
+        'RUN test -n "${PLATFORM_TENANT_PACKAGE_DIR}" || (echo \'PLATFORM_TENANT_PACKAGE_DIR build argument is required\' >&2 && exit 1)',
+      );
+    }
+    expect(runnerStage).toContain(
+      'COPY --from=builder --chown=node:node /app/${PLATFORM_TENANT_PACKAGE_DIR}/config ./${PLATFORM_TENANT_PACKAGE_DIR}/config',
+    );
+
+    const ciText = fs.readFileSync(
+      path.join(REPO_ROOT, '.github', 'workflows', 'ci.yml'),
+      'utf8',
+    );
+    expect(ciText).toContain(
+      'docker build --build-arg PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR"',
+    );
+  });
+
   it('bundles scripts/run-job.ts into self-contained dist/jobs/run-job.mjs and executes --list on plain Node 24 without tsx', () => {
     const buildRes = spawnSync(
       process.execPath,

@@ -89,7 +89,7 @@ jobs:
       - name: Verify bundled job entry point and container image (R404)
         run: |
           node dist/jobs/run-job.mjs --list
-          docker build -t onesquared-ci:test .
+          docker build --build-arg PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" -t onesquared-ci:test .
           docker run --rm onesquared-ci:test node dist/jobs/run-job.mjs --list
 
   e2e:
