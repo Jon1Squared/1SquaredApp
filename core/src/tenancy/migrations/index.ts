@@ -647,6 +647,56 @@ DROP SEQUENCE IF EXISTS tenant_audit_id_seq;
 `.trim(),
 };
 
+/**
+ * R453: lets the web app's demo reset clear the audit log under the tenant role, without the
+ * migrate identity. The function exists only in non-live databases and refuses again at run time
+ * if the database is a `_live` one. The tenant role keeps SELECT and INSERT only on audit_entries.
+ */
+export const NON_LIVE_AUDIT_RESET_MIGRATION_0008: TenantMigrationDefinition = {
+  version: '0008',
+  name: '0008_non_live_audit_reset_function',
+  description:
+    'Expand-phase migration adding the SECURITY DEFINER public.reset_non_live_audit_log(text) function in non-live tenant databases only, executable by the tenant role, so demo reset never needs the migrate identity (S0-15, R453).',
+  tablesChanged: [],
+  dependsOn: ['0007'],
+  upSql: `
+DO $do$
+DECLARE
+  v_suffix TEXT := substring(current_database() from '^pg_tenant_(.+)$');
+  v_role TEXT := 'role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$');
+BEGIN
+  IF v_suffix IS NULL OR right(v_suffix, 5) = '_live' THEN
+    RETURN;
+  END IF;
+  EXECUTE $fn$
+    CREATE OR REPLACE FUNCTION public.reset_non_live_audit_log(p_tenant_id TEXT)
+    RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $body$
+    BEGIN
+      IF right(current_database(), 5) = '_live' THEN
+        RAISE EXCEPTION 'LIVE_AUDIT_RESET_FORBIDDEN: Immutable audit_entries cannot be cleared in the live environment.'
+          USING ERRCODE = '42501';
+      END IF;
+      DELETE FROM public.audit_entries WHERE tenant_id = p_tenant_id;
+      PERFORM setval('public.tenant_audit_id_seq', 1, false);
+    END
+    $body$
+  $fn$;
+  EXECUTE 'REVOKE ALL ON FUNCTION public.reset_non_live_audit_log(TEXT) FROM PUBLIC';
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.reset_non_live_audit_log(TEXT) TO %I', v_role);
+  END IF;
+END
+$do$;
+`.trim(),
+  downSql: `
+DROP FUNCTION IF EXISTS public.reset_non_live_audit_log(TEXT);
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -655,6 +705,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   KEY_DATES_MATTER_RESTRICTIONS_MIGRATION_0005,
   DOCUMENT_GENERATION_TENANT_CONFIG_MIGRATION_0006,
   FIRM_AUDIT_LOG_MIGRATION_0007,
+  NON_LIVE_AUDIT_RESET_MIGRATION_0008,
 ];
 
 export function validateMigrationCatalogueOrder(

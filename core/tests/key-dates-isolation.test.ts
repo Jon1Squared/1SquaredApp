@@ -84,7 +84,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     const ctxB = createVerifiedTenantContext('tenant-bravo');
 
     try {
-      for (const v of ['0007', '0006', '0005', '0004', '0003', '0002', '0001']) {
+      for (const v of [...CORE_TENANT_MIGRATIONS.map((m) => m.version)].reverse()) {
         await runner.rollbackVersion(ctxA, v);
         await runner.rollbackVersion(ctxB, v);
       }
@@ -132,9 +132,12 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       expect(await runner.getActiveTables(ctxA)).toContain('key_date_audit_events');
       expect(await runner.getActiveTables(ctxB)).not.toContain('key_dates');
 
-      // R145: Rolling back 0007 + 0006 + 0002 leaves key-date tables intact
-      expect(await runner.rollbackVersion(ctxA, '0007')).toBe(true);
-      expect(await runner.rollbackVersion(ctxA, '0006')).toBe(true);
+      // R145: Rolling back post-0005 migrations + 0002 leaves key-date tables intact
+      for (const v of [...CORE_TENANT_MIGRATIONS.map((m) => m.version)]
+        .filter((x) => x >= '0006')
+        .reverse()) {
+        expect(await runner.rollbackVersion(ctxA, v)).toBe(true);
+      }
       expect(await runner.rollbackVersion(ctxA, '0002')).toBe(true);
       expect(await runner.getActiveTables(ctxA)).toContain('key_dates');
       expect(await runner.getActiveTables(ctxA)).toContain('key_date_reminder_states');

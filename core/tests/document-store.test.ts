@@ -1708,8 +1708,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           'document_reconciliation_findings',
         );
 
-        await runner.rollbackVersion(ctx, '0007');
-        await runner.rollbackVersion(ctx, '0006');
+        for (const m of [...CoreBarrel.CORE_TENANT_MIGRATIONS]
+          .filter((x) => x.version >= '0006')
+          .reverse()) {
+          await runner.rollbackVersion(ctx, m.version);
+        }
         const rolledBack = await runner.rollbackVersion(ctx, '0002');
         expect(rolledBack).toBe(true);
         expect(await runner.getActiveTables(ctx)).not.toContain(

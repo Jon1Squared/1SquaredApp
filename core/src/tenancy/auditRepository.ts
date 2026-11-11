@@ -290,4 +290,28 @@ export class TenantAuditRepository extends TenantScopedRepository {
       return Number(res.rows[0]?.cnt ?? 0);
     });
   }
+
+  /**
+   * Clears this tenant's audit log and restarts the AU- sequence, for demo reset and clean
+   * deployment in non-live environments only (R453).
+   *
+   * Runs under the caller's own tenant role. The tenant role still has no UPDATE or DELETE on
+   * `audit_entries`; the delete happens inside `public.reset_non_live_audit_log`, a
+   * `SECURITY DEFINER` function that migration 0008 creates only in non-live databases and that
+   * refuses again if it ever runs in a `_live` database.
+   */
+  public async resetNonLiveAuditLog(ctx: TenantContext): Promise<void> {
+    if (ctx.environment === 'live') {
+      const err = new Error(
+        'LIVE_AUDIT_RESET_FORBIDDEN: Immutable audit_entries cannot be cleared in the live environment.',
+      ) as Error & { code: string };
+      err.code = 'LIVE_AUDIT_RESET_FORBIDDEN';
+      throw err;
+    }
+    await this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query('SELECT public.reset_non_live_audit_log($1)', [
+        ctx.tenantId,
+      ]);
+    });
+  }
 }

@@ -9,6 +9,7 @@ import {
   buildValidDocxArchive,
   CORE_API_VERSION,
   CORE_FIELD_CATALOGUE,
+  CORE_TENANT_MIGRATIONS,
   createOrUploadDraftTemplateVersion,
   deleteGeneratedDocument,
   executeUsageRetentionPurgeJob,
@@ -987,7 +988,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     const runner = new TenantMigrationRunner();
     try {
       await runner.applyUp(ctxA);
-      expect(await runner.listAppliedMigrations(ctxA)).toHaveLength(7);
+      expect(await runner.listAppliedMigrations(ctxA)).toHaveLength(
+        CORE_TENANT_MIGRATIONS.length,
+      );
       expect(await runner.getActiveTables(ctxA)).toContain('document_templates');
       expect(await runner.getActiveTables(ctxA)).toContain('template_usage_daily_summaries');
       expect(await runner.getActiveTables(ctxA)).toContain('matter_document_locations');
@@ -995,12 +998,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       expect(await runner.getActiveTables(ctxA)).toContain('audit_entries');
 
       // Roll back migrations in reverse order down to 0001 on Tenant A (leaving Tenant B untouched!)
-      expect(await runner.rollbackVersion(ctxA, '0007')).toBe(true);
-      expect(await runner.rollbackVersion(ctxA, '0006')).toBe(true);
-      expect(await runner.rollbackVersion(ctxA, '0005')).toBe(true);
-      expect(await runner.rollbackVersion(ctxA, '0004')).toBe(true);
-      expect(await runner.rollbackVersion(ctxA, '0003')).toBe(true);
-      expect(await runner.rollbackVersion(ctxA, '0002')).toBe(true);
+      for (const m of [...CORE_TENANT_MIGRATIONS].slice(1).reverse()) {
+        expect(await runner.rollbackVersion(ctxA, m.version)).toBe(true);
+      }
       const rolledBack = await runner.rollbackVersion(ctxA, '0001');
       expect(rolledBack).toBe(true);
       expect(await runner.getActiveTables(ctxA)).not.toContain('document_templates');
@@ -1008,7 +1008,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
 
       // Re-apply cleanly
       const reapplied = await runner.applyUp(ctxA);
-      expect(reapplied).toHaveLength(7);
+      expect(reapplied).toHaveLength(CORE_TENANT_MIGRATIONS.length);
       expect(await runner.getActiveTables(ctxA)).toContain('documents');
     } finally {
       await runner.applyUp(ctxA);

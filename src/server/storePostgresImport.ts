@@ -23,7 +23,6 @@ import { isMatterRestrictedForKeyDates } from '@/domain/keyDates';
 import type { Matter, Person, Team } from '@/domain/types';
 import { canPersonAccessMatter } from './rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
-import { resetNonLiveTenantAuditLogForTestingOrDemo } from '../../core/src/tenancy/postgresAdminBootstrap';
 import { getStore, type FirmStore } from './store';
 
 export type ImportableStoreModule =
@@ -139,7 +138,8 @@ export async function clearMigratedPostgresModulesForTenant(options: {
     await keyDateRepo.clearTenantData(ctx);
   }
   if (modules.includes('audit')) {
-    await resetNonLiveTenantAuditLogForTestingOrDemo(ctx);
+    // R453: runs under the caller's tenant role through the non-live reset function (0008).
+    await new TenantAuditRepository().resetNonLiveAuditLog(ctx);
   }
 }
 
