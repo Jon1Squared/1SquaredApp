@@ -144,6 +144,14 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     );
     expect(nonMigrateJobsBlock).toContain("'${runtimeIdentity.id}': {}");
     expect(nonMigrateJobsBlock).not.toContain('migrateIdentity');
+
+    // R431: store-import only needs runtimeCommonEnv, so it mounts no web secrets
+    const storeImportBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource storeImportJob'),
+      platformNoComments.indexOf('resource keyDateRemindersJob'),
+    );
+    expect(storeImportBlock).not.toContain('runtimeKeyVaultSecrets');
+    expect(storeImportBlock).not.toContain('secrets:');
   });
 
   it('enforces Entra ID auth only, TLS 1.2+, and explicit PgBouncer TRANSACTION pool mode on both shared and dedicated PostgreSQL servers (R401)', () => {

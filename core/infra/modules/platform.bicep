@@ -1045,7 +1045,6 @@ resource storeImportJob 'Microsoft.App/jobs@2025-07-01' = if (enableStoreImportJ
           identity: runtimeIdentity.id
         }
       ]
-      secrets: runtimeKeyVaultSecrets
     }
     template: {
       containers: [
