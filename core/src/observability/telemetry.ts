@@ -435,9 +435,32 @@ export function emitPlatformStartupTelemetry(params: {
 }
 
 /**
+ * Every auto-instrumentation `@azure/monitor-opentelemetry` would otherwise switch on.
+ * Auto-instrumented spans (HTTP URLs with query strings, `db.statement`, and so on)
+ * bypass tenant/correlation stamping and the deny-list, so all are disabled explicitly
+ * and only spans recorded through this module are exported (Standard §13, Rule 5, R423).
+ */
+export const DISABLED_AZURE_MONITOR_INSTRUMENTATIONS = Object.freeze({
+  azureSdk: { enabled: false },
+  http: { enabled: false },
+  mongoDb: { enabled: false },
+  mySql: { enabled: false },
+  postgreSql: { enabled: false },
+  redis: { enabled: false },
+  redis4: { enabled: false },
+  bunyan: { enabled: false },
+  winston: { enabled: false },
+  console: { enabled: false },
+});
+
+/**
  * Initialises `@azure/monitor-opentelemetry` ONLY when `connectionString` is non-empty.
  * When unset (local dev/test or Model A opt-out per Standard §7), returns `{ enabled: false }`
  * and performs zero network calls.
+ *
+ * Application Insights has local authentication disabled (`DisableLocalAuth: true`), so
+ * export authenticates with the user-assigned managed identity named by `AZURE_CLIENT_ID`.
+ * Outside `dev`, a missing `AZURE_CLIENT_ID` fails closed (R422).
  */
 export async function initializeAzureMonitorTelemetry(options?: {
   connectionString?: string | null;
@@ -456,6 +479,18 @@ export async function initializeAzureMonitorTelemetry(options?: {
   if (recorder.isAzureMonitorInitialised()) {
     return { enabled: true };
   }
+  const managedIdentityClientId = process.env.AZURE_CLIENT_ID?.trim() ?? '';
+  const environment = process.env.PLATFORM_ENVIRONMENT?.trim() ?? '';
+  if (!managedIdentityClientId && environment !== 'dev') {
+    throw new Error(
+      'TELEMETRY_MANAGED_IDENTITY_REQUIRED: AZURE_CLIENT_ID must name the managed identity used to export telemetry outside dev.',
+    );
+  }
+  const credential = managedIdentityClientId
+    ? new (await import('@azure/identity')).ManagedIdentityCredential({
+        clientId: managedIdentityClientId,
+      })
+    : undefined;
   const loader =
     options?.loadAzureMonitor ??
     (() =>
@@ -466,6 +501,10 @@ export async function initializeAzureMonitorTelemetry(options?: {
   enableAzureMonitor({
     azureMonitorExporterOptions: {
       connectionString: connStr,
+      ...(credential ? { credential } : {}),
+    },
+    instrumentationOptions: {
+      ...DISABLED_AZURE_MONITOR_INSTRUMENTATIONS,
     },
   });
   recorder.markAzureMonitorInitialised();

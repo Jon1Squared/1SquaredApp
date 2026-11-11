@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ManagedIdentityCredential } from '@azure/identity';
 import {
   emitPlatformStartupTelemetry,
   emitTenantTelemetryEvent,
@@ -215,5 +216,72 @@ describe('S0-13b: Core Application Insights / OpenTelemetry telemetry emitter & 
     expect(singleTenantStartup.tenantId).toBe('not-a-law-firm');
     expect(singleTenantStartup.correlationId).toBe('startup-custom-001');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  describe('Azure Monitor loader options (R422, R423)', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    function captureLoader() {
+      const useAzureMonitor = vi.fn();
+      const loadAzureMonitor = async () =>
+        ({ useAzureMonitor }) as unknown as typeof import('@azure/monitor-opentelemetry');
+      return { useAzureMonitor, loadAzureMonitor };
+    }
+
+    it('passes a ManagedIdentityCredential for AZURE_CLIENT_ID and disables every auto-instrumentation', async () => {
+      vi.stubEnv('AZURE_CLIENT_ID', '00000000-0000-0000-0000-00000000c1d0');
+      vi.stubEnv('PLATFORM_ENVIRONMENT', 'test');
+      const { useAzureMonitor, loadAzureMonitor } = captureLoader();
+      const recorder = new PlatformTelemetryRecorder();
+
+      const res = await initializeAzureMonitorTelemetry({
+        connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+        recorder,
+        loadAzureMonitor,
+      });
+
+      expect(res.enabled).toBe(true);
+      expect(useAzureMonitor).toHaveBeenCalledTimes(1);
+      const opts = useAzureMonitor.mock.calls[0][0];
+      expect(opts.azureMonitorExporterOptions.credential).toBeInstanceOf(
+        ManagedIdentityCredential,
+      );
+      for (const key of [
+        'http',
+        'postgreSql',
+        'mongoDb',
+        'mySql',
+        'redis',
+        'redis4',
+        'azureSdk',
+      ]) {
+        expect(opts.instrumentationOptions[key], key).toEqual({ enabled: false });
+      }
+    });
+
+    it('fails closed when telemetry is enabled outside dev without AZURE_CLIENT_ID', async () => {
+      vi.stubEnv('AZURE_CLIENT_ID', '');
+      vi.stubEnv('PLATFORM_ENVIRONMENT', 'live');
+      const { useAzureMonitor, loadAzureMonitor } = captureLoader();
+      const recorder = new PlatformTelemetryRecorder();
+
+      const err = await initializeAzureMonitorTelemetry({
+        connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+        recorder,
+        loadAzureMonitor,
+      }).catch((e: unknown) => e as Error);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message.split(':')[0]).toBe(
+        'TELEMETRY_MANAGED_IDENTITY_REQUIRED',
+      );
+      expect((err as Error).message).toBe(
+        'TELEMETRY_MANAGED_IDENTITY_REQUIRED: AZURE_CLIENT_ID must name the managed identity used to export telemetry outside dev.',
+      );
+      expect(useAzureMonitor).not.toHaveBeenCalled();
+      expect(recorder.isAzureMonitorInitialised()).toBe(false);
+    });
   });
 });
