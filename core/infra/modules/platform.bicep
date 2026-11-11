@@ -140,7 +140,9 @@ var logAnalyticsName = take('law-${resourceSuffix}', 63)
 var appInsightsName = take('appi-${resourceSuffix}', 60)
 var runtimeIdentityName = take('id-runtime-${resourceSuffix}', 60)
 var migrateIdentityName = take('id-migrate-${resourceSuffix}', 60)
-var platformKeyVaultName = take('kv-plat-${sanitizedPlatformSlug}-${environment}', 24)
+// Globally unique: keeps the full uniqueString hash so a second hosted region or a long
+// slug never collides with another deployment's vault (R428).
+var platformKeyVaultName = 'kvp${take(sanitizedPlatformSlug, 8)}${uniqueString(resourceGroup().id, platformSlug, environment)}'
 var platformKvPeName = take('pe-${platformKeyVaultName}', 60)
 var sharedPostgresServerName = take('psql-${resourceSuffix}', 63)
 var containerAppsEnvName = take('cae-${resourceSuffix}', 60)

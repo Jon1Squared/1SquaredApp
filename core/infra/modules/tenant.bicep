@@ -111,9 +111,12 @@ param defenderMalwareScanCapGbPerMonth int = 500
 var sanitizedSlug = replace(tenantSlug, '-', '')
 var underscoredSlug = replace(tenantSlug, '-', '_')
 var resourceSuffix = '${tenantSlug}-${environment}'
-var keyVaultResourceName = take('kv-${sanitizedSlug}-${environment}', 24)
+// Globally unique names keep the full 13-character uniqueString hash so long slugs or a
+// second region never truncate away the environment and collide (R428).
+var globalNameHash = uniqueString(resourceGroup().id, tenantSlug, environment)
+var keyVaultResourceName = 'kv${take(sanitizedSlug, 9)}${globalNameHash}'
 var keyVaultPeName = take('pe-${keyVaultResourceName}', 60)
-var storageAccountName = take('st${sanitizedSlug}${environment}', 24)
+var storageAccountName = 'st${take(sanitizedSlug, 9)}${globalNameHash}'
 var storagePeName = take('pe-${storageAccountName}', 60)
 var containerName = 'tenant-${resourceSuffix}'
 var dedicatedPostgresServerName = take('psql-${resourceSuffix}', 63)

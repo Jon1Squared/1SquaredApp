@@ -226,9 +226,9 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       );
     }
 
-    // R413: tenant.bicep outputs truncated 24-char keyVaultName and keyVaultUri
+    // R413/R428: tenant.bicep outputs a collision-safe 24-char keyVaultName and keyVaultUri
     expect(tenantBicep).toContain(
-      "var keyVaultResourceName = take('kv-${sanitizedSlug}-${environment}', 24)",
+      "var keyVaultResourceName = 'kv${take(sanitizedSlug, 9)}${globalNameHash}'",
     );
     expect(tenantBicep).toContain('output keyVaultName string = keyVault.name');
     expect(tenantBicep).toContain(
@@ -311,6 +311,41 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
         platformNoComments.indexOf('resource enquiryAnonymisationJob '),
       ),
     ).toContain('runtimeAppInsightsMetricsPublisherRole');
+  });
+
+  it('derives Key Vault and storage names that differ per environment and region even for slugs of 20+ characters (R428)', () => {
+    expect(tenantBicep).toContain(
+      'var globalNameHash = uniqueString(resourceGroup().id, tenantSlug, environment)',
+    );
+    expect(tenantBicep).toContain(
+      "var storageAccountName = 'st${take(sanitizedSlug, 9)}${globalNameHash}'",
+    );
+    expect(platformBicep).toContain(
+      "var platformKeyVaultName = 'kvp${take(sanitizedPlatformSlug, 8)}${uniqueString(resourceGroup().id, platformSlug, environment)}'",
+    );
+
+    // Model the expressions: uniqueString always returns 13 characters, so the hash
+    // (which varies by resource group, slug and environment) must survive in full
+    // within the 24-character Key Vault and storage account limits.
+    const UNIQUE_STRING_LENGTH = 13;
+    const slug = 'an-invented-very-long-firm-slug';
+    expect(slug.replace(/-/g, '').length).toBeGreaterThanOrEqual(20);
+    const sanitized = slug.replace(/-/g, '');
+    const fakeHash = (env: string) => `h${env}`.padEnd(UNIQUE_STRING_LENGTH, 'x');
+    const names = (env: string) => ({
+      kv: `kv${sanitized.slice(0, 9)}${fakeHash(env)}`,
+      st: `st${sanitized.slice(0, 9)}${fakeHash(env)}`,
+      platformKv: `kvp${sanitized.slice(0, 8)}${fakeHash(env)}`,
+    });
+    const test = names('test');
+    const live = names('live');
+    for (const key of ['kv', 'st', 'platformKv'] as const) {
+      expect(test[key].length, key).toBeLessThanOrEqual(24);
+      expect(live[key].length, key).toBeLessThanOrEqual(24);
+      expect(test[key], key).not.toBe(live[key]);
+    }
+    expect(tenantBicep).not.toMatch(/take\('kv-\$\{sanitizedSlug\}/);
+    expect(tenantBicep).not.toMatch(/take\('st\$\{sanitizedSlug\}/);
   });
 
   it('compiles main.bicep into a valid ARM template with zero Bicep errors or warnings when Bicep CLI is installed', () => {
