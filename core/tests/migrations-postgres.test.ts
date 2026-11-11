@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  computeMigrationChecksum,
   CORE_REQUIRED_SCHEMA_VERSION,
   CORE_TENANT_MIGRATIONS,
   createDirectMigrationClient,
+  NON_LIVE_AUDIT_RESET_MIGRATION_0008,
   resolveTenantFromVerifiedToken,
   TenantMigrationRunner,
   TenantPostgresPoolManager,
@@ -251,6 +253,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     });
     const ctx = makeTestTenantContext('mig-gap-firm');
     const runner = new TenantMigrationRunner();
+    for (const v of [...CORE_TENANT_MIGRATIONS.map((m) => m.version)].reverse()) {
+      await runner.rollbackVersion(ctx, v);
+    }
     await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
 
     const cachedPoolMgr = new TenantPostgresPoolManager({ schemaReadyTtlMs: 0 });
@@ -447,6 +452,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const preCleanRunner = new TenantMigrationRunner();
     for (const v of [...CORE_TENANT_MIGRATIONS.map((m) => m.version)].reverse()) {
       await preCleanRunner.rollbackVersion(makeTestTenantContext('mig-partial-fail-a'), v);
+      await preCleanRunner.rollbackVersion(makeTestTenantContext('mig-partial-ok-b'), v);
     }
     const summary = await runMigrateJobSweep({
       registry,
@@ -791,5 +797,59 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect(composeYml).not.toContain('FROM pg_shadow');
     expect(composeYml).toContain('PLATFORM_POSTGRES_RUNTIME_PASSWORD');
     expect(composeYml).toContain('PLATFORM_POSTGRES_MIGRATE_PASSWORD');
+  });
+
+  it('rejects a modified 0008 checksum with TENANCY_MIGRATION_CHECKSUM_MISMATCH and carries no acceptedPriorChecksums on 0008 (R463)', async () => {
+    expect(NON_LIVE_AUDIT_RESET_MIGRATION_0008.acceptedPriorChecksums).toBeUndefined();
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'mig-checksum-0008', environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext('mig-checksum-0008');
+    const runner = new TenantMigrationRunner();
+    for (const v of [...CORE_TENANT_MIGRATIONS.map((m) => m.version)].reverse()) {
+      await runner.rollbackVersion(ctx, v);
+    }
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+    const expected0008Checksum = computeMigrationChecksum(
+      NON_LIVE_AUDIT_RESET_MIGRATION_0008,
+    );
+    const staleDev0008Checksum =
+      'ee6d64d00491d8ec88618161273cdce5206997c711e387d3b93c5888acd48dc0';
+    expect(staleDev0008Checksum).not.toBe(expected0008Checksum);
+
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      await client.query(
+        `UPDATE tenant_schema_migrations SET checksum = $1 WHERE tenant_id = $2 AND version = '0008'`,
+        [staleDev0008Checksum, ctx.tenantId],
+      );
+    } finally {
+      await client.end();
+    }
+
+    try {
+      await expect(
+        runner.applyUp(ctx, CORE_TENANT_MIGRATIONS),
+      ).rejects.toMatchObject({
+        code: 'TENANCY_MIGRATION_CHECKSUM_MISMATCH',
+        message: `TENANCY_MIGRATION_CHECKSUM_MISMATCH: Migration 0008 was modified after being applied to ${ctx.postgresDatabaseName}.`,
+      });
+    } finally {
+      // Clean recovery: roll back 0008 and re-apply so the database matches the current catalogue
+      const versionsAfter0008 = CORE_TENANT_MIGRATIONS.map((m) => m.version)
+        .filter((v) => v > '0008')
+        .reverse();
+      for (const v of versionsAfter0008) {
+        await runner.rollbackVersion(ctx, v);
+      }
+      expect(await runner.rollbackVersion(ctx, '0008')).toBe(true);
+      await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    }
+
+    const appliedAfterRecovery = await runner.listAppliedMigrations(ctx);
+    const mig0008 = appliedAfterRecovery.find((m) => m.version === '0008');
+    expect(mig0008?.checksum).toBe(expected0008Checksum);
   });
 });

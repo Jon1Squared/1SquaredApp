@@ -19,6 +19,7 @@ import {
   getPlatformTelemetryRecorder,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
+  TenantPostgresPoolManager,
   type FirmAuditEntryInput,
   type TenantContext,
 } from '../src/index';
@@ -588,6 +589,16 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       const conversionTitle = `R456 Enquiry Conversion Matter ${Date.now().toString(36)}`;
       const preTasksCount = getStore().tasks.length;
       const preEnquiryStatus = openEnquiry.status;
+      const freshAuditRepo = new TenantAuditRepository();
+      const preEnquiryAuditIds = new Set(
+        (
+          await freshAuditRepo.listAuditEntriesForRecord(
+            testTenantCtx('P-000004'),
+            'enquiry',
+            openEnquiry.id,
+          )
+        ).map((a) => a.id),
+      );
       const startedAt = Date.now();
 
       setAuditAdapterFailureHookForTesting(({ entries }) => {
@@ -625,15 +636,99 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(reloadedStore.tasks.length).toBe(preTasksCount);
       expect(reloadedStore.enquiries.find((e) => e.id === openEnquiry.id)?.status).toBe(preEnquiryStatus);
 
-      const freshAuditRepo = new TenantAuditRepository();
       const freshEnquiryAudit = await freshAuditRepo.listAuditEntriesForRecord(
         testTenantCtx('P-000004'),
         'enquiry',
         openEnquiry.id,
       );
-      expect(freshEnquiryAudit.some((a) => Date.parse(a.at) >= startedAt)).toBe(false);
+      expect(freshEnquiryAudit.some((a) => !preEnquiryAuditIds.has(a.id))).toBe(false);
       const written = await auditEntriesWrittenSince(startedAt);
       expect(written.some((a) => String(a.newValue ?? '').includes(conversionTitle))).toBe(false);
+
+      // Positive control (R464): identical saveMatterRecord (with sourceEnquiryId) with no forced failure
+      // commits the matter, converts the enquiry, creates the automatic 'complete_matter_opening' task,
+      // and commits matter, enquiry, and task audit rows readable on a fresh connection.
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const cleanOpenEnquiry = getStore().enquiries.find(
+        (e) => e.id === openEnquiry.id,
+      )!;
+      expect(cleanOpenEnquiry).toBeDefined();
+      const prePositiveTasksCount = getStore().tasks.length;
+      const positiveTitle = `R464 Positive Conversion Matter ${Date.now().toString(36)}`;
+      const positiveSaveRes = await withTimeout(
+        runAsTestEmployee('P-000004', () =>
+          saveMatterRecord(
+            {
+              ...matterTemplate,
+              matterNumber: 'DRAFT',
+              openedAt: null,
+              fieldValues: {},
+              title: positiveTitle,
+              sourceEnquiryId: cleanOpenEnquiry.id,
+              agreedFeeCapGbp: 5000,
+              feeEstimateGbp: 5000,
+            },
+            { byId: 'P-000004', saveMode: 'submit_cleared' },
+          ),
+        ),
+        2000,
+        'saveMatterRecord -> finalizeEnquiryConversionToMatter -> raiseAutomaticTask (positive control)',
+      );
+      expect(positiveSaveRes.errors).toBeUndefined();
+      expect(positiveSaveRes.matter).not.toBeNull();
+      expect(positiveSaveRes.matter!.matterNumber).not.toBe('DRAFT');
+
+      clearStoreMemoryCache();
+      const afterPositiveStore = getStore();
+      expect(afterPositiveStore.tasks.length).toBe(prePositiveTasksCount + 1);
+      const newAutoTasks = afterPositiveStore.tasks.filter(
+        (t) =>
+          t.autoTrigger === 'complete_matter_opening' &&
+          t.linkedRecords.some(
+            (lr) => lr.recordType === 'matter' && lr.recordId === positiveSaveRes.matter!.id,
+          ),
+      );
+      expect(newAutoTasks).toHaveLength(1);
+      const createdAutoTask = newAutoTasks[0]!;
+      expect(
+        afterPositiveStore.enquiries.find((e) => e.id === cleanOpenEnquiry.id)?.status,
+      ).toBe('Converted');
+
+      const freshPoolMgr = new TenantPostgresPoolManager();
+      try {
+        const freshPositiveAuditRepo = new TenantAuditRepository({
+          poolManager: freshPoolMgr,
+        });
+        const positiveCtx = testTenantCtx('P-000004');
+        const matterAuditRows = await freshPositiveAuditRepo.listAuditEntriesForRecord(
+          positiveCtx,
+          'matter',
+          positiveSaveRes.matter!.id,
+        );
+        const enquiryAuditRows = await freshPositiveAuditRepo.listAuditEntriesForRecord(
+          positiveCtx,
+          'enquiry',
+          cleanOpenEnquiry.id,
+        );
+        const taskAuditRows = await freshPositiveAuditRepo.listAuditEntriesForRecord(
+          positiveCtx,
+          'task',
+          createdAutoTask.id,
+        );
+        expect(
+          matterAuditRows.some((a) => String(a.newValue ?? '').includes(positiveTitle)),
+        ).toBe(true);
+        expect(
+          enquiryAuditRows.some(
+            (a) =>
+              a.action === 'convert' &&
+              String(a.newValue ?? '').includes(positiveSaveRes.matter!.id),
+          ),
+        ).toBe(true);
+        expect(taskAuditRows.some((a) => a.action === 'create')).toBe(true);
+      } finally {
+        await freshPoolMgr.closeAllPools();
+      }
     } finally {
       setAuditAdapterFailureHookForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());

@@ -659,9 +659,6 @@ export const NON_LIVE_AUDIT_RESET_MIGRATION_0008: TenantMigrationDefinition = {
     'Expand-phase migration adding the SECURITY DEFINER public.reset_non_live_audit_log(text) function in non-live tenant databases only, executable by the tenant role, so demo reset never needs the migrate identity, plus idx_audit_entries_tenant_seq and sequence privilege tightening (S0-15, R451, R453, R460).',
   tablesChanged: [],
   dependsOn: ['0007'],
-  acceptedPriorChecksums: [
-    'ee6d64d00491d8ec88618161273cdce5206997c711e387d3b93c5888acd48dc0',
-  ],
   upSql: `
 CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_seq
   ON public.audit_entries (tenant_id, seq DESC);
@@ -853,9 +850,11 @@ export class TenantMigrationRunner {
                 recordedChecksum ?? '',
               )
             ) {
-              throw new Error(
+              const mismatchErr = new Error(
                 `TENANCY_MIGRATION_CHECKSUM_MISMATCH: Migration ${migration.version} was modified after being applied to ${ctx.postgresDatabaseName}.`,
-              );
+              ) as Error & { code: string };
+              mismatchErr.code = 'TENANCY_MIGRATION_CHECKSUM_MISMATCH';
+              throw mismatchErr;
             }
             await client.query('COMMIT');
             continue;
