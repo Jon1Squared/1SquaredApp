@@ -39,6 +39,8 @@ export interface TenantPostgresPoolManagerOptions {
   readonly idleTimeoutMillis?: number;
   readonly connectionTimeoutMillis?: number;
   readonly poolIdleEvictionMs?: number;
+  /** How long a positive schema readiness check is trusted before re-checking (R437). */
+  readonly schemaReadyTtlMs?: number;
 }
 
 interface ManagedPoolEntry {
@@ -233,7 +235,7 @@ async function ensurePgParsersInitialised(): Promise<typeof PgTypes> {
 
 export class TenantPostgresPoolManager {
   private readonly pools = new Map<string, ManagedPoolEntry>();
-  private readonly readySchemas = new Set<string>();
+  private readonly readySchemas = new Map<string, number>();
   private readonly options: TenantPostgresPoolManagerOptions;
 
   public constructor(options: TenantPostgresPoolManagerOptions = {}) {
@@ -334,14 +336,24 @@ export class TenantPostgresPoolManager {
     databaseName: string,
     requiredVersion: string,
   ): boolean {
-    return this.readySchemas.has(`${databaseName}::${requiredVersion}`);
+    const key = `${databaseName}::${requiredVersion}`;
+    const markedAtMs = this.readySchemas.get(key);
+    if (markedAtMs === undefined) {
+      return false;
+    }
+    const ttlMs = this.options.schemaReadyTtlMs ?? 30_000;
+    if (Date.now() - markedAtMs > ttlMs) {
+      this.readySchemas.delete(key);
+      return false;
+    }
+    return true;
   }
 
   public markTenantSchemaReady(
     databaseName: string,
     requiredVersion: string,
   ): void {
-    this.readySchemas.add(`${databaseName}::${requiredVersion}`);
+    this.readySchemas.set(`${databaseName}::${requiredVersion}`, Date.now());
   }
 
   public invalidateSchemaReadiness(databaseName?: string): void {
@@ -349,7 +361,7 @@ export class TenantPostgresPoolManager {
       this.readySchemas.clear();
       return;
     }
-    for (const key of Array.from(this.readySchemas)) {
+    for (const key of Array.from(this.readySchemas.keys())) {
       if (key.startsWith(`${databaseName}::`)) {
         this.readySchemas.delete(key);
       }

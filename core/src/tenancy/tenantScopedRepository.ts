@@ -84,12 +84,27 @@ function createSchemaNotReadyError(params: {
   databaseName: string;
   currentVersion: string | null;
   requiredVersion: string;
+  missingVersion?: string;
 }): Error & { code: string } {
   const err = new Error(
-    `TENANT_SCHEMA_NOT_READY: Tenant "${params.tenantId}" database "${params.databaseName}" schema version is "${params.currentVersion ?? 'unmigrated'}", below required "${params.requiredVersion}".`,
+    params.missingVersion && params.currentVersion
+      ? `TENANT_SCHEMA_NOT_READY: Tenant "${params.tenantId}" database "${params.databaseName}" is missing migration "${params.missingVersion}" required by "${params.requiredVersion}".`
+      : `TENANT_SCHEMA_NOT_READY: Tenant "${params.tenantId}" database "${params.databaseName}" schema version is "${params.currentVersion ?? 'unmigrated'}", below required "${params.requiredVersion}".`,
   ) as Error & { code: string };
   err.code = 'TENANT_SCHEMA_NOT_READY';
   return err;
+}
+
+export function listRequiredSchemaVersions(requiredVersion: string): string[] {
+  const required = Number(requiredVersion);
+  if (!/^\d{4}$/.test(requiredVersion) || required < 1) {
+    throw new Error(
+      `TENANCY_SCHEMA_VERSION_INVALID: Required schema version "${requiredVersion}" is not a four-digit catalogue version.`,
+    );
+  }
+  return Array.from({ length: required }, (_, i) =>
+    String(i + 1).padStart(4, '0'),
+  );
 }
 
 export function toIsoString(val: unknown): string {
@@ -224,12 +239,15 @@ export abstract class TenantScopedRepository {
           throw migCheckErr;
         }
 
+        const appliedVersions = new Set(versionRows.map((r) => r.version));
         const maxVersion =
-          versionRows
-            .map((r) => r.version)
-            .sort()
-            .at(-1) ?? null;
-        if (!maxVersion || maxVersion < this.requiredSchemaVersion) {
+          [...appliedVersions].sort().at(-1) ?? null;
+        // R437: every catalogue version up to the required one must be applied, not only the
+        // highest. Catalogue versions are contiguous four-digit numbers (validated in tests).
+        const missingVersion = listRequiredSchemaVersions(
+          this.requiredSchemaVersion,
+        ).find((v) => !appliedVersions.has(v));
+        if (!maxVersion || missingVersion) {
           await rawClient.query('ROLLBACK');
           inTransaction = false;
           throw createSchemaNotReadyError({
@@ -237,6 +255,9 @@ export abstract class TenantScopedRepository {
             databaseName: target.databaseName,
             currentVersion: maxVersion,
             requiredVersion: this.requiredSchemaVersion,
+            ...(missingVersion && maxVersion !== null && maxVersion >= this.requiredSchemaVersion
+              ? { missingVersion }
+              : {}),
           });
         }
         this.poolManager.markTenantSchemaReady(
@@ -260,6 +281,10 @@ export abstract class TenantScopedRepository {
               rowCount: res.rowCount ?? res.rows.length,
             };
           } catch (queryErr) {
+            if ((queryErr as { code?: string })?.code === '42P01') {
+              // A missing relation means the schema changed under us (R437): re-check next time.
+              this.poolManager.invalidateSchemaReadiness(target.databaseName);
+            }
             throw sanitizePostgresError(queryErr, 'query');
           }
         },

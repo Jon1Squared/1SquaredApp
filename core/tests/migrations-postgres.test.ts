@@ -238,6 +238,48 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect('provisionPostgresClusterRolesAndDatabases' in corePkg).toBe(false);
   });
 
+  it('refuses a tenant whose intermediate migration was rolled back, and re-checks a cached ready state after its TTL (R437)', async () => {
+    // Catalogue versions are contiguous, which the readiness check relies on.
+    expect(CORE_TENANT_MIGRATIONS.map((m) => m.version)).toEqual(
+      CORE_TENANT_MIGRATIONS.map((_, i) => String(i + 1).padStart(4, '0')),
+    );
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'mig-gap-firm', environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext('mig-gap-firm');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+    const cachedPoolMgr = new TenantPostgresPoolManager({ schemaReadyTtlMs: 0 });
+    const freshPoolMgr = new TenantPostgresPoolManager();
+    try {
+      // Positive control: fully migrated tenant is ready.
+      const cachedRepo = new DiagnosticProbeRepository({ poolManager: cachedPoolMgr });
+      expect(await cachedRepo.countDiagnosticTemplateRows(ctx)).toBe(0);
+
+      expect(await runner.rollbackVersion(ctx, '0005')).toBe(true);
+
+      const expectedNotReady = {
+        code: 'TENANT_SCHEMA_NOT_READY',
+        message: `TENANT_SCHEMA_NOT_READY: Tenant "mig-gap-firm" database "pg_tenant_mig_gap_firm_test" is missing migration "0005" required by "${CORE_REQUIRED_SCHEMA_VERSION}".`,
+      };
+      // A fresh pool manager re-reads the ledger and sees the gap.
+      const freshRepo = new DiagnosticProbeRepository({ poolManager: freshPoolMgr });
+      await expect(freshRepo.countDiagnosticTemplateRows(ctx)).rejects.toMatchObject(
+        expectedNotReady,
+      );
+      // The previously-ready cache expires and re-checks.
+      await expect(cachedRepo.countDiagnosticTemplateRows(ctx)).rejects.toMatchObject(
+        expectedNotReady,
+      );
+    } finally {
+      await cachedPoolMgr.closeAllPools();
+      await freshPoolMgr.closeAllPools();
+      await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    }
+  });
+
   it('restores both documents template foreign keys when 0006 is rolled back (R434)', async () => {
     await provisionPostgresClusterRolesAndDatabases({
       tenants: [{ tenantId: 'mig-fk-restore', environment: 'test' }],
