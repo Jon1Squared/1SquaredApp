@@ -21,7 +21,6 @@ import type {
   TenantContext,
 } from '../api/index';
 import { TenantAuditRepository } from './auditRepository';
-import { bumpPostgresPartiesMattersWriteSeq } from './partyRepository';
 import {
   TenantScopedRepository,
   type TenantSqlClient,
@@ -607,7 +606,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       }
     }
 
-    bumpPostgresPartiesMattersWriteSeq();
     return mapTeamRow<TTeam>(saved);
   }
 
@@ -695,7 +693,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -746,7 +743,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
       const readRes = await tx.query<EmploymentRow>(
         `SELECT eer.*, esr.payroll_json
          FROM public.employee_employment_records eer
@@ -790,7 +786,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
     });
   }
 
@@ -877,7 +872,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -951,7 +945,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       );
     }
     this.assertRowTenant(ctx, saved.tenant_id, 'employee_sensitive_records');
-    bumpPostgresPartiesMattersWriteSeq();
     return mapSensitiveRow<TSens>(saved)!;
   }
 
@@ -1034,7 +1027,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
             input.payroll ? JSON.stringify(input.payroll) : null,
           ],
         );
-        bumpPostgresPartiesMattersWriteSeq();
       }
       if (input.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, input.auditEntries);
@@ -1120,7 +1112,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
     });
   }
 
@@ -1267,7 +1258,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
       return affected;
     });
   }
@@ -1320,7 +1310,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
           'DELETE FROM public.employee_migration_reports WHERE tenant_id = $1',
           [ctx.tenantId],
         );
-        bumpPostgresPartiesMattersWriteSeq();
         return null;
       }
       const res = await tx.query<EmployeeMigrationReportRow>(
@@ -1336,7 +1325,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (row) {
         this.assertRowTenant(ctx, row.tenant_id, 'employee_migration_reports');
       }
-      bumpPostgresPartiesMattersWriteSeq();
       return row?.report_json
         ? (structuredClone(row.report_json) as TReport)
         : null;
@@ -1360,7 +1348,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
         'DELETE FROM public.employee_migration_reports WHERE tenant_id = $1',
         [ctx.tenantId],
       );
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -1422,7 +1409,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
         if (options?.auditEntries?.length) {
           await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
         }
-        bumpPostgresPartiesMattersWriteSeq();
         return null;
       }
       const updatedAtIso = safeTimestampIso(options?.updatedAt);
@@ -1445,7 +1431,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
       return row?.rbac_override_json
         ? (structuredClone(row.rbac_override_json) as TOverride)
         : null;
@@ -1504,7 +1489,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -1719,7 +1703,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
          WHERE tenant_id = $1 AND counter_key = 'TM'`,
         [ctx.tenantId],
       );
-      bumpPostgresPartiesMattersWriteSeq();
     });
   }
 }

@@ -13,6 +13,7 @@ import {
   TenantAuditRepository,
   TenantDocumentRepository,
   TenantDocumentStoreRepository,
+  TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantKeyDateRepository,
   TenantMatterRepository,
@@ -22,6 +23,9 @@ import {
   type MatterRestrictionMetadata,
   type TenantConfiguration,
   type TenantContext,
+  type TenantEmployeeEmploymentPayload,
+  type TenantEmployeeMigrationReportPayload,
+  type TenantEmployeeSensitiveHrPayload,
   type TenantEnquiryRecord,
   type TenantMatterRecord,
   type TenantMergeHistoryRecord,
@@ -31,8 +35,10 @@ import {
   type TenantPersonOrganisationLinkRecord,
   type TenantPersonRecord,
   type TenantQuoteRecord,
+  type TenantRbacConfigOverridePayload,
   type TenantSignOffRecord,
   type TenantTaskRecord,
+  type TenantTeamRecord,
 } from '@platform/core';
 import { isMatterRestrictedForKeyDates } from '@/domain/keyDates';
 import { canPersonAccessMatter } from '@/domain/rbac';
@@ -46,6 +52,7 @@ export type ImportableStoreModule =
   | 'intake'
   | 'quotes'
   | 'tasks'
+  | 'hr'
   | 'documents'
   | 'document-store'
   | 'key-dates'
@@ -57,6 +64,7 @@ export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
   'intake',
   'quotes',
   'tasks',
+  'hr',
   'documents',
   'document-store',
   'key-dates',
@@ -106,6 +114,11 @@ export interface ImportStoreModulesResult {
     notifications: number;
     signOffs: number;
     recentlyViewed: number;
+    teams: number;
+    employeeEmploymentRecords: number;
+    employeeSensitiveRecords: number;
+    hasEmployeeMigrationReport: boolean;
+    hasRbacConfigOverride: boolean;
     documentTemplates: number;
     documentTemplateVersions: number;
     documents: number;
@@ -207,6 +220,10 @@ export async function clearMigratedPostgresModulesForTenant(options: {
         : {}),
     });
   }
+  if (modules.includes('hr')) {
+    const hrRbacRepo = new TenantHrAndRbacRepository();
+    await hrRbacRepo.clearTenantData(ctx);
+  }
   if (modules.includes('parties')) {
     const partyRepo = new TenantPartyRepository();
     await partyRepo.clearTenantData(ctx);
@@ -253,6 +270,11 @@ export async function importFirmStoreModulesToPostgres(
     notifications: 0,
     signOffs: 0,
     recentlyViewed: 0,
+    teams: 0,
+    employeeEmploymentRecords: 0,
+    employeeSensitiveRecords: 0,
+    hasEmployeeMigrationReport: false,
+    hasRbacConfigOverride: false,
     documentTemplates: 0,
     documentTemplateVersions: 0,
     documents: 0,
@@ -273,9 +295,30 @@ export async function importFirmStoreModulesToPostgres(
     auditEntries: 0,
   };
 
+  // R421: Capture any pre-existing PostgreSQL `people.employment_json` / `employee_employment_records`
+  // before `parties` import runs so post-S0-16 live employment edits in PostgreSQL are never overwritten
+  // by stale `store.people[].employment`.
+  const preImportPgEmployment = modules.includes('hr')
+    ? await new TenantHrAndRbacRepository().readAuthoritativePeopleEmploymentForImport(
+        ctx,
+      )
+    : [];
+  const preImportPgEmpByPersonId = new Map(
+    preImportPgEmployment.map((row) => [row.personId, row]),
+  );
+
   if (modules.includes('parties')) {
     const partyRepo = new TenantPartyRepository();
-    const people = (store.people ?? []) as unknown as TenantPersonRecord[];
+    const people = (store.people ?? []).map((p) => {
+      const existingPg = preImportPgEmpByPersonId.get(p.id);
+      if (existingPg?.employment) {
+        return {
+          ...p,
+          employment: existingPg.employment,
+        } as unknown as TenantPersonRecord;
+      }
+      return p as unknown as TenantPersonRecord;
+    });
     const organisations = (store.organisations ??
       []) as unknown as TenantOrganisationRecord[];
     const links = (store.links ??
@@ -441,6 +484,141 @@ export async function importFirmStoreModulesToPostgres(
     ) {
       throw new Error(
         'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection tasks/workflows row counts did not match imported totals.',
+      );
+    }
+  }
+
+  if (modules.includes('hr')) {
+    const hrRbacRepo = new TenantHrAndRbacRepository();
+    const partyRepo = new TenantPartyRepository();
+
+    // R421: Read authoritative employment from PostgreSQL (`people.employment_json` / `employee_employment_records`)
+    // and combine with pre-import snapshot and fallback JSON `store.people` so post-S0-16 live employment edits win.
+    const currentPgEmployment =
+      await hrRbacRepo.readAuthoritativePeopleEmploymentForImport(ctx);
+    const currentPgByPersonId = new Map(
+      currentPgEmployment.map((row) => [row.personId, row]),
+    );
+    const storePeopleById = new Map(
+      (store.people ?? []).map((p) => [p.id, p]),
+    );
+    const sensitiveRecordsMap = (store.employeeSensitiveRecords ?? {}) as Record<
+      string,
+      TenantEmployeeSensitiveHrPayload | undefined
+    >;
+
+    const allCandidatePersonIds = new Set<string>([
+      ...preImportPgEmpByPersonId.keys(),
+      ...currentPgByPersonId.keys(),
+      ...storePeopleById.keys(),
+      ...Object.keys(sensitiveRecordsMap),
+    ]);
+
+    const teams = (store.teams ?? []) as unknown as TenantTeamRecord[];
+    const migrationReport = (store.employeeMigrationReport ??
+      null) as TenantEmployeeMigrationReportPayload | null;
+    const rbacOverride = (store.rbacConfigOverride ??
+      null) as TenantRbacConfigOverridePayload | null;
+
+    await hrRbacRepo.withTenantTransaction(ctx, async () => {
+      await hrRbacRepo.putTeams(ctx, teams);
+      counts.teams = teams.length;
+
+      for (const personId of allCandidatePersonIds) {
+        const prePg = preImportPgEmpByPersonId.get(personId);
+        const curPg = currentPgByPersonId.get(personId);
+        const storePerson = storePeopleById.get(personId);
+        const sensitiveHr = sensitiveRecordsMap[personId] ?? null;
+
+        const authoritativeEmployment: TenantEmployeeEmploymentPayload | null =
+          prePg?.employment ??
+          curPg?.employment ??
+          ((storePerson?.employment as unknown as TenantEmployeeEmploymentPayload | undefined) ??
+            null);
+
+        if (!authoritativeEmployment && !sensitiveHr) {
+          continue;
+        }
+
+        // Ensure the parent `public.people` row exists before inserting into `employee_employment_records`
+        // or `employee_sensitive_records` (`ON DELETE RESTRICT` FK `R413`).
+        if (!curPg && storePerson) {
+          await partyRepo.putPerson(
+            ctx,
+            {
+              ...storePerson,
+              employment: authoritativeEmployment ?? undefined,
+            } as unknown as TenantPersonRecord,
+          );
+        }
+
+        const mergedIntoId =
+          curPg?.mergedIntoId ?? storePerson?.mergedIntoId ?? null;
+
+        if (authoritativeEmployment) {
+          await hrRbacRepo.putEmploymentRecord(
+            ctx,
+            personId,
+            authoritativeEmployment,
+            {
+              syncFirmWorkEmail: true,
+              personMergedIntoId: mergedIntoId,
+            },
+          );
+          counts.employeeEmploymentRecords += 1;
+        }
+
+        const payroll =
+          authoritativeEmployment?.payroll &&
+          typeof authoritativeEmployment.payroll === 'object'
+            ? authoritativeEmployment.payroll
+            : null;
+
+        if (payroll || sensitiveHr) {
+          await hrRbacRepo.putEmployeeSensitiveRecord(ctx, {
+            personId,
+            payroll,
+            sensitiveHr,
+            updatedById: sensitiveHr?.updatedById ?? 'system-store-import',
+            ...(sensitiveHr?.updatedAt
+              ? { updatedAt: sensitiveHr.updatedAt }
+              : {}),
+          });
+          counts.employeeSensitiveRecords += 1;
+        }
+      }
+
+      if (migrationReport) {
+        await hrRbacRepo.putEmployeeMigrationReport(ctx, migrationReport);
+        counts.hasEmployeeMigrationReport = true;
+      }
+
+      if (rbacOverride && Object.keys(rbacOverride).length > 0) {
+        await hrRbacRepo.putRbacTenantConfig(
+          ctx,
+          rbacOverride,
+          'system-store-import',
+        );
+        counts.hasRbacConfigOverride = true;
+      }
+    });
+
+    const verifyHrRepo = new TenantHrAndRbacRepository();
+    const verifiedHrCounts = await verifyHrRepo.countAllTenantHrRbacRows(ctx);
+    const verifyPartyRepo = new TenantPartyRepository();
+    const verifiedPartyCounts =
+      await verifyPartyRepo.countAllTenantPartyRows(ctx);
+    counts.personEmails = verifiedPartyCounts.personEmails;
+    if (
+      verifiedHrCounts.teams < counts.teams ||
+      verifiedHrCounts.employmentRecords < counts.employeeEmploymentRecords ||
+      verifiedHrCounts.sensitiveRecords < counts.employeeSensitiveRecords ||
+      (counts.hasEmployeeMigrationReport &&
+        !verifiedHrCounts.hasMigrationReport) ||
+      (counts.hasRbacConfigOverride && !verifiedHrCounts.hasRbacConfigOverride)
+    ) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection HR/teams/RBAC row counts did not match imported totals.',
       );
     }
   }

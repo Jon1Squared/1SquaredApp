@@ -15,9 +15,10 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import { AuthorisationError } from '@/domain/rbac';
-import type { Enquiry, Matter, Organisation, Person, PersonOrganisationLink } from '@/domain/types';
+import type { Enquiry, Matter, Organisation, Person, PersonOrganisationLink, Team } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
@@ -2539,14 +2540,17 @@ export const POST = guardedRoute(
       const partyRepo = getPartyRepository();
       const matterRepo = getMatterRepository();
       const intakeRepo = getIntakeQuoteRepository();
-      const [allPeople, allOrganisations, allMatters, allEnquiries] = await Promise.all([
+      const hrRepo = getHrAndRbacRepository();
+      const [allPeople, allOrganisations, allMatters, allEnquiries, allTeams] = await Promise.all([
         partyRepo.listAllPeople<Person>(tenantContext),
         partyRepo.listAllOrganisations<Organisation>(tenantContext),
         matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
         intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(tenantContext),
+        hrRepo.listAllTeams<Team>(tenantContext),
       ]);
       const actorPerson = allPeople.find((p) => p.id === byId) ?? null;
-      const visibility = buildRecordVisibility(store, actorPerson, {
+      const visibility = buildRecordVisibility({ teams: allTeams }, actorPerson, {
+        teams: allTeams,
         people: allPeople,
         matters: allMatters,
         enquiries: allEnquiries,
@@ -2592,7 +2596,7 @@ export const POST = guardedRoute(
         Boolean(guardedActor?.permissions.has('contact:create')) &&
         hasPersonPermission(actorPerson, 'contact:create', {
           allPeople,
-          teams: store.teams,
+          teams: allTeams,
         });
 
       // 1. If the extracted client does not exist in the CRM store yet, create it only when actor holds contact:create
@@ -2726,16 +2730,17 @@ export const POST = guardedRoute(
         }
       }
 
-      const latestStore = getStore();
-      const [latestPeople, latestOrganisations, latestLinks, latestMatters, latestEnquiries] =
+      const [latestPeople, latestOrganisations, latestLinks, latestMatters, latestEnquiries, latestTeams] =
         await Promise.all([
           partyRepo.listAllPeople<Person>(tenantContext),
           partyRepo.listAllOrganisations<Organisation>(tenantContext),
           partyRepo.listAllLinks<PersonOrganisationLink>(tenantContext),
           matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
           intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(tenantContext),
+          hrRepo.listAllTeams<Team>(tenantContext),
         ]);
-      const latestVisibility = buildRecordVisibility(latestStore, actorPerson, {
+      const latestVisibility = buildRecordVisibility({ teams: latestTeams }, actorPerson, {
+        teams: latestTeams,
         people: latestPeople,
         matters: latestMatters,
         enquiries: latestEnquiries,

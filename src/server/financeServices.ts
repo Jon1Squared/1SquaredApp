@@ -19,10 +19,11 @@ import {
   PMS_AS_AT_UNAVAILABLE_LABEL,
 } from '@/domain/pms';
 import { getActiveActorSession } from '@/domain/rbac';
-import type { Matter, Person, PmsLink } from '@/domain/types';
+import type { Matter, Person, PmsLink, Team } from '@/domain/types';
 import {
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
+  getHrAndRbacRepository,
   getMatterRepository,
   getPartyRepository,
   resolveCurrentTenantContext,
@@ -119,6 +120,7 @@ export async function verifyFinanceActorAndPermission(
       tenantContext: TenantContext;
       people: Person[];
       matters: Matter[];
+      teams: Team[];
       actor: Person;
       effectiveWorkPerson: Person;
       permSet: ReturnType<typeof resolvePersonPermissionSet>;
@@ -183,9 +185,10 @@ export async function verifyFinanceActorAndPermission(
     );
 
   const store = getStore();
-  const [people, matters] = await Promise.all([
+  const [people, matters, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(prelimTenantContext),
     getMatterRepository().listAllMattersUnfiltered<Matter>(prelimTenantContext),
+    getHrAndRbacRepository().listAllTeams<Team>(prelimTenantContext),
   ]);
   const actor = people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
   if (!actor) {
@@ -201,7 +204,7 @@ export async function verifyFinanceActorAndPermission(
       : undefined;
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     tokenRoles,
   });
   if (!permSet.permissions.has(requiredPermission)) {
@@ -211,7 +214,7 @@ export async function verifyFinanceActorAndPermission(
     );
   }
 
-  const actorRoles = resolveEmployeeRoles(actor, store.teams);
+  const actorRoles = resolveEmployeeRoles(actor, teams);
   const tenantContext: TenantContext =
     verifiedTenantContext ??
     createVerifiedTenantContext(
@@ -227,6 +230,7 @@ export async function verifyFinanceActorAndPermission(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    teams,
     tokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -261,6 +265,7 @@ export async function verifyFinanceActorAndPermission(
     tenantContext,
     people,
     matters,
+    teams,
     actor,
     effectiveWorkPerson,
     permSet,
@@ -289,6 +294,7 @@ export async function getMatterFinanceRows(
     store,
     people,
     matters,
+    teams,
     actor,
     tokenRoles,
     accessibleLinkedPmsMatterCodes,
@@ -307,7 +313,7 @@ export async function getMatterFinanceRows(
         !matter ||
         !canPersonAccessMatter(matter, actor.id, actor, {
           allPeople: people,
-          teams: store.teams,
+          teams,
           tokenRoles,
         })
       ) {

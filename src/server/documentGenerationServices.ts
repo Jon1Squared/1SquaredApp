@@ -76,11 +76,12 @@ import {
   getActiveActorSession,
   hasPersonPermission,
 } from './rbacRuntime';
-import type { Matter, Organisation, Person } from '@/domain/types';
+import type { Matter, Organisation, Person, Team } from '@/domain/types';
 import { resolveRequestCorrelationId } from './correlationId';
 import {
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
+  getHrAndRbacRepository,
   getMatterRepository,
   getPartyRepository,
   resolveCurrentTenantContext,
@@ -712,6 +713,7 @@ export async function getInitializedDocGenContext(
   people: Person[];
   organisations: Organisation[];
   matters: Matter[];
+  teams: Team[];
   config: TenantConfiguration;
   repo: TenantDocumentRepository;
   storage: DocumentStorageProvider;
@@ -722,10 +724,11 @@ export async function getInitializedDocGenContext(
     userId,
     session,
   );
-  const [people, organisations, matters] = await Promise.all([
+  const [people, organisations, matters, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const repo = getDocumentRepository();
   const config = await getEffectiveTenantConfig(ctx, repo);
@@ -733,7 +736,7 @@ export async function getInitializedDocGenContext(
 
   await ensureSeedDocumentTemplates(ctx, store, people, repo, storage);
 
-  return { store, ctx, user, people, organisations, matters, config, repo, storage };
+  return { store, ctx, user, people, organisations, matters, teams, config, repo, storage };
 }
 
 export async function getDocumentGenerationSnapshotForUser(
@@ -1238,7 +1241,7 @@ export async function previewTemplateService(
   mimeType: string;
   missingRequiredFields: string[];
 }> {
-  const { store, ctx, user, people, organisations, matters, config, repo, storage } =
+  const { store, ctx, user, people, organisations, matters, teams, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
@@ -1248,7 +1251,7 @@ export async function previewTemplateService(
   const accessibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, user.id, user, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       config,
     }),
   );
@@ -1333,7 +1336,7 @@ export async function generateDocumentService(
   fileBase64?: string;
   missingRequiredFields: string[];
 }> {
-  const { store, ctx, user, people, organisations, matters, config, repo, storage } =
+  const { store, ctx, user, people, organisations, matters, teams, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
@@ -1369,7 +1372,7 @@ export async function generateDocumentService(
     ? (store.values.find((v) => v.id === matter.workTypeSubcategoryId)?.label ??
       matter.workTypeSubcategoryId)
     : null;
-  const userTeam = store.teams.find(
+  const userTeam = teams.find(
     (t) => t.memberIds.includes(user.id) || t.leadIds.includes(user.id),
   );
 

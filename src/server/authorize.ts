@@ -13,6 +13,7 @@ import {
   requirePermission,
   type MatterAccessRecord,
   type PermissionKey,
+  type RbacConfiguration,
   type ResolvedPermissionSet,
   type TenantContext,
 } from '@platform/core';
@@ -36,14 +37,17 @@ import {
   emitTenantTelemetryEvent,
   resolveCurrentRequestCorrelationId,
 } from './telemetry';
-import { resolvePersonPermissionSet } from './rbacRuntime';
-import { getPartyRepository } from './auditAdapter';
+import {
+  getDefaultTenantRbacConfig,
+  mergeRbacConfigOverlay,
+  resolvePersonPermissionSet,
+} from './rbacRuntime';
+import { getHrAndRbacRepository, getPartyRepository } from './auditAdapter';
 import {
   requireAuthenticatedActor,
   type AuthenticatedActorContext,
 } from './services';
-import type { Person } from '@/domain/types';
-import { getStore } from './store';
+import type { Person, Team } from '@/domain/types';
 
 export interface GuardedActorContext extends AuthenticatedActorContext {
   readonly tenantContext: TenantContext;
@@ -161,11 +165,27 @@ async function buildGuardedActorContext(
     { correlationId },
   );
   const tenantContext = resolveCurrentTenantContext(verifiedActor, tenantCfg);
-  const store = getStore();
-  const allPeople = await getPartyRepository().listAllPeople<Person>(tenantContext);
+  const [allPeople, teams, rbacOverride] = await Promise.all([
+    actor.allPeople
+      ? Promise.resolve([...actor.allPeople])
+      : getPartyRepository().listAllPeople<Person>(tenantContext),
+    actor.teams
+      ? Promise.resolve([...actor.teams])
+      : getHrAndRbacRepository().listAllTeams<Team>(tenantContext),
+    getHrAndRbacRepository().getRbacTenantConfig<RbacConfiguration>(
+      tenantContext,
+    ),
+  ]);
+  const effectiveRbacConfig = rbacOverride
+    ? mergeRbacConfigOverlay(
+        getDefaultTenantRbacConfig(tenantContext.tenantId),
+        rbacOverride,
+      )
+    : undefined;
   const permissions = resolvePersonPermissionSet(actor.person, {
     allPeople,
-    teams: store.teams,
+    teams,
+    ...(effectiveRbacConfig ? { config: { rbac: effectiveRbacConfig } } : {}),
     tenantId: tenantContext.tenantId,
     context: tenantContext,
     mfaVerified: tenantContext.mfaVerified,
