@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getGlobalTenantPostgresPoolManager,
   MATTER_CONCURRENCY_CONFLICT_CODE,
@@ -33,7 +35,9 @@ import {
   createOrUpdateLink,
   executeMerge,
   generateMatterNumber,
+  getAppSnapshot,
   liftMatterRestriction,
+  listFirmAuditEntriesPage,
   markEngagementLetterDrafted,
   reassignLeaverOwnedRecords,
   resetAllDemoData,
@@ -44,6 +48,10 @@ import {
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
 } from '@/server/services';
+import {
+  getActiveTenantConfiguration,
+  setActiveTenantConfigForTesting,
+} from '@/platform/tenantRuntime';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { testDataResetContext } from '@/test/testTenantContexts';
 
@@ -575,14 +583,12 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
 
       // Writer (4): updateMatterConflictRecord
       const m6BeforeW4 = (
-        await freshMatterRepo.getMatterById(ctx, 'M-000006', {
+        await freshMatterRepo.getMatterById<import('@/domain/types').Matter>(ctx, 'M-000006', {
           viewerUserId: 'P-000001',
           hasRestrictedMatterAccess: true,
         })
       )!;
-      const storedM6Conflict = getStore().matters.find(
-        (m) => m.id === 'M-000006',
-      )!.conflictCheckRecord!;
+      const storedM6Conflict = m6BeforeW4.conflictCheckRecord!;
       const w4 = await runWithActiveActorSession(carysSession, () =>
         updateMatterConflictRecord(
           'M-000006',
@@ -629,7 +635,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
 
       // Writer (7): executeMerge (merging a duplicate client contact into M-000011's instructingContactId)
       const m11BeforeW7 = (
-        await freshMatterRepo.getMatterById(ctx, 'M-000011', {
+        await freshMatterRepo.getMatterById<import('@/domain/types').Matter>(ctx, 'M-000011', {
           viewerUserId: 'P-000001',
           hasRestrictedMatterAccess: true,
         })
@@ -647,7 +653,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       const w7Prep = await runWithActiveActorSession(carysSession, () =>
         saveMatterRecord(
           {
-            ...getStore().matters.find((m) => m.id === 'M-000011')!,
+            ...m11BeforeW7,
             instructingContactId: dupPersonId,
           },
           {
@@ -665,7 +671,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         executeMerge('person', survivorPerson.id, dupPersonId, 'P-000001'),
       );
       const m11AfterW7 = (
-        await freshMatterRepo.getMatterById(ctx, 'M-000011', {
+        await freshMatterRepo.getMatterById<import('@/domain/types').Matter>(ctx, 'M-000011', {
           viewerUserId: 'P-000001',
           hasRestrictedMatterAccess: true,
         })
@@ -677,7 +683,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       const w8Prep = await runWithActiveActorSession(carysSession, () =>
         saveMatterRecord(
           {
-            ...getStore().matters.find((m) => m.id === 'M-000011')!,
+            ...m11AfterW7,
             leadFeeEarnerId: 'P-000010',
           },
           {
@@ -859,7 +865,11 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       const preMattersCount = (await freshMatterRepo.countAllTenantMatterRows(ctx)).matters;
 
       setAuditAdapterFailureHookForTesting(() => {
-        throw new Error('SIMULATED_S016_TX_FAILURE');
+        const simErr = new Error('SIMULATED_S016_TX_FAILURE') as Error & {
+          code: string;
+        };
+        simErr.code = 'TENANCY_SIMULATED_S016_TX_FAILURE';
+        throw simErr;
       });
 
       await expect(
@@ -993,5 +1003,599 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     expect(store.matters.some((m) => m.id === nextMatterId)).toBe(false);
 
     await getGlobalTenantPostgresPoolManager().closeAllPools();
+  });
+
+  it('R465: Cold start or new replica with unset ONESQUARED_RUNTIME_STORE_PATH and cleared globals preserves PostgreSQL people and matters without running clearTenantData', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const carysSession = makeActorSession('P-000001');
+    const savedRuntimeStoreEnv = process.env.ONESQUARED_RUNTIME_STORE_PATH;
+
+    try {
+      // 1. Write a person and a matter through the services
+      const createdPerson = await runWithActiveActorSession(carysSession, () =>
+        savePersonRecord(
+          {
+            firstName: 'ColdStart',
+            surname: 'ReplicaSurvivor',
+            emails: [
+              {
+                id: 'em-r465-1',
+                address: 'coldstart.survivor@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+                active: true,
+              },
+            ],
+          },
+          { byId: 'P-000001' },
+        ),
+      );
+      expect(createdPerson.errors).toBeUndefined();
+      const personId = createdPerson.person.id;
+
+      const templateMatter = structuredClone(
+        (await getMatterRepository().listAllMatters<import('@/domain/types').Matter>(
+          testDataResetContext(),
+        ))[0]!,
+      );
+      const { id: _omitId, rowVersion: _omitRv, ...newMatterInput } = templateMatter;
+      void _omitId;
+      void _omitRv;
+      const createdMatter = await runWithActiveActorSession(carysSession, () =>
+        saveMatterRecord(
+          {
+            ...newMatterInput,
+            matterNumber: 'DRAFT',
+            title: 'R465 Cold Start Replica Matter',
+          },
+          { byId: 'P-000001', saveMode: 'draft' },
+        ),
+      );
+      expect(createdMatter.errors).toBeUndefined();
+      const matterId = createdMatter.matter!.id;
+
+      // 2. Simulate a restart: vi.resetModules(), clear every __oneSquared* global, unset ONESQUARED_RUNTIME_STORE_PATH
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
+      vi.resetModules();
+      for (const key of Object.keys(globalThis)) {
+        if (key.startsWith('__oneSquared')) {
+          delete (globalThis as Record<string, unknown>)[key];
+        }
+      }
+      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
+
+      // 3. Re-import services and repositories in the fresh replica module graph and spy on clearTenantData
+      const freshCore = await import('@platform/core');
+      const clearPartySpy = vi.spyOn(
+        freshCore.TenantPartyRepository.prototype,
+        'clearTenantData',
+      );
+      const clearMatterSpy = vi.spyOn(
+        freshCore.TenantMatterRepository.prototype,
+        'clearTenantData',
+      );
+      const clearKeyDateSpy = vi.spyOn(
+        freshCore.TenantKeyDateRepository.prototype,
+        'clearTenantData',
+      );
+      const clearAuditSpy = vi.spyOn(
+        freshCore.TenantAuditRepository.prototype,
+        'resetNonLiveAuditLog',
+      );
+
+      const freshEntra = await import('@/server/entraAuth');
+      const freshRbac = await import('@/server/rbacRuntime');
+      const freshServices = await import('@/server/services');
+      const freshSignedCookie = freshEntra.createSignedEntraSessionCookie(
+        carysSession.verifiedSession,
+      );
+      const freshVerifiedSession =
+        freshEntra.verifySignedEntraSessionCookie(freshSignedCookie)!;
+      const freshCarysSession = {
+        ...carysSession,
+        verifiedSession: freshVerifiedSession,
+      };
+
+      const snapshotAfterColdStart = await freshRbac.runWithActiveActorSession(
+        freshCarysSession,
+        () => freshServices.getAppSnapshot('P-000001'),
+      );
+
+      // 4. Assert both person and matter are unchanged and no clearTenantData ran
+      const readBackPerson = snapshotAfterColdStart.people.find(
+        (p) => p.id === personId,
+      );
+      const readBackMatter = snapshotAfterColdStart.matters.find(
+        (m) => m.id === matterId,
+      );
+      expect(readBackPerson).toBeDefined();
+      expect(readBackPerson?.firstName).toBe('ColdStart');
+      expect(readBackPerson?.surname).toBe('ReplicaSurvivor');
+      expect(readBackMatter).toBeDefined();
+      expect(readBackMatter?.title).toBe('R465 Cold Start Replica Matter');
+
+      expect(clearPartySpy).not.toHaveBeenCalled();
+      expect(clearMatterSpy).not.toHaveBeenCalled();
+      expect(clearKeyDateSpy).not.toHaveBeenCalled();
+      expect(clearAuditSpy).not.toHaveBeenCalled();
+
+      await freshCore.getGlobalTenantPostgresPoolManager().closeAllPools();
+    } finally {
+      if (savedRuntimeStoreEnv !== undefined) {
+        process.env.ONESQUARED_RUNTIME_STORE_PATH = savedRuntimeStoreEnv;
+      } else {
+        delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
+      }
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R466: Two isolated module instances (replicas) sharing one database see writes immediately and stale saves from Replica B do not overwrite Replica A changes', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const carysSession = makeActorSession('P-000001');
+
+    // Verify zero __oneSquaredSynced* globals in core/src/tenancy/ or src/
+    const coreTenancyDir = path.resolve(__dirname, '../src/tenancy');
+    const walkTsFiles = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...walkTsFiles(full));
+        else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(full);
+      }
+      return out;
+    };
+    for (const file of walkTsFiles(coreTenancyDir)) {
+      const src = fs.readFileSync(file, 'utf8');
+      expect(src).not.toContain('__oneSquaredSynced');
+    }
+
+    // Load Replica A and Replica B from separate vi.resetModules() module graphs
+    vi.resetModules();
+    const replicaAEntra = await import('@/server/entraAuth');
+    const replicaARbac = await import('@/server/rbacRuntime');
+    const replicaAServices = await import('@/server/services');
+    const replicaACore = await import('@platform/core');
+    const replicaASession = {
+      ...carysSession,
+      verifiedSession: replicaAEntra.verifySignedEntraSessionCookie(
+        replicaAEntra.createSignedEntraSessionCookie(carysSession.verifiedSession),
+      )!,
+    };
+
+    vi.resetModules();
+    for (const key of Object.keys(globalThis)) {
+      if (key.startsWith('__oneSquared')) {
+        delete (globalThis as Record<string, unknown>)[key];
+      }
+    }
+    const replicaBEntra = await import('@/server/entraAuth');
+    const replicaBRbac = await import('@/server/rbacRuntime');
+    const replicaBServices = await import('@/server/services');
+    const replicaBCore = await import('@platform/core');
+    const replicaBSession = {
+      ...carysSession,
+      verifiedSession: replicaBEntra.verifySignedEntraSessionCookie(
+        replicaBEntra.createSignedEntraSessionCookie(carysSession.verifiedSession),
+      )!,
+    };
+
+    try {
+      // 1. Replica B reads initial snapshot before Replica A writes
+      const snapBInitial = await replicaBRbac.runWithActiveActorSession(
+        replicaBSession,
+        () => replicaBServices.getAppSnapshot('P-000001'),
+      );
+      const matterM11InitialInB = snapBInitial.matters.find(
+        (m) => m.id === 'M-000011',
+      )!;
+      const staleRowVersionInB = matterM11InitialInB.rowVersion!;
+      const personP3InitialInB = snapBInitial.people.find(
+        (p) => p.id === 'P-000003',
+      )!;
+
+      // 2. Replica A creates a new person and a new matter, and updates M-000011 and P-000002
+      const newPersonFromA = await replicaARbac.runWithActiveActorSession(
+        replicaASession,
+        () =>
+          replicaAServices.savePersonRecord(
+            {
+              firstName: 'ReplicaA',
+              surname: 'ImmediateVisibility',
+            },
+            { byId: 'P-000001' },
+          ),
+      );
+      expect(newPersonFromA.errors).toBeUndefined();
+
+      const { id: _omitId, rowVersion: _omitRv, ...m11Template } =
+        structuredClone(matterM11InitialInB);
+      void _omitId;
+      void _omitRv;
+      const newMatterFromA = await replicaARbac.runWithActiveActorSession(
+        replicaASession,
+        () =>
+          replicaAServices.saveMatterRecord(
+            {
+              ...m11Template,
+              matterNumber: 'DRAFT',
+              title: 'Replica A Newly Created Matter',
+            },
+            { byId: 'P-000001', saveMode: 'draft' },
+          ),
+      );
+      expect(newMatterFromA.errors).toBeUndefined();
+
+      const updatedM11FromA = await replicaARbac.runWithActiveActorSession(
+        replicaASession,
+        () =>
+          replicaAServices.saveMatterRecord(
+            {
+              ...matterM11InitialInB,
+              title: 'Replica A Updated Matter Title',
+            },
+            {
+              id: 'M-000011',
+              byId: 'P-000001',
+              expectedRowVersion: staleRowVersionInB,
+            },
+          ),
+      );
+      expect(updatedM11FromA.errors).toBeUndefined();
+      expect(updatedM11FromA.matter?.rowVersion).toBe(staleRowVersionInB + 1);
+
+      const personP2InA = snapBInitial.people.find((p) => p.id === 'P-000002')!;
+      const updatedP2FromA = await replicaARbac.runWithActiveActorSession(
+        replicaASession,
+        () =>
+          replicaAServices.savePersonRecord(
+            {
+              ...personP2InA,
+              jobTitle: 'Replica A Senior Partner Title',
+            },
+            { id: 'P-000002', byId: 'P-000001' },
+          ),
+      );
+      expect(updatedP2FromA.errors).toBeUndefined();
+
+      // 3. Replica B immediately sees Replica A's new person, new matter, updated matter, and updated person
+      const snapBAfterA = await replicaBRbac.runWithActiveActorSession(
+        replicaBSession,
+        () => replicaBServices.getAppSnapshot('P-000001'),
+      );
+      expect(
+        snapBAfterA.people.some((p) => p.id === newPersonFromA.person.id),
+      ).toBe(true);
+      expect(
+        snapBAfterA.matters.some((m) => m.id === newMatterFromA.matter!.id),
+      ).toBe(true);
+      expect(
+        snapBAfterA.matters.find((m) => m.id === 'M-000011')?.title,
+      ).toBe('Replica A Updated Matter Title');
+      expect(
+        snapBAfterA.people.find((p) => p.id === 'P-000002')?.jobTitle,
+      ).toBe('Replica A Senior Partner Title');
+
+      // 4. A save from Replica B based on its older read (staleRowVersionInB) returns errors.conflict and does not overwrite A's change
+      const staleSaveFromB = await replicaBRbac.runWithActiveActorSession(
+        replicaBSession,
+        () =>
+          replicaBServices.saveMatterRecord(
+            {
+              ...matterM11InitialInB,
+              title: 'Replica B Stale Overwrite Attempt',
+            },
+            {
+              id: 'M-000011',
+              byId: 'P-000001',
+              expectedRowVersion: staleRowVersionInB,
+            },
+          ),
+      );
+      expect(staleSaveFromB.matter).toBeNull();
+      expect(staleSaveFromB.errors?.conflict).toBe(
+        MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+      );
+
+      // Saving P-000003 from Replica B does not overwrite Replica A's change to P-000002 or newPersonFromA
+      const saveP3FromB = await replicaBRbac.runWithActiveActorSession(
+        replicaBSession,
+        () =>
+          replicaBServices.savePersonRecord(
+            {
+              ...personP3InitialInB,
+              interests: 'Replica B Updated P3 Interests',
+            },
+            { id: 'P-000003', byId: 'P-000001' },
+          ),
+      );
+      expect(saveP3FromB.errors).toBeUndefined();
+
+      const snapAVerify = await replicaARbac.runWithActiveActorSession(
+        replicaASession,
+        () => replicaAServices.getAppSnapshot('P-000001'),
+      );
+      expect(
+        snapAVerify.matters.find((m) => m.id === 'M-000011')?.title,
+      ).toBe('Replica A Updated Matter Title');
+      expect(
+        snapAVerify.people.find((p) => p.id === 'P-000002')?.jobTitle,
+      ).toBe('Replica A Senior Partner Title');
+      expect(
+        snapAVerify.people.some((p) => p.id === newPersonFromA.person.id),
+      ).toBe(true);
+      expect(
+        snapAVerify.people.find((p) => p.id === 'P-000003')?.interests,
+      ).toBe('Replica B Updated P3 Interests');
+    } finally {
+      await replicaACore.getGlobalTenantPostgresPoolManager().closeAllPools();
+      await replicaBCore.getGlobalTenantPostgresPoolManager().closeAllPools();
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R467: Services-level two-tenant test in one process (Model B configuration) interleaves saves and reads across Tenant A and Tenant B with zero cross-tenant leakage', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const rawBaseConfig = JSON.parse(
+      fs.readFileSync(
+        path.resolve(__dirname, '../../client-not-a-law-firm/config/base.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const rawConfigA: Record<string, unknown> = {
+      ...structuredClone(rawBaseConfig),
+      tenantId: 'tenant-a',
+      displayName: 'Tenant A Law LLP',
+      hostingMode: 'multi_tenant',
+    };
+    const rawConfigB: Record<string, unknown> = {
+      ...structuredClone(rawBaseConfig),
+      tenantId: 'tenant-b',
+      displayName: 'Tenant B Chambers LLP',
+      hostingMode: 'multi_tenant',
+    };
+    setActiveTenantConfigForTesting(rawConfigA, {});
+    const validatedConfigA = getActiveTenantConfiguration();
+    setActiveTenantConfigForTesting(rawConfigB, {});
+    const validatedConfigB = getActiveTenantConfiguration();
+    setActiveTenantConfigForTesting(null);
+
+    const sessionA = makeActorSession(
+      'P-000001',
+      ['admin', 'managing_partner', 'partner', 'risk_compliance', 'fee_earner'],
+      'tenant-a',
+    );
+    const sessionB = makeActorSession(
+      'P-000001',
+      ['admin', 'managing_partner', 'partner', 'risk_compliance', 'fee_earner'],
+      'tenant-b',
+    );
+    const ctxA = makeTenantCtx('tenant-a', 'P-000001');
+    const ctxB = makeTenantCtx('tenant-b', 'P-000001');
+
+    try {
+      // Seed Tenant A and Tenant B per-tenant databases with base fixture so P-000001 and O-000001 exist in both
+      await getMatterRepository().clearTenantData(ctxA);
+      await getPartyRepository().clearTenantData(ctxA);
+      await new TenantAuditRepository().resetNonLiveAuditLog(ctxA);
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxA,
+        tenantConfig: validatedConfigA,
+        store: getStore(),
+        modules: ['parties', 'matters'],
+      });
+
+      await getMatterRepository().clearTenantData(ctxB);
+      await getPartyRepository().clearTenantData(ctxB);
+      await new TenantAuditRepository().resetNonLiveAuditLog(ctxB);
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxB,
+        tenantConfig: validatedConfigB,
+        store: getStore(),
+        modules: ['parties', 'matters'],
+      });
+
+      // Step 1: Tenant A saves a person, an organisation, and a matter via services
+      setActiveTenantConfigForTesting(rawConfigA, {});
+      const personARes = await runWithActiveActorSession(sessionA, () =>
+        savePersonRecord(
+          {
+            firstName: 'TenantAOnlyFirstName',
+            surname: 'TenantAOnlySurname',
+          },
+          { byId: 'P-000001' },
+        ),
+      );
+      expect(personARes.errors).toBeUndefined();
+
+      const orgARes = await runWithActiveActorSession(sessionA, () =>
+        saveOrganisationRecord(
+          {
+            legalName: 'Tenant A Exclusive Holdings Ltd',
+          },
+          { byId: 'P-000001' },
+        ),
+      );
+      expect(orgARes.errors).toBeUndefined();
+
+      const templateMatter = structuredClone(
+        (await getMatterRepository().listAllMatters<import('@/domain/types').Matter>(
+          ctxA,
+        ))[0]!,
+      );
+      const { id: _omitId, rowVersion: _omitRv, ...matterInput } = templateMatter;
+      void _omitId;
+      void _omitRv;
+      const matterARes = await runWithActiveActorSession(sessionA, () =>
+        saveMatterRecord(
+          {
+            ...matterInput,
+            clientId: orgARes.organisation.id,
+            matterNumber: 'DRAFT',
+            title: 'Tenant A Exclusive Matter Deal',
+          },
+          { byId: 'P-000001', saveMode: 'draft' },
+        ),
+      );
+      expect(matterARes.errors).toBeUndefined();
+
+      // Step 2: Interleave Tenant B saves in the same process
+      setActiveTenantConfigForTesting(rawConfigB, {});
+      const personBRes = await runWithActiveActorSession(sessionB, () =>
+        savePersonRecord(
+          {
+            firstName: 'TenantBOnlyFirstName',
+            surname: 'TenantBOnlySurname',
+          },
+          { byId: 'P-000001' },
+        ),
+      );
+      expect(personBRes.errors).toBeUndefined();
+
+      const orgBRes = await runWithActiveActorSession(sessionB, () =>
+        saveOrganisationRecord(
+          {
+            legalName: 'Tenant B Exclusive Ventures Plc',
+          },
+          { byId: 'P-000001' },
+        ),
+      );
+      expect(orgBRes.errors).toBeUndefined();
+
+      const matterBRes = await runWithActiveActorSession(sessionB, () =>
+        saveMatterRecord(
+          {
+            ...matterInput,
+            clientId: orgBRes.organisation.id,
+            matterNumber: 'DRAFT',
+            title: 'Tenant B Exclusive Matter Merger',
+          },
+          { byId: 'P-000001', saveMode: 'draft' },
+        ),
+      );
+      expect(matterBRes.errors).toBeUndefined();
+
+      // Step 3: Interleave another Tenant A save after Tenant B ran, then read Tenant A snapshot & audit
+      setActiveTenantConfigForTesting(rawConfigA, {});
+      const personA2Res = await runWithActiveActorSession(sessionA, () =>
+        savePersonRecord(
+          {
+            firstName: 'TenantASecondFirstName',
+            surname: 'TenantASecondSurname',
+          },
+          { byId: 'P-000001' },
+        ),
+      );
+      expect(personA2Res.errors).toBeUndefined();
+
+      const snapA = await runWithActiveActorSession(sessionA, () =>
+        getAppSnapshot('P-000001'),
+      );
+      const auditA = await runWithActiveActorSession(sessionA, () =>
+        listFirmAuditEntriesPage('P-000001', { limit: 200 }),
+      );
+
+      // Positive controls for Tenant A
+      expect(
+        snapA.people.some((p) => p.firstName === 'TenantAOnlyFirstName'),
+      ).toBe(true);
+      expect(
+        snapA.people.some((p) => p.firstName === 'TenantASecondFirstName'),
+      ).toBe(true);
+      expect(
+        snapA.organisations.some(
+          (o) => o.legalName === 'Tenant A Exclusive Holdings Ltd',
+        ),
+      ).toBe(true);
+      expect(
+        snapA.matters.some((m) => m.title === 'Tenant A Exclusive Matter Deal'),
+      ).toBe(true);
+      expect(
+        auditA.entries.some((a) =>
+          String(a.newValue ?? '').includes('Tenant A Exclusive'),
+        ),
+      ).toBe(true);
+
+      // Negative controls: zero Tenant B records, counts, or audit entries in Tenant A
+      expect(
+        snapA.people.some((p) => p.firstName === 'TenantBOnlyFirstName'),
+      ).toBe(false);
+      expect(
+        snapA.organisations.some(
+          (o) => o.legalName === 'Tenant B Exclusive Ventures Plc',
+        ),
+      ).toBe(false);
+      expect(
+        snapA.matters.some(
+          (m) => m.title === 'Tenant B Exclusive Matter Merger',
+        ),
+      ).toBe(false);
+      expect(
+        auditA.entries.some((a) =>
+          String(a.newValue ?? '').includes('Tenant B Exclusive'),
+        ),
+      ).toBe(false);
+
+      // Step 4: Read Tenant B snapshot & audit and assert positive and negative controls
+      setActiveTenantConfigForTesting(rawConfigB, {});
+      const snapB = await runWithActiveActorSession(sessionB, () =>
+        getAppSnapshot('P-000001'),
+      );
+      const auditB = await runWithActiveActorSession(sessionB, () =>
+        listFirmAuditEntriesPage('P-000001', { limit: 200 }),
+      );
+
+      // Positive controls for Tenant B
+      expect(
+        snapB.people.some((p) => p.firstName === 'TenantBOnlyFirstName'),
+      ).toBe(true);
+      expect(
+        snapB.organisations.some(
+          (o) => o.legalName === 'Tenant B Exclusive Ventures Plc',
+        ),
+      ).toBe(true);
+      expect(
+        snapB.matters.some(
+          (m) => m.title === 'Tenant B Exclusive Matter Merger',
+        ),
+      ).toBe(true);
+      expect(
+        auditB.entries.some((a) =>
+          String(a.newValue ?? '').includes('Tenant B Exclusive'),
+        ),
+      ).toBe(true);
+
+      // Negative controls: zero Tenant A records, counts, or audit entries in Tenant B
+      expect(
+        snapB.people.some((p) => p.firstName === 'TenantAOnlyFirstName'),
+      ).toBe(false);
+      expect(
+        snapB.people.some((p) => p.firstName === 'TenantASecondFirstName'),
+      ).toBe(false);
+      expect(
+        snapB.organisations.some(
+          (o) => o.legalName === 'Tenant A Exclusive Holdings Ltd',
+        ),
+      ).toBe(false);
+      expect(
+        snapB.matters.some((m) => m.title === 'Tenant A Exclusive Matter Deal'),
+      ).toBe(false);
+      expect(
+        auditB.entries.some((a) =>
+          String(a.newValue ?? '').includes('Tenant A Exclusive'),
+        ),
+      ).toBe(false);
+      expect(snapB.people.length).toBe(snapA.people.length - 1);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      await getMatterRepository().clearTenantData(ctxA);
+      await getPartyRepository().clearTenantData(ctxA);
+      await new TenantAuditRepository().resetNonLiveAuditLog(ctxA);
+      await getMatterRepository().clearTenantData(ctxB);
+      await getPartyRepository().clearTenantData(ctxB);
+      await new TenantAuditRepository().resetNonLiveAuditLog(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
+    }
   });
 });

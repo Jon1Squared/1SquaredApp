@@ -25,6 +25,7 @@ import {
 import {
   auditEntriesSince,
   markAuditPosition,
+  runAsTestActor,
 } from '../../src/server/testSupport/auditTestSupport';
 import { switchUserAction } from '../../src/app/actions';
 import { GET as callbackGet } from '../../src/app/api/auth/callback/microsoft-entra-id/route';
@@ -666,7 +667,9 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     expect(await getCurrentUserId()).toBe('P-000002');
 
     // R50: switchUserAction as a non-admin with demo mode off is rejected
-    await saveHomePagesConfig({ firmSettings: { demoMode: false } }, 'P-000001');
+    await runAsTestActor('P-000001', () =>
+      saveHomePagesConfig({ firmSettings: { demoMode: false } }, 'P-000001'),
+    );
     await expect(switchUserAction('P-000001')).rejects.toThrow(
       /Demo Mode is enabled/i,
     );

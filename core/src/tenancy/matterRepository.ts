@@ -449,15 +449,6 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
   return out as TMatter;
 }
 
-declare global {
-  var __oneSquaredPostgresPartiesMattersWriteSeq: number | undefined;
-}
-
-function bumpPostgresPartiesMattersWriteSeq(): void {
-  global.__oneSquaredPostgresPartiesMattersWriteSeq =
-    (global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0) + 1;
-}
-
 function buildMatterDbParameters(
   ctx: TenantContext,
   matter: TenantMatterRecord,
@@ -544,40 +535,19 @@ function buildMatterDbParameters(
     agreedFeeCapGbp: matter.agreedFeeCapGbp ?? null,
     retainerMoniesOnAccountGbp: matter.retainerMoniesOnAccountGbp ?? null,
     partiesFallback: matter.parties ?? [],
-    hasSourceEnquiryId: Object.prototype.hasOwnProperty.call(
-      matter,
-      'sourceEnquiryId',
-    ),
-    hasSourceQuoteId: Object.prototype.hasOwnProperty.call(
-      matter,
-      'sourceQuoteId',
-    ),
-    hasIsStaffMatter: Object.prototype.hasOwnProperty.call(
-      matter,
-      'isStaffMatter',
-    ),
-    hasEthicalWallFlag: Object.prototype.hasOwnProperty.call(
-      matter,
-      'hasEthicalWall',
-    ),
-    hasRestrictedAccessUserIds: Object.prototype.hasOwnProperty.call(
-      matter,
-      'restrictedAccessUserIds',
-    ),
-    ...(Object.prototype.hasOwnProperty.call(matter, 'restrictedAccessUserIds')
+    hasSourceEnquiryId: matter.sourceEnquiryId !== undefined,
+    hasSourceQuoteId: matter.sourceQuoteId !== undefined,
+    hasIsStaffMatter: matter.isStaffMatter !== undefined,
+    hasEthicalWallFlag: matter.hasEthicalWall !== undefined,
+    hasRestrictedAccessUserIds: matter.restrictedAccessUserIds !== undefined,
+    ...(matter.restrictedAccessUserIds !== undefined
       ? {
           restrictedAccessUserIdsFallback:
             matter.restrictedAccessUserIds ?? [],
         }
       : {}),
-    hasOwningDepartmentId: Object.prototype.hasOwnProperty.call(
-      matter,
-      'owningDepartmentId',
-    ),
-    hasOwningTeamId: Object.prototype.hasOwnProperty.call(
-      matter,
-      'owningTeamId',
-    ),
+    hasOwningDepartmentId: matter.owningDepartmentId !== undefined,
+    hasOwningTeamId: matter.owningTeamId !== undefined,
     ...(matter.conflictDecision !== undefined
       ? { conflictDecision: matter.conflictDecision }
       : {}),
@@ -1058,7 +1028,6 @@ export class TenantMatterRepository extends TenantScopedRepository {
         }
       }
 
-      bumpPostgresPartiesMattersWriteSeq();
       return mapMatterRow<TMatter>(saved, partyRows);
     });
   }
@@ -1226,8 +1195,169 @@ export class TenantMatterRepository extends TenantScopedRepository {
       this.assertRowTenant(ctx, updated.tenant_id, 'Matter');
       const partyRows = await this.syncMatterPartiesInTx(tx, ctx, matter);
       await this.advanceMatterNumberHighWaterInTx(tx, ctx, p.matterNumber);
-      bumpPostgresPartiesMattersWriteSeq();
       return mapMatterRow<TMatter>(updated, partyRows);
+    });
+  }
+
+  public async putMatter<TMatter extends TenantMatterRecord = TenantMatterRecord>(
+    ctx: TenantContext,
+    matter: TMatter,
+    options?: {
+      expectedRowVersion?: number | null;
+      sqlRestrictedAccessUserIds?: readonly string[];
+    },
+  ): Promise<TMatter> {
+    if (
+      options?.expectedRowVersion !== undefined &&
+      options?.expectedRowVersion !== null
+    ) {
+      return this.updateMatter<TMatter>(ctx, matter, options.expectedRowVersion, {
+        sqlRestrictedAccessUserIds: options.sqlRestrictedAccessUserIds,
+      });
+    }
+    if (options?.expectedRowVersion === undefined) {
+      return this.createMatter<TMatter>(ctx, matter, {
+        sqlRestrictedAccessUserIds: options?.sqlRestrictedAccessUserIds,
+      });
+    }
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const p = buildMatterDbParameters(
+        ctx,
+        matter,
+        options?.sqlRestrictedAccessUserIds,
+      );
+      const res = await tx.query<DbMatterRow>(
+        `INSERT INTO public.matters (
+           tenant_id, id, row_version, matter_number, title, client_type,
+           client_id, instructing_contact_id, billing_contact_id,
+           referrer_person_id, referrer_organisation_id, legal_entity_id,
+           department_id, team_id, office_id, practice_area_id,
+           work_type_subcategory_id, status_id, stage_group_id, current_stage_id,
+           responsible_partner_id, responsible_fee_earner_id, supervisor_id,
+           risk_rating_id, conflict_check_status, conflict_cleared_by_id,
+           is_staff_matter, has_ethical_wall, source_enquiry_id, source_quote_id,
+           opened_on, closed_on, destruction_date, engagement_letter_status,
+           created_at, updated_at, additional_client_ids_json,
+           restricted_access_user_ids_json, fields_json, custom_fields_json,
+           conflict_check_record_json, risk_assessment_json, costs_json,
+           opening_record_json, milestones_json
+         ) VALUES (
+           $1, $2, 1, $3, $4, $5,
+           $6, $7, $8,
+           $9, $10, $11,
+           $12, $13, $14, $15,
+           $16, $17, $18, $19,
+           $20, $21, $22,
+           $23, $24, $25,
+           $26, $27, $28, $29,
+           $30, $31, $32, $33,
+           $34::timestamptz, $35::timestamptz, $36::jsonb,
+           $37::jsonb, $38::jsonb, $39::jsonb,
+           $40::jsonb, $41::jsonb, $42::jsonb,
+           $43::jsonb, $44::jsonb
+         )
+         ON CONFLICT (tenant_id, id) DO UPDATE SET
+           row_version = COALESCE(public.matters.row_version, 0) + 1,
+           matter_number = EXCLUDED.matter_number,
+           title = EXCLUDED.title,
+           client_type = EXCLUDED.client_type,
+           client_id = EXCLUDED.client_id,
+           instructing_contact_id = EXCLUDED.instructing_contact_id,
+           billing_contact_id = EXCLUDED.billing_contact_id,
+           referrer_person_id = EXCLUDED.referrer_person_id,
+           referrer_organisation_id = EXCLUDED.referrer_organisation_id,
+           legal_entity_id = EXCLUDED.legal_entity_id,
+           department_id = EXCLUDED.department_id,
+           team_id = EXCLUDED.team_id,
+           office_id = EXCLUDED.office_id,
+           practice_area_id = EXCLUDED.practice_area_id,
+           work_type_subcategory_id = EXCLUDED.work_type_subcategory_id,
+           status_id = EXCLUDED.status_id,
+           stage_group_id = EXCLUDED.stage_group_id,
+           current_stage_id = EXCLUDED.current_stage_id,
+           responsible_partner_id = EXCLUDED.responsible_partner_id,
+           responsible_fee_earner_id = EXCLUDED.responsible_fee_earner_id,
+           supervisor_id = EXCLUDED.supervisor_id,
+           risk_rating_id = EXCLUDED.risk_rating_id,
+           conflict_check_status = EXCLUDED.conflict_check_status,
+           conflict_cleared_by_id = EXCLUDED.conflict_cleared_by_id,
+           is_staff_matter = EXCLUDED.is_staff_matter,
+           has_ethical_wall = EXCLUDED.has_ethical_wall,
+           source_enquiry_id = EXCLUDED.source_enquiry_id,
+           source_quote_id = EXCLUDED.source_quote_id,
+           opened_on = EXCLUDED.opened_on,
+           closed_on = EXCLUDED.closed_on,
+           destruction_date = EXCLUDED.destruction_date,
+           engagement_letter_status = EXCLUDED.engagement_letter_status,
+           created_at = EXCLUDED.created_at,
+           updated_at = EXCLUDED.updated_at,
+           additional_client_ids_json = EXCLUDED.additional_client_ids_json,
+           restricted_access_user_ids_json = EXCLUDED.restricted_access_user_ids_json,
+           fields_json = EXCLUDED.fields_json,
+           custom_fields_json = EXCLUDED.custom_fields_json,
+           conflict_check_record_json = EXCLUDED.conflict_check_record_json,
+           risk_assessment_json = EXCLUDED.risk_assessment_json,
+           costs_json = EXCLUDED.costs_json,
+           opening_record_json = EXCLUDED.opening_record_json,
+           milestones_json = EXCLUDED.milestones_json
+         RETURNING *`,
+        [
+          p.tenantId,
+          p.id,
+          p.matterNumber,
+          p.title,
+          p.clientType,
+          p.clientId,
+          p.instructingContactId,
+          p.billingContactId,
+          p.referrerPersonId,
+          p.referrerOrganisationId,
+          p.legalEntityId,
+          p.departmentId,
+          p.teamId,
+          p.officeId,
+          p.practiceAreaId,
+          p.workTypeSubcategoryId,
+          p.statusId,
+          p.stageGroupId,
+          p.currentStageId,
+          p.responsiblePartnerId,
+          p.responsibleFeeEarnerId,
+          p.supervisorId,
+          p.riskRatingId,
+          p.conflictCheckStatus,
+          p.conflictClearedById,
+          p.isStaffMatter,
+          p.hasEthicalWall,
+          p.sourceEnquiryId,
+          p.sourceQuoteId,
+          p.openedOn,
+          p.closedOn,
+          p.destructionDate,
+          p.engagementLetterStatus,
+          p.createdAt,
+          p.updatedAt,
+          p.additionalClientIdsJson,
+          p.restrictedAccessUserIdsJson,
+          p.fieldsJson,
+          p.customFieldsJson,
+          p.conflictCheckRecordJson,
+          p.riskAssessmentJson,
+          p.costsJson,
+          p.openingRecordJson,
+          p.milestonesJson,
+        ],
+      );
+      const saved = res.rows[0];
+      if (!saved) {
+        throw new Error(
+          'TENANCY_ISOLATION_ERROR: Matter row could not be persisted.',
+        );
+      }
+      this.assertRowTenant(ctx, saved.tenant_id, 'Matter');
+      const partyRows = await this.syncMatterPartiesInTx(tx, ctx, matter);
+      await this.advanceMatterNumberHighWaterInTx(tx, ctx, p.matterNumber);
+      return mapMatterRow<TMatter>(saved, partyRows);
     });
   }
 
@@ -1416,7 +1546,6 @@ export class TenantMatterRepository extends TenantScopedRepository {
         );
       }
 
-      bumpPostgresPartiesMattersWriteSeq();
       return out;
     });
   }
@@ -1457,7 +1586,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       false;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
-        'SELECT * FROM public.matters WHERE tenant_id = $1 AND id = $2',
+        "SELECT * FROM public.matters WHERE tenant_id = $1 AND id = $2 AND client_id <> 'O-KEYDATE-STUB'",
         [ctx.tenantId, id],
       );
       const row = res.rows[0];
@@ -1505,6 +1634,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
             `SELECT *
              FROM public.matters
              WHERE tenant_id = $1
+               AND client_id <> 'O-KEYDATE-STUB'
              ORDER BY id ASC`,
             [ctx.tenantId],
           )
@@ -1512,6 +1642,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
             `SELECT *
              FROM public.matters
              WHERE tenant_id = $1
+               AND client_id <> 'O-KEYDATE-STUB'
                AND (
                  (is_staff_matter = FALSE AND has_ethical_wall = FALSE)
                  OR restricted_access_user_ids_json ? $2
@@ -1539,7 +1670,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
   ): Promise<TMatter[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
-        'SELECT * FROM public.matters WHERE tenant_id = $1 ORDER BY id ASC',
+        "SELECT * FROM public.matters WHERE tenant_id = $1 AND client_id <> 'O-KEYDATE-STUB' ORDER BY id ASC",
         [ctx.tenantId],
       );
       for (const row of res.rows) {
@@ -1554,6 +1685,12 @@ export class TenantMatterRepository extends TenantScopedRepository {
         mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
       );
     });
+  }
+
+  public async listAllMatters<TMatter extends TenantMatterRecord = TenantMatterRecord>(
+    ctx: TenantContext,
+  ): Promise<TMatter[]> {
+    return this.listAllMattersUnfiltered<TMatter>(ctx);
   }
 
   public async searchVisibleMatters<TMatter extends TenantMatterRecord = TenantMatterRecord>(
@@ -1612,7 +1749,6 @@ export class TenantMatterRepository extends TenantScopedRepository {
         'DELETE FROM public.matters WHERE tenant_id = $1 AND id = $2',
         [ctx.tenantId, id],
       );
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -1629,7 +1765,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
         seq_cnt: number;
       }>(
         `SELECT
-           (SELECT COUNT(*)::int FROM public.matters WHERE tenant_id = $1) AS m_cnt,
+           (SELECT COUNT(*)::int FROM public.matters WHERE tenant_id = $1 AND client_id <> 'O-KEYDATE-STUB') AS m_cnt,
            (SELECT COUNT(*)::int FROM public.matter_parties WHERE tenant_id = $1) AS mp_cnt,
            (SELECT COUNT(*)::int FROM public.matter_number_sequences WHERE tenant_id = $1) AS seq_cnt`,
         [ctx.tenantId],
@@ -1669,7 +1805,6 @@ export class TenantMatterRepository extends TenantScopedRepository {
           [ctx.tenantId],
         );
       }
-      bumpPostgresPartiesMattersWriteSeq();
     });
   }
 }

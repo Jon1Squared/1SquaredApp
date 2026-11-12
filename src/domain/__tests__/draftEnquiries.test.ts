@@ -19,6 +19,7 @@ import { resolveLabel } from '../lists';
 import {
   assignEnquiryRecord,
   closeEnquiryRecord,
+  getPartyRepository,
   logEnquiryContactRecord,
   prepareEnquiryConversion,
   saveCustomFieldDefinition,
@@ -30,7 +31,9 @@ import {
   markAuditPosition,
   runAsTestActor,
   setTestActorSession,
+  testTenantCtx,
 } from '@/server/testSupport/auditTestSupport';
+import type { Person } from '../types';
 
 describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   beforeEach(() => {
@@ -620,9 +623,12 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     );
     expect(conv.ok).toBe(true);
     expect(enq1.linkedPersonId).toBeTruthy();
-    expect(store.people.some((p) => p.id === enq1.linkedPersonId)).toBe(true);
+    const currentPeople = await getPartyRepository().listAllPeople<Person>(
+      testTenantCtx('P-000001'),
+    );
+    expect(currentPeople.some((p) => p.id === enq1.linkedPersonId)).toBe(true);
 
-    stageList = getEnquiryStagePeople(store.enquiries, store.people, store.values);
+    stageList = getEnquiryStagePeople(store.enquiries, currentPeople, store.values);
     expect(stageList.some((p) => p.enquiryId === enq1.id)).toBe(false);
 
     // 3. Declined enquiry removes the enquiry person from the people list

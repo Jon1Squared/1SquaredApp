@@ -10,7 +10,7 @@ export default async function MattersPage() {
   return withPageActor(async (actor) => {
     const snap = await getAppSnapshot(actor.personId);
     const matterFinanceRes = snap.finance.canViewMatter
-      ? getMatterFinanceRows(actor.personId)
+      ? await getMatterFinanceRows(actor.personId)
       : null;
     const matterFinance =
       matterFinanceRes && !isActionDenied(matterFinanceRes) ? matterFinanceRes : undefined;

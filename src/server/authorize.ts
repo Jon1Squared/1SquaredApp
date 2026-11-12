@@ -37,10 +37,12 @@ import {
   resolveCurrentRequestCorrelationId,
 } from './telemetry';
 import { resolvePersonPermissionSet } from './rbacRuntime';
+import { getPartyRepository } from './auditAdapter';
 import {
   requireAuthenticatedActor,
   type AuthenticatedActorContext,
 } from './services';
+import type { Person } from '@/domain/types';
 import { getStore } from './store';
 
 export interface GuardedActorContext extends AuthenticatedActorContext {
@@ -149,10 +151,10 @@ function mapAuthorisationErrorToActionDenied(
   return buildActionDenied(mappedCode, err.message);
 }
 
-function buildGuardedActorContext(
+async function buildGuardedActorContext(
   actor: AuthenticatedActorContext,
   correlationId: string,
-): GuardedActorContext {
+): Promise<GuardedActorContext> {
   const tenantCfg = getActiveTenantConfiguration();
   const verifiedActor = createVerifiedSessionActorFromEntraSession(
     actor.session,
@@ -160,8 +162,9 @@ function buildGuardedActorContext(
   );
   const tenantContext = resolveCurrentTenantContext(verifiedActor, tenantCfg);
   const store = getStore();
+  const allPeople = await getPartyRepository().listAllPeople<Person>(tenantContext);
   const permissions = resolvePersonPermissionSet(actor.person, {
-    allPeople: store.people,
+    allPeople,
     teams: store.teams,
     tenantId: tenantContext.tenantId,
     context: tenantContext,
@@ -237,7 +240,7 @@ export async function guardedAction<R>(
       verifiedSession: actor.session,
     },
     async () => {
-      const guardedActor = buildGuardedActorContext(actor, correlationId);
+      const guardedActor = await buildGuardedActorContext(actor, correlationId);
 
       if (isEnforcedByAction) {
         try {
@@ -324,7 +327,7 @@ export function guardedRoute<
           verifiedSession: actor.session,
         },
         async () => {
-          const guardedActor = buildGuardedActorContext(actor, correlationId);
+          const guardedActor = await buildGuardedActorContext(actor, correlationId);
           requirePermissionForPolicy(
             guardedActor.permissions,
             policy.key,

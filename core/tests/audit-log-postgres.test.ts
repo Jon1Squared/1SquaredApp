@@ -27,6 +27,8 @@ import {
   executeMerge,
   getAppSnapshot,
   getKeyDatesConfig,
+  getMatterRepository,
+  getPartyRepository,
   listAuditEntriesForRecord,
   listFirmAuditEntriesPage,
   logEmployeeRestrictedAccess,
@@ -50,7 +52,12 @@ import { buildValidDocxArchive } from '@platform/core';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import { importFirmStoreModulesToPostgres } from '../../src/server/storePostgresImport';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
-import { clearStoreMemoryCache, getStore, saveStore } from '../../src/server/store';
+import {
+  clearStoreMemoryCache,
+  createSeedStore,
+  getStore,
+  saveStore,
+} from '../../src/server/store';
 import { canUserTakeTask } from '../../src/server/rbacRuntime';
 import { runWithActiveActorSession } from '../../src/domain/rbac';
 import { resolveEmployeeRoles } from '../../src/domain/homeConfig';
@@ -74,7 +81,9 @@ import {
 function runAsTestEmployee<T>(personId: string, fn: () => T): T {
   const store = getStore();
   const tenantId = getActiveTenantConfiguration().tenantId;
-  const emp = store.people.find((p) => p.id === personId)!;
+  const emp =
+    store.people.find((p) => p.id === personId) ??
+    createSeedStore(new Date(), { includeSyntheticEntraOids: true }).people.find((p) => p.id === personId)!;
   const nowIso = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
   const roles = resolveEmployeeRoles(emp, store.teams);
@@ -334,6 +343,14 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       staffMatter.teamMemberIds = ['P-000004'];
       staffMatter.restrictedAccessUserIds = ['P-000004'];
       saveStore(store);
+      await getMatterRepository().putMatter(
+        testTenantCtx('P-000004'),
+        staffMatter,
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-000004'],
+        },
+      );
 
       await getAuditRepository().appendAuditEntry(testTenantCtx('P-000004'), {
         recordType: 'matter',
@@ -513,11 +530,13 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(opB.status).toBe('fulfilled');
       if (opB.status === 'fulfilled') expect(opB.value.ok).toBe(true);
 
-      // Re-read from the persisted JSON store, not the in-memory cache
+      // Re-read from PostgreSQL party repository
       clearStoreMemoryCache();
-      const reloaded = getStore();
-      const afterA = reloaded.people.find((p) => p.id === 'P-000002')!;
-      const afterB = reloaded.people.find((p) => p.id === 'P-000005')!;
+      const reloadedPeople = await getPartyRepository().listAllPeople<import('@/domain/types').Person>(
+        testTenantCtx('P-000004'),
+      );
+      const afterA = reloadedPeople.find((p) => p.id === 'P-000002')!;
+      const afterB = reloadedPeople.find((p) => p.id === 'P-000005')!;
       expect(afterA.permissionOverrides ?? null).toEqual(beforeA.permissionOverrides ?? null);
       expect(afterA.updatedAt).toBe(beforeA.updatedAt);
       expect(afterB.permissionOverrides?.grant).toContain('risk:view');
@@ -583,7 +602,11 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
         (e) => e.status !== 'Converted' && e.status !== 'No response',
       )!;
       expect(openEnquiry).toBeDefined();
-      const baseMatter = getStore().matters.find((m) => !m.isStaffMatter)!;
+      const baseMatter = (
+        await getMatterRepository().listAllMatters<import('@/domain/types').Matter>(
+          testTenantCtx('P-000004'),
+        )
+      ).find((m) => !m.isStaffMatter)!;
       const { id: _omittedMatterId, ...matterTemplate } = baseMatter;
       void _omittedMatterId;
       const conversionTitle = `R456 Enquiry Conversion Matter ${Date.now().toString(36)}`;
@@ -632,7 +655,10 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       clearStoreMemoryCache();
       const reloadedStore = getStore();
-      expect(reloadedStore.matters.some((m) => m.title === conversionTitle)).toBe(false);
+      const reloadedMatters = await getMatterRepository().listAllMatters(
+        testTenantCtx('P-000004'),
+      );
+      expect(reloadedMatters.some((m) => m.title === conversionTitle)).toBe(false);
       expect(reloadedStore.tasks.length).toBe(preTasksCount);
       expect(reloadedStore.enquiries.find((e) => e.id === openEnquiry.id)?.status).toBe(preEnquiryStatus);
 
@@ -1216,18 +1242,23 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       setAuditAdapterFailureHookForTesting(null);
       clearStoreMemoryCache();
-      const reloaded = getStore();
+      const reloadedPeople = await getPartyRepository().listAllPeople(
+        testTenantCtx('P-000001'),
+      );
+      const reloadedMergeHistory = await getPartyRepository().listAllMergeHistory(
+        testTenantCtx('P-000001'),
+      );
       expect(
-        reloaded.people.find((p) => p.id === unrelatedPerson.id)?.surname,
+        reloadedPeople.find((p) => p.id === unrelatedPerson.id)?.surname,
       ).toBe('R443-Unrelated-Preserved');
       expect(
-        reloaded.people.find((p) => p.id === merged.id)?.mergedIntoId,
+        reloadedPeople.find((p) => p.id === merged.id)?.mergedIntoId,
       ).toBeFalsy();
       expect(
-        reloaded.people.find((p) => p.id === survivor.id)?.surname,
+        reloadedPeople.find((p) => p.id === survivor.id)?.surname,
       ).toBe(survivorBeforeName);
       expect(
-        reloaded.mergeHistory.some(
+        reloadedMergeHistory.some(
           (mh) => mh.survivorId === survivor.id && mh.mergedId === merged.id,
         ),
       ).toBe(false);
@@ -1258,6 +1289,18 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
         (m) => m.id !== 'M-000014' && !m.isStaffMatter && !m.hasEthicalWall,
       )!;
       saveStore(store);
+      await getPartyRepository().putPerson(
+        testTenantCtx('P-000001'),
+        adminViewer,
+      );
+      await getMatterRepository().putMatter(
+        testTenantCtx('P-000001'),
+        staffMatter,
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-000001'],
+        },
+      );
 
       const ctx = testTenantCtx('P-000001');
       const batch300: FirmAuditEntryInput[] = [];
@@ -1350,6 +1393,18 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       staffMatter.teamMemberIds = ['P-000001'];
       staffMatter.restrictedAccessUserIds = ['P-000001'];
       saveStore(store);
+      await getPartyRepository().putPerson(
+        testTenantCtx('P-000001'),
+        nonRestrictedAdmin,
+      );
+      await getMatterRepository().putMatter(
+        testTenantCtx('P-000001'),
+        staffMatter,
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-000001'],
+        },
+      );
 
       const staffMarkerField = `R457-staff-audit-${Date.now().toString(36)}`;
       await getAuditRepository().appendAuditEntry(testTenantCtx('P-000001'), {

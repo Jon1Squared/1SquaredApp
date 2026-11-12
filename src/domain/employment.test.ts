@@ -36,9 +36,12 @@ import { getStore, resetStore } from '../server/store';
 import {
   getAppSnapshot,
   getEmployeeDetailsForUser,
+  getMatterRepository,
+  getPartyRepository,
   listAuditEntriesForRecord,
   logEmployeeRestrictedAccess,
   reassignLeaverOwnedRecords,
+  resetAllDemoData,
   saveMatterRecord,
   savePersonRecord,
 } from '../server/services';
@@ -48,14 +51,15 @@ import {
 } from '../server/entraAuth';
 import { runWithActiveActorSession } from './rbac';
 import { runAsTestActor } from '../server/testSupport/auditTestSupport';
-import type { EmploymentRecord, Person } from './types';
+import { testDataResetContext } from '../test/testTenantContexts';
+import type { EmploymentRecord, Matter, Organisation, Person } from './types';
 
 describe('Employee section, conversion paths, migration & permissions', () => {
-  beforeAll(() => {
-    resetStore();
+  beforeAll(async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
   });
-  afterAll(() => {
-    resetStore();
+  afterAll(async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
   });
 
   describe('1. Validation & formatting rules', () => {
@@ -563,11 +567,22 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         );
 
         // Assign a person record to this leaver and test reassignment
-        store.people[0].relationshipOwnerId = leaverUpdated.id;
+        const [beforePeople, beforeOrgs, beforeMatters] = await Promise.all([
+          getPartyRepository().listAllPeople<Person>(testDataResetContext()),
+          getPartyRepository().listAllOrganisations<Organisation>(
+            testDataResetContext(),
+          ),
+          getMatterRepository().listAllMatters<Matter>(testDataResetContext()),
+        ]);
+        beforePeople[0].relationshipOwnerId = leaverUpdated.id;
+        await getPartyRepository().putPerson(
+          testDataResetContext(),
+          beforePeople[0],
+        );
         const ownedBefore = findRecordsOwnedByLeavers(
-          store.people,
-          store.organisations,
-          store.matters,
+          beforePeople,
+          beforeOrgs,
+          beforeMatters,
           store.tasks,
           store.enquiries,
           leaverUpdated.id,
@@ -582,16 +597,23 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         expect(reassignRes.errors).toBeUndefined();
         expect(reassignRes.reassignedCount).toBeGreaterThan(0);
 
+        const [afterPeople, afterOrgs, afterMatters] = await Promise.all([
+          getPartyRepository().listAllPeople<Person>(testDataResetContext()),
+          getPartyRepository().listAllOrganisations<Organisation>(
+            testDataResetContext(),
+          ),
+          getMatterRepository().listAllMatters<Matter>(testDataResetContext()),
+        ]);
         const ownedAfter = findRecordsOwnedByLeavers(
-          store.people,
-          store.organisations,
-          store.matters,
+          afterPeople,
+          afterOrgs,
+          afterMatters,
           store.tasks,
           store.enquiries,
           leaverUpdated.id,
         );
         expect(ownedAfter.length).toBe(0);
-        resetStore();
+        await resetAllDemoData('P-000001', testDataResetContext());
       });
     });
   });

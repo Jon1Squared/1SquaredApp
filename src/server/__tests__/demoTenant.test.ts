@@ -22,6 +22,7 @@ import {
 } from '@/seed/seedSnapshot';
 import {
   clearAllDataToCleanDeployment,
+  getPartyRepository,
   isDataResetAllowedEnvironment,
   isDemoModeEnabled,
   resetAllDemoData,
@@ -373,18 +374,23 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       });
 
       process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
+      vi.stubEnv('PLATFORM_ENVIRONMENT', 'demo');
+      setActiveTenantConfigForTesting(null);
       clearStoreMemoryCache();
 
-      await resetAllDemoData('P-000004', testDataResetContext());
+      const demoCtx = testDataResetContext();
+      await resetAllDemoData('P-000004', demoCtx);
 
-      const afterReset = getStore();
-      const p1 = afterReset.people.find((p) => p.id === 'P-000001');
-      const p4 = afterReset.people.find((p) => p.id === 'P-000004');
-      const p2 = afterReset.people.find((p) => p.id === 'P-000002');
+      const peopleAfterReset = await getPartyRepository().listAllPeople(demoCtx);
+      const p1 = peopleAfterReset.find((p) => p.id === 'P-000001');
+      const p4 = peopleAfterReset.find((p) => p.id === 'P-000004');
+      const p2 = peopleAfterReset.find((p) => p.id === 'P-000002');
       expect(p1?.entraObjectId).toBe('22222222-3333-4444-8555-666666666601');
       expect(p4?.entraObjectId).toBe('22222222-3333-4444-8555-666666666604');
       expect(p2?.entraObjectId).toBeUndefined();
     } finally {
+      vi.unstubAllEnvs();
+      setActiveTenantConfigForTesting(null);
       delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

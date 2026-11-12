@@ -140,6 +140,8 @@ import type {
 import { buildActionDenied } from '@/domain/actionResult';
 import {
   getActiveTenantConfiguration,
+  getMatterRepository,
+  getPartyRepository,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import { guardedAction } from '@/server/authorize';
@@ -784,16 +786,20 @@ export async function linkPmsRecordAction(
   onesquaredId: string,
   pmsCode: string,
 ) {
-  return guardedAction('linkPmsRecordAction', async ({ personId: byId }) => {
-    const store = getStore();
+  return guardedAction('linkPmsRecordAction', async ({ personId: byId, tenantContext }) => {
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
     const recordExists =
       entityType === 'employee'
-        ? store.people.some((p) => p.id === onesquaredId && p.isEmployee)
+        ? Boolean(
+            (await partyRepo.getPersonById<Person>(tenantContext, onesquaredId))
+              ?.isEmployee,
+          )
         : entityType === 'person'
-          ? store.people.some((p) => p.id === onesquaredId)
+          ? Boolean(await partyRepo.getPersonById<Person>(tenantContext, onesquaredId))
           : entityType === 'organisation'
-            ? store.organisations.some((o) => o.id === onesquaredId)
-            : store.matters.some((m) => m.id === onesquaredId);
+            ? Boolean(await partyRepo.getOrganisationById(tenantContext, onesquaredId))
+            : Boolean(await matterRepo.getMatterById(tenantContext, onesquaredId));
     if (!recordExists) {
       return buildActionDenied(
         'FORBIDDEN',

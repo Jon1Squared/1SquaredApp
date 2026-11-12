@@ -78,7 +78,7 @@ export default async function MatterProfilePage({
     }
 
     const pmsViewRes = snap.finance.canViewMatter
-      ? getMatterPmsViewBundle(matter.id, userId)
+      ? await getMatterPmsViewBundle(matter.id, userId)
       : null;
     const pmsView =
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined;

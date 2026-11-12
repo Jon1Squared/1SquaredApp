@@ -2,7 +2,7 @@
  * Temporary PostgreSQL Audit Adapter & Per-Record JSON Delta Compensator
  * (`src/server/auditAdapter.ts`).
  *
- * Implements ADR 0028 §§4–5 & `S0-15` (`Owner Decision 4`, `Owner Decision 5`, `R406`, `R418`, `R420`):
+ * Implements ADR 0028 §§4–5 & `S0-15`/`S0-16` (`Owner Decision 4`, `Owner Decision 5`, `R406`, `R418`, `R420`, `R469`):
  * - While unmoved modules still persist primary records in `FirmStore` (`src/server/store.ts`),
  *   their audit entries write to PostgreSQL `public.audit_entries` (`TenantAuditRepository`) inside
  *   `withJsonStoreWriteLock`.
@@ -11,8 +11,8 @@
  *   (`inserted`, `updated`, `deleted` items by ID, plus touched scalar settings keys) and register a
  *   record-level compensating callback onto `RecordDeltaCompensator`. If the PostgreSQL `audit_entries`
  *   transaction (or an outer cross-module step in a nested re-entrant lock chain, `R418`) fails, ONLY
- *   this operation's record deltas are reverted in memory and on disk (`saveStore`), leaving any other
- *   operation's records untouched.
+ *   this operation's unmoved JSON record deltas are reverted in memory and on disk (`saveStore`), leaving
+ *   any other operation's records untouched.
  *
  * Retirement schedule:
  * - @remove-in S0-17a: Enquiries, Quotes, Tasks, Notifications, Sign-Offs, Recently Viewed
@@ -23,32 +23,15 @@
  */
 
 import {
-  MATTER_CONCURRENCY_CONFLICT_CODE,
-  MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   TenantAuditRepository,
   TenantMatterRepository,
   TenantPartyRepository,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
   type TenantContext,
-  type TenantMatterRecord,
-  type TenantMergeHistoryRecord,
-  type TenantNoteRecord,
-  type TenantOrganisationRecord,
-  type TenantPersonOrganisationLinkRecord,
-  type TenantPersonRecord,
 } from '@platform/core';
 import { getActiveActorSession } from '@/domain/rbac';
-import type {
-  AuditEntry,
-  EmployeeSensitiveRecord,
-  Matter,
-  MergeHistory,
-  Note,
-  Organisation,
-  Person,
-  PersonOrganisationLink,
-} from '@/domain/types';
+import type { AuditEntry, EmployeeSensitiveRecord } from '@/domain/types';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { resolveRequestCorrelationId } from './correlationId';
 import { getStore, saveStore, type FirmStore } from './store';
@@ -57,7 +40,6 @@ import {
   withJsonStoreWriteLock,
   type RecordDeltaCompensator,
 } from './storeLock';
-import { computeMatterRestrictionMetadataForStore } from './storePostgresImport';
 
 interface AsyncLocalStorageLike<T> {
   getStore(): T | undefined;
@@ -97,25 +79,10 @@ function getAuditStagingStorage(): AsyncLocalStorageLike<ActiveAuditStagingScope
   return cachedAuditStagingStorage;
 }
 
-interface TenantPartiesMattersSyncState {
-  peopleById: Map<string, string>;
-  organisationsById: Map<string, string>;
-  linksById: Map<string, string>;
-  notesById: Map<string, string>;
-  mergeHistoryById: Map<string, string>;
-  mattersById: Map<string, string>;
-  matterRowVersionById: Map<string, number>;
-  storeResetGeneration: number;
-  pgWriteSeq: number;
-}
-
 declare global {
   var __oneSquaredAuditRepo: TenantAuditRepository | undefined;
   var __oneSquaredPartyRepo: TenantPartyRepository | undefined;
   var __oneSquaredMatterRepo: TenantMatterRepository | undefined;
-  var __oneSquaredPartiesMattersSyncByDb:
-    | Map<string, TenantPartiesMattersSyncState>
-    | undefined;
 }
 
 export function getAuditRepository(): TenantAuditRepository {
@@ -139,597 +106,13 @@ export function getMatterRepository(): TenantMatterRepository {
   return global.__oneSquaredMatterRepo;
 }
 
-function getPartiesMattersSyncCache(): Map<string, TenantPartiesMattersSyncState> {
-  if (!global.__oneSquaredPartiesMattersSyncByDb) {
-    global.__oneSquaredPartiesMattersSyncByDb = new Map();
-  }
-  return global.__oneSquaredPartiesMattersSyncByDb;
-}
-
-function serializeMatterWithoutRowVersion(matter: Matter | TenantMatterRecord): string {
-  const { rowVersion: _rv, ...rest } = matter as Matter & { rowVersion?: number };
-  void _rv;
-  return JSON.stringify(rest);
-}
-
-function buildSyncStateFromStore(
-  store: FirmStore,
-  rowVersionOverrides?: ReadonlyMap<string, number>,
-): TenantPartiesMattersSyncState {
-  const peopleById = new Map<string, string>();
-  for (const p of store.people ?? []) {
-    peopleById.set(p.id, JSON.stringify(p));
-  }
-  const organisationsById = new Map<string, string>();
-  for (const o of store.organisations ?? []) {
-    organisationsById.set(o.id, JSON.stringify(o));
-  }
-  const linksById = new Map<string, string>();
-  for (const l of store.links ?? []) {
-    linksById.set(l.id, JSON.stringify(l));
-  }
-  const notesById = new Map<string, string>();
-  for (const n of store.notes ?? []) {
-    notesById.set(n.id, JSON.stringify(n));
-  }
-  const mergeHistoryById = new Map<string, string>();
-  for (const mh of store.mergeHistory ?? []) {
-    mergeHistoryById.set(mh.id, JSON.stringify(mh));
-  }
-  const mattersById = new Map<string, string>();
-  const matterRowVersionById = new Map<string, number>();
-  for (const m of store.matters ?? []) {
-    const rv =
-      rowVersionOverrides?.get(m.id) ??
-      (typeof m.rowVersion === 'number' &&
-      Number.isInteger(m.rowVersion) &&
-      m.rowVersion >= 1
-        ? m.rowVersion
-        : 1);
-    if (m.rowVersion === undefined) {
-      m.rowVersion = rv;
-    }
-    mattersById.set(m.id, serializeMatterWithoutRowVersion(m));
-    matterRowVersionById.set(m.id, rv);
-  }
-  return {
-    peopleById,
-    organisationsById,
-    linksById,
-    notesById,
-    mergeHistoryById,
-    mattersById,
-    matterRowVersionById,
-    storeResetGeneration: global.__oneSquaredStoreResetGeneration ?? 0,
-    pgWriteSeq: global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0,
-  };
-}
-
-export function markPartiesAndMattersSyncedWithStore(
-  store: FirmStore,
-  ctx: TenantContext,
-  rowVersionOverrides?: ReadonlyMap<string, number>,
-): void {
-  getPartiesMattersSyncCache().set(
-    ctx.postgresDatabaseName,
-    buildSyncStateFromStore(store, rowVersionOverrides),
-  );
-}
-
-export function invalidatePartiesAndMattersSyncCache(
-  postgresDatabaseName?: string,
-): void {
-  const cache = getPartiesMattersSyncCache();
-  if (postgresDatabaseName) {
-    cache.delete(postgresDatabaseName);
-  } else {
-    cache.clear();
-  }
-}
-
-function updateCounterHighWater(
-  store: FirmStore,
-  prefix: 'P' | 'O' | 'L' | 'N' | 'M',
-  ids: readonly string[],
-): void {
-  const regex = new RegExp(`^${prefix}-(\\d+)$`);
-  let maxVal = store.counters?.[prefix] ?? 0;
-  for (const id of ids) {
-    const m = regex.exec(id);
-    if (m?.[1]) {
-      const n = Number.parseInt(m[1], 10);
-      if (Number.isFinite(n) && n > maxVal) {
-        maxVal = n;
-      }
-    }
-  }
-  if (store.counters) {
-    store.counters[prefix] = maxVal;
-  }
-}
-
-function mergeOrderedFromPostgres<T extends { id: string }>(
-  currentInMemory: readonly T[],
-  pgRows: readonly T[],
-): T[] {
-  const pgById = new Map<string, T>();
-  for (const r of pgRows) {
-    pgById.set(r.id, r);
-  }
-  const result: T[] = [];
-  const seen = new Set<string>();
-  for (const existing of currentInMemory) {
-    const pgRow = pgById.get(existing.id);
-    if (pgRow) {
-      const target = existing as unknown as Record<string, unknown>;
-      const source = pgRow as unknown as Record<string, unknown>;
-      for (const k of Object.keys(target)) {
-        if (!Object.prototype.hasOwnProperty.call(source, k)) {
-          delete target[k];
-        }
-      }
-      Object.assign(target, source);
-      result.push(existing);
-      seen.add(existing.id);
-    }
-  }
-  for (const pgRow of pgRows) {
-    if (!seen.has(pgRow.id)) {
-      result.push(pgRow);
-    }
-  }
-  return result;
-}
-
-/**
- * Reconciles `store.people`, `store.organisations`, `store.links`, `store.notes`,
- * `store.mergeHistory`, and `store.matters` with PostgreSQL (`S0-16`):
- * - Fast path (0 SQL queries) when neither `store` nor PostgreSQL has changed since the last sync.
- * - If a test called `resetStore()` / `clearStoreToCleanDeployment()` synchronously, resets and
- *   imports `store`'s parties & matters into PostgreSQL (preserving `matter_number_sequences`, `B6`).
- * - If a test mutated `store` directly in memory, pushes those per-record diffs to PostgreSQL.
- * - If `TenantPartyRepository` or `TenantMatterRepository` wrote directly to PostgreSQL, hydrates
- *   `store` in place from PostgreSQL.
- */
-export async function syncAndHydratePartiesAndMattersFromPostgres(
-  store: FirmStore,
-  ctx: TenantContext,
-): Promise<void> {
-  const cache = getPartiesMattersSyncCache();
-  const dbKey = ctx.postgresDatabaseName;
-  const state = cache.get(dbKey);
-  const currentResetGen = global.__oneSquaredStoreResetGeneration ?? 0;
-  const currentPgWriteSeq = global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0;
-  const lastResetAtWriteSeq =
-    ((global as Record<string, unknown>).__oneSquaredLastResetAtWriteSeq as
-      | number
-      | undefined) ?? 0;
-  const isInMemoryTestEnv =
-    Boolean(process.env.VITEST || process.env.NODE_ENV === 'test') &&
-    !process.env.ONESQUARED_RUNTIME_STORE_PATH;
-  const partyRepo = getPartyRepository();
-  const matterRepo = getMatterRepository();
-  const tenantCfg = getActiveTenantConfiguration();
-
-  if (
-    (state && state.storeResetGeneration !== currentResetGen) ||
-    (!state && isInMemoryTestEnv && currentPgWriteSeq <= lastResetAtWriteSeq)
-  ) {
-    await partyRepo.withTenantTransaction(ctx, async () => {
-      await matterRepo.clearTenantData(ctx, { resetMatterNumberSequences: false });
-      await partyRepo.clearTenantData(ctx);
-      await partyRepo.putPeople(
-        ctx,
-        (store.people ?? []) as unknown as TenantPersonRecord[],
-      );
-      await partyRepo.putOrganisations(
-        ctx,
-        (store.organisations ?? []) as unknown as TenantOrganisationRecord[],
-      );
-      await partyRepo.putLinks(
-        ctx,
-        (store.links ?? []) as unknown as TenantPersonOrganisationLinkRecord[],
-      );
-      await partyRepo.putNotes(
-        ctx,
-        (store.notes ?? []) as unknown as TenantNoteRecord[],
-      );
-      await partyRepo.putMergeHistoryRecords(
-        ctx,
-        (store.mergeHistory ?? []) as unknown as TenantMergeHistoryRecord[],
-      );
-      const sqlRestrictions = new Map<string, readonly string[]>();
-      for (const m of store.matters ?? []) {
-        const meta = computeMatterRestrictionMetadataForStore(
-          m,
-          store.people ?? [],
-          store.teams ?? [],
-          tenantCfg,
-        );
-        sqlRestrictions.set(m.id, meta.restrictedAccessUserIds);
-      }
-      const importedMatters = await matterRepo.importMatters(
-        ctx,
-        (store.matters ?? []) as unknown as TenantMatterRecord[],
-        { sqlRestrictedAccessUserIdsByMatterId: sqlRestrictions },
-      );
-      const rvMap = new Map<string, number>();
-      for (const im of importedMatters) {
-        rvMap.set(im.id, im.rowVersion ?? 1);
-      }
-      for (const m of store.matters ?? []) {
-        m.rowVersion = rvMap.get(m.id) ?? 1;
-      }
-    });
-    markPartiesAndMattersSyncedWithStore(store, ctx);
-    return;
-  }
-
-  if (!state) {
-    const [pgPeople, pgOrgs, pgLinks, pgNotes, pgMerges, pgMatters] =
-      await partyRepo.withTenantReadTransaction(ctx, async () => {
-        const people = await partyRepo.listAllPeople<Person>(ctx);
-        const orgs = await partyRepo.listAllOrganisations<Organisation>(ctx);
-        const links =
-          await partyRepo.listAllLinks<PersonOrganisationLink>(ctx);
-        const notes = await partyRepo.listAllNotes<Note>(ctx);
-        const merges = await partyRepo.listAllMergeHistory<MergeHistory>(ctx);
-        const matters =
-          await matterRepo.listAllMattersUnfiltered<Matter>(ctx);
-        return [people, orgs, links, notes, merges, matters] as const;
-      });
-
-    if (
-      pgPeople.length === 0 &&
-      pgOrgs.length === 0 &&
-      pgMatters.length === 0 &&
-      !store.isCleanDeployment &&
-      (store.people.length > 0 || store.matters.length > 0)
-    ) {
-      await partyRepo.withTenantTransaction(ctx, async () => {
-        await partyRepo.putPeople(
-          ctx,
-          (store.people ?? []) as unknown as TenantPersonRecord[],
-        );
-        await partyRepo.putOrganisations(
-          ctx,
-          (store.organisations ?? []) as unknown as TenantOrganisationRecord[],
-        );
-        await partyRepo.putLinks(
-          ctx,
-          (store.links ?? []) as unknown as TenantPersonOrganisationLinkRecord[],
-        );
-        await partyRepo.putNotes(
-          ctx,
-          (store.notes ?? []) as unknown as TenantNoteRecord[],
-        );
-        await partyRepo.putMergeHistoryRecords(
-          ctx,
-          (store.mergeHistory ?? []) as unknown as TenantMergeHistoryRecord[],
-        );
-        const sqlRestrictions = new Map<string, readonly string[]>();
-        for (const m of store.matters ?? []) {
-          const meta = computeMatterRestrictionMetadataForStore(
-            m,
-            store.people ?? [],
-            store.teams ?? [],
-            tenantCfg,
-          );
-          sqlRestrictions.set(m.id, meta.restrictedAccessUserIds);
-        }
-        const importedMatters = await matterRepo.importMatters(
-          ctx,
-          (store.matters ?? []) as unknown as TenantMatterRecord[],
-          { sqlRestrictedAccessUserIdsByMatterId: sqlRestrictions },
-        );
-        const rvMap = new Map<string, number>();
-        for (const im of importedMatters) {
-          rvMap.set(im.id, im.rowVersion ?? 1);
-        }
-        for (const m of store.matters ?? []) {
-          m.rowVersion = rvMap.get(m.id) ?? 1;
-        }
-      });
-      markPartiesAndMattersSyncedWithStore(store, ctx);
-      return;
-    }
-
-    store.people = mergeOrderedFromPostgres(store.people ?? [], pgPeople);
-    store.organisations = mergeOrderedFromPostgres(
-      store.organisations ?? [],
-      pgOrgs,
-    );
-    store.links = mergeOrderedFromPostgres(store.links ?? [], pgLinks);
-    store.notes = mergeOrderedFromPostgres(store.notes ?? [], pgNotes);
-    store.mergeHistory = mergeOrderedFromPostgres(
-      store.mergeHistory ?? [],
-      pgMerges,
-    );
-    store.matters = mergeOrderedFromPostgres(store.matters ?? [], pgMatters);
-    updateCounterHighWater(
-      store,
-      'P',
-      store.people.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'O',
-      store.organisations.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'L',
-      store.links.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'N',
-      store.notes.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'M',
-      store.matters.map((x) => x.id),
-    );
-    markPartiesAndMattersSyncedWithStore(store, ctx);
-    return;
-  }
-
-  // Check if in-memory store was mutated directly since `state` was recorded
-  const changedPeople: Person[] = [];
-  const deletedPersonIds: string[] = [];
-  const seenPeople = new Set<string>();
-  for (const p of store.people ?? []) {
-    seenPeople.add(p.id);
-    if (state.peopleById.get(p.id) !== JSON.stringify(p)) {
-      changedPeople.push(p);
-    }
-  }
-  for (const id of state.peopleById.keys()) {
-    if (!seenPeople.has(id)) deletedPersonIds.push(id);
-  }
-
-  const changedOrgs: Organisation[] = [];
-  const deletedOrgIds: string[] = [];
-  const seenOrgs = new Set<string>();
-  for (const o of store.organisations ?? []) {
-    seenOrgs.add(o.id);
-    if (state.organisationsById.get(o.id) !== JSON.stringify(o)) {
-      changedOrgs.push(o);
-    }
-  }
-  for (const id of state.organisationsById.keys()) {
-    if (!seenOrgs.has(id)) deletedOrgIds.push(id);
-  }
-
-  const changedLinks: PersonOrganisationLink[] = [];
-  const deletedLinkIds: string[] = [];
-  const seenLinks = new Set<string>();
-  for (const l of store.links ?? []) {
-    seenLinks.add(l.id);
-    if (state.linksById.get(l.id) !== JSON.stringify(l)) {
-      changedLinks.push(l);
-    }
-  }
-  for (const id of state.linksById.keys()) {
-    if (!seenLinks.has(id)) deletedLinkIds.push(id);
-  }
-
-  const changedNotes: Note[] = [];
-  const deletedNoteIds: string[] = [];
-  const seenNotes = new Set<string>();
-  for (const n of store.notes ?? []) {
-    seenNotes.add(n.id);
-    if (state.notesById.get(n.id) !== JSON.stringify(n)) {
-      changedNotes.push(n);
-    }
-  }
-  for (const id of state.notesById.keys()) {
-    if (!seenNotes.has(id)) deletedNoteIds.push(id);
-  }
-
-  const changedMerges: MergeHistory[] = [];
-  const deletedMergeIds: string[] = [];
-  const seenMerges = new Set<string>();
-  for (const mh of store.mergeHistory ?? []) {
-    seenMerges.add(mh.id);
-    if (state.mergeHistoryById.get(mh.id) !== JSON.stringify(mh)) {
-      changedMerges.push(mh);
-    }
-  }
-  for (const id of state.mergeHistoryById.keys()) {
-    if (!seenMerges.has(id)) deletedMergeIds.push(id);
-  }
-
-  const changedMatters: Matter[] = [];
-  const deletedMatterIds: string[] = [];
-  const seenMatters = new Set<string>();
-  for (const m of store.matters ?? []) {
-    seenMatters.add(m.id);
-    if (m.rowVersion === undefined) {
-      m.rowVersion = state.matterRowVersionById.get(m.id) ?? 1;
-    }
-    if (state.mattersById.get(m.id) !== serializeMatterWithoutRowVersion(m)) {
-      changedMatters.push(m);
-    }
-  }
-  for (const id of state.mattersById.keys()) {
-    if (!seenMatters.has(id)) deletedMatterIds.push(id);
-  }
-
-  const hasInMemoryStoreChanges =
-    changedPeople.length > 0 ||
-    deletedPersonIds.length > 0 ||
-    changedOrgs.length > 0 ||
-    deletedOrgIds.length > 0 ||
-    changedLinks.length > 0 ||
-    deletedLinkIds.length > 0 ||
-    changedNotes.length > 0 ||
-    deletedNoteIds.length > 0 ||
-    changedMerges.length > 0 ||
-    deletedMergeIds.length > 0 ||
-    changedMatters.length > 0 ||
-    deletedMatterIds.length > 0;
-
-  if (!hasInMemoryStoreChanges && state.pgWriteSeq === currentPgWriteSeq) {
-    return;
-  }
-
-  if (hasInMemoryStoreChanges) {
-    await partyRepo.withTenantTransaction(ctx, async () => {
-      for (const id of deletedMergeIds) {
-        await partyRepo.deleteMergeHistoryById(ctx, id);
-      }
-      for (const id of deletedNoteIds) {
-        await partyRepo.deleteNoteById(ctx, id);
-      }
-      for (const id of deletedLinkIds) {
-        await partyRepo.deleteLinkById(ctx, id);
-      }
-      for (const id of deletedMatterIds) {
-        await matterRepo.deleteMatterById(ctx, id);
-      }
-      for (const id of deletedOrgIds) {
-        await partyRepo.deleteOrganisationById(ctx, id);
-      }
-      for (const id of deletedPersonIds) {
-        await partyRepo.deletePersonById(ctx, id);
-      }
-      if (changedPeople.length > 0) {
-        await partyRepo.putPeople(
-          ctx,
-          changedPeople as unknown as TenantPersonRecord[],
-        );
-      }
-      if (changedOrgs.length > 0) {
-        await partyRepo.putOrganisations(
-          ctx,
-          changedOrgs as unknown as TenantOrganisationRecord[],
-        );
-      }
-      if (changedLinks.length > 0) {
-        await partyRepo.putLinks(
-          ctx,
-          changedLinks as unknown as TenantPersonOrganisationLinkRecord[],
-        );
-      }
-      if (changedNotes.length > 0) {
-        await partyRepo.putNotes(
-          ctx,
-          changedNotes as unknown as TenantNoteRecord[],
-        );
-      }
-      if (changedMerges.length > 0) {
-        await partyRepo.putMergeHistoryRecords(
-          ctx,
-          changedMerges as unknown as TenantMergeHistoryRecord[],
-        );
-      }
-      if (changedMatters.length > 0 || changedPeople.length > 0) {
-        const mattersToSync =
-          changedPeople.length > 0
-            ? (store.matters ?? []).filter(
-                (m) =>
-                  changedMatters.includes(m) ||
-                  Boolean(m.isStaffMatter || m.hasEthicalWall),
-              )
-            : changedMatters;
-        if (mattersToSync.length > 0) {
-          const sqlRestrictions = new Map<string, readonly string[]>();
-          for (const m of mattersToSync) {
-            const meta = computeMatterRestrictionMetadataForStore(
-              m,
-              store.people ?? [],
-              store.teams ?? [],
-              tenantCfg,
-            );
-            sqlRestrictions.set(m.id, meta.restrictedAccessUserIds);
-          }
-          const importedMatters = await matterRepo.importMatters(
-            ctx,
-            mattersToSync as unknown as TenantMatterRecord[],
-            { sqlRestrictedAccessUserIdsByMatterId: sqlRestrictions },
-          );
-          const rvMap = new Map<string, number>();
-          for (const im of importedMatters) {
-            rvMap.set(im.id, im.rowVersion ?? 1);
-          }
-          for (const m of mattersToSync) {
-            m.rowVersion = rvMap.get(m.id) ?? m.rowVersion ?? 1;
-          }
-        }
-      }
-    });
-  }
-
-  if (state.pgWriteSeq !== currentPgWriteSeq) {
-    const [pgPeople, pgOrgs, pgLinks, pgNotes, pgMerges, pgMatters] =
-      await partyRepo.withTenantReadTransaction(ctx, async () => {
-        const people = await partyRepo.listAllPeople<Person>(ctx);
-        const orgs = await partyRepo.listAllOrganisations<Organisation>(ctx);
-        const links =
-          await partyRepo.listAllLinks<PersonOrganisationLink>(ctx);
-        const notes = await partyRepo.listAllNotes<Note>(ctx);
-        const merges = await partyRepo.listAllMergeHistory<MergeHistory>(ctx);
-        const matters =
-          await matterRepo.listAllMattersUnfiltered<Matter>(ctx);
-        return [people, orgs, links, notes, merges, matters] as const;
-      });
-    store.people = mergeOrderedFromPostgres(store.people ?? [], pgPeople);
-    store.organisations = mergeOrderedFromPostgres(
-      store.organisations ?? [],
-      pgOrgs,
-    );
-    store.links = mergeOrderedFromPostgres(store.links ?? [], pgLinks);
-    store.notes = mergeOrderedFromPostgres(store.notes ?? [], pgNotes);
-    store.mergeHistory = mergeOrderedFromPostgres(
-      store.mergeHistory ?? [],
-      pgMerges,
-    );
-    store.matters = mergeOrderedFromPostgres(store.matters ?? [], pgMatters);
-    updateCounterHighWater(
-      store,
-      'P',
-      store.people.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'O',
-      store.organisations.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'L',
-      store.links.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'N',
-      store.notes.map((x) => x.id),
-    );
-    updateCounterHighWater(
-      store,
-      'M',
-      store.matters.map((x) => x.id),
-    );
-  }
-
-  markPartiesAndMattersSyncedWithStore(store, ctx);
-}
-
 /**
  * Keys on `FirmStore` that have already moved to PostgreSQL (or are monotonic sequence counters)
- * and are therefore excluded from JSON store delta compensation (`R442`).
+ * and are therefore excluded from JSON store delta compensation (`R442`, `R469`).
  */
 export type MovedToPostgresKeys =
   | 'audit'
   | 'counters'
-  | 'people'
-  | 'organisations'
-  | 'links'
-  | 'matters'
-  | 'notes'
-  | 'mergeHistory'
   | 'documentTemplates'
   | 'documentTemplateVersions'
   | 'documents'
@@ -744,7 +127,13 @@ export type MovedToPostgresKeys =
   | 'keyDateNotApplicable'
   | 'keyDateReminderStates'
   | 'keyDateCalendarSyncs'
-  | 'keyDatesConfigOverride';
+  | 'keyDatesConfigOverride'
+  | 'people'
+  | 'organisations'
+  | 'links'
+  | 'matters'
+  | 'notes'
+  | 'mergeHistory';
 
 export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>;
 
@@ -889,244 +278,6 @@ export function captureJsonStoreBaseline(store: FirmStore): JsonStoreBaseline {
   };
 }
 
-interface CapturedPostgresMatterEntry {
-  readonly jsonWithoutRowVersion: string;
-  readonly fullJson: string;
-  readonly rowVersion: number;
-  readonly index: number;
-}
-
-export interface PostgresPartiesAndMattersBaseline {
-  readonly peopleById: Map<string, CapturedItemEntry>;
-  readonly organisationsById: Map<string, CapturedItemEntry>;
-  readonly linksById: Map<string, CapturedItemEntry>;
-  readonly notesById: Map<string, CapturedItemEntry>;
-  readonly mergeHistoryById: Map<string, CapturedItemEntry>;
-  readonly mattersById: Map<string, CapturedPostgresMatterEntry>;
-  readonly matterObjectsById: Map<string, Matter>;
-}
-
-export function capturePostgresPartiesAndMattersBaseline(
-  store: FirmStore,
-  ctx?: TenantContext | null,
-): PostgresPartiesAndMattersBaseline {
-  const syncState = ctx
-    ? getPartiesMattersSyncCache().get(ctx.postgresDatabaseName)
-    : undefined;
-
-  const peopleById = new Map<string, CapturedItemEntry>();
-  for (let i = 0; i < (store.people?.length ?? 0); i++) {
-    const p = store.people[i]!;
-    peopleById.set(p.id, { json: JSON.stringify(p), index: i });
-  }
-
-  const organisationsById = new Map<string, CapturedItemEntry>();
-  for (let i = 0; i < (store.organisations?.length ?? 0); i++) {
-    const o = store.organisations[i]!;
-    organisationsById.set(o.id, { json: JSON.stringify(o), index: i });
-  }
-
-  const linksById = new Map<string, CapturedItemEntry>();
-  for (let i = 0; i < (store.links?.length ?? 0); i++) {
-    const l = store.links[i]!;
-    linksById.set(l.id, { json: JSON.stringify(l), index: i });
-  }
-
-  const notesById = new Map<string, CapturedItemEntry>();
-  for (let i = 0; i < (store.notes?.length ?? 0); i++) {
-    const n = store.notes[i]!;
-    notesById.set(n.id, { json: JSON.stringify(n), index: i });
-  }
-
-  const mergeHistoryById = new Map<string, CapturedItemEntry>();
-  for (let i = 0; i < (store.mergeHistory?.length ?? 0); i++) {
-    const mh = store.mergeHistory[i]!;
-    mergeHistoryById.set(mh.id, { json: JSON.stringify(mh), index: i });
-  }
-
-  const mattersById = new Map<string, CapturedPostgresMatterEntry>();
-  const matterObjectsById = new Map<string, Matter>();
-  for (let i = 0; i < (store.matters?.length ?? 0); i++) {
-    const m = store.matters[i]!;
-    const rv =
-      typeof m.rowVersion === 'number' &&
-      Number.isInteger(m.rowVersion) &&
-      m.rowVersion >= 1
-        ? m.rowVersion
-        : (syncState?.matterRowVersionById.get(m.id) ?? 1);
-    if (m.rowVersion === undefined) {
-      m.rowVersion = rv;
-    }
-    mattersById.set(m.id, {
-      jsonWithoutRowVersion: serializeMatterWithoutRowVersion(m),
-      fullJson: JSON.stringify(m),
-      rowVersion: rv,
-      index: i,
-    });
-    matterObjectsById.set(m.id, m);
-  }
-
-  return {
-    peopleById,
-    organisationsById,
-    linksById,
-    notesById,
-    mergeHistoryById,
-    mattersById,
-    matterObjectsById,
-  };
-}
-
-export interface PostgresPartiesAndMattersDeltas {
-  readonly upsertedPeople: Person[];
-  readonly deletedPersonIds: string[];
-  readonly upsertedOrganisations: Organisation[];
-  readonly deletedOrganisationIds: string[];
-  readonly upsertedLinks: PersonOrganisationLink[];
-  readonly deletedLinkIds: string[];
-  readonly upsertedNotes: Note[];
-  readonly deletedNoteIds: string[];
-  readonly upsertedMergeHistory: MergeHistory[];
-  readonly deletedMergeHistoryIds: string[];
-  readonly createdMatters: Matter[];
-  readonly updatedMatters: Array<{ matter: Matter; expectedRowVersion: number }>;
-  readonly deletedMatterIds: string[];
-  readonly hasAnyDelta: boolean;
-}
-
-export function diffPostgresPartiesAndMatters(
-  baseline: PostgresPartiesAndMattersBaseline,
-  afterStore: FirmStore,
-): PostgresPartiesAndMattersDeltas {
-  const upsertedPeople: Person[] = [];
-  const deletedPersonIds: string[] = [];
-  const seenPeople = new Set<string>();
-  for (const p of afterStore.people ?? []) {
-    seenPeople.add(p.id);
-    const before = baseline.peopleById.get(p.id);
-    if (!before || before.json !== JSON.stringify(p)) {
-      upsertedPeople.push(p);
-    }
-  }
-  for (const id of baseline.peopleById.keys()) {
-    if (!seenPeople.has(id)) deletedPersonIds.push(id);
-  }
-
-  const upsertedOrganisations: Organisation[] = [];
-  const deletedOrganisationIds: string[] = [];
-  const seenOrgs = new Set<string>();
-  for (const o of afterStore.organisations ?? []) {
-    seenOrgs.add(o.id);
-    const before = baseline.organisationsById.get(o.id);
-    if (!before || before.json !== JSON.stringify(o)) {
-      upsertedOrganisations.push(o);
-    }
-  }
-  for (const id of baseline.organisationsById.keys()) {
-    if (!seenOrgs.has(id)) deletedOrganisationIds.push(id);
-  }
-
-  const upsertedLinks: PersonOrganisationLink[] = [];
-  const deletedLinkIds: string[] = [];
-  const seenLinks = new Set<string>();
-  for (const l of afterStore.links ?? []) {
-    seenLinks.add(l.id);
-    const before = baseline.linksById.get(l.id);
-    if (!before || before.json !== JSON.stringify(l)) {
-      upsertedLinks.push(l);
-    }
-  }
-  for (const id of baseline.linksById.keys()) {
-    if (!seenLinks.has(id)) deletedLinkIds.push(id);
-  }
-
-  const upsertedNotes: Note[] = [];
-  const deletedNoteIds: string[] = [];
-  const seenNotes = new Set<string>();
-  for (const n of afterStore.notes ?? []) {
-    seenNotes.add(n.id);
-    const before = baseline.notesById.get(n.id);
-    if (!before || before.json !== JSON.stringify(n)) {
-      upsertedNotes.push(n);
-    }
-  }
-  for (const id of baseline.notesById.keys()) {
-    if (!seenNotes.has(id)) deletedNoteIds.push(id);
-  }
-
-  const upsertedMergeHistory: MergeHistory[] = [];
-  const deletedMergeHistoryIds: string[] = [];
-  const seenMerges = new Set<string>();
-  for (const mh of afterStore.mergeHistory ?? []) {
-    seenMerges.add(mh.id);
-    const before = baseline.mergeHistoryById.get(mh.id);
-    if (!before || before.json !== JSON.stringify(mh)) {
-      upsertedMergeHistory.push(mh);
-    }
-  }
-  for (const id of baseline.mergeHistoryById.keys()) {
-    if (!seenMerges.has(id)) deletedMergeHistoryIds.push(id);
-  }
-
-  const createdMatters: Matter[] = [];
-  const updatedMatters: Array<{ matter: Matter; expectedRowVersion: number }> = [];
-  const deletedMatterIds: string[] = [];
-  const seenMatters = new Set<string>();
-  for (const m of afterStore.matters ?? []) {
-    seenMatters.add(m.id);
-    const before = baseline.mattersById.get(m.id);
-    if (!before) {
-      createdMatters.push(m);
-    } else {
-      const afterWithoutRv = serializeMatterWithoutRowVersion(m);
-      if (afterWithoutRv !== before.jsonWithoutRowVersion) {
-        const expectedRowVersion =
-          typeof m.rowVersion === 'number' &&
-          Number.isInteger(m.rowVersion) &&
-          m.rowVersion >= 1
-            ? m.rowVersion
-            : before.rowVersion;
-        updatedMatters.push({ matter: m, expectedRowVersion });
-      }
-    }
-  }
-  for (const id of baseline.mattersById.keys()) {
-    if (!seenMatters.has(id)) deletedMatterIds.push(id);
-  }
-
-  const hasAnyDelta =
-    upsertedPeople.length > 0 ||
-    deletedPersonIds.length > 0 ||
-    upsertedOrganisations.length > 0 ||
-    deletedOrganisationIds.length > 0 ||
-    upsertedLinks.length > 0 ||
-    deletedLinkIds.length > 0 ||
-    upsertedNotes.length > 0 ||
-    deletedNoteIds.length > 0 ||
-    upsertedMergeHistory.length > 0 ||
-    deletedMergeHistoryIds.length > 0 ||
-    createdMatters.length > 0 ||
-    updatedMatters.length > 0 ||
-    deletedMatterIds.length > 0;
-
-  return {
-    upsertedPeople,
-    deletedPersonIds,
-    upsertedOrganisations,
-    deletedOrganisationIds,
-    upsertedLinks,
-    deletedLinkIds,
-    upsertedNotes,
-    deletedNoteIds,
-    upsertedMergeHistory,
-    deletedMergeHistoryIds,
-    createdMatters,
-    updatedMatters,
-    deletedMatterIds,
-    hasAnyDelta,
-  };
-}
-
 interface ArrayRecordDelta {
   readonly collection: string;
   readonly keyField: string;
@@ -1139,74 +290,16 @@ interface ArrayRecordDelta {
   }>;
 }
 
-function computeArrayDeltaForCollection(
-  collectionName: string,
-  keyField: string,
-  beforeMap: ReadonlyMap<string, CapturedItemEntry>,
-  afterArr: ReadonlyArray<Record<string, unknown>>,
-): ArrayRecordDelta | null {
-  const seenAfterIds = new Set<string>();
-  const insertedIds: string[] = [];
-  const updatedItems: Array<{ id: string; beforeJson: string }> = [];
-
-  for (const item of afterArr) {
-    const idVal = item?.[keyField];
-    if (typeof idVal !== 'string' || !idVal) continue;
-    seenAfterIds.add(idVal);
-    const beforeEntry = beforeMap.get(idVal);
-    if (!beforeEntry) {
-      insertedIds.push(idVal);
-    } else {
-      const afterJson = JSON.stringify(item);
-      if (afterJson !== beforeEntry.json) {
-        updatedItems.push({ id: idVal, beforeJson: beforeEntry.json });
-      }
-    }
-  }
-
-  const deletedItems: Array<{
-    id: string;
-    beforeJson: string;
-    beforeIndex: number;
-  }> = [];
-  for (const [idVal, beforeEntry] of beforeMap.entries()) {
-    if (!seenAfterIds.has(idVal)) {
-      deletedItems.push({
-        id: idVal,
-        beforeJson: beforeEntry.json,
-        beforeIndex: beforeEntry.index,
-      });
-    }
-  }
-
-  if (
-    insertedIds.length === 0 &&
-    updatedItems.length === 0 &&
-    deletedItems.length === 0
-  ) {
-    return null;
-  }
-
-  return {
-    collection: collectionName,
-    keyField,
-    insertedIds,
-    updatedItems,
-    deletedItems,
-  };
-}
-
 /**
  * Computes the exact per-record diff between `baseline` and `afterStore` and registers
  * a record-level compensating undo step on `compensator` (`R406`).
- * Returns `true` if any JSON store record or scalar setting changed.
+ * Returns `true` if any unmoved JSON store record or scalar setting changed.
  */
 export function registerJsonStoreRecordDeltas(
   baseline: JsonStoreBaseline,
   afterStore: FirmStore,
   compensator: RecordDeltaCompensator,
   label = 'json-store.record-delta',
-  pgBaseline?: PostgresPartiesAndMattersBaseline,
 ): boolean {
   const afterRecord = afterStore as unknown as Record<string, unknown>;
   const arrayDeltas: ArrayRecordDelta[] = [];
@@ -1218,51 +311,52 @@ export function registerJsonStoreRecordDeltas(
     const afterArr = Array.isArray(afterRecord[spec.name])
       ? (afterRecord[spec.name] as Array<Record<string, unknown>>)
       : [];
-    const delta = computeArrayDeltaForCollection(
-      spec.name,
-      spec.keyField,
-      beforeMap,
-      afterArr,
-    );
-    if (delta) {
-      arrayDeltas.push(delta);
-    }
-  }
+    const seenAfterIds = new Set<string>();
+    const insertedIds: string[] = [];
+    const updatedItems: Array<{ id: string; beforeJson: string }> = [];
 
-  const pgArrayDeltas: ArrayRecordDelta[] = [];
-  if (pgBaseline) {
-    const pgSpecs: Array<{
-      name: string;
-      beforeMap: ReadonlyMap<string, CapturedItemEntry>;
-    }> = [
-      { name: 'people', beforeMap: pgBaseline.peopleById },
-      { name: 'organisations', beforeMap: pgBaseline.organisationsById },
-      { name: 'links', beforeMap: pgBaseline.linksById },
-      { name: 'notes', beforeMap: pgBaseline.notesById },
-      { name: 'mergeHistory', beforeMap: pgBaseline.mergeHistoryById },
-      {
-        name: 'matters',
-        beforeMap: new Map(
-          Array.from(pgBaseline.mattersById.entries()).map(([id, entry]) => [
-            id,
-            { json: entry.fullJson, index: entry.index },
-          ]),
-        ),
-      },
-    ];
-    for (const spec of pgSpecs) {
-      const afterArr = Array.isArray(afterRecord[spec.name])
-        ? (afterRecord[spec.name] as Array<Record<string, unknown>>)
-        : [];
-      const delta = computeArrayDeltaForCollection(
-        spec.name,
-        'id',
-        spec.beforeMap,
-        afterArr,
-      );
-      if (delta) {
-        pgArrayDeltas.push(delta);
+    for (const item of afterArr) {
+      const idVal = item?.[spec.keyField];
+      if (typeof idVal !== 'string' || !idVal) continue;
+      seenAfterIds.add(idVal);
+      const beforeEntry = beforeMap.get(idVal);
+      if (!beforeEntry) {
+        insertedIds.push(idVal);
+      } else {
+        const afterJson = JSON.stringify(item);
+        if (afterJson !== beforeEntry.json) {
+          updatedItems.push({ id: idVal, beforeJson: beforeEntry.json });
+        }
       }
+    }
+
+    const deletedItems: Array<{
+      id: string;
+      beforeJson: string;
+      beforeIndex: number;
+    }> = [];
+    for (const [idVal, beforeEntry] of beforeMap.entries()) {
+      if (!seenAfterIds.has(idVal)) {
+        deletedItems.push({
+          id: idVal,
+          beforeJson: beforeEntry.json,
+          beforeIndex: beforeEntry.index,
+        });
+      }
+    }
+
+    if (
+      insertedIds.length > 0 ||
+      updatedItems.length > 0 ||
+      deletedItems.length > 0
+    ) {
+      arrayDeltas.push({
+        collection: spec.name,
+        keyField: spec.keyField,
+        insertedIds,
+        updatedItems,
+        deletedItems,
+      });
     }
   }
 
@@ -1320,13 +414,11 @@ export function registerJsonStoreRecordDeltas(
     }
   }
 
-  const hasUnmovedDelta =
+  const hasAnyDelta =
     arrayDeltas.length > 0 ||
     recentChanges.length > 0 ||
     sensitiveChanges.length > 0 ||
     scalarChanges.length > 0;
-
-  const hasAnyDelta = hasUnmovedDelta || pgArrayDeltas.length > 0;
 
   if (!hasAnyDelta) {
     return false;
@@ -1336,7 +428,7 @@ export function registerJsonStoreRecordDeltas(
     const liveStore = getStore();
     const liveRecord = liveStore as unknown as Record<string, unknown>;
 
-    for (const delta of [...arrayDeltas, ...pgArrayDeltas]) {
+    for (const delta of arrayDeltas) {
       let arr = liveRecord[delta.collection] as
         | Array<Record<string, unknown>>
         | undefined;
@@ -1376,7 +468,12 @@ export function registerJsonStoreRecordDeltas(
     }
 
     if (recentChanges.length > 0) {
-      liveStore.recentlyViewed = liveStore.recentlyViewed ?? {};
+      if (
+        !liveStore.recentlyViewed ||
+        typeof liveStore.recentlyViewed !== 'object'
+      ) {
+        liveStore.recentlyViewed = {};
+      }
       for (const rc of recentChanges) {
         if (rc.beforeJson === null) {
           delete liveStore.recentlyViewed[rc.userId];
@@ -1389,8 +486,12 @@ export function registerJsonStoreRecordDeltas(
     }
 
     if (sensitiveChanges.length > 0) {
-      liveStore.employeeSensitiveRecords =
-        liveStore.employeeSensitiveRecords ?? {};
+      if (
+        !liveStore.employeeSensitiveRecords ||
+        typeof liveStore.employeeSensitiveRecords !== 'object'
+      ) {
+        liveStore.employeeSensitiveRecords = {};
+      }
       for (const sc of sensitiveChanges) {
         if (sc.beforeJson === null) {
           delete liveStore.employeeSensitiveRecords[sc.personId];
@@ -1410,23 +511,19 @@ export function registerJsonStoreRecordDeltas(
       }
     }
 
-    if (pgArrayDeltas.length > 0) {
-      invalidatePartiesAndMattersSyncCache();
-    }
-
     try {
       saveStore(liveStore);
     } catch (saveErr) {
       if (label === 'executeMerge') {
-        let tenantId = 'unknown';
-        try {
-          tenantId = getActiveTenantConfiguration().tenantId || 'unknown';
-        } catch {
-          // ignore
-        }
+        const session = getActiveActorSession();
+        const tenantId =
+          session?.tenantId ?? getActiveTenantConfiguration().tenantId;
         const correlationId = resolveRequestCorrelationId(
-          (getActiveActorSession() as { correlationId?: string } | null)
-            ?.correlationId ?? null,
+          (
+            session?.verifiedSession as
+              | { correlationId?: string }
+              | undefined
+          )?.correlationId,
           'corr-merge-rollback',
         );
         console.error(
@@ -1447,7 +544,7 @@ export function registerJsonStoreRecordDeltas(
     }
   });
 
-  return hasUnmovedDelta;
+  return true;
 }
 
 /**
@@ -1513,13 +610,45 @@ export async function appendUnmigratedModuleAuditEntries(
 }
 
 /**
- * Runs an unmoved-module JSON store mutation or `S0-16` party/matter mutation inside `withJsonStoreWriteLock` (`R406`, `R418`, `R446`):
- * - Only the outermost `runUnmigratedJsonMutationWithAudit` frame captures the JSON store and PostgreSQL
- *   party/matter baselines, registers the single per-record delta undo step, and commits all moved
- *   party/matter writes + staged `audit_entries` in one PostgreSQL transaction (`withTenantTransaction`).
+ * Runs a PostgreSQL-backed service mutation inside an active audit staging scope
+ * so `writeAudit` + `flushStagedAuditEntries(ctx)` commit atomically inside `withTenantTransaction`.
+ */
+export async function runWithAuditStagingScope<T>(
+  fn: () => Promise<T>,
+): Promise<T> {
+  const stagingStorage = getAuditStagingStorage();
+  if (!stagingStorage) {
+    return fn();
+  }
+  return stagingStorage.run({ stagedEntries: [] }, fn);
+}
+
+/**
+ * Drains and appends all currently staged audit entries inside the active scope
+ * (joining an active `withTenantTransaction` if called inside one).
+ */
+export async function flushStagedAuditEntries(
+  ctx: TenantContext,
+): Promise<FirmAuditEntryRecord[]> {
+  const activeScope = getAuditStagingStorage()?.getStore();
+  if (!activeScope || activeScope.stagedEntries.length === 0) {
+    return [];
+  }
+  const entries = activeScope.stagedEntries.splice(
+    0,
+    activeScope.stagedEntries.length,
+  );
+  return appendUnmigratedModuleAuditEntries(ctx, entries);
+}
+
+/**
+ * Runs an unmoved-module JSON store mutation inside `withJsonStoreWriteLock` (`R406`, `R418`, `R446`):
+ * - Only the outermost `runUnmigratedJsonMutationWithAudit` frame captures the JSON store baseline,
+ *   registers the single per-record delta undo step, and appends all staged `audit_entries` in one
+ *   PostgreSQL transaction.
  * - Nested frames push their staged entries onto the outer scope and skip baseline/undo/append so
- *   overlapping record mutations revert cleanly to the pre-outer state and never commit inner PostgreSQL
- *   or audit rows before the outer frame succeeds (`R446`).
+ *   overlapping record mutations revert cleanly to the pre-outer state and never commit inner audit
+ *   rows before the outer frame succeeds (`R446`).
  */
 export async function runUnmigratedJsonMutationWithAudit<T>(params: {
   resolveCtx: (store: FirmStore, result: T) => TenantContext | null;
@@ -1537,264 +666,48 @@ export async function runUnmigratedJsonMutationWithAudit<T>(params: {
     );
   }
 
-  try {
-    return await withJsonStoreWriteLock(async (compensator) => {
-      const store = getStore();
-      let preCtx: TenantContext | null = null;
-      try {
-        preCtx = params.resolveCtx(store, undefined as unknown as T);
-      } catch {
-        preCtx = null;
-      }
-      if (preCtx) {
-        await syncAndHydratePartiesAndMattersFromPostgres(store, preCtx);
-      }
+  return withJsonStoreWriteLock(async (compensator) => {
+    const store = getStore();
+    const baseline = captureJsonStoreBaseline(store);
+    const stagedEntries: FirmAuditEntryInput[] = [];
 
-      const baseline = captureJsonStoreBaseline(store);
-      const pgBaseline = capturePostgresPartiesAndMattersBaseline(store, preCtx);
-      const stagedEntries: FirmAuditEntryInput[] = [];
-
-      const executeMutate = async () => params.mutate(store, compensator);
-      let result: T;
-      try {
-        result = stagingStorage
-          ? await stagingStorage.run({ stagedEntries }, executeMutate)
-          : await executeMutate();
-      } catch (err) {
-        registerJsonStoreRecordDeltas(
-          baseline,
-          store,
-          compensator,
-          params.label ?? 'json-store.record-delta',
-          pgBaseline,
-        );
-        throw err;
-      }
-
-      const pgDeltas = diffPostgresPartiesAndMatters(pgBaseline, store);
-      const storeMutated = registerJsonStoreRecordDeltas(
+    const executeMutate = async () => params.mutate(store, compensator);
+    let result: T;
+    try {
+      result = stagingStorage
+        ? await stagingStorage.run({ stagedEntries }, executeMutate)
+        : await executeMutate();
+    } catch (err) {
+      registerJsonStoreRecordDeltas(
         baseline,
         store,
         compensator,
         params.label ?? 'json-store.record-delta',
-        pgBaseline,
       );
-
-      if (stagedEntries.length > 0 || storeMutated || pgDeltas.hasAnyDelta) {
-        const ctx = params.resolveCtx(store, result) ?? preCtx;
-        if (!ctx) {
-          throw new Error(
-            'TENANCY_AUTH_ERROR: Cannot write firm audit entries without a resolved TenantContext.',
-          );
-        }
-
-        if (pgDeltas.hasAnyDelta || stagedEntries.length > 0) {
-          const partyRepo = getPartyRepository();
-          const matterRepo = getMatterRepository();
-          const auditRepo = getAuditRepository();
-          const tenantCfg = getActiveTenantConfiguration();
-          const persistedRowVersions = new Map<string, number>();
-
-          let capturedAuditError: unknown = null;
-          try {
-            await partyRepo.withTenantTransaction(ctx, async () => {
-              for (const id of pgDeltas.deletedMergeHistoryIds) {
-                await partyRepo.deleteMergeHistoryById(ctx, id);
-              }
-              for (const id of pgDeltas.deletedNoteIds) {
-                await partyRepo.deleteNoteById(ctx, id);
-              }
-              for (const id of pgDeltas.deletedLinkIds) {
-                await partyRepo.deleteLinkById(ctx, id);
-              }
-              for (const id of pgDeltas.deletedMatterIds) {
-                await matterRepo.deleteMatterById(ctx, id);
-              }
-              for (const id of pgDeltas.deletedOrganisationIds) {
-                await partyRepo.deleteOrganisationById(ctx, id);
-              }
-              for (const id of pgDeltas.deletedPersonIds) {
-                await partyRepo.deletePersonById(ctx, id);
-              }
-              if (pgDeltas.upsertedPeople.length > 0) {
-                await partyRepo.putPeople(
-                  ctx,
-                  pgDeltas.upsertedPeople as unknown as TenantPersonRecord[],
-                );
-              }
-              if (pgDeltas.upsertedOrganisations.length > 0) {
-                await partyRepo.putOrganisations(
-                  ctx,
-                  pgDeltas.upsertedOrganisations as unknown as TenantOrganisationRecord[],
-                );
-              }
-              if (pgDeltas.upsertedLinks.length > 0) {
-                await partyRepo.putLinks(
-                  ctx,
-                  pgDeltas.upsertedLinks as unknown as TenantPersonOrganisationLinkRecord[],
-                );
-              }
-              if (pgDeltas.upsertedNotes.length > 0) {
-                await partyRepo.putNotes(
-                  ctx,
-                  pgDeltas.upsertedNotes as unknown as TenantNoteRecord[],
-                );
-              }
-              if (pgDeltas.upsertedMergeHistory.length > 0) {
-                await partyRepo.putMergeHistoryRecords(
-                  ctx,
-                  pgDeltas.upsertedMergeHistory as unknown as TenantMergeHistoryRecord[],
-                );
-              }
-              for (const m of pgDeltas.createdMatters) {
-                const meta = computeMatterRestrictionMetadataForStore(
-                  m,
-                  store.people ?? [],
-                  store.teams ?? [],
-                  tenantCfg,
-                );
-                const created = await matterRepo.createMatter(
-                  ctx,
-                  m as unknown as TenantMatterRecord,
-                  { sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds },
-                );
-                persistedRowVersions.set(m.id, created.rowVersion ?? 1);
-              }
-              for (const { matter: m, expectedRowVersion } of pgDeltas.updatedMatters) {
-                const meta = computeMatterRestrictionMetadataForStore(
-                  m,
-                  store.people ?? [],
-                  store.teams ?? [],
-                  tenantCfg,
-                );
-                const updated = await matterRepo.updateMatter(
-                  ctx,
-                  m as unknown as TenantMatterRecord,
-                  {
-                    expectedRowVersion,
-                    sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
-                  },
-                );
-                persistedRowVersions.set(
-                  m.id,
-                  updated.rowVersion ?? expectedRowVersion + 1,
-                );
-              }
-              if (
-                pgDeltas.upsertedPeople.length > 0 ||
-                pgDeltas.deletedPersonIds.length > 0
-              ) {
-                const touchedMatterIds = new Set<string>([
-                  ...pgDeltas.createdMatters.map((x) => x.id),
-                  ...pgDeltas.updatedMatters.map((x) => x.matter.id),
-                ]);
-                const restrictedUntouchedMatters = (store.matters ?? []).filter(
-                  (m) =>
-                    !touchedMatterIds.has(m.id) &&
-                    Boolean(
-                      m.isStaffMatter ||
-                        m.hasEthicalWall ||
-                        (m.restrictedAccessUserIds &&
-                          m.restrictedAccessUserIds.length > 0),
-                    ),
-                );
-                if (restrictedUntouchedMatters.length > 0) {
-                  const sqlRestrictions = new Map<string, readonly string[]>();
-                  for (const m of restrictedUntouchedMatters) {
-                    const meta = computeMatterRestrictionMetadataForStore(
-                      m,
-                      store.people ?? [],
-                      store.teams ?? [],
-                      tenantCfg,
-                    );
-                    sqlRestrictions.set(m.id, meta.restrictedAccessUserIds);
-                  }
-                  await matterRepo.importMatters(
-                    ctx,
-                    restrictedUntouchedMatters as unknown as TenantMatterRecord[],
-                    { sqlRestrictedAccessUserIdsByMatterId: sqlRestrictions },
-                  );
-                }
-              }
-              if (stagedEntries.length > 0) {
-                try {
-                  await auditRepo.appendAuditEntries(ctx, stagedEntries);
-                } catch (auditErr) {
-                  capturedAuditError = auditErr;
-                  throw auditErr;
-                }
-              }
-            });
-          } catch (txErr) {
-            if (capturedAuditError !== null) {
-              throw capturedAuditError;
-            }
-            throw txErr;
-          }
-
-          if (persistedRowVersions.size > 0) {
-            for (const [mId, newRv] of persistedRowVersions.entries()) {
-              const storeM = store.matters?.find((x) => x.id === mId);
-              if (storeM) {
-                storeM.rowVersion = newRv;
-              }
-              const preMatterObj = pgBaseline.matterObjectsById.get(mId);
-              if (preMatterObj) {
-                preMatterObj.rowVersion = newRv;
-              }
-              if (result && typeof result === 'object') {
-                const resMatter = (result as { matter?: Matter | null }).matter;
-                if (resMatter && resMatter.id === mId) {
-                  resMatter.rowVersion = newRv;
-                }
-                const resDirect = result as {
-                  id?: string;
-                  matterNumber?: string;
-                  rowVersion?: number;
-                };
-                if (
-                  resDirect.id === mId &&
-                  typeof resDirect.matterNumber === 'string'
-                ) {
-                  resDirect.rowVersion = newRv;
-                }
-              }
-            }
-          }
-
-          if (pgDeltas.hasAnyDelta) {
-            markPartiesAndMattersSyncedWithStore(store, ctx, persistedRowVersions);
-            if (
-              persistedRowVersions.size > 0 &&
-              (process.env.VITEST || process.env.NODE_ENV === 'test') &&
-              !process.env.ONESQUARED_RUNTIME_STORE_PATH
-            ) {
-              global.__oneSquaredLastSavedStoreJson = JSON.stringify(store);
-            }
-          }
-        }
-      }
-
-      return result;
-    });
-  } catch (err) {
-    if (
-      params.label === 'saveMatterRecord' &&
-      err &&
-      typeof err === 'object' &&
-      (err as { code?: string }).code === MATTER_CONCURRENCY_CONFLICT_CODE
-    ) {
-      return {
-        matter: null,
-        code: MATTER_CONCURRENCY_CONFLICT_CODE,
-        message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
-        errors: {
-          conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
-        },
-      } as unknown as T;
+      throw err;
     }
-    throw err;
-  }
+
+    const storeMutated = registerJsonStoreRecordDeltas(
+      baseline,
+      store,
+      compensator,
+      params.label ?? 'json-store.record-delta',
+    );
+
+    if (stagedEntries.length > 0 || storeMutated) {
+      const ctx = params.resolveCtx(store, result);
+      if (!ctx) {
+        throw new Error(
+          'TENANCY_AUTH_ERROR: Cannot write firm audit entries without a resolved TenantContext.',
+        );
+      }
+      if (stagedEntries.length > 0) {
+        await appendUnmigratedModuleAuditEntries(ctx, stagedEntries);
+      }
+    }
+
+    return result;
+  });
 }
 
 export function getActiveCompensatorOrNull(): RecordDeltaCompensator | null {

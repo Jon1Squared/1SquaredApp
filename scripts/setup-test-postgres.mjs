@@ -105,9 +105,11 @@ async function ensureLocalWindowsPostgresIfNeeded() {
           '-l',
           pgLogFile,
           '-w',
+          '-t',
+          '180',
           'start',
           '-o',
-          `-h 127.0.0.1 -p ${pgMigratePort}`,
+          `-F -h 127.0.0.1 -p ${pgMigratePort}`,
         ],
         { stdio: 'inherit', shell: false },
       );
@@ -134,7 +136,7 @@ async function ensureLocalWindowsPostgresIfNeeded() {
 async function run() {
   await ensureLocalWindowsPostgresIfNeeded();
 
-  const args = ['tsx', 'scripts/provision-test-postgres.ts'];
+  const args = ['tsx', '--conditions', 'react-server', 'scripts/provision-test-postgres.ts'];
   const res = isWin
     ? spawnSync([npxCmd, ...args].join(' '), {
         stdio: 'inherit',

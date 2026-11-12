@@ -28,13 +28,9 @@ import {
   type TenantPersonRecord,
 } from '@platform/core';
 import { isMatterRestrictedForKeyDates } from '@/domain/keyDates';
+import { canPersonAccessMatter } from '@/domain/rbac';
 import type { Matter, Person, Team } from '@/domain/types';
-import { canPersonAccessMatter } from './rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
-import {
-  invalidatePartiesAndMattersSyncCache,
-  markPartiesAndMattersSyncedWithStore,
-} from './auditAdapter';
 import { getStore, type FirmStore } from './store';
 
 export type ImportableStoreModule =
@@ -130,6 +126,7 @@ export function computeMatterRestrictionMetadataForStore(
       restrictedAccessUserIds: [],
     };
   }
+  const effectiveTenantConfig = tenantConfig ?? getActiveTenantConfiguration();
   const permittedIds = new Set<string>(matter.restrictedAccessUserIds ?? []);
   for (const person of people) {
     if (!person.isEmployee || person.mergedIntoId) continue;
@@ -137,7 +134,8 @@ export function computeMatterRestrictionMetadataForStore(
       canPersonAccessMatter(matter, person.id, person, {
         allPeople: people,
         teams,
-        ...(tenantConfig ? { config: tenantConfig } : {}),
+        config: effectiveTenantConfig,
+        tenantId: effectiveTenantConfig.tenantId,
       })
     ) {
       permittedIds.add(person.id);
@@ -177,12 +175,10 @@ export async function clearMigratedPostgresModulesForTenant(options: {
         ? { resetMatterNumberSequences: options.resetMatterNumberSequences }
         : {}),
     });
-    global.__oneSquaredPartiesMattersSyncByDb?.delete(ctx.postgresDatabaseName);
   }
   if (modules.includes('parties')) {
     const partyRepo = new TenantPartyRepository();
     await partyRepo.clearTenantData(ctx);
-    global.__oneSquaredPartiesMattersSyncByDb?.delete(ctx.postgresDatabaseName);
   }
   if (modules.includes('audit')) {
     // R453: runs under the caller's tenant role through the non-live reset function (0008).
@@ -319,7 +315,6 @@ export async function importFirmStoreModulesToPostgres(
       }
     });
     counts.matters = matters.length;
-    global.__oneSquaredPartiesMattersSyncByDb?.delete(ctx.postgresDatabaseName);
 
     const verifyMatterRepo = new TenantMatterRepository();
     const verifiedMatterCounts =
@@ -330,18 +325,6 @@ export async function importFirmStoreModulesToPostgres(
       throw new Error(
         'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection matters row count did not match imported total.',
       );
-    }
-  }
-
-  if (modules.includes('parties') || modules.includes('matters')) {
-    if (
-      store === global.__oneSquaredStore &&
-      modules.includes('parties') &&
-      modules.includes('matters')
-    ) {
-      markPartiesAndMattersSyncedWithStore(store, ctx);
-    } else {
-      invalidatePartiesAndMattersSyncCache(ctx.postgresDatabaseName);
     }
   }
 
@@ -570,22 +553,15 @@ export async function importFirmStoreModulesToPostgres(
 
   if (modules.includes('key-dates')) {
     const keyDateRepo = new TenantKeyDateRepository();
-    const people = store.people ?? [];
-    const teams = store.teams ?? [];
-    const matters = store.matters ?? [];
+    const matters =
+      (store.matters?.length ?? 0) > 0
+        ? store.matters!
+        : ((await new TenantMatterRepository().listAllMatters(
+            ctx,
+          )) as unknown as Matter[]);
     const matterIdSet = new Set(matters.map((m) => m.id));
 
     await keyDateRepo.withTenantTransaction(ctx, async () => {
-      // Stage unrestricted matter rows inside the transaction so system-store-import
-      // can upsert restricted-matter key dates before locking down exact allow-lists.
-      for (const m of matters) {
-        await keyDateRepo.setMatterRestriction(ctx, {
-          matterId: m.id,
-          isRestricted: false,
-          restrictedAccessUserIds: [],
-        });
-      }
-
       if (store.keyDatesConfigOverride !== undefined) {
         await keyDateRepo.putKeyDatesTenantConfig(
           ctx,
@@ -629,19 +605,6 @@ export async function importFirmStoreModulesToPostgres(
         if (!importedKeyDateIds.has(cs.keyDateId)) continue;
         await keyDateRepo.putCalendarSync(ctx, cs);
         counts.keyDateCalendarSyncs += 1;
-      }
-
-      // Apply authoritative staff-matter & ethical-wall allow-lists before COMMIT
-      for (const m of matters) {
-        await keyDateRepo.setMatterRestriction(
-          ctx,
-          computeMatterRestrictionMetadataForStore(
-            m,
-            people,
-            teams,
-            tenantConfig,
-          ),
-        );
       }
     });
 

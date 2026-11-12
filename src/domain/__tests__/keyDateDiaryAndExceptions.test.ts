@@ -28,6 +28,7 @@ import {
   runAsTestActor,
   testTenantCtx,
 } from '@/server/testSupport/auditTestSupport';
+import { getMatterRepository } from '@/platform/tenantRuntime';
 
 const config = exampleConfig as unknown as KeyDatesConfig;
 
@@ -858,10 +859,10 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       leadFeeEarnerId: managingPartner.id,
       teamMemberIds: [managingPartner.id],
     };
-    store.matters.push(staffMatterNoAssignee);
     const activeTeamId = store.teams.find((t) => t.active)!.id;
     const kdRepo = getKeyDateRepository();
     const partnerCtx = testTenantCtx(managingPartner.id);
+    await getMatterRepository().putMatter(partnerCtx, staffMatterNoAssignee);
     const baseKd = (await kdRepo.listAllVisibleKeyDates(partnerCtx)).find((k) =>
       Boolean(k.matterId),
     )!;

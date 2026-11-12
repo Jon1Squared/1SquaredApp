@@ -218,7 +218,6 @@ declare global {
   var __oneSquaredStore: FirmStore | undefined;
   var __oneSquaredStoreMtimeMs: number | undefined;
   var __oneSquaredLastSavedStoreJson: string | undefined;
-  var __oneSquaredStoreResetGeneration: number | undefined;
 }
 
 /**
@@ -639,43 +638,6 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
   };
 }
 
-let firestoreSynced = false;
-
-async function trySyncToFirestore(store: FirmStore): Promise<void> {
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    return;
-  }
-  try {
-    const { getApps, initializeApp, cert } = await import('firebase-admin/app');
-    const { getFirestore } = await import('firebase-admin/firestore');
-    if (!getApps().length) {
-      if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-        initializeApp({
-          credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)),
-          projectId: process.env.FIREBASE_PROJECT_ID || 'onesquared-poc',
-        });
-      } else {
-        initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'onesquared-poc' });
-      }
-    }
-    const db = getFirestore();
-    await db
-      .collection('firms')
-      .doc(store.firmId)
-      .set(
-        {
-          firm: store.firm,
-          counters: store.counters,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true },
-      );
-    firestoreSynced = true;
-  } catch {
-    // Fallback to local store when Firestore API or credentials are not active
-  }
-}
-
 function hasInvalidSupervisingPartner(person: Person, allPeople: Person[]): boolean {
   const supId = person.employment?.supervisingPartnerId;
   if (!supId) return false;
@@ -1059,6 +1021,17 @@ export function getStore(): FirmStore {
   if (isTestEnv && global.__oneSquaredLastSavedStoreJson) {
     try {
       const parsed = JSON.parse(global.__oneSquaredLastSavedStoreJson) as FirmStore;
+      if (!Array.isArray(parsed.organisations)) parsed.organisations = [];
+      if (!Array.isArray(parsed.people)) parsed.people = [];
+      if (!Array.isArray(parsed.links)) parsed.links = [];
+      if (!Array.isArray(parsed.matters)) parsed.matters = [];
+      if (!Array.isArray(parsed.notes)) parsed.notes = [];
+      if (!Array.isArray(parsed.audit)) parsed.audit = [];
+      if (!Array.isArray(parsed.mergeHistory)) parsed.mergeHistory = [];
+      if (!Array.isArray(parsed.keyDates)) parsed.keyDates = [];
+      if (!Array.isArray(parsed.keyDateNotApplicable)) parsed.keyDateNotApplicable = [];
+      if (!Array.isArray(parsed.keyDateReminderStates)) parsed.keyDateReminderStates = [];
+      if (!Array.isArray(parsed.keyDateCalendarSyncs)) parsed.keyDateCalendarSyncs = [];
       setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
       global.__oneSquaredStore = parsed;
       return global.__oneSquaredStore;
@@ -1071,6 +1044,46 @@ export function getStore(): FirmStore {
   return fresh;
 }
 
+const MOVED_TO_POSTGRES_STORE_KEYS: ReadonlySet<string> = new Set([
+  'audit',
+  'documentTemplates',
+  'documentTemplateVersions',
+  'documents',
+  'documentLinks',
+  'templateUsageEvents',
+  'documentGenerationConfigOverride',
+  'matterDocumentLocations',
+  'documentStoreFolderScopes',
+  'documentLifecycleJobs',
+  'documentReconciliationFindings',
+  'documentStoreAuditEvents',
+  'documentStoreConfigOverride',
+  'keyDates',
+  'keyDateNotApplicable',
+  'keyDateReminderStates',
+  'keyDateCalendarSyncs',
+  'keyDatesConfigOverride',
+  'people',
+  'organisations',
+  'links',
+  'matters',
+  'notes',
+  'mergeHistory',
+]);
+
+function serializeUnmigratedStoreForPersistence(
+  store: FirmStore,
+  space?: number,
+): string {
+  const unmigratedCopy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(store)) {
+    if (!MOVED_TO_POSTGRES_STORE_KEYS.has(key)) {
+      unmigratedCopy[key] = value;
+    }
+  }
+  return JSON.stringify(unmigratedCopy, null, space);
+}
+
 export function saveStore(store: FirmStore): void {
   global.__oneSquaredStore = store;
   setRuntimeRbacConfigOverride(store.rbacConfigOverride);
@@ -1078,7 +1091,8 @@ export function saveStore(store: FirmStore): void {
     (process.env.VITEST || process.env.NODE_ENV === 'test') &&
     !process.env.ONESQUARED_RUNTIME_STORE_PATH
   ) {
-    global.__oneSquaredLastSavedStoreJson = JSON.stringify(store);
+    global.__oneSquaredLastSavedStoreJson =
+      serializeUnmigratedStoreForPersistence(store);
     return;
   }
   try {
@@ -1087,7 +1101,11 @@ export function saveStore(store: FirmStore): void {
     if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
     const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
     try {
-      fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
+      fs.writeFileSync(
+        tmpPath,
+        serializeUnmigratedStoreForPersistence(store, 2),
+        'utf8',
+      );
       fs.renameSync(tmpPath, targetPath);
     } catch (writeErr) {
       try {
@@ -1101,29 +1119,18 @@ export function saveStore(store: FirmStore): void {
   } catch {
     // ignore read-only fs errors in serverless environments
   }
-  if (!firestoreSynced) {
-    void trySyncToFirestore(store);
-  }
 }
 
 export function resetStore(): FirmStore {
   const includeSyntheticEntraOids =
     getActiveTenantConfiguration().environment === 'test';
   const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
-  global.__oneSquaredStoreResetGeneration =
-    (global.__oneSquaredStoreResetGeneration ?? 0) + 1;
-  (global as Record<string, unknown>).__oneSquaredLastResetAtWriteSeq =
-    global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0;
   saveStore(fresh);
   return fresh;
 }
 
 export function clearStoreToCleanDeployment(): FirmStore {
   const clean = createCleanDeploymentStore(new Date());
-  global.__oneSquaredStoreResetGeneration =
-    (global.__oneSquaredStoreResetGeneration ?? 0) + 1;
-  (global as Record<string, unknown>).__oneSquaredLastResetAtWriteSeq =
-    global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0;
   saveStore(clean);
   return clean;
 }

@@ -123,12 +123,16 @@ import {
   uploadMatterStoreDocument,
 } from '@/server/documentStoreServices';
 import {
+  getMatterRepository,
+  getPartyRepository,
   liftMatterRestriction,
   markEngagementLetterDrafted,
+  resetAllDemoData,
   saveMatterRecord,
   savePersonRecord,
   updateMatterConflictRecord,
 } from '@/server/services';
+import { testDataResetContext } from '@/test/testTenantContexts';
 import { getStore, saveStore } from '@/server/store';
 import {
   auditEntriesForRecord,
@@ -2049,9 +2053,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const { sessions, asEmployee } = registerStoreEmployeeSessionsForTest(store);
 
         // R19: Unknown userId throws UNAUTHENTICATED rather than falling back to P-000001
-        expect(() =>
+        await expect(
           buildTenantContextForUser('P-NON-EXISTENT', store),
-        ).toThrow(/UNAUTHENTICATED/);
+        ).rejects.toThrow(/UNAUTHENTICATED/);
 
         // R5: Employee excluded from a restricted matter calling browseMatterDocumentStoreFolder gets no locations/jobs and does not trigger provisioning
         const restrictedMatter = store.matters.find((m) => m.id === 'M-000002')!;
@@ -2061,6 +2065,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         restrictedMatter.supervisingPartnerId = 'P-000001';
         restrictedMatter.responsiblePartnerId = 'P-000001';
         restrictedMatter.teamMemberIds = ['P-000001'];
+        await getMatterRepository().putMatter(
+          testTenantCtx('P-000001'),
+          restrictedMatter,
+          {
+            expectedRowVersion: null,
+            sqlRestrictedAccessUserIds: ['P-000001'],
+          },
+        );
 
         // P-000007 is a fee earner in Corporate without matter:restricted:access
         const jobsOnRestrictedBefore = (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).filter(
@@ -2092,6 +2104,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         // Provision Matter A (M-000001, accessible to P-000002, with P-000010 NOT named on the matter) and Matter B (M-000002, restricted to P-000001)
         const matterABeforeProv = store.matters.find((m) => m.id === 'M-000001')!;
         matterABeforeProv.teamMemberIds = ['P-000002'];
+        await getMatterRepository().putMatter(
+          testTenantCtx('P-000001'),
+          matterABeforeProv,
+          { expectedRowVersion: null },
+        );
         const provA = await asEmployee('P-000002', () =>
           ensureMatterDocumentStoreProvisioned('M-000001', 'P-000002'),
         );
@@ -2239,6 +2256,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const m5ForLegacy = store.matters.find((m) => m.id === 'M-000005')!;
         m5ForLegacy.owningDepartmentId = matterABeforeProv.owningDepartmentId;
         m5ForLegacy.owningTeamId = matterABeforeProv.owningTeamId;
+        await getMatterRepository().putMatter(
+          testTenantCtx('P-000001'),
+          m5ForLegacy,
+          { expectedRowVersion: null },
+        );
         const { partition: partA, item: rootItemA } = mockBackend.getItemOrThrow(
           locA.tenantId,
           locA.providerSiteId,
@@ -2382,6 +2404,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const clientIdOnMatterA = 'P-000030';
         targetMatterA.clientId = clientIdOnMatterA;
         targetMatterA.teamMemberIds = ['P-000002', 'P-000003'];
+        await getMatterRepository().putMatter(
+          testTenantCtx('P-000001'),
+          targetMatterA,
+          { expectedRowVersion: null },
+        );
         const clientPerson = store.people.find((p) => p.id === clientIdOnMatterA)!;
         const snapshotCustomFields = structuredClone(store.customFields);
         store.customFields.push({
@@ -2409,7 +2436,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           );
           expect(rejectedHire.errors?.['CF-REQ-PERSON-TEST']).toBeDefined();
           expect(
-            Boolean(store.matters.find((m) => m.id === 'M-000001')?.isStaffMatter),
+            Boolean(
+              (
+                await getMatterRepository().getMatterById(
+                  testTenantCtx('P-000001'),
+                  'M-000001',
+                )
+              )?.isStaffMatter,
+            ),
           ).toBe(false);
           const { item: mockItemBeforeValidHire } = mockBackend.getItemOrThrow(
             locA.tenantId,
@@ -2471,10 +2505,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toBe(true);
 
         // R8: Removing a team member from restricted Matter A removes their grant on the mock backend
+        const refreshedMatterA = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+          testTenantCtx('P-000001'),
+          'M-000001',
+        ))!;
         await asEmployee('P-000001', async () =>
           saveMatterRecord(
             {
-              ...targetMatterA,
+              ...refreshedMatterA,
               isStaffMatter: true,
               hasEthicalWall: true,
               teamMemberIds: ['P-000002'],
@@ -2516,9 +2554,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           /not found or restricted/i,
         );
         await flushDocumentLifecycleSyncForTesting();
-        const matterAfterUnauthorizedSave = getStore().matters.find(
-          (m) => m.id === 'M-000001',
-        )!;
+        const matterAfterUnauthorizedSave = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+          testTenantCtx('P-000001'),
+          'M-000001',
+        ))!;
         expect(matterAfterUnauthorizedSave.isStaffMatter).toBe(true);
         expect(matterAfterUnauthorizedSave.title).not.toBe(
           'Unauthorized Tampered Title',
@@ -2558,7 +2597,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         ).toContain('P-000002');
 
         // R121: (3) A user without matter:create (e.g. finance role P-000009) cannot create a matter
-        const countBeforeUnauthorisedCreate = getStore().matters.length;
+        const countBeforeUnauthorisedCreate = (
+          await getMatterRepository().listAllMatters(testTenantCtx('P-000001'))
+        ).length;
         const unauthorisedCreateRes = await asEmployee('P-000009', async () =>
           saveMatterRecord(
             {
@@ -2573,7 +2614,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(unauthorisedCreateRes.errors?.permission).toMatch(
           /matter:create/i,
         );
-        expect(getStore().matters.length).toBe(countBeforeUnauthorisedCreate);
+        expect(
+          (await getMatterRepository().listAllMatters(testTenantCtx('P-000001')))
+            .length,
+        ).toBe(countBeforeUnauthorisedCreate);
 
         // R88: Closing a matter via saveMatterRecord runs closeMatterFolderJob (invoking onBeforeMatterDocumentsClose hook and writing lifecycle:matter:closed audit event), and reopening writes lifecycle:matter:reopened
         const closeHookCalls: string[] = [];
@@ -2604,7 +2648,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           const closeSaveRes = await asEmployee('P-000001', async () =>
             saveMatterRecord(
               {
-                ...targetMatterA,
+                ...authorisedAttemptToStripRes.matter!,
                 isStaffMatter: true,
                 hasEthicalWall: true,
                 matterStatusId: closedStatusId,
@@ -2631,7 +2675,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           const reopenSaveRes = await asEmployee('P-000001', async () =>
             saveMatterRecord(
               {
-                ...targetMatterA,
+                ...closeSaveRes.matter!,
                 isStaffMatter: true,
                 hasEthicalWall: true,
                 matterStatusId: openStatusId,
@@ -2933,7 +2977,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const noTeamMatterId = savedNoTeamMatterRes.matter!.id;
         expect(savedNoTeamMatterRes.matter?.owningTeamId).toBeUndefined();
         expect(
-          getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
+          (
+            await getMatterRepository().getMatterById(
+              testTenantCtx('P-000001'),
+              noTeamMatterId,
+            )
+          )?.owningTeamId,
         ).toBeUndefined();
 
         // Save again by another user without setting owningTeamId: still undefined
@@ -2973,7 +3022,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           /does not exist or is inactive/i,
         );
         expect(
-          getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
+          (
+            await getMatterRepository().getMatterById(
+              testTenantCtx('P-000001'),
+              noTeamMatterId,
+            )
+          )?.owningTeamId,
         ).toBeUndefined();
 
         const badCrossDeptTeamRes = await asEmployee('P-000001', async () =>
@@ -2990,7 +3044,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           /does not belong to the selected owning department/i,
         );
         expect(
-          getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
+          (
+            await getMatterRepository().getMatterById(
+              testTenantCtx('P-000001'),
+              noTeamMatterId,
+            )
+          )?.owningTeamId,
         ).toBeUndefined();
 
         // R107: (2) A fee earner without matter:reassign_ownership (P-000002) cannot change an existing matter's owning team
@@ -3008,7 +3067,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           /matter:reassign_ownership/i,
         );
         expect(
-          getStore().matters.find((m) => m.id === noTeamMatterId)?.owningTeamId,
+          (
+            await getMatterRepository().getMatterById(
+              testTenantCtx('P-000001'),
+              noTeamMatterId,
+            )
+          )?.owningTeamId,
         ).toBeUndefined();
 
         // R107: Setting owningDepartmentId and owningTeamId via saveMatterRecord by a partner (with matter:reassign_ownership) persists both and allows provisioning to succeed
@@ -3111,6 +3175,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           const m4 = store.matters.find((m) => m.id === 'M-000004')!;
           m4.owningDepartmentId = targetMatterA.owningDepartmentId;
           m4.owningTeamId = targetMatterA.owningTeamId;
+          await getMatterRepository().putMatter(
+            testTenantCtx('P-000001'),
+            m4,
+            { expectedRowVersion: null },
+          );
           const provM4 = await asEmployee('P-000001', () =>
             ensureMatterDocumentStoreProvisioned(
               m4.id,
@@ -3252,6 +3321,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           const m4 = store.matters.find((m) => m.id === 'M-000004')!;
           m4.owningDepartmentId = targetMatterA.owningDepartmentId;
           m4.owningTeamId = targetMatterA.owningTeamId;
+          await getMatterRepository().putMatter(
+            testTenantCtx('P-000001'),
+            m4,
+            { expectedRowVersion: null },
+          );
           const browseCorrId = 'corr-r93-browse-provision';
           const browseProvRes = await asEmployee('P-000001', () =>
             browseMatterDocumentStoreFolder({
@@ -3352,6 +3426,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         store.documentReconciliationFindings = snapshotFindings;
         store.documentStoreAuditEvents = snapshotAudits;
         saveStore(store);
+        await resetAllDemoData('P-000001', testDataResetContext());
         resetDocumentStoreSingletonsForTesting();
       }
     });
@@ -3450,7 +3525,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             expiresAt: new Date(Date.now() + 3600_000).toISOString(),
           }),
         )!;
-        const { ctx: emptyGroupsCtx } = buildTenantContextForUser(
+        const { ctx: emptyGroupsCtx } = await buildTenantContextForUser(
           empWithStoredAdmin.id,
           store,
           cfg,
@@ -3459,11 +3534,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(emptyGroupsCtx.actorGroups).toEqual([]);
 
         // R77 (2): Calling buildTenantContextForUser('P-000002', store, cfg, { session: verifiedSessionForP000001 }) throws TENANCY_ACTOR_MISMATCH
-        expect(() =>
+        await expect(
           buildTenantContextForUser('P-000002', store, cfg, {
             session: sessions.get('P-000001'),
           }),
-        ).toThrow(/TENANCY_ACTOR_MISMATCH/);
+        ).rejects.toThrow(/TENANCY_ACTOR_MISMATCH/);
 
         // R77 (3): Calling buildEntraSessionPayload without rawClaims.oid throws ENTRA_CLAIM_ERROR
         expect(() =>
@@ -3510,7 +3585,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           );
           const m1 = store.matters.find((m) => m.id === 'M-000001')!;
           const updatedTitle = `R112 Persisted Title ${Date.now()}`;
-          const r112Ctx = await asEmployee('P-000001', () => buildTenantContextForUser('P-000001', store).ctx);
+          const r112Ctx = (await asEmployee('P-000001', () => buildTenantContextForUser('P-000001', store))).ctx;
           const r112Repo = getRepositorySingleton();
           const prevDocStoreOverride = await r112Repo.getDocumentStoreTenantConfig(r112Ctx);
           await r112Repo.putDocumentStoreTenantConfig(
@@ -3544,16 +3619,12 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           expect(saveRes.errors).toBeUndefined();
           expect(saveRes.matter).not.toBeNull();
           expect(saveRes.matter!.title).toBe(updatedTitle);
-          expect(
-            getStore().matters.find((m) => m.id === 'M-000001')?.title,
-          ).toBe(updatedTitle);
-
-          const diskStore = JSON.parse(
-            fs.readFileSync(runtimeStorePath, 'utf8'),
-          ) as { matters: Array<{ id: string; title: string }> };
-          expect(
-            diskStore.matters.find((m) => m.id === 'M-000001')?.title,
-          ).toBe(updatedTitle);
+          const persistedMatter = await getMatterRepository().getMatterById(
+            r112Ctx,
+            'M-000001',
+            { includeRestricted: true },
+          );
+          expect(persistedMatter?.title).toBe(updatedTitle);
 
           expect(
             syncErrSpy.mock.calls.some((args) => {
@@ -3775,14 +3846,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         });
         const verifiedForgedSession =
           verifySignedEntraSessionCookie(forgedTenantCookie)!;
-        expect(() =>
+        await expect(
           buildTenantContextForUser(
             carysUser.id,
             store,
             getActiveTenantConfiguration(),
             { session: verifiedForgedSession },
           ),
-        ).toThrow(/TENANCY_FORGERY_DETECTED/);
+        ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
 
         // Helper for authenticated request sessions on store employees
         const runAsStoreEmployee = <T>(
@@ -3842,7 +3913,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(noEditPermRes.errors?.permission).toMatch(/matter:edit/i);
 
         // R138: Passing an existing matter object with `id` into saveMatterRecord without `opts.id` returns errors.id and matter: null without creating a duplicate
-        const matterCountBeforeMissingId = store.matters.length;
+        const matterCountBeforeMissingId = (
+          await getMatterRepository().listAllMatters(testTenantCtx('P-000001'))
+        ).length;
         const missingIdOptsRes = await runAsStoreEmployee('P-000001', async () =>
           saveMatterRecord(
             { ...openMatter, title: 'Missing opts.id' },
@@ -3851,7 +3924,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
         expect(missingIdOptsRes.matter).toBeNull();
         expect(missingIdOptsRes.errors?.id).toMatch(/opts\.id/i);
-        expect(store.matters.length).toBe(matterCountBeforeMissingId);
+        expect(
+          (await getMatterRepository().listAllMatters(testTenantCtx('P-000001')))
+            .length,
+        ).toBe(matterCountBeforeMissingId);
 
         // R138 (b): markEngagementLetterDrafted updates only engagementLetterStatus: 'Drafted' on the existing matter
         const draftedRes = await runAsStoreEmployee('P-000001', async () =>
@@ -3882,7 +3958,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           const legacyDeptTitleSave = await runAsStoreEmployee('P-000001', async () =>
             saveMatterRecord(
               {
-                ...openMatter,
+                ...draftedRes.matter!,
                 title: `${openMatter.title} (Updated on Legacy Archived Dept)`,
               },
               { id: openMatter.id, byId: 'P-000001' },
@@ -3898,7 +3974,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             async () =>
               saveMatterRecord(
                 {
-                  ...openMatter,
+                  ...legacyDeptTitleSave.matter!,
                   owningDepartmentId: otherInactiveDept.id,
                 },
                 { id: openMatter.id, byId: 'P-000001' },
@@ -3922,10 +3998,19 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           if (!openMatter.teamMemberIds.includes('P-000002')) {
             openMatter.teamMemberIds = [...openMatter.teamMemberIds, 'P-000002'];
           }
+          await getMatterRepository().putMatter(
+            testTenantCtx('P-000001'),
+            openMatter,
+            { expectedRowVersion: null },
+          );
           onMatterFeeEarner.permissionOverrides = {
             grant: ['risk:view'],
             revoke: ['matter:edit'],
           };
+          await getPartyRepository().putPerson(
+            testTenantCtx('P-000001'),
+            onMatterFeeEarner,
+          );
           const riskViewOnlyOnMatterRes = await runAsStoreEmployee('P-000002', async () =>
             updateMatterConflictRecord(
               openMatter.id,
@@ -3949,6 +4034,15 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         } finally {
           openMatter.teamMemberIds = prevTeamMemberIds;
           onMatterFeeEarner.permissionOverrides = prevOverrides;
+          await getMatterRepository().putMatter(
+            testTenantCtx('P-000001'),
+            openMatter,
+            { expectedRowVersion: null },
+          );
+          await getPartyRepository().putPerson(
+            testTenantCtx('P-000001'),
+            onMatterFeeEarner,
+          );
         }
 
         // R136 (b) & R135: Permitted user saves an information_barrier match -> hasEthicalWall becomes true; liftMatterRestriction enforces matter:restriction:lift (refusing partner), MFA, and reason, writes matter-restriction-lift audit, and persists across subsequent saves until a new barrier match is added
@@ -3996,7 +4090,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(barrierRes.matter?.hasEthicalWall).toBe(true);
 
         // R136 (a2): updateMatterConflictRecord also requires canPersonAccessMatter even when the user holds matter:edit (P-000006 is a fee earner with matter:edit who is outside openMatter's ethical wall)
-        expect(openMatter.restrictedAccessUserIds).not.toContain('P-000006');
+        expect(barrierRes.matter?.restrictedAccessUserIds).not.toContain('P-000006');
         const matterEditButNotOnRestrictedMatterRes = await runAsStoreEmployee(
           'P-000006',
           async () =>
@@ -4039,6 +4133,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const prevCarysRoles = [...(carysEmp.roles ?? [])];
         try {
           carysEmp.roles = ['partner'];
+          await getPartyRepository().putPerson(
+            testTenantCtx('P-000001'),
+            carysEmp,
+          );
           const liftPartnerOnly = await runAsStoreEmployee(
             'P-000001',
             async () =>
@@ -4056,6 +4154,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           );
         } finally {
           carysEmp.roles = prevCarysRoles;
+          await getPartyRepository().putPerson(
+            testTenantCtx('P-000001'),
+            carysEmp,
+          );
         }
 
         // Lifting without MFA (P-000003 risk_compliance with mfaVerified: false) is refused
@@ -4103,7 +4205,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         const postLiftSave = await runAsStoreEmployee('P-000001', async () =>
           saveMatterRecord(
             {
-              ...openMatter,
+              ...liftOk.matter!,
               title: `${openMatter.title} (Title edited after lift)`,
             },
             { id: openMatter.id, byId: 'P-000001' },
@@ -4119,9 +4221,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             updateMatterConflictRecord(
               openMatter.id,
               {
-                ...(openMatter.conflictCheckRecord!),
+                ...(liftOk.matter!.conflictCheckRecord!),
                 matches: [
-                  ...(openMatter.conflictCheckRecord?.matches ?? []),
+                  ...(liftOk.matter?.conflictCheckRecord?.matches ?? []),
                   {
                     id: 'CM-BARRIER-2',
                     partyId: 'pt-2',
@@ -4151,6 +4253,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         store.matters = snapshotMatters;
         store.people = snapshotPeople;
         saveStore(store);
+        await resetAllDemoData('P-000001', testDataResetContext());
         resetDocumentStoreSingletonsForTesting();
       }
     });

@@ -7,8 +7,8 @@ import {
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
-import { resetAllDemoData } from '@/server/services';
-import { getStore } from '@/server/store';
+import { getPartyRepository, resetAllDemoData } from '@/server/services';
+import { getStore, saveStore } from '@/server/store';
 import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from '@/server/visibility';
 import { testDataResetContext } from '@/test/testTenantContexts';
 
@@ -276,8 +276,13 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
       grant: [],
       revoke: ['contact:create'],
     };
-    const orgCountBeforeNoContactCreate = storeAfter.organisations.length;
-    const peopleCountBeforeNoContactCreate = storeAfter.people.length;
+    await getPartyRepository().putPerson(testDataResetContext(), actor);
+    const orgCountBeforeNoContactCreate = (
+      await getPartyRepository().listAllOrganisations(testDataResetContext())
+    ).length;
+    const peopleCountBeforeNoContactCreate = (
+      await getPartyRepository().listAllPeople(testDataResetContext())
+    ).length;
 
     globalThis.fetch = mockAnthropicSuccessResponse({
       client: {
@@ -305,12 +310,18 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     };
     expect(noContactCreateData.extraction.client?.matchedRecordId).toBeUndefined();
     expect(noContactCreateData.extraction.instructingContact?.matchedPersonId).toBeUndefined();
-    expect(getStore().organisations.length).toBe(orgCountBeforeNoContactCreate);
-    expect(getStore().people.length).toBe(peopleCountBeforeNoContactCreate);
+    expect(
+      (await getPartyRepository().listAllOrganisations(testDataResetContext())).length,
+    ).toBe(orgCountBeforeNoContactCreate);
+    expect(
+      (await getPartyRepository().listAllPeople(testDataResetContext())).length,
+    ).toBe(peopleCountBeforeNoContactCreate);
 
     // R263 (3): When both the organisation and the contact already exist in the CRM, lacking contact:create prevents linking them
     clearMatterExtractionCacheForTesting();
-    const existingOrg = getStore().organisations[0]!;
+    const existingOrg = (
+      await getPartyRepository().listAllOrganisations(testDataResetContext())
+    )[0]!;
     const unlinkedPerson = {
       ...structuredClone(getStore().people.find((p) => !p.isEmployee)!),
       id: 'P-UNLINKED-EXT-01',
@@ -326,8 +337,10 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
         },
       ],
     };
-    getStore().people.push(unlinkedPerson);
-    const linksBeforeExistingMatch = getStore().links.length;
+    await getPartyRepository().putPerson(testDataResetContext(), unlinkedPerson);
+    const linksBeforeExistingMatch = (
+      await getPartyRepository().listAllLinks(testDataResetContext())
+    ).length;
 
     globalThis.fetch = mockAnthropicSuccessResponse({
       client: {
@@ -359,9 +372,12 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
       unlinkedPerson.id,
     );
     expect(existingWithoutCreateData.links).toEqual([]);
-    expect(getStore().links.length).toBe(linksBeforeExistingMatch);
+    const linksAfterExistingMatch = await getPartyRepository().listAllLinks(
+      testDataResetContext(),
+    );
+    expect(linksAfterExistingMatch.length).toBe(linksBeforeExistingMatch);
     expect(
-      getStore().links.some(
+      linksAfterExistingMatch.some(
         (l) => l.personId === unlinkedPerson.id && l.organisationId === existingOrg.id,
       ),
     ).toBe(false);
@@ -447,6 +463,10 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     store.enquiries.push(hiddenEnq, visibleEnq);
     // Push the hidden-enquiry person BEFORE the visible-enquiry person so an unfiltered .find() would pick the hidden one
     store.people.push(hiddenEnqPerson, sameNameHiddenPerson, sameNameVisiblePerson);
+    saveStore(store);
+    for (const p of [hiddenEnqPerson, sameNameHiddenPerson, sameNameVisiblePerson]) {
+      await getPartyRepository().putPerson(testDataResetContext(), p);
+    }
 
     const visibility = buildRecordVisibility(store, feeEarner, {
       hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
@@ -646,6 +666,10 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
       tenantId: 'pembroke-vaughan',
       displayName: 'Pembroke Vaughan',
     });
+    await getPartyRepository().putPerson(
+      testDataResetContext(),
+      getStore().people.find((p) => p.id === 'P-000002')!,
+    );
     setTestEntraSessionOverride({
       ...FEE_EARNER_SESSION,
       tenantId: 'pembroke-vaughan',

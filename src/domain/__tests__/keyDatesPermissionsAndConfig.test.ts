@@ -22,6 +22,7 @@ import {
   acknowledgeKeyDateReminderRecord,
   createOrProposeKeyDateRecord,
   getKeyDatesConfig,
+  getPartyRepository,
   previewLimitationCalculationRecord,
   proposeProvisionalKeyDateRecord,
   reassignKeyDateTeamRecord,
@@ -640,6 +641,10 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         },
       });
       store.people.push(revokedViewer);
+      await getPartyRepository().putPerson(
+        testTenantCtx(admin.id),
+        revokedViewer,
+      );
       // Put revokedViewer on confirmedKd.responsiblePersonIds so the ONLY reason acknowledge fails is missing keydate:view
       confirmedKd.responsiblePersonIds = [
         ...confirmedKd.responsiblePersonIds,
@@ -684,6 +689,10 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         roles: ['fee_earner'],
       });
       store.people.push(unrelatedFeeEarner);
+      await getPartyRepository().putPerson(
+        testTenantCtx(admin.id),
+        unrelatedFeeEarner,
+      );
       expect(confirmedKd.responsiblePersonIds).not.toContain(
         unrelatedFeeEarner.id,
       );

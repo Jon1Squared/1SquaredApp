@@ -442,7 +442,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
           .spyOn(pmsSourceModule, 'getPmsSource')
           .mockReturnValue(customSource);
         try {
-          const rowsRes = getMatterFinanceRows('P-000001');
+          const rowsRes = await getMatterFinanceRows('P-000001');
           expect(isActionDenied(rowsRes)).toBe(false);
           if (!isActionDenied(rowsRes)) {
             expect(rowsRes.pmsExtractInfo.asAtDate).toBe('');
@@ -451,14 +451,14 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
             expect(rowsRes.pmsSummaryByMatterId).toEqual({});
           }
 
-          const myRes = getMyFinanceFigures('P-000002');
+          const myRes = await getMyFinanceFigures('P-000002');
           expect(isActionDenied(myRes)).toBe(false);
           if (!isActionDenied(myRes)) {
             expect(myRes.myFeeEarnerFigures).toBeNull();
             expect(myRes.myWeeklyTime).toBeNull();
           }
 
-          const firmRes = getFirmFinance('P-000001');
+          const firmRes = await getFirmFinance('P-000001');
           expect(isActionDenied(firmRes)).toBe(false);
           if (!isActionDenied(firmRes)) {
             expect(firmRes.pmsExtractInfo.asAtDate).toBe('');
@@ -468,7 +468,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
             expect(firmRes.allClientFins).toEqual([]);
           }
 
-          const matterBundleRes = getMatterPmsViewBundle('M-000001', 'P-000004');
+          const matterBundleRes = await getMatterPmsViewBundle('M-000001', 'P-000004');
           expect(isActionDenied(matterBundleRes)).toBe(false);
           if (!isActionDenied(matterBundleRes)) {
             expect(matterBundleRes.extractInfo.asAtDate).toBe('');
@@ -479,7 +479,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
             expect(matterBundleRes.allUnlinkedPmsMatters.length).toBeGreaterThan(0);
           }
 
-          const clientBundleRes = getClientPmsViewBundle(
+          const clientBundleRes = await getClientPmsViewBundle(
             'organisation',
             'O-000001',
             'P-000001',
@@ -655,7 +655,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   it('computes Severn Holdings plc corporate group rollup across parent and two subsidiaries', async () => {
     const { isActionDenied } = await import('@/domain/actionResult');
     const { getClientPmsViewBundle } = await import('@/server/services');
-    const view = getClientPmsViewBundle('organisation', 'O-000005', 'P-000001');
+    const view = await getClientPmsViewBundle('organisation', 'O-000005', 'P-000001');
     expect(isActionDenied(view)).toBe(false);
     if (isActionDenied(view)) return;
     expect(view.link?.pmsCode).toBe('SEV001');
@@ -684,7 +684,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
 
     const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
-    const matterRows = getMatterFinanceRows('P-000001');
+    const matterRows = await getMatterFinanceRows('P-000001');
     expect(isActionDenied(matterRows)).toBe(false);
     if (isActionDenied(matterRows)) return;
 
@@ -732,7 +732,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
 
     const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
-    const matterRows = getMatterFinanceRows('P-000001');
+    const matterRows = await getMatterFinanceRows('P-000001');
     expect(isActionDenied(matterRows)).toBe(false);
     if (isActionDenied(matterRows)) return;
 

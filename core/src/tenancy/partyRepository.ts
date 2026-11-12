@@ -680,15 +680,6 @@ function mapMergeHistoryRow<TMerge extends TenantMergeHistoryRecord = TenantMerg
   return out as TMerge;
 }
 
-declare global {
-  var __oneSquaredPostgresPartiesMattersWriteSeq: number | undefined;
-}
-
-function bumpPostgresPartiesMattersWriteSeq(): void {
-  global.__oneSquaredPostgresPartiesMattersWriteSeq =
-    (global.__oneSquaredPostgresPartiesMattersWriteSeq ?? 0) + 1;
-}
-
 export class TenantPartyRepository extends TenantScopedRepository {
   // ============================================================================
   // Per-Tenant Sequence Allocation (`P-`, `O-`, `L-`, `N-`, `MRG-`)
@@ -1139,7 +1130,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
     }
     this.assertRowTenant(ctx, saved.tenant_id, 'Person');
     await this.syncPersonEmailsInTx(tx, ctx, person);
-    bumpPostgresPartiesMattersWriteSeq();
     return mapPersonRow<TPerson>(saved);
   }
 
@@ -1327,7 +1317,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
         'DELETE FROM public.people WHERE tenant_id = $1 AND id = $2',
         [ctx.tenantId, id],
       );
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -1479,7 +1468,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
       );
     }
     this.assertRowTenant(ctx, saved.tenant_id, 'Organisation');
-    bumpPostgresPartiesMattersWriteSeq();
     return mapOrganisationRow<TOrg>(saved);
   }
 
@@ -1565,7 +1553,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
         'DELETE FROM public.organisations WHERE tenant_id = $1 AND id = $2',
         [ctx.tenantId, id],
       );
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -1641,7 +1628,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
       );
     }
     this.assertRowTenant(ctx, saved.tenant_id, 'PersonOrganisationLink');
-    bumpPostgresPartiesMattersWriteSeq();
     return mapLinkRow<TLink>(saved);
   }
 
@@ -1737,9 +1723,22 @@ export class TenantPartyRepository extends TenantScopedRepository {
         'DELETE FROM public.person_organisation_links WHERE tenant_id = $1 AND id = $2',
         [ctx.tenantId, id],
       );
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
+  }
+
+  public async deleteLink(
+    ctx: TenantContext,
+    id: string,
+  ): Promise<boolean> {
+    return this.deleteLinkById(ctx, id);
+  }
+
+  public async listLinksForPerson<TLink extends TenantPersonOrganisationLinkRecord = TenantPersonOrganisationLinkRecord>(
+    ctx: TenantContext,
+    personId: string,
+  ): Promise<TLink[]> {
+    return this.listAllLinks<TLink>(ctx, { personId });
   }
 
   // ============================================================================
@@ -1787,7 +1786,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
       );
     }
     this.assertRowTenant(ctx, saved.tenant_id, 'Note');
-    bumpPostgresPartiesMattersWriteSeq();
     return mapNoteRow<TNote>(saved);
   }
 
@@ -1891,7 +1889,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
         'DELETE FROM public.notes WHERE tenant_id = $1 AND id = $2',
         [ctx.tenantId, id],
       );
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -1940,7 +1937,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
       );
     }
     this.assertRowTenant(ctx, saved.tenant_id, 'MergeHistory');
-    bumpPostgresPartiesMattersWriteSeq();
     return mapMergeHistoryRow<TMerge>(saved);
   }
 
@@ -1953,7 +1949,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
         'DELETE FROM public.merge_history WHERE tenant_id = $1 AND id = $2',
         [ctx.tenantId, id],
       );
-      bumpPostgresPartiesMattersWriteSeq();
       return del.rowCount > 0;
     });
   }
@@ -2029,6 +2024,62 @@ export class TenantPartyRepository extends TenantScopedRepository {
     });
   }
 
+  public async executeMergeInTransaction(
+    ctx: TenantContext,
+    params: {
+      recordType: 'person' | 'organisation';
+      survivor: TenantPersonRecord | TenantOrganisationRecord;
+      merged: TenantPersonRecord | TenantOrganisationRecord;
+      linksToUpsert: readonly TenantPersonOrganisationLinkRecord[];
+      linkIdsToDelete: readonly string[];
+      repointedSubsidiaries: readonly TenantOrganisationRecord[];
+      notesToRepoint: readonly TenantNoteRecord[];
+      mergeHistory: TenantMergeHistoryRecord;
+    },
+  ): Promise<void> {
+    await this.withTenantTransaction(ctx, async (tx) => {
+      if (params.recordType === 'person') {
+        await this.upsertPersonInTx(
+          tx,
+          ctx,
+          params.survivor as TenantPersonRecord,
+        );
+        await this.upsertPersonInTx(
+          tx,
+          ctx,
+          params.merged as TenantPersonRecord,
+        );
+      } else {
+        await this.upsertOrganisationInTx(
+          tx,
+          ctx,
+          params.survivor as TenantOrganisationRecord,
+        );
+        await this.upsertOrganisationInTx(
+          tx,
+          ctx,
+          params.merged as TenantOrganisationRecord,
+        );
+      }
+      for (const linkId of params.linkIdsToDelete) {
+        await tx.query(
+          'DELETE FROM public.person_organisation_links WHERE tenant_id = $1 AND id = $2',
+          [ctx.tenantId, linkId],
+        );
+      }
+      for (const link of params.linksToUpsert) {
+        await this.upsertLinkInTx(tx, ctx, link);
+      }
+      for (const sub of params.repointedSubsidiaries) {
+        await this.upsertOrganisationInTx(tx, ctx, sub);
+      }
+      for (const note of params.notesToRepoint) {
+        await this.upsertNoteInTx(tx, ctx, note);
+      }
+      await this.upsertMergeHistoryInTx(tx, ctx, params.mergeHistory);
+    });
+  }
+
   // ============================================================================
   // Counts & Clear
   // ============================================================================
@@ -2097,7 +2148,6 @@ export class TenantPartyRepository extends TenantScopedRepository {
          WHERE tenant_id = $1 AND counter_key IN ('P', 'O', 'L', 'N', 'MRG')`,
         [ctx.tenantId],
       );
-      bumpPostgresPartiesMattersWriteSeq();
     });
   }
 }

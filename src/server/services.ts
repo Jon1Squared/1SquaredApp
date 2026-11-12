@@ -13,20 +13,19 @@ import {
 import {
   appendUnmigratedModuleAuditEntries,
   captureJsonStoreBaseline,
+  flushStagedAuditEntries,
   getActiveCompensatorOrNull,
   getAuditRepository,
   getMatterRepository,
   getPartyRepository,
-  markPartiesAndMattersSyncedWithStore,
   registerJsonStoreRecordDeltas,
   runUnmigratedJsonMutationWithAudit,
+  runWithAuditStagingScope,
   stageUnmigratedAuditEntry,
-  syncAndHydratePartiesAndMattersFromPostgres,
 } from './auditAdapter';
 export {
   getMatterRepository,
   getPartyRepository,
-  syncAndHydratePartiesAndMattersFromPostgres,
 };
 import {
   clearMigratedPostgresModulesForTenant,
@@ -373,7 +372,8 @@ export interface AuthenticatedActorContext {
 }
 
 export async function requireAuthenticatedActor(): Promise<AuthenticatedActorContext> {
-  const tenantId = getActiveTenantConfiguration().tenantId;
+  const activeConfig = getActiveTenantConfiguration();
+  const tenantId = activeConfig.tenantId;
   const entraSession = await getEntraSession();
   if (!entraSession || !entraSession.personId || !entraSession.tenantId?.trim()) {
     throw new AuthorisationError({
@@ -384,21 +384,18 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
       actorUserId: 'anonymous',
     });
   }
-  const store = getStore();
-  try {
-    const authCtx = resolveCurrentTenantContext(
-      createVerifiedSessionActorFromEntraSession(entraSession, {
-        correlationId: 'auth-check',
-      }),
-      getActiveTenantConfiguration(),
-    );
-    await syncAndHydratePartiesAndMattersFromPostgres(store, authCtx);
-  } catch {
-    // Session tenant mismatches are handled by downstream actor checks
-  }
-  const person = store.people.find(
-    (p) => p.id === entraSession.personId && p.isEmployee && !p.mergedIntoId,
+  const authCtx = resolveCurrentTenantContext(
+    createVerifiedSessionActorFromEntraSession(entraSession, {
+      correlationId: 'auth-check',
+    }),
+    activeConfig,
   );
+  const loaded = await getPartyRepository().getPersonById<Person>(
+    authCtx,
+    entraSession.personId,
+  );
+  const person =
+    loaded && loaded.isEmployee && !loaded.mergedIntoId ? loaded : null;
   if (!person) {
     throw new AuthorisationError({
       code: 'UNAUTHENTICATED',
@@ -481,7 +478,14 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
       actorUserId: actor.personId,
     });
   }
-  const targetPerson = store.people.find(
+  const ctx = resolveDefaultServiceTenantContext(store, actor.personId, {
+    session: actor.session,
+  });
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const targetPerson = people.find(
     (p) => p.id === targetUserId && p.isEmployee && !p.mergedIntoId,
   );
   if (!targetPerson || !targetPerson.demo) {
@@ -494,15 +498,15 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     });
   }
 
-  const actorPerson = store.people.find((p) => p.id === actor.personId) ?? null;
+  const actorPerson = people.find((p) => p.id === actor.personId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actorPerson, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     mfaVerified: actor.mfaVerified,
     tokenRoles: actor.session.mappedRoles,
   });
   const targetPerms = resolvePersonPermissionSet(targetPerson, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     mfaVerified: true,
   });
@@ -521,18 +525,18 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   }
 
   // R104: Refuse Demo Mode switch if the target persona can access any restricted/staff matter not accessible to the signed-in actor
-  const restrictedMatterWithTargetAccess = store.matters.find(
+  const restrictedMatterWithTargetAccess = matters.find(
     (m) =>
       Boolean(
         m.isStaffMatter ||
           (m.restrictedAccessUserIds && m.restrictedAccessUserIds.length > 0),
       ) &&
       canPersonAccessMatter(m, targetPerson.id, targetPerson, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       }) &&
       !canPersonAccessMatter(m, actor.personId, actorPerson, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
         tokenRoles: actor.session.mappedRoles,
       }),
@@ -560,14 +564,9 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     expiresAt: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
   };
 
-  await runUnmigratedJsonMutationWithAudit({
-    label: 'switchUserInDemoMode',
-    resolveCtx: (s) =>
-      resolveDefaultServiceTenantContext(s, actor.personId, {
-        session: actor.session,
-      }),
-    mutate: async (lockedStore) => {
-      writeAudit(lockedStore, {
+  await runWithAuditStagingScope(() =>
+    getPartyRepository().withTenantTransaction(ctx, async () => {
+      writeAudit(store, {
         recordType: 'person',
         recordId: targetPerson.id,
         action: 'update',
@@ -576,36 +575,76 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
         newValue: targetPerson.id,
         byId: actor.personId,
       });
-      saveStore(lockedStore);
-    },
-  });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
 
   await persistEntraSessionCookie(nextSession);
 
   return { ok: true, personId: targetPerson.id };
 }
 
-export function activeEmployees(store: FirmStore = getStore()): Person[] {
-  return store.people
+export function activeEmployees(
+  peopleOrSource:
+    | readonly Person[]
+    | { people: readonly Person[]; values: readonly ChoiceValue[] },
+  valuesArg?: readonly ChoiceValue[],
+): Person[] {
+  const people = Array.isArray(peopleOrSource)
+    ? peopleOrSource
+    : (peopleOrSource as { people: readonly Person[]; values: readonly ChoiceValue[] })
+        .people;
+  const values = Array.isArray(peopleOrSource)
+    ? (valuesArg ?? [])
+    : (peopleOrSource as { people: readonly Person[]; values: readonly ChoiceValue[] })
+        .values;
+  return people
     .filter(
       (p) =>
         isSelectableInEmployeeDropdown(p) &&
         !p.mergedIntoId &&
-        systemKeyOf(store.values, p.recordStatusId) === 'active',
+        systemKeyOf(values as ChoiceValue[], p.recordStatusId) === 'active',
     )
     .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b)));
 }
 
-export function formatContext(store: FirmStore): FormatContext {
+export function formatContext(
+  source: {
+    people?: readonly Person[];
+    organisations?: readonly Organisation[];
+    matters?: readonly Matter[];
+    enquiries?: readonly Enquiry[];
+    tasks?: readonly Task[];
+    teams?: readonly Team[];
+    values: ChoiceValue[];
+  },
+  overrides?: {
+    people?: readonly Person[];
+    organisations?: readonly Organisation[];
+    matters?: readonly Matter[];
+  },
+): FormatContext {
   const names = new Map<string, string>();
-  for (const p of store.people) names.set(p.id, personDisplayName(p));
-  for (const o of store.organisations) names.set(o.id, o.legalName);
-  for (const m of store.matters) names.set(m.id, `${m.matterNumber} — ${m.title}`);
-  for (const e of store.enquiries) names.set(e.id, `${e.reference} — ${enquiryDisplayName(e)}`);
-  for (const t of store.tasks) names.set(t.id, `${t.reference} — ${t.title}`);
-  for (const tm of store.teams) names.set(tm.id, tm.name);
+  for (const p of overrides?.people ?? source.people ?? []) {
+    names.set(p.id, personDisplayName(p));
+  }
+  for (const o of overrides?.organisations ?? source.organisations ?? []) {
+    names.set(o.id, o.legalName);
+  }
+  for (const m of overrides?.matters ?? source.matters ?? []) {
+    names.set(m.id, `${m.matterNumber} — ${m.title}`);
+  }
+  for (const e of source.enquiries ?? []) {
+    names.set(e.id, `${e.reference} — ${enquiryDisplayName(e)}`);
+  }
+  for (const t of source.tasks ?? []) {
+    names.set(t.id, `${t.reference} — ${t.title}`);
+  }
+  for (const tm of source.teams ?? []) {
+    names.set(tm.id, tm.name);
+  }
   return {
-    values: store.values,
+    values: source.values,
     nameOf: (id: string) => names.get(id) ?? id,
   };
 }
@@ -630,7 +669,7 @@ function getMatterRestrictionDigestCache(): Map<string, string> {
 }
 
 function resolveDefaultServiceTenantContext(
-  _store: FirmStore,
+  _store?: FirmStore | null,
   preferredActorId?: string | null,
   options?: {
     tenantCtx?: TenantContext | null;
@@ -681,7 +720,8 @@ function resolveDefaultServiceTenantContext(
 
 async function syncMatterRestrictionInPostgres(
   ctx: TenantContext,
-  store: FirmStore,
+  people: readonly Person[],
+  teams: readonly Team[],
   matter: Matter,
   compensator?: RecordDeltaCompensator | null,
   previousMatter?: Matter | null,
@@ -689,15 +729,15 @@ async function syncMatterRestrictionInPostgres(
   const tenantConfig = getActiveTenantConfiguration();
   const nextMeta = computeMatterRestrictionMetadataForStore(
     matter,
-    store.people,
-    store.teams,
+    people as Person[],
+    teams as Team[],
     tenantConfig,
   );
   const prevMeta = previousMatter
     ? computeMatterRestrictionMetadataForStore(
         previousMatter,
-        store.people,
-        store.teams,
+        people as Person[],
+        teams as Team[],
         tenantConfig,
       )
     : null;
@@ -726,19 +766,20 @@ async function syncMatterRestrictionInPostgres(
   }
 }
 
-async function ensureStoreMattersRestrictedMetadataSynced(
+async function ensureMattersRestrictedMetadataSynced(
   ctx: TenantContext,
-  store: FirmStore,
+  matters: readonly Matter[],
+  people: readonly Person[],
+  teams: readonly Team[],
 ): Promise<void> {
-  await syncAndHydratePartiesAndMattersFromPostgres(store, ctx);
   const tenantConfig = getActiveTenantConfiguration();
   const repo = getKeyDateRepository();
   const digestCache = getMatterRestrictionDigestCache();
-  for (const m of store.matters) {
+  for (const m of matters) {
     const meta = computeMatterRestrictionMetadataForStore(
       m,
-      store.people,
-      store.teams,
+      people as Person[],
+      teams as Team[],
       tenantConfig,
     );
     const cacheKey = `${ctx.postgresDatabaseName}:${m.id}`;
@@ -767,7 +808,7 @@ function mapFirmAuditRecordToAuditEntry(rec: FirmAuditEntryRecord): AuditEntry {
 }
 
 function writeAudit(
-  _store: FirmStore,
+  _store: FirmStore | null | undefined,
   entry: Omit<AuditEntry, 'id' | 'at'> & { at?: string },
 ): AuditEntry {
   return stageUnmigratedAuditEntry(entry);
@@ -782,16 +823,13 @@ export async function getKeyDatesConfig(
   const isOptionsObj =
     Boolean(storeOrOptions) &&
     typeof storeOrOptions === 'object' &&
-    !('people' in (storeOrOptions as Record<string, unknown>));
-  const store = isOptionsObj
-    ? getStore()
-    : ((storeOrOptions as FirmStore | undefined) ?? getStore());
+    !('lists' in (storeOrOptions as Record<string, unknown>));
   const opts = isOptionsObj
     ? (storeOrOptions as { ctx?: TenantContext; userId?: string })
     : undefined;
 
   const ctx =
-    opts?.ctx ?? resolveDefaultServiceTenantContext(store, opts?.userId);
+    opts?.ctx ?? resolveDefaultServiceTenantContext(null, opts?.userId);
   const override = await getKeyDateRepository().getKeyDatesTenantConfig(ctx);
   const raw = override ?? activeTenantConfig.keyDates ?? { enabled: false };
   return validateKeyDatesConfig(raw) as unknown as KeyDatesConfig;
@@ -807,27 +845,32 @@ export async function listAuditEntriesForRecord(
   viewerId: string,
   options?: { limit?: number; tokenRoles?: readonly string[] },
 ): Promise<AuditEntry[]> {
-  const store = getStore();
+  let ctx: TenantContext;
   try {
-    const prelimCtx = resolveDefaultServiceTenantContext(store, viewerId);
-    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
+    ctx = resolveDefaultServiceTenantContext(null, viewerId);
   } catch {
-    // Handled below if viewer is missing or session is unauthenticated
+    return [];
   }
-  const viewer = store.people.find(
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
   );
   if (!viewer) {
     return [];
   }
+  const store = getStore();
   const activeSession = getActiveActorSession();
   const effectiveTokenRoles =
     options?.tokenRoles ??
     (activeSession?.personId === viewer.id ? activeSession.tokenRoles : undefined);
-  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
-  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
+    people,
+    matters,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -837,12 +880,14 @@ export async function listAuditEntriesForRecord(
       prelimVisibility.hiddenMatterIds,
     );
   const visibility = buildRecordVisibility(store, viewer, {
+    people,
+    matters,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
 
   if (recordType === 'matter') {
-    const m = store.matters.find((x) => x.id === recordId);
+    const m = matters.find((x) => x.id === recordId);
     if (m && !visibility.canViewMatter(m)) {
       return [];
     }
@@ -873,11 +918,11 @@ export async function listAuditEntriesForRecord(
       return [];
     }
   } else if (recordType === 'employee_payroll') {
-    if (!hasEmployeePermission(viewer, 'employee:payroll', store.people, store.teams)) {
+    if (!hasEmployeePermission(viewer, 'employee:payroll', people, store.teams)) {
       return [];
     }
   } else if (recordType === 'employee_sensitive') {
-    if (!hasEmployeePermission(viewer, 'employee:sensitive', store.people, store.teams)) {
+    if (!hasEmployeePermission(viewer, 'employee:sensitive', people, store.teams)) {
       return [];
     }
   }
@@ -906,14 +951,25 @@ export async function listFirmAuditEntriesPage(
 ): Promise<
   { entries: AuditEntry[]; nextBeforeSeq: number | null } & Partial<ActionDenied>
 > {
-  const store = getStore();
+  let ctx: TenantContext;
   try {
-    const prelimCtx = resolveDefaultServiceTenantContext(store, viewerId);
-    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
+    ctx = resolveDefaultServiceTenantContext(null, viewerId);
   } catch {
-    // Handled below if viewer is missing or session is unauthenticated
+    return {
+      ...buildActionDenied(
+        'FORBIDDEN',
+        'You need "admin:access" permission to view the firm audit log.',
+      ),
+      entries: [],
+      nextBeforeSeq: null,
+    };
   }
-  const viewer = store.people.find(
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const store = getStore();
+  const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
   );
   const activeSession = getActiveActorSession();
@@ -925,7 +981,7 @@ export async function listFirmAuditEntriesPage(
   if (
     !viewer ||
     !hasPersonPermission(viewer, 'admin:access', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
       tokenRoles: effectiveTokenRoles,
     })
@@ -939,10 +995,11 @@ export async function listFirmAuditEntriesPage(
       nextBeforeSeq: null,
     };
   }
-  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
-  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
+    people,
+    matters,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -952,6 +1009,8 @@ export async function listFirmAuditEntriesPage(
       prelimVisibility.hiddenMatterIds,
     );
   const visibility = buildRecordVisibility(store, viewer, {
+    people,
+    matters,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
@@ -961,13 +1020,13 @@ export async function listFirmAuditEntriesPage(
   const canPayroll = hasEmployeePermission(
     viewer,
     'employee:payroll',
-    store.people,
+    people,
     store.teams,
   );
   const canSensitive = hasEmployeePermission(
     viewer,
     'employee:sensitive',
-    store.people,
+    people,
     store.teams,
   );
 
@@ -1082,13 +1141,28 @@ async function getAppSnapshotInScope(
 ): Promise<AppSnapshot> {
   const store = getStore();
   const now = new Date();
-  try {
-    const prelimCtx = resolveDefaultServiceTenantContext(store, userId);
-    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
-  } catch {
-    // Handled below if user is missing or session is unauthenticated
+  if (!userId || !userId.trim()) {
+    throw new AuthorisationError({
+      code: 'UNAUTHENTICATED',
+      message: `Authenticated user "${userId}" was not found or is inactive.`,
+      tenantId: getActiveTenantConfiguration().tenantId,
+      correlationId: 'app-snapshot',
+      actorUserId: userId || 'anonymous',
+    });
   }
-  const user = store.people.find(
+  const snapshotTenantCtx = resolveDefaultServiceTenantContext(store, userId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, links, notes, mergeHistory, matters] =
+    await Promise.all([
+      partyRepo.listAllPeople<Person>(snapshotTenantCtx),
+      partyRepo.listAllOrganisations<Organisation>(snapshotTenantCtx),
+      partyRepo.listAllLinks<PersonOrganisationLink>(snapshotTenantCtx),
+      partyRepo.listAllNotes<Note>(snapshotTenantCtx),
+      partyRepo.listAllMergeHistory<MergeHistory>(snapshotTenantCtx),
+      matterRepo.listAllMatters<Matter>(snapshotTenantCtx),
+    ]);
+  const user = people.find(
     (p) => p.id === userId && !p.mergedIntoId,
   );
   if (!user) {
@@ -1100,11 +1174,11 @@ async function getAppSnapshotInScope(
       actorUserId: userId || 'anonymous',
     });
   }
-  const employees = activeEmployees(store);
+  const employees = activeEmployees(people, store.values);
   const currentUserRole = resolveUserAppRole(user, store.teams, store.values);
   const currentUserEmployeePermissions = resolveEmployeePermissions(
     user,
-    store.people,
+    people,
     store.teams,
   );
   const activeSession = getActiveActorSession();
@@ -1112,7 +1186,7 @@ async function getAppSnapshotInScope(
     options?.tokenRoles ??
     (activeSession?.personId === user.id ? activeSession.tokenRoles : undefined);
   const currentUserPermissions = resolvePersonPermissions(user, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     tokenRoles: effectiveTokenRoles,
   });
@@ -1124,14 +1198,14 @@ async function getAppSnapshotInScope(
     });
 
   // Filter employment records on people at the API level based on requesting user's permissions
-  const filteredPeople: Person[] = store.people.map((p) => {
+  const filteredPeople: Person[] = people.map((p) => {
     if (!p.employment) return p;
     return {
       ...p,
       employment: filterEmploymentForUser(
         p.employment,
         user,
-        store.people,
+        people,
         store.teams,
         orgStructure,
       ),
@@ -1141,12 +1215,18 @@ async function getAppSnapshotInScope(
   // Never bulk-return sensitive HR records in page snapshots (R63); serve only via audited per-person read service.
   const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
-  const snapshotTenantCtx = resolveDefaultServiceTenantContext(store, user.id);
   const keyDateRepo = getKeyDateRepository();
-  await ensureStoreMattersRestrictedMetadataSynced(snapshotTenantCtx, store);
+  await ensureMattersRestrictedMetadataSynced(
+    snapshotTenantCtx,
+    matters,
+    people,
+    store.teams,
+  );
 
   // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
   const prelimVisibility = buildRecordVisibility(store, user, {
+    people,
+    matters,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -1155,10 +1235,12 @@ async function getAppSnapshotInScope(
     prelimVisibility.hiddenMatterIds,
   );
   const visibility = buildRecordVisibility(store, user, {
+    people,
+    matters,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
-  const visibleMatters: Matter[] = store.matters.filter(visibility.canViewMatter);
+  const visibleMatters: Matter[] = matters.filter(visibility.canViewMatter);
   const hiddenMatterIds = visibility.hiddenMatterIds;
   const hiddenMatterSourceQuoteIds = visibility.hiddenMatterSourceQuoteIds;
 
@@ -1213,11 +1295,11 @@ async function getAppSnapshotInScope(
   );
 
   // Person-to-organisation links only connect People and Organisations.
-  const visibleLinks = store.links;
+  const visibleLinks = links;
 
   const leaverOwnedRecords = findRecordsOwnedByLeavers(
-    store.people,
-    store.organisations,
+    people,
+    organisations,
     visibleMatters,
     visibleTasks,
     visibleEnquiries,
@@ -1242,7 +1324,7 @@ async function getAppSnapshotInScope(
   const keyDatesConfig = await getKeyDatesConfig({ ctx: snapshotTenantCtx, userId: user.id });
   const currentUserKeyDatePermissions = resolveKeyDatePermissions(user, {
     config: keyDatesConfig,
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   const baseRail = getLeftRailVisibility(activeViewingRole, currentUserRoles);
@@ -1258,11 +1340,11 @@ async function getAppSnapshotInScope(
   const permittedDiaryTeamIds = new Set(
     resolvePermittedDiaryTeamIds(user, undefined, store.teams, {
       config: keyDatesConfig,
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     }),
   );
-  const matterByIdForKd = new Map(store.matters.map((m) => [m.id, m]));
+  const matterByIdForKd = new Map(matters.map((m) => [m.id, m]));
   const canViewKeyDates = currentUserKeyDatePermissions.includes('keydate:view');
   const repoVisibleKeyDates = canViewKeyDates
     ? await keyDateRepo.listAllVisibleKeyDates(snapshotTenantCtx, user.id)
@@ -1271,7 +1353,7 @@ async function getAppSnapshotInScope(
     if (!permittedDiaryTeamIds.has(kd.teamId)) return false;
     if (!kd.matterId) return true;
     const m = matterByIdForKd.get(kd.matterId);
-    return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
+    return canViewerAccessMatterKeyDates(m, user.id, user, people);
   });
   const visibleKeyDateIdSet = new Set(visibleKeyDates.map((kd) => kd.id));
   const repoVisibleNotApplicable = canViewKeyDates
@@ -1280,7 +1362,7 @@ async function getAppSnapshotInScope(
   const visibleKeyDateNotApplicable: KeyDateNotApplicable[] = repoVisibleNotApplicable.filter(
     (na) => {
       const m = matterByIdForKd.get(na.matterId);
-      return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
+      return canViewerAccessMatterKeyDates(m, user.id, user, people);
     },
   );
   const repoReminderStates = canViewKeyDates
@@ -1299,7 +1381,7 @@ async function getAppSnapshotInScope(
   // If the current user is a demo user with showsWorkOfId, resolve the underlying employee for personal panels
   const effectiveWorkPerson: Person =
     user.demo && user.showsWorkOfId
-      ? (store.people.find((p) => p.id === user.showsWorkOfId) ?? user)
+      ? (people.find((p) => p.id === user.showsWorkOfId) ?? user)
       : user;
 
   const finance: AppFinanceCapabilities = {
@@ -1337,8 +1419,8 @@ async function getAppSnapshotInScope(
   const resolvedFirmName =
     activeTenantCfg.displayName || store.firm?.shortName || store.firm?.name || '';
   const searchIndex = buildSearchIndex(
-    store.people,
-    store.organisations,
+    people,
+    organisations,
     visibleLinks,
     store.values,
     visibleMatters,
@@ -1347,7 +1429,7 @@ async function getAppSnapshotInScope(
     store.teams,
     resolvedFirmName,
   );
-  const attention = attentionList([...store.people, ...store.organisations], store.values, now, {
+  const attention = attentionList([...people, ...organisations], store.values, now, {
     userId: effectiveWorkPerson.id,
     tasks: visibleTasks,
     enquiries: visibleEnquiries,
@@ -1381,7 +1463,7 @@ async function getAppSnapshotInScope(
   const visibleSignOffs = (store.signOffs ?? []).filter(
     (s) => !(s.matterId && hiddenMatterIds.has(s.matterId)),
   );
-  const visibleNotes = store.notes.filter(
+  const visibleNotes = notes.filter(
     (n) =>
       !hiddenMatterIds.has(n.recordId) &&
       !hiddenTaskIds.has(n.recordId) &&
@@ -1423,7 +1505,7 @@ async function getAppSnapshotInScope(
       user.id,
       t,
       store.teams,
-      store.people,
+      people,
       store.values,
       currentUserPermissions,
     );
@@ -1436,7 +1518,7 @@ async function getAppSnapshotInScope(
   for (const kd of visibleKeyDates) {
     canVerifyByKeyDateId[kd.id] = canUserVerifyKeyDate(user, kd, {
       config: keyDatesConfig,
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     });
   }
@@ -1449,7 +1531,7 @@ async function getAppSnapshotInScope(
         user.id,
         eq,
         store.teams,
-        store.people,
+        people,
         store.values,
       );
   }
@@ -1457,7 +1539,7 @@ async function getAppSnapshotInScope(
   const appRoleByPersonId: Record<string, AppRole> = {};
   const rolesByPersonId: Record<string, HomeRoleKey[]> = {};
   const permissionsByPersonId: Record<string, PermissionKey[]> = {};
-  for (const emp of store.people) {
+  for (const emp of people) {
     if (!emp.isEmployee || emp.mergedIntoId) continue;
     appRoleByPersonId[emp.id] = resolveUserAppRole(
       emp,
@@ -1466,7 +1548,7 @@ async function getAppSnapshotInScope(
     );
     rolesByPersonId[emp.id] = resolveEmployeeRoles(emp, store.teams);
     permissionsByPersonId[emp.id] = resolvePersonPermissions(emp, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     });
   }
@@ -1551,7 +1633,7 @@ async function getAppSnapshotInScope(
     values: store.values,
     customFields: store.customFields,
     people: filteredPeople,
-    organisations: store.organisations,
+    organisations,
     links: visibleLinks,
     matters: visibleMatters,
     teams: store.teams,
@@ -1571,7 +1653,7 @@ async function getAppSnapshotInScope(
     taskBadgeCount,
     notes: visibleNotes,
     audit: visibleAudit,
-    mergeHistory: store.mergeHistory,
+    mergeHistory,
     searchIndex,
     attention,
     recentIds,
@@ -1611,9 +1693,11 @@ export async function getEmployeeDetailsForUser(
   errors?: Record<string, string>;
 }> {
   const store = getStore();
-  const user = store.people.find((p) => p.id === byId) ?? null;
-  const person = store.people.find((p) => p.id === personId) ?? null;
-  const perms = resolveEmployeePermissions(user, store.people, store.teams);
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const user = people.find((p) => p.id === byId) ?? null;
+  const person = people.find((p) => p.id === personId) ?? null;
+  const perms = resolveEmployeePermissions(user, people, store.teams);
   const errors: Record<string, string> = {};
 
   if (!person) {
@@ -1640,7 +1724,7 @@ export async function getEmployeeDetailsForUser(
   const employment = filterEmploymentForUser(
     person.employment,
     user,
-    store.people,
+    people,
     store.teams,
     store.orgStructure,
   );
@@ -1667,15 +1751,16 @@ export async function logEmployeeRestrictedAccess(
   fieldDetail?: string,
 ): Promise<{ auditEntry?: AuditEntry; error?: string }> {
   const store = getStore();
-  const user = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const user = people.find((p) => p.id === byId) ?? null;
   const requiredPerm: EmployeePermission =
     section === 'payroll' ? 'employee:payroll' : 'employee:sensitive';
 
-  if (!hasEmployeePermission(user, requiredPerm, store.people, store.teams)) {
+  if (!hasEmployeePermission(user, requiredPerm, people, store.teams)) {
     return { error: `Permission denied: ${requiredPerm} is required.` };
   }
 
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
   const persisted = await appendUnmigratedModuleAuditEntries(ctx, [
     {
       recordType: section === 'payroll' ? 'employee_payroll' : 'employee_sensitive',
@@ -1705,10 +1790,18 @@ export async function reassignLeaverOwnedRecords(
     label: 'reassignLeaverOwnedRecords',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async (store, compensator): Promise<{ reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>> => {
+  const reassignCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(reassignCtx),
+    partyRepo.listAllOrganisations<Organisation>(reassignCtx),
+    matterRepo.listAllMatters<Matter>(reassignCtx),
+  ]);
   const now = new Date().toISOString();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   if (
@@ -1724,7 +1817,7 @@ export async function reassignLeaverOwnedRecords(
     };
   }
 
-  const fromLeaver = store.people.find((p) => p.id === fromLeaverId);
+  const fromLeaver = people.find((p) => p.id === fromLeaverId);
   if (!fromLeaver || !isLeaverPerson(fromLeaver)) {
     const msg = 'Source person must be an existing leaver.';
     return {
@@ -1734,7 +1827,7 @@ export async function reassignLeaverOwnedRecords(
     };
   }
 
-  const targetEmp = store.people.find((p) => p.id === toEmployeeId);
+  const targetEmp = people.find((p) => p.id === toEmployeeId);
   if (!targetEmp || !isSelectableInEmployeeDropdown(targetEmp)) {
     const msg = 'Replacement owner must be an active employee.';
     return {
@@ -1747,9 +1840,22 @@ export async function reassignLeaverOwnedRecords(
   const fromName = personDisplayName(fromLeaver);
   const toName = personDisplayName(targetEmp);
   let count = 0;
+  const changedPeople: Array<{ person: Person; prevPerson: Person }> = [];
+  const changedOrganisations: Array<{
+    org: Organisation;
+    prevOrg: Organisation;
+  }> = [];
+  const changedMatters: Array<{ matter: Matter; prevMatter: Matter | null }> = [];
+  let unmigratedStoreMutated = false;
 
-  for (const p of store.people) {
+  for (const p of people) {
     if (p.mergedIntoId) continue;
+    const prevPerson =
+      p.relationshipOwnerId === fromLeaverId ||
+      p.recordOwnerId === fromLeaverId ||
+      p.verificationReviewerId === fromLeaverId
+        ? structuredClone(p)
+        : null;
     const movedRoles: string[] = [];
     if (p.relationshipOwnerId === fromLeaverId) {
       p.relationshipOwnerId = toEmployeeId;
@@ -1766,9 +1872,10 @@ export async function reassignLeaverOwnedRecords(
       count++;
       movedRoles.push('Verification reviewer');
     }
-    if (movedRoles.length > 0) {
+    if (movedRoles.length > 0 && prevPerson) {
       p.updatedAt = now;
       p.updatedById = byId;
+      changedPeople.push({ person: p, prevPerson });
       writeAudit(store, {
         recordType: 'person',
         recordId: p.id,
@@ -1782,8 +1889,14 @@ export async function reassignLeaverOwnedRecords(
     }
   }
 
-  for (const o of store.organisations) {
+  for (const o of organisations) {
     if (o.mergedIntoId) continue;
+    const prevOrg =
+      o.relationshipPartnerId === fromLeaverId ||
+      o.recordOwnerId === fromLeaverId ||
+      o.reviewerId === fromLeaverId
+        ? structuredClone(o)
+        : null;
     const movedRoles: string[] = [];
     if (o.relationshipPartnerId === fromLeaverId) {
       o.relationshipPartnerId = toEmployeeId;
@@ -1800,9 +1913,10 @@ export async function reassignLeaverOwnedRecords(
       count++;
       movedRoles.push('Reviewer');
     }
-    if (movedRoles.length > 0) {
+    if (movedRoles.length > 0 && prevOrg) {
       o.updatedAt = now;
       o.updatedById = byId;
+      changedOrganisations.push({ org: o, prevOrg });
       writeAudit(store, {
         recordType: 'organisation',
         recordId: o.id,
@@ -1816,7 +1930,7 @@ export async function reassignLeaverOwnedRecords(
     }
   }
 
-  for (const m of store.matters) {
+  for (const m of matters) {
     const movedRoles: string[] = [];
     const prevMatter =
       m.responsiblePartnerId === fromLeaverId ||
@@ -1852,6 +1966,7 @@ export async function reassignLeaverOwnedRecords(
         m.restrictedAccessUserIds = Array.from(nextRestricted);
       }
       touchMatter(m, byId);
+      changedMatters.push({ matter: m, prevMatter });
       writeAudit(store, {
         recordType: 'matter',
         recordId: m.id,
@@ -1863,28 +1978,14 @@ export async function reassignLeaverOwnedRecords(
         at: now,
       });
       if (isRestricted && prevMatter) {
-        const reassignCtx = resolveDefaultServiceTenantContext(store, byId);
         await syncMatterRestrictionInPostgres(
           reassignCtx,
-          store,
+          people,
+          store.teams,
           m,
           compensator,
           prevMatter,
         );
-        const syncCorrelationId = `corr-leaver-reassign-${m.id}-${Date.now()}`;
-        try {
-          void syncMatterLifecycleOnSaveSync({
-            matter: m,
-            previousMatter: prevMatter,
-            userId: byId,
-            correlationId: syncCorrelationId,
-            store,
-          }).catch((err) => {
-            logDocumentLifecycleSyncError(err, syncCorrelationId);
-          });
-        } catch (err) {
-          logDocumentLifecycleSyncError(err, syncCorrelationId);
-        }
       }
     }
   }
@@ -1909,6 +2010,7 @@ export async function reassignLeaverOwnedRecords(
     if (taskChanged) {
       t.updatedAt = now;
       t.updatedById = byId;
+      unmigratedStoreMutated = true;
       writeAudit(store, {
         recordType: 'task',
         recordId: t.id,
@@ -1929,6 +2031,7 @@ export async function reassignLeaverOwnedRecords(
       e.updatedAt = now;
       e.updatedById = byId;
       count++;
+      unmigratedStoreMutated = true;
       writeAudit(store, {
         recordType: 'enquiry',
         recordId: e.id,
@@ -1953,7 +2056,76 @@ export async function reassignLeaverOwnedRecords(
     at: now,
   });
 
-  saveStore(store);
+  const tenantCfg = getActiveTenantConfiguration();
+  await partyRepo.withTenantTransaction(reassignCtx, async () => {
+    for (const { person: p } of changedPeople) {
+      await partyRepo.putPerson(reassignCtx, p);
+    }
+    for (const { org: o } of changedOrganisations) {
+      await partyRepo.putOrganisation(reassignCtx, o);
+    }
+    for (const { matter: m } of changedMatters) {
+      const meta = computeMatterRestrictionMetadataForStore(
+        m,
+        people,
+        store.teams,
+        tenantCfg,
+      );
+      await matterRepo.putMatter(reassignCtx, m, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+      });
+    }
+  });
+  for (const { matter: m, prevMatter } of changedMatters) {
+    const isRestricted =
+      m.isStaffMatter ||
+      m.hasEthicalWall ||
+      (m.restrictedAccessUserIds?.length ?? 0) > 0;
+    if (isRestricted && prevMatter) {
+      const syncCorrelationId = `corr-leaver-reassign-${m.id}-${Date.now()}`;
+      try {
+        void syncMatterLifecycleOnSaveSync({
+          matter: m,
+          previousMatter: prevMatter,
+          userId: byId,
+          correlationId: syncCorrelationId,
+          store,
+        }).catch((err) => {
+          logDocumentLifecycleSyncError(err, syncCorrelationId);
+        });
+      } catch (err) {
+        logDocumentLifecycleSyncError(err, syncCorrelationId);
+      }
+    }
+  }
+  compensator.register('leaver.reassign', async () => {
+    await partyRepo.withTenantTransaction(reassignCtx, async () => {
+      for (const { prevPerson } of changedPeople) {
+        await partyRepo.putPerson(reassignCtx, prevPerson);
+      }
+      for (const { prevOrg } of changedOrganisations) {
+        await partyRepo.putOrganisation(reassignCtx, prevOrg);
+      }
+      for (const { prevMatter } of changedMatters) {
+        if (!prevMatter) continue;
+        const prevMeta = computeMatterRestrictionMetadataForStore(
+          prevMatter,
+          people,
+          store.teams,
+          tenantCfg,
+        );
+        await matterRepo.putMatter(reassignCtx, prevMatter, {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
+        });
+      }
+    });
+  });
+
+  if (unmigratedStoreMutated) {
+    saveStore(store);
+  }
   return { reassignedCount: count };
     },
   });
@@ -1989,11 +2161,20 @@ export async function savePersonRecord(
   return runUnmigratedJsonMutationWithAudit({
     label: 'savePersonRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
-    mutate: async () => {
+    mutate: async (_store, compensator) => {
   const store = getStore();
+  const personCtx = resolveDefaultServiceTenantContext(store, opts?.byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(personCtx),
+    partyRepo.listAllOrganisations<Organisation>(personCtx),
+    matterRepo.listAllMatters<Matter>(personCtx),
+  ]);
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
-  const existing = opts.id ? store.people.find((p) => p.id === opts.id) ?? null : null;
+  const existing = opts.id ? people.find((p) => p.id === opts.id) ?? null : null;
+  const previousPersonSnapshot = existing ? structuredClone(existing) : null;
   const deny = (
     code: 'FORBIDDEN' | 'MFA_REQUIRED',
     message: string,
@@ -2013,15 +2194,15 @@ export async function savePersonRecord(
   if (opts.id && !existing && !existingEnquiryForPromotion) {
     return deny('FORBIDDEN', 'Person record not found.', 'id');
   }
-  const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
+  const actingUser = people.find((p) => p.id === opts.byId) ?? null;
   const permSet = resolvePersonPermissionSet(actingUser, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     targetPersonId: existing?.id,
     mfaVerified: opts.mfaVerified,
   });
   const userPerms = new Set([
-    ...resolveEmployeePermissions(actingUser, store.people, store.teams, {
+    ...resolveEmployeePermissions(actingUser, people, store.teams, {
       targetPersonId: existing?.id,
     }),
     ...Array.from(permSet.permissions),
@@ -2079,9 +2260,8 @@ export async function savePersonRecord(
 
   const effectiveDob =
     input.dateOfBirth !== undefined ? input.dateOfBirth : existing?.dateOfBirth ?? null;
-  // Pure candidate ID: only commit `nextId(store, 'P')` after all permission, MFA, and validation gates pass.
-  const targetPersonId =
-    existing?.id ?? `P-${String((store.counters.P ?? 0) + 1).padStart(6, '0')}`;
+  // Pure candidate ID: only allocate from PostgreSQL sequence after all permission, MFA, and validation gates pass.
+  const targetPersonId = existing?.id ?? 'P-PENDING';
 
   let workingEmails = input.emails;
   let workingPhones = input.phones;
@@ -2107,7 +2287,7 @@ export async function savePersonRecord(
           surname: input.surname.trim(),
           jobTitle: rawEmpInput?.jobTitle ?? existing?.employment?.jobTitle ?? input.jobTitle ?? '',
         },
-        allPeople: store.people,
+        allPeople: people,
         orgStructure,
         byId: opts.byId,
         nowIso: now,
@@ -2248,7 +2428,7 @@ export async function savePersonRecord(
       empErrors = validateEmploymentRecord(candidateEmp, {
         personId: targetPersonId,
         dateOfBirth: effectiveDob,
-        allPeople: store.people,
+        allPeople: people,
         orgStructure,
         requireContractStartDate: Boolean(rawEmpInput.contract),
       });
@@ -2313,7 +2493,7 @@ export async function savePersonRecord(
   const nowWorkingAtFirm = Boolean(nextEmployment && nextEmployment.status !== 'Leaver');
   const openMattersOnHire =
     !wasWorkingAtFirm && nowWorkingAtFirm && nextEmployment
-      ? findOpenMattersWherePersonIsParty(targetPersonId, store.matters)
+      ? findOpenMattersWherePersonIsParty(targetPersonId, matters)
       : [];
   if (!wasWorkingAtFirm && nowWorkingAtFirm && nextEmployment) {
     nextEmployment.conflictCheckOnHire = {
@@ -2513,10 +2693,6 @@ export async function savePersonRecord(
   }
 
   // S0-30 (B13, R393, R398): Evaluate employee email identity changes from the FINAL synced `person`
-  // (`person.emails` plus `person.employment.systems.firmWorkEmail`, including any address synthesised
-  // by `createDefaultEmploymentRecord` / `syncPersonWorkContactFlags`) compared with the stored `existing` record,
-  // before any store mutation occurs. `employee:edit_core` and audit apply to any difference; MFA is required
-  // only when a sign-in address is added or changed to a new value (not when removing or deactivating one).
   const normaliseActivePersonEmails = (
     emails: Person['emails'] | undefined,
   ): string[] => {
@@ -2670,233 +2846,301 @@ export async function savePersonRecord(
     return { person: existing as Person, errors: cfValidation.errors };
   }
 
-  // All permission, MFA, and validation gates passed: commit counter and store side effects.
-  if (!existing) {
-    nextId(store, 'P');
-  }
+  let unmigratedStoreMutated = false;
+  const changedMattersOnHire: Array<{ matter: Matter; prevMatter: Matter }> = [];
+  const changedDuplicatePeople: Array<{ person: Person; prevPerson: Person }> = [];
 
-  if (openMattersOnHire.length > 0 && person.employment?.conflictCheckOnHire) {
-    // Flag to Risk & Compliance so an information barrier can be considered
-    const riskOfficerId =
-      store.people.find(
-        (p) =>
-          isWorkingAtFirm(p) &&
-          (p.roles?.includes('risk_compliance') ||
-            p.employeeRoleId === 'employee_role.risk_and_compliance'),
-      )?.id ?? opts.byId;
-    store.notifications.unshift({
-      id: nextId(store, 'NTF'),
-      recipientId: riskOfficerId,
-      kind: 'task_assigned',
-      title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
-      detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMattersOnHire.map((m) => m.matterNumber).join(', ')}.`,
-      href: `/people/${targetPersonId}`,
-      recordId: targetPersonId,
-      createdAt: now,
-      read: false,
-      byId: opts.byId,
-    });
+  await partyRepo.withTenantTransaction(personCtx, async () => {
+    if (!existing) {
+      const allocatedId = await partyRepo.allocateNextPersonId(personCtx);
+      person.id = allocatedId;
+      if (person.employment) {
+        person.employment.personId = allocatedId;
+      }
+    }
 
-    writeAudit(store, {
-      recordType: 'person',
-      recordId: targetPersonId,
-      action: 'status-change',
-      field: 'Conflict check on hire (Risk flag)',
-      oldValue: 'External contact / client',
-      newValue: person.employment.conflictCheckOnHire.riskNotes,
-      byId: opts.byId,
-      at: now,
-    });
+    if (openMattersOnHire.length > 0 && person.employment?.conflictCheckOnHire) {
+      const riskOfficerId =
+        people.find(
+          (p) =>
+            isWorkingAtFirm(p) &&
+            (p.roles?.includes('risk_compliance') ||
+              p.employeeRoleId === 'employee_role.risk_and_compliance'),
+        )?.id ?? opts.byId;
+      store.notifications.unshift({
+        id: nextId(store, 'NTF'),
+        recipientId: riskOfficerId,
+        kind: 'task_assigned',
+        title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
+        detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMattersOnHire.map((m) => m.matterNumber).join(', ')}.`,
+        href: `/people/${person.id}`,
+        recordId: person.id,
+        createdAt: now,
+        read: false,
+        byId: opts.byId,
+      });
+      unmigratedStoreMutated = true;
 
-    // Also if the person is a client on any of those open matters, mark them as staff matters with restricted access
-    for (const m of openMattersOnHire) {
-      if (m.clientId === targetPersonId || m.additionalClientIds?.includes(targetPersonId)) {
-        const prevMatter = structuredClone(m);
-        m.isStaffMatter = true;
-        const allowed = new Set<string>([
-          ...(m.restrictedAccessUserIds ?? []),
-          ...(m.responsiblePartnerId ? [m.responsiblePartnerId] : []),
-          ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
-          ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
-          ...(m.teamMemberIds ?? []),
-        ]);
-        m.restrictedAccessUserIds = Array.from(allowed);
-        touchMatter(m, opts.byId);
-        saveStore(store);
-        const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
-        try {
-          void syncMatterLifecycleOnSaveSync({
-            matter: m,
-            previousMatter: prevMatter,
-            userId: opts.byId,
-            correlationId: syncCorrelationId,
-            store,
-          }).catch((err) => {
-            logDocumentLifecycleSyncError(err, syncCorrelationId);
-          });
-        } catch (err) {
-          logDocumentLifecycleSyncError(err, syncCorrelationId);
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: person.id,
+        action: 'status-change',
+        field: 'Conflict check on hire (Risk flag)',
+        oldValue: 'External contact / client',
+        newValue: person.employment.conflictCheckOnHire.riskNotes,
+        byId: opts.byId,
+        at: now,
+      });
+
+      for (const m of openMattersOnHire) {
+        if (m.clientId === person.id || m.additionalClientIds?.includes(person.id)) {
+          const prevMatter = structuredClone(m);
+          m.isStaffMatter = true;
+          const allowed = new Set<string>([
+            ...(m.restrictedAccessUserIds ?? []),
+            ...(m.responsiblePartnerId ? [m.responsiblePartnerId] : []),
+            ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
+            ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
+            ...(m.teamMemberIds ?? []),
+          ]);
+          m.restrictedAccessUserIds = Array.from(allowed);
+          touchMatter(m, opts.byId);
+          changedMattersOnHire.push({ matter: m, prevMatter });
         }
       }
     }
-  }
 
-  // Audit payroll changes with user and timestamp
-  if (rawEmpInput?.payroll) {
-    const oldPay = existing?.employment?.payroll;
-    const newPay = nextEmployment?.payroll;
-    if (JSON.stringify(oldPay ?? null) !== JSON.stringify(newPay ?? null)) {
-      writeAudit(store, {
-        recordType: 'employee_payroll',
-        recordId: person.id,
-        action: 'update-payroll',
-        field: 'Payroll & benefits',
-        oldValue: oldPay
-          ? `NI: ${maskNationalInsuranceNumber(oldPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(oldPay.bankSortCode || '', oldPay.bankAccountNumber || '').accountNumber}`
-          : null,
-        newValue: newPay
-          ? `NI: ${maskNationalInsuranceNumber(newPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(newPay.bankSortCode || '', newPay.bankAccountNumber || '').accountNumber}, Ref: ${newPay.externalPayrollReference || '—'}`
-          : null,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-  }
-
-  // Store & audit sensitive information separately from main employment record (R76).
-  // Require the sensitive section to be explicitly opened and edited when updating an existing record
-  // or when sensitiveSectionOpened / sensitiveSectionEdited flags are supplied.
-  const canApplySensitiveSubmission =
-    Boolean(opts.sensitiveSubmitted) &&
-    opts.sensitiveSectionOpened !== false &&
-    opts.sensitiveSectionEdited !== false &&
-    (!store.employeeSensitiveRecords?.[person.id] ||
-      (opts.sensitiveSectionOpened === true &&
-        opts.sensitiveSectionEdited === true));
-
-  if (canApplySensitiveSubmission && opts.sensitiveSubmitted) {
-    if (!store.employeeSensitiveRecords) {
-      store.employeeSensitiveRecords = {};
-    }
-    const oldSens = store.employeeSensitiveRecords[person.id] ?? null;
-    const nextSens: EmployeeSensitiveRecord = {
-      personId: person.id,
-      reasonableAdjustmentsNeeded:
-        opts.sensitiveSubmitted.reasonableAdjustmentsNeeded ??
-        oldSens?.reasonableAdjustmentsNeeded ??
-        '',
-      diversity: {
-        ...emptyDiversityAnswers(),
-        ...(oldSens?.diversity ?? {}),
-        ...(opts.sensitiveSubmitted.diversity ?? {}),
-      },
-      updatedById: opts.byId,
-      updatedAt: now,
-    };
-    if (JSON.stringify(oldSens) !== JSON.stringify(nextSens)) {
-      store.employeeSensitiveRecords[person.id] = nextSens;
-      writeAudit(store, {
-        recordType: 'employee_sensitive',
-        recordId: person.id,
-        action: 'update-sensitive',
-        field: 'Sensitive information (special category data)',
-        oldValue: oldSens ? 'Recorded' : null,
-        newValue: `Updated by ${actingUser ? personDisplayName(actingUser) : opts.byId}`,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-  }
-
-  const auditOldActiveEmails =
-    isFirmWorkEmailIdentityChange && prevFirmWorkEmail
-      ? Array.from(new Set([...prevActiveEmails, prevFirmWorkEmail])).sort()
-      : prevActiveEmails;
-  const auditNewActiveEmails =
-    isFirmWorkEmailIdentityChange && nextFirmWorkEmail
-      ? Array.from(new Set([...nextActiveEmails, nextFirmWorkEmail])).sort()
-      : nextActiveEmails;
-
-  const ctx = formatContext(store);
-  if (!existing) {
-    store.people.push(person);
-    writeAudit(store, {
-      recordType: 'person',
-      recordId: person.id,
-      action: 'create',
-      field: null,
-      oldValue: null,
-      newValue: personDisplayName(person),
-      byId: opts.byId,
-      at: now,
-    });
-    if (isEmployeeEmailIdentityChange) {
-      writeAudit(store, {
-        recordType: 'person',
-        recordId: person.id,
-        action: 'update',
-        field: 'Employee sign-in email',
-        oldValue: auditOldActiveEmails.join(', ') || null,
-        newValue: auditNewActiveEmails.join(', ') || null,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-  } else {
-    const idx = store.people.findIndex((p) => p.id === existing.id);
-    const changes = diffRecords(
-      'person',
-      existing as unknown as Record<string, unknown>,
-      person as unknown as Record<string, unknown>,
-      ctx,
-      store.customFields,
-    );
-    store.people[idx] = person;
-    if (isEmployeeEmailIdentityChange) {
-      writeAudit(store, {
-        recordType: 'person',
-        recordId: person.id,
-        action: 'update',
-        field: 'Employee sign-in email',
-        oldValue: auditOldActiveEmails.join(', ') || null,
-        newValue: auditNewActiveEmails.join(', ') || null,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-    for (const ch of changes) {
-      writeAudit(store, {
-        recordType: 'person',
-        recordId: person.id,
-        action: 'update',
-        field: ch.field,
-        oldValue: ch.oldValue,
-        newValue: ch.newValue,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-  }
-
-  if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
-    for (const otherId of opts.matchedDuplicateIds) {
-      const other = store.people.find((p) => p.id === otherId);
-      if (other && !other.possibleMatchIds.includes(person.id)) {
-        other.possibleMatchIds.push(person.id);
-        other.duplicateStatusId = dupPossible;
+    if (rawEmpInput?.payroll) {
+      const oldPay = existing?.employment?.payroll;
+      const newPay = nextEmployment?.payroll;
+      if (JSON.stringify(oldPay ?? null) !== JSON.stringify(newPay ?? null)) {
+        writeAudit(store, {
+          recordType: 'employee_payroll',
+          recordId: person.id,
+          action: 'update-payroll',
+          field: 'Payroll & benefits',
+          oldValue: oldPay
+            ? `NI: ${maskNationalInsuranceNumber(oldPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(oldPay.bankSortCode || '', oldPay.bankAccountNumber || '').accountNumber}`
+            : null,
+          newValue: newPay
+            ? `NI: ${maskNationalInsuranceNumber(newPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(newPay.bankSortCode || '', newPay.bankAccountNumber || '').accountNumber}, Ref: ${newPay.externalPayrollReference || '—'}`
+            : null,
+          byId: opts.byId,
+          at: now,
+        });
       }
     }
+
+    const canApplySensitiveSubmission =
+      Boolean(opts.sensitiveSubmitted) &&
+      opts.sensitiveSectionOpened !== false &&
+      opts.sensitiveSectionEdited !== false &&
+      (!store.employeeSensitiveRecords?.[person.id] ||
+        (opts.sensitiveSectionOpened === true &&
+          opts.sensitiveSectionEdited === true));
+
+    if (canApplySensitiveSubmission && opts.sensitiveSubmitted) {
+      if (!store.employeeSensitiveRecords) {
+        store.employeeSensitiveRecords = {};
+      }
+      const oldSens = store.employeeSensitiveRecords[person.id] ?? null;
+      const nextSens: EmployeeSensitiveRecord = {
+        personId: person.id,
+        reasonableAdjustmentsNeeded:
+          opts.sensitiveSubmitted.reasonableAdjustmentsNeeded ??
+          oldSens?.reasonableAdjustmentsNeeded ??
+          '',
+        diversity: {
+          ...emptyDiversityAnswers(),
+          ...(oldSens?.diversity ?? {}),
+          ...(opts.sensitiveSubmitted.diversity ?? {}),
+        },
+        updatedById: opts.byId,
+        updatedAt: now,
+      };
+      if (JSON.stringify(oldSens) !== JSON.stringify(nextSens)) {
+        store.employeeSensitiveRecords[person.id] = nextSens;
+        unmigratedStoreMutated = true;
+        writeAudit(store, {
+          recordType: 'employee_sensitive',
+          recordId: person.id,
+          action: 'update-sensitive',
+          field: 'Sensitive information (special category data)',
+          oldValue: oldSens ? 'Recorded' : null,
+          newValue: `Updated by ${actingUser ? personDisplayName(actingUser) : opts.byId}`,
+          byId: opts.byId,
+          at: now,
+        });
+      }
+    }
+
+    const auditOldActiveEmails =
+      isFirmWorkEmailIdentityChange && prevFirmWorkEmail
+        ? Array.from(new Set([...prevActiveEmails, prevFirmWorkEmail])).sort()
+        : prevActiveEmails;
+    const auditNewActiveEmails =
+      isFirmWorkEmailIdentityChange && nextFirmWorkEmail
+        ? Array.from(new Set([...nextActiveEmails, nextFirmWorkEmail])).sort()
+        : nextActiveEmails;
+
+    const fmtCtx = formatContext({
+      people,
+      organisations,
+      matters,
+      enquiries: store.enquiries,
+      tasks: store.tasks,
+      teams: store.teams,
+      values: store.values,
+    });
+    if (!existing) {
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: person.id,
+        action: 'create',
+        field: null,
+        oldValue: null,
+        newValue: personDisplayName(person),
+        byId: opts.byId,
+        at: now,
+      });
+      if (isEmployeeEmailIdentityChange) {
+        writeAudit(store, {
+          recordType: 'person',
+          recordId: person.id,
+          action: 'update',
+          field: 'Employee sign-in email',
+          oldValue: auditOldActiveEmails.join(', ') || null,
+          newValue: auditNewActiveEmails.join(', ') || null,
+          byId: opts.byId,
+          at: now,
+        });
+      }
+    } else {
+      const changes = diffRecords(
+        'person',
+        existing as unknown as Record<string, unknown>,
+        person as unknown as Record<string, unknown>,
+        fmtCtx,
+        store.customFields,
+      );
+      if (isEmployeeEmailIdentityChange) {
+        writeAudit(store, {
+          recordType: 'person',
+          recordId: person.id,
+          action: 'update',
+          field: 'Employee sign-in email',
+          oldValue: auditOldActiveEmails.join(', ') || null,
+          newValue: auditNewActiveEmails.join(', ') || null,
+          byId: opts.byId,
+          at: now,
+        });
+      }
+      for (const ch of changes) {
+        writeAudit(store, {
+          recordType: 'person',
+          recordId: person.id,
+          action: 'update',
+          field: ch.field,
+          oldValue: ch.oldValue,
+          newValue: ch.newValue,
+          byId: opts.byId,
+          at: now,
+        });
+      }
+    }
+
+    if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
+      for (const otherId of opts.matchedDuplicateIds) {
+        const other = people.find((p) => p.id === otherId);
+        if (other && !other.possibleMatchIds.includes(person.id)) {
+          const prevPerson = structuredClone(other);
+          other.possibleMatchIds.push(person.id);
+          other.duplicateStatusId = dupPossible;
+          changedDuplicatePeople.push({ person: other, prevPerson });
+        }
+      }
+    }
+
+    await partyRepo.putPerson(personCtx, person);
+    for (const { person: dupPerson } of changedDuplicatePeople) {
+      await partyRepo.putPerson(personCtx, dupPerson);
+    }
+    const peopleWithUpdatedPerson = people.some((p) => p.id === person.id)
+      ? people.map((p) => (p.id === person.id ? person : p))
+      : [...people, person];
+    const tenantCfg = getActiveTenantConfiguration();
+    for (const { matter: m } of changedMattersOnHire) {
+      const meta = computeMatterRestrictionMetadataForStore(
+        m,
+        peopleWithUpdatedPerson,
+        store.teams,
+        tenantCfg,
+      );
+      await matterRepo.putMatter(personCtx, m, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+      });
+    }
+  });
+  for (const { matter: m, prevMatter } of changedMattersOnHire) {
+    const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
+    try {
+      void syncMatterLifecycleOnSaveSync({
+        matter: m,
+        previousMatter: prevMatter,
+        userId: opts.byId,
+        correlationId: syncCorrelationId,
+        store,
+      }).catch((err) => {
+        logDocumentLifecycleSyncError(err, syncCorrelationId);
+      });
+    } catch (err) {
+      logDocumentLifecycleSyncError(err, syncCorrelationId);
+    }
   }
+  let createdInitialLinkId: string | null = null;
+  compensator.register(`person.persist:${person.id}`, async () => {
+    const tenantCfg = getActiveTenantConfiguration();
+    await partyRepo.withTenantTransaction(personCtx, async (tx) => {
+      if (createdInitialLinkId) {
+        await partyRepo.deleteLink(personCtx, createdInitialLinkId);
+      }
+      if (previousPersonSnapshot) {
+        await partyRepo.putPerson(personCtx, previousPersonSnapshot);
+      } else {
+        await tx.query('DELETE FROM people WHERE tenant_id = $1 AND id = $2', [
+          personCtx.tenantId,
+          person.id,
+        ]);
+      }
+      for (const { prevPerson } of changedDuplicatePeople) {
+        await partyRepo.putPerson(personCtx, prevPerson);
+      }
+      for (const { prevMatter } of changedMattersOnHire) {
+        const prevMeta = computeMatterRestrictionMetadataForStore(
+          prevMatter,
+          people,
+          store.teams,
+          tenantCfg,
+        );
+        await matterRepo.putMatter(personCtx, prevMatter, {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
+        });
+      }
+    });
+  });
 
   if (person.createdFromEnquiryId) {
     const srcEnq = store.enquiries.find((e) => e.id === person.createdFromEnquiryId);
     if (srcEnq && !srcEnq.linkedPersonId) {
       srcEnq.linkedPersonId = person.id;
+      unmigratedStoreMutated = true;
     }
   }
 
   if (!existing && opts.initialLink?.organisationId) {
-    await createOrUpdateLink(
+    const createdLink = await createOrUpdateLink(
       {
         personId: person.id,
         organisationId: opts.initialLink.organisationId,
@@ -2913,14 +3157,21 @@ export async function savePersonRecord(
       opts.byId,
       { internalSystemStep: true },
     );
+    if (createdLink?.id) {
+      createdInitialLinkId = createdLink.id;
+    }
   }
 
   // Keep operational teams (store.teams) synchronised with the employee's Organisation Structure Department / Team
   if (person.employment) {
     if (person.employment.status === 'Leaver') {
       for (const tm of store.teams) {
+        const prevLen = tm.memberIds.length + tm.leadIds.length;
         tm.memberIds = tm.memberIds.filter((id) => id !== person.id);
         tm.leadIds = tm.leadIds.filter((id) => id !== person.id);
+        if (tm.memberIds.length + tm.leadIds.length !== prevLen) {
+          unmigratedStoreMutated = true;
+        }
       }
     } else {
       const deptId = person.employment.departmentId;
@@ -2948,19 +3199,23 @@ export async function savePersonRecord(
         if (matchingTeam) {
           if (!matchingTeam.memberIds.includes(person.id)) {
             matchingTeam.memberIds.push(person.id);
+            unmigratedStoreMutated = true;
           }
           if (
             person.employment.roleType === 'Partner/Member' &&
             !matchingTeam.leadIds.includes(person.id)
           ) {
             matchingTeam.leadIds.push(person.id);
+            unmigratedStoreMutated = true;
           }
         }
       }
     }
   }
 
-  saveStore(store);
+  if (unmigratedStoreMutated) {
+    saveStore(store);
+  }
   return { person };
 
     },
@@ -2978,16 +3233,18 @@ export async function saveOrganisationRecord(
     internalSystemStep?: 'enquiry_conversion' | 'quote_conversion';
   },
 ): Promise<{ organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit<
-    { organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>
-  >({
-    label: 'saveOrganisationRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
-    mutate: async (): Promise<{ organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>> => {
   const store = getStore();
+  const orgCtx = resolveDefaultServiceTenantContext(store, opts?.byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(orgCtx),
+    partyRepo.listAllOrganisations<Organisation>(orgCtx),
+    matterRepo.listAllMatters<Matter>(orgCtx),
+  ]);
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
-  const existing = opts.id ? store.organisations.find((o) => o.id === opts.id) ?? null : null;
+  const existing = opts.id ? organisations.find((o) => o.id === opts.id) ?? null : null;
   if (opts.id && !existing) {
     const msg = 'Organisation not found.';
     return {
@@ -2998,11 +3255,11 @@ export async function saveOrganisationRecord(
   }
 
   if (!opts.internalSystemStep) {
-    const actor = store.people.find((p) => p.id === opts.byId) ?? null;
+    const actor = people.find((p) => p.id === opts.byId) ?? null;
     const requiredPerm = existing ? 'contact:edit' : 'contact:create';
     if (
       !hasPersonPermission(actor, requiredPerm, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -3042,155 +3299,168 @@ export async function saveOrganisationRecord(
     ? Array.from(new Set([...(existing?.possibleMatchIds ?? []), ...(opts.matchedDuplicateIds ?? [])]))
     : existing?.possibleMatchIds ?? [];
 
-  const organisation: Organisation = {
-    id: existing?.id ?? nextId(store, 'O'),
-    recordType: 'organisation',
-    recordOwnerId: input.recordOwnerId ?? existing?.recordOwnerId ?? opts.byId,
-    recordStatusId: input.recordStatusId || existing?.recordStatusId || defaultStatus,
-    createdById: existing?.createdById ?? opts.byId,
-    createdAt: existing?.createdAt ?? now,
-    updatedById: opts.byId,
-    updatedAt: now,
-    sourceId: input.sourceId ?? existing?.sourceId ?? vid('data_source', 'Manual entry'),
-    lastVerifiedAt: input.lastVerifiedAt !== undefined ? input.lastVerifiedAt : existing?.lastVerifiedAt ?? today,
-    tags: input.tags ?? existing?.tags ?? [],
-    duplicateStatusId,
-    notDuplicateOf: existing?.notDuplicateOf ?? [],
-    possibleMatchIds: matchedIds,
-    mergedIntoId: existing?.mergedIntoId ?? null,
-    lastInteractionAt:
-      input.lastInteractionAt !== undefined ? input.lastInteractionAt : existing?.lastInteractionAt ?? null,
-    customFields: cfValidation.values,
-
-    legalName: input.legalName.trim(),
-    otherNames: input.otherNames ?? existing?.otherNames ?? [],
-    organisationTypeId:
-      input.organisationTypeId ?? existing?.organisationTypeId ?? vid('organisation_type', 'Company'),
-    companyNumber: (input.companyNumber ?? existing?.companyNumber ?? '').trim(),
-    vatNumber: (input.vatNumber ?? existing?.vatNumber ?? '').trim(),
-    countryOfRegistrationId:
-      input.countryOfRegistrationId ?? existing?.countryOfRegistrationId ?? vid('country', 'United Kingdom'),
-    registeredAddress:
-      input.registeredAddress !== undefined ? input.registeredAddress : existing?.registeredAddress ?? null,
-    correspondenceAddress:
-      input.correspondenceAddress !== undefined
-        ? input.correspondenceAddress
-        : existing?.correspondenceAddress ?? null,
-    peopleWithSignificantControl:
-      input.peopleWithSignificantControl !== undefined
-        ? input.peopleWithSignificantControl
-        : existing?.peopleWithSignificantControl ?? [],
-    directors:
-      input.directors !== undefined
-        ? input.directors
-        : existing?.directors ?? [],
-    website: (input.website ?? existing?.website ?? '').trim(),
-    mainPhone: (input.mainPhone ?? existing?.mainPhone ?? '').trim(),
-    generalEmail: (input.generalEmail ?? existing?.generalEmail ?? '').trim(),
-    parentOrganisationId:
-      input.parentOrganisationId !== undefined ? input.parentOrganisationId : existing?.parentOrganisationId ?? null,
-
-    relationshipPartnerId:
-      input.relationshipPartnerId !== undefined
-        ? input.relationshipPartnerId
-        : existing?.relationshipPartnerId ?? opts.byId,
-    relationshipTypeIds: input.relationshipTypeIds ?? existing?.relationshipTypeIds ?? [],
-    relationshipStatusId:
-      input.relationshipStatusId !== undefined
-        ? input.relationshipStatusId
-        : existing?.relationshipStatusId ?? vid('relationship_status', 'Active'),
-    relationshipStandingId:
-      input.relationshipStandingId !== undefined
-        ? input.relationshipStandingId
-        : existing?.relationshipStandingId ?? null,
-    sectorId: input.sectorId !== undefined ? input.sectorId : existing?.sectorId ?? null,
-    clientTierId: input.clientTierId !== undefined ? input.clientTierId : existing?.clientTierId ?? null,
-    originId: input.originId !== undefined ? input.originId : existing?.originId ?? null,
-    relationshipStartedAt:
-      input.relationshipStartedAt !== undefined
-        ? input.relationshipStartedAt
-        : existing?.relationshipStartedAt ?? null,
-    engagementLevelId:
-      input.engagementLevelId !== undefined ? input.engagementLevelId : existing?.engagementLevelId ?? null,
-    pipelineStageId:
-      input.pipelineStageId !== undefined ? input.pipelineStageId : existing?.pipelineStageId ?? null,
-    bdNotes: input.bdNotes ?? existing?.bdNotes ?? '',
-
-    clientReference: (input.clientReference ?? existing?.clientReference ?? '').trim(),
-    onboardingStatusId:
-      input.onboardingStatusId !== undefined ? input.onboardingStatusId : existing?.onboardingStatusId ?? null,
-    conflictStatusId:
-      input.conflictStatusId !== undefined ? input.conflictStatusId : existing?.conflictStatusId ?? null,
-    conflictReference: (input.conflictReference ?? existing?.conflictReference ?? '').trim(),
-    riskRatingId: input.riskRatingId !== undefined ? input.riskRatingId : existing?.riskRatingId ?? null,
-    riskAssessmentStatusId:
-      input.riskAssessmentStatusId !== undefined
-        ? input.riskAssessmentStatusId
-        : existing?.riskAssessmentStatusId ?? null,
-    verificationStatusId:
-      input.verificationStatusId !== undefined ? input.verificationStatusId : existing?.verificationStatusId ?? null,
-    billingAddress: input.billingAddress !== undefined ? input.billingAddress : existing?.billingAddress ?? null,
-    invoicePreferenceId:
-      input.invoicePreferenceId !== undefined ? input.invoicePreferenceId : existing?.invoicePreferenceId ?? null,
-    paymentTermsId: input.paymentTermsId !== undefined ? input.paymentTermsId : existing?.paymentTermsId ?? null,
-    creditControlNotes: input.creditControlNotes ?? existing?.creditControlNotes ?? '',
-    engagementTermsRef: (input.engagementTermsRef ?? existing?.engagementTermsRef ?? '').trim(),
-    reviewDate: input.reviewDate !== undefined ? input.reviewDate : existing?.reviewDate ?? null,
-    reviewerId: input.reviewerId !== undefined ? input.reviewerId : existing?.reviewerId ?? null,
-  };
-
-  const ctx = formatContext(store);
-  if (!existing) {
-    store.organisations.push(organisation);
-    writeAudit(store, {
+  let organisation!: Organisation;
+  await runWithAuditStagingScope(() =>
+    partyRepo.withTenantTransaction(orgCtx, async () => {
+    const allocatedId =
+      existing?.id ?? (await partyRepo.allocateNextOrganisationId(orgCtx));
+    organisation = {
+      id: allocatedId,
       recordType: 'organisation',
-      recordId: organisation.id,
-      action: 'create',
-      field: null,
-      oldValue: null,
-      newValue: organisation.legalName,
-      byId: opts.byId,
-      at: now,
+      recordOwnerId: input.recordOwnerId ?? existing?.recordOwnerId ?? opts.byId,
+      recordStatusId: input.recordStatusId || existing?.recordStatusId || defaultStatus,
+      createdById: existing?.createdById ?? opts.byId,
+      createdAt: existing?.createdAt ?? now,
+      updatedById: opts.byId,
+      updatedAt: now,
+      sourceId: input.sourceId ?? existing?.sourceId ?? vid('data_source', 'Manual entry'),
+      lastVerifiedAt: input.lastVerifiedAt !== undefined ? input.lastVerifiedAt : existing?.lastVerifiedAt ?? today,
+      tags: input.tags ?? existing?.tags ?? [],
+      duplicateStatusId,
+      notDuplicateOf: existing?.notDuplicateOf ?? [],
+      possibleMatchIds: matchedIds,
+      mergedIntoId: existing?.mergedIntoId ?? null,
+      lastInteractionAt:
+        input.lastInteractionAt !== undefined ? input.lastInteractionAt : existing?.lastInteractionAt ?? null,
+      customFields: cfValidation.values,
+
+      legalName: input.legalName.trim(),
+      otherNames: input.otherNames ?? existing?.otherNames ?? [],
+      organisationTypeId:
+        input.organisationTypeId ?? existing?.organisationTypeId ?? vid('organisation_type', 'Company'),
+      companyNumber: (input.companyNumber ?? existing?.companyNumber ?? '').trim(),
+      vatNumber: (input.vatNumber ?? existing?.vatNumber ?? '').trim(),
+      countryOfRegistrationId:
+        input.countryOfRegistrationId ?? existing?.countryOfRegistrationId ?? vid('country', 'United Kingdom'),
+      registeredAddress:
+        input.registeredAddress !== undefined ? input.registeredAddress : existing?.registeredAddress ?? null,
+      correspondenceAddress:
+        input.correspondenceAddress !== undefined
+          ? input.correspondenceAddress
+          : existing?.correspondenceAddress ?? null,
+      peopleWithSignificantControl:
+        input.peopleWithSignificantControl !== undefined
+          ? input.peopleWithSignificantControl
+          : existing?.peopleWithSignificantControl ?? [],
+      directors:
+        input.directors !== undefined
+          ? input.directors
+          : existing?.directors ?? [],
+      website: (input.website ?? existing?.website ?? '').trim(),
+      mainPhone: (input.mainPhone ?? existing?.mainPhone ?? '').trim(),
+      generalEmail: (input.generalEmail ?? existing?.generalEmail ?? '').trim(),
+      parentOrganisationId:
+        input.parentOrganisationId !== undefined ? input.parentOrganisationId : existing?.parentOrganisationId ?? null,
+
+      relationshipPartnerId:
+        input.relationshipPartnerId !== undefined
+          ? input.relationshipPartnerId
+          : existing?.relationshipPartnerId ?? opts.byId,
+      relationshipTypeIds: input.relationshipTypeIds ?? existing?.relationshipTypeIds ?? [],
+      relationshipStatusId:
+        input.relationshipStatusId !== undefined
+          ? input.relationshipStatusId
+          : existing?.relationshipStatusId ?? vid('relationship_status', 'Active'),
+      relationshipStandingId:
+        input.relationshipStandingId !== undefined
+          ? input.relationshipStandingId
+          : existing?.relationshipStandingId ?? null,
+      sectorId: input.sectorId !== undefined ? input.sectorId : existing?.sectorId ?? null,
+      clientTierId: input.clientTierId !== undefined ? input.clientTierId : existing?.clientTierId ?? null,
+      originId: input.originId !== undefined ? input.originId : existing?.originId ?? null,
+      relationshipStartedAt:
+        input.relationshipStartedAt !== undefined
+          ? input.relationshipStartedAt
+          : existing?.relationshipStartedAt ?? null,
+      engagementLevelId:
+        input.engagementLevelId !== undefined ? input.engagementLevelId : existing?.engagementLevelId ?? null,
+      pipelineStageId:
+        input.pipelineStageId !== undefined ? input.pipelineStageId : existing?.pipelineStageId ?? null,
+      bdNotes: input.bdNotes ?? existing?.bdNotes ?? '',
+
+      clientReference: (input.clientReference ?? existing?.clientReference ?? '').trim(),
+      onboardingStatusId:
+        input.onboardingStatusId !== undefined ? input.onboardingStatusId : existing?.onboardingStatusId ?? null,
+      conflictStatusId:
+        input.conflictStatusId !== undefined ? input.conflictStatusId : existing?.conflictStatusId ?? null,
+      conflictReference: (input.conflictReference ?? existing?.conflictReference ?? '').trim(),
+      riskRatingId: input.riskRatingId !== undefined ? input.riskRatingId : existing?.riskRatingId ?? null,
+      riskAssessmentStatusId:
+        input.riskAssessmentStatusId !== undefined
+          ? input.riskAssessmentStatusId
+          : existing?.riskAssessmentStatusId ?? null,
+      verificationStatusId:
+        input.verificationStatusId !== undefined ? input.verificationStatusId : existing?.verificationStatusId ?? null,
+      billingAddress: input.billingAddress !== undefined ? input.billingAddress : existing?.billingAddress ?? null,
+      invoicePreferenceId:
+        input.invoicePreferenceId !== undefined ? input.invoicePreferenceId : existing?.invoicePreferenceId ?? null,
+      paymentTermsId: input.paymentTermsId !== undefined ? input.paymentTermsId : existing?.paymentTermsId ?? null,
+      creditControlNotes: input.creditControlNotes ?? existing?.creditControlNotes ?? '',
+      engagementTermsRef: (input.engagementTermsRef ?? existing?.engagementTermsRef ?? '').trim(),
+      reviewDate: input.reviewDate !== undefined ? input.reviewDate : existing?.reviewDate ?? null,
+      reviewerId: input.reviewerId !== undefined ? input.reviewerId : existing?.reviewerId ?? null,
+    };
+
+    const fmtCtx = formatContext({
+      people,
+      organisations,
+      matters,
+      enquiries: store.enquiries,
+      tasks: store.tasks,
+      teams: store.teams,
+      values: store.values,
     });
-  } else {
-    const idx = store.organisations.findIndex((o) => o.id === existing.id);
-    const changes = diffRecords(
-      'organisation',
-      existing as unknown as Record<string, unknown>,
-      organisation as unknown as Record<string, unknown>,
-      ctx,
-      store.customFields,
-    );
-    store.organisations[idx] = organisation;
-    for (const ch of changes) {
+    if (!existing) {
       writeAudit(store, {
         recordType: 'organisation',
         recordId: organisation.id,
-        action: 'update',
-        field: ch.field,
-        oldValue: ch.oldValue,
-        newValue: ch.newValue,
+        action: 'create',
+        field: null,
+        oldValue: null,
+        newValue: organisation.legalName,
         byId: opts.byId,
         at: now,
       });
-    }
-  }
-
-  if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
-    for (const otherId of opts.matchedDuplicateIds) {
-      const other = store.organisations.find((o) => o.id === otherId);
-      if (other && !other.possibleMatchIds.includes(organisation.id)) {
-        other.possibleMatchIds.push(organisation.id);
-        other.duplicateStatusId = dupPossible;
+    } else {
+      const changes = diffRecords(
+        'organisation',
+        existing as unknown as Record<string, unknown>,
+        organisation as unknown as Record<string, unknown>,
+        fmtCtx,
+        store.customFields,
+      );
+      for (const ch of changes) {
+        writeAudit(store, {
+          recordType: 'organisation',
+          recordId: organisation.id,
+          action: 'update',
+          field: ch.field,
+          oldValue: ch.oldValue,
+          newValue: ch.newValue,
+          byId: opts.byId,
+          at: now,
+        });
       }
     }
-  }
 
-  saveStore(store);
+    await partyRepo.putOrganisation(orgCtx, organisation);
+
+    if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
+      for (const otherId of opts.matchedDuplicateIds) {
+        const other = organisations.find((o) => o.id === otherId);
+        if (other && !other.possibleMatchIds.includes(organisation.id)) {
+          other.possibleMatchIds.push(organisation.id);
+          other.duplicateStatusId = dupPossible;
+          await partyRepo.putOrganisation(orgCtx, other);
+        }
+      }
+    }
+
+    await flushStagedAuditEntries(orgCtx);
+    }),
+  );
+
   return { organisation };
-
-    },
-  });
 }
 
 export async function createOrUpdateLink(
@@ -3200,21 +3470,23 @@ export async function createOrUpdateLink(
   byId: string,
   opts?: { internalSystemStep?: boolean },
 ): Promise<PersonOrganisationLink & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'createOrUpdateLink',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
+  const linkCtx = resolveDefaultServiceTenantContext(null, byId);
+  const partyRepo = getPartyRepository();
   const now = new Date().toISOString();
-  const existing = input.id ? store.links.find((l) => l.id === input.id) ?? null : null;
+  const [people, org, existing] = await Promise.all([
+    partyRepo.listAllPeople<Person>(linkCtx),
+    partyRepo.getOrganisationById<Organisation>(linkCtx, input.organisationId),
+    input.id
+      ? partyRepo.getLinkById<PersonOrganisationLink>(linkCtx, input.id)
+      : Promise.resolve(null),
+  ]);
   if (input.id && !existing) {
     return buildActionDenied(
       'FORBIDDEN',
       `Organisation link "${input.id}" not found.`,
     ) as unknown as PersonOrganisationLink & Partial<ActionDenied>;
   }
-  const person = store.people.find((p) => p.id === input.personId);
-  const org = store.organisations.find((o) => o.id === input.organisationId);
+  const person = people.find((p) => p.id === input.personId);
   if (!person || !org) {
     return buildActionDenied(
       'FORBIDDEN',
@@ -3222,11 +3494,12 @@ export async function createOrUpdateLink(
     ) as unknown as PersonOrganisationLink & Partial<ActionDenied>;
   }
   if (!opts?.internalSystemStep) {
-    const actor = store.people.find((p) => p.id === byId) ?? null;
+    const store = getStore();
+    const actor = people.find((p) => p.id === byId) ?? null;
     const requiredPerm = existing ? 'contact:edit' : 'contact:create';
     if (
       !hasPersonPermission(actor, requiredPerm, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -3238,78 +3511,83 @@ export async function createOrUpdateLink(
   }
   const label = `${person ? personDisplayName(person) : input.personId} ↔ ${org ? org.legalName : input.organisationId}`;
 
-  const link: PersonOrganisationLink = {
-    id: existing?.id ?? nextId(store, 'L'),
-    personId: input.personId,
-    organisationId: input.organisationId,
-    jobTitle: input.jobTitle.trim(),
-    department: input.department.trim(),
-    roleWithinOrganisation: input.roleWithinOrganisation.trim(),
-    contactRoleIds: input.contactRoleIds,
-    isPrimaryContact: input.isPrimaryContact,
-    isCurrent: input.isCurrent,
-    startDate: input.startDate || null,
-    endDate: input.endDate || null,
-    contactStatusId: input.contactStatusId || vid('contact_status', 'Active'),
-    createdById: existing?.createdById ?? byId,
-    createdAt: existing?.createdAt ?? now,
-    updatedById: byId,
-    updatedAt: now,
-  };
+  let link!: PersonOrganisationLink;
+  await runWithAuditStagingScope(() =>
+    partyRepo.withTenantTransaction(linkCtx, async () => {
+    const allocatedId =
+      existing?.id ?? (await partyRepo.allocateNextLinkId(linkCtx));
+    link = {
+      id: allocatedId,
+      personId: input.personId,
+      organisationId: input.organisationId,
+      jobTitle: input.jobTitle.trim(),
+      department: input.department.trim(),
+      roleWithinOrganisation: input.roleWithinOrganisation.trim(),
+      contactRoleIds: input.contactRoleIds,
+      isPrimaryContact: input.isPrimaryContact,
+      isCurrent: input.isCurrent,
+      startDate: input.startDate || null,
+      endDate: input.endDate || null,
+      contactStatusId: input.contactStatusId || vid('contact_status', 'Active'),
+      createdById: existing?.createdById ?? byId,
+      createdAt: existing?.createdAt ?? now,
+      updatedById: byId,
+      updatedAt: now,
+    };
 
-  if (!existing) {
-    store.links.push(link);
-    for (const [rtype, rid] of [
-      ['person', link.personId],
-      ['organisation', link.organisationId],
-    ] as const) {
-      writeAudit(store, {
-        recordType: rtype,
-        recordId: rid,
-        action: 'link',
-        field: 'Organisation link',
-        oldValue: null,
-        newValue: label + (link.jobTitle ? ` (${link.jobTitle})` : ''),
-        byId,
-        at: now,
-      });
+    await partyRepo.putLink(linkCtx, link);
+
+    if (!existing) {
+      for (const [rtype, rid] of [
+        ['person', link.personId],
+        ['organisation', link.organisationId],
+      ] as const) {
+        writeAudit(null, {
+          recordType: rtype,
+          recordId: rid,
+          action: 'link',
+          field: 'Organisation link',
+          oldValue: null,
+          newValue: label + (link.jobTitle ? ` (${link.jobTitle})` : ''),
+          byId,
+          at: now,
+        });
+      }
+    } else {
+      for (const [rtype, rid] of [
+        ['person', link.personId],
+        ['organisation', link.organisationId],
+      ] as const) {
+        writeAudit(null, {
+          recordType: rtype,
+          recordId: rid,
+          action: 'link-update',
+          field: 'Organisation link',
+          oldValue: label,
+          newValue: label + (link.jobTitle ? ` (${link.jobTitle})` : ''),
+          byId,
+          at: now,
+        });
+      }
     }
-  } else {
-    const idx = store.links.findIndex((l) => l.id === existing.id);
-    store.links[idx] = link;
-    for (const [rtype, rid] of [
-      ['person', link.personId],
-      ['organisation', link.organisationId],
-    ] as const) {
-      writeAudit(store, {
-        recordType: rtype,
-        recordId: rid,
-        action: 'link-update',
-        field: 'Organisation link',
-        oldValue: label,
-        newValue: label + (link.jobTitle ? ` (${link.jobTitle})` : ''),
-        byId,
-        at: now,
-      });
-    }
-  }
-  saveStore(store);
+    await flushStagedAuditEntries(linkCtx);
+    }),
+  );
   return link;
-
-    },
-  });
 }
 
 export async function deleteLink(linkId: string, byId: string): Promise<{ ok: true } | ActionDenied> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'deleteLink',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const linkCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const [people, existing] = await Promise.all([
+    partyRepo.listAllPeople<Person>(linkCtx),
+    partyRepo.getLinkById<PersonOrganisationLink>(linkCtx, linkId),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'contact:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -3318,33 +3596,36 @@ export async function deleteLink(linkId: string, byId: string): Promise<{ ok: tr
       'You do not have permission (contact:edit) to delete a person-organisation link.',
     );
   }
-  const existing = store.links.find((l) => l.id === linkId);
   if (!existing) {
     return buildActionDenied('FORBIDDEN', `Organisation link "${linkId}" not found.`);
   }
-  const person = store.people.find((p) => p.id === existing.personId);
-  const org = store.organisations.find((o) => o.id === existing.organisationId);
+  const person = people.find((p) => p.id === existing.personId);
+  const org = await partyRepo.getOrganisationById<Organisation>(
+    linkCtx,
+    existing.organisationId,
+  );
   const label = `${person ? personDisplayName(person) : existing.personId} ↔ ${org ? org.legalName : existing.organisationId}`;
-  store.links = store.links.filter((l) => l.id !== linkId);
-  for (const [rtype, rid] of [
-    ['person', existing.personId],
-    ['organisation', existing.organisationId],
-  ] as const) {
-    writeAudit(store, {
-      recordType: rtype,
-      recordId: rid,
-      action: 'unlink',
-      field: 'Organisation link',
-      oldValue: label,
-      newValue: null,
-      byId,
-    });
-  }
-  saveStore(store);
+  await runWithAuditStagingScope(() =>
+    partyRepo.withTenantTransaction(linkCtx, async () => {
+      await partyRepo.deleteLink(linkCtx, linkId);
+      for (const [rtype, rid] of [
+        ['person', existing.personId],
+        ['organisation', existing.organisationId],
+      ] as const) {
+        writeAudit(store, {
+          recordType: rtype,
+          recordId: rid,
+          action: 'unlink',
+          field: 'Organisation link',
+          oldValue: label,
+          newValue: null,
+          byId,
+        });
+      }
+      await flushStagedAuditEntries(linkCtx);
+    }),
+  );
   return { ok: true };
-
-    },
-  });
 }
 
 export async function addNoteToRecord(
@@ -3353,22 +3634,30 @@ export async function addNoteToRecord(
   text: string,
   byId: string,
 ): Promise<Note & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'addNoteToRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const noteCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, matters, targetOrg] = await Promise.all([
+    partyRepo.listAllPeople<Person>(noteCtx),
+    matterRepo.listAllMatters<Matter>(noteCtx),
+    recordType === 'organisation'
+      ? partyRepo.getOrganisationById<Organisation>(noteCtx, recordId)
+      : Promise.resolve(null),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
 
   const target: (AnyRecord | Matter) | undefined =
     recordType === 'person'
-      ? store.people.find((p) => p.id === recordId)
+      ? people.find((p) => p.id === recordId)
       : recordType === 'matter'
-        ? store.matters.find((m) => m.id === recordId)
-        : store.organisations.find((o) => o.id === recordId);
+        ? matters.find((m) => m.id === recordId)
+        : (targetOrg ?? undefined);
 
   if (!target) {
     return buildActionDenied(
@@ -3380,7 +3669,7 @@ export async function addNoteToRecord(
   if (recordType === 'matter') {
     if (
       !hasPersonPermission(actor, 'matter:edit', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       }) ||
       !visibility.canViewMatter(target as Matter)
@@ -3393,7 +3682,7 @@ export async function addNoteToRecord(
   } else if (recordType === 'organisation') {
     if (
       !hasPersonPermission(actor, 'contact:edit', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -3408,7 +3697,7 @@ export async function addNoteToRecord(
     const requiredPerm = isEmpOrLeaver ? 'employee:edit_core' : 'contact:edit';
     if (
       !hasPersonPermission(actor, requiredPerm, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
         targetPersonId: targetPerson.id,
       })
@@ -3422,16 +3711,6 @@ export async function addNoteToRecord(
 
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
-  const note: Note = {
-    id: nextId(store, 'N'),
-    recordType,
-    recordId,
-    authorId: byId,
-    at: now,
-    text: text.trim(),
-  };
-  store.notes.unshift(note);
-
   const oldInteraction = target.lastInteractionAt;
   target.lastInteractionAt = today;
   if (recordType === 'matter') {
@@ -3440,30 +3719,63 @@ export async function addNoteToRecord(
     target.updatedAt = now;
     target.updatedById = byId;
   }
-  writeAudit(store, {
-    recordType,
-    recordId,
-    action: 'note',
-    field: 'Note added',
-    oldValue: oldInteraction,
-    newValue: note.text.slice(0, 120),
-    byId,
-    at: now,
-  });
-  saveStore(store);
-  return note;
 
-    },
-  });
+  let note!: Note;
+  await runWithAuditStagingScope(() =>
+    partyRepo.withTenantTransaction(noteCtx, async () => {
+    const noteId = await partyRepo.allocateNextNoteId(noteCtx);
+    note = {
+      id: noteId,
+      recordType,
+      recordId,
+      authorId: byId,
+      at: now,
+      text: text.trim(),
+    };
+    await partyRepo.putNote(noteCtx, note);
+    if (recordType === 'person') {
+      await partyRepo.putPerson(noteCtx, target as Person);
+    } else if (recordType === 'organisation') {
+      await partyRepo.putOrganisation(noteCtx, target as Organisation);
+    } else {
+      const meta = computeMatterRestrictionMetadataForStore(
+        target as Matter,
+        people,
+        store.teams,
+        getActiveTenantConfiguration(),
+      );
+      await matterRepo.putMatter(noteCtx, target as Matter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+      });
+    }
+    writeAudit(store, {
+      recordType,
+      recordId,
+      action: 'note',
+      field: 'Note added',
+      oldValue: oldInteraction,
+      newValue: note.text.slice(0, 120),
+      byId,
+      at: now,
+    });
+    await flushStagedAuditEntries(noteCtx);
+    }),
+  );
+  return note;
 }
 
 export async function generateMatterNumber(
-  store: FirmStore,
+  store: FirmStore | null | undefined,
   clientId: string,
   ctx?: TenantContext,
 ): Promise<string> {
-  const org = store.organisations.find((o) => o.id === clientId);
-  const person = store.people.find((p) => p.id === clientId);
+  const effectiveCtx = ctx ?? resolveDefaultServiceTenantContext(store);
+  const partyRepo = getPartyRepository();
+  const [org, person] = await Promise.all([
+    partyRepo.getOrganisationById<Organisation>(effectiveCtx, clientId),
+    partyRepo.getPersonById<Person>(effectiveCtx, clientId),
+  ]);
   let prefix = 'MAT001';
   if (org?.clientReference?.trim()) {
     prefix = org.clientReference.trim().toUpperCase();
@@ -3472,8 +3784,6 @@ export async function generateMatterNumber(
   } else if (person) {
     prefix = person.surname.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X') + '001';
   }
-  const effectiveCtx = ctx ?? resolveDefaultServiceTenantContext(store);
-  await syncAndHydratePartiesAndMattersFromPostgres(store, effectiveCtx);
   return getMatterRepository().allocateNextMatterNumber(effectiveCtx, prefix);
 }
 
@@ -3562,7 +3872,16 @@ async function runMatterOpeningGate(params: {
   if (kdConfig.enabled) {
     const keyDateRepo = getKeyDateRepository();
     if (!isNewMatter) {
-      await ensureStoreMattersRestrictedMetadataSynced(extensionCtx, store);
+      const [people, matters] = await Promise.all([
+        getPartyRepository().listAllPeople<Person>(extensionCtx),
+        getMatterRepository().listAllMatters<Matter>(extensionCtx),
+      ]);
+      await ensureMattersRestrictedMetadataSynced(
+        extensionCtx,
+        matters,
+        people,
+        store.teams,
+      );
     }
     const targetMatterTypeId = matter.matterTypeId || matter.practiceAreaId;
     const matterKds = isNewMatter
@@ -3918,12 +4237,51 @@ export async function saveMatterRecord(
     resolveCtx: (s) =>
       resolvedMatterCtx ?? resolveDefaultServiceTenantContext(s, opts.byId),
     mutate: async (store, compensator) => {
-  const existingRef = opts.id ? store.matters.find((m) => m.id === opts.id) ?? null : null;
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  const tenantCfg = getActiveTenantConfiguration();
+  let lookupCtx: TenantContext | null = null;
+  try {
+    lookupCtx = resolveDefaultServiceTenantContext(store, opts.byId);
+  } catch {
+    if (activeVerifiedSession) {
+      try {
+        lookupCtx = resolveCurrentTenantContext(
+          createVerifiedSessionActorFromEntraSession(activeVerifiedSession, {
+            correlationId: `matter-save-lookup-${randomUUID()}`,
+          }),
+          tenantCfg,
+        );
+      } catch {
+        lookupCtx = null;
+      }
+    }
+  }
+  const [people, organisations, links, matters] = lookupCtx
+    ? await Promise.all([
+        partyRepo.listAllPeople<Person>(lookupCtx),
+        partyRepo.listAllOrganisations<Organisation>(lookupCtx),
+        partyRepo.listAllLinks<PersonOrganisationLink>(lookupCtx),
+        matterRepo.listAllMatters<Matter>(lookupCtx),
+      ])
+    : [[], [], [], []];
+  const existingRef = opts.id ? matters.find((m) => m.id === opts.id) ?? null : null;
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingRowVersion = existing?.rowVersion ?? 1;
   const now = nextMonotonicIsoTimestamp(existing?.updatedAt);
   const today = toIsoDate(new Date());
-  const actingUser = store.people.find((p) => p.id === opts.byId) ?? null;
+  if (!activeVerifiedSession) {
+    return {
+      matter: null,
+      errors: {
+        access: 'UNAUTHENTICATED: Your session has expired. Please sign in again.',
+      },
+    };
+  }
+  const actingUser = people.find((p) => p.id === opts.byId) ?? null;
   if (!actingUser || !actingUser.isEmployee) {
     return {
       matter: null,
@@ -3933,10 +4291,7 @@ export async function saveMatterRecord(
       },
     };
   }
-  const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
-    | VerifiedEntraSessionPayload
-    | undefined;
-  if (!activeVerifiedSession || activeVerifiedSession.personId !== actingUser.id) {
+  if (activeVerifiedSession.personId !== actingUser.id) {
     return {
       matter: null,
       errors: {
@@ -3944,7 +4299,6 @@ export async function saveMatterRecord(
       },
     };
   }
-  const tenantCfg = getActiveTenantConfiguration();
   let extensionCtx: TenantContext;
   try {
     extensionCtx = resolveCurrentTenantContext(
@@ -3973,7 +4327,7 @@ export async function saveMatterRecord(
     if (
       !existing ||
       !canPersonAccessMatter(existing, opts.byId, actingUser, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -3987,7 +4341,7 @@ export async function saveMatterRecord(
     }
     if (
       !hasPersonPermission(actingUser, 'matter:edit', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -4021,7 +4375,7 @@ export async function saveMatterRecord(
   } else {
     if (
       !hasPersonPermission(actingUser, 'matter:create', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -4110,7 +4464,7 @@ export async function saveMatterRecord(
     if (
       (deptChanged || teamChanged) &&
       !hasPersonPermission(actingUser, 'matter:reassign_ownership', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -4143,7 +4497,12 @@ export async function saveMatterRecord(
       nextStatusId === 'matter_status.closed';
 
     if (targetMatterId && isClosing) {
-      await ensureStoreMattersRestrictedMetadataSynced(extensionCtx, store);
+      await ensureMattersRestrictedMetadataSynced(
+        extensionCtx,
+        matters,
+        people,
+        store.teams,
+      );
       const matterKds = await getKeyDateRepository().listKeyDatesForMatter(
         extensionCtx,
         targetMatterId,
@@ -4174,14 +4533,14 @@ export async function saveMatterRecord(
     vid('matter_status', 'CMI incomplete');
   const prospectiveStatus = resolveProspectiveStatusId(store);
 
-  const promoteEnquiryPersonId = (rawId: string | null | undefined): string | null => {
+  const promoteEnquiryPersonId = async (rawId: string | null | undefined): Promise<string | null> => {
     if (!rawId) return null;
     if (!rawId.startsWith('ENQ-')) return rawId;
     const enq = store.enquiries.find((e) => e.id === rawId);
     if (!enq) return rawId;
     if (
       enq.linkedPersonId &&
-      (store.people.some((p) => p.id === enq.linkedPersonId) ||
+      (people.some((p) => p.id === enq.linkedPersonId) ||
         pendingPeople.some((p) => p.id === enq.linkedPersonId))
     ) {
       return enq.linkedPersonId;
@@ -4191,13 +4550,13 @@ export async function saveMatterRecord(
       return existingPendingLink.linkedPersonId;
     }
     const existingFromEnq =
-      store.people.find((p) => p.createdFromEnquiryId === enq.id) ??
+      people.find((p) => p.createdFromEnquiryId === enq.id) ??
       pendingPeople.find((p) => p.createdFromEnquiryId === enq.id);
     if (existingFromEnq) {
       pendingEnquiryLinks.push({ enquiry: enq, linkedPersonId: existingFromEnq.id });
       return existingFromEnq.id;
     }
-    const newPersonId = nextId(store, 'P');
+    const newPersonId = await partyRepo.allocateNextPersonId(extensionCtx);
     const activeRecordStatus =
       valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
     const newPerson: Person = {
@@ -4279,15 +4638,15 @@ export async function saveMatterRecord(
   };
 
   const effectiveClientId =
-    promoteEnquiryPersonId(
+    (await promoteEnquiryPersonId(
       input.clientId !== undefined ? input.clientId : existing?.clientId,
-    ) ?? '';
+    )) ?? '';
   const rawMatterNumberInput = (input.matterNumber ?? existing?.matterNumber ?? '').trim();
   const rawMatterNumber =
     !existing &&
     rawMatterNumberInput &&
     rawMatterNumberInput !== 'DRAFT' &&
-    store.matters.some((m) => m.matterNumber === rawMatterNumberInput)
+    matters.some((m) => m.matterNumber === rawMatterNumberInput)
       ? ''
       : rawMatterNumberInput;
   const matterNumber = isDraftSave
@@ -4298,25 +4657,29 @@ export async function saveMatterRecord(
 
   // Auto-create new contacts/organisations on save for any party added by typing a new name
   const createdRecordByPartyId = new Map<string, string>();
-  const resolvedParties = (input.parties ?? existing?.parties ?? []).map((pt) => {
+  const resolvedParties: Matter['parties'] = [];
+  for (const pt of input.parties ?? existing?.parties ?? []) {
     if (pt.linkedRecordId) {
       if (pt.linkedRecordId.startsWith('ENQ-')) {
-        const promotedId = promoteEnquiryPersonId(pt.linkedRecordId);
+        const promotedId = await promoteEnquiryPersonId(pt.linkedRecordId);
         if (promotedId) {
           createdRecordByPartyId.set(pt.id, promotedId);
-          return { ...pt, linkedRecordId: promotedId };
+          resolvedParties.push({ ...pt, linkedRecordId: promotedId });
+          continue;
         }
       }
-      return pt;
+      resolvedParties.push(pt);
+      continue;
     }
     if (!pt.name?.trim() || pt.name.trim().startsWith('[')) {
-      return pt;
+      resolvedParties.push(pt);
+      continue;
     }
     const cleanName = pt.name.trim();
     const isPerson = pt.entityType === 'person';
     if (isPerson) {
       const existingPerson =
-        store.people.find(
+        people.find(
           (p) => !p.mergedIntoId && personDisplayName(p).toLowerCase() === cleanName.toLowerCase(),
         ) ??
         pendingPeople.find(
@@ -4324,12 +4687,13 @@ export async function saveMatterRecord(
         );
       if (existingPerson) {
         createdRecordByPartyId.set(pt.id, existingPerson.id);
-        return { ...pt, linkedRecordId: existingPerson.id };
+        resolvedParties.push({ ...pt, linkedRecordId: existingPerson.id });
+        continue;
       }
       const parts = cleanName.split(/\s+/);
       const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : cleanName;
       const surname = parts.length > 1 ? parts[parts.length - 1] : 'Contact';
-      const newPersonId = nextId(store, 'P');
+      const newPersonId = await partyRepo.allocateNextPersonId(extensionCtx);
       const activeRecordStatus =
         valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
       const newPerson: Person = {
@@ -4408,10 +4772,10 @@ export async function saveMatterRecord(
       };
       pendingPeople.push(newPerson);
       createdRecordByPartyId.set(pt.id, newPersonId);
-      return { ...pt, linkedRecordId: newPersonId };
+      resolvedParties.push({ ...pt, linkedRecordId: newPersonId });
     } else {
       const existingOrg =
-        store.organisations.find(
+        organisations.find(
           (o) => !o.mergedIntoId && o.legalName.toLowerCase() === cleanName.toLowerCase(),
         ) ??
         pendingOrganisations.find(
@@ -4419,9 +4783,10 @@ export async function saveMatterRecord(
         );
       if (existingOrg) {
         createdRecordByPartyId.set(pt.id, existingOrg.id);
-        return { ...pt, linkedRecordId: existingOrg.id };
+        resolvedParties.push({ ...pt, linkedRecordId: existingOrg.id });
+        continue;
       }
-      const newOrgId = nextId(store, 'O');
+      const newOrgId = await partyRepo.allocateNextOrganisationId(extensionCtx);
       const activeRecordStatus =
         valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
       const newOrg: Organisation = {
@@ -4495,16 +4860,16 @@ export async function saveMatterRecord(
       };
       pendingOrganisations.push(newOrg);
       createdRecordByPartyId.set(pt.id, newOrgId);
-      return { ...pt, linkedRecordId: newOrgId };
+      resolvedParties.push({ ...pt, linkedRecordId: newOrgId });
     }
-  });
+  }
 
   const allPeopleWithPending =
-    pendingPeople.length > 0 ? [...store.people, ...pendingPeople] : store.people;
+    pendingPeople.length > 0 ? [...people, ...pendingPeople] : people;
   const allOrganisationsWithPending =
     pendingOrganisations.length > 0
-      ? [...store.organisations, ...pendingOrganisations]
-      : store.organisations;
+      ? [...organisations, ...pendingOrganisations]
+      : organisations;
 
   const effectiveResponsiblePartnerId =
     input.responsiblePartnerId !== undefined
@@ -4519,20 +4884,24 @@ export async function saveMatterRecord(
       ? input.leadFeeEarnerId
       : existing?.leadFeeEarnerId ?? opts.byId;
   const effectiveTeamMemberIds = input.teamMemberIds ?? existing?.teamMemberIds ?? [];
-  const resolvedAdditionalClientIds = (
-    input.additionalClientIds ??
-    existing?.additionalClientIds ??
-    []
-  ).map((cid) => promoteEnquiryPersonId(cid) || cid);
-  const resolvedInstructingContactId = promoteEnquiryPersonId(
+  const resolvedAdditionalClientIds: string[] = [];
+  for (const cid of input.additionalClientIds ?? existing?.additionalClientIds ?? []) {
+    resolvedAdditionalClientIds.push((await promoteEnquiryPersonId(cid)) || cid);
+  }
+  const resolvedInstructingContactId = await promoteEnquiryPersonId(
     input.instructingContactId !== undefined
       ? input.instructingContactId
       : existing?.instructingContactId ?? null,
   );
-  const resolvedBillingContactId = promoteEnquiryPersonId(
+  const resolvedBillingContactId = await promoteEnquiryPersonId(
     input.billingContactId !== undefined
       ? input.billingContactId
       : existing?.billingContactId ?? null,
+  );
+  const resolvedReferrerContactId = await promoteEnquiryPersonId(
+    input.referrerContactId !== undefined
+      ? input.referrerContactId
+      : existing?.referrerContactId ?? null,
   );
 
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
@@ -4560,9 +4929,13 @@ export async function saveMatterRecord(
     organisations: allOrganisationsWithPending,
   });
   const visibility = buildRecordVisibility(
-    { ...store, people: allPeopleWithPending },
+    store,
     actingUser,
-    { hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS },
+    {
+      people: allPeopleWithPending,
+      matters,
+      hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    },
   );
   const rawServerMatches = searchMatterConflicts(
     {
@@ -4582,11 +4955,11 @@ export async function saveMatterRecord(
       reviewedAtIso: now,
     },
     {
-      matters: store.matters,
+      matters,
       enquiries: store.enquiries,
       people: allPeopleWithPending,
       organisations: allOrganisationsWithPending,
-      links: store.links,
+      links,
       tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
@@ -4812,8 +5185,9 @@ export async function saveMatterRecord(
         )
       : [];
 
+  const candidateMatterId = existing?.id ?? 'M-PENDING';
   let matter: Matter = {
-    id: existing?.id ?? nextId(store, 'M'),
+    id: candidateMatterId,
     recordType: 'matter',
     rowVersion: existing?.rowVersion ?? 1,
     recordOwnerId: input.leadFeeEarnerId || input.responsiblePartnerId || existing?.recordOwnerId || opts.byId,
@@ -4871,16 +5245,10 @@ export async function saveMatterRecord(
     teamMemberIds: input.teamMemberIds ?? existing?.teamMemberIds ?? [],
     relationshipPartnerId:
       input.relationshipPartnerId !== undefined ? input.relationshipPartnerId : existing?.relationshipPartnerId ?? opts.byId,
-    instructingContactId: promoteEnquiryPersonId(
-      input.instructingContactId !== undefined ? input.instructingContactId : existing?.instructingContactId ?? null,
-    ),
-    billingContactId: promoteEnquiryPersonId(
-      input.billingContactId !== undefined ? input.billingContactId : existing?.billingContactId ?? null,
-    ),
+    instructingContactId: resolvedInstructingContactId,
+    billingContactId: resolvedBillingContactId,
     referrerTypeId: input.referrerTypeId !== undefined ? input.referrerTypeId : existing?.referrerTypeId ?? null,
-    referrerContactId: promoteEnquiryPersonId(
-      input.referrerContactId !== undefined ? input.referrerContactId : existing?.referrerContactId ?? null,
-    ),
+    referrerContactId: resolvedReferrerContactId,
     parties: resolvedParties,
     conflictCheckStatus:
       resolvedConflictCheckRecord ?? storedConflictRecord
@@ -5056,26 +5424,6 @@ export async function saveMatterRecord(
     };
   }
 
-  if (existing) {
-    const current = store.matters.find((m) => m.id === existing.id);
-    if (!current || (current.rowVersion ?? 1) !== existingRowVersion) {
-      return {
-        matter: null,
-        code: MATTER_CONCURRENCY_CONFLICT_CODE,
-        message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
-        errors: {
-          conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
-        },
-      };
-    }
-  }
-
-  for (const person of pendingPeople) {
-    store.people.push(person);
-  }
-  for (const org of pendingOrganisations) {
-    store.organisations.push(org);
-  }
   for (const link of pendingEnquiryLinks) {
     link.enquiry.linkedPersonId = link.linkedPersonId;
   }
@@ -5100,14 +5448,18 @@ export async function saveMatterRecord(
     matter.fieldValues['matterOpeningGate'] = draftGateRecord;
   }
 
+  if (!existing) {
+    matter.id = await matterRepo.allocateNextMatterId(extensionCtx);
+  }
+
   if (!existingHasOpened) {
     // Re-build fresh snapshot until the matter has actually opened (non-prospective status)
     const cleanFieldVals = { ...matter.fieldValues };
     delete cleanFieldVals['matterOpeningSnapshot'];
     const openingSnapshot = resolveMatterOpeningSnapshot(
       { ...matter, fieldValues: cleanFieldVals },
-      store.people,
-      store.organisations,
+      allPeopleWithPending,
+      allOrganisationsWithPending,
       store.values,
       store.enquiries,
       store.quotes,
@@ -5130,8 +5482,8 @@ export async function saveMatterRecord(
           existing?.conflictCheckStatus ?? matter.conflictCheckStatus,
         fieldValues: cleanFieldVals,
       },
-      store.people,
-      store.organisations,
+      allPeopleWithPending,
+      allOrganisationsWithPending,
       store.values,
       store.enquiries,
       store.quotes,
@@ -5146,8 +5498,82 @@ export async function saveMatterRecord(
     matter.fieldValues['matterOpeningSnapshot'] = backfilledSnapshot;
   }
 
+  const previousMatterSnapshot: Matter | undefined = existing ?? undefined;
+  const expectedRowVersionForPut = existing
+    ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
+    : undefined;
+  const restrictionMeta = computeMatterRestrictionMetadataForStore(
+    matter,
+    allPeopleWithPending,
+    store.teams,
+    tenantCfg,
+  );
+  try {
+    await matterRepo.withTenantTransaction(extensionCtx, async () => {
+      for (const person of pendingPeople) {
+        await partyRepo.putPerson(extensionCtx, person);
+      }
+      for (const org of pendingOrganisations) {
+        await partyRepo.putOrganisation(extensionCtx, org);
+      }
+      const saved = await matterRepo.putMatter<Matter>(extensionCtx, matter, {
+        expectedRowVersion: expectedRowVersionForPut,
+        sqlRestrictedAccessUserIds: restrictionMeta.restrictedAccessUserIds,
+      });
+      matter = saved;
+    });
+  } catch (err) {
+    if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
+      return {
+        matter: null,
+        code: MATTER_CONCURRENCY_CONFLICT_CODE,
+        message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+        errors: {
+          conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+        },
+      };
+    }
+    throw err;
+  }
+
+  const cacheKey = `${extensionCtx.postgresDatabaseName}:${matter.id}`;
+  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(restrictionMeta));
+  compensator.register(`matter.persist:${matter.id}`, async () => {
+    await matterRepo.withTenantTransaction(extensionCtx, async (tx) => {
+      if (previousMatterSnapshot) {
+        const prevMeta = computeMatterRestrictionMetadataForStore(
+          previousMatterSnapshot,
+          people,
+          store.teams,
+          tenantCfg,
+        );
+        await matterRepo.putMatter(extensionCtx, previousMatterSnapshot, {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
+        });
+      } else {
+        await tx.query('DELETE FROM matters WHERE tenant_id = $1 AND id = $2', [
+          extensionCtx.tenantId,
+          matter.id,
+        ]);
+      }
+      for (const person of pendingPeople) {
+        await tx.query('DELETE FROM people WHERE tenant_id = $1 AND id = $2', [
+          extensionCtx.tenantId,
+          person.id,
+        ]);
+      }
+      for (const org of pendingOrganisations) {
+        await tx.query(
+          'DELETE FROM organisations WHERE tenant_id = $1 AND id = $2',
+          [extensionCtx.tenantId, org.id],
+        );
+      }
+    });
+    getMatterRestrictionDigestCache().delete(cacheKey);
+  });
+
   if (!existing) {
-    store.matters.unshift(matter);
     writeAudit(store, {
       recordType: 'matter',
       recordId: matter.id,
@@ -5164,7 +5590,7 @@ export async function saveMatterRecord(
       action: 'create',
       field: 'Conflict check record',
       oldValue: null,
-      newValue: `${matter.conflictCheckRecord.status} (${matter.conflictCheckRecord.outcomeLabel}) · ${matter.conflictCheckRecord.parties.length} parties checked`,
+      newValue: `${matter.conflictCheckRecord!.status} (${matter.conflictCheckRecord!.outcomeLabel}) · ${matter.conflictCheckRecord!.parties.length} parties checked`,
       byId: opts.byId,
       at: now,
     });
@@ -5201,13 +5627,6 @@ export async function saveMatterRecord(
       });
     }
 
-    await syncMatterRestrictionInPostgres(
-      extensionCtx,
-      store,
-      matter,
-      compensator,
-      null,
-    );
     if (matter.sourceEnquiryId) {
       await finalizeEnquiryConversionToMatter(
         store,
@@ -5230,21 +5649,7 @@ export async function saveMatterRecord(
         compensator,
       );
     }
-  }
-  let previousMatterSnapshot: Matter | undefined;
-  if (existing && existingRef) {
-    previousMatterSnapshot = existing;
-    const idx = store.matters.findIndex((m) => m.id === existingRef.id);
-    for (const k of Object.keys(existingRef)) {
-      if (!Object.prototype.hasOwnProperty.call(matter, k)) {
-        delete (existingRef as unknown as Record<string, unknown>)[k];
-      }
-    }
-    Object.assign(existingRef, matter);
-    matter = existingRef;
-    if (idx >= 0) {
-      store.matters[idx] = existingRef;
-    }
+  } else if (previousMatterSnapshot) {
     writeAudit(store, {
       recordType: 'matter',
       recordId: matter.id,
@@ -5271,13 +5676,6 @@ export async function saveMatterRecord(
       });
     }
 
-    await syncMatterRestrictionInPostgres(
-      extensionCtx,
-      store,
-      matter,
-      compensator,
-      previousMatterSnapshot,
-    );
     if (matter.sourceEnquiryId) {
       await finalizeEnquiryConversionToMatter(
         store,
@@ -5303,8 +5701,8 @@ export async function saveMatterRecord(
   }
 
   // Handle To Do task creation / completion for Draft & Referred conflict checks
-  const clientOrg = store.organisations.find((o) => o.id === matter.clientId);
-  const clientPerson = store.people.find((p) => p.id === matter.clientId);
+  const clientOrg = allOrganisationsWithPending.find((o) => o.id === matter.clientId);
+  const clientPerson = allPeopleWithPending.find((p) => p.id === matter.clientId);
   const clientLabel =
     clientOrg?.legalName ||
     (clientPerson ? personDisplayName(clientPerson) : matter.title || 'Untitled matter');
@@ -5319,7 +5717,10 @@ export async function saveMatterRecord(
           t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id))),
   );
 
+  let unmigratedStoreMutated = pendingEnquiryLinks.length > 0 || Boolean(matter.sourceEnquiryId || matter.sourceQuoteId);
+
   if (isDraftSave) {
+    unmigratedStoreMutated = true;
     if (existingDraftTask) {
       existingDraftTask.title = draftTaskTitle;
       existingDraftTask.updatedAt = now;
@@ -5352,6 +5753,7 @@ export async function saveMatterRecord(
     }
   } else if (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred') {
     if (existingDraftTask) {
+      unmigratedStoreMutated = true;
       existingDraftTask.status = 'Done';
       existingDraftTask.completedById = opts.byId;
       existingDraftTask.completedAt = now;
@@ -5359,11 +5761,16 @@ export async function saveMatterRecord(
       existingDraftTask.updatedById = opts.byId;
     }
     if (opts.saveMode === 'submit_referred') {
+      unmigratedStoreMutated = true;
       const riskTaskId = nextId(store, 'TSK');
       const configuredTeamKey = tenantCfg.conflictReview?.assigneeTeamKey?.trim() || null;
       const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
       const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
-        resolveConflictReviewTaskRouting(store, tenantCfg.conflictReview, matter);
+        resolveConflictReviewTaskRouting(
+          { people: allPeopleWithPending, teams: store.teams },
+          tenantCfg.conflictReview,
+          matter,
+        );
 
       if (!assignedReviewerId) {
         console.warn(
@@ -5415,7 +5822,9 @@ export async function saveMatterRecord(
     }
   }
 
-  saveStore(store);
+  if (unmigratedStoreMutated) {
+    saveStore(store);
+  }
 
   if (previousMatterSnapshot) {
     const syncCorrelationId = `corr-lifecycle-sync-${matter.id}-${Date.now()}`;
@@ -5443,22 +5852,32 @@ export async function markEngagementLetterDrafted(
   matterId: string,
   byId: string,
 ): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
-  return runUnmigratedJsonMutationWithAudit<{
-    matter: Matter | null;
-    errors?: Record<string, string>;
-  }>({
-    label: 'markEngagementLetterDrafted',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (): Promise<{ matter: Matter | null; errors?: Record<string, string>; }> => {
   const store = getStore();
-  const existing = store.matters.find((m) => m.id === matterId) ?? null;
-  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  let ctx: TenantContext;
+  try {
+    ctx = resolveDefaultServiceTenantContext(store, byId);
+  } catch {
+    return {
+      matter: null,
+      errors: {
+        access: 'Matter not found or restricted.',
+        permission: 'Matter not found or restricted.',
+      },
+    };
+  }
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, existing] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    matterRepo.getMatterById<Matter>(ctx, matterId),
+  ]);
+  const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
     !existing ||
     !actingUser ||
     !actingUser.isEmployee ||
     !canPersonAccessMatter(existing, byId, actingUser, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -5472,7 +5891,7 @@ export async function markEngagementLetterDrafted(
   }
   if (
     !hasPersonPermission(actingUser, 'matter:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -5489,21 +5908,33 @@ export async function markEngagementLetterDrafted(
   const prevStatus = existing.engagementLetterStatus;
   existing.engagementLetterStatus = 'Drafted';
   const now = touchMatter(existing, byId);
-  writeAudit(store, {
-    recordType: 'matter',
-    recordId: existing.id,
-    action: 'update',
-    field: 'Engagement letter status',
-    oldValue: prevStatus,
-    newValue: 'Drafted',
-    byId,
-    at: now,
-  });
-  saveStore(store);
-  return { matter: existing };
-
-    },
-  });
+  const meta = computeMatterRestrictionMetadataForStore(
+    existing,
+    people,
+    store.teams,
+    getActiveTenantConfiguration(),
+  );
+  let saved!: Matter;
+  await runWithAuditStagingScope(() =>
+    matterRepo.withTenantTransaction(ctx, async () => {
+      saved = await matterRepo.putMatter<Matter>(ctx, existing, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+      });
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: existing.id,
+        action: 'update',
+        field: 'Engagement letter status',
+        oldValue: prevStatus,
+        newValue: 'Drafted',
+        byId,
+        at: now,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
+  return { matter: saved };
 }
 
 export async function liftMatterRestriction(
@@ -5512,21 +5943,32 @@ export async function liftMatterRestriction(
   reason: string,
   byId: string,
 ): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
-  return runUnmigratedJsonMutationWithAudit<{
-    matter: Matter | null;
-    errors?: Record<string, string>;
-  }>({
-    label: 'liftMatterRestriction',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store, compensator): Promise<{ matter: Matter | null; errors?: Record<string, string>; }> => {
-  const existing = store.matters.find((m) => m.id === matterId) ?? null;
-  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  const store = getStore();
+  let prelimCtx: TenantContext;
+  try {
+    prelimCtx = resolveDefaultServiceTenantContext(store, byId);
+  } catch {
+    return {
+      matter: null,
+      errors: {
+        access: 'Matter not found or restricted.',
+        permission: 'Matter not found or restricted.',
+      },
+    };
+  }
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, existing] = await Promise.all([
+    partyRepo.listAllPeople<Person>(prelimCtx),
+    matterRepo.getMatterById<Matter>(prelimCtx, matterId),
+  ]);
+  const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
     !existing ||
     !actingUser ||
     !actingUser.isEmployee ||
     !canPersonAccessMatter(existing, byId, actingUser, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -5539,7 +5981,7 @@ export async function liftMatterRestriction(
     };
   }
   const canLift = hasPersonPermission(actingUser, 'matter:restriction:lift', {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   if (!canLift) {
@@ -5586,7 +6028,7 @@ export async function liftMatterRestriction(
       new Set(
         [existing.clientId, ...(existing.additionalClientIds ?? [])].filter(
           (cid): cid is string =>
-            Boolean(cid && store.people.some((p) => p.id === cid && isWorkingAtFirm(p))),
+            Boolean(cid && people.some((p) => p.id === cid && isWorkingAtFirm(p))),
         ),
       ),
     );
@@ -5617,34 +6059,43 @@ export async function liftMatterRestriction(
     existing.restrictedAccessUserIds = [];
   }
 
-  writeAudit(store, {
-    recordType: 'matter',
-    recordId: existing.id,
-    action: 'matter-restriction-lift',
-    field: fieldLabel,
-    oldValue: oldVal,
-    newValue: 'false',
-    reason: cleanReason,
-    byId,
-    at: now,
-  });
-
-  saveStore(store);
   const liftCtx = resolveDefaultServiceTenantContext(store, byId, {
     session: activeVerifiedSession,
   });
-  await syncMatterRestrictionInPostgres(
-    liftCtx,
-    store,
+  const meta = computeMatterRestrictionMetadataForStore(
     existing,
-    compensator,
-    prevMatter,
+    people,
+    store.teams,
+    getActiveTenantConfiguration(),
   );
+  let saved!: Matter;
+  await runWithAuditStagingScope(() =>
+    matterRepo.withTenantTransaction(liftCtx, async () => {
+      saved = await matterRepo.putMatter<Matter>(liftCtx, existing, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+      });
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: existing.id,
+        action: 'matter-restriction-lift',
+        field: fieldLabel,
+        oldValue: oldVal,
+        newValue: 'false',
+        reason: cleanReason,
+        byId,
+        at: now,
+      });
+      await flushStagedAuditEntries(liftCtx);
+    }),
+  );
+  const cacheKey = `${liftCtx.postgresDatabaseName}:${saved.id}`;
+  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(meta));
 
-  const syncCorrelationId = `corr-lifecycle-sync-${existing.id}-${Date.now()}`;
+  const syncCorrelationId = `corr-lifecycle-sync-${saved.id}-${Date.now()}`;
   try {
     void syncMatterLifecycleOnSaveSync({
-      matter: existing,
+      matter: saved,
       previousMatter: prevMatter,
       userId: byId,
       correlationId: syncCorrelationId,
@@ -5656,9 +6107,7 @@ export async function liftMatterRestriction(
     logDocumentLifecycleSyncError(err, syncCorrelationId);
   }
 
-  return { matter: existing };
-    },
-  });
+  return { matter: saved };
 }
 
 export async function runMatterConflictSearchRecord(
@@ -5670,21 +6119,37 @@ export async function runMatterConflictSearchRecord(
   matter?: Matter | null;
   errors?: Record<string, string>;
 }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'runMatterConflictSearchRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const store = getStore();
-  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  let ctx: TenantContext;
+  try {
+    ctx = resolveDefaultServiceTenantContext(store, byId);
+  } catch {
+    return {
+      matches: [],
+      errors: {
+        permission:
+          'You do not have permission (matter:create or matter:edit) to run a matter conflict search.',
+      },
+    };
+  }
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, links, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    partyRepo.listAllOrganisations<Organisation>(ctx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
+    matterRepo.listAllMatters<Matter>(ctx),
+  ]);
+  const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
     !actingUser ||
     !actingUser.isEmployee ||
     (!hasPersonPermission(actingUser, 'matter:create', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     }) &&
       !hasPersonPermission(actingUser, 'matter:edit', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       }))
   ) {
@@ -5697,10 +6162,12 @@ export async function runMatterConflictSearchRecord(
     };
   }
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   const visibility = buildRecordVisibility(store, actingUser, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const nowIso = new Date().toISOString();
@@ -5714,11 +6181,11 @@ export async function runMatterConflictSearchRecord(
       reviewedAtIso: nowIso,
     },
     {
-      matters: store.matters,
+      matters,
       enquiries: store.enquiries,
-      people: store.people,
-      organisations: store.organisations,
-      links: store.links,
+      people,
+      organisations,
+      links,
       tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
@@ -5738,16 +6205,17 @@ export async function runMatterConflictSearchRecord(
     ).length,
     searchedSources: [...CONFLICT_SEARCHED_SOURCES],
   };
-  const savedMatter = input.currentMatterId
-    ? store.matters.find((m) => m.id === input.currentMatterId) ?? null
+  let savedMatter = input.currentMatterId
+    ? matters.find((m) => m.id === input.currentMatterId) ?? null
     : null;
   const hasSavedMatter = Boolean(savedMatter);
-  let storeModified = false;
+  let matterUpdated = false;
+  let auditWritten = false;
   if (
     savedMatter &&
     visibility.canViewMatter(savedMatter) &&
     hasPersonPermission(actingUser, 'matter:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     }) &&
     savedMatter.conflictCheckRecord
@@ -5760,47 +6228,62 @@ export async function runMatterConflictSearchRecord(
     savedMatter.conflictCheckRecord.lastRunById = byId;
     savedMatter.conflictCheckRecord.lastRunByName = actorDisplayName;
     touchMatter(savedMatter, byId);
-    storeModified = true;
+    matterUpdated = true;
   }
   const restrictedCount = matches.filter((m) => m.restricted).length;
-  if (restrictedCount > 0) {
-    const tenantId = getActiveTenantConfiguration().tenantId;
-    const activeSession = getActiveActorSession();
-    const correlationId =
-      (activeSession as { correlationId?: string } | null)?.correlationId ??
-      `conflict-search-${randomUUID()}`;
-    if (hasSavedMatter && input.currentMatterId) {
-      writeAudit(store, {
-        recordType: 'matter',
-        recordId: input.currentMatterId,
-        action: 'update',
-        field: 'Conflict check restricted match',
-        oldValue: null,
-        newValue: `Restricted conflict match count: ${restrictedCount} across ${input.parties.length} searched party/parties`,
-        byId,
-      });
-      storeModified = true;
+  await runWithAuditStagingScope(async () => {
+    if (restrictedCount > 0) {
+      const tenantId = getActiveTenantConfiguration().tenantId;
+      const activeSession = getActiveActorSession();
+      const correlationId =
+        (activeSession as { correlationId?: string } | null)?.correlationId ??
+        `conflict-search-${randomUUID()}`;
+      if (hasSavedMatter && input.currentMatterId) {
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: input.currentMatterId,
+          action: 'update',
+          field: 'Conflict check restricted match',
+          oldValue: null,
+          newValue: `Restricted conflict match count: ${restrictedCount} across ${input.parties.length} searched party/parties`,
+          byId,
+        });
+        auditWritten = true;
+      }
+      console.info(
+        JSON.stringify({
+          level: 'info',
+          event: 'conflict_search_restricted_match',
+          tenantId,
+          correlationId,
+          actorId: byId,
+          matterId: hasSavedMatter ? input.currentMatterId : null,
+          partiesCount: input.parties.length,
+          restrictedCount,
+        }),
+      );
     }
-    console.info(
-      JSON.stringify({
-        level: 'info',
-        event: 'conflict_search_restricted_match',
-        tenantId,
-        correlationId,
-        actorId: byId,
-        matterId: hasSavedMatter ? input.currentMatterId : null,
-        partiesCount: input.parties.length,
-        restrictedCount,
-      }),
-    );
-  }
-  if (storeModified) {
-    saveStore(store);
-  }
-  return { matches, run, ...(savedMatter ? { matter: savedMatter } : {}) };
-
-    },
+    if (matterUpdated || auditWritten) {
+      await matterRepo.withTenantTransaction(ctx, async () => {
+        if (matterUpdated && savedMatter) {
+          const meta = computeMatterRestrictionMetadataForStore(
+            savedMatter,
+            people,
+            store.teams,
+            getActiveTenantConfiguration(),
+          );
+          savedMatter = await matterRepo.putMatter<Matter>(ctx, savedMatter, {
+            expectedRowVersion: null,
+            sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+          });
+        }
+        if (auditWritten) {
+          await flushStagedAuditEntries(ctx);
+        }
+      });
+    }
   });
+  return { matches, run, ...(savedMatter ? { matter: savedMatter } : {}) };
 }
 
 export async function updateMatterConflictRecord(
@@ -5808,18 +6291,36 @@ export async function updateMatterConflictRecord(
   record: ConflictCheckRecordInput | ConflictCheckRecord,
   byId: string,
 ): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[] }> {
-  return runUnmigratedJsonMutationWithAudit<{
+  return withJsonStoreWriteLock<{
     matter: Matter | null;
     errors?: Record<string, string>;
     warnings?: string[];
-  }>({
-    label: 'updateMatterConflictRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store, compensator): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[]; }> => {
+  }>(async (): Promise<{
+    matter: Matter | null;
+    errors?: Record<string, string>;
+    warnings?: string[];
+  }> => {
+    const store = getStore();
+    let conflictCtx: TenantContext;
+    try {
+      conflictCtx = resolveDefaultServiceTenantContext(store, byId);
+    } catch {
+      return { matter: null };
+    }
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const [people, organisations, links, matters] = await Promise.all([
+      partyRepo.listAllPeople<Person>(conflictCtx),
+      partyRepo.listAllOrganisations<Organisation>(conflictCtx),
+      partyRepo.listAllLinks<PersonOrganisationLink>(conflictCtx),
+      matterRepo.listAllMatters<Matter>(conflictCtx),
+    ]);
   const today = toIsoDate(new Date());
-  const matter = store.matters.find((m) => m.id === matterId);
-  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  const matter = matters.find((m) => m.id === matterId);
+  const actingUser = people.find((p) => p.id === byId) ?? null;
   const visibility = buildRecordVisibility(store, actingUser, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   if (
@@ -5828,14 +6329,14 @@ export async function updateMatterConflictRecord(
     !actingUser.isEmployee ||
     !visibility.canViewMatter(matter) ||
     !hasPersonPermission(actingUser, 'matter:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
     return { matter: null };
   }
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   if (
@@ -5852,7 +6353,7 @@ export async function updateMatterConflictRecord(
   }
   const storedConflictRecord =
     matter.conflictCheckRecord ??
-    resolveMatterConflictCheckRecord(matter, store.people, store.organisations);
+    resolveMatterConflictCheckRecord(matter, people, organisations);
   const prospectiveStatusId = resolveProspectiveStatusId(store);
   const opened = matterHasOpened(matter, prospectiveStatusId);
   if (
@@ -5891,8 +6392,8 @@ export async function updateMatterConflictRecord(
     instructingContactId: matter.instructingContactId,
     billingContactId: matter.billingContactId,
     matterParties: matter.parties,
-    people: store.people,
-    organisations: store.organisations,
+    people,
+    organisations,
   });
   const rawServerMatches = searchMatterConflicts(
     {
@@ -5907,11 +6408,11 @@ export async function updateMatterConflictRecord(
       reviewedAtIso: nowCheckIso,
     },
     {
-      matters: store.matters,
+      matters,
       enquiries: store.enquiries,
-      people: store.people,
-      organisations: store.organisations,
-      links: store.links,
+      people,
+      organisations,
+      links,
       tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
@@ -5986,8 +6487,12 @@ export async function updateMatterConflictRecord(
     matter.restrictedAccessUserIds = Array.from(allowed);
   }
 
-  const conflictCtx = resolveDefaultServiceTenantContext(store, byId);
-  await ensureStoreMattersRestrictedMetadataSynced(conflictCtx, store);
+  await ensureMattersRestrictedMetadataSynced(
+    conflictCtx,
+    matters,
+    people,
+    store.teams,
+  );
   const gate = matter.fieldValues?.['matterOpeningGate'] as
     | MatterOpeningGateRecord
     | undefined;
@@ -6035,8 +6540,8 @@ export async function updateMatterConflictRecord(
         delete cleanFieldVals['matterOpeningSnapshot'];
         const openingSnapshot = resolveMatterOpeningSnapshot(
           { ...matter, fieldValues: cleanFieldVals },
-          store.people,
-          store.organisations,
+          people,
+          organisations,
           store.values,
           store.enquiries,
           store.quotes,
@@ -6055,30 +6560,39 @@ export async function updateMatterConflictRecord(
     }
   }
 
-  writeAudit(store, {
-    recordType: 'matter',
-    recordId: matter.id,
-    action: 'update',
-    field: 'Conflict check record',
-    oldValue: null,
-    newValue: `${sanitisedRecord.status} — ${sanitisedRecord.outcomeLabel}`,
-    byId,
-    at: now,
-  });
-
-  saveStore(store);
-  await syncMatterRestrictionInPostgres(
-    conflictCtx,
-    store,
+  const meta = computeMatterRestrictionMetadataForStore(
     matter,
-    compensator,
-    prevMatter,
+    people,
+    store.teams,
+    getActiveTenantConfiguration(),
   );
+  let saved!: Matter;
+  await runWithAuditStagingScope(() =>
+    matterRepo.withTenantTransaction(conflictCtx, async () => {
+      saved = await matterRepo.putMatter<Matter>(conflictCtx, matter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+      });
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: matter.id,
+        action: 'update',
+        field: 'Conflict check record',
+        oldValue: null,
+        newValue: `${sanitisedRecord.status} — ${sanitisedRecord.outcomeLabel}`,
+        byId,
+        at: now,
+      });
+      await flushStagedAuditEntries(conflictCtx);
+    }),
+  );
+  const cacheKey = `${conflictCtx.postgresDatabaseName}:${saved.id}`;
+  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(meta));
 
-  const syncCorrelationId = `corr-lifecycle-sync-${matter.id}-${Date.now()}`;
+  const syncCorrelationId = `corr-lifecycle-sync-${saved.id}-${Date.now()}`;
   try {
     void syncMatterLifecycleOnSaveSync({
-      matter,
+      matter: saved,
       previousMatter: prevMatter,
       userId: byId,
       correlationId: syncCorrelationId,
@@ -6090,8 +6604,7 @@ export async function updateMatterConflictRecord(
     logDocumentLifecycleSyncError(err, syncCorrelationId);
   }
 
-  return { matter, ...(warnings.length > 0 ? { warnings } : {}) };
-    },
+  return { matter: saved, ...(warnings.length > 0 ? { warnings } : {}) };
   });
 }
 
@@ -6115,21 +6628,28 @@ export async function signOffMatterCostsRecord(
       matter: null,
     };
   }
-  let resolvedSignOffCtx: TenantContext | null = null;
-  return runUnmigratedJsonMutationWithAudit<
-    {
-      matter: Matter | null;
-      errors?: Record<string, string>;
-      warnings?: string[];
-    } & Partial<ActionDenied>
-  >({
-    label: 'signOffMatterCostsRecord',
-    resolveCtx: (s) =>
-      resolvedSignOffCtx ?? resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[]; } & Partial<ActionDenied>> => {
-  const matter = store.matters.find((m) => m.id === matterId) ?? null;
-  const actingUser = store.people.find((p) => p.id === byId) ?? null;
+  const store = getStore();
+  let prelimCtx: TenantContext;
+  try {
+    prelimCtx = resolveDefaultServiceTenantContext(store, byId);
+  } catch {
+    return {
+      matter: null,
+      errors: { permission: 'Matter not found or restricted.' },
+    };
+  }
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(prelimCtx),
+    partyRepo.listAllOrganisations<Organisation>(prelimCtx),
+    matterRepo.listAllMatters<Matter>(prelimCtx),
+  ]);
+  const matter = matters.find((m) => m.id === matterId) ?? null;
+  const actingUser = people.find((p) => p.id === byId) ?? null;
   const visibility = buildRecordVisibility(store, actingUser, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   if (
@@ -6145,7 +6665,7 @@ export async function signOffMatterCostsRecord(
   }
   if (
     !hasPersonPermission(actingUser, 'matter:costs:sign_off', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -6176,7 +6696,6 @@ export async function signOffMatterCostsRecord(
       }),
       tenantCfg,
     );
-    resolvedSignOffCtx = extensionCtx;
   } catch {
     return {
       matter: null,
@@ -6246,8 +6765,8 @@ export async function signOffMatterCostsRecord(
       delete cleanFieldVals['matterOpeningSnapshot'];
       const openingSnapshot = resolveMatterOpeningSnapshot(
         { ...matter, fieldValues: cleanFieldVals },
-        store.people,
-        store.organisations,
+        people,
+        organisations,
         store.values,
         store.enquiries,
         store.quotes,
@@ -6266,20 +6785,33 @@ export async function signOffMatterCostsRecord(
     if (firstErr) warnings.push(firstErr);
   }
 
-  writeAudit(store, {
-    recordType: 'matter',
-    recordId: matter.id,
-    action: 'update',
-    field: 'Partner cost sign-off',
-    oldValue: null,
-    newValue: `Signed off £${signedOffEstimateGbp.toLocaleString('en-GB')} by ${signOffRecord.byName}${signOffRecord.note ? ` (${signOffRecord.note})` : ''}`,
-    byId,
-    at: now,
-  });
-  saveStore(store);
-  return { matter, ...(warnings.length > 0 ? { warnings } : {}) };
-    },
-  });
+  const meta = computeMatterRestrictionMetadataForStore(
+    matter,
+    people,
+    store.teams,
+    tenantCfg,
+  );
+  let saved!: Matter;
+  await runWithAuditStagingScope(() =>
+    matterRepo.withTenantTransaction(extensionCtx, async () => {
+      saved = await matterRepo.putMatter<Matter>(extensionCtx, matter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+      });
+      writeAudit(store, {
+        recordType: 'matter',
+        recordId: matter.id,
+        action: 'update',
+        field: 'Partner cost sign-off',
+        oldValue: null,
+        newValue: `Signed off £${signedOffEstimateGbp.toLocaleString('en-GB')} by ${signOffRecord.byName}${signOffRecord.note ? ` (${signOffRecord.note})` : ''}`,
+        byId,
+        at: now,
+      });
+      await flushStagedAuditEntries(extensionCtx);
+    }),
+  );
+  return { matter: saved, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 export async function dismissDuplicateMatch(
@@ -6288,15 +6820,19 @@ export async function dismissDuplicateMatch(
   otherId: string | null,
   byId: string,
 ): Promise<{ ok: true } | ActionDenied> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'dismissDuplicateMatch',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const dupCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const [people, organisations] = await Promise.all([
+    partyRepo.listAllPeople<Person>(dupCtx),
+    recordType === 'organisation'
+      ? partyRepo.listAllOrganisations<Organisation>(dupCtx)
+      : Promise.resolve([] as Organisation[]),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'record:merge', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -6306,7 +6842,7 @@ export async function dismissDuplicateMatch(
     );
   }
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
-  const list: AnyRecord[] = recordType === 'person' ? store.people : store.organisations;
+  const list: AnyRecord[] = recordType === 'person' ? people : organisations;
   const rec = list.find((r) => r.id === recordId);
   if (!rec) {
     return buildActionDenied('FORBIDDEN', `Target ${recordType} "${recordId}" not found.`);
@@ -6315,6 +6851,7 @@ export async function dismissDuplicateMatch(
     return buildActionDenied('FORBIDDEN', `Compared ${recordType} "${otherId}" not found.`);
   }
 
+  const changedRecords = new Map<string, AnyRecord>();
   const targets = otherId ? [otherId] : [...rec.possibleMatchIds];
   for (const tid of targets) {
     if (!rec.notDuplicateOf.includes(tid)) rec.notDuplicateOf.push(tid);
@@ -6324,24 +6861,34 @@ export async function dismissDuplicateMatch(
       if (!other.notDuplicateOf.includes(recordId)) other.notDuplicateOf.push(recordId);
       other.possibleMatchIds = other.possibleMatchIds.filter((id) => id !== recordId);
       if (other.possibleMatchIds.length === 0) other.duplicateStatusId = dupNone;
+      changedRecords.set(other.id, other);
     }
   }
   if (rec.possibleMatchIds.length === 0) rec.duplicateStatusId = dupNone;
+  changedRecords.set(rec.id, rec);
 
-  writeAudit(store, {
-    recordType,
-    recordId,
-    action: 'duplicate',
-    field: 'Duplicate status',
-    oldValue: 'Possible match',
-    newValue: 'Dismissed (Not a duplicate)',
-    byId,
-  });
-  saveStore(store);
+  await runWithAuditStagingScope(() =>
+    partyRepo.withTenantTransaction(dupCtx, async () => {
+      for (const updated of changedRecords.values()) {
+        if (recordType === 'person') {
+          await partyRepo.putPerson(dupCtx, updated as Person);
+        } else {
+          await partyRepo.putOrganisation(dupCtx, updated as Organisation);
+        }
+      }
+      writeAudit(store, {
+        recordType,
+        recordId,
+        action: 'duplicate',
+        field: 'Duplicate status',
+        oldValue: 'Possible match',
+        newValue: 'Dismissed (Not a duplicate)',
+        byId,
+      });
+      await flushStagedAuditEntries(dupCtx);
+    }),
+  );
   return { ok: true };
-
-    },
-  });
 }
 
 function mergeCollidingLinkIntoSurvivor(
@@ -6401,10 +6948,20 @@ export async function executeMerge(
     label: 'executeMerge',
     resolveCtx: (s) => mergeCtx ?? resolveDefaultServiceTenantContext(s, byId),
     mutate: async (store, compensator) => {
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const prelimCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, links, notes, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(prelimCtx),
+    partyRepo.listAllOrganisations<Organisation>(prelimCtx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(prelimCtx),
+    partyRepo.listAllNotes<Note>(prelimCtx),
+    matterRepo.listAllMatters<Matter>(prelimCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'record:merge', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -6420,7 +6977,7 @@ export async function executeMerge(
     ) as unknown as MergeHistory & Partial<ActionDenied>;
   }
   const now = new Date().toISOString();
-  const list: AnyRecord[] = recordType === 'person' ? store.people : store.organisations;
+  const list: AnyRecord[] = recordType === 'person' ? people : organisations;
   const survivor = list.find((r) => r.id === survivorId);
   const merged = list.find((r) => r.id === mergedId);
   if (!survivor || !merged) {
@@ -6443,10 +7000,25 @@ export async function executeMerge(
   }
 
   // R271 & R272: Resolve verified tenant context before mutating any record
-  mergeCtx = resolveTenantContextForStoreUser(
-    store,
-    actor!.id,
-  ).ctx;
+  mergeCtx = (await resolveTenantContextForStoreUser(store, actor!.id)).ctx;
+  const prevSurvivorSnapshot = structuredClone(survivor);
+  const prevMergedSnapshot = structuredClone(merged);
+  const prevLinksSnapshot = structuredClone(links);
+  const prevSubsidiariesSnapshot =
+    recordType === 'organisation'
+      ? organisations
+          .filter(
+            (org) =>
+              org.parentOrganisationId === merged.id && org.id !== survivor.id,
+          )
+          .map((org) => structuredClone(org))
+      : [];
+  const prevNotesSnapshot = notes
+    .filter((note) => note.recordType === recordType && note.recordId === merged.id)
+    .map((note) => structuredClone(note));
+  const prevMattersById = new Map<string, Matter>(
+    matters.map((m) => [m.id, structuredClone(m)]),
+  );
   const plan = planMerge(survivor, merged);
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
   const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
@@ -6458,144 +7030,182 @@ export async function executeMerge(
 
   // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
   let linksMoved = 0;
-    const nextLinks: PersonOrganisationLink[] = [];
-    for (const link of store.links) {
-      if (recordType === 'person' && link.personId === merged.id) {
-        const existingSurvivorLink =
-          nextLinks.find(
-            (l) =>
-              l.personId === survivor.id &&
-              l.organisationId === link.organisationId,
-          ) ??
-          store.links.find(
-            (l) =>
-              l !== link &&
-              l.personId === survivor.id &&
-              l.organisationId === link.organisationId,
-          );
-        if (existingSurvivorLink) {
-          mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
-          linksMoved++;
-        } else {
-          link.personId = survivor.id;
-          nextLinks.push(link);
-          linksMoved++;
-        }
-      } else if (
-        recordType === 'organisation' &&
-        link.organisationId === merged.id
-      ) {
-        const existingSurvivorLink =
-          nextLinks.find(
-            (l) =>
-              l.organisationId === survivor.id &&
-              l.personId === link.personId,
-          ) ??
-          store.links.find(
-            (l) =>
-              l !== link &&
-              l.organisationId === survivor.id &&
-              l.personId === link.personId,
-          );
-        if (existingSurvivorLink) {
-          mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
-          linksMoved++;
-        } else {
-          link.organisationId = survivor.id;
-          nextLinks.push(link);
-          linksMoved++;
-        }
-      } else {
-        nextLinks.push(link);
-      }
-    }
-    store.links = nextLinks;
-    if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
-      plan.fieldsTaken.push('Organisation links');
-    }
-
-    // 2. Repoint subsidiary parent links if merging an organisation (relationshipPartnerId is never changed)
-    if (recordType === 'organisation') {
-      for (const org of store.organisations) {
-        if (org.parentOrganisationId === merged.id && org.id !== survivor.id) {
-          org.parentOrganisationId = survivor.id;
-        }
-      }
-    }
-
-    // 3. Repoint Matter references and conflict check records
-    const repointConflictRecordObject = (
-      cr:
-        | {
-            parties?: { linkedRecordId: string | null }[];
-            matches?: { matchedRecordId: string }[];
-          }
-        | null
-        | undefined,
-    ) => {
-      if (!cr || typeof cr !== 'object') return;
-      if (Array.isArray(cr.parties)) {
-        for (const cp of cr.parties) {
-          if (cp && cp.linkedRecordId === merged.id) {
-            cp.linkedRecordId = survivor.id;
-          }
-        }
-      }
-      if (Array.isArray(cr.matches)) {
-        for (const match of cr.matches) {
-          if (match && match.matchedRecordId === merged.id) {
-            match.matchedRecordId = survivor.id;
-          }
-        }
-      }
-    };
-
-    for (const matter of store.matters) {
-      if (matter.clientId === merged.id) {
-        matter.clientId = survivor.id;
-      }
-      if (
-        Array.isArray(matter.additionalClientIds) &&
-        matter.additionalClientIds.includes(merged.id)
-      ) {
-        matter.additionalClientIds = Array.from(
-          new Set(
-            matter.additionalClientIds.map((id) =>
-              id === merged.id ? survivor.id : id,
-            ),
-          ),
+  const nextLinks: PersonOrganisationLink[] = [];
+  const linksToUpsert: PersonOrganisationLink[] = [];
+  const linkIdsToDelete: string[] = [];
+  for (const link of links) {
+    if (recordType === 'person' && link.personId === merged.id) {
+      const existingSurvivorLink =
+        nextLinks.find(
+          (l) =>
+            l.personId === survivor.id &&
+            l.organisationId === link.organisationId,
+        ) ??
+        links.find(
+          (l) =>
+            l !== link &&
+            l.personId === survivor.id &&
+            l.organisationId === link.organisationId,
         );
+      if (existingSurvivorLink) {
+        mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
+        if (!linksToUpsert.includes(existingSurvivorLink)) {
+          linksToUpsert.push(existingSurvivorLink);
+        }
+        linkIdsToDelete.push(link.id);
+        linksMoved++;
+      } else {
+        link.personId = survivor.id;
+        nextLinks.push(link);
+        linksToUpsert.push(link);
+        linksMoved++;
       }
-      if (matter.instructingContactId === merged.id) {
-        matter.instructingContactId = survivor.id;
+    } else if (
+      recordType === 'organisation' &&
+      link.organisationId === merged.id
+    ) {
+      const existingSurvivorLink =
+        nextLinks.find(
+          (l) =>
+            l.organisationId === survivor.id &&
+            l.personId === link.personId,
+        ) ??
+        links.find(
+          (l) =>
+            l !== link &&
+            l.organisationId === survivor.id &&
+            l.personId === link.personId,
+        );
+      if (existingSurvivorLink) {
+        mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
+        if (!linksToUpsert.includes(existingSurvivorLink)) {
+          linksToUpsert.push(existingSurvivorLink);
+        }
+        linkIdsToDelete.push(link.id);
+        linksMoved++;
+      } else {
+        link.organisationId = survivor.id;
+        nextLinks.push(link);
+        linksToUpsert.push(link);
+        linksMoved++;
       }
-      if (matter.billingContactId === merged.id) {
-        matter.billingContactId = survivor.id;
+    } else {
+      nextLinks.push(link);
+    }
+  }
+  if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
+    plan.fieldsTaken.push('Organisation links');
+  }
+
+  // 2. Repoint subsidiary parent links if merging an organisation (relationshipPartnerId is never changed)
+  const repointedSubsidiaries: Organisation[] = [];
+  if (recordType === 'organisation') {
+    for (const org of organisations) {
+      if (org.parentOrganisationId === merged.id && org.id !== survivor.id) {
+        org.parentOrganisationId = survivor.id;
+        repointedSubsidiaries.push(org);
       }
-      if (matter.referrerContactId === merged.id) {
-        matter.referrerContactId = survivor.id;
-      }
-      for (const party of matter.parties ?? []) {
-        if (party.linkedRecordId === merged.id) {
-          party.linkedRecordId = survivor.id;
+    }
+  }
+
+  // 3. Repoint Matter references and conflict check records
+  const repointedMatters: Matter[] = [];
+  const repointConflictRecordObject = (
+    cr:
+      | {
+          parties?: { linkedRecordId: string | null }[];
+          matches?: { matchedRecordId: string }[];
+        }
+      | null
+      | undefined,
+  ): boolean => {
+    if (!cr || typeof cr !== 'object') return false;
+    let changed = false;
+    if (Array.isArray(cr.parties)) {
+      for (const cp of cr.parties) {
+        if (cp && cp.linkedRecordId === merged.id) {
+          cp.linkedRecordId = survivor.id;
+          changed = true;
         }
       }
-      repointConflictRecordObject(matter.conflictCheckRecord);
-      if (matter.fieldValues && typeof matter.fieldValues === 'object') {
+    }
+    if (Array.isArray(cr.matches)) {
+      for (const match of cr.matches) {
+        if (match && match.matchedRecordId === merged.id) {
+          match.matchedRecordId = survivor.id;
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  };
+
+  for (const matter of matters) {
+    let matterChanged = false;
+    if (matter.clientId === merged.id) {
+      matter.clientId = survivor.id;
+      matterChanged = true;
+    }
+    if (
+      Array.isArray(matter.additionalClientIds) &&
+      matter.additionalClientIds.includes(merged.id)
+    ) {
+      matter.additionalClientIds = Array.from(
+        new Set(
+          matter.additionalClientIds.map((id) =>
+            id === merged.id ? survivor.id : id,
+          ),
+        ),
+      );
+      matterChanged = true;
+    }
+    if (matter.instructingContactId === merged.id) {
+      matter.instructingContactId = survivor.id;
+      matterChanged = true;
+    }
+    if (matter.billingContactId === merged.id) {
+      matter.billingContactId = survivor.id;
+      matterChanged = true;
+    }
+    if (matter.referrerContactId === merged.id) {
+      matter.referrerContactId = survivor.id;
+      matterChanged = true;
+    }
+    for (const party of matter.parties ?? []) {
+      if (party.linkedRecordId === merged.id) {
+        party.linkedRecordId = survivor.id;
+        matterChanged = true;
+      }
+    }
+    if (repointConflictRecordObject(matter.conflictCheckRecord)) {
+      matterChanged = true;
+    }
+    if (matter.fieldValues && typeof matter.fieldValues === 'object') {
+      if (
         repointConflictRecordObject(
           matter.fieldValues['conflictCheckRecord'] as {
             parties?: { linkedRecordId: string | null }[];
             matches?: { matchedRecordId: string }[];
           },
-        );
+        )
+      ) {
+        matterChanged = true;
+      }
+      if (
         repointConflictRecordObject(
           matter.fieldValues['conflictCheck'] as {
             parties?: { linkedRecordId: string | null }[];
             matches?: { matchedRecordId: string }[];
           },
-        );
+        )
+      ) {
+        matterChanged = true;
       }
     }
+    if (matterChanged) {
+      repointedMatters.push(matter);
+    }
+  }
 
     // 4. Repoint Enquiry references and conflict snapshots
     for (const enq of store.enquiries) {
@@ -6727,15 +7337,15 @@ export async function executeMerge(
     store.pmsLinks = nextPmsLinks;
 
     // 9. Copy notes to survivor
-    let notesMoved = 0;
-    for (const note of store.notes) {
+    const notesToRepoint: Note[] = [];
+    for (const note of notes) {
       if (note.recordType === recordType && note.recordId === merged.id) {
         note.recordId = survivor.id;
         note.mergedFromId = merged.id;
-        notesMoved++;
+        notesToRepoint.push(note);
       }
     }
-    if (notesMoved > 0 && !plan.fieldsTaken.includes('Notes')) {
+    if (notesToRepoint.length > 0 && !plan.fieldsTaken.includes('Notes')) {
       plan.fieldsTaken.push('Notes');
     }
 
@@ -6789,9 +7399,6 @@ export async function executeMerge(
       plan.survivor.duplicateStatusId = dupNone;
     }
 
-    const sIdx = list.findIndex((r) => r.id === survivor.id);
-    list[sIdx] = plan.survivor;
-
     // Mark merged record
     merged.mergedIntoId = survivor.id;
     merged.recordStatusId = statusMerged;
@@ -6800,20 +7407,7 @@ export async function executeMerge(
     merged.updatedAt = now;
     merged.updatedById = byId;
 
-    const activeMergeCtx = mergeCtx ?? resolveDefaultServiceTenantContext(store, byId);
-    const mergeHistoryId = await getPartyRepository().allocateNextMergeHistoryId(activeMergeCtx);
-    const history: MergeHistory = {
-      id: mergeHistoryId,
-      recordType,
-      survivorId: survivor.id,
-      mergedId: merged.id,
-      mergedLabel: recordDisplayName(merged),
-      byId,
-      at: now,
-      fieldsTaken: plan.fieldsTaken,
-      ...(pmsLinkConflicts.length > 0 ? { pmsLinkConflicts } : {}),
-    };
-    store.mergeHistory.unshift(history);
+    const activeMergeCtx = mergeCtx ?? prelimCtx;
 
     // 8. Repoint generated documents and links in PostgreSQL with delta compensation (R405, R406)
     const repoDocsUpdated = await repointMergedEntityWithCompensation(
@@ -6828,28 +7422,116 @@ export async function executeMerge(
       plan.fieldsTaken.push('Generated documents');
     }
 
-    writeAudit(store, {
+    const mergeHistoryId = await partyRepo.allocateNextMergeHistoryId(activeMergeCtx);
+    const history: MergeHistory = {
+      id: mergeHistoryId,
       recordType,
-      recordId: survivor.id,
-      action: 'merge',
-      field: `Merged ${merged.id} (${recordDisplayName(merged)}) into ${survivor.id}`,
-      oldValue: merged.id,
-      newValue: plan.fieldsTaken.length
-        ? `Fields taken: ${plan.fieldsTaken.join(', ')}`
-        : 'No additional fields needed',
+      survivorId: survivor.id,
+      mergedId: merged.id,
+      mergedLabel: recordDisplayName(merged),
       byId,
       at: now,
-    });
+      fieldsTaken: plan.fieldsTaken,
+      ...(pmsLinkConflicts.length > 0 ? { pmsLinkConflicts } : {}),
+    };
 
-    writeAudit(store, {
-      recordType,
-      recordId: merged.id,
-      action: 'merged-into',
-      field: 'Merged into surviving record',
-      oldValue: merged.id,
-      newValue: survivor.id,
-      byId,
-      at: now,
+    const tenantCfg = getActiveTenantConfiguration();
+    await partyRepo.withTenantTransaction(activeMergeCtx, async () => {
+      await partyRepo.executeMergeInTransaction(activeMergeCtx, {
+        recordType,
+        survivor: plan.survivor,
+        merged,
+        linksToUpsert,
+        linkIdsToDelete,
+        repointedSubsidiaries,
+        notesToRepoint,
+        mergeHistory: history,
+      });
+      for (const m of repointedMatters) {
+        const meta = computeMatterRestrictionMetadataForStore(
+          m,
+          people,
+          store.teams,
+          tenantCfg,
+        );
+        await matterRepo.putMatter(activeMergeCtx, m, {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        });
+      }
+      writeAudit(store, {
+        recordType,
+        recordId: survivor.id,
+        action: 'merge',
+        field: `Merged ${merged.id} (${recordDisplayName(merged)}) into ${survivor.id}`,
+        oldValue: merged.id,
+        newValue: plan.fieldsTaken.length
+          ? `Fields taken: ${plan.fieldsTaken.join(', ')}`
+          : 'No additional fields needed',
+        byId,
+        at: now,
+      });
+
+      writeAudit(store, {
+        recordType,
+        recordId: merged.id,
+        action: 'merged-into',
+        field: 'Merged into surviving record',
+        oldValue: merged.id,
+        newValue: survivor.id,
+        byId,
+        at: now,
+      });
+    });
+    compensator.register(`merge.execute:${history.id}`, async () => {
+      await partyRepo.withTenantTransaction(activeMergeCtx, async (tx) => {
+        if (recordType === 'person') {
+          await partyRepo.putPerson(
+            activeMergeCtx,
+            prevSurvivorSnapshot as Person,
+          );
+          await partyRepo.putPerson(
+            activeMergeCtx,
+            prevMergedSnapshot as Person,
+          );
+        } else {
+          await partyRepo.putOrganisation(
+            activeMergeCtx,
+            prevSurvivorSnapshot as Organisation,
+          );
+          await partyRepo.putOrganisation(
+            activeMergeCtx,
+            prevMergedSnapshot as Organisation,
+          );
+        }
+        for (const sub of prevSubsidiariesSnapshot) {
+          await partyRepo.putOrganisation(activeMergeCtx, sub);
+        }
+        for (const prevLink of prevLinksSnapshot) {
+          await partyRepo.putLink(activeMergeCtx, prevLink);
+        }
+        for (const prevNote of prevNotesSnapshot) {
+          await partyRepo.putNote(activeMergeCtx, prevNote);
+        }
+        await tx.query(
+          'DELETE FROM merge_history WHERE tenant_id = $1 AND id = $2',
+          [activeMergeCtx.tenantId, history.id],
+        );
+        for (const m of repointedMatters) {
+          const prevM = prevMattersById.get(m.id);
+          if (!prevM) continue;
+          const prevMeta = computeMatterRestrictionMetadataForStore(
+            prevM,
+            people,
+            store.teams,
+            tenantCfg,
+          );
+          await matterRepo.putMatter(activeMergeCtx, prevM, {
+            expectedRowVersion: null,
+            sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
+          });
+        }
+      });
     });
 
     saveStore(store);
@@ -6858,12 +7540,23 @@ export async function executeMerge(
   });
 }
 
-export function findCandidateDuplicatesForRecord(record: AnyRecord): AnyRecord[] {
-  const store = getStore();
+export async function findCandidateDuplicatesForRecord(
+  record: AnyRecord,
+  options?: {
+    people?: readonly Person[];
+    organisations?: readonly Organisation[];
+    ctx?: TenantContext;
+  },
+): Promise<AnyRecord[]> {
   // Same rules as the People / Organisation forms: a shared address alone isn't a duplicate.
   const notAddressOnly = (reasons: string[]) =>
     reasons.some((r) => r !== 'address' && r !== 'postcode');
   if (record.recordType === 'person') {
+    const people =
+      options?.people ??
+      (await getPartyRepository().listAllPeople<Person>(
+        options?.ctx ?? resolveDefaultServiceTenantContext(null),
+      ));
     const matches = findPersonDuplicates(
       {
         id: record.id,
@@ -6874,12 +7567,17 @@ export function findCandidateDuplicatesForRecord(record: AnyRecord): AnyRecord[]
         phones: record.phones.map((p) => p.number),
         addresses: record.addresses,
       },
-      store.people,
+      people as Person[],
       record.notDuplicateOf,
       { fuzzy: true },
     );
     return matches.filter((m) => notAddressOnly(m.reasons)).map((m) => m.record);
   }
+  const organisations =
+    options?.organisations ??
+    (await getPartyRepository().listAllOrganisations<Organisation>(
+      options?.ctx ?? resolveDefaultServiceTenantContext(null),
+    ));
   const matches = findOrganisationDuplicates(
     {
       id: record.id,
@@ -6892,7 +7590,7 @@ export function findCandidateDuplicatesForRecord(record: AnyRecord): AnyRecord[]
         (a): a is Address => Boolean(a),
       ),
     },
-    store.organisations,
+    organisations as Organisation[],
     record.notDuplicateOf,
     { fuzzy: true },
   );
@@ -7313,50 +8011,53 @@ export async function resetAllDemoData(
   ctx: TenantContext,
 ): Promise<void> {
   await withJsonStoreWriteLock(async () => {
-  const prevStore = getStore();
-  const actor = prevStore.people.find((p) => p.id === byId) ?? null;
-  const actorName = actor ? personDisplayName(actor) : byId;
-  const prevSeededEntraByIdAndEmail = new Map<string, string | null | undefined>();
-  if (!prevStore.isCleanDeployment) {
-    for (const p of prevStore.people) {
-      const email = primaryEmail(p).trim().toLowerCase();
-      if (email) {
-        prevSeededEntraByIdAndEmail.set(`${p.id}::${email}`, p.entraObjectId);
-      }
-    }
-  }
-  const fresh = resetStore();
-  if (prevSeededEntraByIdAndEmail.size > 0) {
-    for (const p of fresh.people) {
-      const email = primaryEmail(p).trim().toLowerCase();
-      const key = `${p.id}::${email}`;
-      if (email && prevSeededEntraByIdAndEmail.has(key)) {
-        const prevOid = prevSeededEntraByIdAndEmail.get(key);
-        if (prevOid === undefined) {
-          delete p.entraObjectId;
-        } else {
-          p.entraObjectId = prevOid;
+    const prevStore = getStore();
+    const prevPeople = await getPartyRepository().listAllPeople<Person>(ctx);
+    const actor = prevPeople.find((p) => p.id === byId) ?? null;
+    const actorName = actor ? personDisplayName(actor) : byId;
+    const prevSeededEntraByIdAndEmail = new Map<string, string | null | undefined>();
+    if (
+      !prevStore.isCleanDeployment &&
+      getActiveTenantConfiguration().environment !== 'test'
+    ) {
+      for (const p of prevPeople) {
+        const email = primaryEmail(p).trim().toLowerCase();
+        if (email) {
+          prevSeededEntraByIdAndEmail.set(`${p.id}::${email}`, p.entraObjectId);
         }
       }
     }
-  }
-  saveStore(fresh);
-  getMatterRestrictionDigestCache().clear();
-  await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
-  saveStore(fresh);
-  markPartiesAndMattersSyncedWithStore(fresh, ctx);
-  await appendUnmigratedModuleAuditEntries(ctx, [
-    {
-      recordType: 'system',
-      recordId: 'demo-data',
-      action: 'data-reset',
-      field: 'Reset demo data',
-      oldValue: null,
-      newValue: `Restored initial ${fresh.firm.name} dataset (by ${actorName} [${byId}])`,
-      byId,
-      at: new Date().toISOString(),
-    },
-  ]);
+    const fresh = resetStore();
+    if (prevSeededEntraByIdAndEmail.size > 0) {
+      for (const p of fresh.people) {
+        const email = primaryEmail(p).trim().toLowerCase();
+        const key = `${p.id}::${email}`;
+        if (email && prevSeededEntraByIdAndEmail.has(key)) {
+          const prevOid = prevSeededEntraByIdAndEmail.get(key);
+          if (prevOid === undefined) {
+            delete p.entraObjectId;
+          } else {
+            p.entraObjectId = prevOid;
+          }
+        }
+      }
+    }
+    saveStore(fresh);
+    getMatterRestrictionDigestCache().clear();
+    await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
+    saveStore(fresh);
+    await appendUnmigratedModuleAuditEntries(ctx, [
+      {
+        recordType: 'system',
+        recordId: 'demo-data',
+        action: 'data-reset',
+        field: 'Reset demo data',
+        oldValue: null,
+        newValue: `Restored initial ${fresh.firm.name} dataset (by ${actorName} [${byId}])`,
+        byId,
+        at: new Date().toISOString(),
+      },
+    ]);
   });
 }
 
@@ -7365,26 +8066,24 @@ export async function clearAllDataToCleanDeployment(
   ctx: TenantContext,
 ): Promise<void> {
   await withJsonStoreWriteLock(async () => {
-  const prevStore = getStore();
-  const actor = prevStore.people.find((p) => p.id === byId) ?? null;
-  const actorName = actor ? personDisplayName(actor) : byId;
-  const clean = clearStoreToCleanDeployment();
-  saveStore(clean);
-  getMatterRestrictionDigestCache().clear();
-  await clearMigratedPostgresModulesForTenant({ ctx });
-  markPartiesAndMattersSyncedWithStore(clean, ctx);
-  await appendUnmigratedModuleAuditEntries(ctx, [
-    {
-      recordType: 'system',
-      recordId: 'clean-deployment',
-      action: 'data-cleared',
-      field: 'Clear all data to clean deployment',
-      oldValue: null,
-      newValue: `Cleared store to clean deployment (by ${actorName} [${byId}])`,
-      byId,
-      at: new Date().toISOString(),
-    },
-  ]);
+    const actor = await getPartyRepository().getPersonById<Person>(ctx, byId);
+    const actorName = actor ? personDisplayName(actor) : byId;
+    const clean = clearStoreToCleanDeployment();
+    saveStore(clean);
+    getMatterRestrictionDigestCache().clear();
+    await clearMigratedPostgresModulesForTenant({ ctx });
+    await appendUnmigratedModuleAuditEntries(ctx, [
+      {
+        recordType: 'system',
+        recordId: 'clean-deployment',
+        action: 'data-cleared',
+        field: 'Clear all data to clean deployment',
+        oldValue: null,
+        newValue: `Cleared store to clean deployment (by ${actorName} [${byId}])`,
+        byId,
+        at: new Date().toISOString(),
+      },
+    ]);
   });
 }
 
@@ -7550,78 +8249,79 @@ export async function updateEmployeeRoleSetting(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'updateEmployeeRoleSetting',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId);
-  const person = store.people.find((p) => p.id === personId && p.isEmployee);
-  if (!actor) return { ok: false, error: 'Acting user not found.' };
-  if (!person) return { ok: false, error: 'Employee not found.' };
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  return partyRepo.withTenantTransaction(ctx, async () => {
+    const people = await partyRepo.listAllPeople<Person>(ctx);
+    const actor = people.find((p) => p.id === byId);
+    const person = people.find((p) => p.id === personId && p.isEmployee);
+    if (!actor) return { ok: false, error: 'Acting user not found.' };
+    if (!person) return { ok: false, error: 'Employee not found.' };
 
-  const rbacConfig = getDefaultTenantRbacConfig();
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
-    teams: store.teams,
-    mfaVerified: options.mfaVerified ?? false,
-  });
-
-  const addedRoleKeys: string[] =
-    appRole === 'admin'
-      ? [
-          'admin',
-          'managing_partner',
-          'partner',
-          'fee_earner',
-          'legal_secretary',
-          'enquiries_coordinator',
-          'finance',
-          'risk_compliance',
-        ]
-      : appRole === 'team_lead'
-        ? ['partner', 'fee_earner']
-        : appRole === 'call_handler'
-          ? ['enquiries_coordinator']
-          : appRole === 'fee_earner'
-            ? ['fee_earner']
-            : [];
-
-  try {
-    validateUserOverrideOrRoleMutation({
-      actorPermissions: actorPerms,
-      targetPersonId: person.id,
-      addedRoleKeys,
-      rbacConfig,
+    const rbacConfig = getDefaultTenantRbacConfig();
+    const actorPerms = resolvePersonPermissionSet(actor, {
+      allPeople: people,
+      teams: store.teams,
+      mfaVerified: options.mfaVerified ?? false,
     });
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
-    };
-  }
 
-  const beforeJson = JSON.stringify({ appRole: person.appRole ?? null });
-  person.appRole = appRole;
-  person.updatedAt = new Date().toISOString();
-  person.updatedById = byId;
-  const afterJson = JSON.stringify({ appRole: person.appRole ?? null });
-  writeAudit(store, {
-    recordType: 'person',
-    recordId: person.id,
-    action: 'update',
-    field: 'App role',
-    oldValue: beforeJson,
-    newValue: afterJson,
-    byId,
-  });
-  saveStore(store);
-  return { ok: true };
+    const addedRoleKeys: string[] =
+      appRole === 'admin'
+        ? [
+            'admin',
+            'managing_partner',
+            'partner',
+            'fee_earner',
+            'legal_secretary',
+            'enquiries_coordinator',
+            'finance',
+            'risk_compliance',
+          ]
+        : appRole === 'team_lead'
+          ? ['partner', 'fee_earner']
+          : appRole === 'call_handler'
+            ? ['enquiries_coordinator']
+            : appRole === 'fee_earner'
+              ? ['fee_earner']
+              : [];
 
-    },
+    try {
+      validateUserOverrideOrRoleMutation({
+        actorPermissions: actorPerms,
+        targetPersonId: person.id,
+        addedRoleKeys,
+        rbacConfig,
+      });
+    } catch (err) {
+      const code = err instanceof AuthorisationError ? err.code : undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        code,
+        error: code ? `${code}: ${message}` : message,
+      };
+    }
+
+    const beforeJson = JSON.stringify({ appRole: person.appRole ?? null });
+    person.appRole = appRole;
+    person.updatedAt = new Date().toISOString();
+    person.updatedById = byId;
+    const afterJson = JSON.stringify({ appRole: person.appRole ?? null });
+    await partyRepo.putPerson(ctx, person);
+    await runWithAuditStagingScope(async () => {
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: person.id,
+        action: 'update',
+        field: 'App role',
+        oldValue: beforeJson,
+        newValue: afterJson,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+    });
+    return { ok: true };
   });
 }
 
@@ -7714,10 +8414,19 @@ export async function saveTaskRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async (store) => {
   const now = new Date().toISOString();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
   const taskCtx = resolveDefaultServiceTenantContext(store, byId);
-  await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(taskCtx),
+    partyRepo.listAllOrganisations<Organisation>(taskCtx),
+    matterRepo.listAllMatters<Matter>(taskCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
   const prelimVis = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -7725,13 +8434,15 @@ export async function saveTaskRecord(
     prelimVis.hiddenMatterIds,
   );
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
 
   if (!opts?.viaTakeTask && !opts?.internalSystemStep) {
     if (
       !hasPersonPermission(actor, 'task:edit', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -7753,7 +8464,7 @@ export async function saveTaskRecord(
   const candidateLinks = input.linkedRecords ?? existing?.linkedRecords ?? [];
   for (const lr of candidateLinks) {
     if (lr.recordType === 'matter') {
-      const m = store.matters.find((x) => x.id === lr.recordId);
+      const m = matters.find((x) => x.id === lr.recordId);
       if (!m || !visibility.canViewMatter(m)) {
         const msg = 'Linked matter not found or access denied.';
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -7771,12 +8482,12 @@ export async function saveTaskRecord(
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
       }
     } else if (lr.recordType === 'person') {
-      if (!store.people.some((x) => x.id === lr.recordId)) {
+      if (!people.some((x) => x.id === lr.recordId)) {
         const msg = 'Linked person not found.';
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
       }
     } else if (lr.recordType === 'organisation') {
-      if (!store.organisations.some((x) => x.id === lr.recordId)) {
+      if (!organisations.some((x) => x.id === lr.recordId)) {
         const msg = 'Linked organisation not found.';
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
       }
@@ -7834,10 +8545,10 @@ export async function saveTaskRecord(
         nextTeamId === existing.assignedTeamId &&
         nextPersonIds.length === 1 &&
         nextPersonIds[0] === byId &&
-        canUserTakeTask(byId, existing, store.teams, store.people, store.values);
+        canUserTakeTask(byId, existing, store.teams, people, store.values);
       if (
         !isSelfClaim &&
-        !canUserReassignTask(byId, existing, store.teams, store.people, store.values)
+        !canUserReassignTask(byId, existing, store.teams, people, store.values)
       ) {
         const msg = 'You do not have permission to reassign this task.';
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -7938,7 +8649,7 @@ export async function saveTaskRecord(
     autoTrigger: input.autoTrigger !== undefined ? input.autoTrigger : existing?.autoTrigger ?? null,
   };
 
-  const ctx = formatContext(store);
+  const ctx = formatContext(store, { people, organisations, matters });
 
   if (!existing) {
     store.tasks.unshift(task);
@@ -8058,7 +8769,7 @@ export async function saveTaskRecord(
   if (
     task.assignedPersonId &&
     hasPersonPermission(actor, 'enquiry:assign', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -8108,17 +8819,27 @@ export async function takeTaskRecord(
 ): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
   return withJsonStoreWriteLock(async () => {
     const store = getStore();
-    const actor = store.people.find((p) => p.id === byId) ?? null;
     const taskCtx = resolveDefaultServiceTenantContext(store, byId);
-    await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const [people, matters] = await Promise.all([
+      partyRepo.listAllPeople<Person>(taskCtx),
+      matterRepo.listAllMatters<Matter>(taskCtx),
+    ]);
+    const actor = people.find((p) => p.id === byId) ?? null;
+    await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
     const prelimVis = buildRecordVisibility(store, actor, {
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
+      people,
+      matters,
+      hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    });
     const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
       taskCtx,
       prelimVis.hiddenMatterIds,
     );
     const visibility = buildRecordVisibility(store, actor, {
+      people,
+      matters,
       hiddenMatterKeyDateIds: hiddenKdIds,
     });
     const existing = store.tasks.find((t) => t.id === taskId);
@@ -8126,7 +8847,7 @@ export async function takeTaskRecord(
       const msg = 'Task not found.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
     }
-    if (!canUserTakeTask(byId, existing, store.teams, store.people, store.values)) {
+    if (!canUserTakeTask(byId, existing, store.teams, people, store.values)) {
       const msg = 'You do not have permission to claim this task.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
     }
@@ -8158,19 +8879,27 @@ export async function addTaskCommentRecord(
     label: 'addTaskCommentRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async (store) => {
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const taskCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(taskCtx),
+    matterRepo.listAllMatters<Matter>(taskCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'task:comment', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
     const msg = 'You do not have permission (task:comment) to comment on tasks.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const taskCtx = resolveDefaultServiceTenantContext(store, byId);
-  await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
+  await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
   const prelimVis = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -8178,6 +8907,8 @@ export async function addTaskCommentRecord(
     prelimVis.hiddenMatterIds,
   );
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
   const task = store.tasks.find((t) => t.id === taskId);
@@ -8210,7 +8941,7 @@ export async function addTaskCommentRecord(
     at: now,
   });
 
-  const authorName = formatContext(store).nameOf(byId);
+  const authorName = formatContext(store, { people, matters }).nameOf(byId);
   const recipients = new Set<string>();
   if (task.assignedPersonId) recipients.add(task.assignedPersonId);
   if (task.createdById) recipients.add(task.createdById);
@@ -8402,8 +9133,19 @@ export async function saveEnquiryRecord(
     mutate: async (): Promise<{ enquiry?: Enquiry; routedTeamName?: string; routedToIntakeFallback?: boolean; errors?: Record<string, string>; missingFields?: string[]; } & Partial<ActionDenied>> => {
   const store = getStore();
   const now = opts.now ?? new Date().toISOString();
-  const actor = store.people.find((p) => p.id === opts.byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, opts.byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, links, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(enqCtx),
+    partyRepo.listAllOrganisations<Organisation>(enqCtx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
+    matterRepo.listAllMatters<Matter>(enqCtx),
+  ]);
+  const actor = people.find((p) => p.id === opts.byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const existing = opts.id ? store.enquiries.find((e) => e.id === opts.id) ?? null : null;
@@ -8417,7 +9159,7 @@ export async function saveEnquiryRecord(
   if (!existing) {
     if (
       !hasPersonPermission(actor, 'enquiry:create', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -8430,7 +9172,7 @@ export async function saveEnquiryRecord(
   } else {
     if (
       !hasPersonPermission(actor, 'enquiry:edit', {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       }) ||
       !visibility.canViewEnquiry(existing)
@@ -8464,7 +9206,7 @@ export async function saveEnquiryRecord(
   }
   if (
     input.linkedOrganisationId &&
-    !store.organisations.some((o) => o.id === input.linkedOrganisationId)
+    !organisations.some((o) => o.id === input.linkedOrganisationId)
   ) {
     const msg = 'Linked organisation not found.';
     return {
@@ -8474,7 +9216,7 @@ export async function saveEnquiryRecord(
   }
   if (
     input.linkedPersonId &&
-    !store.people.some((p) => p.id === input.linkedPersonId)
+    !people.some((p) => p.id === input.linkedPersonId)
   ) {
     const msg = 'Linked person not found.';
     return {
@@ -8572,16 +9314,16 @@ export async function saveEnquiryRecord(
       linkedPersonId: mergedInput.linkedPersonId,
       linkedOrganisationId: mergedInput.linkedOrganisationId,
     },
-    store.people,
-    store.organisations,
-    store.matters,
+    people,
+    organisations,
+    matters,
     store.values,
     {
       recordedAt: now,
       recordedById: opts.byId,
       enquiries: store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
       excludeEnquiryId: existing?.id ?? null,
-      links: store.links,
+      links,
       canViewMatter: visibility.canViewMatter,
       tenantId: getActiveTenantConfiguration().tenantId,
     },
@@ -8917,10 +9659,15 @@ export async function assignEnquiryRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(enqCtx),
+    getMatterRepository().listAllMatters<Matter>(enqCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:assign', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -8928,6 +9675,8 @@ export async function assignEnquiryRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
@@ -8948,7 +9697,7 @@ export async function assignEnquiryRecord(
   }
 
   const now = new Date().toISOString();
-  const ctx = formatContext(store);
+  const ctx = formatContext(store, { people, matters });
   const oldAssignee = enq.assignedToId ? ctx.nameOf(enq.assignedToId) : 'Unassigned';
   const oldStatus = enq.status;
 
@@ -9035,10 +9784,15 @@ export async function logEnquiryContactRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(enqCtx),
+    getMatterRepository().listAllMatters<Matter>(enqCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -9046,6 +9800,8 @@ export async function logEnquiryContactRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
@@ -9128,10 +9884,15 @@ export async function sendEnquiryEmailRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(enqCtx),
+    getMatterRepository().listAllMatters<Matter>(enqCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -9139,6 +9900,8 @@ export async function sendEnquiryEmailRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
@@ -9204,10 +9967,17 @@ export async function closeEnquiryRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(enqCtx),
+    matterRepo.listAllMatters<Matter>(enqCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:close', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -9215,6 +9985,8 @@ export async function closeEnquiryRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
@@ -9284,9 +10056,9 @@ export async function closeEnquiryRecord(
   // If an enquiry-stage person record was created solely for this enquiry and has no matters or other open/converted enquiries, remove it
   if (enq.linkedPersonId) {
     const linkedId = enq.linkedPersonId;
-    const linkedPerson = store.people.find((p) => p.id === linkedId);
+    const linkedPerson = people.find((p) => p.id === linkedId);
     if (linkedPerson && !linkedPerson.isEmployee && linkedPerson.createdFromEnquiryId === enq.id) {
-      const hasMatters = store.matters.some(
+      const hasMatters = matters.some(
         (m) =>
           m.clientId === linkedId ||
           m.instructingContactId === linkedId ||
@@ -9302,8 +10074,16 @@ export async function closeEnquiryRecord(
           (isEnquiryOpen(other) || other.status === 'Converted'),
       );
       if (!hasMatters && !hasOtherActiveOrConvertedEnquiry) {
-        store.people = store.people.filter((p) => p.id !== linkedId);
-        store.links = store.links.filter((l) => l.personId !== linkedId);
+        await partyRepo.withTenantTransaction(enqCtx, async (tx) => {
+          await tx.query(
+            'DELETE FROM person_organisation_links WHERE tenant_id = $1 AND person_id = $2',
+            [enqCtx.tenantId, linkedId],
+          );
+          await tx.query('DELETE FROM people WHERE tenant_id = $1 AND id = $2', [
+            enqCtx.tenantId,
+            linkedId,
+          ]);
+        });
         enq.linkedPersonId = null;
       }
     }
@@ -9325,10 +10105,15 @@ export async function reopenEnquiryRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(enqCtx),
+    getMatterRepository().listAllMatters<Matter>(enqCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:reopen', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -9336,6 +10121,8 @@ export async function reopenEnquiryRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
@@ -9350,7 +10137,7 @@ export async function reopenEnquiryRecord(
         : 'Only closed enquiries (Declined, Referred out, or No response) can be reopened.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  if (!canUserReopenEnquiry(byId, enq, store.teams, store.people, store.values)) {
+  if (!canUserReopenEnquiry(byId, enq, store.teams, people, store.values)) {
     const msg =
       'Only the assignee, the team lead for the enquiry team, Intake, or an administrator may reopen this enquiry.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -9386,7 +10173,7 @@ const DECLINED_ORG_NAME_WARNING =
   "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.";
 
 function assessDeclinedOrganisation(
-  store: FirmStore,
+  organisations: readonly Organisation[],
   existingOrg: Organisation | undefined,
   clientOrgName: string,
 ): {
@@ -9402,7 +10189,7 @@ function assessDeclinedOrganisation(
   const clientOrgNameLower = clientOrgName.trim().toLowerCase();
   const matchingOrgsByName =
     !existingOrg && clientOrgNameLower
-      ? store.organisations.filter(
+      ? organisations.filter(
           (o) =>
             !o.mergedIntoId &&
             (o.legalName.trim().toLowerCase() === clientOrgNameLower ||
@@ -9449,10 +10236,19 @@ export async function prepareEnquiryConversion(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, links, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(enqCtx),
+    partyRepo.listAllOrganisations<Organisation>(enqCtx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
+    matterRepo.listAllMatters<Matter>(enqCtx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'matter:create', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -9465,6 +10261,8 @@ export async function prepareEnquiryConversion(
     };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
@@ -9499,19 +10297,19 @@ export async function prepareEnquiryConversion(
       linkedPersonId: opts.usePersonId ?? enq.linkedPersonId,
       linkedOrganisationId: opts.useOrganisationId ?? enq.linkedOrganisationId,
     },
-    store.people,
-    store.organisations,
-    store.matters,
+    people,
+    organisations,
+    matters,
     store.values,
     store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
     enq.id,
-    store.links,
+    links,
     visibility.canViewMatter,
     getActiveTenantConfiguration().tenantId,
   );
 
   const redactRestrictedMatterReasons = (rawReasons: string[]): string[] => {
-    const hiddenMatters = store.matters.filter((m) => !visibility.canViewMatter(m));
+    const hiddenMatters = matters.filter((m) => !visibility.canViewMatter(m));
     return rawReasons.map((reason) => {
       let safe = reason;
       for (const hm of hiddenMatters) {
@@ -9533,11 +10331,11 @@ export async function prepareEnquiryConversion(
 
   const linkedOrgId = opts.useOrganisationId ?? enq.linkedOrganisationId ?? null;
   const existingOrg = linkedOrgId
-    ? store.organisations.find((o) => o.id === linkedOrgId)
+    ? organisations.find((o) => o.id === linkedOrgId)
     : undefined;
   const clientOrgName = existingOrg?.legalName || enq.callingOnBehalfOf.trim();
   const declinedOrgAssessment = assessDeclinedOrganisation(
-    store,
+    organisations,
     existingOrg,
     clientOrgName,
   );
@@ -9690,9 +10488,10 @@ export async function prepareEnquiryConversion(
         { byId, internalSystemStep: 'enquiry_conversion' },
       );
       orgId = createdOrg.organisation.id;
-      const orgRecord = store.organisations.find((o) => o.id === orgId);
+      const orgRecord = await partyRepo.getOrganisationById<Organisation>(enqCtx, orgId);
       if (orgRecord) {
         orgRecord.conflictDecision = decisionSnapshot;
+        await partyRepo.putOrganisation(enqCtx, orgRecord);
         writeAudit(store, {
           recordType: 'organisation',
           recordId: orgId,
@@ -9710,8 +10509,12 @@ export async function prepareEnquiryConversion(
     if (orgId) {
       enq.linkedOrganisationId = orgId;
       clientId = orgId;
-      const hasLink = store.links.some(
-        (l) => l.personId === personId && l.organisationId === orgId && l.isCurrent,
+      const personLinks = await partyRepo.listLinksForPerson<PersonOrganisationLink>(
+        enqCtx,
+        personId,
+      );
+      const hasLink = personLinks.some(
+        (l) => l.organisationId === orgId && l.isCurrent,
       );
       if (!hasLink) {
         await createOrUpdateLink(
@@ -9910,9 +10713,11 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(enqCtx);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   requirePermission(permSet, 'enquiry:anonymise');
@@ -10009,19 +10814,19 @@ export interface MatterPmsViewBundle {
   allUnlinkedPmsMatters: PmsMatter[];
 }
 
-export function getMatterPmsViewBundle(
+export async function getMatterPmsViewBundle(
   matterId: string,
   byId?: string,
-): MatterPmsViewBundle | ActionDenied {
-  const auth = verifyFinanceActorAndPermission(byId, 'finance:view_matter');
+): Promise<MatterPmsViewBundle | ActionDenied> {
+  const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { store, actor, permSet, tokenRoles, visiblePmsLinks } = auth;
-  const matter = store.matters.find((m) => m.id === matterId && !m.mergedIntoId);
+  const { store, actor, permSet, tokenRoles, visiblePmsLinks, people, matters } = auth;
+  const matter = matters.find((m) => m.id === matterId && !m.mergedIntoId);
   if (
     !matter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
       tokenRoles,
     })
@@ -10084,19 +10889,23 @@ export function getMatterPmsViewBundle(
   };
 }
 
-export function getClientPmsViewBundle(
+export async function getClientPmsViewBundle(
   recordType: 'organisation' | 'person',
   recordId: string,
   byId?: string,
-): ClientPmsViewBundle | ActionDenied {
-  const auth = verifyFinanceActorAndPermission(byId, 'finance:view_matter');
+): Promise<ClientPmsViewBundle | ActionDenied> {
+  const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { store, hiddenMatterIds, accessibleLinkedPmsMatterCodes, visiblePmsLinks } = auth;
+  const { hiddenMatterIds, accessibleLinkedPmsMatterCodes, visiblePmsLinks, people, ctx } = auth;
+  const organisations =
+    recordType === 'organisation'
+      ? await getPartyRepository().listAllOrganisations<Organisation>(ctx)
+      : [];
   const targetExists =
     recordType === 'organisation'
-      ? store.organisations.some((o) => o.id === recordId && !o.mergedIntoId)
-      : store.people.some((p) => p.id === recordId && !p.mergedIntoId);
+      ? organisations.some((o) => o.id === recordId && !o.mergedIntoId)
+      : people.some((p) => p.id === recordId && !p.mergedIntoId);
   if (!targetExists) {
     return buildActionDenied(
       'FORBIDDEN',
@@ -10163,9 +10972,9 @@ export function getClientPmsViewBundle(
 
   let groupView: PmsGroupFinancials | null = null;
   if (recordType === 'organisation') {
-    const org = store.organisations.find((o) => o.id === recordId);
+    const org = organisations.find((o) => o.id === recordId);
     if (org) {
-      const subsidiaries = store.organisations.filter(
+      const subsidiaries = organisations.filter(
         (o) => !o.mergedIntoId && o.parentOrganisationId === org.id,
       );
       if (subsidiaries.length > 0) {
@@ -10242,7 +11051,7 @@ export interface PmsAdminSnapshot {
   suggestedMatterMatches: PmsSuggestedMatch[];
 }
 
-export function getPmsAdminSnapshot(byId?: string): PmsAdminSnapshot {
+export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapshot> {
   const store = getStore();
   const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
   if (isCleanEmpty) {
@@ -10261,15 +11070,20 @@ export function getPmsAdminSnapshot(byId?: string): PmsAdminSnapshot {
     };
   }
   const actorId = byId || getActiveActorSession()?.personId;
-  const actor = actorId ? store.people.find((p) => p.id === actorId) ?? null : null;
+  const ctx = resolveDefaultServiceTenantContext(store, actorId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = actorId ? people.find((p) => p.id === actorId) ?? null : null;
   const visibleMatters = actorId
-    ? store.matters.filter((m) =>
+    ? matters.filter((m) =>
         canPersonAccessMatter(m, actorId, actor, {
-          allPeople: store.people,
+          allPeople: people,
           teams: store.teams,
         }),
       )
-    : store.matters;
+    : matters;
   const visibleMatterIdSet = new Set(visibleMatters.map((m) => m.id));
   const hiddenPmsCodes = new Set(
     store.pmsLinks
@@ -10394,13 +11208,19 @@ export async function rerunAutomaticPmsMatching(byId: string): Promise<{ totalLi
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, organisations, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getPartyRepository().listAllOrganisations<Organisation>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
   const pms = getPmsSource();
   const now = new Date().toISOString();
   store.pmsLinks = computeAutomaticPmsLinks(
     store.pmsLinks,
-    store.organisations,
-    store.people,
-    store.matters,
+    organisations,
+    people,
+    matters,
     pms.listClients(),
     pms.listFeeEarners(),
     pms.listMatters(),
@@ -10467,11 +11287,13 @@ export async function createRecordFromPms(
   opts: { mfaVerified: boolean },
 ): Promise<{ ok: boolean; createdId?: string; error?: string } & Partial<Omit<ActionDenied, 'ok'>>> {
   const store = getStore();
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
   const pms = getPmsSource();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const actor = people.find((p) => p.id === byId) ?? null;
   const effectiveMfaVerified = opts.mfaVerified === true;
   const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     mfaVerified: effectiveMfaVerified,
   });
@@ -10765,7 +11587,8 @@ export async function switchViewingRole(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
     mutate: async () => {
   const store = getStore();
-  const user = store.people.find((p) => p.id === userId);
+  const ctx = resolveDefaultServiceTenantContext(store, userId);
+  const user = await getPartyRepository().getPersonById<Person>(ctx, userId);
   if (!user) return { ok: false, error: 'User not found.' };
 
   if (!store.homePagesConfig) {
@@ -10814,10 +11637,11 @@ export async function saveHomePagesConfig(
   const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
   const current =
     store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
-  const actor = store.people.find((p) => p.id === byId) ?? null;
-  const rbacConfig = getDefaultTenantRbacConfig();
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     mfaVerified: options.mfaVerified ?? false,
   });
@@ -10898,10 +11722,11 @@ export async function resetHomePagesConfig(
   const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
   const current =
     store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
-  const actor = store.people.find((p) => p.id === byId) ?? null;
-  const rbacConfig = getDefaultTenantRbacConfig();
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     mfaVerified: options.mfaVerified ?? false,
   });
@@ -10970,10 +11795,11 @@ export async function addHomeRole(
     mutate: async () => {
   const store = getStore();
   const nowIso = new Date().toISOString();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
-  const rbacConfig = getDefaultTenantRbacConfig();
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     mfaVerified: options.mfaVerified ?? false,
   });
@@ -11062,82 +11888,83 @@ export async function updateEmployeeRolesAndSupports(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'updateEmployeeRolesAndSupports',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId);
-  const person = store.people.find((p) => p.id === personId);
-  if (!actor) return { ok: false, error: 'Acting user not found.' };
-  if (!person) return { ok: false, error: 'Employee not found.' };
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  return partyRepo.withTenantTransaction(ctx, async () => {
+    const people = await partyRepo.listAllPeople<Person>(ctx);
+    const actor = people.find((p) => p.id === byId);
+    const person = people.find((p) => p.id === personId);
+    if (!actor) return { ok: false, error: 'Acting user not found.' };
+    if (!person) return { ok: false, error: 'Employee not found.' };
 
-  const rbacConfig = getDefaultTenantRbacConfig();
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
-    teams: store.teams,
-    mfaVerified: options.mfaVerified ?? false,
-  });
-
-  const prevRoles = new Set<string>(person.roles ?? []);
-  const nextRoles =
-    input.roles !== undefined
-      ? Array.from(new Set(input.roles))
-      : Array.from(prevRoles);
-  const addedRoleKeys = nextRoles.filter((rk) => !prevRoles.has(rk));
-
-  try {
-    validateUserOverrideOrRoleMutation({
-      actorPermissions: actorPerms,
-      targetPersonId: person.id,
-      addedRoleKeys,
-      rbacConfig,
+    const rbacConfig = getDefaultTenantRbacConfig();
+    const actorPerms = resolvePersonPermissionSet(actor, {
+      allPeople: people,
+      teams: store.teams,
+      mfaVerified: options.mfaVerified ?? false,
     });
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
-    };
-  }
 
-  const beforeJson = JSON.stringify({
-    roles: person.roles ?? [],
-    supportsIds: person.supportsIds ?? [],
-  });
+    const prevRoles = new Set<string>(person.roles ?? []);
+    const nextRoles =
+      input.roles !== undefined
+        ? Array.from(new Set(input.roles))
+        : Array.from(prevRoles);
+    const addedRoleKeys = nextRoles.filter((rk) => !prevRoles.has(rk));
 
-  if (input.roles && input.roles.length > 0) {
-    person.roles = Array.from(new Set(input.roles));
-  } else if (input.roles && input.roles.length === 0) {
-    person.roles = [];
-  }
-  if (input.supportsIds) {
-    person.supportsIds = Array.from(new Set(input.supportsIds));
-  }
-  person.updatedAt = new Date().toISOString();
-  person.updatedById = byId;
+    try {
+      validateUserOverrideOrRoleMutation({
+        actorPermissions: actorPerms,
+        targetPersonId: person.id,
+        addedRoleKeys,
+        rbacConfig,
+      });
+    } catch (err) {
+      const code = err instanceof AuthorisationError ? err.code : undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        code,
+        error: code ? `${code}: ${message}` : message,
+      };
+    }
 
-  const afterJson = JSON.stringify({
-    roles: person.roles ?? [],
-    supportsIds: person.supportsIds ?? [],
-  });
+    const beforeJson = JSON.stringify({
+      roles: person.roles ?? [],
+      supportsIds: person.supportsIds ?? [],
+    });
 
-  writeAudit(store, {
-    recordType: 'person',
-    recordId: person.id,
-    action: 'update',
-    field: 'Roles & supported fee earners',
-    oldValue: beforeJson,
-    newValue: afterJson,
-    byId,
-  });
+    if (input.roles && input.roles.length > 0) {
+      person.roles = Array.from(new Set(input.roles));
+    } else if (input.roles && input.roles.length === 0) {
+      person.roles = [];
+    }
+    if (input.supportsIds) {
+      person.supportsIds = Array.from(new Set(input.supportsIds));
+    }
+    person.updatedAt = new Date().toISOString();
+    person.updatedById = byId;
 
-  saveStore(store);
-  return { ok: true };
+    const afterJson = JSON.stringify({
+      roles: person.roles ?? [],
+      supportsIds: person.supportsIds ?? [],
+    });
 
-    },
+    await partyRepo.putPerson(ctx, person);
+    await runWithAuditStagingScope(async () => {
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: person.id,
+        action: 'update',
+        field: 'Roles & supported fee earners',
+        oldValue: beforeJson,
+        newValue: afterJson,
+        byId,
+      });
+
+      await flushStagedAuditEntries(ctx);
+    });
+    return { ok: true };
   });
 }
 
@@ -11146,7 +11973,7 @@ export async function updateEmployeeRolesAndSupports(
  * `grant`/`revoke` overrides (and optional draft `rbacConfig`) are applied, using the
  * central RBAC resolver (`resolvePersonPermissions`).
  */
-export function previewRbacOverrides(
+export async function previewRbacOverrides(
   personId: string,
   draftOverrides: {
     grant: PermissionKey[];
@@ -11155,25 +11982,27 @@ export function previewRbacOverrides(
   },
   byId: string,
   options?: { mfaVerified?: boolean },
-): { ok: boolean; code?: string; error?: string; permissions: PermissionKey[] } {
+): Promise<{ ok: boolean; code?: string; error?: string; permissions: PermissionKey[] }> {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId);
-  const target = store.people.find((p) => p.id === personId);
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const actor = people.find((p) => p.id === byId);
+  const target = people.find((p) => p.id === personId);
   if (!actor)
     return { ok: false, error: 'Acting user not found.', permissions: [] };
   if (!target)
     return { ok: false, error: 'Target employee not found.', permissions: [] };
   if (
     !hasPersonPermission(actor, 'admin:access', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     }) &&
     !hasPersonPermission(actor, 'rbac:manage_user_overrides', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     }) &&
     !hasPersonPermission(actor, 'rbac:manage_config', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -11229,7 +12058,7 @@ export function previewRbacOverrides(
   };
 
   const permissions = resolvePersonPermissions(syntheticTarget, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     ...(validatedRbacConfig
       ? { config: { rbac: validatedRbacConfig } }
@@ -11255,94 +12084,95 @@ export async function updatePersonPermissionOverrides(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string; person?: Person }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'updatePersonPermissionOverrides',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId);
-  const target = store.people.find((p) => p.id === personId);
-  if (!actor) return { ok: false, error: 'Acting user not found.' };
-  if (!target) return { ok: false, error: 'Target employee not found.' };
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  return partyRepo.withTenantTransaction(ctx, async () => {
+    const people = await partyRepo.listAllPeople<Person>(ctx);
+    const actor = people.find((p) => p.id === byId);
+    const target = people.find((p) => p.id === personId);
+    if (!actor) return { ok: false, error: 'Acting user not found.' };
+    if (!target) return { ok: false, error: 'Target employee not found.' };
 
-  const rbacConfig = getDefaultTenantRbacConfig();
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
-    teams: store.teams,
-    mfaVerified: options.mfaVerified ?? false,
-  });
-
-  const cleanGrant = Array.from(
-    new Set((input.grant ?? []).filter(isRegisteredPermissionKey)),
-  );
-  const cleanRevoke = Array.from(
-    new Set((input.revoke ?? []).filter(isRegisteredPermissionKey)),
-  );
-  const prevGrant = new Set<PermissionKey>(
-    target.permissionOverrides?.grant ?? [],
-  );
-  const newlyAddedPermissions = cleanGrant.filter((p) => !prevGrant.has(p));
-
-  try {
-    validateUserOverrideOrRoleMutation({
-      actorPermissions: actorPerms,
-      targetPersonId: target.id,
-      addedPermissions: newlyAddedPermissions,
-      rbacConfig,
+    const rbacConfig = getDefaultTenantRbacConfig();
+    const actorPerms = resolvePersonPermissionSet(actor, {
+      allPeople: people,
+      teams: store.teams,
+      mfaVerified: options.mfaVerified ?? false,
     });
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
+
+    const cleanGrant = Array.from(
+      new Set((input.grant ?? []).filter(isRegisteredPermissionKey)),
+    );
+    const cleanRevoke = Array.from(
+      new Set((input.revoke ?? []).filter(isRegisteredPermissionKey)),
+    );
+    const prevGrant = new Set<PermissionKey>(
+      target.permissionOverrides?.grant ?? [],
+    );
+    const newlyAddedPermissions = cleanGrant.filter((p) => !prevGrant.has(p));
+
+    try {
+      validateUserOverrideOrRoleMutation({
+        actorPermissions: actorPerms,
+        targetPersonId: target.id,
+        addedPermissions: newlyAddedPermissions,
+        rbacConfig,
+      });
+    } catch (err) {
+      const code = err instanceof AuthorisationError ? err.code : undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        code,
+        error: code ? `${code}: ${message}` : message,
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    const beforeSummary = JSON.stringify({
+      permissionOverrides: target.permissionOverrides ?? null,
+      entraObjectId: target.entraObjectId ?? null,
+    });
+
+    target.permissionOverrides = {
+      grant: cleanGrant,
+      revoke: cleanRevoke.filter((p) => !cleanGrant.includes(p)),
+      ...(input.reason?.trim() ? { reason: input.reason.trim() } : {}),
+      updatedAt: nowIso,
+      updatedByUserId: byId,
     };
-  }
+    // Clear deprecated override fields once unified permissionOverrides is saved
+    delete target.employeePermissions;
+    delete target.documentPermissions;
 
-  const nowIso = new Date().toISOString();
-  const beforeSummary = JSON.stringify({
-    permissionOverrides: target.permissionOverrides ?? null,
-    entraObjectId: target.entraObjectId ?? null,
-  });
+    if (input.entraObjectId !== undefined) {
+      target.entraObjectId = input.entraObjectId?.trim() || null;
+    }
+    target.updatedAt = nowIso;
+    target.updatedById = byId;
 
-  target.permissionOverrides = {
-    grant: cleanGrant,
-    revoke: cleanRevoke.filter((p) => !cleanGrant.includes(p)),
-    ...(input.reason?.trim() ? { reason: input.reason.trim() } : {}),
-    updatedAt: nowIso,
-    updatedByUserId: byId,
-  };
-  // Clear deprecated override fields once unified permissionOverrides is saved
-  delete target.employeePermissions;
-  delete target.documentPermissions;
+    const afterSummary = JSON.stringify({
+      permissionOverrides: target.permissionOverrides,
+      entraObjectId: target.entraObjectId ?? null,
+    });
 
-  if (input.entraObjectId !== undefined) {
-    target.entraObjectId = input.entraObjectId?.trim() || null;
-  }
-  target.updatedAt = nowIso;
-  target.updatedById = byId;
+    await partyRepo.putPerson(ctx, target);
+    await runWithAuditStagingScope(async () => {
+      writeAudit(store, {
+        recordType: 'person',
+        recordId: target.id,
+        action: 'update',
+        field: 'Permission overrides & Entra ID binding',
+        oldValue: beforeSummary,
+        newValue: afterSummary,
+        byId,
+        at: nowIso,
+      });
 
-  const afterSummary = JSON.stringify({
-    permissionOverrides: target.permissionOverrides,
-    entraObjectId: target.entraObjectId ?? null,
-  });
-
-  writeAudit(store, {
-    recordType: 'person',
-    recordId: target.id,
-    action: 'update',
-    field: 'Permission overrides & Entra ID binding',
-    oldValue: beforeSummary,
-    newValue: afterSummary,
-    byId,
-    at: nowIso,
-  });
-
-  saveStore(store);
-  return { ok: true, person: target };
-
-    },
+      await flushStagedAuditEntries(ctx);
+    });
+    return { ok: true, person: target };
   });
 }
 
@@ -11360,11 +12190,13 @@ export async function updateTenantRbacConfig(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId);
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const actor = people.find((p) => p.id === byId);
   if (!actor) return { ok: false, error: 'Acting user not found.' };
 
   const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     mfaVerified: options.mfaVerified ?? false,
   });
@@ -11510,9 +12342,14 @@ export async function approveSignOff(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   if (!permSet.permissions.has('signoff:approve')) {
@@ -11528,11 +12365,11 @@ export async function approveSignOff(
   }
 
   if (item.matterId) {
-    const linkedMatter = store.matters.find((m) => m.id === item.matterId) ?? null;
+    const linkedMatter = matters.find((m) => m.id === item.matterId) ?? null;
     if (
       !linkedMatter ||
       !canPersonAccessMatter(linkedMatter, byId, actor, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -11599,9 +12436,14 @@ export async function discussSignOff(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   if (!permSet.permissions.has('signoff:approve')) {
@@ -11617,11 +12459,11 @@ export async function discussSignOff(
   }
 
   if (item.matterId) {
-    const linkedMatter = store.matters.find((m) => m.id === item.matterId) ?? null;
+    const linkedMatter = matters.find((m) => m.id === item.matterId) ?? null;
     if (
       !linkedMatter ||
       !canPersonAccessMatter(linkedMatter, byId, actor, {
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -11698,20 +12540,20 @@ export async function requestMatterBill(
   matterCode: string,
   byId: string,
 ): Promise<{ ok: true; taskId?: string } | ActionDenied> {
-  const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
+  const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor, tokenRoles } = auth;
+  const { store, actor, tokenRoles, people, matters } = auth;
   const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
   const targetMatter = linkedId
-    ? store.matters.find((m) => m.id === linkedId && !m.mergedIntoId)
+    ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
     : undefined;
   const pmsMatter = linkedId ? getPmsSource().getMatterFinancials(matterCode) : null;
   if (
     !targetMatter ||
     !pmsMatter ||
     !canPersonAccessMatter(targetMatter, actor.id, actor, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
       tokenRoles,
     })
@@ -11766,7 +12608,7 @@ export async function flagMatterWriteOff(
     label: 'flagMatterWriteOff',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
+  const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
   if (typeof amountGbp !== 'number' || !Number.isFinite(amountGbp) || amountGbp <= 0) {
@@ -11776,17 +12618,17 @@ export async function flagMatterWriteOff(
     );
   }
 
-  const { store, actor, tokenRoles } = auth;
+  const { store, actor, tokenRoles, people, matters } = auth;
   const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
   const matter = linkedId
-    ? store.matters.find((m) => m.id === linkedId && !m.mergedIntoId)
+    ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
     : undefined;
   const pmsMatter = linkedId ? getPmsSource().getMatterFinancials(matterCode) : null;
   if (
     !matter ||
     !pmsMatter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
       tokenRoles,
     })
@@ -11848,9 +12690,11 @@ export async function remindTeamLeadOverdueCompliance(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   if (!permSet.permissions.has('risk:view')) {
@@ -11925,10 +12769,10 @@ export async function recordInvoiceCreditControlAction(
     label: 'recordInvoiceCreditControlAction',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
+  const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor, tokenRoles } = auth;
+  const { store, actor, tokenRoles, people, matters, ctx } = auth;
   const linkedMatterId = findOneSquaredIdForPmsCode(
     store.pmsLinks,
     'matter',
@@ -11936,7 +12780,7 @@ export async function recordInvoiceCreditControlAction(
   );
 
   const matter = linkedMatterId
-    ? store.matters.find((m) => m.id === linkedMatterId && !m.mergedIntoId)
+    ? matters.find((m) => m.id === linkedMatterId && !m.mergedIntoId)
     : null;
   const pmsMatter = linkedMatterId
     ? getPmsSource().getMatterFinancials(input.matterCode)
@@ -11945,7 +12789,7 @@ export async function recordInvoiceCreditControlAction(
     !matter ||
     !pmsMatter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
       tokenRoles,
     })
@@ -12023,11 +12867,13 @@ export async function recordInvoiceCreditControlAction(
     return { ok: true, taskId: res.task?.id };
   }
 
-  // Record a note on the client or matter and log an audit entry
+  // Record a note on the client or matter in PostgreSQL and log an audit entry
   const targetRecordId = linkedOrgId ?? linkedPersonId ?? linkedMatterId;
   if (targetRecordId) {
-    store.notes.unshift({
-      id: nextId(store, 'N'),
+    const partyRepo = getPartyRepository();
+    const noteId = await partyRepo.allocateNextNoteId(ctx);
+    await partyRepo.putNote(ctx, {
+      id: noteId,
       recordType: targetRecordId.startsWith('O-')
         ? 'organisation'
         : targetRecordId.startsWith('P-')
@@ -12214,9 +13060,11 @@ export async function deleteMatterPartyRelationship(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const matters = await getMatterRepository().listAllMatters<Matter>(ctx);
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
-  const usage = computeMatterPartyUsageCounts(store.matters);
+  const usage = computeMatterPartyUsageCounts(matters);
   const count = usage.byRelationshipCode[code] ?? 0;
   if (count > 0) {
     return {
@@ -12338,9 +13186,11 @@ export async function deleteMatterPartyCapacity(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const matters = await getMatterRepository().listAllMatters<Matter>(ctx);
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
-  const usage = computeMatterPartyUsageCounts(store.matters);
+  const usage = computeMatterPartyUsageCounts(matters);
   const count = usage.byCapacityCode[code] ?? 0;
   if (count > 0) {
     return {
@@ -12435,10 +13285,16 @@ export async function saveQuoteRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === opts.byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, opts.byId);
+  const [people, organisations, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getPartyRepository().listAllOrganisations<Organisation>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === opts.byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -12446,6 +13302,8 @@ export async function saveQuoteRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const now = new Date();
@@ -12460,11 +13318,11 @@ export async function saveQuoteRecord(
   const clientType = input.clientType || 'prospect';
   const linkedOrganisationId = input.linkedOrganisationId || null;
   const linkedPersonId = input.linkedPersonId || null;
-  if (linkedOrganisationId && !store.organisations.some((o) => o.id === linkedOrganisationId)) {
+  if (linkedOrganisationId && !organisations.some((o) => o.id === linkedOrganisationId)) {
     const msg = 'Linked organisation not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  if (linkedPersonId && !store.people.some((p) => p.id === linkedPersonId)) {
+  if (linkedPersonId && !people.some((p) => p.id === linkedPersonId)) {
     const msg = 'Linked person not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -12605,7 +13463,7 @@ export async function saveQuoteRecord(
       action: 'create',
       field: markSent ? 'Quote created and marked as sent' : 'Quote saved as draft',
       oldValue: null,
-      newValue: `${created.reference} — ${quoteClientDisplayName(created, store.people, store.organisations)}`,
+      newValue: `${created.reference} — ${quoteClientDisplayName(created, people, organisations)}`,
       byId: opts.byId,
       at: nowIso,
     });
@@ -12687,10 +13545,15 @@ export async function markQuoteSentRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -12698,6 +13561,8 @@ export async function markQuoteSentRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = store.quotes.find((q) => q.id === quoteId);
@@ -12758,10 +13623,15 @@ export async function logQuoteFollowUpRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -12769,6 +13639,8 @@ export async function logQuoteFollowUpRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = store.quotes.find((q) => q.id === quoteId);
@@ -12852,10 +13724,15 @@ export async function reviseQuoteRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -12863,6 +13740,8 @@ export async function reviseQuoteRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = store.quotes.find((q) => q.id === quoteId);
@@ -13004,10 +13883,15 @@ export async function recordQuoteOutcomeRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -13015,6 +13899,8 @@ export async function recordQuoteOutcomeRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = store.quotes.find((q) => q.id === quoteId);
@@ -13110,10 +13996,19 @@ export async function prepareQuoteConversionRecord(
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
   const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [people, organisations, links, matters] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    partyRepo.listAllOrganisations<Organisation>(ctx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
+    matterRepo.listAllMatters<Matter>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'matter:create', {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -13126,6 +14021,8 @@ export async function prepareQuoteConversionRecord(
     };
   }
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = store.quotes.find((q) => q.id === quoteId);
@@ -13138,7 +14035,7 @@ export async function prepareQuoteConversionRecord(
   const today = toIsoDate(now);
   const actorName = actor ? personDisplayName(actor) : byId;
   const actorHasRiskView = hasPersonPermission(actor, 'risk:view', {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
 
@@ -13156,8 +14053,8 @@ export async function prepareQuoteConversionRecord(
 
   const hasOrgName = Boolean(quote.prospectOrganisationName.trim());
   const hasPersonName = Boolean(quote.prospectName.trim());
-  const existingOrg = orgId ? store.organisations.find((o) => o.id === orgId) : undefined;
-  const existingPerson = personId ? store.people.find((p) => p.id === personId) : undefined;
+  const existingOrg = orgId ? organisations.find((o) => o.id === orgId) : undefined;
+  const existingPerson = personId ? people.find((p) => p.id === personId) : undefined;
   const clientOrgName = existingOrg?.legalName || quote.prospectOrganisationName.trim();
   const clientPersonName = existingPerson
     ? personDisplayName(existingPerson)
@@ -13212,8 +14109,8 @@ export async function prepareQuoteConversionRecord(
     submittedParties,
     clientId: orgId || personId || null,
     instructingContactId: orgId ? personId : null,
-    people: store.people,
-    organisations: store.organisations,
+    people,
+    organisations,
   });
 
   const rawMatterMatches = searchMatterConflicts(
@@ -13227,11 +14124,11 @@ export async function prepareQuoteConversionRecord(
       reviewedAtIso: nowIso,
     },
     {
-      matters: store.matters,
+      matters,
       enquiries: store.enquiries,
-      people: store.people,
-      organisations: store.organisations,
-      links: store.links,
+      people,
+      organisations,
+      links,
       tenantId: getActiveTenantConfiguration().tenantId,
       canView: visibility.canViewMatter,
       canViewEnquiry: visibility.canViewEnquiry,
@@ -13267,20 +14164,20 @@ export async function prepareQuoteConversionRecord(
       linkedPersonId: personId ?? null,
       linkedOrganisationId: orgId ?? null,
     },
-    store.people,
-    store.organisations,
-    store.matters,
+    people,
+    organisations,
+    matters,
     store.values,
     store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
     quote.linkedEnquiryId ?? null,
-    store.links,
+    links,
     visibility.canViewMatter,
     getActiveTenantConfiguration().tenantId,
   );
 
   const hasRestrictedMatch = hasUnapprovedRestrictedMatches(reconciledMatches, []);
   const declinedOrgAssessment = assessDeclinedOrganisation(
-    store,
+    organisations,
     existingOrg,
     clientOrgName,
   );
@@ -13444,9 +14341,11 @@ export async function prepareQuoteConversionRecord(
     createdNewClientOrg = true;
 
     if (personId && orgId) {
-      const linkExists = store.links.some(
-        (l) => l.personId === personId && l.organisationId === orgId,
+      const personLinks = await partyRepo.listLinksForPerson<PersonOrganisationLink>(
+        ctx,
+        personId,
       );
+      const linkExists = personLinks.some((l) => l.organisationId === orgId);
       if (!linkExists) {
         await createOrUpdateLink(
           {
@@ -13471,13 +14370,14 @@ export async function prepareQuoteConversionRecord(
 
   // R254: Set conflict status and conflictDecision only on organisations created by this conversion.
   if (createdNewClientOrg && orgId) {
-    const orgRecord = store.organisations.find((o) => o.id === orgId);
+    const orgRecord = await partyRepo.getOrganisationById<Organisation>(ctx, orgId);
     if (orgRecord) {
       orgRecord.conflictStatusId = vid('conflict_status', outcomeLabel);
       orgRecord.conflictReference = conflictReference;
       orgRecord.reviewDate = today;
       orgRecord.reviewerId = byId;
       orgRecord.conflictDecision = decisionSnapshot;
+      await partyRepo.putOrganisation(ctx, orgRecord);
       writeAudit(store, {
         recordType: 'organisation',
         recordId: orgId,
@@ -13710,7 +14610,7 @@ export async function resolveOrProvisionEntraEmployee(
     verifiedToken,
   } = resolvePersonForEntraClaims({
     claims,
-    people: prelimStore.people,
+    people: [],
     teams: prelimStore.teams,
     tenantId: activeTenantId,
     rbacConfig,
@@ -13735,7 +14635,7 @@ export async function resolveOrProvisionEntraEmployee(
     }),
     activeTenantConfig,
   );
-  await syncAndHydratePartiesAndMattersFromPostgres(prelimStore, signInCtx);
+  const prelimPeople = await getPartyRepository().listAllPeople<Person>(signInCtx);
   if (claimEmail) {
     await getPartyRepository().findActivePeopleByEmail(signInCtx, claimEmail);
   }
@@ -13744,7 +14644,7 @@ export async function resolveOrProvisionEntraEmployee(
     refusedPrivilegedEmailLinkPersonId,
   } = resolvePersonForEntraClaims({
     claims,
-    people: prelimStore.people,
+    people: prelimPeople,
     teams: prelimStore.teams,
     tenantId: activeTenantId,
     rbacConfig,
@@ -13804,180 +14704,181 @@ export async function resolveOrProvisionEntraEmployee(
     label: 'resolveOrProvisionEntraEmployee',
     resolveCtx: () => signInCtx,
     mutate: async (store) => {
+      const partyRepo = getPartyRepository();
+      const people = await partyRepo.listAllPeople<Person>(signInCtx);
       const {
         person: matchedPerson,
         matchedByEmailOnly,
       } = resolvePersonForEntraClaims({
         claims,
-        people: store.people,
+        people,
         teams: store.teams,
         tenantId: activeTenantId,
         rbacConfig,
         primaryDomain: activeTenantConfig.branding.primaryDomain,
       });
 
-  if (matchedPerson) {
-    const prevOid = matchedPerson.entraObjectId?.trim() || null;
-    const isFirstEmailLink = Boolean(matchedByEmailOnly && !prevOid && oid);
-    if (isFirstEmailLink && oid) {
-      matchedPerson.entraObjectId = oid;
+      if (matchedPerson) {
+        const prevOid = matchedPerson.entraObjectId?.trim() || null;
+        const isFirstEmailLink = Boolean(matchedByEmailOnly && !prevOid && oid);
+        if (isFirstEmailLink && oid) {
+          matchedPerson.entraObjectId = oid;
+          writeAudit(store, {
+            recordType: 'person',
+            recordId: matchedPerson.id,
+            action: 'entra-link',
+            field: 'Entra ID Email Link',
+            oldValue: 'unlinked',
+            newValue: `Linked employee ${matchedPerson.id} on first verified-domain sign-in`,
+            byId: matchedPerson.id,
+            at: now,
+          });
+          console.info(
+            JSON.stringify({
+              event: 'ENTRA_EMAIL_LINK_BOUND',
+              tenantId: activeTenantId,
+              correlationId,
+              personId: matchedPerson.id,
+            }),
+          );
+        }
+        if (authorityMode === 'token_only') {
+          matchedPerson.roles = [...verifiedToken.roles];
+          matchedPerson.appRole = matchedPerson.roles.includes('admin')
+            ? 'admin'
+            : matchedPerson.roles.length > 0
+              ? 'fee_earner'
+              : null;
+          if (matchedPerson.roles.length === 0) {
+            matchedPerson.employeeRoleId = null;
+          } else if (matchedPerson.roles.includes('admin')) {
+            matchedPerson.employeeRoleId = 'employee_role.system_administrator';
+          }
+        }
+        matchedPerson.updatedAt = now;
+        await partyRepo.putPerson(signInCtx, matchedPerson);
+        writeAudit(store, {
+          recordType: 'person',
+          recordId: matchedPerson.id,
+          action: 'update',
+          field: 'Entra ID OIDC Sign-In',
+          oldValue: prevOid ? 'bound' : 'unlinked',
+          newValue: `personId=${matchedPerson.id}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
+          byId: matchedPerson.id,
+          at: now,
+        });
+        return { person: matchedPerson, verifiedToken, rbacConfig };
+      }
+
+      // Provision a linked employee record for this authenticated Entra user (R52: no default 'admin' or hardcoded 'DEPT-EXEC')
+      const rawName =
+        (typeof claims.name === 'string' && claims.name.trim()) ||
+        claimEmail.split('@')[0] ||
+        'Entra User';
+      const nameParts = rawName.split(/\s+/).filter(Boolean);
+      const firstName = nameParts[0] || 'Entra';
+      const surname = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'User';
+
+      const defaultRoleKeys = rbacConfig.identityMapping?.defaultRoleKeys ?? [];
+      const mappedRoles =
+        verifiedToken.roles.length > 0
+          ? [...verifiedToken.roles]
+          : [...defaultRoleKeys];
+      const isAdmin = mappedRoles.includes('admin');
+      const isPartner =
+        mappedRoles.includes('managing_partner') || mappedRoles.includes('partner');
+
+      const newId = await partyRepo.allocateNextPersonId(signInCtx);
+      const newEmployee: Person = {
+        id: newId,
+        recordType: 'person',
+        recordOwnerId: newId,
+        recordStatusId: 'person_record_status.active',
+        createdById: newId,
+        createdAt: now,
+        updatedById: newId,
+        updatedAt: now,
+        sourceId: null,
+        lastVerifiedAt: now,
+        tags: ['entra-id'],
+        duplicateStatusId: 'duplicate_status.none',
+        notDuplicateOf: [],
+        possibleMatchIds: [],
+        mergedIntoId: null,
+        lastInteractionAt: now,
+        customFields: {},
+        titleId: null,
+        firstName,
+        middleNames: '',
+        surname,
+        preferredName: '',
+        dateOfBirth: null,
+        otherNames: [],
+        jobTitle: isAdmin
+          ? 'System Administrator (Entra ID)'
+          : isPartner
+            ? 'Partner (Entra ID)'
+            : mappedRoles.length > 0
+              ? 'Solicitor (Entra ID)'
+              : 'Unassigned Employee (Entra ID)',
+        emails: claimEmail
+          ? [
+              {
+                id: `em-${newId}-1`,
+                address: claimEmail,
+                typeId: 'email_type.work',
+                isPrimary: true,
+              },
+            ]
+          : [],
+        phones: [],
+        preferredContactMethodId: null,
+        preferredLanguageId: null,
+        addresses: [],
+        website: '',
+        relationshipOwnerId: null,
+        relationshipStatusId: null,
+        relationshipStandingId: null,
+        relationshipRoleIds: [],
+        originId: null,
+        firstKnownAt: now.slice(0, 10),
+        engagementLevelId: null,
+        interests: '',
+        relationshipNotes: '',
+        marketingConsentId: null,
+        consentRecord: '',
+        verificationStatusId: null,
+        verifiedAt: null,
+        verificationMethodId: null,
+        verificationReviewerId: null,
+        riskReferences: '',
+        isEmployee: true,
+        employeeRoleId: isAdmin
+          ? 'employee_role.system_administrator'
+          : isPartner
+            ? 'employee_role.partner'
+            : mappedRoles.length > 0
+              ? 'employee_role.solicitor'
+              : null,
+        departmentId: null,
+        appRole: isAdmin ? 'admin' : mappedRoles.length > 0 ? 'fee_earner' : null,
+        roles: mappedRoles,
+        entraObjectId: oid,
+      };
+
+      await partyRepo.putPerson(signInCtx, newEmployee);
       writeAudit(store, {
         recordType: 'person',
-        recordId: matchedPerson.id,
-        action: 'entra-link',
-        field: 'Entra ID Email Link',
-        oldValue: 'unlinked',
-        newValue: `Linked employee ${matchedPerson.id} on first verified-domain sign-in`,
-        byId: matchedPerson.id,
+        recordId: newEmployee.id,
+        action: 'create',
+        field: 'Entra ID OIDC Provisioned Employee',
+        oldValue: null,
+        newValue: `personId=${newEmployee.id}; roles=${mappedRoles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
+        byId: newEmployee.id,
         at: now,
       });
-      console.info(
-        JSON.stringify({
-          event: 'ENTRA_EMAIL_LINK_BOUND',
-          tenantId: activeTenantId,
-          correlationId,
-          personId: matchedPerson.id,
-        }),
-      );
-    }
-    if (authorityMode === 'token_only') {
-      matchedPerson.roles = [...verifiedToken.roles];
-      matchedPerson.appRole = matchedPerson.roles.includes('admin')
-        ? 'admin'
-        : matchedPerson.roles.length > 0
-          ? 'fee_earner'
-          : null;
-      if (matchedPerson.roles.length === 0) {
-        matchedPerson.employeeRoleId = null;
-      } else if (matchedPerson.roles.includes('admin')) {
-        matchedPerson.employeeRoleId = 'employee_role.system_administrator';
-      }
-    }
-    matchedPerson.updatedAt = now;
-    writeAudit(store, {
-      recordType: 'person',
-      recordId: matchedPerson.id,
-      action: 'update',
-      field: 'Entra ID OIDC Sign-In',
-      oldValue: prevOid ? 'bound' : 'unlinked',
-      newValue: `personId=${matchedPerson.id}; roles=${verifiedToken.roles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
-      byId: matchedPerson.id,
-      at: now,
-    });
-    saveStore(store);
-    return { person: matchedPerson, verifiedToken, rbacConfig };
-  }
 
-  // Provision a linked employee record for this authenticated Entra user (R52: no default 'admin' or hardcoded 'DEPT-EXEC')
-  const rawName =
-    (typeof claims.name === 'string' && claims.name.trim()) ||
-    claimEmail.split('@')[0] ||
-    'Entra User';
-  const nameParts = rawName.split(/\s+/).filter(Boolean);
-  const firstName = nameParts[0] || 'Entra';
-  const surname = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'User';
-
-  const defaultRoleKeys = rbacConfig.identityMapping?.defaultRoleKeys ?? [];
-  const mappedRoles =
-    verifiedToken.roles.length > 0
-      ? [...verifiedToken.roles]
-      : [...defaultRoleKeys];
-  const isAdmin = mappedRoles.includes('admin');
-  const isPartner =
-    mappedRoles.includes('managing_partner') || mappedRoles.includes('partner');
-
-  const newId = nextId(store, 'P');
-  const newEmployee: Person = {
-    id: newId,
-    recordType: 'person',
-    recordOwnerId: newId,
-    recordStatusId: 'person_record_status.active',
-    createdById: newId,
-    createdAt: now,
-    updatedById: newId,
-    updatedAt: now,
-    sourceId: null,
-    lastVerifiedAt: now,
-    tags: ['entra-id'],
-    duplicateStatusId: 'duplicate_status.none',
-    notDuplicateOf: [],
-    possibleMatchIds: [],
-    mergedIntoId: null,
-    lastInteractionAt: now,
-    customFields: {},
-    titleId: null,
-    firstName,
-    middleNames: '',
-    surname,
-    preferredName: '',
-    dateOfBirth: null,
-    otherNames: [],
-    jobTitle: isAdmin
-      ? 'System Administrator (Entra ID)'
-      : isPartner
-        ? 'Partner (Entra ID)'
-        : mappedRoles.length > 0
-          ? 'Solicitor (Entra ID)'
-          : 'Unassigned Employee (Entra ID)',
-    emails: claimEmail
-      ? [
-          {
-            id: `em-${newId}-1`,
-            address: claimEmail,
-            typeId: 'email_type.work',
-            isPrimary: true,
-          },
-        ]
-      : [],
-    phones: [],
-    preferredContactMethodId: null,
-    preferredLanguageId: null,
-    addresses: [],
-    website: '',
-    relationshipOwnerId: null,
-    relationshipStatusId: null,
-    relationshipStandingId: null,
-    relationshipRoleIds: [],
-    originId: null,
-    firstKnownAt: now.slice(0, 10),
-    engagementLevelId: null,
-    interests: '',
-    relationshipNotes: '',
-    marketingConsentId: null,
-    consentRecord: '',
-    verificationStatusId: null,
-    verifiedAt: null,
-    verificationMethodId: null,
-    verificationReviewerId: null,
-    riskReferences: '',
-    isEmployee: true,
-    employeeRoleId: isAdmin
-      ? 'employee_role.system_administrator'
-      : isPartner
-        ? 'employee_role.partner'
-        : mappedRoles.length > 0
-          ? 'employee_role.solicitor'
-          : null,
-    departmentId: null,
-    appRole: isAdmin ? 'admin' : mappedRoles.length > 0 ? 'fee_earner' : null,
-    roles: mappedRoles,
-    entraObjectId: oid,
-  };
-
-  store.people.push(newEmployee);
-  writeAudit(store, {
-    recordType: 'person',
-    recordId: newEmployee.id,
-    action: 'create',
-    field: 'Entra ID OIDC Provisioned Employee',
-    oldValue: null,
-    newValue: `personId=${newEmployee.id}; roles=${mappedRoles.join(',') || 'none'}; mfa=${verifiedToken.mfaVerified}; correlationId=${correlationId}`,
-    byId: newEmployee.id,
-    at: now,
-  });
-  saveStore(store);
-
-  return { person: newEmployee, verifiedToken, rbacConfig };
+      return { person: newEmployee, verifiedToken, rbacConfig };
     },
   });
 }
@@ -13986,12 +14887,48 @@ export async function resolveOrProvisionEntraEmployee(
 // Key Dates & Limitation Module Service Functions (§1–§9)
 // ============================================================================
 
-function resolveActorForKeyDates(store: FirmStore, byId: string): Person | null {
+function resolveActorFromPeopleForKeyDates(
+  people: readonly Person[],
+  byId: string,
+): Person | null {
   if (!byId || !byId.trim()) return null;
   return (
-    store.people.find((p) => p.id === byId && p.isEmployee && !p.mergedIntoId) ??
+    people.find((p) => p.id === byId && p.isEmployee && !p.mergedIntoId) ??
     null
   );
+}
+
+async function resolveKeyDatesActorAndData(
+  store: FirmStore,
+  byId: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<{
+  ctx: TenantContext;
+  actor: Person | null;
+  people: Person[];
+  matters: Matter[];
+} | null> {
+  if (!byId || !byId.trim()) return null;
+  let prelimCtx: TenantContext;
+  try {
+    prelimCtx = resolveDefaultServiceTenantContext(store, null, {
+      tenantCtx: options?.tenantCtx,
+    });
+  } catch {
+    return null;
+  }
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(prelimCtx),
+    getMatterRepository().listAllMatters<Matter>(prelimCtx),
+  ]);
+  const actor = resolveActorFromPeopleForKeyDates(people, byId);
+  if (!actor) {
+    return { ctx: prelimCtx, actor: null, people, matters };
+  }
+  const ctx = resolveDefaultServiceTenantContext(store, actor.id, {
+    tenantCtx: options?.tenantCtx,
+  });
+  return { ctx, actor, people, matters };
 }
 
 function assertKeyDatesModuleEnabled(
@@ -14059,14 +14996,13 @@ export async function getMatterKeyDatesSnapshot(
   canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
 }> {
   const store = getStore();
+  let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    const prelimCtx = resolveDefaultServiceTenantContext(store, userId);
-    await syncAndHydratePartiesAndMattersFromPostgres(store, prelimCtx);
+    resolved = await resolveKeyDatesActorAndData(store, userId);
   } catch {
-    // Handled below if user is missing or session is unauthenticated
+    resolved = null;
   }
-  const user = resolveActorForKeyDates(store, userId);
-  if (!user) {
+  if (!resolved || !resolved.actor) {
     return {
       keyDates: [],
       keyDateNotApplicable: [],
@@ -14075,12 +15011,12 @@ export async function getMatterKeyDatesSnapshot(
       canVerifyByKeyDateId: {},
     };
   }
-  const ctx = resolveDefaultServiceTenantContext(store, user.id);
+  const { ctx, actor: user, people, matters } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: user.id });
   if (
     !hasKeyDatePermission(user, 'keydate:view', {
       config,
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -14092,8 +15028,8 @@ export async function getMatterKeyDatesSnapshot(
       canVerifyByKeyDateId: {},
     };
   }
-  const matter = store.matters.find((m) => m.id === matterId);
-  if (!matter || !canViewerAccessMatterKeyDates(matter, user.id, user, store.people)) {
+  const matter = matters.find((m) => m.id === matterId);
+  if (!matter || !canViewerAccessMatterKeyDates(matter, user.id, user, people)) {
     return {
       keyDates: [],
       keyDateNotApplicable: [],
@@ -14102,7 +15038,7 @@ export async function getMatterKeyDatesSnapshot(
       canVerifyByKeyDateId: {},
     };
   }
-  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const keyDateRepo = getKeyDateRepository();
   const [keyDates, keyDateNotApplicable, allReminders, allCalendarSyncs] =
     await Promise.all([
@@ -14125,7 +15061,7 @@ export async function getMatterKeyDatesSnapshot(
   for (const kd of keyDates) {
     canVerifyByKeyDateId[kd.id] = canUserVerifyKeyDate(user, kd, {
       config,
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     });
   }
@@ -14150,16 +15086,16 @@ export async function previewLimitationCalculationRecord(
 ): Promise<{ ok: boolean; result?: CalculationResult; error?: string }> {
   try {
     const store = getStore();
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
+    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+    const { ctx, actor, people } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     if (
       !hasKeyDatePermission(actor, 'keydate:view', {
         config,
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
@@ -14228,11 +15164,11 @@ export async function createOrProposeKeyDateRecord(
   try {
     return await withJsonStoreWriteLock(async (compensator) => {
       const store = getStore();
-      const actor = resolveActorForKeyDates(store, byId);
-      if (!actor) {
+      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const { ctx, actor, people, matters } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -14241,7 +15177,7 @@ export async function createOrProposeKeyDateRecord(
       const todayIso = toIsoDate(new Date());
 
       const matter = input.matterId
-        ? store.matters.find((m) => m.id === input.matterId) ?? null
+        ? matters.find((m) => m.id === input.matterId) ?? null
         : null;
       const enquiry = input.enquiryId
         ? store.enquiries.find((e) => e.id === input.enquiryId) ?? null
@@ -14249,7 +15185,7 @@ export async function createOrProposeKeyDateRecord(
 
       if (
         input.matterId &&
-        (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+        (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people))
       ) {
         return { ok: false, error: 'Matter not found or restricted.' };
       }
@@ -14271,7 +15207,7 @@ export async function createOrProposeKeyDateRecord(
         return buildActionDenied('FORBIDDEN', manualCheck.error);
       }
 
-      await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+      await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
       const keyDateRepo = getKeyDateRepository();
       const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
       const stagedAudit: AuditEntry[] = [];
@@ -14297,7 +15233,7 @@ export async function createOrProposeKeyDateRecord(
         nowIso,
         config,
         teams: store.teams,
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
@@ -14314,7 +15250,7 @@ export async function createOrProposeKeyDateRecord(
           tasks: storeTasks,
           reminderStates: reminderStatesWorking,
           matters: matter ? [matter] : [],
-          people: store.people,
+          people,
           audit: stagedAudit,
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
           todayIso,
@@ -14369,11 +15305,11 @@ export async function proposeProvisionalKeyDateRecord(
   try {
     return await withJsonStoreWriteLock(async (compensator) => {
       const store = getStore();
-      const actor = resolveActorForKeyDates(store, byId);
-      if (!actor) {
+      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const { ctx, actor, people, matters } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -14386,6 +15322,8 @@ export async function proposeProvisionalKeyDateRecord(
         store,
         keyDateId,
         actor,
+        people,
+        matters,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -14404,7 +15342,7 @@ export async function proposeProvisionalKeyDateRecord(
         matter,
         enquiry,
         teams: store.teams,
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
@@ -14427,7 +15365,7 @@ export async function proposeProvisionalKeyDateRecord(
           tasks: storeTasks,
           reminderStates: reminderStatesWorking,
           matters: matter ? [matter] : [],
-          people: store.people,
+          people,
           audit: stagedAudit,
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
           todayIso,
@@ -14480,8 +15418,10 @@ async function loadKeyDateForActorOrClassifyError(
   store: FirmStore,
   keyDateId: string,
   actor: Person,
+  people: readonly Person[],
+  matters: readonly Matter[],
 ): Promise<{ kd: KeyDate | null; error?: string; matter: Matter | null; enquiry: Enquiry | null }> {
-  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const keyDateRepo = getKeyDateRepository();
   const kd = await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
   if (!kd) {
@@ -14499,14 +15439,14 @@ async function loadKeyDateForActorOrClassifyError(
     return { kd: null, error: 'Key date not found.', matter: null, enquiry: null };
   }
   const matter = kd.matterId
-    ? store.matters.find((m) => m.id === kd.matterId) ?? null
+    ? matters.find((m) => m.id === kd.matterId) ?? null
     : null;
   const enquiry = kd.enquiryId
     ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
     : null;
   if (
     kd.matterId &&
-    (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+    (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people as Person[]))
   ) {
     return { kd: null, error: 'Matter not found or restricted.', matter: null, enquiry: null };
   }
@@ -14520,11 +15460,11 @@ export async function verifyProposedKeyDateRecord(
   try {
     return await withJsonStoreWriteLock(async (compensator) => {
       const store = getStore();
-      const verifier = resolveActorForKeyDates(store, byId);
-      if (!verifier) {
+      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const ctx = resolveDefaultServiceTenantContext(store, verifier.id);
+      const { ctx, actor: verifier, people, matters } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -14534,6 +15474,8 @@ export async function verifyProposedKeyDateRecord(
         store,
         keyDateId,
         verifier,
+        people,
+        matters,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -14551,7 +15493,7 @@ export async function verifyProposedKeyDateRecord(
         nowIso,
         config,
         teams: store.teams,
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
@@ -14574,7 +15516,7 @@ export async function verifyProposedKeyDateRecord(
         tasks: storeTasks,
         reminderStates: reminderStatesWorking,
         matters: matter ? [matter] : [],
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
         todayIso,
@@ -14634,11 +15576,11 @@ export async function rejectProposedKeyDateRecord(
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     const store = getStore();
-    const verifier = resolveActorForKeyDates(store, byId);
-    if (!verifier) {
+    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const ctx = resolveDefaultServiceTenantContext(store, verifier.id);
+    const { ctx, actor: verifier, people, matters } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
     const disabledErr = assertKeyDatesModuleEnabled(config);
     if (disabledErr) return disabledErr;
@@ -14648,6 +15590,8 @@ export async function rejectProposedKeyDateRecord(
       store,
       keyDateId,
       verifier,
+      people,
+      matters,
     );
     if (!loaded.kd) {
       return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -14664,7 +15608,7 @@ export async function rejectProposedKeyDateRecord(
       nowIso,
       config,
       teams: store.teams,
-      people: store.people,
+      people,
       audit: stagedAudit,
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
@@ -14712,11 +15656,11 @@ export async function supersedeConfirmedKeyDateRecord(
   try {
     return await withJsonStoreWriteLock(async (compensator) => {
       const store = getStore();
-      const actor = resolveActorForKeyDates(store, byId);
-      if (!actor) {
+      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const { ctx, actor, people, matters } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -14726,6 +15670,8 @@ export async function supersedeConfirmedKeyDateRecord(
         store,
         keyDateId,
         actor,
+        people,
+        matters,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -14769,7 +15715,7 @@ export async function supersedeConfirmedKeyDateRecord(
         matter,
         enquiry,
         teams: store.teams,
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
@@ -14791,7 +15737,7 @@ export async function supersedeConfirmedKeyDateRecord(
         tasks: storeTasks,
         reminderStates: reminderStatesWorking,
         matters: matter ? [matter] : [],
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
         todayIso,
@@ -14895,11 +15841,11 @@ export async function resolveKeyDateOutcomeRecord(
   try {
     return await withJsonStoreWriteLock(async (compensator) => {
       const store = getStore();
-      const actor = resolveActorForKeyDates(store, byId);
-      if (!actor) {
+      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const { ctx, actor, people, matters } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -14909,6 +15855,8 @@ export async function resolveKeyDateOutcomeRecord(
         store,
         keyDateId,
         actor,
+        people,
+        matters,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -14927,7 +15875,7 @@ export async function resolveKeyDateOutcomeRecord(
         nowIso,
         config,
         teams: store.teams,
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
@@ -14999,11 +15947,11 @@ export async function reassignKeyDateTeamRecord(
   try {
     return await withJsonStoreWriteLock(async (compensator) => {
       const store = getStore();
-      const actor = resolveActorForKeyDates(store, byId);
-      if (!actor) {
+      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const { ctx, actor, people, matters } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -15013,6 +15961,8 @@ export async function reassignKeyDateTeamRecord(
         store,
         keyDateId,
         actor,
+        people,
+        matters,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -15036,7 +15986,7 @@ export async function reassignKeyDateTeamRecord(
         matter,
         tasks: storeTasks,
         teams: store.teams,
-        people: store.people,
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
@@ -15092,21 +16042,21 @@ export async function recordKeyDateNotApplicableRecord(
 ): Promise<{ ok: boolean; record?: KeyDateNotApplicable; error?: string }> {
   try {
     const store = getStore();
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
+    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+    const { ctx, actor, people, matters } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     const disabledErr = assertKeyDatesModuleEnabled(config);
     if (disabledErr) return disabledErr;
 
-    const matter = store.matters.find((m) => m.id === input.matterId);
-    if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
+    const matter = matters.find((m) => m.id === input.matterId);
+    if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people)) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
-    await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+    await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
     const keyDateRepo = getKeyDateRepository();
     const existingNaList = await keyDateRepo.listNotApplicableForMatter(
       ctx,
@@ -15127,7 +16077,7 @@ export async function recordKeyDateNotApplicableRecord(
       config,
       notApplicableList: existingNaList,
       teams: store.teams,
-      people: store.people,
+      people,
       audit: stagedAudit,
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
@@ -15157,11 +16107,11 @@ export async function acknowledgeKeyDateReminderRecord(
   try {
     return await withJsonStoreWriteLock(async (compensator) => {
       const store = getStore();
-      const actor = resolveActorForKeyDates(store, byId);
-      if (!actor) {
+      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const { ctx, actor, people, matters } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -15169,7 +16119,7 @@ export async function acknowledgeKeyDateReminderRecord(
       if (
         !hasKeyDatePermission(actor, 'keydate:view', {
           config,
-          allPeople: store.people,
+          allPeople: people,
           teams: store.teams,
         })
       ) {
@@ -15185,6 +16135,8 @@ export async function acknowledgeKeyDateReminderRecord(
         store,
         keyDateId,
         actor,
+        people,
+        matters,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -15228,7 +16180,7 @@ export async function acknowledgeKeyDateReminderRecord(
           tasks: storeTasks,
           reminderStates: reminderStatesWorking,
           matters: matter ? [matter] : [],
-          people: store.people,
+          people,
           audit: stagedAudit,
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
           todayIso,
@@ -15351,7 +16303,16 @@ export async function runKeyDateReminderSchedulerRecord(
     : options?.mfaVerified === true;
 
   const prelimStore = getStore();
-  const actor = resolveActorForKeyDates(prelimStore, actorId);
+  let prelimPeople: Person[] = [];
+  try {
+    const readPeopleCtx =
+      effectiveTenantCtx ??
+      resolveDefaultServiceTenantContext(prelimStore, null);
+    prelimPeople = await getPartyRepository().listAllPeople<Person>(readPeopleCtx);
+  } catch {
+    prelimPeople = prelimStore.people;
+  }
+  const actor = resolveActorFromPeopleForKeyDates(prelimPeople, actorId);
   if (!actor) {
     return { ok: false, error: `Unknown or unauthenticated user "${actorId}".` };
   }
@@ -15363,7 +16324,7 @@ export async function runKeyDateReminderSchedulerRecord(
   if (
     !hasKeyDatePermission(actor, 'keydate:configure', {
       config: inMemoryKeyDatesConfig,
-      allPeople: prelimStore.people,
+      allPeople: prelimPeople,
       teams: prelimStore.teams,
       rbac: effectiveTenantCtx
         ? { tokenRoles: effectiveTenantCtx.actorRoles }
@@ -15400,6 +16361,10 @@ export async function runKeyDateReminderSchedulerRecord(
 
   return withJsonStoreWriteLock(async (compensator) => {
     const store = getStore();
+    const [people, matters] = await Promise.all([
+      getPartyRepository().listAllPeople<Person>(effectiveTenantCtx!),
+      getMatterRepository().listAllMatters<Matter>(effectiveTenantCtx!),
+    ]);
     const config = await getKeyDatesConfig({
       ctx: effectiveTenantCtx!,
       userId: actor.id,
@@ -15407,7 +16372,7 @@ export async function runKeyDateReminderSchedulerRecord(
     if (
       !hasKeyDatePermission(actor, 'keydate:configure', {
         config,
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
         rbac: { tokenRoles: effectiveTenantCtx!.actorRoles },
       })
@@ -15421,7 +16386,12 @@ export async function runKeyDateReminderSchedulerRecord(
     const nowIso = new Date().toISOString();
     const todayIso = toIsoDate(new Date());
 
-    await ensureStoreMattersRestrictedMetadataSynced(effectiveTenantCtx!, store);
+    await ensureMattersRestrictedMetadataSynced(
+      effectiveTenantCtx!,
+      matters,
+      people,
+      store.teams,
+    );
     const keyDateRepo = getKeyDateRepository();
     // Scheduler evaluates all key dates in the tenant database (including restricted matters via system/admin visibility)
     const allTenantKeyDates = await keyDateRepo.withTenantReadTransaction(
@@ -15450,7 +16420,7 @@ export async function runKeyDateReminderSchedulerRecord(
     let pendingIdx = 0;
 
     const baseline = captureJsonStoreBaseline(store);
-    const { tasks: storeTasks, matters: storeMatters } = store;
+    const { tasks: storeTasks } = store;
     const result = runTenantBackgroundJob(
       {
         jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
@@ -15467,9 +16437,9 @@ export async function runKeyDateReminderSchedulerRecord(
           keyDates: keyDatesWorking,
           reminderStates: reminderStatesWorking,
           tasks: storeTasks,
-          matters: storeMatters,
+          matters,
           teams: store.teams,
-          people: store.people,
+          people,
           notifications: store.notifications,
           audit: stagedAudit,
           nextTaskId: () => nextId(store, 'TSK'),
@@ -15507,19 +16477,24 @@ export async function queryKeyDatesTeamDiaryRecord(
   todayIso: string = toIsoDate(new Date()),
 ): Promise<TeamDiaryEntry[]> {
   const store = getStore();
-  const viewer = resolveActorForKeyDates(store, byId);
-  if (!viewer) return [];
-  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
+  try {
+    resolved = await resolveKeyDatesActorAndData(store, byId);
+  } catch {
+    resolved = null;
+  }
+  if (!resolved || !resolved.actor) return [];
+  const { ctx, actor: viewer, people, matters } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
-  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const keyDateRepo = getKeyDateRepository();
   const [keyDates, reminderStates] = await Promise.all([
     keyDateRepo.listAllVisibleKeyDates(ctx, viewer.id),
     keyDateRepo.listAllReminderStates(ctx, viewer.id),
   ]);
-  const visibleMatters = store.matters.filter((m) =>
+  const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     }),
   );
@@ -15533,7 +16508,7 @@ export async function queryKeyDatesTeamDiaryRecord(
     matters: visibleMatters,
     enquiries: store.enquiries,
     teams: store.teams,
-    people: store.people,
+    people,
   });
 }
 
@@ -15543,14 +16518,19 @@ export async function getKeyDateExceptionsReportRecord(
   todayIso: string = toIsoDate(new Date()),
 ): Promise<KeyDateException[]> {
   const store = getStore();
-  const viewer = resolveActorForKeyDates(store, byId);
-  if (!viewer) return [];
-  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
+  try {
+    resolved = await resolveKeyDatesActorAndData(store, byId);
+  } catch {
+    resolved = null;
+  }
+  if (!resolved || !resolved.actor) return [];
+  const { ctx, actor: viewer, people, matters } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
-  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const canConfigure = hasKeyDatePermission(viewer, 'keydate:configure', {
     config,
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
   });
   const keyDateRepo = getKeyDateRepository();
@@ -15563,9 +16543,9 @@ export async function getKeyDateExceptionsReportRecord(
       keyDateRepo.listAllReminderStates(ctx, viewer.id),
       keyDateRepo.listAllVisibleCalendarSyncs(ctx, viewer.id),
     ]);
-  const visibleMatters = store.matters.filter((m) =>
+  const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     }),
   );
@@ -15580,7 +16560,7 @@ export async function getKeyDateExceptionsReportRecord(
     calendarSyncs,
     matters: visibleMatters,
     teams: store.teams,
-    people: store.people,
+    people,
     values: store.values,
     filterTeamIds: filter.teamIds,
     filterKinds: filter.kinds,
@@ -15597,17 +16577,22 @@ export async function exportKeyDateExceptionsReportRecord(
   todayIso: string = toIsoDate(new Date()),
 ): Promise<{ ok: boolean; content?: string; filename?: string; count?: number; error?: string }> {
   const store = getStore();
-  const viewer = resolveActorForKeyDates(store, byId);
-  if (!viewer) {
+  let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
+  try {
+    resolved = await resolveKeyDatesActorAndData(store, byId);
+  } catch {
+    resolved = null;
+  }
+  if (!resolved || !resolved.actor) {
     return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
   }
-  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  const { ctx, actor: viewer, people } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
 
   if (
     !hasKeyDatePermission(viewer, 'keydate:view_any_team', {
       config,
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
     })
   ) {
@@ -15674,17 +16659,17 @@ export async function saveKeyDatesConfigRecord(
 ): Promise<{ ok: boolean; config?: KeyDatesConfig; error?: string }> {
   try {
     const store = getStore();
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
+    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+    const { ctx, actor, people } = resolved;
     const currentConfig = await getKeyDatesConfig({ ctx, userId: actor.id });
 
     if (
       !hasKeyDatePermission(actor, 'keydate:configure', {
         config: currentConfig,
-        allPeople: store.people,
+        allPeople: people,
         teams: store.teams,
       })
     ) {
