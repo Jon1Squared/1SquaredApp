@@ -624,7 +624,6 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       'integrations.pmsSync.clientCodeAllocation': 'S0-18',
       'integrations.pmsSync.pollIntervalMinutes': 'S0-18',
       'integrations.pmsSync.fieldMappings': 'S0-18',
-      customFields: 'S0-17',
       'documentGeneration.usage.retentionMonths': 'S0-19',
       'documentGeneration.customDocumentTypes': 'backlog',
       'documentAccess.autoRemediateDrift': 'S0-25',

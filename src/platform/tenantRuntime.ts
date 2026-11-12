@@ -16,6 +16,7 @@ import {
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
+  TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
@@ -729,6 +730,7 @@ const matterRepositoryInstance = new TenantMatterRepository();
 const intakeQuoteRepositoryInstance = new TenantIntakeQuoteRepository();
 const taskWorkflowRepositoryInstance = new TenantTaskWorkflowRepository();
 const hrAndRbacRepositoryInstance = new TenantHrAndRbacRepository();
+const catalogueRepositoryInstance = new TenantCatalogueRepository();
 
 export function getPartyRepository(): TenantPartyRepository {
   return partyRepositoryInstance;
@@ -748,6 +750,10 @@ export function getTaskWorkflowRepository(): TenantTaskWorkflowRepository {
 
 export function getHrAndRbacRepository(): TenantHrAndRbacRepository {
   return hrAndRbacRepositoryInstance;
+}
+
+export function getCatalogueRepository(): TenantCatalogueRepository {
+  return catalogueRepositoryInstance;
 }
 
 export function createVerifiedTenantContext(
@@ -798,6 +804,15 @@ export function createVerifiedTenantContext(
       : undefined,
   });
 }
+
+export {
+  TenantCatalogueRepository,
+  TenantHrAndRbacRepository,
+  TenantIntakeQuoteRepository,
+  TenantMatterRepository,
+  TenantPartyRepository,
+  TenantTaskWorkflowRepository,
+};
 
 export function getPlatformArchitectureSnapshot(
   actor: VerifiedSessionActorInput,

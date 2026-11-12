@@ -10,7 +10,9 @@
  */
 
 import {
+  mergeDeclarativeTenantConfigCustomFields,
   TenantAuditRepository,
+  TenantCatalogueRepository,
   TenantDocumentRepository,
   TenantDocumentStoreRepository,
   TenantHrAndRbacRepository,
@@ -21,12 +23,16 @@ import {
   TenantTaskWorkflowRepository,
   type FirmAuditEntryInput,
   type MatterRestrictionMetadata,
+  type TenantChoiceListRecord,
+  type TenantChoiceValueRecord,
   type TenantConfiguration,
   type TenantContext,
+  type TenantCustomFieldDefinitionRecord,
   type TenantEmployeeEmploymentPayload,
   type TenantEmployeeMigrationReportPayload,
   type TenantEmployeeSensitiveHrPayload,
   type TenantEnquiryRecord,
+  type TenantFirmProfilePayload,
   type TenantMatterRecord,
   type TenantMergeHistoryRecord,
   type TenantNoteRecord,
@@ -53,6 +59,7 @@ export type ImportableStoreModule =
   | 'quotes'
   | 'tasks'
   | 'hr'
+  | 'catalogues'
   | 'documents'
   | 'document-store'
   | 'key-dates'
@@ -65,6 +72,7 @@ export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
   'quotes',
   'tasks',
   'hr',
+  'catalogues',
   'documents',
   'document-store',
   'key-dates',
@@ -119,6 +127,11 @@ export interface ImportStoreModulesResult {
     employeeSensitiveRecords: number;
     hasEmployeeMigrationReport: boolean;
     hasRbacConfigOverride: boolean;
+    hasFirmProfile: boolean;
+    choiceLists: number;
+    choiceValues: number;
+    customFieldDefinitions: number;
+    tenantModuleConfigs: number;
     documentTemplates: number;
     documentTemplateVersions: number;
     documents: number;
@@ -224,6 +237,10 @@ export async function clearMigratedPostgresModulesForTenant(options: {
     const hrRbacRepo = new TenantHrAndRbacRepository();
     await hrRbacRepo.clearTenantData(ctx);
   }
+  if (modules.includes('catalogues')) {
+    const catalogueRepo = new TenantCatalogueRepository();
+    await catalogueRepo.clearTenantData(ctx);
+  }
   if (modules.includes('parties')) {
     const partyRepo = new TenantPartyRepository();
     await partyRepo.clearTenantData(ctx);
@@ -275,6 +292,11 @@ export async function importFirmStoreModulesToPostgres(
     employeeSensitiveRecords: 0,
     hasEmployeeMigrationReport: false,
     hasRbacConfigOverride: false,
+    hasFirmProfile: false,
+    choiceLists: 0,
+    choiceValues: 0,
+    customFieldDefinitions: 0,
+    tenantModuleConfigs: 0,
     documentTemplates: 0,
     documentTemplateVersions: 0,
     documents: 0,
@@ -619,6 +641,135 @@ export async function importFirmStoreModulesToPostgres(
     ) {
       throw new Error(
         'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection HR/teams/RBAC row counts did not match imported totals.',
+      );
+    }
+  }
+
+  if (modules.includes('catalogues')) {
+    const catalogueRepo = new TenantCatalogueRepository();
+    const rawLists = (store.lists ?? []) as unknown as TenantChoiceListRecord[];
+    const rawValues = (store.values ??
+      []) as unknown as TenantChoiceValueRecord[];
+    const rawCustomFields = (store.customFields ??
+      []) as unknown as TenantCustomFieldDefinitionRecord[];
+
+    const mergedCatalogues = mergeDeclarativeTenantConfigCustomFields(
+      tenantConfig,
+      rawCustomFields,
+      rawLists,
+      rawValues,
+    );
+
+    const moduleConfigEntries: Array<{
+      key:
+        | 'org_structure'
+        | 'matter_party_taxonomy'
+        | 'matter_party_migration_report'
+        | 'home_pages'
+        | 'matter_costs'
+        | 'enquiry_settings'
+        | 'task_settings'
+        | 'counters';
+      value: unknown;
+    }> = [];
+    if (store.orgStructure !== undefined) {
+      moduleConfigEntries.push({
+        key: 'org_structure',
+        value: store.orgStructure,
+      });
+    }
+    if (store.matterPartyTaxonomy !== undefined) {
+      moduleConfigEntries.push({
+        key: 'matter_party_taxonomy',
+        value: store.matterPartyTaxonomy,
+      });
+    }
+    if (
+      store.matterPartyMigrationReport !== undefined &&
+      store.matterPartyMigrationReport !== null
+    ) {
+      moduleConfigEntries.push({
+        key: 'matter_party_migration_report',
+        value: store.matterPartyMigrationReport,
+      });
+    }
+    if (store.homePagesConfig !== undefined) {
+      moduleConfigEntries.push({
+        key: 'home_pages',
+        value: store.homePagesConfig,
+      });
+    }
+    if (store.matterCostsConfig !== undefined) {
+      moduleConfigEntries.push({
+        key: 'matter_costs',
+        value: store.matterCostsConfig,
+      });
+    }
+    if (store.enquirySettings !== undefined) {
+      moduleConfigEntries.push({
+        key: 'enquiry_settings',
+        value: store.enquirySettings,
+      });
+    }
+    if (store.taskSettings !== undefined) {
+      moduleConfigEntries.push({
+        key: 'task_settings',
+        value: store.taskSettings,
+      });
+    }
+    if (store.counters !== undefined) {
+      moduleConfigEntries.push({
+        key: 'counters',
+        value: store.counters,
+      });
+    }
+
+    await catalogueRepo.withTenantTransaction(ctx, async () => {
+      if (store.firm) {
+        await catalogueRepo.putFirmProfile(ctx, {
+          firmId: store.firmId ?? ctx.tenantId,
+          isCleanDeployment: Boolean(store.isCleanDeployment),
+          firm: store.firm as unknown as TenantFirmProfilePayload,
+        });
+        counts.hasFirmProfile = true;
+      }
+
+      await catalogueRepo.putChoiceLists(ctx, mergedCatalogues.lists);
+      counts.choiceLists = mergedCatalogues.lists.length;
+
+      await catalogueRepo.putChoiceValues(ctx, mergedCatalogues.values);
+      counts.choiceValues = mergedCatalogues.values.length;
+
+      await catalogueRepo.putCustomFieldDefinitions(
+        ctx,
+        mergedCatalogues.customFields,
+      );
+      counts.customFieldDefinitions = mergedCatalogues.customFields.length;
+
+      for (const entry of moduleConfigEntries) {
+        await catalogueRepo.putModuleConfig(
+          ctx,
+          entry.key,
+          entry.value,
+          'system-store-import',
+        );
+        counts.tenantModuleConfigs += 1;
+      }
+    });
+
+    const verifyCatalogueRepo = new TenantCatalogueRepository();
+    const verifiedCatalogueCounts =
+      await verifyCatalogueRepo.countAllTenantCatalogueRows(ctx);
+    if (
+      (counts.hasFirmProfile && !verifiedCatalogueCounts.hasFirmProfile) ||
+      verifiedCatalogueCounts.choiceLists < counts.choiceLists ||
+      verifiedCatalogueCounts.choiceValues < counts.choiceValues ||
+      verifiedCatalogueCounts.customFieldDefinitions <
+        counts.customFieldDefinitions ||
+      verifiedCatalogueCounts.moduleConfigs < counts.tenantModuleConfigs
+    ) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection catalogues/configs row counts did not match imported totals.',
       );
     }
   }

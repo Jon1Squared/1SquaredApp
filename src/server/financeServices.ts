@@ -23,6 +23,7 @@ import type { Matter, Person, PmsLink, Team } from '@/domain/types';
 import {
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
+  getCatalogueRepository,
   getHrAndRbacRepository,
   getMatterRepository,
   getPartyRepository,
@@ -185,11 +186,18 @@ export async function verifyFinanceActorAndPermission(
     );
 
   const store = getStore();
-  const [people, matters, teams] = await Promise.all([
+  const [people, matters, teams, firmProfile, homePagesConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(prelimTenantContext),
     getMatterRepository().listAllMattersUnfiltered<Matter>(prelimTenantContext),
     getHrAndRbacRepository().listAllTeams<Team>(prelimTenantContext),
+    getCatalogueRepository().getFirmProfile(prelimTenantContext),
+    getCatalogueRepository().getHomePagesConfig<FirmStore['homePagesConfig']>(prelimTenantContext),
   ]);
+  const effectiveStore: FirmStore = {
+    ...store,
+    ...(firmProfile ? { isCleanDeployment: firmProfile.isCleanDeployment } : {}),
+    ...(homePagesConfig ? { homePagesConfig } : {}),
+  };
   const actor = people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
   if (!actor) {
     return buildActionDenied(
@@ -260,7 +268,7 @@ export async function verifyFinanceActorAndPermission(
 
   return {
     ok: true,
-    store,
+    store: effectiveStore,
     ctx: tenantContext,
     tenantContext,
     people,

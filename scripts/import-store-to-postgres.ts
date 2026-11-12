@@ -39,6 +39,7 @@ const VALID_MODULES = new Set<ImportableStoreModule>([
   'quotes',
   'tasks',
   'hr',
+  'catalogues',
   'documents',
   'document-store',
   'key-dates',
@@ -51,8 +52,8 @@ function printUsage(): void {
       'Usage: import-store [--modules <csv>] [--store-path <path>] [--clear] [--help]',
       '',
       'Options:',
-      '  --modules <csv>      Comma-separated modules to import (default: parties,matters,intake,quotes,tasks,hr,documents,document-store,key-dates,audit)',
-      '                       Supported: parties (or directory), matters, intake, quotes (or intake-quotes), tasks (or tasks-workflows), hr (or teams, rbac, hr-teams-rbac), documents, document-store, key-dates, audit',
+      '  --modules <csv>      Comma-separated modules to import (default: parties,matters,intake,quotes,tasks,hr,catalogues,documents,document-store,key-dates,audit)',
+      '                       Supported: parties (or directory), matters, intake, quotes (or intake-quotes), tasks (or tasks-workflows), hr (or teams, rbac, hr-teams-rbac), catalogues (or config, catalogues-and-config, catalogues-and-configs), documents, document-store, key-dates, audit',
       '  --store-path <path>  Optional JSON store file path to import instead of the active runtime store',
       '  --clear              Clear target PostgreSQL module tables for the tenant before importing (non-live only for audit)',
       '  --help, -h           Print usage and exit 0',
@@ -119,6 +120,13 @@ export function parseStoreImportCliArgs(argv: readonly string[]): {
             m === 'hr-and-rbac'
           ) {
             return ['hr'];
+          }
+          if (
+            m === 'config' ||
+            m === 'catalogues-and-config' ||
+            m === 'catalogues-and-configs'
+          ) {
+            return ['catalogues'];
           }
           if (!VALID_MODULES.has(m as ImportableStoreModule)) {
             throw new Error(

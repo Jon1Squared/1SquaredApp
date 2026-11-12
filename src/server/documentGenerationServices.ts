@@ -76,11 +76,20 @@ import {
   getActiveActorSession,
   hasPersonPermission,
 } from './rbacRuntime';
-import type { Matter, Organisation, Person, Team } from '@/domain/types';
+import type {
+  ChoiceList,
+  ChoiceValue,
+  CustomFieldDefinition,
+  Matter,
+  Organisation,
+  Person,
+  Team,
+} from '@/domain/types';
 import { resolveRequestCorrelationId } from './correlationId';
 import {
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
+  getCatalogueRepository,
   getHrAndRbacRepository,
   getMatterRepository,
   getPartyRepository,
@@ -92,11 +101,13 @@ import {
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
 import { appendUnmigratedModuleAuditEntries } from './auditAdapter';
-import {
-  getStore,
-  type FirmStore,
-} from './store';
+import type { FirmStore } from './store';
 import type { RecordDeltaCompensator } from './storeLock';
+
+type DocGenCatalogueStoreView = Pick<
+  FirmStore,
+  'isCleanDeployment' | 'firm' | 'values' | 'customFields'
+>;
 
 void findUnmappedPlaceholders;
 void hasPermission;
@@ -248,7 +259,7 @@ export async function getEffectiveTenantConfig(
 }
 
 export async function resolveTenantContextForStoreUser(
-  _store: FirmStore,
+  _store: unknown,
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<{ ctx: TenantContext; user: Person }> {
@@ -308,7 +319,7 @@ export function getDocumentRepository(): TenantDocumentRepository {
 }
 
 export async function repointMergedEntityWithCompensation(
-  store: FirmStore,
+  store: unknown,
   actor: Person | null,
   entityType: 'organisation' | 'person',
   mergedId: string,
@@ -390,7 +401,7 @@ const inFlightSeedTemplatesByTenant = new Map<string, Promise<void>>();
 
 async function ensureSeedDocumentTemplates(
   ctx: TenantContext,
-  store: FirmStore,
+  store: DocGenCatalogueStoreView,
   people: Person[],
   repo: TenantDocumentRepository,
   storage: DocumentStorageProvider,
@@ -421,7 +432,7 @@ async function ensureSeedDocumentTemplates(
 
 async function ensureSeedDocumentTemplatesInner(
   ctx: TenantContext,
-  store: FirmStore,
+  store: DocGenCatalogueStoreView,
   people: Person[],
   repo: TenantDocumentRepository,
   storage: DocumentStorageProvider,
@@ -707,7 +718,7 @@ export async function getInitializedDocGenContext(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<{
-  store: FirmStore;
+  store: DocGenCatalogueStoreView;
   ctx: TenantContext;
   user: Person;
   people: Person[];
@@ -718,20 +729,36 @@ export async function getInitializedDocGenContext(
   repo: TenantDocumentRepository;
   storage: DocumentStorageProvider;
 }> {
-  const store = getStore();
   const { ctx, user } = await resolveTenantContextForStoreUser(
-    store,
+    null,
     userId,
     session,
   );
-  const [people, organisations, matters, teams] = await Promise.all([
+  const repo = getDocumentRepository();
+  const [people, organisations, matters, teams, config] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getEffectiveTenantConfig(ctx, repo),
   ]);
-  const repo = getDocumentRepository();
-  const config = await getEffectiveTenantConfig(ctx, repo);
+  const catalogueSnap = await getCatalogueRepository().getFullCatalogueAndConfigsSnapshot<
+    FirmStore['firm'],
+    ChoiceList,
+    ChoiceValue,
+    CustomFieldDefinition
+  >(ctx, config);
+  const defaultFirm: FirmStore['firm'] = {
+    name: config.displayName,
+    shortName: config.displayName.replace(/\s+LLP$/i, '').trim() || config.displayName,
+    offices: [],
+  };
+  const store: DocGenCatalogueStoreView = {
+    isCleanDeployment: Boolean(catalogueSnap.firmProfile?.isCleanDeployment),
+    firm: catalogueSnap.firmProfile?.firm ?? defaultFirm,
+    values: catalogueSnap.values,
+    customFields: catalogueSnap.customFields,
+  };
   const storage = getDocumentStorage(config);
 
   await ensureSeedDocumentTemplates(ctx, store, people, repo, storage);
