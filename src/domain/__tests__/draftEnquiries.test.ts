@@ -19,7 +19,9 @@ import { resolveLabel } from '../lists';
 import {
   assignEnquiryRecord,
   closeEnquiryRecord,
+  getIntakeQuoteRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
   logEnquiryContactRecord,
   prepareEnquiryConversion,
   saveCustomFieldDefinition,
@@ -53,7 +55,10 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
 
   it('1. Save as draft sets status Draft and creates no task, no queue routing and no SLA target', async () => {
     const store = getStore();
-    const initialTaskCount = store.tasks.length;
+    const ctx = testTenantCtx('P-000018');
+    const initialTaskCount = (
+      await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)
+    ).length;
     const auditMark = await markAuditPosition();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
@@ -84,8 +89,9 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(res.routedTeamName).toBeUndefined();
 
     // No automatic callback task created
-    expect(store.tasks.length).toBe(initialTaskCount);
-    const linkedTasks = store.tasks.filter((t) =>
+    const tasksAfter = await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx);
+    expect(tasksAfter.length).toBe(initialTaskCount);
+    const linkedTasks = tasksAfter.filter((t) =>
       t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === draft.id),
     );
     expect(linkedTasks).toHaveLength(0);
@@ -171,7 +177,10 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       expect(routed.firstContactDueAt?.startsWith('2026-10-21')).toBe(true);
 
       // Callback task created for the routed enquiry
-      const linkedTasks = store.tasks.filter((t) =>
+      const tasksAfterRoute = await getTaskWorkflowRepository().listAllTasksUnfiltered(
+        testTenantCtx('P-000018'),
+      );
+      const linkedTasks = tasksAfterRoute.filter((t) =>
         t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === routed.id),
       );
       expect(linkedTasks).toHaveLength(1);
@@ -233,12 +242,18 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     ]);
 
     // Verify the stored draft was NOT mutated or routed
-    const storedDraft = store.enquiries.find((e) => e.id === draft.id)!;
+    const ctx = testTenantCtx('P-000018');
+    const storedDraft = (await getIntakeQuoteRepository().getEnquiryById(
+      ctx,
+      draft.id,
+      { includeRestricted: true },
+    ))!;
     expect(storedDraft.status).toBe('Draft');
     expect(storedDraft.notes).toBe('');
     expect(storedDraft.updatedAt).toBe(savedUpdatedAt);
+    const tasksNow = await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx);
     expect(
-      store.tasks.filter((t) =>
+      tasksNow.filter((t) =>
         t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === draft.id),
       ),
     ).toHaveLength(0);
@@ -523,14 +538,18 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     const draft = draftRes.enquiry!;
 
     const myTeamIds = new Set(['TM-000005', 'TM-000006']);
+    const allEnquiries =
+      await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
+        testTenantCtx('P-000018'),
+      );
 
     // Appears in "My drafts" for the user who created/took it
-    const myDrafts = filterEnquiriesForTab(store.enquiries, 'drafts', 'P-000018', myTeamIds);
+    const myDrafts = filterEnquiriesForTab(allEnquiries, 'drafts', 'P-000018', myTeamIds);
     expect(myDrafts.some((e) => e.id === draft.id)).toBe(true);
 
     // Does NOT appear in team queues ('team'), 'mine', or 'open'
     for (const tab of ['team', 'mine', 'open'] as const) {
-      const list = filterEnquiriesForTab(store.enquiries, tab, 'P-000018', myTeamIds);
+      const list = filterEnquiriesForTab(allEnquiries, tab, 'P-000018', myTeamIds);
       expect(list.some((e) => e.id === draft.id)).toBe(false);
     }
   });
@@ -611,8 +630,13 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     );
     const enq1 = saved.enquiry!;
     expect(enq1.linkedPersonId).toBeNull();
+    const ctx = testTenantCtx('P-000001');
 
-    let stageList = getEnquiryStagePeople(store.enquiries, store.people, store.values);
+    let stageList = getEnquiryStagePeople(
+      await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
+      store.people,
+      store.values,
+    );
     expect(stageList.some((p) => p.enquiryId === enq1.id && p.displayName === 'Nia Gwynne')).toBe(
       true,
     );
@@ -622,13 +646,22 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       prepareEnquiryConversion(enq1.id, {}, 'P-000001'),
     );
     expect(conv.ok).toBe(true);
-    expect(enq1.linkedPersonId).toBeTruthy();
+    const convertedEnq1 = (await getIntakeQuoteRepository().getEnquiryById(
+      ctx,
+      enq1.id,
+      { includeRestricted: true },
+    ))!;
+    expect(convertedEnq1.linkedPersonId).toBeTruthy();
     const currentPeople = await getPartyRepository().listAllPeople<Person>(
       testTenantCtx('P-000001'),
     );
-    expect(currentPeople.some((p) => p.id === enq1.linkedPersonId)).toBe(true);
+    expect(currentPeople.some((p) => p.id === convertedEnq1.linkedPersonId)).toBe(true);
 
-    stageList = getEnquiryStagePeople(store.enquiries, currentPeople, store.values);
+    stageList = getEnquiryStagePeople(
+      await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
+      currentPeople,
+      store.values,
+    );
     expect(stageList.some((p) => p.enquiryId === enq1.id)).toBe(false);
 
     // 3. Declined enquiry removes the enquiry person from the people list
@@ -647,9 +680,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     )).enquiry!;
 
     expect(
-      getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
-        (p) => p.enquiryId === savedDecline.id,
-      ),
+      getEnquiryStagePeople(
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
+        store.people,
+        store.values,
+      ).some((p) => p.enquiryId === savedDecline.id),
     ).toBe(true);
 
     await runAsTestActor('P-000001', () =>
@@ -660,9 +695,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       ),
     );
     expect(
-      getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
-        (p) => p.enquiryId === savedDecline.id,
-      ),
+      getEnquiryStagePeople(
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
+        store.people,
+        store.values,
+      ).some((p) => p.enquiryId === savedDecline.id),
     ).toBe(false);
 
     // 4. Referred out enquiry removes the enquiry person from the people list
@@ -681,9 +718,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     )).enquiry!;
 
     expect(
-      getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
-        (p) => p.enquiryId === savedRefer.id,
-      ),
+      getEnquiryStagePeople(
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
+        store.people,
+        store.values,
+      ).some((p) => p.enquiryId === savedRefer.id),
     ).toBe(true);
 
     await runAsTestActor('P-000001', () =>
@@ -694,9 +733,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       ),
     );
     expect(
-      getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
-        (p) => p.enquiryId === savedRefer.id,
-      ),
+      getEnquiryStagePeople(
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
+        store.people,
+        store.values,
+      ).some((p) => p.enquiryId === savedRefer.id),
     ).toBe(false);
 
     // 5. Closed (No response) enquiry removes the enquiry person from the people list
@@ -728,9 +769,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       await closeEnquiryRecord(savedNoResp.id, { targetStatus: 'No response' }, 'P-000001');
     });
     expect(
-      getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
-        (p) => p.enquiryId === savedNoResp.id,
-      ),
+      getEnquiryStagePeople(
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
+        store.people,
+        store.values,
+      ).some((p) => p.enquiryId === savedNoResp.id),
     ).toBe(false);
   });
 
@@ -756,9 +799,13 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       },
       { byId: 'P-000018', asDraft: true },
     )).enquiry!;
+    const allEnquiries =
+      await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
+        testTenantCtx('P-000018'),
+      );
 
     // 1. mergePeopleWithEnquiries includes Gethin Maddox as a synthetic Person record
-    const mergedPeople = mergePeopleWithEnquiries(store.people, store.enquiries, store.values);
+    const mergedPeople = mergePeopleWithEnquiries(store.people, allEnquiries, store.values);
     const gethinRecord = mergedPeople.find((p) => p.id === savedEnq.id);
     expect(gethinRecord).toBeDefined();
     expect(gethinRecord?.firstName).toBe('Gethin');
@@ -773,7 +820,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       },
       store.people,
       store.organisations,
-      store.enquiries,
+      allEnquiries,
     );
     expect(entityMatches.people.some((m) => m.person.id === savedEnq.id)).toBe(true);
 
@@ -787,7 +834,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.organisations,
       store.matters,
       store.values,
-      store.enquiries,
+      allEnquiries,
       null,
       [],
       undefined,
@@ -808,7 +855,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.organisations,
       store.matters,
       store.values,
-      store.enquiries,
+      allEnquiries,
       null,
       [],
       undefined,

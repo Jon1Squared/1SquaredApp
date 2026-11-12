@@ -26,9 +26,11 @@ import {
 import {
   executeMerge,
   getAppSnapshot,
+  getIntakeQuoteRepository,
   getKeyDatesConfig,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
   listAuditEntriesForRecord,
   listFirmAuditEntriesPage,
   logEmployeeRestrictedAccess,
@@ -555,11 +557,16 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const store = getStore();
+      const ctx = testTenantCtx('P-000004');
+      const [allTasks, allPeople] = await Promise.all([
+        getTaskWorkflowRepository().listAllTasksUnfiltered(ctx),
+        getPartyRepository().listAllPeople<import('@/domain/types').Person>(ctx),
+      ]);
       let pick: { taskId: string; personId: string } | null = null;
-      for (const task of store.tasks) {
+      for (const task of allTasks) {
         if (task.assignedPersonId) continue;
-        const taker = store.people.find(
-          (p) => p.isEmployee && canUserTakeTask(p.id, task, store.teams, store.people, store.values),
+        const taker = allPeople.find(
+          (p) => p.isEmployee && canUserTakeTask(p.id, task, store.teams, allPeople, store.values),
         );
         if (taker) {
           pick = { taskId: task.id, personId: taker.id };
@@ -584,7 +591,13 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_NESTED/);
       setAuditAdapterFailureHookForTesting(null);
       clearStoreMemoryCache();
-      expect(getStore().tasks.find((t) => t.id === taskId)?.assignedPersonId ?? null).toBeNull();
+      expect(
+        (
+          await getTaskWorkflowRepository().getTaskById(ctx, taskId, {
+            includeRestricted: true,
+          })
+        )?.assignedPersonId ?? null,
+      ).toBeNull();
 
       // (b) Same nested call succeeds without deadlock
       const taken = await withTimeout(
@@ -598,9 +611,9 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       // (c) Real saveMatterRecord (with sourceEnquiryId) -> finalizeEnquiryConversionToMatter -> raiseAutomaticTask
       //     nested chain (R418, R456): on a forced PostgreSQL audit failure, neither the matter nor the automatic
       //     task nor the enquiry status change survives clearStoreMemoryCache(), and no audit rows exist on a fresh connection.
-      const openEnquiry = getStore().enquiries.find(
-        (e) => e.status !== 'Converted' && e.status !== 'No response',
-      )!;
+      const openEnquiry = (
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx)
+      ).find((e) => e.status !== 'Converted' && e.status !== 'No response')!;
       expect(openEnquiry).toBeDefined();
       const baseMatter = (
         await getMatterRepository().listAllMattersUnfiltered<import('@/domain/types').Matter>(
@@ -610,7 +623,9 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       const { id: _omittedMatterId, ...matterTemplate } = baseMatter;
       void _omittedMatterId;
       const conversionTitle = `R456 Enquiry Conversion Matter ${Date.now().toString(36)}`;
-      const preTasksCount = getStore().tasks.length;
+      const preTasksCount = (
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)
+      ).length;
       const preEnquiryStatus = openEnquiry.status;
       const freshAuditRepo = new TenantAuditRepository();
       const preEnquiryAuditIds = new Set(
@@ -654,13 +669,19 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       setAuditAdapterFailureHookForTesting(null);
 
       clearStoreMemoryCache();
-      const reloadedStore = getStore();
       const reloadedMatters = await getMatterRepository().listAllMattersUnfiltered(
         testTenantCtx('P-000004'),
       );
+      const reloadedTasks =
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx);
+      const reloadedEnq = await getIntakeQuoteRepository().getEnquiryById(
+        ctx,
+        openEnquiry.id,
+        { includeRestricted: true },
+      );
       expect(reloadedMatters.some((m) => m.title === conversionTitle)).toBe(false);
-      expect(reloadedStore.tasks.length).toBe(preTasksCount);
-      expect(reloadedStore.enquiries.find((e) => e.id === openEnquiry.id)?.status).toBe(preEnquiryStatus);
+      expect(reloadedTasks.length).toBe(preTasksCount);
+      expect(reloadedEnq?.status).toBe(preEnquiryStatus);
 
       const freshEnquiryAudit = await freshAuditRepo.listAuditEntriesForRecord(
         testTenantCtx('P-000004'),
@@ -675,11 +696,15 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       // commits the matter, converts the enquiry, creates the automatic 'complete_matter_opening' task,
       // and commits matter, enquiry, and task audit rows readable on a fresh connection.
       await resetAllDemoData('P-000001', testDataResetContext());
-      const cleanOpenEnquiry = getStore().enquiries.find(
-        (e) => e.id === openEnquiry.id,
+      const cleanOpenEnquiry = (
+        await getIntakeQuoteRepository().getEnquiryById(ctx, openEnquiry.id, {
+          includeRestricted: true,
+        })
       )!;
       expect(cleanOpenEnquiry).toBeDefined();
-      const prePositiveTasksCount = getStore().tasks.length;
+      const prePositiveTasksCount = (
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)
+      ).length;
       const positiveTitle = `R464 Positive Conversion Matter ${Date.now().toString(36)}`;
       const positiveSaveRes = await withTimeout(
         runAsTestEmployee('P-000004', () =>
@@ -705,9 +730,10 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(positiveSaveRes.matter!.matterNumber).not.toBe('DRAFT');
 
       clearStoreMemoryCache();
-      const afterPositiveStore = getStore();
-      expect(afterPositiveStore.tasks.length).toBe(prePositiveTasksCount + 1);
-      const newAutoTasks = afterPositiveStore.tasks.filter(
+      const afterPositiveTasks =
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx);
+      expect(afterPositiveTasks.length).toBe(prePositiveTasksCount + 1);
+      const newAutoTasks = afterPositiveTasks.filter(
         (t) =>
           t.autoTrigger === 'complete_matter_opening' &&
           t.linkedRecords.some(
@@ -717,7 +743,13 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(newAutoTasks).toHaveLength(1);
       const createdAutoTask = newAutoTasks[0]!;
       expect(
-        afterPositiveStore.enquiries.find((e) => e.id === cleanOpenEnquiry.id)?.status,
+        (
+          await getIntakeQuoteRepository().getEnquiryById(
+            ctx,
+            cleanOpenEnquiry.id,
+            { includeRestricted: true },
+          )
+        )?.status,
       ).toBe('Converted');
 
       const freshPoolMgr = new TenantPostgresPoolManager();
@@ -927,10 +959,10 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     }
   });
 
-  it('R446: nested runUnmigratedJsonMutationWithAudit where outer inserts notification X, inner updates X, and outer audit append fails leaves X absent after clearStoreMemoryCache() and commits no inner audit row', async () => {
+  it('R446: nested runUnmigratedJsonMutationWithAudit where outer inserts unmoved record X, inner updates X, and outer audit append fails leaves X absent after clearStoreMemoryCache() and commits no inner audit row', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const notifId = 'NTF-R446-OVERLAP';
+      const teamId = 'TM-R446-OVERLAP';
       const startedAt = Date.now();
 
       setAuditAdapterFailureHookForTesting(({ entries }) => {
@@ -944,33 +976,31 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
           label: 'r446-outer',
           resolveCtx: () => testTenantCtx('P-000004'),
           mutate: async (outerStore) => {
-            outerStore.notifications.unshift({
-              id: notifId,
-              recipientId: 'P-000002',
-              kind: 'task_assigned',
-              title: 'Inserted by outer frame',
-              detail: 'Outer notification detail',
-              href: '/tasks',
-              recordId: 'P-000002',
-              createdAt: new Date().toISOString(),
-              read: false,
-            } as unknown as (typeof outerStore.notifications)[number]);
+            outerStore.teams.unshift({
+              id: teamId,
+              name: 'Inserted by outer frame',
+              description: 'Outer team detail',
+              leadIds: ['P-000001'],
+              memberIds: ['P-000001'],
+              practiceAreaIds: [],
+              active: true,
+            } as unknown as (typeof outerStore.teams)[number]);
             saveStore(outerStore);
 
             await runUnmigratedJsonMutationWithAudit({
               label: 'r446-inner',
               resolveCtx: () => testTenantCtx('P-000004'),
               mutate: async (innerStore) => {
-                const target = innerStore.notifications.find((n) => n.id === notifId) as
+                const target = innerStore.teams.find((t) => t.id === teamId) as
                   | Record<string, unknown>
                   | undefined;
                 expect(target).toBeDefined();
-                target!.title = 'Updated by inner frame';
+                target!.name = 'Updated by inner frame';
                 stageUnmigratedAuditEntry({
-                  recordType: 'person',
-                  recordId: notifId,
+                  recordType: 'team',
+                  recordId: teamId,
                   action: 'update',
-                  field: 'Inner notification update',
+                  field: 'Inner team update',
                   oldValue: 'Inserted by outer frame',
                   newValue: 'Updated by inner frame',
                   byId: 'P-000004',
@@ -980,12 +1010,12 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
             });
 
             stageUnmigratedAuditEntry({
-              recordType: 'person',
+              recordType: 'team',
               recordId: 'R446-OUTER-TRIGGER',
               action: 'create',
-              field: 'Outer notification trigger',
+              field: 'Outer team trigger',
               oldValue: null,
-              newValue: notifId,
+              newValue: teamId,
               byId: 'P-000004',
             });
           },
@@ -994,13 +1024,13 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       setAuditAdapterFailureHookForTesting(null);
 
       clearStoreMemoryCache();
-      expect(getStore().notifications.some((n) => n.id === notifId)).toBe(false);
+      expect(getStore().teams.some((t) => t.id === teamId)).toBe(false);
 
       const freshRepo = new TenantAuditRepository();
       const innerRows = await freshRepo.listAuditEntriesForRecord(
         testTenantCtx('P-000004'),
-        'person',
-        notifId,
+        'team',
+        teamId,
       );
       expect(innerRows.filter((r) => Date.parse(r.at) >= startedAt)).toEqual([]);
     } finally {

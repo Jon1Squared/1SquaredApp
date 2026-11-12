@@ -2033,7 +2033,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       const store = getStore();
       const snapshotMatters = structuredClone(store.matters);
       const snapshotPeople = structuredClone(store.people);
-      const snapshotNotifications = structuredClone(store.notifications ?? []);
       const snapshotLocations = structuredClone(
         store.matterDocumentLocations ?? [],
       );
@@ -3419,7 +3418,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         setTestEntraSessionOverride(undefined);
         store.matters = snapshotMatters;
         store.people = snapshotPeople;
-        store.notifications = snapshotNotifications;
         store.matterDocumentLocations = snapshotLocations;
         store.documentStoreFolderScopes = snapshotScopes;
         store.documentLifecycleJobs = snapshotJobs;

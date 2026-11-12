@@ -183,7 +183,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    // Round-trip rollback 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
     expect(await runner.getActiveTables(ctx)).toEqual(
       expect.arrayContaining([
         'people',
@@ -196,8 +196,26 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'matter_parties',
         'matter_number_sequences',
         'tenant_record_sequences',
+        'enquiries',
+        'quotes',
+        'quote_reference_sequences',
+        'tasks',
+        'task_linked_records',
+        'notifications',
+        'sign_offs',
+        'recently_viewed',
       ]),
     );
+    expect(await runner.rollbackVersion(ctx, '0010')).toBe(true);
+    const activeAfter0010Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0010Rollback).not.toContain('enquiries');
+    expect(activeAfter0010Rollback).not.toContain('quotes');
+    expect(activeAfter0010Rollback).not.toContain('quote_reference_sequences');
+    expect(activeAfter0010Rollback).not.toContain('tasks');
+    expect(activeAfter0010Rollback).not.toContain('task_linked_records');
+    expect(activeAfter0010Rollback).not.toContain('notifications');
+    expect(activeAfter0010Rollback).not.toContain('sign_offs');
+    expect(activeAfter0010Rollback).not.toContain('recently_viewed');
     expect(await runner.rollbackVersion(ctx, '0009')).toBe(true);
     const activeAfter0009Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0009Rollback).not.toContain('people');
@@ -241,6 +259,14 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'matter_parties',
         'matter_number_sequences',
         'tenant_record_sequences',
+        'enquiries',
+        'quotes',
+        'quote_reference_sequences',
+        'tasks',
+        'task_linked_records',
+        'notifications',
+        'sign_offs',
+        'recently_viewed',
       ]),
     );
   });
