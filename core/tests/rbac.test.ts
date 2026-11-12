@@ -82,6 +82,7 @@ import {
   getAppSnapshot,
   getClientPmsViewBundle,
   getEmployeeDetailsForUser,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterPmsViewBundle,
   getMatterRepository,
@@ -2143,10 +2144,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
 
         // R130: getEmployeeDetailsForUser returns sensitive: null when logEmployeeRestrictedAccess returns null (e.g. caller without employee:view_sensitive or when logViewSensitive is false)
-        store.employeeSensitiveRecords['P-000002'] = {
+        const seededSensitive = {
           personId: 'P-000002',
           RightToWorkStatus: 'Verified',
         } as unknown as (typeof store.employeeSensitiveRecords)[string];
+        store.employeeSensitiveRecords['P-000002'] = seededSensitive;
+        await getHrAndRbacRepository().putSensitiveRecord(
+          testTenantCtx('P-000004'),
+          seededSensitive,
+        );
 
         const deniedRead = await runAsTestActor('P-000006', () =>
           getEmployeeDetailsForUser('P-000002', 'P-000006', {

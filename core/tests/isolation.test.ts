@@ -91,6 +91,7 @@ import {
   flagMatterWriteOff,
   getAppSnapshot,
   getClientPmsViewBundle,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getKeyDateExceptionsReportRecord,
   getMatterPmsViewBundle,
@@ -4098,7 +4099,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       )!;
 
       // 1. Team whose display name (not id or code) equals assigneeTeamKey is NOT picked
-      store.teams.push({
+      const nameOnlyTeam = {
         id: 'TM-R174-NAME-ONLY',
         name: 'custom-team-key-by-name',
         description: 'Name collision test team',
@@ -4111,7 +4112,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         updatedById: partner.id,
         updatedAt: new Date().toISOString(),
-      });
+      };
+      store.teams.push(nameOnlyTeam);
+      await getHrAndRbacRepository().putTeam(
+        testTenantCtx(partner.id),
+        nameOnlyTeam,
+      );
 
       setActiveTenantConfigForTesting({
         ...originalRawBase,
@@ -4133,7 +4139,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         nonRiskEmployee,
       );
       const emptyCustomTeamId = 'TM-R174-EMPTY-TEAM';
-      store.teams.push({
+      const emptyCustomTeam = {
         id: emptyCustomTeamId,
         name: 'Conflict Review Team Without Custom Role Holder',
         description: 'Team that does not include nonRiskEmployee',
@@ -4146,7 +4152,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         updatedById: partner.id,
         updatedAt: new Date().toISOString(),
-      });
+      };
+      store.teams.push(emptyCustomTeam);
+      await getHrAndRbacRepository().putTeam(
+        testTenantCtx(partner.id),
+        emptyCustomTeam,
+      );
       setActiveTenantConfigForTesting({
         ...originalRawBase,
         conflictReview: {
@@ -6969,9 +6980,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           practiceAreaIds: firstTeam.practiceAreaIds,
         }),
       ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
-      expect(store.teams.find((t) => t.id === firstTeam.id)?.name).toBe(
-        firstTeam.name,
-      );
+      expect(
+        (await getHrAndRbacRepository().getTeamById(testDataResetContext(), firstTeam.id))?.name,
+      ).toBe(firstTeam.name);
 
       // 2. Even within an authenticated admin session, tampered cross-tenant record IDs that do not belong to the tenant are rejected with FORBIDDEN and never create phantom records
       setTestEntraSessionOverride({
@@ -6991,7 +7002,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expiresAt,
       });
 
-      const teamsCountBefore = store.teams.length;
+      const teamsCountBefore = (
+        await getHrAndRbacRepository().listAllTeams(testDataResetContext())
+      ).length;
       const cfCountBefore = store.customFields.length;
       const pmsLinksCountBefore = store.pmsLinks.length;
 
@@ -7032,7 +7045,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         practiceAreaIds: [],
       });
       expect(isActionDenied(tamperedTeamSave)).toBe(true);
-      expect(store.teams.length).toBe(teamsCountBefore);
+      expect(
+        (await getHrAndRbacRepository().listAllTeams(testDataResetContext())).length,
+      ).toBe(teamsCountBefore);
 
       const tamperedPmsLink = await linkPmsRecordAction(
         'organisation',

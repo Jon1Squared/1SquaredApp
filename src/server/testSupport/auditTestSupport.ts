@@ -33,6 +33,7 @@ import {
   type VerifiedEntraSessionPayload,
 } from '../entraAuth';
 import {
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getKeyDateRepository,
   getMatterRepository,
@@ -41,14 +42,25 @@ import {
 } from '../services';
 import { getStore } from '../store';
 import { loadCommittedSeedStore } from '../../seed/seedSnapshot';
-import type { Person } from '../../domain/types';
+import type { Person, Team } from '../../domain/types';
 
 let committedSeedPeopleCache: readonly Person[] | null = null;
+let committedSeedTeamsCache: readonly Team[] | null = null;
 function findCommittedSeedPerson(actorId: string): Person | null {
   if (!committedSeedPeopleCache) {
-    committedSeedPeopleCache = loadCommittedSeedStore().people;
+    const seed = loadCommittedSeedStore();
+    committedSeedPeopleCache = seed.people;
+    committedSeedTeamsCache = seed.teams;
   }
   return committedSeedPeopleCache.find((p) => p.id === actorId) ?? null;
+}
+function getCommittedSeedTeams(): readonly Team[] {
+  if (!committedSeedTeamsCache) {
+    const seed = loadCommittedSeedStore();
+    committedSeedPeopleCache = seed.people;
+    committedSeedTeamsCache = seed.teams;
+  }
+  return committedSeedTeamsCache;
 }
 
 export type AuditAdapterTestFailureHook = (params: {
@@ -138,7 +150,10 @@ export function buildTestEntraSessionPayload(
   const roles = options?.roles
     ? [...options.roles]
     : person
-      ? resolveEmployeeRoles(person, store.teams)
+      ? resolveEmployeeRoles(
+          person,
+          store.teams.length > 0 ? store.teams : [...getCommittedSeedTeams()],
+        )
       : [];
   const email =
     options?.email?.trim() ||
@@ -315,6 +330,7 @@ export async function auditEntriesWrittenSince(sinceMs: number): Promise<FirmAud
 
 export {
   getAuditRepository,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getKeyDateRepository,
   getMatterRepository,

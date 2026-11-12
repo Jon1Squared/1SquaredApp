@@ -6181,8 +6181,6 @@ export async function liftMatterRestriction(
       await flushStagedAuditEntries(liftCtx);
     }),
   );
-  const cacheKey = `${liftCtx.postgresDatabaseName}:${saved.id}`;
-  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(meta));
 
   const syncCorrelationId = `corr-lifecycle-sync-${saved.id}-${Date.now()}`;
   try {
