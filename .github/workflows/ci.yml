@@ -98,7 +98,11 @@ jobs:
           default_pool_size = 5
           admin_users = postgres
           EOF
-          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -Atc "SELECT '\"' || rolname || '\" \"' || rolpassword || '\"' FROM pg_authid WHERE rolcanlogin AND rolpassword IS NOT NULL;" | sudo tee /etc/pgbouncer/userlist.txt > /dev/null
+          cat <<EOF | sudo tee /etc/pgbouncer/userlist.txt > /dev/null
+          "${PLATFORM_POSTGRES_ADMIN_USER:-postgres}" "${PLATFORM_POSTGRES_ADMIN_PASSWORD}"
+          "${PLATFORM_POSTGRES_RUNTIME_USER:-runtime_login}" "${PLATFORM_POSTGRES_RUNTIME_PASSWORD}"
+          "${PLATFORM_POSTGRES_MIGRATE_USER:-migrate_login}" "${PLATFORM_POSTGRES_MIGRATE_PASSWORD}"
+          EOF
           sudo chown postgres:postgres /etc/pgbouncer/pgbouncer.ini /etc/pgbouncer/userlist.txt
           sudo chmod 600 /etc/pgbouncer/userlist.txt
           sudo systemctl restart pgbouncer
@@ -208,7 +212,11 @@ jobs:
           default_pool_size = 5
           admin_users = postgres
           EOF
-          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -Atc "SELECT '\"' || rolname || '\" \"' || rolpassword || '\"' FROM pg_authid WHERE rolcanlogin AND rolpassword IS NOT NULL;" | sudo tee /etc/pgbouncer/userlist.txt > /dev/null
+          cat <<EOF | sudo tee /etc/pgbouncer/userlist.txt > /dev/null
+          "${PLATFORM_POSTGRES_ADMIN_USER:-postgres}" "${PLATFORM_POSTGRES_ADMIN_PASSWORD}"
+          "${PLATFORM_POSTGRES_RUNTIME_USER:-runtime_login}" "${PLATFORM_POSTGRES_RUNTIME_PASSWORD}"
+          "${PLATFORM_POSTGRES_MIGRATE_USER:-migrate_login}" "${PLATFORM_POSTGRES_MIGRATE_PASSWORD}"
+          EOF
           sudo chown postgres:postgres /etc/pgbouncer/pgbouncer.ini /etc/pgbouncer/userlist.txt
           sudo chmod 600 /etc/pgbouncer/userlist.txt
           sudo systemctl restart pgbouncer

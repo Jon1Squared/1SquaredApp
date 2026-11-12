@@ -9,6 +9,26 @@ const npxCmd = isWin ? 'npx.cmd' : 'npx';
 const pgHost = process.env.PLATFORM_POSTGRES_MIGRATE_HOST || process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1';
 const pgMigratePort = Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
 
+export function buildPgBouncerUserlistContent(env = process.env) {
+  const adminUser = (env.PLATFORM_POSTGRES_ADMIN_USER || 'postgres').trim();
+  const adminPassword = (env.PLATFORM_POSTGRES_ADMIN_PASSWORD || 'postgres').trim();
+  const runtimeUser = (env.PLATFORM_POSTGRES_RUNTIME_USER || 'runtime_login').trim();
+  const runtimePassword = (
+    env.PLATFORM_POSTGRES_RUNTIME_PASSWORD || 'onesquared_local_runtime'
+  ).trim();
+  const migrateUser = (env.PLATFORM_POSTGRES_MIGRATE_USER || 'migrate_login').trim();
+  const migratePassword = (
+    env.PLATFORM_POSTGRES_MIGRATE_PASSWORD || 'onesquared_local_migrate'
+  ).trim();
+  const escapeEntry = (val) => val.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return [
+    `"${escapeEntry(adminUser)}" "${escapeEntry(adminPassword)}"`,
+    `"${escapeEntry(runtimeUser)}" "${escapeEntry(runtimePassword)}"`,
+    `"${escapeEntry(migrateUser)}" "${escapeEntry(migratePassword)}"`,
+    '',
+  ].join('\n');
+}
+
 function checkTcpPort(host, port, timeoutMs = 1500) {
   return new Promise((resolve) => {
     const socket = new net.Socket();
@@ -129,6 +149,15 @@ async function run() {
 
   if (res.status !== 0) {
     process.exit(res.status ?? 1);
+  }
+
+  const userlistPath = process.env.PGBOUNCER_USERLIST_PATH?.trim();
+  if (userlistPath) {
+    fs.mkdirSync(path.dirname(userlistPath), { recursive: true });
+    fs.writeFileSync(userlistPath, buildPgBouncerUserlistContent(process.env), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
   }
 }
 

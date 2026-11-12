@@ -32,8 +32,25 @@ services:
       MAX_CLIENT_CONN: 200
       DEFAULT_POOL_SIZE: 5
       AUTH_TYPE: scram-sha-256
-      AUTH_QUERY: "SELECT usename, passwd FROM pg_shadow WHERE usename=$$1"
       ADMIN_USERS: postgres
+      PLATFORM_POSTGRES_ADMIN_USER: ${PLATFORM_POSTGRES_ADMIN_USER:-postgres}
+      PLATFORM_POSTGRES_ADMIN_PASSWORD: ${PLATFORM_POSTGRES_ADMIN_PASSWORD:-postgres}
+      PLATFORM_POSTGRES_RUNTIME_USER: ${PLATFORM_POSTGRES_RUNTIME_USER:-runtime_login}
+      PLATFORM_POSTGRES_RUNTIME_PASSWORD: ${PLATFORM_POSTGRES_RUNTIME_PASSWORD:-onesquared_local_runtime}
+      PLATFORM_POSTGRES_MIGRATE_USER: ${PLATFORM_POSTGRES_MIGRATE_USER:-migrate_login}
+      PLATFORM_POSTGRES_MIGRATE_PASSWORD: ${PLATFORM_POSTGRES_MIGRATE_PASSWORD:-onesquared_local_migrate}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /etc/pgbouncer
+        cat <<EOF > /etc/pgbouncer/userlist.txt
+        "$${PLATFORM_POSTGRES_ADMIN_USER}" "$${PLATFORM_POSTGRES_ADMIN_PASSWORD}"
+        "$${PLATFORM_POSTGRES_RUNTIME_USER}" "$${PLATFORM_POSTGRES_RUNTIME_PASSWORD}"
+        "$${PLATFORM_POSTGRES_MIGRATE_USER}" "$${PLATFORM_POSTGRES_MIGRATE_PASSWORD}"
+        EOF
+        chmod 600 /etc/pgbouncer/userlist.txt
+        exec /entrypoint.sh /usr/bin/pgbouncer /etc/pgbouncer/pgbouncer.ini
     ports:
       - "6432:6432"
     healthcheck:

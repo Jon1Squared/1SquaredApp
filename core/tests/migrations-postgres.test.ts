@@ -15,6 +15,7 @@ import {
   type TenantRegistry,
 } from '@platform/core';
 import * as corePkg from '@platform/core';
+import { loadPgModule } from '../src/tenancy/pgDriver';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import * as tenantRuntimePkg from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/server/store';
@@ -707,5 +708,78 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect(summaries).toHaveLength(1);
     expect(summaries[0]!.generatedCount).toBe(1);
     expect(await docStoreRepo.listAuditEvents(ctx)).toHaveLength(1);
+  });
+
+  it('R472: re-provisioning cluster roles leaves existing runtime_login and migrate_login SCRAM verifiers unchanged and pooled connections succeed', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'tenant-a', environment: 'test' }],
+    });
+
+    const pg = await loadPgModule();
+    const host =
+      process.env.PLATFORM_POSTGRES_MIGRATE_HOST?.trim() ||
+      process.env.PLATFORM_POSTGRES_HOST?.trim() ||
+      '127.0.0.1';
+    const port = Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
+    const adminUser = process.env.PLATFORM_POSTGRES_ADMIN_USER?.trim() || 'postgres';
+    const adminPassword = process.env.PLATFORM_POSTGRES_ADMIN_PASSWORD?.trim() || 'postgres';
+
+    const readLoginVerifiers = async (): Promise<Record<string, string>> => {
+      const client = new pg.Client({
+        host,
+        port,
+        database: 'postgres',
+        user: adminUser,
+        password: adminPassword,
+      });
+      await client.connect();
+      try {
+        const res = await client.query<{ rolname: string; rolpassword: string }>(
+          `SELECT rolname, rolpassword
+             FROM pg_authid
+            WHERE rolname IN ('runtime_login', 'migrate_login')
+            ORDER BY rolname`,
+        );
+        return Object.fromEntries(res.rows.map((r) => [r.rolname, r.rolpassword]));
+      } finally {
+        await client.end();
+      }
+    };
+
+    const verifiersBefore = await readLoginVerifiers();
+    expect(verifiersBefore.runtime_login).toMatch(/^SCRAM-SHA-256\$/);
+    expect(verifiersBefore.migrate_login).toMatch(/^SCRAM-SHA-256\$/);
+
+    // Re-provision without rotatePasswords: verifiers in pg_authid must be identical (no salt rotation).
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'tenant-a', environment: 'test' }],
+    });
+
+    const verifiersAfter = await readLoginVerifiers();
+    expect(verifiersAfter.runtime_login).toBe(verifiersBefore.runtime_login);
+    expect(verifiersAfter.migrate_login).toBe(verifiersBefore.migrate_login);
+
+    // Pooled runtime connection succeeds after re-provisioning.
+    const ctx = makeTestTenantContext('tenant-a');
+    const poolMgr = new TenantPostgresPoolManager();
+    try {
+      const repo = new DiagnosticProbeRepository({ poolManager: poolMgr });
+      const probe = await repo.readCurrentRoleAndBackendPid(ctx);
+      expect(probe.currentUser).toBe('role_tenant_tenant_a_test');
+      expect(probe.sessionUser).toBe('runtime_login');
+    } finally {
+      await poolMgr.closeAllPools();
+    }
+
+    // CI workflow and docker-compose build userlist.txt from env passwords rather than copying pg_authid/pg_shadow SCRAM verifiers.
+    const ciYml = fs.readFileSync(path.join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+    expect(ciYml).not.toContain('FROM pg_authid');
+    expect(ciYml).toContain('PLATFORM_POSTGRES_RUNTIME_PASSWORD');
+    expect(ciYml).toContain('PLATFORM_POSTGRES_MIGRATE_PASSWORD');
+
+    const composeYml = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.postgres.yml'), 'utf8');
+    expect(composeYml).not.toContain('FROM pg_shadow');
+    expect(composeYml).toContain('PLATFORM_POSTGRES_RUNTIME_PASSWORD');
+    expect(composeYml).toContain('PLATFORM_POSTGRES_MIGRATE_PASSWORD');
   });
 });

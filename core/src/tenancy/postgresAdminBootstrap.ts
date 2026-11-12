@@ -24,6 +24,12 @@ export interface ProvisionPostgresClusterOptions {
     readonly tenantId: string;
     readonly environment: PlatformEnvironment;
   }>;
+  /**
+   * When false (the default), existing `migrate_login` and `runtime_login` roles keep their
+   * current password / SCRAM verifier (`R472`) while role attributes (`LOGIN`, `NOINHERIT`, etc.)
+   * are still enforced. Pass `true` only when explicitly rotating cluster login passwords.
+   */
+  readonly rotatePasswords?: boolean;
 }
 
 function requireBootstrapEnv(name: string): string {
@@ -73,7 +79,7 @@ export async function provisionPostgresClusterRolesAndDatabases(
 
   const databasesProvisioned: string[] = [];
   try {
-    // 1. Provision migrate_login (migration/provisioning admin) and NOINHERIT runtime_login (R402)
+    // 1. Provision migrate_login (migration/provisioning admin) and NOINHERIT runtime_login (R402, R472)
     const migExists = await adminClient.query(
       'SELECT 1 FROM pg_roles WHERE rolname = $1',
       [migrateUser],
@@ -83,9 +89,13 @@ export async function provisionPostgresClusterRolesAndDatabases(
       await adminClient.query(
         `CREATE ROLE ${migrateIdent} WITH LOGIN CREATEDB CREATEROLE PASSWORD '${escapedMigPass}'`,
       );
-    } else {
+    } else if (options.rotatePasswords === true) {
       await adminClient.query(
         `ALTER ROLE ${migrateIdent} WITH LOGIN CREATEDB CREATEROLE PASSWORD '${escapedMigPass}'`,
+      );
+    } else {
+      await adminClient.query(
+        `ALTER ROLE ${migrateIdent} WITH LOGIN CREATEDB CREATEROLE`,
       );
     }
 
@@ -98,9 +108,13 @@ export async function provisionPostgresClusterRolesAndDatabases(
       await adminClient.query(
         `CREATE ROLE ${runtimeIdent} WITH LOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOSUPERUSER PASSWORD '${escapedRunPass}'`,
       );
-    } else {
+    } else if (options.rotatePasswords === true) {
       await adminClient.query(
         `ALTER ROLE ${runtimeIdent} WITH LOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOSUPERUSER PASSWORD '${escapedRunPass}'`,
+      );
+    } else {
+      await adminClient.query(
+        `ALTER ROLE ${runtimeIdent} WITH LOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOSUPERUSER`,
       );
     }
 
