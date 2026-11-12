@@ -104,6 +104,11 @@ export function sanitizePostgresError(
         existingCode.startsWith('KEY_DATE_') ||
         existingCode.startsWith('MATTER_') ||
         existingCode.startsWith('PARTY_') ||
+        existingCode.startsWith('INTAKE_') ||
+        existingCode.startsWith('QUOTE_') ||
+        existingCode.startsWith('TASK_') ||
+        existingCode.startsWith('NOTIFICATION_') ||
+        existingCode.startsWith('SIGN_OFF_') ||
         existingCode.startsWith('MIGRATION_') ||
         existingCode.startsWith('DOCUMENT_') ||
         existingCode.startsWith('TEMPLATE_'))
@@ -116,6 +121,11 @@ export function sanitizePostgresError(
       err.message.startsWith('KEY_DATE_') ||
       err.message.startsWith('MATTER_') ||
       err.message.startsWith('PARTY_') ||
+      err.message.startsWith('INTAKE_') ||
+      err.message.startsWith('QUOTE_') ||
+      err.message.startsWith('TASK_') ||
+      err.message.startsWith('NOTIFICATION_') ||
+      err.message.startsWith('SIGN_OFF_') ||
       err.message.startsWith('MIGRATION_') ||
       err.message.startsWith('DOCUMENT_') ||
       err.message.startsWith('TEMPLATE_')

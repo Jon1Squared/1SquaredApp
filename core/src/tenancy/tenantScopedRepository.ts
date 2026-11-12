@@ -23,7 +23,7 @@ import {
   type TenantPostgresPoolManager,
 } from './postgresPoolManager';
 
-export const CORE_REQUIRED_SCHEMA_VERSION = '0009';
+export const CORE_REQUIRED_SCHEMA_VERSION = '0010';
 
 export interface TenantQueryResult<TRow = Record<string, unknown>> {
   readonly rows: TRow[];
@@ -43,6 +43,7 @@ interface ActiveTenantTransactionScope {
   readonly databaseName: string;
   readonly readOnly: boolean;
   readonly tx: TenantSqlClient;
+  closed?: boolean;
 }
 
 interface AsyncLocalStorageLike<T> {
@@ -212,6 +213,7 @@ export abstract class TenantScopedRepository {
     const existingScope = joinExistingScope ? txStorage?.getStore() : undefined;
     if (
       existingScope &&
+      !existingScope.closed &&
       existingScope.poolManager === this.poolManager &&
       existingScope.tenantId === ctx.tenantId &&
       existingScope.databaseName === ctx.postgresDatabaseName &&
@@ -229,6 +231,7 @@ export abstract class TenantScopedRepository {
     }
 
     let inTransaction = false;
+    let fnThrew = false;
     try {
       await rawClient.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
       inTransaction = true;
@@ -294,27 +297,36 @@ export abstract class TenantScopedRepository {
         );
       }
 
+      let queryQueue: Promise<unknown> = Promise.resolve();
       const wrappedTx: TenantSqlClient = {
-        query: async <TRow = Record<string, unknown>>(
+        query: <TRow = Record<string, unknown>>(
           sql: string,
           params?: readonly unknown[],
         ): Promise<TenantQueryResult<TRow>> => {
-          try {
-            const res = await rawClient.query(
-              sql,
-              params ? [...params] : undefined,
-            );
-            return {
-              rows: res.rows as TRow[],
-              rowCount: res.rowCount ?? res.rows.length,
-            };
-          } catch (queryErr) {
-            if ((queryErr as { code?: string })?.code === '42P01') {
-              // A missing relation means the schema changed under us (R437): re-check next time.
-              this.poolManager.invalidateSchemaReadiness(target.databaseName);
+          const runQuery = async (): Promise<TenantQueryResult<TRow>> => {
+            try {
+              const res = await rawClient.query(
+                sql,
+                params ? [...params] : undefined,
+              );
+              return {
+                rows: res.rows as TRow[],
+                rowCount: res.rowCount ?? res.rows.length,
+              };
+            } catch (queryErr) {
+              if ((queryErr as { code?: string })?.code === '42P01') {
+                // A missing relation means the schema changed under us (R437): re-check next time.
+                this.poolManager.invalidateSchemaReadiness(target.databaseName);
+              }
+              throw sanitizePostgresError(queryErr, 'query');
             }
-            throw sanitizePostgresError(queryErr, 'query');
-          }
+          };
+          const next = queryQueue.then(runQuery, runQuery);
+          queryQueue = next.then(
+            () => undefined,
+            () => undefined,
+          );
+          return next;
         },
       };
 
@@ -325,9 +337,17 @@ export abstract class TenantScopedRepository {
         readOnly,
         tx: wrappedTx,
       };
-      const result = txStorage
-        ? await txStorage.run(scope, () => fn(wrappedTx))
-        : await fn(wrappedTx);
+      let result: T;
+      try {
+        result = txStorage
+          ? await txStorage.run(scope, () => fn(wrappedTx))
+          : await fn(wrappedTx);
+      } catch (fnErr) {
+        fnThrew = true;
+        throw fnErr;
+      } finally {
+        scope.closed = true;
+      }
 
       await rawClient.query('COMMIT');
       inTransaction = false;
@@ -335,6 +355,13 @@ export abstract class TenantScopedRepository {
     } catch (err) {
       if (inTransaction) {
         await rawClient.query('ROLLBACK').catch(() => {});
+      }
+      const errCode = (err as { code?: unknown })?.code;
+      if (
+        fnThrew &&
+        !(typeof errCode === 'string' && /^[0-9A-Z]{5}$/.test(errCode))
+      ) {
+        throw err;
       }
       throw sanitizePostgresError(err, 'transaction');
     } finally {

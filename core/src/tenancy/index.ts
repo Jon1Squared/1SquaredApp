@@ -35,6 +35,8 @@ export * from './keyDateRepository';
 export * from './auditRepository';
 export * from './partyRepository';
 export * from './matterRepository';
+export * from './intakeQuoteRepository';
+export * from './taskWorkflowRepository';
 
 export {
   isEntraMfaVerified,

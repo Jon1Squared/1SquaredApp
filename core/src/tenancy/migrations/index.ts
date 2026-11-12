@@ -1060,6 +1060,292 @@ DROP SEQUENCE IF EXISTS tenant_person_id_seq;
 `.trim(),
 };
 
+export const INTAKE_QUOTES_TASKS_MIGRATION_0010: TenantMigrationDefinition = {
+  version: '0010',
+  name: '0010_intake_quotes_tasks_expand',
+  description:
+    'Creates tenant-scoped tables and sequences for enquiries, quotes, tasks, task_linked_records, notifications, sign_offs, and recently_viewed (S0-17a).',
+  dependsOn: ['0009'],
+  tablesChanged: [
+    'enquiries',
+    'quotes',
+    'quote_reference_sequences',
+    'tasks',
+    'task_linked_records',
+    'notifications',
+    'sign_offs',
+    'recently_viewed',
+  ],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS tenant_enquiry_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_quote_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_task_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_notification_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_sign_off_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS enquiries (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  reference TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'New',
+  first_name TEXT NOT NULL DEFAULT '',
+  last_name TEXT NOT NULL DEFAULT '',
+  email TEXT NULL,
+  phone TEXT NULL,
+  postcode TEXT NULL,
+  calling_on_behalf_of TEXT NULL,
+  organisation_name TEXT NULL,
+  channel_id TEXT NULL,
+  practice_area_id TEXT NULL,
+  work_type_subcategory_id TEXT NULL,
+  urgency_id TEXT NULL,
+  assigned_team_id TEXT NULL,
+  assigned_to_id TEXT NULL,
+  taken_by_id TEXT NULL,
+  created_by_id TEXT NULL,
+  updated_by_id TEXT NULL,
+  linked_person_id TEXT NULL,
+  linked_organisation_id TEXT NULL,
+  referrer_person_id TEXT NULL,
+  referred_to_organisation_id TEXT NULL,
+  converted_matter_id TEXT NULL,
+  close_reason_id TEXT NULL,
+  privacy_notice_given BOOLEAN NOT NULL DEFAULT FALSE,
+  received_at TIMESTAMPTZ NOT NULL,
+  first_contact_due_at TIMESTAMPTZ NULL,
+  closed_at TIMESTAMPTZ NULL,
+  anonymised_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  summary_and_notes_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  contact_log_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  conflict_snapshot_json JSONB NULL,
+  key_dates_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  custom_fields_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enquiries_tenant_status
+  ON enquiries (tenant_id, status, received_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_enquiries_tenant_team
+  ON enquiries (tenant_id, assigned_team_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_enquiries_tenant_assignee
+  ON enquiries (tenant_id, assigned_to_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_enquiries_tenant_linked_person
+  ON enquiries (tenant_id, linked_person_id);
+
+CREATE INDEX IF NOT EXISTS idx_enquiries_tenant_linked_org
+  ON enquiries (tenant_id, linked_organisation_id);
+
+CREATE INDEX IF NOT EXISTS idx_enquiries_tenant_converted_matter
+  ON enquiries (tenant_id, converted_matter_id);
+
+CREATE INDEX IF NOT EXISTS idx_enquiries_tenant_retention
+  ON enquiries (tenant_id, status, closed_at);
+
+CREATE TABLE IF NOT EXISTS quotes (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  quote_reference TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'Draft',
+  fee_basis TEXT NOT NULL DEFAULT '',
+  client_type TEXT NULL,
+  client_person_id TEXT NULL,
+  client_organisation_id TEXT NULL,
+  prospect_name TEXT NULL,
+  source_enquiry_id TEXT NULL,
+  converted_matter_id TEXT NULL,
+  practice_area_id TEXT NULL,
+  work_type_subcategory_id TEXT NULL,
+  prepared_by_id TEXT NULL,
+  assigned_team_id TEXT NULL,
+  fee_total_ex_vat_gbp NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_inc_vat_gbp NUMERIC(12,2) NOT NULL DEFAULT 0,
+  payment_on_account_gbp NUMERIC(12,2) NULL,
+  valid_until TEXT NULL,
+  sent_at TIMESTAMPTZ NULL,
+  outcome_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  pricing_breakdown_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  follow_ups_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  version_history_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  conflict_decision_json JSONB NULL,
+  custom_fields_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_tenant_status
+  ON quotes (tenant_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_tenant_enquiry
+  ON quotes (tenant_id, source_enquiry_id);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_tenant_converted_matter
+  ON quotes (tenant_id, converted_matter_id);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_tenant_reference
+  ON quotes (tenant_id, quote_reference);
+
+CREATE TABLE IF NOT EXISTS quote_reference_sequences (
+  tenant_id TEXT NOT NULL,
+  year INTEGER NOT NULL,
+  last_number BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, year)
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  reference TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'To do',
+  task_type_id TEXT NULL,
+  priority_id TEXT NULL,
+  due_at TEXT NULL,
+  assigned_team_id TEXT NULL,
+  assigned_person_id TEXT NULL,
+  multi_assignee_mode TEXT NULL,
+  linked_key_date_id TEXT NULL,
+  system_key TEXT NULL,
+  auto_trigger TEXT NULL,
+  created_by_id TEXT NULL,
+  updated_by_id TEXT NULL,
+  completed_by_id TEXT NULL,
+  completed_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  assigned_person_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  linked_records_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  comments_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  checklist_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_tenant_status_due
+  ON tasks (tenant_id, status, due_at);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_tenant_team
+  ON tasks (tenant_id, assigned_team_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_tenant_person
+  ON tasks (tenant_id, assigned_person_id, status);
+
+CREATE TABLE IF NOT EXISTS task_linked_records (
+  tenant_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  record_type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (tenant_id, task_id, record_type, record_id),
+  FOREIGN KEY (tenant_id, task_id) REFERENCES tasks (tenant_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_linked_records_tenant_target
+  ON task_linked_records (tenant_id, record_type, record_id);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  href TEXT NOT NULL DEFAULT '',
+  record_id TEXT NOT NULL DEFAULT '',
+  by_id TEXT NULL,
+  read BOOLEAN NOT NULL DEFAULT FALSE,
+  read_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant_user_created
+  ON notifications (tenant_id, user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS sign_offs (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  matter_id TEXT NULL,
+  matter_number TEXT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  subtitle TEXT NOT NULL DEFAULT '',
+  requested_by_id TEXT NULL,
+  assigned_approver_id TEXT NULL,
+  decided_by_id TEXT NULL,
+  amount_gbp NUMERIC(12,2) NULL,
+  requested_at TIMESTAMPTZ NOT NULL,
+  decided_at TIMESTAMPTZ NULL,
+  discussion_note TEXT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sign_offs_tenant_status_matter
+  ON sign_offs (tenant_id, status, matter_id);
+
+CREATE TABLE IF NOT EXISTS recently_viewed (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  items_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, user_id)
+);
+`.trim(),
+  downSql: `
+DROP TABLE IF EXISTS recently_viewed;
+
+DROP INDEX IF EXISTS idx_sign_offs_tenant_status_matter;
+DROP TABLE IF EXISTS sign_offs;
+
+DROP INDEX IF EXISTS idx_notifications_tenant_user_created;
+DROP TABLE IF EXISTS notifications;
+
+DROP INDEX IF EXISTS idx_task_linked_records_tenant_target;
+DROP TABLE IF EXISTS task_linked_records;
+
+DROP INDEX IF EXISTS idx_tasks_tenant_person;
+DROP INDEX IF EXISTS idx_tasks_tenant_team;
+DROP INDEX IF EXISTS idx_tasks_tenant_status_due;
+DROP TABLE IF EXISTS tasks;
+
+DROP TABLE IF EXISTS quote_reference_sequences;
+
+DROP INDEX IF EXISTS idx_quotes_tenant_reference;
+DROP INDEX IF EXISTS idx_quotes_tenant_converted_matter;
+DROP INDEX IF EXISTS idx_quotes_tenant_enquiry;
+DROP INDEX IF EXISTS idx_quotes_tenant_status;
+DROP TABLE IF EXISTS quotes;
+
+DROP INDEX IF EXISTS idx_enquiries_tenant_retention;
+DROP INDEX IF EXISTS idx_enquiries_tenant_converted_matter;
+DROP INDEX IF EXISTS idx_enquiries_tenant_linked_org;
+DROP INDEX IF EXISTS idx_enquiries_tenant_linked_person;
+DROP INDEX IF EXISTS idx_enquiries_tenant_assignee;
+DROP INDEX IF EXISTS idx_enquiries_tenant_team;
+DROP INDEX IF EXISTS idx_enquiries_tenant_status;
+DROP TABLE IF EXISTS enquiries;
+
+DROP SEQUENCE IF EXISTS tenant_sign_off_id_seq;
+DROP SEQUENCE IF EXISTS tenant_notification_id_seq;
+DROP SEQUENCE IF EXISTS tenant_task_id_seq;
+DROP SEQUENCE IF EXISTS tenant_quote_id_seq;
+DROP SEQUENCE IF EXISTS tenant_enquiry_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -1070,6 +1356,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   FIRM_AUDIT_LOG_MIGRATION_0007,
   NON_LIVE_AUDIT_RESET_MIGRATION_0008,
   PARTIES_AND_MATTERS_MIGRATION_0009,
+  INTAKE_QUOTES_TASKS_MIGRATION_0010,
 ];
 
 export function validateMigrationCatalogueOrder(
