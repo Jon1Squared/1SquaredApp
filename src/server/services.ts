@@ -3,35 +3,40 @@ import { cookies } from 'next/headers';
 import { resolveRequestCorrelationId } from './correlationId';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import {
-  repointMergedEntityWithCompensation,
+  repointMergedEntityForTenant,
   resolveTenantContextForStoreUser,
 } from './documentGenerationServices';
 import {
-  withJsonStoreWriteLock,
-  type RecordDeltaCompensator,
-} from './storeLock';
-import {
-  appendUnmigratedModuleAuditEntries,
-  captureJsonStoreBaseline,
+  appendTenantAuditEntries,
   flushStagedAuditEntries,
-  getActiveCompensatorOrNull,
   getAuditRepository,
+  getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
+  getPmsRepository,
   getTaskWorkflowRepository,
-  registerJsonStoreRecordDeltas,
-  runUnmigratedJsonMutationWithAudit,
   runWithAuditStagingScope,
-  stageUnmigratedAuditEntry,
-} from './auditAdapter';
+  stageAuditEntry,
+  TenantCatalogueRepository,
+  TenantPmsRepository,
+  getActiveTenantConfiguration,
+  getExtensionHostLoadErrors,
+  getPlatformExtensionHost,
+  isNonLiveDemoEnvironment,
+  resolveCurrentTenantContext,
+} from '@/platform/tenantRuntime';
 export {
+  getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
+  getPmsRepository,
   getTaskWorkflowRepository,
+  TenantCatalogueRepository,
+  TenantPmsRepository,
 };
 import {
   clearMigratedPostgresModulesForTenant,
@@ -200,16 +205,6 @@ import {
   createSignInActorFromVerifiedOidcToken,
 } from './entraAuth';
 import {
-  getActiveTenantConfiguration,
-  getCatalogueRepository,
-  getExtensionHostLoadErrors,
-  getPlatformExtensionHost,
-  isNonLiveDemoEnvironment,
-  resolveCurrentTenantContext,
-  TenantCatalogueRepository,
-} from '@/platform/tenantRuntime';
-export { getCatalogueRepository, TenantCatalogueRepository };
-import {
   getActiveTenantTransactionState,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
@@ -282,7 +277,11 @@ import {
   resolveConflictReviewTaskRouting,
   resolveSuggestedConflictReviewer,
 } from './conflictReview';
-import { verifyFinanceActorAndPermission } from './financeServices';
+import {
+  isTenantContextInput,
+  verifyFinanceActorAndPermission,
+  type FinanceActorInput,
+} from './financeServices';
 import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from './visibility';
 import type {
   Address,
@@ -350,7 +349,7 @@ import type {
   Team,
   WorkTypeProfileCode,
 } from '@/domain/types';
-import { getPmsSource } from '@/pms/pmsSource';
+import { getTenantPmsSource } from '@/pms/pmsSource';
 import type {
   PmsClient,
   PmsClientFinancials,
@@ -365,11 +364,10 @@ import { DEFAULT_ENQUIRY_SETTINGS, DEFAULT_TASK_SETTINGS } from '@/seed/demo';
 import { buildSeedLists, slug, vid } from '@/seed/lists';
 import {
   clearStoreToCleanDeployment,
-  type FirmStore,
-  getStore,
-  nextId,
+  createCleanDeploymentStore,
+  createSeedStore,
   resetStore,
-  saveStore,
+  type FirmStore,
 } from './store';
 
 export const USER_COOKIE = 'onesquared_user';
@@ -827,7 +825,7 @@ async function loadTenantCatalogueStoreView(
         displayName: activeTenantConfig.displayName,
         primaryDomain: activeTenantConfig.branding.primaryDomain,
       }),
-      getPmsSource().listFeeEarners(),
+      (await getTenantPmsSource(ctx)).listFeeEarners(),
       values,
     );
 
@@ -880,7 +878,9 @@ async function loadTenantCatalogueStoreView(
     signOffs: [],
     homePagesConfig,
     matterCostsConfig,
-    pmsLinks: options?.includePmsLinks ? getStore().pmsLinks : [],
+    pmsLinks: options?.includePmsLinks
+      ? await getPmsRepository().listPmsLinks<PmsLink>(ctx)
+      : [],
     notes: [],
     audit: [],
     mergeHistory: [],
@@ -1038,7 +1038,7 @@ function writeAudit(
   _store: FirmStore | null | undefined,
   entry: Omit<AuditEntry, 'id' | 'at'> & { at?: string },
 ): AuditEntry {
-  return stageUnmigratedAuditEntry(entry);
+  return stageAuditEntry(entry);
 }
 
 export async function getKeyDatesConfig(
@@ -1685,7 +1685,7 @@ async function getAppSnapshotInScope(
   if (finance.canViewMatter) {
     const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
     if (!isCleanEmpty) {
-      const pms = getPmsSource();
+      const pms = await getTenantPmsSource(snapshotTenantCtx);
       const hiddenPmsMatterCodes = new Set(
         store.pmsLinks
           .filter((l) => l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId))
@@ -2527,9 +2527,9 @@ export async function savePersonRecord(
     previousMatter: Matter;
     store: FirmStore;
   }> = [];
-  const res = await withJsonStoreWriteLock<
+  const res = await (async (): Promise<
     ({ person: Person; errors?: Record<string, string> } & Partial<ActionDenied>)
-  >(async () => {
+  > => {
   const personCtx = resolveDefaultServiceTenantContext(null, opts?.byId);
   const store = await loadTenantCatalogueStoreView(personCtx);
   const partyRepo = getPartyRepository();
@@ -3565,7 +3565,7 @@ export async function savePersonRecord(
     });
   }
   return { person };
-  });
+  })();
   for (const syncItem of pendingLifecycleSyncs) {
     const syncCorrelationId = `corr-lifecycle-sync-${syncItem.matter.id}-${Date.now()}`;
     try {
@@ -4583,11 +4583,7 @@ export async function saveMatterRecord(
     previousMatter: Matter;
     store: FirmStore;
   } | null = null;
-  const res = await runUnmigratedJsonMutationWithAudit({
-    label: 'saveMatterRecord',
-    resolveCtx: (s) =>
-      resolvedMatterCtx ?? resolveDefaultServiceTenantContext(s, opts.byId),
-    mutate: async (_rawStore) => {
+  const res = await runWithAuditStagingScope(async () => {
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
@@ -6156,7 +6152,6 @@ export async function saveMatterRecord(
   }
 
   return { matter };
-    },
   });
   if (pendingLifecycleSync) {
     const syncItem = pendingLifecycleSync as {
@@ -6609,15 +6604,6 @@ export async function updateMatterConflictRecord(
   record: ConflictCheckRecordInput | ConflictCheckRecord,
   byId: string,
 ): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[] }> {
-  return withJsonStoreWriteLock<{
-    matter: Matter | null;
-    errors?: Record<string, string>;
-    warnings?: string[];
-  }>(async (): Promise<{
-    matter: Matter | null;
-    errors?: Record<string, string>;
-    warnings?: string[];
-  }> => {
     let conflictCtx: TenantContext;
     try {
       conflictCtx = resolveDefaultServiceTenantContext(null, byId);
@@ -6921,7 +6907,6 @@ export async function updateMatterConflictRecord(
   }
 
   return { matter: saved, ...(warnings.length > 0 ? { warnings } : {}) };
-  });
 }
 
 export async function signOffMatterCostsRecord(
@@ -7261,10 +7246,7 @@ export async function executeMerge(
   byId: string,
 ): Promise<MergeHistory & Partial<ActionDenied>> {
   let mergeCtx: TenantContext | null = null;
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'executeMerge',
-    resolveCtx: (s) => mergeCtx ?? resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (rawStore, compensator) => {
+  return runWithAuditStagingScope(async () => {
   const prelimCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -7320,24 +7302,6 @@ export async function executeMerge(
 
   // R271 & R272: Resolve verified tenant context before mutating any record
   mergeCtx = (await resolveTenantContextForStoreUser(store, actor!.id)).ctx;
-  const prevSurvivorSnapshot = structuredClone(survivor);
-  const prevMergedSnapshot = structuredClone(merged);
-  const prevLinksSnapshot = structuredClone(links);
-  const prevSubsidiariesSnapshot =
-    recordType === 'organisation'
-      ? organisations
-          .filter(
-            (org) =>
-              org.parentOrganisationId === merged.id && org.id !== survivor.id,
-          )
-          .map((org) => structuredClone(org))
-      : [];
-  const prevNotesSnapshot = notes
-    .filter((note) => note.recordType === recordType && note.recordId === merged.id)
-    .map((note) => structuredClone(note));
-  const prevMattersById = new Map<string, Matter>(
-    matters.map((m) => [m.id, structuredClone(m)]),
-  );
   const plan = planMerge(survivor, merged);
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
   const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
@@ -7529,15 +7493,13 @@ export async function executeMerge(
     // 4-6. Enquiries (including conflict_snapshot_json), quotes, tasks (task_linked_records),
     // notifications, and recently_viewed are repointed atomically inside partyRepo.executeMergeInTransaction.
 
-    // 7. Repoint PMS links (handle collision when survivor already has a PMS link)
-    let pmsLinksChanged = false;
+    // 7. Repoint PMS links (repointed in SQL by partyRepo.executeMergeInTransaction; record conflicts in plan & audit)
     const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
     const nextPmsLinks: PmsLink[] = [];
-    for (const pmsLink of rawStore.pmsLinks) {
+    for (const pmsLink of store.pmsLinks) {
       if (pmsLink.onesquaredId === merged.id) {
-        pmsLinksChanged = true;
         const existingSurvivorPmsLink =
-          rawStore.pmsLinks.find(
+          store.pmsLinks.find(
             (other) =>
               other !== pmsLink &&
               other.entityType === pmsLink.entityType &&
@@ -7577,9 +7539,6 @@ export async function executeMerge(
       } else {
         nextPmsLinks.push(pmsLink);
       }
-    }
-    if (pmsLinksChanged) {
-      rawStore.pmsLinks = nextPmsLinks;
     }
 
     // 9. Copy notes to survivor
@@ -7626,128 +7585,102 @@ export async function executeMerge(
     merged.updatedById = byId;
 
     const activeMergeCtx = mergeCtx ?? prelimCtx;
-
-    // 8. Repoint generated documents and links in PostgreSQL with delta compensation (R405, R406)
-    const repoDocsUpdated = await repointMergedEntityWithCompensation(
-      store,
-      actor,
-      recordType,
-      merged.id,
-      survivor.id,
-      compensator,
-    );
-    if (repoDocsUpdated > 0 && !plan.fieldsTaken.includes('Generated documents')) {
-      plan.fieldsTaken.push('Generated documents');
-    }
-
-    const mergeHistoryId = await partyRepo.allocateNextMergeHistoryId(activeMergeCtx);
-    const history: MergeHistory = {
-      id: mergeHistoryId,
-      recordType,
-      survivorId: survivor.id,
-      mergedId: merged.id,
-      mergedLabel: recordDisplayName(merged),
-      byId,
-      at: now,
-      fieldsTaken: plan.fieldsTaken,
-      ...(pmsLinkConflicts.length > 0 ? { pmsLinkConflicts } : {}),
-    };
-
-    const tenantCfg = getActiveTenantConfiguration();
-    await partyRepo.withTenantTransaction(activeMergeCtx, async () => {
-      await partyRepo.executeMergeInTransaction(activeMergeCtx, {
-        recordType,
-        survivor: plan.survivor,
-        merged,
-        linksToUpsert,
-        linkIdsToDelete,
-        repointedSubsidiaries,
-        notesToRepoint,
-        mergeHistory: history,
-      });
-      for (const m of repointedMatters) {
-        await putMatterWithInTxRestrictions(activeMergeCtx, m, {
-          expectedRowVersion: null,
-        });
-      }
-      writeAudit(store, {
-        recordType,
-        recordId: survivor.id,
-        action: 'merge',
-        field: `Merged ${merged.id} (${recordDisplayName(merged)}) into ${survivor.id}`,
-        oldValue: merged.id,
-        newValue: plan.fieldsTaken.length
-          ? `Fields taken: ${plan.fieldsTaken.join(', ')}`
-          : 'No additional fields needed',
-        byId,
-        at: now,
-      });
-
-      writeAudit(store, {
-        recordType,
-        recordId: merged.id,
-        action: 'merged-into',
-        field: 'Merged into surviving record',
-        oldValue: merged.id,
-        newValue: survivor.id,
-        byId,
-        at: now,
-      });
-    });
-    compensator.register(`merge.execute:${history.id}`, async () => {
-      await partyRepo.withTenantTransaction(activeMergeCtx, async (tx) => {
-        if (recordType === 'person') {
-          await partyRepo.putPerson(
-            activeMergeCtx,
-            prevSurvivorSnapshot as Person,
-          );
-          await partyRepo.putPerson(
-            activeMergeCtx,
-            prevMergedSnapshot as Person,
-          );
-        } else {
-          await partyRepo.putOrganisation(
-            activeMergeCtx,
-            prevSurvivorSnapshot as Organisation,
-          );
-          await partyRepo.putOrganisation(
-            activeMergeCtx,
-            prevMergedSnapshot as Organisation,
-          );
-        }
-        for (const sub of prevSubsidiariesSnapshot) {
-          await partyRepo.putOrganisation(activeMergeCtx, sub);
-        }
-        for (const prevLink of prevLinksSnapshot) {
-          await partyRepo.putLink(activeMergeCtx, prevLink);
-        }
-        for (const prevNote of prevNotesSnapshot) {
-          await partyRepo.putNote(activeMergeCtx, prevNote);
-        }
-        await tx.query(
-          'DELETE FROM merge_history WHERE tenant_id = $1 AND id = $2',
-          [activeMergeCtx.tenantId, history.id],
+    let history!: MergeHistory;
+    let mergeSqlApplied = false;
+    try {
+      await partyRepo.withTenantTransaction(activeMergeCtx, async () => {
+        // 8. Repoint generated documents and links in the same PostgreSQL transaction (R474)
+        const repoDocsUpdated = await repointMergedEntityForTenant(
+          activeMergeCtx,
+          recordType,
+          merged.id,
+          survivor.id,
         );
+        if (repoDocsUpdated > 0 && !plan.fieldsTaken.includes('Generated documents')) {
+          plan.fieldsTaken.push('Generated documents');
+        }
+
+        const mergeHistoryId = await partyRepo.allocateNextMergeHistoryId(activeMergeCtx);
+        history = {
+          id: mergeHistoryId,
+          recordType,
+          survivorId: survivor.id,
+          mergedId: merged.id,
+          mergedLabel: recordDisplayName(merged),
+          byId,
+          at: now,
+          fieldsTaken: plan.fieldsTaken,
+          ...(pmsLinkConflicts.length > 0 ? { pmsLinkConflicts } : {}),
+        };
+
+        await partyRepo.executeMergeInTransaction(activeMergeCtx, {
+          recordType,
+          survivor: plan.survivor,
+          merged,
+          linksToUpsert,
+          linkIdsToDelete,
+          repointedSubsidiaries,
+          notesToRepoint,
+          mergeHistory: history,
+        });
+        mergeSqlApplied = true;
         for (const m of repointedMatters) {
-          const prevM = prevMattersById.get(m.id);
-          if (!prevM) continue;
-          const prevMeta = computeMatterRestrictionMetadataForStore(
-            prevM,
-            people,
-            teams,
-            tenantCfg,
-          );
-          await matterRepo.putMatter(activeMergeCtx, prevM, {
+          await putMatterWithInTxRestrictions(activeMergeCtx, m, {
             expectedRowVersion: null,
-            sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
           });
         }
-      });
-    });
+        writeAudit(store, {
+          recordType,
+          recordId: survivor.id,
+          action: 'merge',
+          field: `Merged ${merged.id} (${recordDisplayName(merged)}) into ${survivor.id}`,
+          oldValue: merged.id,
+          newValue: plan.fieldsTaken.length
+            ? `Fields taken: ${plan.fieldsTaken.join(', ')}`
+            : 'No additional fields needed',
+          byId,
+          at: now,
+        });
 
-    saveStore(rawStore);
+        writeAudit(store, {
+          recordType,
+          recordId: merged.id,
+          action: 'merged-into',
+          field: 'Merged into surviving record',
+          oldValue: merged.id,
+          newValue: survivor.id,
+          byId,
+          at: now,
+        });
+
+        await flushStagedAuditEntries(activeMergeCtx);
+      });
+    } catch (mergeErr) {
+      if (mergeSqlApplied) {
+        const session = getActiveActorSession();
+        const tenantId =
+          session?.tenantId ?? getActiveTenantConfiguration().tenantId;
+        const correlationId = resolveRequestCorrelationId(
+          (
+            session?.verifiedSession as
+              | { correlationId?: string }
+              | undefined
+          )?.correlationId,
+          'corr-merge-rollback',
+        );
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'merge.rollback_save_failed',
+            correlationId,
+            tenantId,
+          }),
+        );
+      }
+      throw mergeErr;
+    }
+
     return history;
-    },
   });
 }
 
@@ -8289,7 +8222,6 @@ export async function resetAllDemoData(
   byId: string,
   ctx: TenantContext,
 ): Promise<void> {
-  await withJsonStoreWriteLock(async () => {
     const [prevProfile, prevPeople] = await Promise.all([
       getCatalogueRepository().getFirmProfile(ctx),
       getPartyRepository().listAllPeople<Person>(ctx),
@@ -8323,10 +8255,8 @@ export async function resetAllDemoData(
         }
       }
     }
-    saveStore(fresh);
     await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
-    saveStore(fresh);
-    await appendUnmigratedModuleAuditEntries(ctx, [
+    await appendTenantAuditEntries(ctx, [
       {
         recordType: 'system',
         recordId: 'demo-data',
@@ -8338,18 +8268,15 @@ export async function resetAllDemoData(
         at: new Date().toISOString(),
       },
     ]);
-  });
 }
 
 export async function clearAllDataToCleanDeployment(
   byId: string,
   ctx: TenantContext,
 ): Promise<void> {
-  await withJsonStoreWriteLock(async () => {
     const actor = await getPartyRepository().getPersonById<Person>(ctx, byId);
     const actorName = actor ? personDisplayName(actor) : byId;
     const clean = clearStoreToCleanDeployment();
-    saveStore(clean);
     await clearMigratedPostgresModulesForTenant({ ctx });
     await importFirmStoreModulesToPostgres({
       ctx,
@@ -8357,7 +8284,7 @@ export async function clearAllDataToCleanDeployment(
       modules: ['catalogues'],
       clearFirst: false,
     });
-    await appendUnmigratedModuleAuditEntries(ctx, [
+    await appendTenantAuditEntries(ctx, [
       {
         recordType: 'system',
         recordId: 'clean-deployment',
@@ -8369,7 +8296,6 @@ export async function clearAllDataToCleanDeployment(
         at: new Date().toISOString(),
       },
     ]);
-  });
 }
 
 // ------------------------------------------------------------------ Notifications
@@ -8686,10 +8612,7 @@ export async function saveTaskRecord(
   byId: string,
   opts?: { viaTakeTask?: boolean; internalSystemStep?: boolean },
 ): Promise<{ task?: Task; tasks?: Task[]; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveTaskRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const now = new Date().toISOString();
   const taskCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
@@ -8898,6 +8821,7 @@ export async function saveTaskRecord(
           at: now,
         });
       }
+      await flushStagedAuditEntries(taskCtx);
     });
     return { task: createdTasks[0], tasks: createdTasks };
   }
@@ -9096,10 +9020,10 @@ export async function saveTaskRecord(
         }
       }
     }
+    await flushStagedAuditEntries(taskCtx);
   });
 
   return { task };
-    },
   });
 }
 
@@ -9107,7 +9031,6 @@ export async function takeTaskRecord(
   taskId: string,
   byId: string,
 ): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
-  return withJsonStoreWriteLock(async () => {
     const taskCtx = resolveDefaultServiceTenantContext(null, byId);
     const partyRepo = getPartyRepository();
     const matterRepo = getMatterRepository();
@@ -9167,7 +9090,6 @@ export async function takeTaskRecord(
       byId,
       { viaTakeTask: true },
     );
-  });
 }
 
 export async function addTaskCommentRecord(
@@ -9175,10 +9097,7 @@ export async function addTaskCommentRecord(
   text: string,
   byId: string,
 ): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'addTaskCommentRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const taskCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -9241,38 +9160,40 @@ export async function addTaskCommentRecord(
   task.updatedAt = now;
   task.updatedById = byId;
 
-  await taskRepo.putTask(taskCtx, task);
+  await taskRepo.withTenantTransaction(taskCtx, async () => {
+    await taskRepo.putTask(taskCtx, task);
 
-  writeAudit(store, {
-    recordType: 'task',
-    recordId: task.id,
-    action: 'comment',
-    field: 'Comment added',
-    oldValue: null,
-    newValue: trimmed.slice(0, 120),
-    byId,
-    at: now,
-  });
-
-  const authorName = formatContext(store, { people, matters }).nameOf(byId);
-  const recipients = new Set<string>();
-  if (task.assignedPersonId) recipients.add(task.assignedPersonId);
-  if (task.createdById) recipients.add(task.createdById);
-  for (const rId of recipients) {
-    await pushNotification(taskCtx, {
-      recipientId: rId,
-      kind: 'task_comment',
-      title: `New comment on ${task.reference}`,
-      detail: `${authorName}: "${trimmed.slice(0, 90)}"`,
-      href: `/tasks/${task.id}`,
+    writeAudit(store, {
+      recordType: 'task',
       recordId: task.id,
+      action: 'comment',
+      field: 'Comment added',
+      oldValue: null,
+      newValue: trimmed.slice(0, 120),
       byId,
       at: now,
     });
-  }
+
+    const authorName = formatContext(store, { people, matters }).nameOf(byId);
+    const recipients = new Set<string>();
+    if (task.assignedPersonId) recipients.add(task.assignedPersonId);
+    if (task.createdById) recipients.add(task.createdById);
+    for (const rId of recipients) {
+      await pushNotification(taskCtx, {
+        recipientId: rId,
+        kind: 'task_comment',
+        title: `New comment on ${task.reference}`,
+        detail: `${authorName}: "${trimmed.slice(0, 90)}"`,
+        href: `/tasks/${task.id}`,
+        recordId: task.id,
+        byId,
+        at: now,
+      });
+    }
+    await flushStagedAuditEntries(taskCtx);
+  });
 
   return { task };
-    },
   });
 }
 
@@ -9437,7 +9358,7 @@ export async function saveEnquiryRecord(
   errors?: Record<string, string>;
   missingFields?: string[];
 } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit<
+  return runWithAuditStagingScope(async (): Promise<
     {
       enquiry?: Enquiry;
       routedTeamName?: string;
@@ -9445,10 +9366,7 @@ export async function saveEnquiryRecord(
       errors?: Record<string, string>;
       missingFields?: string[];
     } & Partial<ActionDenied>
-  >({
-    label: 'saveEnquiryRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
-    mutate: async (): Promise<{ enquiry?: Enquiry; routedTeamName?: string; routedToIntakeFallback?: boolean; errors?: Record<string, string>; missingFields?: string[]; } & Partial<ActionDenied>> => {
+  > => {
   const now = opts.now ?? new Date().toISOString();
   const enqCtx = resolveDefaultServiceTenantContext(null, opts.byId);
   const partyRepo = getPartyRepository();
@@ -9665,6 +9583,7 @@ export async function saveEnquiryRecord(
         ? `${conflictSnapshot.matchCount} ${conflictSnapshot.matchCount === 1 ? 'possible conflict' : 'possible conflicts'} (high severity)`
         : `${conflictSnapshot.matchCount} ${conflictSnapshot.matchCount === 1 ? 'match' : 'matches'} (${conflictSnapshot.highestSeverity} severity)`;
 
+  return intakeRepo.withTenantTransaction(enqCtx, async () => {
   const id = existing?.id ?? (await intakeRepo.allocateNextEnquiryId(enqCtx));
   const receivedAt = input.receivedAt || existing?.receivedAt || now;
 
@@ -9765,6 +9684,7 @@ export async function saveEnquiryRecord(
       snapshot: conflictSnapshot,
     });
 
+    await flushStagedAuditEntries(enqCtx);
     return {
       enquiry: draftEnquiry,
       routedToIntakeFallback: false,
@@ -9960,13 +9880,13 @@ export async function saveEnquiryRecord(
     });
   }
 
+  await flushStagedAuditEntries(enqCtx);
   return {
     enquiry,
     routedTeamName: routedTeam?.name ?? 'Intake',
     routedToIntakeFallback,
   };
-
-    },
+  });
   });
 }
 
@@ -9976,10 +9896,7 @@ export async function assignEnquiryRecord(
   assignedTeamId: string | null | undefined,
   byId: string,
 ): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'assignEnquiryRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
@@ -10042,63 +9959,65 @@ export async function assignEnquiryRecord(
   enq.updatedAt = now;
   enq.updatedById = byId;
 
-  await intakeRepo.putEnquiry(enqCtx, enq);
+  await intakeRepo.withTenantTransaction(enqCtx, async () => {
+    await intakeRepo.putEnquiry(enqCtx, enq);
 
-  const newAssignee = assignedToId ? ctx.nameOf(assignedToId) : 'Unassigned';
-  writeAudit(store, {
-    recordType: 'enquiry',
-    recordId: enq.id,
-    action: 'assign',
-    field: 'Assigned to',
-    oldValue: `${oldAssignee} (${oldStatus})`,
-    newValue: `${newAssignee} (${enq.status})`,
-    byId,
-    at: now,
-  });
-
-  // Automatic task rule: When enquiry is assigned to someone, the open contact task moves to them (due unchanged)
-  if (assignedToId) {
-    for (const t of tasks) {
-      const isLinked = t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === enq.id);
-      const isContactTask =
-        t.autoTrigger === 'enquiry_contact' ||
-        t.taskTypeId === vid('task_type', 'Call back') ||
-        t.title.toLowerCase().startsWith('contact new enquiry');
-      if (isLinked && isContactTask && isTaskOpen(t)) {
-        const prevTaskPerson = t.assignedPersonId;
-        t.assignedPersonId = assignedToId;
-        if (assignedTeamId) t.assignedTeamId = assignedTeamId;
-        t.updatedAt = now;
-        t.updatedById = byId;
-        await taskRepo.putTask(enqCtx, t);
-        writeAudit(store, {
-          recordType: 'task',
-          recordId: t.id,
-          action: 'assign',
-          field: 'Assigned to (from enquiry assignment)',
-          oldValue: prevTaskPerson ? ctx.nameOf(prevTaskPerson) : 'Team queue',
-          newValue: newAssignee,
-          byId,
-          at: now,
-        });
-      }
-    }
-
-    await pushNotification(enqCtx, {
-      recipientId: assignedToId,
-      kind: 'enquiry_assigned',
-      title: `Enquiry assigned to you: ${enq.reference} (${enquiryDisplayName(enq)})`,
-      detail: `${resolveLabel(store.values, enq.practiceAreaId)} · ${enq.summary}`,
-      href: `/enquiries/${enq.id}`,
+    const newAssignee = assignedToId ? ctx.nameOf(assignedToId) : 'Unassigned';
+    writeAudit(store, {
+      recordType: 'enquiry',
       recordId: enq.id,
+      action: 'assign',
+      field: 'Assigned to',
+      oldValue: `${oldAssignee} (${oldStatus})`,
+      newValue: `${newAssignee} (${enq.status})`,
       byId,
       at: now,
     });
-  }
+
+    // Automatic task rule: When enquiry is assigned to someone, the open contact task moves to them (due unchanged)
+    if (assignedToId) {
+      for (const t of tasks) {
+        const isLinked = t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === enq.id);
+        const isContactTask =
+          t.autoTrigger === 'enquiry_contact' ||
+          t.taskTypeId === vid('task_type', 'Call back') ||
+          t.title.toLowerCase().startsWith('contact new enquiry');
+        if (isLinked && isContactTask && isTaskOpen(t)) {
+          const prevTaskPerson = t.assignedPersonId;
+          t.assignedPersonId = assignedToId;
+          if (assignedTeamId) t.assignedTeamId = assignedTeamId;
+          t.updatedAt = now;
+          t.updatedById = byId;
+          await taskRepo.putTask(enqCtx, t);
+          writeAudit(store, {
+            recordType: 'task',
+            recordId: t.id,
+            action: 'assign',
+            field: 'Assigned to (from enquiry assignment)',
+            oldValue: prevTaskPerson ? ctx.nameOf(prevTaskPerson) : 'Team queue',
+            newValue: newAssignee,
+            byId,
+            at: now,
+          });
+        }
+      }
+
+      await pushNotification(enqCtx, {
+        recipientId: assignedToId,
+        kind: 'enquiry_assigned',
+        title: `Enquiry assigned to you: ${enq.reference} (${enquiryDisplayName(enq)})`,
+        detail: `${resolveLabel(store.values, enq.practiceAreaId)} · ${enq.summary}`,
+        href: `/enquiries/${enq.id}`,
+        recordId: enq.id,
+        byId,
+        at: now,
+      });
+    }
+
+    await flushStagedAuditEntries(enqCtx);
+  });
 
   return { enquiry: enq };
-
-    },
   });
 }
 
@@ -10112,10 +10031,7 @@ export async function logEnquiryContactRecord(
   },
   byId: string,
 ): Promise<{ enquiry?: Enquiry; suggestNoResponse?: boolean; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'logEnquiryContactRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
@@ -10167,34 +10083,38 @@ export async function logEnquiryContactRecord(
   }
 
   const prevStatus = enq.status;
-  if (input.outcome === 'Spoke' && (enq.status === 'New' || enq.status === 'Assigned')) {
-    enq.status = 'In contact';
-    // Complete the initial contact task once spoken
-    await completeOpenContactTasksForEnquiry(
-      enqCtx,
-      store,
-      enq.id,
-      'Spoke to enquirer',
+  await intakeRepo.withTenantTransaction(enqCtx, async () => {
+    if (input.outcome === 'Spoke' && (enq.status === 'New' || enq.status === 'Assigned')) {
+      enq.status = 'In contact';
+      // Complete the initial contact task once spoken
+      await completeOpenContactTasksForEnquiry(
+        enqCtx,
+        store,
+        enq.id,
+        'Spoke to enquirer',
+        byId,
+        now,
+      );
+    } else if (enq.status === 'New') {
+      enq.status = 'Assigned';
+    }
+
+    enq.updatedAt = now;
+    enq.updatedById = byId;
+    await intakeRepo.putEnquiry(enqCtx, enq);
+
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'contact-log',
+      field: `Contact logged (${input.method} · ${input.outcome})`,
+      oldValue: prevStatus !== enq.status ? `Status: ${prevStatus}` : null,
+      newValue: `${entry.note.slice(0, 100)}${prevStatus !== enq.status ? ` (Status → ${enq.status})` : ''}`,
       byId,
-      now,
-    );
-  } else if (enq.status === 'New') {
-    enq.status = 'Assigned';
-  }
+      at: now,
+    });
 
-  enq.updatedAt = now;
-  enq.updatedById = byId;
-  await intakeRepo.putEnquiry(enqCtx, enq);
-
-  writeAudit(store, {
-    recordType: 'enquiry',
-    recordId: enq.id,
-    action: 'contact-log',
-    field: `Contact logged (${input.method} · ${input.outcome})`,
-    oldValue: prevStatus !== enq.status ? `Status: ${prevStatus}` : null,
-    newValue: `${entry.note.slice(0, 100)}${prevStatus !== enq.status ? ` (Status → ${enq.status})` : ''}`,
-    byId,
-    at: now,
+    await flushStagedAuditEntries(enqCtx);
   });
 
   const threshold = store.enquirySettings.failedAttemptsBeforeSuggestNoResponse || 3;
@@ -10205,8 +10125,6 @@ export async function logEnquiryContactRecord(
     enquiry: enq,
     suggestNoResponse: isEnquiryOpen(enq) && failedCount >= threshold,
   };
-
-    },
   });
 }
 
@@ -10220,10 +10138,7 @@ export async function sendEnquiryEmailRecord(
   },
   byId: string,
 ): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'sendEnquiryEmailRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
@@ -10269,7 +10184,6 @@ export async function sendEnquiryEmailRecord(
   const now = new Date().toISOString();
   enq.updatedAt = now;
   enq.updatedById = byId;
-  await intakeRepo.putEnquiry(enqCtx, enq);
 
   const emailSnapshot: EnquirySentEmailSnapshot = {
     kind: 'sent_email',
@@ -10281,21 +10195,23 @@ export async function sendEnquiryEmailRecord(
     sentById: byId,
   };
 
-  writeAudit(store, {
-    recordType: 'enquiry',
-    recordId: enq.id,
-    action: 'email-sent',
-    field: `Email sent to ${to}`,
-    oldValue: null,
-    newValue: `Subject: "${subject}"${emailSnapshot.bodyText ? ` · ${emailSnapshot.bodyText.slice(0, 80)}` : ''}`,
-    byId,
-    at: now,
-    snapshot: emailSnapshot,
+  await intakeRepo.withTenantTransaction(enqCtx, async () => {
+    await intakeRepo.putEnquiry(enqCtx, enq);
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'email-sent',
+      field: `Email sent to ${to}`,
+      oldValue: null,
+      newValue: `Subject: "${subject}"${emailSnapshot.bodyText ? ` · ${emailSnapshot.bodyText.slice(0, 80)}` : ''}`,
+      byId,
+      at: now,
+      snapshot: emailSnapshot,
+    });
+    await flushStagedAuditEntries(enqCtx);
   });
 
   return { enquiry: enq };
-
-    },
   });
 }
 
@@ -10310,10 +10226,7 @@ export async function closeEnquiryRecord(
   },
   byId: string,
 ): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'closeEnquiryRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -10388,49 +10301,49 @@ export async function closeEnquiryRecord(
   enq.updatedById = byId;
 
   const reasonLabel = resolveLabel(store.values, enq.closeReasonId) || input.targetStatus;
-  writeAudit(store, {
-    recordType: 'enquiry',
-    recordId: enq.id,
-    action: 'status-change',
-    field: `Enquiry closed (${input.targetStatus})`,
-    oldValue: prevStatus,
-    newValue: `${input.targetStatus} — Reason: ${reasonLabel}${enq.referredToName ? ` · Referred to: ${enq.referredToName}` : ''}`,
-    byId,
-    at: now,
-  });
+  await intakeRepo.withTenantTransaction(enqCtx, async (tx) => {
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'status-change',
+      field: `Enquiry closed (${input.targetStatus})`,
+      oldValue: prevStatus,
+      newValue: `${input.targetStatus} — Reason: ${reasonLabel}${enq.referredToName ? ` · Referred to: ${enq.referredToName}` : ''}`,
+      byId,
+      at: now,
+    });
 
-  // Complete open contact task automatically
-  await completeOpenContactTasksForEnquiry(
-    enqCtx,
-    store,
-    enq.id,
-    `Enquiry closed as ${input.targetStatus}`,
-    byId,
-    now,
-  );
+    // Complete open contact task automatically
+    await completeOpenContactTasksForEnquiry(
+      enqCtx,
+      store,
+      enq.id,
+      `Enquiry closed as ${input.targetStatus}`,
+      byId,
+      now,
+    );
 
-  // If an enquiry-stage person record was created solely for this enquiry and has no matters or other open/converted enquiries, remove it
-  if (enq.linkedPersonId) {
-    const linkedId = enq.linkedPersonId;
-    const linkedPerson = people.find((p) => p.id === linkedId);
-    if (linkedPerson && !linkedPerson.isEmployee && linkedPerson.createdFromEnquiryId === enq.id) {
-      const hasMatters = matters.some(
-        (m) =>
-          m.clientId === linkedId ||
-          m.instructingContactId === linkedId ||
-          m.billingContactId === linkedId ||
-          m.referrerContactId === linkedId ||
-          m.additionalClientIds?.includes(linkedId) ||
-          m.parties.some((pt) => pt.linkedRecordId === linkedId),
-      );
-      const hasOtherActiveOrConvertedEnquiry = enquiries.some(
-        (other) =>
-          other.id !== enq.id &&
-          (other.linkedPersonId === linkedId || other.referrerPersonId === linkedId) &&
-          (isEnquiryOpen(other) || other.status === 'Converted'),
-      );
-      if (!hasMatters && !hasOtherActiveOrConvertedEnquiry) {
-        await partyRepo.withTenantTransaction(enqCtx, async (tx) => {
+    // If an enquiry-stage person record was created solely for this enquiry and has no matters or other open/converted enquiries, remove it
+    if (enq.linkedPersonId) {
+      const linkedId = enq.linkedPersonId;
+      const linkedPerson = people.find((p) => p.id === linkedId);
+      if (linkedPerson && !linkedPerson.isEmployee && linkedPerson.createdFromEnquiryId === enq.id) {
+        const hasMatters = matters.some(
+          (m) =>
+            m.clientId === linkedId ||
+            m.instructingContactId === linkedId ||
+            m.billingContactId === linkedId ||
+            m.referrerContactId === linkedId ||
+            m.additionalClientIds?.includes(linkedId) ||
+            m.parties.some((pt) => pt.linkedRecordId === linkedId),
+        );
+        const hasOtherActiveOrConvertedEnquiry = enquiries.some(
+          (other) =>
+            other.id !== enq.id &&
+            (other.linkedPersonId === linkedId || other.referrerPersonId === linkedId) &&
+            (isEnquiryOpen(other) || other.status === 'Converted'),
+        );
+        if (!hasMatters && !hasOtherActiveOrConvertedEnquiry) {
           await tx.query(
             'DELETE FROM person_organisation_links WHERE tenant_id = $1 AND person_id = $2',
             [enqCtx.tenantId, linkedId],
@@ -10439,16 +10352,15 @@ export async function closeEnquiryRecord(
             enqCtx.tenantId,
             linkedId,
           ]);
-        });
-        enq.linkedPersonId = null;
+          enq.linkedPersonId = null;
+        }
       }
     }
-  }
 
-  await intakeRepo.putEnquiry(enqCtx, enq);
+    await intakeRepo.putEnquiry(enqCtx, enq);
+    await flushStagedAuditEntries(enqCtx);
+  });
   return { enquiry: enq };
-
-    },
   });
 }
 
@@ -10456,10 +10368,7 @@ export async function reopenEnquiryRecord(
   enquiryId: string,
   byId: string,
 ): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'reopenEnquiryRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
@@ -10512,22 +10421,24 @@ export async function reopenEnquiryRecord(
   enq.updatedAt = now;
   enq.updatedById = byId;
 
-  await intakeRepo.putEnquiry(enqCtx, enq);
+  await intakeRepo.withTenantTransaction(enqCtx, async () => {
+    await intakeRepo.putEnquiry(enqCtx, enq);
 
-  writeAudit(store, {
-    recordType: 'enquiry',
-    recordId: enq.id,
-    action: 'status-change',
-    field: 'Enquiry reopened',
-    oldValue: prevStatus,
-    newValue: enq.status,
-    byId,
-    at: now,
+    writeAudit(store, {
+      recordType: 'enquiry',
+      recordId: enq.id,
+      action: 'status-change',
+      field: 'Enquiry reopened',
+      oldValue: prevStatus,
+      newValue: enq.status,
+      byId,
+      at: now,
+    });
+
+    await flushStagedAuditEntries(enqCtx);
   });
 
   return { enquiry: enq };
-
-    },
   });
 }
 
@@ -10595,10 +10506,7 @@ export async function prepareEnquiryConversion(
   enquiryId?: string;
   error?: string;
 } & Partial<Omit<ActionDenied, 'ok'>>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'prepareEnquiryConversion',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -10737,16 +10645,19 @@ export async function prepareEnquiryConversion(
       searchedSources: [...CONFLICT_SEARCHED_SOURCES],
       summary: blockedDecisionSummary,
     };
-    writeAudit(store, {
-      recordType: 'enquiry',
-      recordId: enq.id,
-      action: 'conflict-decision',
-      field: 'Enquiry conversion blocked by conflict check',
-      oldValue: null,
-      newValue: `${blockedDecisionSummary} · ${reasons.join(' · ')}`,
-      byId,
-      at: nowIso,
-      snapshot: blockedDecisionSnapshot,
+    await intakeRepo.withTenantTransaction(enqCtx, async () => {
+      writeAudit(store, {
+        recordType: 'enquiry',
+        recordId: enq.id,
+        action: 'conflict-decision',
+        field: 'Enquiry conversion blocked by conflict check',
+        oldValue: null,
+        newValue: `${blockedDecisionSummary} · ${reasons.join(' · ')}`,
+        byId,
+        at: nowIso,
+        snapshot: blockedDecisionSnapshot,
+      });
+      await flushStagedAuditEntries(enqCtx);
     });
     return {
       ok: false,
@@ -10919,8 +10830,6 @@ export async function prepareEnquiryConversion(
       ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
     };
   });
-
-    },
   });
 }
 
@@ -11084,10 +10993,7 @@ async function finalizeEnquiryConversionToMatter(
 
 /** Anonymise unconverted closed enquiries past the firm's retention period (or a specific enquiry). */
 export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: string): Promise<number> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'anonymiseExpiredEnquiries',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [store, people, enquiries, teams] = await Promise.all([
@@ -11107,41 +11013,42 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
   const months = store.enquirySettings.retentionMonths || 12;
   let count = 0;
 
-  for (const enq of enquiries) {
-    const matchTarget = specificEnquiryId
-      ? enq.id === specificEnquiryId && isReadyForRetentionAnonymisation(enq, months, now)
-      : isReadyForRetentionAnonymisation(enq, months, now);
-    if (!matchTarget || enq.anonymisedAt) continue;
+  await intakeRepo.withTenantTransaction(enqCtx, async () => {
+    for (const enq of enquiries) {
+      const matchTarget = specificEnquiryId
+        ? enq.id === specificEnquiryId && isReadyForRetentionAnonymisation(enq, months, now)
+        : isReadyForRetentionAnonymisation(enq, months, now);
+      if (!matchTarget || enq.anonymisedAt) continue;
 
-    enq.firstName = 'Anonymised';
-    enq.lastName = 'Enquirer';
-    enq.callingOnBehalfOf = '';
-    enq.email = '';
-    enq.phone = '';
-    enq.address = null;
-    enq.otherPartiesNamed = '';
-    enq.notes = '[Personal details removed under the firm data retention policy. Practice area, channel, dates and outcome retained for reporting.]';
-    enq.anonymisedAt = nowIso;
-    enq.updatedAt = nowIso;
-    enq.updatedById = byId;
-    count++;
-    await intakeRepo.putEnquiry(enqCtx, enq);
+      enq.firstName = 'Anonymised';
+      enq.lastName = 'Enquirer';
+      enq.callingOnBehalfOf = '';
+      enq.email = '';
+      enq.phone = '';
+      enq.address = null;
+      enq.otherPartiesNamed = '';
+      enq.notes = '[Personal details removed under the firm data retention policy. Practice area, channel, dates and outcome retained for reporting.]';
+      enq.anonymisedAt = nowIso;
+      enq.updatedAt = nowIso;
+      enq.updatedById = byId;
+      count++;
+      await intakeRepo.putEnquiry(enqCtx, enq);
 
-    writeAudit(store, {
-      recordType: 'enquiry',
-      recordId: enq.id,
-      action: 'update',
-      field: 'Privacy retention anonymisation',
-      oldValue: 'Personal details stored',
-      newValue: 'Personal details removed; practice area, channel, dates and outcome kept',
-      byId,
-      at: nowIso,
-    });
-  }
+      writeAudit(store, {
+        recordType: 'enquiry',
+        recordId: enq.id,
+        action: 'update',
+        field: 'Privacy retention anonymisation',
+        oldValue: 'Personal details stored',
+        newValue: 'Personal details removed; practice area, channel, dates and outcome kept',
+        byId,
+        at: nowIso,
+      });
+    }
+    await flushStagedAuditEntries(enqCtx);
+  });
 
   return count;
-
-    },
   });
 }
 
@@ -11197,12 +11104,12 @@ export interface MatterPmsViewBundle {
 
 export async function getMatterPmsViewBundle(
   matterId: string,
-  byId?: string,
+  byId?: FinanceActorInput,
 ): Promise<MatterPmsViewBundle | ActionDenied> {
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { store, actor, permSet, tokenRoles, visiblePmsLinks, people, matters, teams } = auth;
+  const { ctx, actor, permSet, tokenRoles, visiblePmsLinks, tenantPmsLinks, people, matters, teams } = auth;
   const matter = matters.find((m) => m.id === matterId && !m.mergedIntoId);
   if (
     !matter ||
@@ -11218,7 +11125,7 @@ export async function getMatterPmsViewBundle(
     );
   }
 
-  const pms = getPmsSource();
+  const pms = await getTenantPmsSource(ctx);
   const extractInfo = pms.getExtractInfo();
   const link =
     visiblePmsLinks.find((l) => l.entityType === 'matter' && l.onesquaredId === matterId) ?? null;
@@ -11229,7 +11136,7 @@ export async function getMatterPmsViewBundle(
 
   if (canManageLinks) {
     const linkedPmsCodes = new Set(
-      store.pmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
+      tenantPmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
     );
     const allPmsMatters = pms.listMatters();
     allUnlinkedPmsMatters = allPmsMatters.filter((pm) => !linkedPmsCodes.has(pm.matter_code));
@@ -11273,7 +11180,7 @@ export async function getMatterPmsViewBundle(
 export async function getClientPmsViewBundle(
   recordType: 'organisation' | 'person',
   recordId: string,
-  byId?: string,
+  byId?: FinanceActorInput,
 ): Promise<ClientPmsViewBundle | ActionDenied> {
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
@@ -11294,7 +11201,7 @@ export async function getClientPmsViewBundle(
     );
   }
 
-  const pms = getPmsSource();
+  const pms = await getTenantPmsSource(ctx);
   const extractInfo = pms.getExtractInfo();
   const link =
     visiblePmsLinks.find((l) => l.entityType === recordType && l.onesquaredId === recordId) ?? null;
@@ -11432,9 +11339,17 @@ export interface PmsAdminSnapshot {
   suggestedMatterMatches: PmsSuggestedMatch[];
 }
 
-export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapshot> {
-  const actorId = byId || getActiveActorSession()?.personId;
-  const ctx = resolveDefaultServiceTenantContext(null, actorId);
+export async function getPmsAdminSnapshot(byId?: FinanceActorInput): Promise<PmsAdminSnapshot> {
+  const actorId = isTenantContextInput(byId)
+    ? byId.actorId
+    : typeof byId === 'string'
+      ? byId
+      : byId && 'personId' in byId
+        ? byId.personId
+        : getActiveActorSession()?.personId;
+  const ctx = isTenantContextInput(byId)
+    ? byId
+    : resolveDefaultServiceTenantContext(null, actorId);
   const store = await loadTenantCatalogueStoreView(ctx, { includePmsLinks: true });
   const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
   if (isCleanEmpty) {
@@ -11452,10 +11367,11 @@ export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapsh
       suggestedMatterMatches: [],
     };
   }
-  const [people, matters, teams] = await Promise.all([
+  const [people, matters, teams, pms] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getTenantPmsSource(ctx),
   ]);
   const actor = actorId ? people.find((p) => p.id === actorId) ?? null : null;
   const visibleMatters = actorId
@@ -11475,7 +11391,6 @@ export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapsh
   const visiblePmsLinks = store.pmsLinks.filter(
     (l) => !(l.entityType === 'matter' && !visibleMatterIdSet.has(l.onesquaredId)),
   );
-  const pms = getPmsSource();
   const extractInfo = pms.getExtractInfo();
   const pmsFeeEarners = pms.listFeeEarners();
   const pmsClients = pms.listClients();
@@ -11501,120 +11416,141 @@ export async function linkPmsRecord(
   onesquaredId: string,
   pmsCode: string,
   byId: string,
+  options?: { tenantCtx?: TenantContext | null },
 ): Promise<PmsLink> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'linkPmsRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const now = new Date().toISOString();
+  const ctx = resolveDefaultServiceTenantContext(null, byId, options);
+  const pmsRepo = getPmsRepository();
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  let link!: PmsLink;
+  await runWithAuditStagingScope(() =>
+    pmsRepo.withTenantTransaction(ctx, async () => {
+      const recordExists =
+        entityType === 'employee'
+          ? Boolean(
+              (await partyRepo.getPersonById<Person>(ctx, onesquaredId))
+                ?.isEmployee,
+            )
+          : entityType === 'person'
+            ? Boolean(await partyRepo.getPersonById<Person>(ctx, onesquaredId))
+            : entityType === 'organisation'
+              ? Boolean(await partyRepo.getOrganisationById(ctx, onesquaredId))
+              : Boolean(
+                  await matterRepo.getMatterById(ctx, onesquaredId, {
+                    includeRestricted: true,
+                  }),
+                );
+      if (!recordExists) {
+        throw Object.assign(
+          new Error(`NOT_FOUND: Target ${entityType} "${onesquaredId}" not found.`),
+          { code: 'NOT_FOUND' as const },
+        );
+      }
 
-  // Remove any existing link for either side of this entityType
-  store.pmsLinks = store.pmsLinks.filter(
-    (l) =>
-      !(
-        l.entityType === entityType &&
-        (l.onesquaredId === onesquaredId || l.pmsCode === pmsCode)
-      ),
+      const now = new Date().toISOString();
+      const id = await pmsRepo.allocatePmsLinkId(ctx);
+      link = {
+        id,
+        entityType,
+        onesquaredId,
+        pmsCode,
+        matchedBy: 'manual',
+        matchedAt: now,
+      };
+      await pmsRepo.putPmsLink(ctx, link);
+
+      const auditRecordType =
+        entityType === 'employee'
+          ? 'person'
+          : entityType === 'matter'
+            ? 'matter'
+            : entityType;
+      writeAudit(null, {
+        recordType: auditRecordType,
+        recordId: onesquaredId,
+        action: 'link',
+        field: 'PMS link',
+        oldValue: null,
+        newValue: `${pmsCode} (manual)`,
+        byId,
+        at: now,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
   );
-
-  const link: PmsLink = {
-    id: nextId(store, 'PMSL'),
-    entityType,
-    onesquaredId,
-    pmsCode,
-    matchedBy: 'manual',
-    matchedAt: now,
-  };
-  store.pmsLinks.push(link);
-
-  const auditRecordType =
-    entityType === 'employee'
-      ? 'person'
-      : entityType === 'matter'
-        ? 'matter'
-        : entityType;
-  writeAudit(store, {
-    recordType: auditRecordType,
-    recordId: onesquaredId,
-    action: 'link',
-    field: 'PMS link',
-    oldValue: null,
-    newValue: `${pmsCode} (manual)`,
-    byId,
-    at: now,
-  });
-
-  saveStore(store);
   return link;
-
-    },
-  });
 }
 
-export async function unlinkPmsRecord(linkId: string, byId: string): Promise<void> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'unlinkPmsRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const existing = store.pmsLinks.find((l) => l.id === linkId);
-  if (!existing) return;
-  store.pmsLinks = store.pmsLinks.filter((l) => l.id !== linkId);
+export async function unlinkPmsRecord(
+  linkId: string,
+  byId: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<void> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId, options);
+  const pmsRepo = getPmsRepository();
+  await runWithAuditStagingScope(() =>
+    pmsRepo.withTenantTransaction(ctx, async () => {
+      const existing = await pmsRepo.getPmsLinkById<PmsLink>(ctx, linkId);
+      if (!existing) {
+        throw Object.assign(
+          new Error(`NOT_FOUND: PMS link "${linkId}" not found.`),
+          { code: 'NOT_FOUND' as const },
+        );
+      }
+      await pmsRepo.deletePmsLinkById(ctx, linkId);
 
-  const auditRecordType =
-    existing.entityType === 'employee'
-      ? 'person'
-      : existing.entityType === 'matter'
-        ? 'matter'
-        : existing.entityType;
-  writeAudit(store, {
-    recordType: auditRecordType,
-    recordId: existing.onesquaredId,
-    action: 'unlink',
-    field: 'PMS link',
-    oldValue: existing.pmsCode,
-    newValue: null,
-    byId,
-  });
-
-  saveStore(store);
-
-    },
-  });
-}
-
-export async function rerunAutomaticPmsMatching(byId: string): Promise<{ totalLinks: number }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'rerunAutomaticPmsMatching',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, organisations, matters] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getPartyRepository().listAllOrganisations<Organisation>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-  ]);
-  const pms = getPmsSource();
-  const now = new Date().toISOString();
-  store.pmsLinks = computeAutomaticPmsLinks(
-    store.pmsLinks,
-    organisations,
-    people,
-    matters,
-    pms.listClients(),
-    pms.listFeeEarners(),
-    pms.listMatters(),
-    now,
-    false,
+      const auditRecordType =
+        existing.entityType === 'employee'
+          ? 'person'
+          : existing.entityType === 'matter'
+            ? 'matter'
+            : existing.entityType;
+      writeAudit(null, {
+        recordType: auditRecordType,
+        recordId: existing.onesquaredId,
+        action: 'unlink',
+        field: 'PMS link',
+        oldValue: existing.pmsCode,
+        newValue: null,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
   );
-  void byId;
-  saveStore(store);
-  return { totalLinks: store.pmsLinks.length };
+}
 
-    },
+export async function rerunAutomaticPmsMatching(
+  byId: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<{ totalLinks: number }> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId, options);
+  const pmsRepo = getPmsRepository();
+  let totalLinks = 0;
+  await pmsRepo.withTenantTransaction(ctx, async () => {
+    const [existingLinks, people, organisations, matters, pms] = await Promise.all([
+      pmsRepo.listPmsLinks<PmsLink>(ctx),
+      getPartyRepository().listAllPeople<Person>(ctx),
+      getPartyRepository().listAllOrganisations<Organisation>(ctx),
+      getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+      getTenantPmsSource(ctx),
+    ]);
+    const now = new Date().toISOString();
+    const nextLinks = computeAutomaticPmsLinks(
+      existingLinks,
+      organisations,
+      people,
+      matters,
+      pms.listClients(),
+      pms.listFeeEarners(),
+      pms.listMatters(),
+      now,
+      false,
+    );
+    void byId;
+    await pmsRepo.putPmsLinks(ctx, nextLinks, { replaceAll: true });
+    totalLinks = nextLinks.length;
   });
+  return { totalLinks };
 }
 
 function mapPmsPracticeAreaId(store: FirmStore, pmsPracticeArea: string): string {
@@ -11666,15 +11602,17 @@ export async function createRecordFromPms(
   entityType: PmsEntityType,
   pmsCode: string,
   byId: string,
-  opts: { mfaVerified: boolean },
+  opts: { mfaVerified: boolean; tenantCtx?: TenantContext | null },
 ): Promise<{ ok: boolean; createdId?: string; error?: string } & Partial<Omit<ActionDenied, 'ok'>>> {
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
-  const [store, people, teams] = await Promise.all([
+  const ctx = resolveDefaultServiceTenantContext(null, byId, {
+    tenantCtx: opts?.tenantCtx,
+  });
+  const [store, people, teams, pms] = await Promise.all([
     loadTenantCatalogueStoreView(ctx, { includePmsLinks: true }),
     getPartyRepository().listAllPeople<Person>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getTenantPmsSource(ctx),
   ]);
-  const pms = getPmsSource();
   const actor = people.find((p) => p.id === byId) ?? null;
   const effectiveMfaVerified = opts.mfaVerified === true;
   const actorPerms = resolvePersonPermissionSet(actor, {
@@ -11773,7 +11711,7 @@ export async function createRecordFromPms(
     }
     if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
 
-    await linkPmsRecord('employee', res.person.id, pmsCode, byId);
+    await linkPmsRecord('employee', res.person.id, pmsCode, byId, { tenantCtx: ctx });
     return { ok: true, createdId: res.person.id };
   }
 
@@ -11814,7 +11752,7 @@ export async function createRecordFromPms(
     );
     if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
 
-    await linkPmsRecord('organisation', res.organisation.id, pmsCode, byId);
+    await linkPmsRecord('organisation', res.organisation.id, pmsCode, byId, { tenantCtx: ctx });
     return { ok: true, createdId: res.organisation.id };
   }
 
@@ -11877,7 +11815,7 @@ export async function createRecordFromPms(
     );
     if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
 
-    await linkPmsRecord('person', res.person.id, pmsCode, byId);
+    await linkPmsRecord('person', res.person.id, pmsCode, byId, { tenantCtx: ctx });
     return { ok: true, createdId: res.person.id };
   }
 
@@ -11954,7 +11892,7 @@ export async function createRecordFromPms(
       return { ok: false, error: res.errors ? Object.values(res.errors).join(' ') : 'Matter could not be saved.' };
     }
 
-    await linkPmsRecord('matter', res.matter.id, pmsCode, byId);
+    await linkPmsRecord('matter', res.matter.id, pmsCode, byId, { tenantCtx: ctx });
     return { ok: true, createdId: res.matter.id };
   }
 
@@ -12814,10 +12752,7 @@ export async function approveSignOff(
   signOffId: string,
   byId: string,
 ): Promise<{ ok: true } | ActionDenied> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'approveSignOff',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const taskRepo = getTaskWorkflowRepository();
   const [people, matters, item, teams] = await Promise.all([
@@ -12885,22 +12820,24 @@ export async function approveSignOff(
   item.approvedById = byId;
   item.approvedAt = nowIso;
 
-  await taskRepo.putSignOff(ctx, item);
+  await taskRepo.withTenantTransaction(ctx, async () => {
+    await taskRepo.putSignOff(ctx, item);
 
-  writeAudit(null, {
-    recordType: item.matterId ? 'matter' : 'system',
-    recordId: item.matterId ?? item.id,
-    action: 'status-change',
-    field: 'Partner sign-off',
-    oldValue: previousStatus,
-    newValue: `Approved: ${item.title}`,
-    byId,
-    at: nowIso,
+    writeAudit(null, {
+      recordType: item.matterId ? 'matter' : 'system',
+      recordId: item.matterId ?? item.id,
+      action: 'status-change',
+      field: 'Partner sign-off',
+      oldValue: previousStatus,
+      newValue: `Approved: ${item.title}`,
+      byId,
+      at: nowIso,
+    });
+
+    await flushStagedAuditEntries(ctx);
   });
 
   return { ok: true };
-
-    },
   });
 }
 
@@ -12910,10 +12847,7 @@ export async function discussSignOff(
   note: string,
   byId: string,
 ): Promise<{ ok: true } | ActionDenied> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'discussSignOff',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const taskRepo = getTaskWorkflowRepository();
   const [people, matters, item, teams] = await Promise.all([
@@ -12980,56 +12914,59 @@ export async function discussSignOff(
   item.status = 'Discussing';
   item.discussionNote = note.trim() || 'Partner requested discussion before sign-off.';
 
-  await taskRepo.putSignOff(ctx, item);
+  await taskRepo.withTenantTransaction(ctx, async () => {
+    await taskRepo.putSignOff(ctx, item);
 
-  writeAudit(null, {
-    recordType: item.matterId ? 'matter' : 'system',
-    recordId: item.matterId ?? item.id,
-    action: 'status-change',
-    field: 'Partner sign-off',
-    oldValue: previousStatus,
-    newValue: `Discussing: ${item.title} (${item.discussionNote})`,
-    byId,
-    at: nowIso,
+    writeAudit(null, {
+      recordType: item.matterId ? 'matter' : 'system',
+      recordId: item.matterId ?? item.id,
+      action: 'status-change',
+      field: 'Partner sign-off',
+      oldValue: previousStatus,
+      newValue: `Discussing: ${item.title} (${item.discussionNote})`,
+      byId,
+      at: nowIso,
+    });
+
+    // Create a follow-up task for the requester
+    const linkedRecords: TaskLinkedRecord[] = [];
+    if (item.matterId) linkedRecords.push({ recordType: 'matter', recordId: item.matterId });
+    await saveTaskRecord(
+      {
+        title: `Discuss partner sign-off: ${item.title}`,
+        description: item.discussionNote,
+        taskTypeId: vid('task_type', 'Review'),
+        priorityId: vid('task_priority', 'High'),
+        dueAt: toIsoDate(new Date()),
+        assignedPersonId: item.requestedById,
+        linkedRecords,
+      },
+      byId,
+      { internalSystemStep: true },
+    );
+
+    await flushStagedAuditEntries(ctx);
   });
 
-  // Create a follow-up task for the requester
-  const linkedRecords: TaskLinkedRecord[] = [];
-  if (item.matterId) linkedRecords.push({ recordType: 'matter', recordId: item.matterId });
-  await saveTaskRecord(
-    {
-      title: `Discuss partner sign-off: ${item.title}`,
-      description: item.discussionNote,
-      taskTypeId: vid('task_type', 'Review'),
-      priorityId: vid('task_priority', 'High'),
-      dueAt: toIsoDate(new Date()),
-      assignedPersonId: item.requestedById,
-      linkedRecords,
-    },
-    byId,
-    { internalSystemStep: true },
-  );
-
   return { ok: true };
-
-    },
   });
 }
 
 
 export async function requestMatterBill(
   matterCode: string,
-  byId: string,
+  byId: FinanceActorInput,
 ): Promise<{ ok: true; taskId?: string } | ActionDenied> {
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor, tokenRoles, people, matters, teams } = auth;
-  const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
+  const { ctx, actor, tokenRoles, tenantPmsLinks, people, matters, teams } = auth;
+  const linkedId = findOneSquaredIdForPmsCode(tenantPmsLinks, 'matter', matterCode);
   const targetMatter = linkedId
     ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
     : undefined;
-  const pmsMatter = linkedId ? getPmsSource().getMatterFinancials(matterCode) : null;
+  const pms = await getTenantPmsSource(ctx);
+  const pmsMatter = linkedId ? pms.getMatterFinancials(matterCode) : null;
   if (
     !targetMatter ||
     !pmsMatter ||
@@ -13083,12 +13020,8 @@ export async function requestMatterBill(
 export async function flagMatterWriteOff(
   matterCode: string,
   amountGbp: number,
-  byId: string,
+  byId: FinanceActorInput,
 ): Promise<{ ok: true; signOffId?: string } | ActionDenied> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'flagMatterWriteOff',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
@@ -13099,12 +13032,13 @@ export async function flagMatterWriteOff(
     );
   }
 
-  const { store, actor, tokenRoles, people, matters, teams } = auth;
-  const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
+  const { ctx, actor, tokenRoles, tenantPmsLinks, people, matters, teams } = auth;
+  const linkedId = findOneSquaredIdForPmsCode(tenantPmsLinks, 'matter', matterCode);
   const matter = linkedId
     ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
     : undefined;
-  const pmsMatter = linkedId ? getPmsSource().getMatterFinancials(matterCode) : null;
+  const pms = await getTenantPmsSource(ctx);
+  const pmsMatter = linkedId ? pms.getMatterFinancials(matterCode) : null;
   if (
     !matter ||
     !pmsMatter ||
@@ -13120,7 +13054,6 @@ export async function flagMatterWriteOff(
     );
   }
 
-  const ctx = resolveDefaultServiceTenantContext(store, actor.id);
   const taskRepo = getTaskWorkflowRepository();
   const id = await taskRepo.allocateNextSignOffId(ctx);
   const nowIso = new Date().toISOString();
@@ -13157,19 +13090,13 @@ export async function flagMatterWriteOff(
 
   await taskRepo.putSignOff(ctx, signOff);
   return { ok: true, signOffId: id };
-
-    },
-  });
 }
 
 export async function remindTeamLeadOverdueCompliance(
   teamId: string,
   byId: string,
 ): Promise<{ ok: boolean } | ActionDenied> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'remindTeamLeadOverdueCompliance',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const [people, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -13206,34 +13133,36 @@ export async function remindTeamLeadOverdueCompliance(
   }
   const nowIso = new Date().toISOString();
   const taskRepo = getTaskWorkflowRepository();
-  const notifId = await taskRepo.allocateNextNotificationId(ctx);
-  await taskRepo.putNotification(ctx, {
-    id: notifId,
-    recipientId: leadId,
-    kind: 'task_overdue',
-    title: `Compliance reminder: overdue onboarding / AML tasks in ${team.name}`,
-    detail: 'MLRO / COLP requested an update on overdue compliance tasks in your team.',
-    href: '/tasks',
-    recordId: team.id,
-    createdAt: nowIso,
-    read: false,
-    byId,
-  });
+  await taskRepo.withTenantTransaction(ctx, async () => {
+    const notifId = await taskRepo.allocateNextNotificationId(ctx);
+    await taskRepo.putNotification(ctx, {
+      id: notifId,
+      recipientId: leadId,
+      kind: 'task_overdue',
+      title: `Compliance reminder: overdue onboarding / AML tasks in ${team.name}`,
+      detail: 'MLRO / COLP requested an update on overdue compliance tasks in your team.',
+      href: '/tasks',
+      recordId: team.id,
+      createdAt: nowIso,
+      read: false,
+      byId,
+    });
 
-  writeAudit(null, {
-    recordType: 'team',
-    recordId: team.id,
-    action: 'update',
-    field: 'Compliance reminder',
-    oldValue: null,
-    newValue: `Sent overdue compliance task reminder to team lead (${leadId})`,
-    byId,
-    at: nowIso,
+    writeAudit(null, {
+      recordType: 'team',
+      recordId: team.id,
+      action: 'update',
+      field: 'Compliance reminder',
+      oldValue: null,
+      newValue: `Sent overdue compliance task reminder to team lead (${leadId})`,
+      byId,
+      at: nowIso,
+    });
+
+    await flushStagedAuditEntries(ctx);
   });
 
   return { ok: true };
-
-    },
   });
 }
 
@@ -13246,18 +13175,15 @@ export async function recordInvoiceCreditControlAction(
     actionType: 'log_call' | 'send_reminder' | 'escalate';
     note?: string;
   },
-  byId: string,
+  byId: FinanceActorInput,
 ): Promise<{ ok: true; taskId?: string } | ActionDenied> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'recordInvoiceCreditControlAction',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor, tokenRoles, people, matters, teams, ctx } = auth;
+  const { actor, tokenRoles, tenantPmsLinks, people, matters, teams, ctx } = auth;
+  const pms = await getTenantPmsSource(ctx);
   const linkedMatterId = findOneSquaredIdForPmsCode(
-    store.pmsLinks,
+    tenantPmsLinks,
     'matter',
     input.matterCode,
   );
@@ -13266,7 +13192,7 @@ export async function recordInvoiceCreditControlAction(
     ? matters.find((m) => m.id === linkedMatterId && !m.mergedIntoId)
     : null;
   const pmsMatter = linkedMatterId
-    ? getPmsSource().getMatterFinancials(input.matterCode)
+    ? pms.getMatterFinancials(input.matterCode)
     : null;
   if (
     !matter ||
@@ -13283,7 +13209,7 @@ export async function recordInvoiceCreditControlAction(
     );
   }
 
-  const pmsInvoice = getPmsSource().getInvoiceBalance(input.invoiceNumber);
+  const pmsInvoice = pms.getInvoiceBalance(input.invoiceNumber);
   if (!pmsInvoice || pmsInvoice.matter_code !== input.matterCode) {
     return buildActionDenied(
       'FORBIDDEN',
@@ -13298,12 +13224,12 @@ export async function recordInvoiceCreditControlAction(
   }
   const invoiceClientCode = pmsInvoice.client_code;
   const linkedOrgId = findOneSquaredIdForPmsCode(
-    store.pmsLinks,
+    tenantPmsLinks,
     'organisation',
     invoiceClientCode,
   );
   const linkedPersonId = findOneSquaredIdForPmsCode(
-    store.pmsLinks,
+    tenantPmsLinks,
     'person',
     invoiceClientCode,
   );
@@ -13350,43 +13276,57 @@ export async function recordInvoiceCreditControlAction(
     return { ok: true, taskId: res.task?.id };
   }
 
-  // Record a note on the client or matter in PostgreSQL and log an audit entry
-  const targetRecordId = linkedOrgId ?? linkedPersonId ?? linkedMatterId;
-  if (targetRecordId) {
-    const partyRepo = getPartyRepository();
-    const noteId = await partyRepo.allocateNextNoteId(ctx);
-    await partyRepo.putNote(ctx, {
-      id: noteId,
-      recordType: targetRecordId.startsWith('O-')
-        ? 'organisation'
-        : targetRecordId.startsWith('P-')
-          ? 'person'
-          : 'matter',
-      recordId: targetRecordId,
-      authorId: byId,
-      at: nowIso,
-      text:
-        input.actionType === 'log_call'
-          ? `Credit control call logged regarding invoice ${input.invoiceNumber} (${input.matterCode}). ${input.note ?? ''}`.trim()
-          : `Credit control reminder statement sent for invoice ${input.invoiceNumber} (${input.matterCode}).`,
-    });
-  }
+  const noteText =
+    input.actionType === 'log_call'
+      ? `Credit control call logged regarding invoice ${input.invoiceNumber} (${input.matterCode}). ${input.note ?? ''}`.trim()
+      : `Credit control reminder statement sent for invoice ${input.invoiceNumber} (${input.matterCode}).`;
 
-  writeAudit(store, {
-    recordType: linkedMatterId ? 'matter' : 'system',
-    recordId: linkedMatterId ?? input.invoiceNumber,
-    action: 'note',
-    field: 'Credit control',
-    oldValue: null,
-    newValue: `${input.actionType === 'log_call' ? 'Logged chase call' : 'Sent reminder'} on ${input.invoiceNumber}`,
-    byId,
-    at: nowIso,
-  });
+  // Record a note on the client or matter, persist to pms_credit_control_log, and log an audit entry in one transaction
+  const targetRecordId = linkedOrgId ?? linkedPersonId ?? linkedMatterId;
+  const pmsRepo = getPmsRepository();
+  await runWithAuditStagingScope(() =>
+    pmsRepo.withTenantTransaction(ctx, async () => {
+      if (targetRecordId) {
+        const partyRepo = getPartyRepository();
+        const noteId = await partyRepo.allocateNextNoteId(ctx);
+        await partyRepo.putNote(ctx, {
+          id: noteId,
+          recordType: targetRecordId.startsWith('O-')
+            ? 'organisation'
+            : targetRecordId.startsWith('P-')
+              ? 'person'
+              : 'matter',
+          recordId: targetRecordId,
+          authorId: actor.id,
+          at: nowIso,
+          text: noteText,
+        });
+      }
+
+      await pmsRepo.recordCreditControlAction(ctx, {
+        invoiceNumber: input.invoiceNumber,
+        matterCode: input.matterCode,
+        actionType: input.actionType,
+        notes: noteText,
+        actorName: personDisplayName(actor),
+        createdAt: nowIso,
+      });
+
+      writeAudit(null, {
+        recordType: linkedMatterId ? 'matter' : 'system',
+        recordId: linkedMatterId ?? input.invoiceNumber,
+        action: 'note',
+        field: 'Credit control',
+        oldValue: null,
+        newValue: `${input.actionType === 'log_call' ? 'Logged chase call' : 'Sent reminder'} on ${input.invoiceNumber}`,
+        byId: actor.id,
+        at: nowIso,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
 
   return { ok: true };
-
-    },
-  });
 }
 
 
@@ -13836,10 +13776,7 @@ export async function saveQuoteRecord(
   input: SaveQuoteInput,
   opts: { id?: string; byId: string; markAsSent?: boolean },
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveQuoteRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, opts.byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
@@ -13951,85 +13888,88 @@ export async function saveQuoteRecord(
   }
 
   if (!existing) {
-    const reference = await intakeRepo.allocateNextQuoteReference(ctx, now.getFullYear());
-    const timeline: Quote['timeline'] = [
-      {
-        id: `QT-${Date.now()}-1`,
-        kind: 'created',
-        at: nowIso,
+    return intakeRepo.withTenantTransaction(ctx, async () => {
+      const reference = await intakeRepo.allocateNextQuoteReference(ctx, now.getFullYear());
+      const timeline: Quote['timeline'] = [
+        {
+          id: `QT-${Date.now()}-1`,
+          kind: 'created',
+          at: nowIso,
+          byId: opts.byId,
+          title: 'Quote created (v1)',
+          detail: `${input.feeBasis} — £${totals.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
+        },
+      ];
+      if (markSent) {
+        timeline.push({
+          id: `QT-${Date.now()}-2`,
+          kind: 'sent',
+          at: nowIso,
+          byId: opts.byId,
+          title: 'Marked as sent',
+          detail: `First follow-up scheduled for ${nextFollowUpDate}`,
+        });
+      }
+
+      const created: Quote = {
+        id: reference,
+        reference,
+        version: 1,
+        status,
+        clientType,
+        linkedOrganisationId,
+        linkedPersonId,
+        prospectName,
+        prospectOrganisationName,
+        prospectEmail,
+        prospectPhone,
+        linkedEnquiryId: input.linkedEnquiryId || null,
+        convertedMatterId: null,
+        practiceAreaId: input.practiceAreaId,
+        workTypeSubcategoryId: input.workTypeSubcategoryId || null,
+        scope: input.scope.trim(),
+        assumptions: (input.assumptions ?? '').trim(),
+        feeBasis: input.feeBasis,
+        feeAmountExVat: totals.feeAmountExVat,
+        hourlyRateGbp:
+          input.feeBasis === 'Hourly rate with estimate'
+            ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+            : null,
+        vatAmount: totals.vatOnFee,
+        vatOverridden: Boolean(input.vatOverridden),
+        disbursements,
+        totalIncVat: totals.totalIncVat,
+        feeEarnerId,
+        assignedTeamId,
+        validUntil,
+        followUpAfterDays,
+        sentAt,
+        nextFollowUpDate,
+        outcomeAt: null,
+        declineReason: null,
+        followUps: [],
+        versionHistory: [],
+        timeline,
+        createdById: opts.byId,
+        createdAt: nowIso,
+        updatedById: opts.byId,
+        updatedAt: nowIso,
+      };
+
+      await intakeRepo.putQuote(ctx, created);
+      writeAudit(null, {
+        recordType: 'quote',
+        recordId: created.id,
+        action: 'create',
+        field: markSent ? 'Quote created and marked as sent' : 'Quote saved as draft',
+        oldValue: null,
+        newValue: `${created.reference} — ${quoteClientDisplayName(created, people, organisations)}`,
         byId: opts.byId,
-        title: 'Quote created (v1)',
-        detail: `${input.feeBasis} — £${totals.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
-      },
-    ];
-    if (markSent) {
-      timeline.push({
-        id: `QT-${Date.now()}-2`,
-        kind: 'sent',
         at: nowIso,
-        byId: opts.byId,
-        title: 'Marked as sent',
-        detail: `First follow-up scheduled for ${nextFollowUpDate}`,
       });
-    }
-
-    const created: Quote = {
-      id: reference,
-      reference,
-      version: 1,
-      status,
-      clientType,
-      linkedOrganisationId,
-      linkedPersonId,
-      prospectName,
-      prospectOrganisationName,
-      prospectEmail,
-      prospectPhone,
-      linkedEnquiryId: input.linkedEnquiryId || null,
-      convertedMatterId: null,
-      practiceAreaId: input.practiceAreaId,
-      workTypeSubcategoryId: input.workTypeSubcategoryId || null,
-      scope: input.scope.trim(),
-      assumptions: (input.assumptions ?? '').trim(),
-      feeBasis: input.feeBasis,
-      feeAmountExVat: totals.feeAmountExVat,
-      hourlyRateGbp:
-        input.feeBasis === 'Hourly rate with estimate'
-          ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
-          : null,
-      vatAmount: totals.vatOnFee,
-      vatOverridden: Boolean(input.vatOverridden),
-      disbursements,
-      totalIncVat: totals.totalIncVat,
-      feeEarnerId,
-      assignedTeamId,
-      validUntil,
-      followUpAfterDays,
-      sentAt,
-      nextFollowUpDate,
-      outcomeAt: null,
-      declineReason: null,
-      followUps: [],
-      versionHistory: [],
-      timeline,
-      createdById: opts.byId,
-      createdAt: nowIso,
-      updatedById: opts.byId,
-      updatedAt: nowIso,
-    };
-
-    await intakeRepo.putQuote(ctx, created);
-    writeAudit(null, {
-      recordType: 'quote',
-      recordId: created.id,
-      action: 'create',
-      field: markSent ? 'Quote created and marked as sent' : 'Quote saved as draft',
-      oldValue: null,
-      newValue: `${created.reference} — ${quoteClientDisplayName(created, people, organisations)}`,
-      byId: opts.byId,
-      at: nowIso,
+      await flushStagedAuditEntries(ctx);
+      return { quote: created };
     });
-    return { quote: created };
   }
 
   // Update existing quote
@@ -14080,20 +14020,21 @@ export async function saveQuoteRecord(
     existing.status = evaluateQuoteEffectiveStatus(existing, now);
   }
 
-  await intakeRepo.putQuote(ctx, existing);
-  writeAudit(null, {
-    recordType: 'quote',
-    recordId: existing.id,
-    action: 'update',
-    field: wasSentNow ? 'Quote marked as sent' : 'Quote updated',
-    oldValue: null,
-    newValue: `${existing.reference} (v${existing.version})`,
-    byId: opts.byId,
-    at: nowIso,
+  await intakeRepo.withTenantTransaction(ctx, async () => {
+    await intakeRepo.putQuote(ctx, existing);
+    writeAudit(null, {
+      recordType: 'quote',
+      recordId: existing.id,
+      action: 'update',
+      field: wasSentNow ? 'Quote marked as sent' : 'Quote updated',
+      oldValue: null,
+      newValue: `${existing.reference} (v${existing.version})`,
+      byId: opts.byId,
+      at: nowIso,
+    });
+    await flushStagedAuditEntries(ctx);
   });
   return { quote: existing };
-
-    },
   });
 }
 
@@ -14101,10 +14042,7 @@ export async function markQuoteSentRecord(
   quoteId: string,
   byId: string,
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'markQuoteSentRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
@@ -14156,21 +14094,22 @@ export async function markQuoteSentRecord(
     detail: `First follow-up scheduled for ${nextFollowUpDate} (${followUpDays} days)`,
   });
 
-  await intakeRepo.putQuote(ctx, quote);
-  writeAudit(null, {
-    recordType: 'quote',
-    recordId: quote.id,
-    action: 'status-change',
-    field: 'Mark as sent',
-    oldValue: 'Draft',
-    newValue: `Sent (follow-up due ${nextFollowUpDate})`,
-    byId,
-    at: nowIso,
+  await intakeRepo.withTenantTransaction(ctx, async () => {
+    await intakeRepo.putQuote(ctx, quote);
+    writeAudit(null, {
+      recordType: 'quote',
+      recordId: quote.id,
+      action: 'status-change',
+      field: 'Mark as sent',
+      oldValue: 'Draft',
+      newValue: `Sent (follow-up due ${nextFollowUpDate})`,
+      byId,
+      at: nowIso,
+    });
+    await flushStagedAuditEntries(ctx);
   });
 
   return { quote };
-
-    },
   });
 }
 
@@ -14183,10 +14122,7 @@ export async function logQuoteFollowUpRecord(
   },
   byId: string,
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'logQuoteFollowUpRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
@@ -14252,21 +14188,22 @@ export async function logQuoteFollowUpRecord(
     detail: `${input.note.trim()}${nextDate ? ` · Next follow-up: ${nextDate}` : ''}`,
   });
 
-  await intakeRepo.putQuote(ctx, quote);
-  writeAudit(null, {
-    recordType: 'quote',
-    recordId: quote.id,
-    action: 'contact-log',
-    field: `Quote follow-up (${input.method})`,
-    oldValue: null,
-    newValue: input.note.trim(),
-    byId,
-    at: nowIso,
+  await intakeRepo.withTenantTransaction(ctx, async () => {
+    await intakeRepo.putQuote(ctx, quote);
+    writeAudit(null, {
+      recordType: 'quote',
+      recordId: quote.id,
+      action: 'contact-log',
+      field: `Quote follow-up (${input.method})`,
+      oldValue: null,
+      newValue: input.note.trim(),
+      byId,
+      at: nowIso,
+    });
+    await flushStagedAuditEntries(ctx);
   });
 
   return { quote };
-
-    },
   });
 }
 
@@ -14288,10 +14225,7 @@ export async function reviseQuoteRecord(
   },
   byId: string,
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'reviseQuoteRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
@@ -14424,21 +14358,22 @@ export async function reviseQuoteRecord(
     });
   }
 
-  await intakeRepo.putQuote(ctx, quote);
-  writeAudit(null, {
-    recordType: 'quote',
-    recordId: quote.id,
-    action: 'update',
-    field: `Quote revised to v${nextVersion}`,
-    oldValue: `v${prevVersion} (Superseded)`,
-    newValue: `v${nextVersion} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT (${quote.status})`,
-    byId,
-    at: nowIso,
+  await intakeRepo.withTenantTransaction(ctx, async () => {
+    await intakeRepo.putQuote(ctx, quote);
+    writeAudit(null, {
+      recordType: 'quote',
+      recordId: quote.id,
+      action: 'update',
+      field: `Quote revised to v${nextVersion}`,
+      oldValue: `v${prevVersion} (Superseded)`,
+      newValue: `v${nextVersion} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT (${quote.status})`,
+      byId,
+      at: nowIso,
+    });
+    await flushStagedAuditEntries(ctx);
   });
 
   return { quote };
-
-    },
   });
 }
 
@@ -14451,10 +14386,7 @@ export async function recordQuoteOutcomeRecord(
   },
   byId: string,
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'recordQuoteOutcomeRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
@@ -14528,24 +14460,25 @@ export async function recordQuoteOutcomeRecord(
     });
   }
 
-  await intakeRepo.putQuote(ctx, quote);
-  writeAudit(null, {
-    recordType: 'quote',
-    recordId: quote.id,
-    action: 'status-change',
-    field: 'Quote outcome',
-    oldValue: prevStatus,
-    newValue:
-      input.outcome === 'Declined'
-        ? `Declined · ${input.declineReason}${input.note?.trim() ? ` (${input.note.trim()})` : ''}`
-        : `Accepted${input.note?.trim() ? ` (${input.note.trim()})` : ''}`,
-    byId,
-    at: nowIso,
+  await intakeRepo.withTenantTransaction(ctx, async () => {
+    await intakeRepo.putQuote(ctx, quote);
+    writeAudit(null, {
+      recordType: 'quote',
+      recordId: quote.id,
+      action: 'status-change',
+      field: 'Quote outcome',
+      oldValue: prevStatus,
+      newValue:
+        input.outcome === 'Declined'
+          ? `Declined · ${input.declineReason}${input.note?.trim() ? ` (${input.note.trim()})` : ''}`
+          : `Accepted${input.note?.trim() ? ` (${input.note.trim()})` : ''}`,
+      byId,
+      at: nowIso,
+    });
+    await flushStagedAuditEntries(ctx);
   });
 
   return { quote };
-
-    },
   });
 }
 
@@ -14568,10 +14501,7 @@ export async function prepareQuoteConversionRecord(
   enquiryId?: string | null;
   error?: string;
 } & Partial<Omit<ActionDenied, 'ok'>>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'prepareQuoteConversionRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
+  return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -14809,16 +14739,19 @@ export async function prepareQuoteConversionRecord(
 
     // R254: Never overwrite an existing organisation's conflict status or conflictDecision.
     // Record the blocked decision on the quote audit trail (`conflict-decision`, R258).
-    writeAudit(store, {
-      recordType: 'quote',
-      recordId: quote.id,
-      action: 'conflict-decision',
-      field: 'Quote conversion blocked by conflict check',
-      oldValue: null,
-      newValue: `${decisionSummary} · ${reasons.join(' · ')}`,
-      byId,
-      at: nowIso,
-      snapshot: decisionSnapshot,
+    await intakeRepo.withTenantTransaction(ctx, async () => {
+      writeAudit(store, {
+        recordType: 'quote',
+        recordId: quote.id,
+        action: 'conflict-decision',
+        field: 'Quote conversion blocked by conflict check',
+        oldValue: null,
+        newValue: `${decisionSummary} · ${reasons.join(' · ')}`,
+        byId,
+        at: nowIso,
+        snapshot: decisionSnapshot,
+      });
+      await flushStagedAuditEntries(ctx);
     });
 
     return {
@@ -15009,8 +14942,6 @@ export async function prepareQuoteConversionRecord(
       ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
     };
   });
-
-    },
   });
 }
 
@@ -15123,6 +15054,7 @@ export async function saveMatterCostsConfig(
 
 export async function syncMatterCostsRatesFromPms(
   byId: string,
+  options?: { tenantCtx?: TenantContext | null },
 ): Promise<MatterCostsConfig> {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enablePmsLiveRateSync) {
@@ -15135,13 +15067,15 @@ export async function syncMatterCostsRatesFromPms(
       actorUserId: byId,
     });
   }
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId, options);
   const catalogueRepo = getCatalogueRepository();
   let next!: MatterCostsConfig;
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
-      const store = await loadTenantCatalogueStoreView(ctx);
-      const pms = getPmsSource();
+      const [store, pms] = await Promise.all([
+        loadTenantCatalogueStoreView(ctx),
+        getTenantPmsSource(ctx),
+      ]);
       const feeEarners = pms.listFeeEarners();
       const base =
         store.matterCostsConfig ??
@@ -15252,7 +15186,7 @@ export async function resolveOrProvisionEntraEmployee(
   const authorityMode = rbacConfig.identityMapping?.authorityMode ?? 'hybrid';
 
   if (refusedPrivilegedEmailLinkPersonId) {
-    await appendUnmigratedModuleAuditEntries(signInCtx, [
+    await appendTenantAuditEntries(signInCtx, [
       {
         recordType: 'person',
         recordId: refusedPrivilegedEmailLinkPersonId,
@@ -15276,7 +15210,7 @@ export async function resolveOrProvisionEntraEmployee(
   }
 
   if (ambiguousEmailMatchPersonIds && ambiguousEmailMatchPersonIds.length > 1) {
-    await appendUnmigratedModuleAuditEntries(signInCtx, [
+    await appendTenantAuditEntries(signInCtx, [
       {
         recordType: 'person',
         recordId: ambiguousEmailMatchPersonIds[0]!,
@@ -15299,30 +15233,28 @@ export async function resolveOrProvisionEntraEmployee(
     throw new Error('Your account needs to be linked by an administrator.');
   }
 
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'resolveOrProvisionEntraEmployee',
-    resolveCtx: () => signInCtx,
-    mutate: async () => {
-      const partyRepo = getPartyRepository();
-      const [people, teams] = await Promise.all([
-        partyRepo.listAllPeople<Person>(signInCtx),
-        hrRepo.listAllTeams<Team>(signInCtx),
-      ]);
-      const {
-        person: matchedPerson,
-        matchedByEmailOnly,
-      } = resolvePersonForEntraClaims({
-        claims,
-        people,
-        teams,
-        tenantId: activeTenantId,
-        rbacConfig,
-        primaryDomain: activeTenantConfig.branding.primaryDomain,
-      });
+  return runWithAuditStagingScope(async () => {
+    const partyRepo = getPartyRepository();
+    const [people, teams] = await Promise.all([
+      partyRepo.listAllPeople<Person>(signInCtx),
+      hrRepo.listAllTeams<Team>(signInCtx),
+    ]);
+    const {
+      person: matchedPerson,
+      matchedByEmailOnly,
+    } = resolvePersonForEntraClaims({
+      claims,
+      people,
+      teams,
+      tenantId: activeTenantId,
+      rbacConfig,
+      primaryDomain: activeTenantConfig.branding.primaryDomain,
+    });
 
-      if (matchedPerson) {
-        const prevOid = matchedPerson.entraObjectId?.trim() || null;
-        const isFirstEmailLink = Boolean(matchedByEmailOnly && !prevOid && oid);
+    if (matchedPerson) {
+      const prevOid = matchedPerson.entraObjectId?.trim() || null;
+      const isFirstEmailLink = Boolean(matchedByEmailOnly && !prevOid && oid);
+      await partyRepo.withTenantTransaction(signInCtx, async () => {
         if (isFirstEmailLink && oid) {
           matchedPerson.entraObjectId = oid;
           writeAudit(null, {
@@ -15369,29 +15301,33 @@ export async function resolveOrProvisionEntraEmployee(
           byId: matchedPerson.id,
           at: now,
         });
-        return { person: matchedPerson, verifiedToken, rbacConfig };
-      }
+        await flushStagedAuditEntries(signInCtx);
+      });
+      return { person: matchedPerson, verifiedToken, rbacConfig };
+    }
 
-      // Provision a linked employee record for this authenticated Entra user (R52: no default 'admin' or hardcoded 'DEPT-EXEC')
-      const rawName =
-        (typeof claims.name === 'string' && claims.name.trim()) ||
-        claimEmail.split('@')[0] ||
-        'Entra User';
-      const nameParts = rawName.split(/\s+/).filter(Boolean);
-      const firstName = nameParts[0] || 'Entra';
-      const surname = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'User';
+    // Provision a linked employee record for this authenticated Entra user (R52: no default 'admin' or hardcoded 'DEPT-EXEC')
+    const rawName =
+      (typeof claims.name === 'string' && claims.name.trim()) ||
+      claimEmail.split('@')[0] ||
+      'Entra User';
+    const nameParts = rawName.split(/\s+/).filter(Boolean);
+    const firstName = nameParts[0] || 'Entra';
+    const surname = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'User';
 
-      const defaultRoleKeys = rbacConfig.identityMapping?.defaultRoleKeys ?? [];
-      const mappedRoles =
-        verifiedToken.roles.length > 0
-          ? [...verifiedToken.roles]
-          : [...defaultRoleKeys];
-      const isAdmin = mappedRoles.includes('admin');
-      const isPartner =
-        mappedRoles.includes('managing_partner') || mappedRoles.includes('partner');
+    const defaultRoleKeys = rbacConfig.identityMapping?.defaultRoleKeys ?? [];
+    const mappedRoles =
+      verifiedToken.roles.length > 0
+        ? [...verifiedToken.roles]
+        : [...defaultRoleKeys];
+    const isAdmin = mappedRoles.includes('admin');
+    const isPartner =
+      mappedRoles.includes('managing_partner') || mappedRoles.includes('partner');
 
+    let newEmployee!: Person;
+    await partyRepo.withTenantTransaction(signInCtx, async () => {
       const newId = await partyRepo.allocateNextPersonId(signInCtx);
-      const newEmployee: Person = {
+      newEmployee = {
         id: newId,
         recordType: 'person',
         recordOwnerId: newId,
@@ -15479,9 +15415,10 @@ export async function resolveOrProvisionEntraEmployee(
         byId: newEmployee.id,
         at: now,
       });
+      await flushStagedAuditEntries(signInCtx);
+    });
 
-      return { person: newEmployee, verifiedToken, rbacConfig };
-    },
+    return { person: newEmployee, verifiedToken, rbacConfig };
   });
 }
 
@@ -15615,7 +15552,7 @@ async function commitKeyDateDomainWritesInPostgres(params: {
         ...(a.reason !== undefined ? { reason: a.reason } : {}),
         ...(a.snapshot !== undefined ? { snapshot: a.snapshot } : {}),
       }));
-      await appendUnmigratedModuleAuditEntries(params.ctx, auditInputs);
+      await appendTenantAuditEntries(params.ctx, auditInputs);
     }
   });
 }
@@ -15794,139 +15731,137 @@ export async function createOrProposeKeyDateRecord(
   message?: string;
 }> {
   try {
-    return await withJsonStoreWriteLock(async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
-      if (!resolved || !resolved.actor) {
-        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-      }
-      const { ctx, actor, people, matters, teams } = resolved;
-      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-      const disabledErr = assertKeyDatesModuleEnabled(config);
-      if (disabledErr) return disabledErr;
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
+    if (!resolved || !resolved.actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const { ctx, actor, people, matters, teams } = resolved;
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-      const nowIso = new Date().toISOString();
-      const todayIso = toIsoDate(new Date());
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
 
-      const matter = input.matterId
-        ? matters.find((m) => m.id === input.matterId) ?? null
-        : null;
-      const enquiry = input.enquiryId
-        ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(ctx, input.enquiryId, {
-            includeRestricted: true,
-          })
-        : null;
+    const matter = input.matterId
+      ? matters.find((m) => m.id === input.matterId) ?? null
+      : null;
+    const enquiry = input.enquiryId
+      ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(ctx, input.enquiryId, {
+          includeRestricted: true,
+        })
+      : null;
 
-      if (
-        input.matterId &&
-        (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people))
-      ) {
-        return { ok: false, error: 'Matter not found or restricted.' };
-      }
+    if (
+      input.matterId &&
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people))
+    ) {
+      return { ok: false, error: 'Matter not found or restricted.' };
+    }
 
-      const resolvedSource = resolveKeyDateSource({
-        source: input.source,
-        hasCalculation: Boolean(input.calculation),
-        allowSystemSource: false,
-      });
-      if (!resolvedSource.ok) {
-        return buildActionDenied('FORBIDDEN', resolvedSource.error);
-      }
-      const manualCheck = validateKeyDateManualEntry(
-        config,
-        input.keyDateTypeId,
-        resolvedSource.source,
+    const resolvedSource = resolveKeyDateSource({
+      source: input.source,
+      hasCalculation: Boolean(input.calculation),
+      allowSystemSource: false,
+    });
+    if (!resolvedSource.ok) {
+      return buildActionDenied('FORBIDDEN', resolvedSource.error);
+    }
+    const manualCheck = validateKeyDateManualEntry(
+      config,
+      input.keyDateTypeId,
+      resolvedSource.source,
+    );
+    if (!manualCheck.ok) {
+      return buildActionDenied('FORBIDDEN', manualCheck.error);
+    }
+
+    const keyDateRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
+
+    const kd = createOrProposeKeyDate({
+      id: newKdId,
+      matter,
+      enquiry,
+      keyDateTypeId: input.keyDateTypeId,
+      title: input.title,
+      dueDate: input.dueDate,
+      dueTime: input.dueTime,
+      isCritical: input.isCritical,
+      source: resolvedSource.source,
+      teamId: input.teamId,
+      responsiblePersonIds: input.responsiblePersonIds,
+      calculation: input.calculation,
+      notes: input.notes,
+      sourceDocumentId: input.sourceDocumentId,
+      intent: input.intent,
+      actor,
+      nowIso,
+      config,
+      teams,
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+    });
+
+    const reminderStatesWorking: KeyDateReminderState[] = [];
+    const calendarSyncsWorking: KeyDateCalendarSync[] = [];
+    let changedTasks: Task[] = [];
+    let deletedTaskIds: string[] = [];
+
+    if (kd.status === 'confirmed') {
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
       );
-      if (!manualCheck.ok) {
-        return buildActionDenied('FORBIDDEN', manualCheck.error);
-      }
-
-      const keyDateRepo = getKeyDateRepository();
-      const taskRepo = getTaskWorkflowRepository();
-      const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
-
-      const kd = createOrProposeKeyDate({
-        id: newKdId,
-        matter,
-        enquiry,
-        keyDateTypeId: input.keyDateTypeId,
-        title: input.title,
-        dueDate: input.dueDate,
-        dueTime: input.dueTime,
-        isCritical: input.isCritical,
-        source: resolvedSource.source,
-        teamId: input.teamId,
-        responsiblePersonIds: input.responsiblePersonIds,
-        calculation: input.calculation,
-        notes: input.notes,
-        sourceDocumentId: input.sourceDocumentId,
-        intent: input.intent,
-        actor,
-        nowIso,
+      let pendingTaskIdx = 0;
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
         config,
-        teams,
+        tasks: storeTasks,
+        reminderStates: reminderStatesWorking,
+        matters: matter ? [matter] : [],
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      });
-
-      const reminderStatesWorking: KeyDateReminderState[] = [];
-      const calendarSyncsWorking: KeyDateCalendarSync[] = [];
-      let changedTasks: Task[] = [];
-      let deletedTaskIds: string[] = [];
-
-      if (kd.status === 'confirmed') {
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-        const beforeTaskJsonById = new Map(
-          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-        );
-        let pendingTaskIdx = 0;
-        syncReminderForConfirmedKeyDate({
-          keyDate: kd,
-          config,
-          tasks: storeTasks,
-          reminderStates: reminderStatesWorking,
-          matters: matter ? [matter] : [],
-          people,
-          audit: stagedAudit,
-          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-          todayIso,
-          nowIso,
-          actorId: actor.id,
-          tenantId: ctx.tenantId,
-          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-        });
-        changedTasks = storeTasks.filter(
-          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-        );
-        const currentIds = new Set(storeTasks.map((t) => t.id));
-        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-          (id) => !currentIds.has(id),
-        );
-      }
-
-      await syncKeyDateToOutlookCalendar({
-        keyDate: kd,
-        config,
-        matter,
-        enquiry,
-        calendarSyncs: calendarSyncsWorking,
+        todayIso,
         nowIso,
+        actorId: actor.id,
+        tenantId: ctx.tenantId,
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
       });
+      changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+      );
+      const currentIds = new Set(storeTasks.map((t) => t.id));
+      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+        (id) => !currentIds.has(id),
+      );
+    }
 
-      await commitKeyDateDomainWritesInPostgres({
-        ctx,
-        keyDatesToUpsert: [kd],
-        reminderStatesToUpsert: reminderStatesWorking,
-        calendarSyncsToUpsert: calendarSyncsWorking,
-        tasksToUpsert: changedTasks,
-        tasksToDeleteIds: deletedTaskIds,
-        auditEntries: stagedAudit,
-      });
-
-      return { ok: true, keyDate: kd };
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: calendarSyncsWorking,
+      nowIso,
     });
+
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      keyDatesToUpsert: [kd],
+      reminderStatesToUpsert: reminderStatesWorking,
+      calendarSyncsToUpsert: calendarSyncsWorking,
+      tasksToUpsert: changedTasks,
+      tasksToDeleteIds: deletedTaskIds,
+      auditEntries: stagedAudit,
+    });
+
+    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -15940,113 +15875,111 @@ export async function proposeProvisionalKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
-      if (!resolved || !resolved.actor) {
-        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-      }
-      const { ctx, actor, people, matters, teams } = resolved;
-      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-      const disabledErr = assertKeyDatesModuleEnabled(config);
-      if (disabledErr) return disabledErr;
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
+    if (!resolved || !resolved.actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const { ctx, actor, people, matters, teams } = resolved;
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-      const nowIso = new Date().toISOString();
-      const todayIso = toIsoDate(new Date());
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
 
-      const loaded = await loadKeyDateForActorOrClassifyError(
-        ctx,
-        null,
-        keyDateId,
-        actor,
-        people,
-        matters,
-        teams,
+    const loaded = await loadKeyDateForActorOrClassifyError(
+      ctx,
+      null,
+      keyDateId,
+      actor,
+      people,
+      matters,
+      teams,
+    );
+    if (!loaded.kd) {
+      return { ok: false, error: loaded.error ?? 'Key date not found.' };
+    }
+    const { kd, matter, enquiry } = loaded;
+    const keyDateRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
+
+    proposeProvisionalKeyDate({
+      keyDate: kd,
+      actor,
+      nowIso,
+      config,
+      matter,
+      enquiry,
+      teams,
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+    });
+
+    const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
+    const reminderStatesWorking: KeyDateReminderState[] = existingReminder
+      ? [existingReminder]
+      : [];
+    const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+    const calendarSyncsWorking: KeyDateCalendarSync[] = existingSync
+      ? [existingSync]
+      : [];
+
+    let changedTasks: Task[] = [];
+    let deletedTaskIds: string[] = [];
+    if (kd.status === 'confirmed') {
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
       );
-      if (!loaded.kd) {
-        return { ok: false, error: loaded.error ?? 'Key date not found.' };
-      }
-      const { kd, matter, enquiry } = loaded;
-      const keyDateRepo = getKeyDateRepository();
-      const taskRepo = getTaskWorkflowRepository();
-
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
-
-      proposeProvisionalKeyDate({
+      let pendingTaskIdx = 0;
+      syncReminderForConfirmedKeyDate({
         keyDate: kd,
-        actor,
-        nowIso,
         config,
-        matter,
-        enquiry,
-        teams,
+        tasks: storeTasks,
+        reminderStates: reminderStatesWorking,
+        matters: matter ? [matter] : [],
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      });
-
-      const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
-      const reminderStatesWorking: KeyDateReminderState[] = existingReminder
-        ? [existingReminder]
-        : [];
-      const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
-      const calendarSyncsWorking: KeyDateCalendarSync[] = existingSync
-        ? [existingSync]
-        : [];
-
-      let changedTasks: Task[] = [];
-      let deletedTaskIds: string[] = [];
-      if (kd.status === 'confirmed') {
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-        const beforeTaskJsonById = new Map(
-          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-        );
-        let pendingTaskIdx = 0;
-        syncReminderForConfirmedKeyDate({
-          keyDate: kd,
-          config,
-          tasks: storeTasks,
-          reminderStates: reminderStatesWorking,
-          matters: matter ? [matter] : [],
-          people,
-          audit: stagedAudit,
-          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-          todayIso,
-          nowIso,
-          actorId: actor.id,
-          tenantId: ctx.tenantId,
-          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-        });
-        changedTasks = storeTasks.filter(
-          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-        );
-        const currentIds = new Set(storeTasks.map((t) => t.id));
-        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-          (id) => !currentIds.has(id),
-        );
-      }
-
-      await syncKeyDateToOutlookCalendar({
-        keyDate: kd,
-        config,
-        matter,
-        enquiry,
-        calendarSyncs: calendarSyncsWorking,
+        todayIso,
         nowIso,
+        actorId: actor.id,
+        tenantId: ctx.tenantId,
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
       });
+      changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+      );
+      const currentIds = new Set(storeTasks.map((t) => t.id));
+      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+        (id) => !currentIds.has(id),
+      );
+    }
 
-      await commitKeyDateDomainWritesInPostgres({
-        ctx,
-        keyDatesToUpsert: [kd],
-        reminderStatesToUpsert: reminderStatesWorking,
-        calendarSyncsToUpsert: calendarSyncsWorking,
-        tasksToUpsert: changedTasks,
-        tasksToDeleteIds: deletedTaskIds,
-        auditEntries: stagedAudit,
-      });
-
-      return { ok: true, keyDate: kd };
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: calendarSyncsWorking,
+      nowIso,
     });
+
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      keyDatesToUpsert: [kd],
+      reminderStatesToUpsert: reminderStatesWorking,
+      calendarSyncsToUpsert: calendarSyncsWorking,
+      tasksToUpsert: changedTasks,
+      tasksToDeleteIds: deletedTaskIds,
+      auditEntries: stagedAudit,
+    });
+
+    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -16102,113 +16035,111 @@ export async function verifyProposedKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
-      if (!resolved || !resolved.actor) {
-        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-      }
-      const { ctx, actor: verifier, people, matters, teams } = resolved;
-      const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
-      const disabledErr = assertKeyDatesModuleEnabled(config);
-      if (disabledErr) return disabledErr;
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
+    if (!resolved || !resolved.actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const { ctx, actor: verifier, people, matters, teams } = resolved;
+    const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-      const loaded = await loadKeyDateForActorOrClassifyError(
-        ctx,
-        null,
-        keyDateId,
-        verifier,
-        people,
-        matters,
-        teams,
-      );
-      if (!loaded.kd) {
-        return { ok: false, error: loaded.error ?? 'Key date not found.' };
-      }
-      const { kd, matter, enquiry } = loaded;
-      const nowIso = new Date().toISOString();
-      const todayIso = toIsoDate(new Date());
+    const loaded = await loadKeyDateForActorOrClassifyError(
+      ctx,
+      null,
+      keyDateId,
+      verifier,
+      people,
+      matters,
+      teams,
+    );
+    if (!loaded.kd) {
+      return { ok: false, error: loaded.error ?? 'Key date not found.' };
+    }
+    const { kd, matter, enquiry } = loaded;
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
 
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
 
-      verifyProposedKeyDate({
-        keyDate: kd,
-        verifier,
-        nowIso,
-        config,
-        teams,
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      });
-
-      const keyDateRepo = getKeyDateRepository();
-      const taskRepo = getTaskWorkflowRepository();
-      const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-        ctx,
-        verifier.id,
-      );
-      const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
-        ctx,
-        verifier.id,
-      );
-
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-      );
-      let pendingTaskIdx = 0;
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: verifier.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-        transferredFromKeyDateId: kd.supersedesKeyDateId,
-      });
-
-      await syncKeyDateToOutlookCalendar({
-        keyDate: kd,
-        config,
-        matter,
-        enquiry,
-        calendarSyncs: calendarSyncsWorking,
-        nowIso,
-      });
-
-      const changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
-
-      const targetReminders = reminderStatesWorking.filter(
-        (rs) => rs.keyDateId === kd.id || rs.keyDateId === kd.supersedesKeyDateId,
-      );
-      const targetSyncs = calendarSyncsWorking.filter((cs) => cs.keyDateId === kd.id);
-
-      await commitKeyDateDomainWritesInPostgres({
-        ctx,
-        keyDatesToUpsert: [kd],
-        reminderStatesToUpsert: targetReminders,
-        calendarSyncsToUpsert: targetSyncs,
-        tasksToUpsert: changedTasks,
-        tasksToDeleteIds: deletedTaskIds,
-        auditEntries: stagedAudit,
-      });
-
-      return { ok: true, keyDate: kd };
+    verifyProposedKeyDate({
+      keyDate: kd,
+      verifier,
+      nowIso,
+      config,
+      teams,
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
+
+    const keyDateRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+      ctx,
+      verifier.id,
+    );
+    const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
+      ctx,
+      verifier.id,
+    );
+
+    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+    const beforeTaskJsonById = new Map(
+      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+    );
+    let pendingTaskIdx = 0;
+    syncReminderForConfirmedKeyDate({
+      keyDate: kd,
+      config,
+      tasks: storeTasks,
+      reminderStates: reminderStatesWorking,
+      matters: matter ? [matter] : [],
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      todayIso,
+      nowIso,
+      actorId: verifier.id,
+      tenantId: ctx.tenantId,
+      nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+      transferredFromKeyDateId: kd.supersedesKeyDateId,
+    });
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: calendarSyncsWorking,
+      nowIso,
+    });
+
+    const changedTasks = storeTasks.filter(
+      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+    );
+    const currentIds = new Set(storeTasks.map((t) => t.id));
+    const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+      (id) => !currentIds.has(id),
+    );
+
+    const targetReminders = reminderStatesWorking.filter(
+      (rs) => rs.keyDateId === kd.id || rs.keyDateId === kd.supersedesKeyDateId,
+    );
+    const targetSyncs = calendarSyncsWorking.filter((cs) => cs.keyDateId === kd.id);
+
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      keyDatesToUpsert: [kd],
+      reminderStatesToUpsert: targetReminders,
+      calendarSyncsToUpsert: targetSyncs,
+      tasksToUpsert: changedTasks,
+      tasksToDeleteIds: deletedTaskIds,
+      auditEntries: stagedAudit,
+    });
+
+    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -16302,197 +16233,195 @@ export async function supersedeConfirmedKeyDateRecord(
   message?: string;
 }> {
   try {
-    return await withJsonStoreWriteLock(async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
-      if (!resolved || !resolved.actor) {
-        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-      }
-      const { ctx, actor, people, matters, teams } = resolved;
-      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-      const disabledErr = assertKeyDatesModuleEnabled(config);
-      if (disabledErr) return disabledErr;
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
+    if (!resolved || !resolved.actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const { ctx, actor, people, matters, teams } = resolved;
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-      const loaded = await loadKeyDateForActorOrClassifyError(
-        ctx,
-        null,
-        keyDateId,
-        actor,
-        people,
-        matters,
-        teams,
-      );
-      if (!loaded.kd) {
-        return { ok: false, error: loaded.error ?? 'Key date not found.' };
-      }
-      const { kd: existing, matter, enquiry } = loaded;
-      const nowIso = new Date().toISOString();
-      const todayIso = toIsoDate(new Date());
+    const loaded = await loadKeyDateForActorOrClassifyError(
+      ctx,
+      null,
+      keyDateId,
+      actor,
+      people,
+      matters,
+      teams,
+    );
+    if (!loaded.kd) {
+      return { ok: false, error: loaded.error ?? 'Key date not found.' };
+    }
+    const { kd: existing, matter, enquiry } = loaded;
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
 
-      const resolvedSupersede = resolveSupersedeKeyDateSource({
-        existingKeyDate: existing,
-        updates,
-        reason,
-        config,
-        allowSystemSource: false,
-      });
-      if (!resolvedSupersede.ok) {
-        return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
-      }
-      const manualCheck = validateKeyDateManualEntry(
-        config,
-        existing.keyDateTypeId,
-        resolvedSupersede.source,
-      );
-      if (!manualCheck.ok) {
-        return buildActionDenied('FORBIDDEN', manualCheck.error);
-      }
-
-      const keyDateRepo = getKeyDateRepository();
-      const taskRepo = getTaskWorkflowRepository();
-      const newKeyDateId = await keyDateRepo.allocateNextKeyDateId(ctx);
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
-
-      const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
-        existingKeyDate: existing,
-        newKeyDateId,
-        updates,
-        reason,
-        actor,
-        nowIso,
-        config,
-        matter,
-        enquiry,
-        teams,
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      });
-
-      const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-        ctx,
-        actor.id,
-      );
-      const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
-        ctx,
-        actor.id,
-      );
-
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-      );
-      let pendingTaskIdx = 0;
-      syncReminderForConfirmedKeyDate({
-        keyDate: replacementKeyDate,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: actor.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-        transferredFromKeyDateId: supersededKeyDate.id,
-      });
-
-      await syncKeyDateToOutlookCalendar({
-        keyDate: supersededKeyDate,
-        config,
-        matter,
-        enquiry,
-        calendarSyncs: calendarSyncsWorking,
-        nowIso,
-      });
-      await syncKeyDateToOutlookCalendar({
-        keyDate: replacementKeyDate,
-        config,
-        matter,
-        enquiry,
-        calendarSyncs: calendarSyncsWorking,
-        nowIso,
-      });
-
-      const changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
-
-      await keyDateRepo.withTenantTransaction(ctx, async (tx) => {
-        for (const deletedId of deletedTaskIds) {
-          await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
-            ctx.tenantId,
-            deletedId,
-          ]);
-        }
-        for (const t of changedTasks) {
-          if (t.id.startsWith('TSK-PENDING-')) {
-            const oldId = t.id;
-            const realId = await taskRepo.allocateNextTaskId(ctx);
-            t.id = realId;
-            t.reference = realId;
-            for (const rs of reminderStatesWorking) {
-              if (rs.taskId === oldId) rs.taskId = realId;
-            }
-            for (const a of stagedAudit) {
-              if (a.recordId === oldId) a.recordId = realId;
-            }
-          }
-          await taskRepo.putTask(ctx, t);
-        }
-
-        // Insert replacement first without supersededBy link on existing, then link both cleanly
-        const replacementFirst = { ...replacementKeyDate };
-        await keyDateRepo.putKeyDate(ctx, {
-          ...supersededKeyDate,
-          supersededByKeyDateId: undefined,
-        });
-        await keyDateRepo.putKeyDate(ctx, replacementFirst);
-        await keyDateRepo.putKeyDate(ctx, supersededKeyDate);
-
-        if (!reminderStatesWorking.some((rs) => rs.keyDateId === supersededKeyDate.id)) {
-          await keyDateRepo.removeReminderState(ctx, supersededKeyDate.id);
-        }
-        for (const rs of reminderStatesWorking) {
-          if (
-            rs.keyDateId === replacementKeyDate.id ||
-            rs.keyDateId === supersededKeyDate.id
-          ) {
-            await keyDateRepo.putReminderState(ctx, rs);
-          }
-        }
-        for (const cs of calendarSyncsWorking) {
-          if (
-            cs.keyDateId === replacementKeyDate.id ||
-            cs.keyDateId === supersededKeyDate.id
-          ) {
-            await keyDateRepo.putCalendarSync(ctx, cs);
-          }
-        }
-        const auditInputs: FirmAuditEntryInput[] = stagedAudit.map((a) => ({
-          recordType: a.recordType,
-          recordId: a.recordId,
-          action: a.action,
-          field: a.field,
-          oldValue: a.oldValue,
-          newValue: a.newValue,
-          byId: a.byId,
-          at: a.at,
-          ...(a.reason !== undefined ? { reason: a.reason } : {}),
-          ...(a.snapshot !== undefined ? { snapshot: a.snapshot } : {}),
-        }));
-        await appendUnmigratedModuleAuditEntries(ctx, auditInputs);
-      });
-
-      return { ok: true, supersededKeyDate, replacementKeyDate };
+    const resolvedSupersede = resolveSupersedeKeyDateSource({
+      existingKeyDate: existing,
+      updates,
+      reason,
+      config,
+      allowSystemSource: false,
     });
+    if (!resolvedSupersede.ok) {
+      return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
+    }
+    const manualCheck = validateKeyDateManualEntry(
+      config,
+      existing.keyDateTypeId,
+      resolvedSupersede.source,
+    );
+    if (!manualCheck.ok) {
+      return buildActionDenied('FORBIDDEN', manualCheck.error);
+    }
+
+    const keyDateRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const newKeyDateId = await keyDateRepo.allocateNextKeyDateId(ctx);
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
+
+    const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
+      existingKeyDate: existing,
+      newKeyDateId,
+      updates,
+      reason,
+      actor,
+      nowIso,
+      config,
+      matter,
+      enquiry,
+      teams,
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+    });
+
+    const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+      ctx,
+      actor.id,
+    );
+    const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
+      ctx,
+      actor.id,
+    );
+
+    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+    const beforeTaskJsonById = new Map(
+      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+    );
+    let pendingTaskIdx = 0;
+    syncReminderForConfirmedKeyDate({
+      keyDate: replacementKeyDate,
+      config,
+      tasks: storeTasks,
+      reminderStates: reminderStatesWorking,
+      matters: matter ? [matter] : [],
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      todayIso,
+      nowIso,
+      actorId: actor.id,
+      tenantId: ctx.tenantId,
+      nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+      transferredFromKeyDateId: supersededKeyDate.id,
+    });
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: supersededKeyDate,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: calendarSyncsWorking,
+      nowIso,
+    });
+    await syncKeyDateToOutlookCalendar({
+      keyDate: replacementKeyDate,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: calendarSyncsWorking,
+      nowIso,
+    });
+
+    const changedTasks = storeTasks.filter(
+      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+    );
+    const currentIds = new Set(storeTasks.map((t) => t.id));
+    const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+      (id) => !currentIds.has(id),
+    );
+
+    await keyDateRepo.withTenantTransaction(ctx, async (tx) => {
+      for (const deletedId of deletedTaskIds) {
+        await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
+          ctx.tenantId,
+          deletedId,
+        ]);
+      }
+      for (const t of changedTasks) {
+        if (t.id.startsWith('TSK-PENDING-')) {
+          const oldId = t.id;
+          const realId = await taskRepo.allocateNextTaskId(ctx);
+          t.id = realId;
+          t.reference = realId;
+          for (const rs of reminderStatesWorking) {
+            if (rs.taskId === oldId) rs.taskId = realId;
+          }
+          for (const a of stagedAudit) {
+            if (a.recordId === oldId) a.recordId = realId;
+          }
+        }
+        await taskRepo.putTask(ctx, t);
+      }
+
+      // Insert replacement first without supersededBy link on existing, then link both cleanly
+      const replacementFirst = { ...replacementKeyDate };
+      await keyDateRepo.putKeyDate(ctx, {
+        ...supersededKeyDate,
+        supersededByKeyDateId: undefined,
+      });
+      await keyDateRepo.putKeyDate(ctx, replacementFirst);
+      await keyDateRepo.putKeyDate(ctx, supersededKeyDate);
+
+      if (!reminderStatesWorking.some((rs) => rs.keyDateId === supersededKeyDate.id)) {
+        await keyDateRepo.removeReminderState(ctx, supersededKeyDate.id);
+      }
+      for (const rs of reminderStatesWorking) {
+        if (
+          rs.keyDateId === replacementKeyDate.id ||
+          rs.keyDateId === supersededKeyDate.id
+        ) {
+          await keyDateRepo.putReminderState(ctx, rs);
+        }
+      }
+      for (const cs of calendarSyncsWorking) {
+        if (
+          cs.keyDateId === replacementKeyDate.id ||
+          cs.keyDateId === supersededKeyDate.id
+        ) {
+          await keyDateRepo.putCalendarSync(ctx, cs);
+        }
+      }
+      const auditInputs: FirmAuditEntryInput[] = stagedAudit.map((a) => ({
+        recordType: a.recordType,
+        recordId: a.recordId,
+        action: a.action,
+        field: a.field,
+        oldValue: a.oldValue,
+        newValue: a.newValue,
+        byId: a.byId,
+        at: a.at,
+        ...(a.reason !== undefined ? { reason: a.reason } : {}),
+        ...(a.snapshot !== undefined ? { snapshot: a.snapshot } : {}),
+      }));
+      await appendTenantAuditEntries(ctx, auditInputs);
+    });
+
+    return { ok: true, supersededKeyDate, replacementKeyDate };
   } catch (err) {
     return {
       ok: false,
@@ -16511,91 +16440,89 @@ export async function resolveKeyDateOutcomeRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
-      if (!resolved || !resolved.actor) {
-        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-      }
-      const { ctx, actor, people, matters, teams } = resolved;
-      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-      const disabledErr = assertKeyDatesModuleEnabled(config);
-      if (disabledErr) return disabledErr;
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
+    if (!resolved || !resolved.actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const { ctx, actor, people, matters, teams } = resolved;
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-      const loaded = await loadKeyDateForActorOrClassifyError(
-        ctx,
-        null,
-        keyDateId,
-        actor,
-        people,
-        matters,
-        teams,
-      );
-      if (!loaded.kd) {
-        return { ok: false, error: loaded.error ?? 'Key date not found.' };
-      }
-      const { kd, matter, enquiry } = loaded;
-      const nowIso = new Date().toISOString();
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
+    const loaded = await loadKeyDateForActorOrClassifyError(
+      ctx,
+      null,
+      keyDateId,
+      actor,
+      people,
+      matters,
+      teams,
+    );
+    if (!loaded.kd) {
+      return { ok: false, error: loaded.error ?? 'Key date not found.' };
+    }
+    const { kd, matter, enquiry } = loaded;
+    const nowIso = new Date().toISOString();
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
 
-      resolveKeyDateOutcome({
-        keyDate: kd,
-        kind: input.kind,
-        note: input.note,
-        evidenceDocumentId: input.evidenceDocumentId,
-        actor,
-        nowIso,
-        config,
-        teams,
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      });
-
-      const keyDateRepo = getKeyDateRepository();
-      const taskRepo = getTaskWorkflowRepository();
-      const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
-      const reminderStatesWorking = existingReminder ? [existingReminder] : [];
-      const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
-      const calendarSyncsWorking = existingSync ? [existingSync] : [];
-
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-      );
-      closeReminderTaskForKeyDate({
-        keyDateId: kd.id,
-        tenantId: ctx.tenantId,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        nowIso,
-        actorId: actor.id,
-      });
-
-      await syncKeyDateToOutlookCalendar({
-        keyDate: kd,
-        config,
-        matter,
-        enquiry,
-        calendarSyncs: calendarSyncsWorking,
-        nowIso,
-      });
-
-      const changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-
-      await commitKeyDateDomainWritesInPostgres({
-        ctx,
-        keyDatesToUpsert: [kd],
-        reminderStatesToUpsert: reminderStatesWorking,
-        calendarSyncsToUpsert: calendarSyncsWorking,
-        tasksToUpsert: changedTasks,
-        auditEntries: stagedAudit,
-      });
-
-      return { ok: true, keyDate: kd };
+    resolveKeyDateOutcome({
+      keyDate: kd,
+      kind: input.kind,
+      note: input.note,
+      evidenceDocumentId: input.evidenceDocumentId,
+      actor,
+      nowIso,
+      config,
+      teams,
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
+
+    const keyDateRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
+    const reminderStatesWorking = existingReminder ? [existingReminder] : [];
+    const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+    const calendarSyncsWorking = existingSync ? [existingSync] : [];
+
+    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+    const beforeTaskJsonById = new Map(
+      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+    );
+    closeReminderTaskForKeyDate({
+      keyDateId: kd.id,
+      tenantId: ctx.tenantId,
+      tasks: storeTasks,
+      reminderStates: reminderStatesWorking,
+      nowIso,
+      actorId: actor.id,
+    });
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: calendarSyncsWorking,
+      nowIso,
+    });
+
+    const changedTasks = storeTasks.filter(
+      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+    );
+
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      keyDatesToUpsert: [kd],
+      reminderStatesToUpsert: reminderStatesWorking,
+      calendarSyncsToUpsert: calendarSyncsWorking,
+      tasksToUpsert: changedTasks,
+      auditEntries: stagedAudit,
+    });
+
+    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -16615,83 +16542,81 @@ export async function reassignKeyDateTeamRecord(
   options?: { calendarAdapter?: GraphCalendarAdapter },
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
-      if (!resolved || !resolved.actor) {
-        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-      }
-      const { ctx, actor, people, matters, teams } = resolved;
-      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-      const disabledErr = assertKeyDatesModuleEnabled(config);
-      if (disabledErr) return disabledErr;
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
+    if (!resolved || !resolved.actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const { ctx, actor, people, matters, teams } = resolved;
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-      const loaded = await loadKeyDateForActorOrClassifyError(
-        ctx,
-        null,
-        keyDateId,
-        actor,
-        people,
-        matters,
-        teams,
-      );
-      if (!loaded.kd) {
-        return { ok: false, error: loaded.error ?? 'Key date not found.' };
-      }
-      const { kd, matter, enquiry } = loaded;
-      const nowIso = new Date().toISOString();
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
+    const loaded = await loadKeyDateForActorOrClassifyError(
+      ctx,
+      null,
+      keyDateId,
+      actor,
+      people,
+      matters,
+      teams,
+    );
+    if (!loaded.kd) {
+      return { ok: false, error: loaded.error ?? 'Key date not found.' };
+    }
+    const { kd, matter, enquiry } = loaded;
+    const nowIso = new Date().toISOString();
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
 
-      const taskRepo = getTaskWorkflowRepository();
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-      );
-      reassignKeyDateTeamAndOwners({
-        keyDate: kd,
-        tenantId: ctx.tenantId,
-        teamId: input.teamId,
-        responsiblePersonIds: input.responsiblePersonIds,
-        reason: input.reason,
-        actor,
-        nowIso,
-        config,
-        matter,
-        tasks: storeTasks,
-        teams,
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      });
-
-      const keyDateRepo = getKeyDateRepository();
-      const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
-      const calendarSyncsWorking = existingSync ? [existingSync] : [];
-
-      await syncKeyDateToOutlookCalendar({
-        keyDate: kd,
-        config,
-        matter,
-        enquiry,
-        calendarSyncs: calendarSyncsWorking,
-        adapter: options?.calendarAdapter,
-        nowIso,
-      });
-
-      const changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-
-      await commitKeyDateDomainWritesInPostgres({
-        ctx,
-        keyDatesToUpsert: [kd],
-        calendarSyncsToUpsert: calendarSyncsWorking,
-        tasksToUpsert: changedTasks,
-        auditEntries: stagedAudit,
-      });
-
-      return { ok: true, keyDate: kd };
+    const taskRepo = getTaskWorkflowRepository();
+    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+    const beforeTaskJsonById = new Map(
+      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+    );
+    reassignKeyDateTeamAndOwners({
+      keyDate: kd,
+      tenantId: ctx.tenantId,
+      teamId: input.teamId,
+      responsiblePersonIds: input.responsiblePersonIds,
+      reason: input.reason,
+      actor,
+      nowIso,
+      config,
+      matter,
+      tasks: storeTasks,
+      teams,
+      people,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
+
+    const keyDateRepo = getKeyDateRepository();
+    const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+    const calendarSyncsWorking = existingSync ? [existingSync] : [];
+
+    await syncKeyDateToOutlookCalendar({
+      keyDate: kd,
+      config,
+      matter,
+      enquiry,
+      calendarSyncs: calendarSyncsWorking,
+      adapter: options?.calendarAdapter,
+      nowIso,
+    });
+
+    const changedTasks = storeTasks.filter(
+      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+    );
+
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      keyDatesToUpsert: [kd],
+      calendarSyncsToUpsert: calendarSyncsWorking,
+      tasksToUpsert: changedTasks,
+      auditEntries: stagedAudit,
+    });
+
+    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -16771,124 +16696,122 @@ export async function acknowledgeKeyDateReminderRecord(
   byId: string,
 ): Promise<{ ok: boolean; reminderState?: KeyDateReminderState; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
-      if (!resolved || !resolved.actor) {
-        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-      }
-      const { ctx, actor, people, matters, teams } = resolved;
-      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-      const disabledErr = assertKeyDatesModuleEnabled(config);
-      if (disabledErr) return disabledErr;
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
+    if (!resolved || !resolved.actor) {
+      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+    }
+    const { ctx, actor, people, matters, teams } = resolved;
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-      if (
-        !hasKeyDatePermission(actor, 'keydate:view', {
-          config,
-          allPeople: people,
-          teams,
-        })
-      ) {
-        return {
-          ok: false,
-          error:
-            'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to acknowledge key date reminders.',
-        };
-      }
-
-      const loaded = await loadKeyDateForActorOrClassifyError(
-        ctx,
-        null,
-        keyDateId,
-        actor,
-        people,
-        matters,
+    if (
+      !hasKeyDatePermission(actor, 'keydate:view', {
+        config,
+        allPeople: people,
         teams,
+      })
+    ) {
+      return {
+        ok: false,
+        error:
+          'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to acknowledge key date reminders.',
+      };
+    }
+
+    const loaded = await loadKeyDateForActorOrClassifyError(
+      ctx,
+      null,
+      keyDateId,
+      actor,
+      people,
+      matters,
+      teams,
+    );
+    if (!loaded.kd) {
+      return { ok: false, error: loaded.error ?? 'Key date not found.' };
+    }
+    const { kd, matter } = loaded;
+
+    if (kd.status !== 'confirmed') {
+      return {
+        ok: false,
+        error: `KEY_DATE_INVALID_STATE: Reminders can only be acknowledged for confirmed key dates (current status: "${kd.status}").`,
+      };
+    }
+
+    const owningTeam = teams.find((t) => t.id === kd.teamId);
+    const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
+    const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
+    if (!isResponsiblePerson && !isOwningTeamLead) {
+      return {
+        ok: false,
+        error:
+          'KEY_DATE_PERMISSION_DENIED: Only a responsible person on the key date or the owning team lead may acknowledge a reminder stage.',
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
+    const keyDateRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const existingReminder = await keyDateRepo.getReminderState(ctx, keyDateId, actor.id);
+    const reminderStatesWorking: KeyDateReminderState[] = existingReminder
+      ? [existingReminder]
+      : [];
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
+
+    let changedTasks: Task[] = [];
+    let deletedTaskIds: string[] = [];
+    if (reminderStatesWorking.length === 0) {
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
       );
-      if (!loaded.kd) {
-        return { ok: false, error: loaded.error ?? 'Key date not found.' };
-      }
-      const { kd, matter } = loaded;
-
-      if (kd.status !== 'confirmed') {
-        return {
-          ok: false,
-          error: `KEY_DATE_INVALID_STATE: Reminders can only be acknowledged for confirmed key dates (current status: "${kd.status}").`,
-        };
-      }
-
-      const owningTeam = teams.find((t) => t.id === kd.teamId);
-      const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
-      const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
-      if (!isResponsiblePerson && !isOwningTeamLead) {
-        return {
-          ok: false,
-          error:
-            'KEY_DATE_PERMISSION_DENIED: Only a responsible person on the key date or the owning team lead may acknowledge a reminder stage.',
-        };
-      }
-
-      const nowIso = new Date().toISOString();
-      const todayIso = toIsoDate(new Date());
-      const keyDateRepo = getKeyDateRepository();
-      const taskRepo = getTaskWorkflowRepository();
-      const existingReminder = await keyDateRepo.getReminderState(ctx, keyDateId, actor.id);
-      const reminderStatesWorking: KeyDateReminderState[] = existingReminder
-        ? [existingReminder]
-        : [];
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
-
-      let changedTasks: Task[] = [];
-      let deletedTaskIds: string[] = [];
-      if (reminderStatesWorking.length === 0) {
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-        const beforeTaskJsonById = new Map(
-          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-        );
-        let pendingTaskIdx = 0;
-        syncReminderForConfirmedKeyDate({
-          keyDate: kd,
-          config,
-          tasks: storeTasks,
-          reminderStates: reminderStatesWorking,
-          matters: matter ? [matter] : [],
-          people,
-          audit: stagedAudit,
-          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-          todayIso,
-          nowIso,
-          actorId: actor.id,
-          tenantId: ctx.tenantId,
-          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-        });
-        changedTasks = storeTasks.filter(
-          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-        );
-        const currentIds = new Set(storeTasks.map((t) => t.id));
-        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-          (id) => !currentIds.has(id),
-        );
-      }
-
-      const state = acknowledgeKeyDateReminderStage({
-        keyDateId,
-        actorId: actor.id,
-        nowIso,
+      let pendingTaskIdx = 0;
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
+        config,
+        tasks: storeTasks,
         reminderStates: reminderStatesWorking,
+        matters: matter ? [matter] : [],
+        people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        todayIso,
+        nowIso,
+        actorId: actor.id,
+        tenantId: ctx.tenantId,
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
       });
+      changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+      );
+      const currentIds = new Set(storeTasks.map((t) => t.id));
+      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+        (id) => !currentIds.has(id),
+      );
+    }
 
-      await commitKeyDateDomainWritesInPostgres({
-        ctx,
-        reminderStatesToUpsert: reminderStatesWorking,
-        tasksToUpsert: changedTasks,
-        tasksToDeleteIds: deletedTaskIds,
-        auditEntries: stagedAudit,
-      });
-
-      return { ok: true, reminderState: state };
+    const state = acknowledgeKeyDateReminderStage({
+      keyDateId,
+      actorId: actor.id,
+      nowIso,
+      reminderStates: reminderStatesWorking,
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
+
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      reminderStatesToUpsert: reminderStatesWorking,
+      tasksToUpsert: changedTasks,
+      tasksToDeleteIds: deletedTaskIds,
+      auditEntries: stagedAudit,
+    });
+
+    return { ok: true, reminderState: state };
   } catch (err) {
     return {
       ok: false,
@@ -17033,116 +16956,114 @@ export async function runKeyDateReminderSchedulerRecord(
     );
   }
 
-  return withJsonStoreWriteLock(async () => {
-    const taskRepo = getTaskWorkflowRepository();
-    const [people, matters, storeTasks, teams] = await Promise.all([
-      getPartyRepository().listAllPeople<Person>(effectiveTenantCtx!),
-      getMatterRepository().listAllMattersUnfiltered<Matter>(effectiveTenantCtx!),
-      taskRepo.listAllTasksUnfiltered<Task>(effectiveTenantCtx!),
-      getHrAndRbacRepository().listAllTeams<Team>(effectiveTenantCtx!),
-    ]);
-    const config = await getKeyDatesConfig({
-      ctx: effectiveTenantCtx!,
-      userId: actor.id,
-    });
-    if (
-      !hasKeyDatePermission(actor, 'keydate:configure', {
-        config,
-        allPeople: people,
-        teams,
-        rbac: { tokenRoles: effectiveTenantCtx!.actorRoles },
-      })
-    ) {
-      return {
-        ok: false,
-        error:
-          'KEY_DATE_PERMISSION_DENIED: You need "keydate:configure" permission to trigger the key date reminder scheduler.',
-      };
-    }
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
-
-    const keyDateRepo = getKeyDateRepository();
-    // Scheduler evaluates all key dates in the tenant database (including restricted matters via system/admin visibility)
-    const allTenantKeyDates = await keyDateRepo.withTenantReadTransaction(
-      effectiveTenantCtx!,
-      async (tx) => {
-        const res = await tx.query<{ id: string }>(
-          'SELECT id FROM key_dates WHERE tenant_id = $1 ORDER BY due_date ASC, id ASC',
-          [effectiveTenantCtx!.tenantId],
-        );
-        return res.rows.map((r) => r.id);
-      },
-    );
-    const keyDatesWorking: KeyDate[] = [];
-    for (const id of allTenantKeyDates) {
-      const kd = await keyDateRepo.getKeyDateById(effectiveTenantCtx!, id, actor.id);
-      if (kd) keyDatesWorking.push(kd);
-    }
-    const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-      effectiveTenantCtx!,
-      actor.id,
-    );
-    const beforeReminderJsonByKd = new Map(
-      reminderStatesWorking.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
-    );
-    const beforeTaskJsonById = new Map(
-      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-    );
-    const createdNotifications: NotificationItem[] = [];
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
-    let pendingTaskIdx = 0;
-    let pendingNotifIdx = 0;
-
-    const result = runTenantBackgroundJob(
-      {
-        jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
-        tenantId: effectiveTenantCtx!.tenantId,
-        correlationId: effectiveTenantCtx!.correlationId,
-        payload: { todayIso, nowIso },
-      },
-      (job) =>
-        runTenantKeyDateReminderJob({
-          tenantId: job.tenantId,
-          todayIso: job.payload.todayIso,
-          nowIso: job.payload.nowIso,
-          config,
-          keyDates: keyDatesWorking,
-          reminderStates: reminderStatesWorking,
-          tasks: storeTasks,
-          matters,
-          teams,
-          people,
-          notifications: createdNotifications,
-          audit: stagedAudit,
-          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-          nextNotificationId: () => `NTF-PENDING-${++pendingNotifIdx}`,
-          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        }),
-    );
-
-    const changedTasks = storeTasks.filter(
-      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-    );
-    const currentIds = new Set(storeTasks.map((t) => t.id));
-    const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-      (id) => !currentIds.has(id),
-    );
-    const changedReminders = reminderStatesWorking.filter(
-      (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
-    );
-    await commitKeyDateDomainWritesInPostgres({
-      ctx: effectiveTenantCtx!,
-      reminderStatesToUpsert: changedReminders,
-      tasksToUpsert: changedTasks,
-      tasksToDeleteIds: deletedTaskIds,
-      notificationsToUpsert: createdNotifications,
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, result, triggeredBy: actor.id };
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, matters, storeTasks, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(effectiveTenantCtx!),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(effectiveTenantCtx!),
+    taskRepo.listAllTasksUnfiltered<Task>(effectiveTenantCtx!),
+    getHrAndRbacRepository().listAllTeams<Team>(effectiveTenantCtx!),
+  ]);
+  const config = await getKeyDatesConfig({
+    ctx: effectiveTenantCtx!,
+    userId: actor.id,
   });
+  if (
+    !hasKeyDatePermission(actor, 'keydate:configure', {
+      config,
+      allPeople: people,
+      teams,
+      rbac: { tokenRoles: effectiveTenantCtx!.actorRoles },
+    })
+  ) {
+    return {
+      ok: false,
+      error:
+        'KEY_DATE_PERMISSION_DENIED: You need "keydate:configure" permission to trigger the key date reminder scheduler.',
+    };
+  }
+  const nowIso = new Date().toISOString();
+  const todayIso = toIsoDate(new Date());
+
+  const keyDateRepo = getKeyDateRepository();
+  // Scheduler evaluates all key dates in the tenant database (including restricted matters via system/admin visibility)
+  const allTenantKeyDates = await keyDateRepo.withTenantReadTransaction(
+    effectiveTenantCtx!,
+    async (tx) => {
+      const res = await tx.query<{ id: string }>(
+        'SELECT id FROM key_dates WHERE tenant_id = $1 ORDER BY due_date ASC, id ASC',
+        [effectiveTenantCtx!.tenantId],
+      );
+      return res.rows.map((r) => r.id);
+    },
+  );
+  const keyDatesWorking: KeyDate[] = [];
+  for (const id of allTenantKeyDates) {
+    const kd = await keyDateRepo.getKeyDateById(effectiveTenantCtx!, id, actor.id);
+    if (kd) keyDatesWorking.push(kd);
+  }
+  const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+    effectiveTenantCtx!,
+    actor.id,
+  );
+  const beforeReminderJsonByKd = new Map(
+    reminderStatesWorking.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
+  );
+  const beforeTaskJsonById = new Map(
+    storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+  );
+  const createdNotifications: NotificationItem[] = [];
+  const stagedAudit: AuditEntry[] = [];
+  let pendingIdx = 0;
+  let pendingTaskIdx = 0;
+  let pendingNotifIdx = 0;
+
+  const result = runTenantBackgroundJob(
+    {
+      jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
+      tenantId: effectiveTenantCtx!.tenantId,
+      correlationId: effectiveTenantCtx!.correlationId,
+      payload: { todayIso, nowIso },
+    },
+    (job) =>
+      runTenantKeyDateReminderJob({
+        tenantId: job.tenantId,
+        todayIso: job.payload.todayIso,
+        nowIso: job.payload.nowIso,
+        config,
+        keyDates: keyDatesWorking,
+        reminderStates: reminderStatesWorking,
+        tasks: storeTasks,
+        matters,
+        teams,
+        people,
+        notifications: createdNotifications,
+        audit: stagedAudit,
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        nextNotificationId: () => `NTF-PENDING-${++pendingNotifIdx}`,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      }),
+  );
+
+  const changedTasks = storeTasks.filter(
+    (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+  );
+  const currentIds = new Set(storeTasks.map((t) => t.id));
+  const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+    (id) => !currentIds.has(id),
+  );
+  const changedReminders = reminderStatesWorking.filter(
+    (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
+  );
+  await commitKeyDateDomainWritesInPostgres({
+    ctx: effectiveTenantCtx!,
+    reminderStatesToUpsert: changedReminders,
+    tasksToUpsert: changedTasks,
+    tasksToDeleteIds: deletedTaskIds,
+    notificationsToUpsert: createdNotifications,
+    auditEntries: stagedAudit,
+  });
+
+  return { ok: true, result, triggeredBy: actor.id };
 }
 
 export async function queryKeyDatesTeamDiaryRecord(
@@ -17279,7 +17200,7 @@ export async function exportKeyDateExceptionsReportRecord(
   const nowIso = new Date().toISOString();
 
   // Audit the compliance exceptions export in PostgreSQL audit_entries (§6, R41, S0-15)
-  await appendUnmigratedModuleAuditEntries(ctx, [
+  await appendTenantAuditEntries(ctx, [
     {
       recordType: 'key_date',
       recordId: 'KEY-DATE-EXCEPTIONS-EXPORT',
@@ -17408,7 +17329,7 @@ export async function saveKeyDatesConfigRecord(
         validated as unknown as KeyDatesConfiguration,
         actor.id,
       );
-      await appendUnmigratedModuleAuditEntries(ctx, [
+      await appendTenantAuditEntries(ctx, [
         {
           recordType: 'key_date',
           recordId: 'FIRM-KEY-DATES-CONFIG',

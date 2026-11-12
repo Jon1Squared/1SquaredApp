@@ -17,13 +17,11 @@ import { resolveEmployeeRoles } from '../../domain/homeConfig';
 import { personDisplayName } from '../../domain/names';
 import {
   getActiveTenantConfiguration,
+  getAuditRepository,
   resolveCurrentTenantContext,
+  setAuditRepositoryOverrideForTesting,
 } from '../../platform/tenantRuntime';
 import { runWithActiveActorSession } from '../rbacRuntime';
-import {
-  getAuditRepository,
-  setAuditRepositoryOverrideForTesting,
-} from '../auditAdapter';
 import {
   createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,

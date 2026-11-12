@@ -498,32 +498,32 @@ const PmsIntegrationSyncConfigSchema = z
       .boolean()
       .default(true)
       .describe(
-        '[x-reserved:S0-18] Whether PMS / Finance DB synchronisation is enabled for this tenant (reserved for live tenant-scoped PMS synchronisation in S0-18)',
+        '[x-reserved:backlog] Whether PMS / Finance DB synchronisation is enabled for this tenant (reserved for backlog live external PMS synchronisation)',
       ),
     providerKey: z
       .string()
       .min(1)
       .default('generic_sql')
       .describe(
-        '[x-reserved:S0-18] Identifier of the connected PMS / Finance adapter (reserved for S0-18)',
+        '[x-reserved:backlog] Identifier of the connected PMS / Finance adapter (reserved for backlog)',
       ),
     syncMode: z
       .enum(['read_only', 'two_way'])
       .default('two_way')
       .describe(
-        '[x-reserved:S0-18] Whether integration is read-only inbound or two-way (reserved for S0-18)',
+        '[x-reserved:backlog] Whether integration is read-only inbound or two-way (reserved for backlog)',
       ),
     matterCodeAllocation: z
       .enum(['onesquared', 'pms_on_open'])
       .default('onesquared')
       .describe(
-        '[x-reserved:S0-18] System responsible for allocating canonical matter numbers (reserved for S0-18)',
+        '[x-reserved:backlog] System responsible for allocating canonical matter numbers (reserved for backlog)',
       ),
     clientCodeAllocation: z
       .enum(['onesquared', 'pms_on_open'])
       .default('onesquared')
       .describe(
-        '[x-reserved:S0-18] System responsible for allocating canonical client codes (reserved for S0-18)',
+        '[x-reserved:backlog] System responsible for allocating canonical client codes (reserved for backlog)',
       ),
     pollIntervalMinutes: z
       .number()
@@ -531,13 +531,13 @@ const PmsIntegrationSyncConfigSchema = z
       .positive()
       .default(15)
       .describe(
-        '[x-reserved:S0-18] Inbound delta sync polling interval in minutes (reserved for S0-18)',
+        '[x-reserved:backlog] Inbound delta sync polling interval in minutes (reserved for backlog)',
       ),
     fieldMappings: z
       .array(PmsFieldMappingEntrySchema)
       .default([])
       .describe(
-        '[x-reserved:S0-18] Field-level mappings and System-of-Record ownership rules (reserved for S0-18)',
+        '[x-reserved:backlog] Field-level mappings and System-of-Record ownership rules (reserved for backlog)',
       ),
   })
   .strict();
@@ -726,17 +726,17 @@ export const TenantConfigurationSchema = z
     integrations: z
       .object({
         pmsConnectionSecretVaultRef: KeyVaultRefSchema.describe(
-          '[x-reserved:S0-18] Key Vault reference for live PMS database connection secret resolution (reserved for S0-18)',
+          '[x-reserved:backlog] Key Vault reference for live PMS database connection secret resolution (reserved for backlog)',
         ),
         companiesHouseApiKeyVaultRef: KeyVaultRefSchema.describe(
-          '[x-reserved:S0-18] Key Vault reference for live Companies House API integration (reserved for S0-18)',
+          '[x-reserved:backlog] Key Vault reference for live Companies House API integration (reserved for backlog item F17)',
         ),
         aiProviderChoice: z
           .enum(['azure_openai_uk', 'anthropic', 'disabled'])
           .default('disabled')
           .describe('Configured AI model provider for this tenant'),
         pmsSync: PmsIntegrationSyncConfigSchema.optional().describe(
-          '[x-reserved:S0-18] Two-way Finance/PMS synchronisation settings and field mappings (reserved for S0-18)',
+          '[x-reserved:backlog] Two-way Finance/PMS synchronisation settings and field mappings (reserved for backlog)',
         ),
       })
       .strict(),
@@ -2529,6 +2529,18 @@ export function loadAndValidateTenantConfig(
   const overlayRbac = environmentOverlay.rbac as
     | Record<string, unknown>
     | undefined;
+  const baseIntegrations = baseConfig.integrations as
+    | Record<string, unknown>
+    | undefined;
+  const overlayIntegrations = environmentOverlay.integrations as
+    | Record<string, unknown>
+    | undefined;
+  const basePmsSync = baseIntegrations?.pmsSync as
+    | Record<string, unknown>
+    | undefined;
+  const overlayPmsSync = overlayIntegrations?.pmsSync as
+    | Record<string, unknown>
+    | undefined;
 
   const merged: Record<string, unknown> = {
     ...baseConfig,
@@ -2546,8 +2558,16 @@ export function loadAndValidateTenantConfig(
       ...(environmentOverlay.matterCosts as Record<string, unknown> | undefined),
     },
     integrations: {
-      ...(baseConfig.integrations as Record<string, unknown> | undefined),
-      ...(environmentOverlay.integrations as Record<string, unknown> | undefined),
+      ...(baseIntegrations ?? {}),
+      ...(overlayIntegrations ?? {}),
+      ...(basePmsSync || overlayPmsSync
+        ? {
+            pmsSync: {
+              ...(basePmsSync ?? {}),
+              ...(overlayPmsSync ?? {}),
+            },
+          }
+        : {}),
     },
   };
 

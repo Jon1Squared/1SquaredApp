@@ -2671,6 +2671,25 @@ export class TenantPartyRepository extends TenantScopedRepository {
         }
       }
 
+      // 12b. Repoint pms_links (`S0-18`), discarding colliding links where survivor already has one for the same entity_type
+      await tx.query(
+        `DELETE FROM public.pms_links pl_merged
+         USING public.pms_links pl_surv
+         WHERE pl_merged.tenant_id = $1
+           AND pl_surv.tenant_id = $1
+           AND pl_merged.onesquared_id = $3
+           AND pl_surv.onesquared_id = $2
+           AND pl_merged.entity_type = pl_surv.entity_type`,
+        [ctx.tenantId, survivorId, mergedId],
+      );
+      await tx.query(
+        `UPDATE public.pms_links
+         SET onesquared_id = $2,
+             payload_json = jsonb_set(payload_json, '{onesquaredId}', to_jsonb($2::text), true)
+         WHERE tenant_id = $1 AND onesquared_id = $3`,
+        [ctx.tenantId, survivorId, mergedId],
+      );
+
       // 13. Record merge_history & audit_entries in the same transaction
       if (params.mergeHistory) {
         await this.upsertMergeHistoryInTx(tx, ctx, params.mergeHistory);

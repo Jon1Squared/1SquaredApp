@@ -236,15 +236,15 @@
         "pmsConnectionSecretVaultRef": {
           "type": "string",
           "x-reserved": {
-            "for": "S0-18",
-            "reason": "Reserved for live tenant-scoped PMS database connection secret resolution in S0-18."
+            "for": "backlog",
+            "reason": "Reserved for backlog live external PMS database connection secret resolution."
           }
         },
         "companiesHouseApiKeyVaultRef": {
           "type": "string",
           "x-reserved": {
-            "for": "S0-18",
-            "reason": "Reserved for live Companies House API integration in S0-18."
+            "for": "backlog",
+            "reason": "Reserved for backlog item F17 live Companies House API integration."
           }
         },
         "aiProviderChoice": {
@@ -266,16 +266,16 @@
               "type": "boolean",
               "default": true,
               "x-reserved": {
-                "for": "S0-18",
-                "reason": "Reserved for live tenant-scoped PMS synchronisation in S0-18."
+                "for": "backlog",
+                "reason": "Reserved for backlog live external PMS synchronisation."
               }
             },
             "providerKey": {
               "type": "string",
               "default": "generic_sql",
               "x-reserved": {
-                "for": "S0-18",
-                "reason": "Reserved for live tenant-scoped PMS adapter selection in S0-18."
+                "for": "backlog",
+                "reason": "Reserved for backlog live external PMS adapter selection."
               }
             },
             "syncMode": {
@@ -286,8 +286,8 @@
               ],
               "default": "two_way",
               "x-reserved": {
-                "for": "S0-18",
-                "reason": "Reserved for live tenant-scoped PMS sync direction control in S0-18."
+                "for": "backlog",
+                "reason": "Reserved for backlog live external PMS sync direction control."
               }
             },
             "matterCodeAllocation": {
@@ -298,8 +298,8 @@
               ],
               "default": "onesquared",
               "x-reserved": {
-                "for": "S0-18",
-                "reason": "Reserved for live tenant-scoped PMS matter number allocation in S0-18."
+                "for": "backlog",
+                "reason": "Reserved for backlog live external PMS matter number allocation."
               }
             },
             "clientCodeAllocation": {
@@ -310,16 +310,16 @@
               ],
               "default": "onesquared",
               "x-reserved": {
-                "for": "S0-18",
-                "reason": "Reserved for live tenant-scoped PMS client code allocation in S0-18."
+                "for": "backlog",
+                "reason": "Reserved for backlog live external PMS client code allocation."
               }
             },
             "pollIntervalMinutes": {
               "type": "integer",
               "default": 15,
               "x-reserved": {
-                "for": "S0-18",
-                "reason": "Reserved for live tenant-scoped PMS delta polling interval in S0-18."
+                "for": "backlog",
+                "reason": "Reserved for backlog live external PMS delta polling interval."
               }
             },
             "fieldMappings": {
@@ -340,8 +340,8 @@
                   "id": {
                     "type": "string",
                     "x-reserved": {
-                      "for": "S0-18",
-                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                      "for": "backlog",
+                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
                     }
                   },
                   "entityType": {
@@ -354,22 +354,22 @@
                       "employee"
                     ],
                     "x-reserved": {
-                      "for": "S0-18",
-                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                      "for": "backlog",
+                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
                     }
                   },
                   "onesquaredFieldKey": {
                     "type": "string",
                     "x-reserved": {
-                      "for": "S0-18",
-                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                      "for": "backlog",
+                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
                     }
                   },
                   "externalFieldKey": {
                     "type": "string",
                     "x-reserved": {
-                      "for": "S0-18",
-                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                      "for": "backlog",
+                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
                     }
                   },
                   "ownership": {
@@ -381,23 +381,23 @@
                     ],
                     "default": "onesquared_master",
                     "x-reserved": {
-                      "for": "S0-18",
-                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                      "for": "backlog",
+                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
                     }
                   },
                   "active": {
                     "type": "boolean",
                     "default": true,
                     "x-reserved": {
-                      "for": "S0-18",
-                      "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                      "for": "backlog",
+                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
                     }
                   }
                 }
               },
               "x-reserved": {
-                "for": "S0-18",
-                "reason": "Reserved for live tenant-scoped PMS field-level synchronisation in S0-18."
+                "for": "backlog",
+                "reason": "Reserved for backlog live external PMS field-level synchronisation."
               }
             }
           }

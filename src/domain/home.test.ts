@@ -16,7 +16,7 @@ import {
 import { getLeftRailVisibility } from '../server/rbacRuntime';
 import { isActionDenied } from './actionResult';
 import { buildFeeEarnerWeeklyTime, buildFirmFinanceRollups } from './pms';
-import { getPmsSource } from '@/pms/pmsSource';
+import { getTenantPmsSource } from '@/pms/pmsSource';
 import { primaryEmail } from './names';
 import { switchUserAction } from '@/app/actions';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
@@ -423,8 +423,8 @@ describe('Role-based Home pages & configuration', () => {
     ]);
   });
 
-  it('provides accurate PMS queries for Home pages matching check-sheet totals', () => {
-    const pms = getPmsSource();
+  it('provides accurate PMS queries for Home pages matching check-sheet totals', async () => {
+    const pms = await getTenantPmsSource(testDataResetContext());
     const extractInfo = pms.getExtractInfo();
     const feeEarners = pms.listFeeEarners();
     const timeEntries = pms.listAllTimeEntries();

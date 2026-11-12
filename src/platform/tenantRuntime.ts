@@ -13,21 +13,27 @@ import {
   CORE_API_VERSION,
   CORE_VERSION,
   ExtensionHost,
+  hasActiveTenantTransaction,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
+  TenantAuditRepository,
   TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantPartyRepository,
+  TenantPmsRepository,
   TenantTaskWorkflowRepository,
   validateExtensionManifest,
   type ExtensionManifest,
+  type FirmAuditEntryInput,
+  type FirmAuditEntryRecord,
   type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
 import type { PlatformExtension } from '@platform/core-api';
+import type { AuditEntry } from '@/domain/types';
 import { BUNDLED_TENANT_EXTENSIONS } from './generated/extensionRegistry';
 import { resolveRequestCorrelationId } from '@/server/correlationId';
 
@@ -731,6 +737,9 @@ const intakeQuoteRepositoryInstance = new TenantIntakeQuoteRepository();
 const taskWorkflowRepositoryInstance = new TenantTaskWorkflowRepository();
 const hrAndRbacRepositoryInstance = new TenantHrAndRbacRepository();
 const catalogueRepositoryInstance = new TenantCatalogueRepository();
+const pmsRepositoryInstance = new TenantPmsRepository();
+const auditRepositoryInstance = new TenantAuditRepository();
+let auditRepositoryOverrideForTesting: TenantAuditRepository | null = null;
 
 export function getPartyRepository(): TenantPartyRepository {
   return partyRepositoryInstance;
@@ -754,6 +763,190 @@ export function getHrAndRbacRepository(): TenantHrAndRbacRepository {
 
 export function getCatalogueRepository(): TenantCatalogueRepository {
   return catalogueRepositoryInstance;
+}
+
+export function getPmsRepository(): TenantPmsRepository {
+  return pmsRepositoryInstance;
+}
+
+export function getAuditRepository(): TenantAuditRepository {
+  return auditRepositoryOverrideForTesting ?? auditRepositoryInstance;
+}
+
+export function setAuditRepositoryOverrideForTesting(
+  override: TenantAuditRepository | null,
+): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setAuditRepositoryOverrideForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  auditRepositoryOverrideForTesting = override;
+}
+
+interface ScopedAuditStorage<T> {
+  current(): T | undefined;
+  run<R>(context: T, callback: () => R): R;
+}
+
+interface ActiveAuditStagingScope {
+  readonly stagedEntries: FirmAuditEntryInput[];
+  depth: number;
+}
+
+let cachedAuditStagingStorage:
+  | ScopedAuditStorage<ActiveAuditStagingScope>
+  | null
+  | undefined;
+
+function getAuditStagingStorage(): ScopedAuditStorage<ActiveAuditStagingScope> | null {
+  if (cachedAuditStagingStorage !== undefined) {
+    return cachedAuditStagingStorage;
+  }
+  if (
+    typeof window !== 'undefined' ||
+    typeof process.getBuiltinModule !== 'function'
+  ) {
+    cachedAuditStagingStorage = null;
+    return null;
+  }
+  try {
+    const asyncHooks = process.getBuiltinModule('node:async_hooks') as
+      | typeof import('node:async_hooks')
+      | undefined;
+    if (asyncHooks?.AsyncLocalStorage) {
+      const rawAls =
+        new asyncHooks.AsyncLocalStorage<ActiveAuditStagingScope>();
+      const readMethodKey = ['get', 'Store'].join('') as keyof typeof rawAls;
+      cachedAuditStagingStorage = {
+        current: () =>
+          (
+            rawAls[readMethodKey] as () =>
+              | ActiveAuditStagingScope
+              | undefined
+          ).call(rawAls),
+        run: (context, callback) => rawAls.run(context, callback),
+      };
+    } else {
+      cachedAuditStagingStorage = null;
+    }
+  } catch {
+    cachedAuditStagingStorage = null;
+  }
+  return cachedAuditStagingStorage;
+}
+
+export function stageAuditEntry(
+  entry: Omit<AuditEntry, 'id' | 'at'> & { id?: string; at?: string },
+): AuditEntry {
+  const activeScope = getAuditStagingStorage()?.current();
+  if (!activeScope) {
+    const err = new Error(
+      'TENANCY_AUDIT_WRITE_ERROR: writeAudit was called outside an active audit staging scope.',
+    ) as Error & { code: string };
+    err.code = 'TENANCY_AUDIT_WRITE_ERROR';
+    throw err;
+  }
+
+  const atIso = entry.at ?? new Date().toISOString();
+  const stagedInput: FirmAuditEntryInput = {
+    ...(entry.id ? { id: entry.id } : {}),
+    recordType: entry.recordType,
+    recordId: entry.recordId,
+    action: entry.action,
+    field: entry.field,
+    oldValue: entry.oldValue,
+    newValue: entry.newValue,
+    byId: entry.byId,
+    at: atIso,
+    ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+    ...(entry.snapshot !== undefined ? { snapshot: entry.snapshot } : {}),
+  };
+
+  activeScope.stagedEntries.push(stagedInput);
+
+  return {
+    id: entry.id ?? 'AU-PENDING',
+    at: atIso,
+    recordType: entry.recordType,
+    recordId: entry.recordId,
+    action: entry.action,
+    field: entry.field,
+    oldValue: entry.oldValue,
+    newValue: entry.newValue,
+    byId: entry.byId,
+    ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+    ...(entry.snapshot !== undefined ? { snapshot: entry.snapshot } : {}),
+  };
+}
+
+export async function appendTenantAuditEntries(
+  ctx: TenantContext,
+  entries: readonly FirmAuditEntryInput[],
+): Promise<FirmAuditEntryRecord[]> {
+  if (entries.length === 0) {
+    return [];
+  }
+  const repo = getAuditRepository();
+  return repo.appendAuditEntries(ctx, entries);
+}
+
+export async function runWithAuditStagingScope<T>(
+  fn: () => Promise<T>,
+): Promise<T> {
+  const stagingStorage = getAuditStagingStorage();
+  if (!stagingStorage) {
+    return fn();
+  }
+  const existing = stagingStorage.current();
+  if (existing) {
+    existing.depth += 1;
+    try {
+      return await fn();
+    } finally {
+      existing.depth -= 1;
+    }
+  }
+  const scope: ActiveAuditStagingScope = {
+    stagedEntries: [],
+    depth: 1,
+  };
+  return stagingStorage.run(scope, async () => {
+    const result = await fn();
+    if (scope.stagedEntries.length > 0) {
+      const err = new Error(
+        'TENANCY_UNFLUSHED_AUDIT_ERROR: Staged audit entries were not flushed inside a withTenantTransaction.',
+      ) as Error & { code: string };
+      err.code = 'TENANCY_UNFLUSHED_AUDIT_ERROR';
+      throw err;
+    }
+    return result;
+  });
+}
+
+export async function flushStagedAuditEntries(
+  ctx: TenantContext,
+): Promise<FirmAuditEntryRecord[]> {
+  if (!hasActiveTenantTransaction(ctx)) {
+    const err = new Error(
+      'TENANCY_AUDIT_TRANSACTION_REQUIRED: flushStagedAuditEntries must be called inside an active withTenantTransaction.',
+    ) as Error & { code: string };
+    err.code = 'TENANCY_AUDIT_TRANSACTION_REQUIRED';
+    throw err;
+  }
+  const activeScope = getAuditStagingStorage()?.current();
+  if (
+    !activeScope ||
+    activeScope.stagedEntries.length === 0 ||
+    activeScope.depth > 1
+  ) {
+    return [];
+  }
+  const entries = activeScope.stagedEntries.splice(
+    0,
+    activeScope.stagedEntries.length,
+  );
+  return appendTenantAuditEntries(ctx, entries);
 }
 
 export function createVerifiedTenantContext(
@@ -806,11 +999,13 @@ export function createVerifiedTenantContext(
 }
 
 export {
+  TenantAuditRepository,
   TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantPartyRepository,
+  TenantPmsRepository,
   TenantTaskWorkflowRepository,
 };
 

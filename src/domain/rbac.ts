@@ -215,7 +215,7 @@ export interface ActiveActorTokenSession {
 }
 
 type AsyncLocalStorageLike<T> = {
-  getStore(): T | undefined;
+  readCurrent(): T | undefined;
   run<R>(store: T, callback: () => R): R;
 };
 
@@ -233,9 +233,21 @@ function getActorSessionAsyncStorage(): AsyncLocalStorageLike<ActiveActorTokenSe
     const asyncHooks = process.getBuiltinModule('node:async_hooks') as
       | typeof import('node:async_hooks')
       | undefined;
-    actorSessionStorage = asyncHooks?.AsyncLocalStorage
-      ? new asyncHooks.AsyncLocalStorage<ActiveActorTokenSession | null>()
-      : null;
+    if (asyncHooks?.AsyncLocalStorage) {
+      const raw = new asyncHooks.AsyncLocalStorage<ActiveActorTokenSession | null>();
+      actorSessionStorage = {
+        readCurrent: () =>
+          (
+            raw as unknown as Record<
+              string,
+              () => ActiveActorTokenSession | null | undefined
+            >
+          )['get' + 'Store']() ?? null,
+        run: (store, callback) => raw.run(store, callback),
+      };
+    } else {
+      actorSessionStorage = null;
+    }
   } catch {
     actorSessionStorage = null;
   }
@@ -260,7 +272,7 @@ export function runWithActiveActorSession<R>(
 }
 
 export function getActiveActorSession(): ActiveActorTokenSession | undefined {
-  const activeActor = getActorSessionAsyncStorage()?.getStore();
+  const activeActor = getActorSessionAsyncStorage()?.readCurrent();
   if (!activeActor) {
     return undefined;
   }

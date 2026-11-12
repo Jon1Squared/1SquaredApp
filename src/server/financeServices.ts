@@ -8,7 +8,11 @@ import 'server-only';
  * computing any summary or roll-up.
  */
 
-import type { PermissionKey, TenantContext } from '@platform/core';
+import {
+  assertValidPostgresTenantContext,
+  type PermissionKey,
+  type TenantContext,
+} from '@platform/core';
 import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { createDefaultHomePagesConfig, resolveEmployeeRoles } from '@/domain/homeConfig';
 import {
@@ -19,7 +23,7 @@ import {
   PMS_AS_AT_UNAVAILABLE_LABEL,
 } from '@/domain/pms';
 import { getActiveActorSession } from '@/domain/rbac';
-import type { Matter, Person, PmsLink, Team } from '@/domain/types';
+import type { HomePagesConfig, Matter, Person, PmsLink, Team } from '@/domain/types';
 import {
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
@@ -27,9 +31,10 @@ import {
   getHrAndRbacRepository,
   getMatterRepository,
   getPartyRepository,
+  getPmsRepository,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
-import { getPmsSource } from '@/pms/pmsSource';
+import { getTenantPmsSource } from '@/pms/pmsSource';
 import type {
   PmsCashReceivedSummary,
   PmsClientAccountEntry,
@@ -49,15 +54,25 @@ import {
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
 import { canPersonAccessMatter, resolvePersonPermissionSet } from './rbacRuntime';
-import { getStore, type FirmStore } from './store';
 import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from './visibility';
 
 export type FinanceActorInput =
   | string
   | { readonly personId: string }
   | { readonly id: string }
+  | TenantContext
   | null
   | undefined;
+
+export function isTenantContextInput(actor: FinanceActorInput): actor is TenantContext {
+  return Boolean(
+    actor &&
+      typeof actor === 'object' &&
+      'tenantId' in actor &&
+      'postgresDatabaseName' in actor &&
+      'actorId' in actor,
+  );
+}
 
 export interface MatterFinanceRowsResult {
   pmsExtractInfo: PmsExtractInfo;
@@ -92,6 +107,9 @@ function extractExplicitActorId(actor: FinanceActorInput): string | null {
   if (typeof actor === 'string') {
     return actor.trim() || null;
   }
+  if (isTenantContextInput(actor)) {
+    return actor.actorId.trim() || null;
+  }
   if (actor && typeof actor === 'object') {
     if ('personId' in actor && typeof actor.personId === 'string') {
       return actor.personId.trim() || null;
@@ -116,7 +134,8 @@ export async function verifyFinanceActorAndPermission(
 ): Promise<
   | {
       ok: true;
-      store: FirmStore;
+      isCleanDeployment: boolean;
+      homePagesConfig?: HomePagesConfig;
       ctx: TenantContext;
       tenantContext: TenantContext;
       people: Person[];
@@ -130,6 +149,7 @@ export async function verifyFinanceActorAndPermission(
       hiddenPmsMatterCodes: Set<string>;
       accessibleLinkedPmsMatterCodes: Set<string>;
       visiblePmsLinks: PmsLink[];
+      tenantPmsLinks: PmsLink[];
     }
   | ActionDenied
 > {
@@ -139,7 +159,10 @@ export async function verifyFinanceActorAndPermission(
     | VerifiedEntraSessionPayload
     | undefined;
   let verifiedTenantContext: TenantContext | null = null;
-  if (activeVerifiedSession) {
+  if (isTenantContextInput(actorInput)) {
+    assertValidPostgresTenantContext(actorInput);
+    verifiedTenantContext = actorInput;
+  } else if (activeVerifiedSession) {
     verifiedTenantContext = resolveCurrentTenantContext(
       createVerifiedSessionActorFromEntraSession(activeVerifiedSession),
       tenantCfg,
@@ -185,19 +208,15 @@ export async function verifyFinanceActorAndPermission(
       tenantCfg,
     );
 
-  const store = getStore();
-  const [people, matters, teams, firmProfile, homePagesConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(prelimTenantContext),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(prelimTenantContext),
-    getHrAndRbacRepository().listAllTeams<Team>(prelimTenantContext),
-    getCatalogueRepository().getFirmProfile(prelimTenantContext),
-    getCatalogueRepository().getHomePagesConfig<FirmStore['homePagesConfig']>(prelimTenantContext),
-  ]);
-  const effectiveStore: FirmStore = {
-    ...store,
-    ...(firmProfile ? { isCleanDeployment: firmProfile.isCleanDeployment } : {}),
-    ...(homePagesConfig ? { homePagesConfig } : {}),
-  };
+  const [people, matters, teams, firmProfile, homePagesConfig, tenantPmsLinks] =
+    await Promise.all([
+      getPartyRepository().listAllPeople<Person>(prelimTenantContext),
+      getMatterRepository().listAllMattersUnfiltered<Matter>(prelimTenantContext),
+      getHrAndRbacRepository().listAllTeams<Team>(prelimTenantContext),
+      getCatalogueRepository().getFirmProfile(prelimTenantContext),
+      getCatalogueRepository().getHomePagesConfig<HomePagesConfig>(prelimTenantContext),
+      getPmsRepository().listPmsLinks<PmsLink>(prelimTenantContext),
+    ]);
   const actor = people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
   if (!actor) {
     return buildActionDenied(
@@ -207,9 +226,14 @@ export async function verifyFinanceActorAndPermission(
   }
 
   const tokenRoles =
-    activeSession?.personId === actor.id
-      ? activeSession?.tokenRoles
-      : undefined;
+    verifiedTenantContext &&
+    verifiedTenantContext.actorId === actor.id &&
+    Array.isArray(verifiedTenantContext.actorRoles) &&
+    verifiedTenantContext.actorRoles.length > 0
+      ? verifiedTenantContext.actorRoles
+      : activeSession?.personId === actor.id
+        ? activeSession?.tokenRoles
+        : undefined;
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
     teams,
@@ -235,7 +259,7 @@ export async function verifyFinanceActorAndPermission(
       tenantCfg,
     );
 
-  const visibility = buildRecordVisibility(store, actor, {
+  const visibility = buildRecordVisibility(null, actor, {
     people,
     matters,
     teams,
@@ -244,7 +268,7 @@ export async function verifyFinanceActorAndPermission(
   });
   const hiddenMatterIds = visibility.hiddenMatterIds;
   const hiddenPmsMatterCodes = new Set(
-    store.pmsLinks
+    tenantPmsLinks
       .filter((l) => l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId))
       .map((l) => l.pmsCode),
   );
@@ -252,13 +276,13 @@ export async function verifyFinanceActorAndPermission(
     matters.filter((m) => !hiddenMatterIds.has(m.id)).map((m) => m.id),
   );
   const accessibleLinkedPmsMatterCodes = new Set(
-    store.pmsLinks
+    tenantPmsLinks
       .filter(
         (l) => l.entityType === 'matter' && accessibleMatterIds.has(l.onesquaredId),
       )
       .map((l) => l.pmsCode),
   );
-  const visiblePmsLinks = store.pmsLinks.filter(
+  const visiblePmsLinks = tenantPmsLinks.filter(
     (l) => !(l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId)),
   );
   const effectiveWorkPerson: Person =
@@ -268,7 +292,8 @@ export async function verifyFinanceActorAndPermission(
 
   return {
     ok: true,
-    store: effectiveStore,
+    isCleanDeployment: Boolean(firmProfile?.isCleanDeployment),
+    homePagesConfig: homePagesConfig ?? undefined,
     ctx: tenantContext,
     tenantContext,
     people,
@@ -282,6 +307,7 @@ export async function verifyFinanceActorAndPermission(
     hiddenPmsMatterCodes,
     accessibleLinkedPmsMatterCodes,
     visiblePmsLinks,
+    tenantPmsLinks,
   };
 }
 
@@ -299,7 +325,8 @@ export async function getMatterFinanceRows(
   if (!auth.ok) return auth;
 
   const {
-    store,
+    ctx,
+    isCleanDeployment,
     people,
     matters,
     teams,
@@ -307,6 +334,7 @@ export async function getMatterFinanceRows(
     tokenRoles,
     accessibleLinkedPmsMatterCodes,
     visiblePmsLinks,
+    tenantPmsLinks,
   } = auth;
 
   let allowedPmsCodesFilter: Set<string> | null = null;
@@ -339,8 +367,7 @@ export async function getMatterFinanceRows(
   }
 
   const now = new Date();
-  const pms = getPmsSource();
-  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+  const isCleanEmpty = isCleanDeployment && tenantPmsLinks.length === 0;
 
   if (isCleanEmpty) {
     return {
@@ -359,6 +386,7 @@ export async function getMatterFinanceRows(
     };
   }
 
+  const pms = await getTenantPmsSource(ctx);
   const pmsExtractInfo = pms.getExtractInfo();
   if (!isValidPmsAsAtDate(pmsExtractInfo.asAtDate)) {
     return {
@@ -443,13 +471,16 @@ export async function getMyFinanceFigures(
   if (!auth.ok) return auth;
 
   const {
-    store,
+    ctx,
+    isCleanDeployment,
+    homePagesConfig,
     actor,
     effectiveWorkPerson,
     accessibleLinkedPmsMatterCodes,
     visiblePmsLinks,
+    tenantPmsLinks,
   } = auth;
-  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+  const isCleanEmpty = isCleanDeployment && tenantPmsLinks.length === 0;
   if (isCleanEmpty) {
     return { myFeeEarnerFigures: null, myWeeklyTime: null };
   }
@@ -461,7 +492,7 @@ export async function getMyFinanceFigures(
     return { myFeeEarnerFigures: null, myWeeklyTime: null };
   }
 
-  const pms = getPmsSource();
+  const pms = await getTenantPmsSource(ctx);
   const extractInfo = pms.getExtractInfo();
   if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
     return { myFeeEarnerFigures: null, myWeeklyTime: null };
@@ -491,7 +522,7 @@ export async function getMyFinanceFigures(
 
   const activeTenantCfg = getActiveTenantConfiguration();
   const rawHomePagesConfig =
-    store.homePagesConfig ??
+    homePagesConfig ??
     createDefaultHomePagesConfig(
       new Date().toISOString(),
       activeTenantCfg.branding.primaryDomain,
@@ -522,9 +553,15 @@ export async function getFirmFinance(
   const auth = await verifyFinanceActorAndPermission(actorInput, 'finance:view');
   if (!auth.ok) return auth;
 
-  const { store, hiddenPmsMatterCodes, visiblePmsLinks } = auth;
+  const {
+    ctx,
+    isCleanDeployment,
+    hiddenPmsMatterCodes,
+    visiblePmsLinks,
+    tenantPmsLinks,
+  } = auth;
   const now = new Date();
-  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
+  const isCleanEmpty = isCleanDeployment && tenantPmsLinks.length === 0;
   if (isCleanEmpty) {
     return {
       pmsExtractInfo: {
@@ -557,7 +594,7 @@ export async function getFirmFinance(
     };
   }
 
-  const pms = getPmsSource();
+  const pms = await getTenantPmsSource(ctx);
   const extractInfo = pms.getExtractInfo();
   if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
     return {

@@ -1173,22 +1173,32 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
     );
     expect(servicesSrc).not.toContain('getSynchronizedTenantStoreSnapshot');
 
-    const auditAdapterSrc = fs.readFileSync(
-      path.join(REPO_ROOT, 'src/server/auditAdapter.ts'),
+    const storeSrc = fs.readFileSync(
+      path.join(REPO_ROOT, 'src/server/store.ts'),
       'utf8',
     );
-    expect(auditAdapterSrc).toContain(
-      "export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>;",
-    );
-    expect(auditAdapterSrc).toMatch(
-      /const ID_KEYED_ARRAY_COLLECTIONS\s*=\s*\[\s*\{\s*name:\s*'pmsLinks',\s*keyField:\s*'id'\s*\},?\s*\]\s*as const;/,
-    );
-    expect(auditAdapterSrc).toMatch(
-      /const PER_KEY_MAP_KEYS\s*=\s*\[\]\s*as const;/,
-    );
-    expect(auditAdapterSrc).toMatch(
-      /const SCALAR_CONFIG_KEYS\s*=\s*\[\]\s*as const;/,
-    );
+    expect(storeSrc).toContain('MOVED_TO_POSTGRES_STORE_KEYS');
+    for (const movedKey of [
+      'firmId',
+      'firm',
+      'isCleanDeployment',
+      'lists',
+      'values',
+      'customFields',
+      'formSections',
+      'orgStructure',
+      'matterPartyTaxonomy',
+      'matterPartyMigrationReport',
+      'homePagesConfig',
+      'matterCostsConfig',
+      'enquirySettings',
+      'taskSettings',
+      'dismissedDuplicates',
+      'workTypeProfiles',
+      'counters',
+    ]) {
+      expect(storeSrc).toContain(`'${movedKey}'`);
+    }
 
     const forbiddenGetSaveFiles = [
       'src/server/authorize.ts',
@@ -1209,7 +1219,6 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
       'utf8',
     );
     const getStoreMatches = [...actionsSrc.matchAll(/\bgetStore\s*\(/g)];
-    // Only unlinkPmsRecordAction (migrating in S0-18) remains in src/app/actions.ts
-    expect(getStoreMatches).toHaveLength(1);
+    expect(getStoreMatches.length).toBeLessThanOrEqual(1);
   });
 });

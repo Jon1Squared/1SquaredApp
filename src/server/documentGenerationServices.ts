@@ -87,6 +87,7 @@ import type {
 } from '@/domain/types';
 import { resolveRequestCorrelationId } from './correlationId';
 import {
+  appendTenantAuditEntries,
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
   getCatalogueRepository,
@@ -100,9 +101,7 @@ import {
   getTestEntraSessionOverride,
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
-import { appendUnmigratedModuleAuditEntries } from './auditAdapter';
 import type { FirmStore } from './store';
-import type { RecordDeltaCompensator } from './storeLock';
 
 type DocGenCatalogueStoreView = Pick<
   FirmStore,
@@ -318,36 +317,18 @@ export function getDocumentRepository(): TenantDocumentRepository {
   return global.__oneSquaredDocRepo;
 }
 
-export async function repointMergedEntityWithCompensation(
-  store: unknown,
-  actor: Person | null,
+export async function repointMergedEntityForTenant(
+  ctx: TenantContext,
   entityType: 'organisation' | 'person',
   mergedId: string,
   survivorId: string,
-  compensator: RecordDeltaCompensator,
 ): Promise<number> {
-  if (!actor) {
-    throw new Error(
-      'UNAUTHENTICATED: Verified Entra ID session is required for document merge repointing.',
-    );
-  }
-  const activeVerified = getActiveActorSession()?.verifiedSession as
-    | VerifiedEntraSessionPayload
-    | undefined;
-  const { ctx } = await resolveTenantContextForStoreUser(
-    store,
-    actor.id,
-    activeVerified,
-  );
-  const repo = getDocumentRepository();
-  const { updatedCount, undoDelta } = await repo.repointMergedEntityWithDelta(
+  return getDocumentRepository().repointMergedEntity(
     ctx,
     entityType,
     mergedId,
     survivorId,
   );
-  compensator.register('documents.merge_repoint', undoDelta);
-  return updatedCount;
 }
 
 async function ensureSeedTemplateBlobsExist(
@@ -881,7 +862,7 @@ async function appendDocGenAuditInTransaction(
     byId: string;
   },
 ): Promise<void> {
-  await appendUnmigratedModuleAuditEntries(ctx, [
+  await appendTenantAuditEntries(ctx, [
     {
       recordType: entry.recordType,
       recordId: entry.recordId,

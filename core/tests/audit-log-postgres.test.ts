@@ -12,11 +12,10 @@
  *
  * All fixtures are invented (the invented demo tenant seed data and synthetic `firm-alpha` / `firm-beta` tenants).
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import AdminCatchAllPage from '../../src/app/admin/[[...slug]]/page';
 import {
-  getPlatformTelemetryRecorder,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
   TenantPostgresPoolManager,
@@ -45,11 +44,11 @@ import {
   updateTenantRbacConfig,
 } from '../../src/server/services';
 import {
+  flushStagedAuditEntries,
   getAuditRepository,
-  runUnmigratedJsonMutationWithAudit,
-  stageUnmigratedAuditEntry,
-} from '../../src/server/auditAdapter';
-import { withJsonStoreWriteLock } from '../../src/server/storeLock';
+  runWithAuditStagingScope,
+  stageAuditEntry,
+} from '../../src/platform/tenantRuntime';
 import { uploadTemplateDraftService } from '../../src/server/documentGenerationServices';
 import { buildValidDocxArchive } from '@platform/core';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
@@ -887,12 +886,12 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     }
   });
 
-  it('R444: stageUnmigratedAuditEntry outside an active staging scope throws TENANCY_AUDIT_WRITE_ERROR, and switchUserInDemoMode writes an audit_entries row readable on a fresh connection', async () => {
+  it('R444: stageAuditEntry outside an active staging scope throws TENANCY_AUDIT_WRITE_ERROR, and switchUserInDemoMode writes an audit_entries row readable on a fresh connection', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
       let outsideErr: (Error & { code?: string }) | null = null;
       try {
-        stageUnmigratedAuditEntry({
+        stageAuditEntry({
           recordType: 'person',
           recordId: 'P-000002',
           action: 'update',
@@ -971,11 +970,13 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     }
   });
 
-  it('R446: nested runUnmigratedJsonMutationWithAudit where outer inserts unmoved record X, inner updates X, and outer audit append fails leaves X absent after clearStoreMemoryCache() and commits no inner audit row', async () => {
+  it('R446: nested runWithAuditStagingScope inside withTenantTransaction where outer inserts record X, inner updates X, and outer audit append fails rolls back X and commits no inner audit row', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const teamId = 'TM-R446-OVERLAP';
       const startedAt = Date.now();
+      const ctx = testTenantCtx('P-000004');
+      const hrRepo = getHrAndRbacRepository();
 
       setAuditAdapterFailureHookForTesting(({ entries }) => {
         if (entries.some((e) => e.recordId === 'R446-OUTER-TRIGGER')) {
@@ -984,11 +985,10 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       });
 
       await expect(
-        runUnmigratedJsonMutationWithAudit({
-          label: 'r446-outer',
-          resolveCtx: () => testTenantCtx('P-000004'),
-          mutate: async (outerStore) => {
-            outerStore.teams.unshift({
+        runWithAuditStagingScope(() =>
+          hrRepo.withTenantTransaction(ctx, async () => {
+            const nowIso = new Date().toISOString();
+            await hrRepo.putTeam(ctx, {
               id: teamId,
               name: 'Inserted by outer frame',
               description: 'Outer team detail',
@@ -996,32 +996,32 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
               memberIds: ['P-000001'],
               practiceAreaIds: [],
               active: true,
-            } as unknown as (typeof outerStore.teams)[number]);
-            saveStore(outerStore);
-
-            await runUnmigratedJsonMutationWithAudit({
-              label: 'r446-inner',
-              resolveCtx: () => testTenantCtx('P-000004'),
-              mutate: async (innerStore) => {
-                const target = innerStore.teams.find((t) => t.id === teamId) as
-                  | Record<string, unknown>
-                  | undefined;
-                expect(target).toBeDefined();
-                target!.name = 'Updated by inner frame';
-                stageUnmigratedAuditEntry({
-                  recordType: 'team',
-                  recordId: teamId,
-                  action: 'update',
-                  field: 'Inner team update',
-                  oldValue: 'Inserted by outer frame',
-                  newValue: 'Updated by inner frame',
-                  byId: 'P-000004',
-                });
-                saveStore(innerStore);
-              },
+              createdById: 'P-000004',
+              createdAt: nowIso,
+              updatedById: 'P-000004',
+              updatedAt: nowIso,
             });
 
-            stageUnmigratedAuditEntry({
+            await runWithAuditStagingScope(async () => {
+              const target = await hrRepo.getTeamById<import('@/domain/types').Team>(ctx, teamId);
+              expect(target).not.toBeNull();
+              await hrRepo.putTeam(ctx, {
+                ...target!,
+                name: 'Updated by inner frame',
+              });
+              stageAuditEntry({
+                recordType: 'team',
+                recordId: teamId,
+                action: 'update',
+                field: 'Inner team update',
+                oldValue: 'Inserted by outer frame',
+                newValue: 'Updated by inner frame',
+                byId: 'P-000004',
+              });
+              await flushStagedAuditEntries(ctx);
+            });
+
+            stageAuditEntry({
               recordType: 'team',
               recordId: 'R446-OUTER-TRIGGER',
               action: 'create',
@@ -1030,17 +1030,17 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
               newValue: teamId,
               byId: 'P-000004',
             });
-          },
-        }),
+            await flushStagedAuditEntries(ctx);
+          }),
+        ),
       ).rejects.toThrow(/SIMULATED_R446_OUTER_AUDIT_FAILURE/);
       setAuditAdapterFailureHookForTesting(null);
 
-      clearStoreMemoryCache();
-      expect(getStore().teams.some((t) => t.id === teamId)).toBe(false);
+      expect(await hrRepo.getTeamById(ctx, teamId)).toBeNull();
 
       const freshRepo = new TenantAuditRepository();
       const innerRows = await freshRepo.listAuditEntriesForRecord(
-        testTenantCtx('P-000004'),
+        ctx,
         'team',
         teamId,
       );
@@ -1051,49 +1051,40 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     }
   });
 
-  it('R447: when a RecordDeltaCompensator undo callback throws inside withJsonStoreWriteLock, logs and emits store.compensation_failed with tenantId and correlationId (no content) and rethrows the original error', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const recorder = getPlatformTelemetryRecorder();
-    const beforeCount = recorder.getRecentEntries().length;
-    try {
-      await expect(
-        runAsTestEmployee('P-000004', () =>
-          withJsonStoreWriteLock(async (compensator) => {
-            compensator.register('r447-failing-undo', () => {
-              throw new Error('SENSITIVE_UNDO_SECRET_PAYLOAD_SHOULD_NOT_LEAK');
-            });
-            throw new Error('ORIGINAL_MUTATION_ERROR_R447');
-          }),
-        ),
-      ).rejects.toThrow('ORIGINAL_MUTATION_ERROR_R447');
+  it('R447 / R475: flushStagedAuditEntries requires an active withTenantTransaction and runWithAuditStagingScope rejects unflushed staged entries', async () => {
+    const ctx = testTenantCtx('P-000004');
+    await expect(
+      runWithAuditStagingScope(async () => {
+        stageAuditEntry({
+          recordType: 'person',
+          recordId: 'P-000002',
+          action: 'update',
+          field: 'Outside tx test',
+          oldValue: null,
+          newValue: 'invented',
+          byId: 'P-000004',
+        });
+        await flushStagedAuditEntries(ctx);
+      }),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_AUDIT_TRANSACTION_REQUIRED',
+    });
 
-      expect(errorSpy).toHaveBeenCalledTimes(1);
-      const loggedRaw = String(errorSpy.mock.calls[0]?.[0] ?? '');
-      const parsed = JSON.parse(loggedRaw) as {
-        level?: string;
-        event?: string;
-        tenantId?: string;
-        correlationId?: string;
-      };
-      expect(parsed.level).toBe('error');
-      expect(parsed.event).toBe('store.compensation_failed');
-      expect(parsed.tenantId).toBe('not-a-law-firm');
-      expect(parsed.correlationId).toBeTruthy();
-      expect(loggedRaw).not.toContain('SENSITIVE_UNDO_SECRET_PAYLOAD_SHOULD_NOT_LEAK');
-
-      const newTelemetry = recorder.getRecentEntries().slice(beforeCount);
-      const compEvents = newTelemetry.filter(
-        (e) => e.eventName === 'store.compensation_failed',
-      );
-      expect(compEvents).toHaveLength(1);
-      expect(compEvents[0]!.tenantId).toBe('not-a-law-firm');
-      expect(compEvents[0]!.correlationId).toBe(parsed.correlationId);
-      expect(JSON.stringify(compEvents[0])).not.toContain(
-        'SENSITIVE_UNDO_SECRET_PAYLOAD_SHOULD_NOT_LEAK',
-      );
-    } finally {
-      errorSpy.mockRestore();
-    }
+    await expect(
+      runWithAuditStagingScope(async () => {
+        stageAuditEntry({
+          recordType: 'person',
+          recordId: 'P-000002',
+          action: 'update',
+          field: 'Unflushed test',
+          oldValue: null,
+          newValue: 'invented',
+          byId: 'P-000004',
+        });
+      }),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_UNFLUSHED_AUDIT_ERROR',
+    });
   });
 
   it('Import idempotency: importFirmStoreModulesToPostgres([key-dates, audit]) run twice gives identical counts and the AU- sequence continues', async () => {
