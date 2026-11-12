@@ -5,7 +5,7 @@ import 'server-only';
  * (`src/server/authorize.ts`, ADR 0025 / Slice S0-02).
  */
 
-import { randomUUID } from 'node:crypto';
+// Central authorisation wrappers
 import { NextResponse } from 'next/server';
 import {
   AuthorisationError,
@@ -31,6 +31,11 @@ import {
   type RegisteredRouteName,
 } from './actionPermissions';
 import { createVerifiedSessionActorFromEntraSession } from './entraAuth';
+import { resolveRequestCorrelationId } from './correlationId';
+import {
+  emitTenantTelemetryEvent,
+  resolveCurrentRequestCorrelationId,
+} from './telemetry';
 import { resolvePersonPermissionSet } from './rbacRuntime';
 import {
   requireAuthenticatedActor,
@@ -57,6 +62,38 @@ function logAuthorisationDenial(params: {
   code: string;
   requiredPermission?: string;
 }): void {
+  // Telemetry must never change the outcome of a denial: if the emitter throws
+  // (for example on an empty tenant), the caller still gets the original 401/403 (R432).
+  try {
+    emitTenantTelemetryEvent({
+      eventName: 'authorisation.denied',
+      severity: 'warn',
+      tenantId: params.tenantId,
+      correlationId: resolveRequestCorrelationId(
+        params.correlationId,
+        'corr-auth',
+      ),
+      properties: {
+        action: params.action,
+        code: params.code,
+        ...(params.requiredPermission
+          ? { requiredPermission: params.requiredPermission }
+          : {}),
+      },
+    });
+  } catch (telemetryError) {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'telemetry.emit_failed',
+        correlationId: params.correlationId,
+        tenantId: params.tenantId,
+        action: params.action,
+        errorName:
+          telemetryError instanceof Error ? telemetryError.name : 'Error',
+      }),
+    );
+  }
   console.warn(
     JSON.stringify({
       level: 'warn',
@@ -167,7 +204,7 @@ export async function guardedAction<R>(
     );
   }
 
-  const correlationId = `corr-act-${randomUUID()}`;
+  const correlationId = await resolveCurrentRequestCorrelationId('corr-act');
   const isEnforcedByAction =
     policy.kind === 'permission' && policy.enforcedBy === 'action';
 
@@ -271,7 +308,10 @@ export function guardedRoute<
       return await handler(request as Req, context as Ctx);
     }
 
-    const correlationId = `corr-rte-${randomUUID()}`;
+    const correlationId = resolveRequestCorrelationId(
+      request?.headers?.get('x-correlation-id'),
+      'corr-rte',
+    );
     try {
       const actor = await requireAuthenticatedActor();
       return await runWithActiveActorSession(

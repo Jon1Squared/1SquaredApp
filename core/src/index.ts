@@ -10,3 +10,4 @@ export * from './domain/rbac/index';
 export * from './domain/document-generation/index';
 export * from './domain/documents/index';
 export * from './integrations/document-stores/index';
+export * from './observability/telemetry';

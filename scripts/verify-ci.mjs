@@ -293,6 +293,41 @@ runStep(
   liveBuildEnv,
 );
 
+console.log('\n=== [CI Verify] 10b/12 Verify bundled CLI job entry point (dist/jobs/run-job.mjs --list, R404) ===');
+runStep(
+  '10b/12 Execute node dist/jobs/run-job.mjs --list',
+  process.execPath,
+  ['dist/jobs/run-job.mjs', '--list'],
+  liveBuildEnv,
+);
+const dockerInfoRes = spawnSync(isWin ? 'docker.exe' : 'docker', ['info'], {
+  stdio: 'ignore',
+  shell: false,
+});
+if (dockerInfoRes.status === 0) {
+  runStep(
+    '10c/12 Build standalone container image (docker build)',
+    isWin ? 'docker.exe' : 'docker',
+    [
+      'build',
+      '--build-arg',
+      `PLATFORM_TENANT_PACKAGE_DIR=${liveBuildEnv.PLATFORM_TENANT_PACKAGE_DIR}`,
+      '-t',
+      'onesquared-ci:test',
+      '.',
+    ],
+    liveBuildEnv,
+  );
+  runStep(
+    '10d/12 Execute bundled job runner inside container image',
+    isWin ? 'docker.exe' : 'docker',
+    ['run', '--rm', 'onesquared-ci:test', 'node', 'dist/jobs/run-job.mjs', '--list'],
+    liveBuildEnv,
+  );
+} else {
+  console.log('[CI Verify] Local Docker daemon not active; dist/jobs/run-job.mjs bundle verified directly on Node 24 (full docker build/run runs on ubuntu-latest in .github/workflows/ci.yml).');
+}
+
 console.log('\n=== [CI Verify] 11/12 Verify client bundle (.next/static) contains no API keys ===');
 const staticDir = path.resolve(process.cwd(), '.next/static');
 const staticFiles = collectFilesRecursively(staticDir);

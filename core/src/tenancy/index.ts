@@ -14,6 +14,7 @@ import type {
   HostingMode,
   PlatformEnvironment,
   TenantContext,
+  TenantKeyVaultConfig,
 } from '../api/index';
 import {
   isEntraMfaVerified,
@@ -26,6 +27,7 @@ export * from './migrations/index';
 export * from './blobStorage';
 export * from './documentRepository';
 export * from './documentStoreRepository';
+export * from './keyVaultSecrets';
 export * from './keyDateRepository';
 export {
   isEntraMfaVerified,
@@ -44,6 +46,7 @@ export interface ResolveTenantInput {
    * attempts to override tenant identity via URL, header, or form fields.
    */
   untrustedRequestTenantOverride?: string;
+  configuredKeyVault?: TenantKeyVaultConfig;
 }
 
 export interface TenantPostgresConnectionConfig {
@@ -117,7 +120,26 @@ export function resolveTenantFromVerifiedToken(
     correlationId,
     postgresDatabaseName: `pg_tenant_${slug}_${environment}`,
     blobContainerName: `tenant-${tenantId}-${environment}`,
-    keyVaultSecretPrefix: `kv-${tenantId}-${environment}`,
+    keyVaultSecretPrefix:
+      input.configuredKeyVault?.vaultName?.trim() ||
+      (input.configuredKeyVault?.vaultUri
+        ? input.configuredKeyVault.vaultUri
+            .trim()
+            .replace(/^https:\/\//i, '')
+            .split('.')[0] || `kv-${tenantId}-${environment}`
+        : `kv-${tenantId}-${environment}`),
+    ...(input.configuredKeyVault
+      ? {
+          configuredKeyVault: Object.freeze({
+            ...(input.configuredKeyVault.vaultName
+              ? { vaultName: input.configuredKeyVault.vaultName }
+              : {}),
+            ...(input.configuredKeyVault.vaultUri
+              ? { vaultUri: input.configuredKeyVault.vaultUri }
+              : {}),
+          }),
+        }
+      : {}),
   });
 }
 

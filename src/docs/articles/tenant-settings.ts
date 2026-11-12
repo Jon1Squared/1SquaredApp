@@ -93,5 +93,7 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 | \`keyDates.matterTypes[].defaultRuleSetIds\` | \`[]\` | Reserved (backlog, F19) | Reserved for default limitation rule set filtering by matter type |
 | \`keyDates.limitationRuleSets[].rules[].claimType\` | Optional | Reserved (backlog, F19) | Reserved for claim-type classification and filtering on limitation rules |
 | \`keyDates.calendarSync.provider\` | \`"microsoft_graph"\` | Reserved (backlog, F19) | Reserved for multi-provider external calendar adapter selection |
+| \`keyVault.vaultName\` | Optional | Active | Deployed per-tenant Azure Key Vault name (3–24 characters, populated from \`keyVaultName\` output of \`core/infra/modules/tenant.bicep\`); enforced by \`assertTenantOwnsKeyVaultSecretRef\` against every \`kv://\` secret reference |
+| \`keyVault.vaultUri\` | Optional | Active | Deployed per-tenant Azure Key Vault URI (\`https://<vault>.vault.azure.net/\`, populated from \`keyVaultUri\` output of \`core/infra/modules/tenant.bicep\`); validated alongside \`keyVault.vaultName\` |
 `.trim(),
 };

@@ -22,7 +22,10 @@ import type {
   TenantContext,
   UserAccessContext,
 } from '../../api/index';
-import { buildTenantCacheKey } from '../../tenancy/index';
+import {
+  assertTenantOwnsKeyVaultSecretRef,
+  buildTenantCacheKey,
+} from '../../tenancy/index';
 
 export const FORBIDDEN_BROAD_SHAREPOINT_PERMISSIONS = Object.freeze([
   'Files.Read.All',
@@ -495,6 +498,13 @@ export class DocumentStoreTokenService {
       authConfig.delegatedPermissionScope ??
       'Files.ReadWrite.All';
 
+    if (authConfig.certificateKeyVaultSecretRef) {
+      assertTenantOwnsKeyVaultSecretRef(
+        accessContext.tenantContext,
+        authConfig.certificateKeyVaultSecretRef,
+      );
+    }
+
     const cached = this.cache.getUserToken({
       ctx: accessContext.tenantContext,
       entraObjectId: accessContext.entraObjectId,
@@ -622,6 +632,13 @@ export class DocumentStoreTokenService {
     }
 
     const scope = params.scope ?? 'https://graph.microsoft.com/.default';
+
+    if (authConfig.certificateKeyVaultSecretRef) {
+      assertTenantOwnsKeyVaultSecretRef(
+        accessContext.tenantContext,
+        authConfig.certificateKeyVaultSecretRef,
+      );
+    }
 
     const cached = this.cache.getAppToken({
       ctx: accessContext.tenantContext,

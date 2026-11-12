@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  assertTenantOwnsKeyVaultSecretRef,
   buildTenantCacheKey,
    collectConfigDeprecationWarnings,
   ConflictReviewConfigSubSchema,
@@ -12,6 +13,8 @@ import {
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
   DocumentStoreTokenService,
+  emitTenantTelemetryEvent,
+  emitTenantTelemetryException,
   ExtensionHookPointSchema,
   ExtensionHost,
   ExtensionManifestSchema,
@@ -19,6 +22,7 @@ import {
   FirmConfigSubSchema,
   KEY_DATES_MIGRATION_0003,
   loadAndValidateTenantConfig,
+  PlatformTelemetryRecorder,
   PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
@@ -6238,7 +6242,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         entraTenantId: '11111111-1111-1111-1111-111111111111',
         credentialMode: 'client_certificate',
         clientId: 'aaaaaaaa-1111-1111-1111-111111111111',
-        certificateKeyVaultSecretRef: 'kv://kv-alpha/sp-cert',
+        certificateKeyVaultSecretRef: 'kv://kv-not-a-law-firm-dev/sp-cert',
         delegatedPermissionScope: 'Sites.Selected',
       },
       sharepoint: {
@@ -6266,7 +6270,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         entraTenantId: '22222222-2222-2222-2222-222222222222',
         credentialMode: 'client_certificate',
         clientId: 'bbbbbbbb-2222-2222-2222-222222222222',
-        certificateKeyVaultSecretRef: 'kv://kv-beta/sp-cert',
+        certificateKeyVaultSecretRef: 'kv://kv-fictional-chambers-uk-dev/sp-cert',
         delegatedPermissionScope: 'Sites.Selected',
       },
       sharepoint: {
@@ -8578,5 +8582,253 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       setTestEntraSessionOverride(undefined);
       resetAllDemoData('P-000001');
     }
+  });
+
+  it('S0-13b: isolates concurrent two-tenant telemetry events, rejects forged tenant claims with TENANCY_FORGERY_DETECTED, and scrubs PII', async () => {
+    const recorder = new PlatformTelemetryRecorder();
+
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-tel-forged-001',
+        untrustedRequestTenantOverride: 'fictional-chambers-uk',
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantAToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-tel-iso-a',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantBToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-tel-iso-b',
+    });
+
+    await Promise.all([
+      Promise.resolve().then(() =>
+        emitTenantTelemetryEvent({
+          eventName: 'matter.opened',
+          tenantId: ctxA.tenantId,
+          correlationId: ctxA.correlationId,
+          properties: {
+            matterId: 'M-A-001',
+            email: ctxA.actorEmail,
+            matterTitle: 'Confidential Alpha Acquisition',
+          },
+          recorder,
+        }),
+      ),
+      Promise.resolve().then(() =>
+        emitTenantTelemetryException({
+          eventName: 'matter.open_failed',
+          tenantId: ctxB.tenantId,
+          correlationId: ctxB.correlationId,
+          error: new Error(
+            'Validation failed for partner@fictionalchambers.co.uk',
+          ),
+          properties: {
+            matterId: 'M-B-999',
+            name: ctxB.actorName,
+          },
+          recorder,
+        }),
+      ),
+    ]);
+
+    const entriesA = recorder.getRecentEntries({ tenantId: ctxA.tenantId });
+    expect(entriesA).toHaveLength(1);
+    expect(entriesA[0]).toMatchObject({
+      eventName: 'matter.opened',
+      tenantId: 'not-a-law-firm',
+      correlationId: 'corr-tel-iso-a',
+      properties: {
+        matterId: 'M-A-001',
+      },
+    });
+    expect(JSON.stringify(entriesA)).not.toContain('notalawfirm.example');
+    expect(JSON.stringify(entriesA)).not.toContain(
+      'Confidential Alpha Acquisition',
+    );
+    expect(JSON.stringify(entriesA)).not.toContain('M-B-999');
+
+    const entriesB = recorder.getRecentEntries({ tenantId: ctxB.tenantId });
+    expect(entriesB).toHaveLength(1);
+    expect(entriesB[0]?.tenantId).toBe('fictional-chambers-uk');
+    expect(entriesB[0]?.correlationId).toBe('corr-tel-iso-b');
+    expect(entriesB[0]?.errorMessage).toBe(
+      'Validation failed for [REDACTED_EMAIL]',
+    );
+    expect(JSON.stringify(entriesB)).not.toContain('fictionalchambers.co.uk');
+    expect(JSON.stringify(entriesB)).not.toContain('Bernard Sterling');
+  });
+
+  it('restricts derived Key Vault names to the context environment, so a test context cannot resolve a live vault reference (S0-13b, R425)', () => {
+    const ctxTest = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantAToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-kv-env-r425',
+    });
+    expect(ctxTest.configuredKeyVault).toBeUndefined();
+
+    let caught: unknown;
+    try {
+      assertTenantOwnsKeyVaultSecretRef(
+        ctxTest,
+        `kv://kv-${ctxTest.tenantId}-live/sp-provisioning-cert`,
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as { code?: string }).code).toBe(
+      'TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED',
+    );
+    expect((caught as Error).message).toBe(
+      `TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED: Tenant "${ctxTest.tenantId}" is not permitted to access Key Vault "kv-${ctxTest.tenantId}-live".`,
+    );
+
+    // Positive tenant-A control: the same tenant's vault for its own environment resolves
+    expect(
+      assertTenantOwnsKeyVaultSecretRef(
+        ctxTest,
+        `kv://kv-${ctxTest.tenantId}-test/sp-provisioning-cert`,
+      ),
+    ).toEqual({
+      vaultName: `kv-${ctxTest.tenantId}-test`,
+      secretName: 'sp-provisioning-cert',
+    });
+  });
+
+  it('enforces two-tenant Key Vault secret-reference isolation in DocumentStoreTokenService including 24-character truncated vault names (S0-13b, ADR 0024 AG3, R411, R413)', async () => {
+    // Forged tenant claim is rejected before any Key Vault reference is inspected
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: tenantAToken,
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-kv-forged',
+        untrustedRequestTenantOverride: 'fictional-chambers-uk',
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    // Tenant A ('not-a-law-firm') configured with deployment output kv-notalawfirm-test
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantAToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-kv-iso-a',
+      configuredKeyVault: {
+        vaultName: 'kv-notalawfirm-test',
+        vaultUri: 'https://kv-notalawfirm-test.vault.azure.net/',
+      },
+    });
+
+    // Tenant B ('fictional-chambers-uk', >24 chars with kv-...-test) configured with 24-char Bicep output kv-fictionalchambersuk-t
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: tenantBToken,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-kv-iso-b',
+      configuredKeyVault: {
+        vaultName: 'kv-fictionalchambersuk-t',
+        vaultUri: 'https://kv-fictionalchambersuk-t.vault.azure.net/',
+      },
+    });
+
+    const tokenService = new DocumentStoreTokenService({
+      cache: new TenantScopedEncryptedTokenCache(),
+    });
+
+    const userAccessA = {
+      kind: 'user' as const,
+      tenantContext: ctxA,
+      actorUserId: ctxA.actorId,
+      entraObjectId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      userUpn: ctxA.actorEmail,
+      userAssertionToken: 'verified-assertion-a',
+    };
+    const provAccessA = {
+      kind: 'provisioning' as const,
+      tenantContext: ctxA,
+      triggeredByUserId: ctxA.actorId,
+      triggerEvent: 'matter.opened',
+    };
+    const provAccessB = {
+      kind: 'provisioning' as const,
+      tenantContext: ctxB,
+      triggeredByUserId: ctxB.actorId,
+      triggerEvent: 'matter.opened',
+    };
+
+    // Attack 1: Tenant A delegated OBO call with tampered certificateKeyVaultSecretRef pointing at Tenant B's 24-char vault
+    await expect(
+      tokenService.acquireDelegatedUserToken({
+        accessContext: userAccessA,
+        storeId: 'store-alpha',
+        authConfig: {
+          entraTenantId: '11111111-1111-1111-1111-111111111111',
+          credentialMode: 'client_certificate',
+          clientId: 'aaaaaaaa-1111-1111-1111-111111111111',
+          certificateKeyVaultSecretRef: 'kv://kv-fictionalchambersuk-t/sp-cert',
+          delegatedPermissionScope: 'Sites.Selected',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED',
+    });
+
+    // Attack 2: Tenant A provisioning call pointing at Tenant B's https://<vault>.vault.azure.net URI
+    await expect(
+      tokenService.acquireProvisioningToken({
+        accessContext: provAccessA,
+        storeId: 'store-alpha',
+        authConfig: {
+          entraTenantId: '11111111-1111-1111-1111-111111111111',
+          credentialMode: 'client_certificate',
+          clientId: 'aaaaaaaa-1111-1111-1111-111111111111',
+          certificateKeyVaultSecretRef:
+            'https://kv-fictionalchambersuk-t.vault.azure.net/secrets/sp-cert',
+          delegatedPermissionScope: 'Sites.Selected',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED',
+    });
+
+    // Positive controls: Tenant A with its own vault and Tenant B with its 24-char truncated output vault both succeed
+    const tokenA = await tokenService.acquireProvisioningToken({
+      accessContext: provAccessA,
+      storeId: 'store-alpha',
+      authConfig: {
+        entraTenantId: '11111111-1111-1111-1111-111111111111',
+        credentialMode: 'client_certificate',
+        clientId: 'aaaaaaaa-1111-1111-1111-111111111111',
+        certificateKeyVaultSecretRef: 'kv://kv-notalawfirm-test/sp-cert',
+        delegatedPermissionScope: 'Sites.Selected',
+      },
+    });
+    expect(typeof tokenA).toBe('string');
+    expect(tokenA.length).toBeGreaterThan(10);
+
+    const tokenB = await tokenService.acquireProvisioningToken({
+      accessContext: provAccessB,
+      storeId: 'store-beta',
+      authConfig: {
+        entraTenantId: '22222222-2222-2222-2222-222222222222',
+        credentialMode: 'client_certificate',
+        clientId: 'bbbbbbbb-2222-2222-2222-222222222222',
+        certificateKeyVaultSecretRef: 'kv://kv-fictionalchambersuk-t/sp-cert',
+        delegatedPermissionScope: 'Sites.Selected',
+      },
+    });
+    expect(typeof tokenB).toBe('string');
+    expect(tokenB).not.toBe(tokenA);
   });
 });

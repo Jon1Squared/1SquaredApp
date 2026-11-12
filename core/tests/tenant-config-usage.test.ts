@@ -1451,4 +1451,66 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       saveStore(snapshot);
     }
   });
+  it('validates optional keyVault.vaultName and keyVault.vaultUri deployment outputs including 24-character truncated vault names and rejects cross-tenant kv:// references (S0-13b, R413)', () => {
+    const longSlugConfig = loadAndValidateTenantConfig(
+      {
+        ...notALawFirmBaseConfig,
+        tenantId: 'fictional-chambers-uk-chancery',
+        environment: 'test',
+        keyVault: {
+          vaultName: 'kv-fictionalchambersuk-t',
+          vaultUri: 'https://kv-fictionalchambersuk-t.vault.azure.net/',
+        },
+        integrations: {
+          ...notALawFirmBaseConfig.integrations,
+          pmsConnectionSecretVaultRef:
+            'kv://kv-fictionalchambersuk-t/pms-connection-string',
+          companiesHouseApiKeyVaultRef:
+            'kv://kv-fictionalchambersuk-t/companies-house-api-key',
+        },
+        documentStores: [
+          {
+            ...notALawFirmBaseConfig.documentStores[0]!,
+            auth: {
+              ...notALawFirmBaseConfig.documentStores[0]!.auth,
+              certificateKeyVaultSecretRef:
+                'kv://kv-fictionalchambersuk-t/sp-provisioning-cert',
+            },
+          },
+        ],
+      },
+      {},
+      'test',
+      'multi_tenant',
+    );
+    expect(longSlugConfig.keyVault?.vaultName).toBe('kv-fictionalchambersuk-t');
+    expect(longSlugConfig.keyVault?.vaultUri).toBe(
+      'https://kv-fictionalchambersuk-t.vault.azure.net/',
+    );
+
+    expect(() =>
+      loadAndValidateTenantConfig(
+        {
+          ...notALawFirmBaseConfig,
+          keyVault: {
+            vaultName: 'kv-notalawfirm-test',
+            vaultUri: 'https://kv-notalawfirm-test.vault.azure.net/',
+          },
+          documentStores: [
+            {
+              ...notALawFirmBaseConfig.documentStores[0]!,
+              auth: {
+                ...notALawFirmBaseConfig.documentStores[0]!.auth,
+                certificateKeyVaultSecretRef:
+                  'kv://kv-fictionalchambersuk-t/sp-provisioning-cert',
+              },
+            },
+          ],
+        },
+        {},
+        'test',
+        'multi_tenant',
+      ),
+    ).toThrow(/TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED/);
+  });
 });
