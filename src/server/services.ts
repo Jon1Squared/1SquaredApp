@@ -483,7 +483,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   });
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const targetPerson = people.find(
     (p) => p.id === targetUserId && p.isEmployee && !p.mergedIntoId,
@@ -651,7 +651,6 @@ export function formatContext(
 
 declare global {
   var __oneSquaredKeyDateRepo: TenantKeyDateRepository | undefined;
-  var __oneSquaredMatterRestrictionSyncDigests: Map<string, string> | undefined;
 }
 
 export function getKeyDateRepository(): TenantKeyDateRepository {
@@ -659,13 +658,6 @@ export function getKeyDateRepository(): TenantKeyDateRepository {
     global.__oneSquaredKeyDateRepo = new TenantKeyDateRepository();
   }
   return global.__oneSquaredKeyDateRepo;
-}
-
-function getMatterRestrictionDigestCache(): Map<string, string> {
-  if (!global.__oneSquaredMatterRestrictionSyncDigests) {
-    global.__oneSquaredMatterRestrictionSyncDigests = new Map<string, string>();
-  }
-  return global.__oneSquaredMatterRestrictionSyncDigests;
 }
 
 function resolveDefaultServiceTenantContext(
@@ -741,10 +733,8 @@ async function syncMatterRestrictionInPostgres(
         tenantConfig,
       )
     : null;
-  const cacheKey = `${ctx.postgresDatabaseName}:${matter.id}`;
   const repo = getKeyDateRepository();
   await repo.setMatterRestriction(ctx, nextMeta);
-  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(nextMeta));
   const activeComp = compensator ?? getActiveCompensatorOrNull();
   if (activeComp) {
     activeComp.register(
@@ -760,7 +750,6 @@ async function syncMatterRestrictionInPostgres(
             );
           });
         }
-        getMatterRestrictionDigestCache().delete(cacheKey);
       },
     );
   }
@@ -772,23 +761,59 @@ async function ensureMattersRestrictedMetadataSynced(
   people: readonly Person[],
   teams: readonly Team[],
 ): Promise<void> {
+  if (matters.length === 0) return;
   const tenantConfig = getActiveTenantConfiguration();
   const repo = getKeyDateRepository();
-  const digestCache = getMatterRestrictionDigestCache();
-  for (const m of matters) {
-    const meta = computeMatterRestrictionMetadataForStore(
-      m,
-      people as Person[],
-      teams as Team[],
-      tenantConfig,
+  await repo.withTenantTransaction(ctx, async (tx) => {
+    const existingRes = await tx.query<{
+      id: string;
+      is_staff_matter: boolean;
+      has_ethical_wall: boolean;
+      restricted_access_user_ids_json: string[] | null;
+    }>(
+      `SELECT id, is_staff_matter, has_ethical_wall, restricted_access_user_ids_json
+         FROM public.matters
+        WHERE tenant_id = $1`,
+      [ctx.tenantId],
     );
-    const cacheKey = `${ctx.postgresDatabaseName}:${m.id}`;
-    const serialized = JSON.stringify(meta);
-    if (digestCache.get(cacheKey) !== serialized) {
-      await repo.setMatterRestriction(ctx, meta);
-      digestCache.set(cacheKey, serialized);
+    const existingById = new Map(
+      existingRes.rows.map((row) => [
+        row.id,
+        {
+          isRestricted:
+            Boolean(row.is_staff_matter) ||
+            Boolean(row.has_ethical_wall) ||
+            (Array.isArray(row.restricted_access_user_ids_json) &&
+              row.restricted_access_user_ids_json.length > 0),
+          restrictedAccessUserIds: Array.isArray(
+            row.restricted_access_user_ids_json,
+          )
+            ? [...row.restricted_access_user_ids_json].sort()
+            : [],
+        },
+      ]),
+    );
+    for (const m of matters) {
+      const meta = computeMatterRestrictionMetadataForStore(
+        m,
+        people as Person[],
+        teams as Team[],
+        tenantConfig,
+      );
+      const currentRow = existingById.get(m.id);
+      const desiredIds = [...meta.restrictedAccessUserIds].sort();
+      const differs =
+        !currentRow ||
+        currentRow.isRestricted !== Boolean(meta.isRestricted) ||
+        currentRow.restrictedAccessUserIds.length !== desiredIds.length ||
+        currentRow.restrictedAccessUserIds.some(
+          (id, idx) => id !== desiredIds[idx],
+        );
+      if (differs) {
+        await repo.setMatterRestriction(ctx, meta);
+      }
     }
-  }
+  });
 }
 
 function mapFirmAuditRecordToAuditEntry(rec: FirmAuditEntryRecord): AuditEntry {
@@ -853,7 +878,7 @@ export async function listAuditEntriesForRecord(
   }
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
@@ -966,7 +991,7 @@ export async function listFirmAuditEntriesPage(
   }
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const store = getStore();
   const viewer = people.find(
@@ -1160,7 +1185,7 @@ async function getAppSnapshotInScope(
       partyRepo.listAllLinks<PersonOrganisationLink>(snapshotTenantCtx),
       partyRepo.listAllNotes<Note>(snapshotTenantCtx),
       partyRepo.listAllMergeHistory<MergeHistory>(snapshotTenantCtx),
-      matterRepo.listAllMatters<Matter>(snapshotTenantCtx),
+      matterRepo.listAllMattersUnfiltered<Matter>(snapshotTenantCtx),
     ]);
   const user = people.find(
     (p) => p.id === userId && !p.mergedIntoId,
@@ -1796,7 +1821,7 @@ export async function reassignLeaverOwnedRecords(
   const [people, organisations, matters] = await Promise.all([
     partyRepo.listAllPeople<Person>(reassignCtx),
     partyRepo.listAllOrganisations<Organisation>(reassignCtx),
-    matterRepo.listAllMatters<Matter>(reassignCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(reassignCtx),
   ]);
   const now = new Date().toISOString();
   const actor = people.find((p) => p.id === byId) ?? null;
@@ -2076,6 +2101,12 @@ export async function reassignLeaverOwnedRecords(
         sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
       });
     }
+    await ensureMattersRestrictedMetadataSynced(
+      reassignCtx,
+      matters,
+      people,
+      store.teams,
+    );
   });
   for (const { matter: m, prevMatter } of changedMatters) {
     const isRestricted =
@@ -2169,7 +2200,7 @@ export async function savePersonRecord(
   const [people, organisations, matters] = await Promise.all([
     partyRepo.listAllPeople<Person>(personCtx),
     partyRepo.listAllOrganisations<Organisation>(personCtx),
-    matterRepo.listAllMatters<Matter>(personCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(personCtx),
   ]);
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
@@ -3081,6 +3112,12 @@ export async function savePersonRecord(
         sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
       });
     }
+    await ensureMattersRestrictedMetadataSynced(
+      personCtx,
+      matters,
+      peopleWithUpdatedPerson,
+      store.teams,
+    );
   });
   for (const { matter: m, prevMatter } of changedMattersOnHire) {
     const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
@@ -3240,7 +3277,7 @@ export async function saveOrganisationRecord(
   const [people, organisations, matters] = await Promise.all([
     partyRepo.listAllPeople<Person>(orgCtx),
     partyRepo.listAllOrganisations<Organisation>(orgCtx),
-    matterRepo.listAllMatters<Matter>(orgCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(orgCtx),
   ]);
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
@@ -3640,7 +3677,7 @@ export async function addNoteToRecord(
   const matterRepo = getMatterRepository();
   const [people, matters, targetOrg] = await Promise.all([
     partyRepo.listAllPeople<Person>(noteCtx),
-    matterRepo.listAllMatters<Matter>(noteCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(noteCtx),
     recordType === 'organisation'
       ? partyRepo.getOrganisationById<Organisation>(noteCtx, recordId)
       : Promise.resolve(null),
@@ -3874,7 +3911,7 @@ async function runMatterOpeningGate(params: {
     if (!isNewMatter) {
       const [people, matters] = await Promise.all([
         getPartyRepository().listAllPeople<Person>(extensionCtx),
-        getMatterRepository().listAllMatters<Matter>(extensionCtx),
+        getMatterRepository().listAllMattersUnfiltered<Matter>(extensionCtx),
       ]);
       await ensureMattersRestrictedMetadataSynced(
         extensionCtx,
@@ -4265,7 +4302,7 @@ export async function saveMatterRecord(
         partyRepo.listAllPeople<Person>(lookupCtx),
         partyRepo.listAllOrganisations<Organisation>(lookupCtx),
         partyRepo.listAllLinks<PersonOrganisationLink>(lookupCtx),
-        matterRepo.listAllMatters<Matter>(lookupCtx),
+        matterRepo.listAllMattersUnfiltered<Matter>(lookupCtx),
       ])
     : [[], [], [], []];
   const existingRef = opts.id ? matters.find((m) => m.id === opts.id) ?? null : null;
@@ -5536,8 +5573,6 @@ export async function saveMatterRecord(
     throw err;
   }
 
-  const cacheKey = `${extensionCtx.postgresDatabaseName}:${matter.id}`;
-  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(restrictionMeta));
   compensator.register(`matter.persist:${matter.id}`, async () => {
     await matterRepo.withTenantTransaction(extensionCtx, async (tx) => {
       if (previousMatterSnapshot) {
@@ -5570,7 +5605,6 @@ export async function saveMatterRecord(
         );
       }
     });
-    getMatterRestrictionDigestCache().delete(cacheKey);
   });
 
   if (!existing) {
@@ -6089,8 +6123,6 @@ export async function liftMatterRestriction(
       await flushStagedAuditEntries(liftCtx);
     }),
   );
-  const cacheKey = `${liftCtx.postgresDatabaseName}:${saved.id}`;
-  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(meta));
 
   const syncCorrelationId = `corr-lifecycle-sync-${saved.id}-${Date.now()}`;
   try {
@@ -6138,7 +6170,7 @@ export async function runMatterConflictSearchRecord(
     partyRepo.listAllPeople<Person>(ctx),
     partyRepo.listAllOrganisations<Organisation>(ctx),
     partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
-    matterRepo.listAllMatters<Matter>(ctx),
+    matterRepo.listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
@@ -6313,7 +6345,7 @@ export async function updateMatterConflictRecord(
       partyRepo.listAllPeople<Person>(conflictCtx),
       partyRepo.listAllOrganisations<Organisation>(conflictCtx),
       partyRepo.listAllLinks<PersonOrganisationLink>(conflictCtx),
-      matterRepo.listAllMatters<Matter>(conflictCtx),
+      matterRepo.listAllMattersUnfiltered<Matter>(conflictCtx),
     ]);
   const today = toIsoDate(new Date());
   const matter = matters.find((m) => m.id === matterId);
@@ -6586,8 +6618,6 @@ export async function updateMatterConflictRecord(
       await flushStagedAuditEntries(conflictCtx);
     }),
   );
-  const cacheKey = `${conflictCtx.postgresDatabaseName}:${saved.id}`;
-  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(meta));
 
   const syncCorrelationId = `corr-lifecycle-sync-${saved.id}-${Date.now()}`;
   try {
@@ -6643,7 +6673,7 @@ export async function signOffMatterCostsRecord(
   const [people, organisations, matters] = await Promise.all([
     partyRepo.listAllPeople<Person>(prelimCtx),
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
-    matterRepo.listAllMatters<Matter>(prelimCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
   ]);
   const matter = matters.find((m) => m.id === matterId) ?? null;
   const actingUser = people.find((p) => p.id === byId) ?? null;
@@ -6956,7 +6986,7 @@ export async function executeMerge(
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(prelimCtx),
     partyRepo.listAllNotes<Note>(prelimCtx),
-    matterRepo.listAllMatters<Matter>(prelimCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -8043,7 +8073,6 @@ export async function resetAllDemoData(
       }
     }
     saveStore(fresh);
-    getMatterRestrictionDigestCache().clear();
     await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
     saveStore(fresh);
     await appendUnmigratedModuleAuditEntries(ctx, [
@@ -8070,7 +8099,6 @@ export async function clearAllDataToCleanDeployment(
     const actorName = actor ? personDisplayName(actor) : byId;
     const clean = clearStoreToCleanDeployment();
     saveStore(clean);
-    getMatterRestrictionDigestCache().clear();
     await clearMigratedPostgresModulesForTenant({ ctx });
     await appendUnmigratedModuleAuditEntries(ctx, [
       {
@@ -8237,6 +8265,21 @@ export async function saveTeamRecord(
     });
   }
   saveStore(store);
+  const teamCtx = resolveDefaultServiceTenantContext(store, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  await partyRepo.withTenantTransaction(teamCtx, async () => {
+    const [people, matters] = await Promise.all([
+      partyRepo.listAllPeople<Person>(teamCtx),
+      matterRepo.listAllMattersUnfiltered<Matter>(teamCtx),
+    ]);
+    await ensureMattersRestrictedMetadataSynced(
+      teamCtx,
+      matters,
+      people,
+      store.teams,
+    );
+  });
   return { team };
 
     },
@@ -8309,6 +8352,13 @@ export async function updateEmployeeRoleSetting(
     person.updatedById = byId;
     const afterJson = JSON.stringify({ appRole: person.appRole ?? null });
     await partyRepo.putPerson(ctx, person);
+    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+    await ensureMattersRestrictedMetadataSynced(
+      ctx,
+      matters,
+      people,
+      store.teams,
+    );
     await runWithAuditStagingScope(async () => {
       writeAudit(store, {
         recordType: 'person',
@@ -8420,7 +8470,7 @@ export async function saveTaskRecord(
   const [people, organisations, matters] = await Promise.all([
     partyRepo.listAllPeople<Person>(taskCtx),
     partyRepo.listAllOrganisations<Organisation>(taskCtx),
-    matterRepo.listAllMatters<Matter>(taskCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
@@ -8824,7 +8874,7 @@ export async function takeTaskRecord(
     const matterRepo = getMatterRepository();
     const [people, matters] = await Promise.all([
       partyRepo.listAllPeople<Person>(taskCtx),
-      matterRepo.listAllMatters<Matter>(taskCtx),
+      matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
     ]);
     const actor = people.find((p) => p.id === byId) ?? null;
     await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
@@ -8884,7 +8934,7 @@ export async function addTaskCommentRecord(
   const matterRepo = getMatterRepository();
   const [people, matters] = await Promise.all([
     partyRepo.listAllPeople<Person>(taskCtx),
-    matterRepo.listAllMatters<Matter>(taskCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9140,7 +9190,7 @@ export async function saveEnquiryRecord(
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
-    matterRepo.listAllMatters<Matter>(enqCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
@@ -9662,7 +9712,7 @@ export async function assignEnquiryRecord(
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMatters<Matter>(enqCtx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9787,7 +9837,7 @@ export async function logEnquiryContactRecord(
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMatters<Matter>(enqCtx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9887,7 +9937,7 @@ export async function sendEnquiryEmailRecord(
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMatters<Matter>(enqCtx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9972,7 +10022,7 @@ export async function closeEnquiryRecord(
   const matterRepo = getMatterRepository();
   const [people, matters] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
-    matterRepo.listAllMatters<Matter>(enqCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -10108,7 +10158,7 @@ export async function reopenEnquiryRecord(
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMatters<Matter>(enqCtx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -10243,7 +10293,7 @@ export async function prepareEnquiryConversion(
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
-    matterRepo.listAllMatters<Matter>(enqCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -11073,7 +11123,7 @@ export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapsh
   const ctx = resolveDefaultServiceTenantContext(store, actorId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = actorId ? people.find((p) => p.id === actorId) ?? null : null;
   const visibleMatters = actorId
@@ -11212,7 +11262,7 @@ export async function rerunAutomaticPmsMatching(byId: string): Promise<{ totalLi
   const [people, organisations, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const pms = getPmsSource();
   const now = new Date().toISOString();
@@ -11951,6 +12001,13 @@ export async function updateEmployeeRolesAndSupports(
     });
 
     await partyRepo.putPerson(ctx, person);
+    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+    await ensureMattersRestrictedMetadataSynced(
+      ctx,
+      matters,
+      people,
+      store.teams,
+    );
     await runWithAuditStagingScope(async () => {
       writeAudit(store, {
         recordType: 'person',
@@ -12158,6 +12215,13 @@ export async function updatePersonPermissionOverrides(
     });
 
     await partyRepo.putPerson(ctx, target);
+    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+    await ensureMattersRestrictedMetadataSynced(
+      ctx,
+      matters,
+      people,
+      store.teams,
+    );
     await runWithAuditStagingScope(async () => {
       writeAudit(store, {
         recordType: 'person',
@@ -12327,6 +12391,15 @@ export async function updateTenantRbacConfig(
   });
 
   saveStore(store);
+  await getPartyRepository().withTenantTransaction(ctx, async () => {
+    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+    await ensureMattersRestrictedMetadataSynced(
+      ctx,
+      matters,
+      people,
+      store.teams,
+    );
+  });
   return { ok: true, rbacConfig: nextRbac };
 
     },
@@ -12345,7 +12418,7 @@ export async function approveSignOff(
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -12439,7 +12512,7 @@ export async function discussSignOff(
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -13061,7 +13134,7 @@ export async function deleteMatterPartyRelationship(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const matters = await getMatterRepository().listAllMatters<Matter>(ctx);
+  const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
   const usage = computeMatterPartyUsageCounts(matters);
@@ -13187,7 +13260,7 @@ export async function deleteMatterPartyCapacity(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const matters = await getMatterRepository().listAllMatters<Matter>(ctx);
+  const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
   const usage = computeMatterPartyUsageCounts(matters);
@@ -13289,7 +13362,7 @@ export async function saveQuoteRecord(
   const [people, organisations, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   if (
@@ -13548,7 +13621,7 @@ export async function markQuoteSentRecord(
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13626,7 +13699,7 @@ export async function logQuoteFollowUpRecord(
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13727,7 +13800,7 @@ export async function reviseQuoteRecord(
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13886,7 +13959,7 @@ export async function recordQuoteOutcomeRecord(
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -14003,7 +14076,7 @@ export async function prepareQuoteConversionRecord(
     partyRepo.listAllPeople<Person>(ctx),
     partyRepo.listAllOrganisations<Organisation>(ctx),
     partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
-    matterRepo.listAllMatters<Matter>(ctx),
+    matterRepo.listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -14919,7 +14992,7 @@ async function resolveKeyDatesActorAndData(
   }
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(prelimCtx),
-    getMatterRepository().listAllMatters<Matter>(prelimCtx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(prelimCtx),
   ]);
   const actor = resolveActorFromPeopleForKeyDates(people, byId);
   if (!actor) {
@@ -16363,7 +16436,7 @@ export async function runKeyDateReminderSchedulerRecord(
     const store = getStore();
     const [people, matters] = await Promise.all([
       getPartyRepository().listAllPeople<Person>(effectiveTenantCtx!),
-      getMatterRepository().listAllMatters<Matter>(effectiveTenantCtx!),
+      getMatterRepository().listAllMattersUnfiltered<Matter>(effectiveTenantCtx!),
     ]);
     const config = await getKeyDatesConfig({
       ctx: effectiveTenantCtx!,

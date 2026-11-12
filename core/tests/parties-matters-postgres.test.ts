@@ -857,7 +857,11 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     const freshAuditRepo = new TenantAuditRepository({ poolManager: freshPoolMgr });
 
     try {
-      const startedAt = Date.now();
+      const preAuditIds = new Set(
+        (await freshAuditRepo.listFirmAuditEntriesPage(ctx, { limit: 100 })).entries.map(
+          (e) => e.id,
+        ),
+      );
       const prePeopleCount = (await freshPartyRepo.countAllTenantPartyRows(ctx)).people;
       const preOrgsCount = (await freshPartyRepo.countAllTenantPartyRows(ctx)).organisations;
       const preLinksCount = (await freshPartyRepo.countAllTenantPartyRows(ctx)).links;
@@ -944,12 +948,12 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       expect(postPartyCounts.notes).toBe(preNotesCount);
       expect(postMatterCounts.matters).toBe(preMattersCount);
 
-      // Verify zero audit entries were committed since startedAt
+      // Verify zero new audit entries were committed during the rolled-back writes
       const recentAudit = await freshAuditRepo.listFirmAuditEntriesPage(ctx, {
-        limit: 50,
+        limit: 100,
       });
       expect(
-        recentAudit.entries.filter((e) => Date.parse(e.at) >= startedAt),
+        recentAudit.entries.filter((e) => !preAuditIds.has(e.id)),
       ).toEqual([]);
 
       // Verify JSON store on disk is also clean after clearStoreMemoryCache()
@@ -1034,7 +1038,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       const personId = createdPerson.person.id;
 
       const templateMatter = structuredClone(
-        (await getMatterRepository().listAllMatters<import('@/domain/types').Matter>(
+        (await getMatterRepository().listAllMattersUnfiltered<import('@/domain/types').Matter>(
           testDataResetContext(),
         ))[0]!,
       );
@@ -1419,7 +1423,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       expect(orgARes.errors).toBeUndefined();
 
       const templateMatter = structuredClone(
-        (await getMatterRepository().listAllMatters<import('@/domain/types').Matter>(
+        (await getMatterRepository().listAllMattersUnfiltered<import('@/domain/types').Matter>(
           ctxA,
         ))[0]!,
       );
@@ -1597,5 +1601,265 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       await resetAllDemoData('P-000001', testDataResetContext());
       await getGlobalTenantPostgresPoolManager().closeAllPools();
     }
+  });
+
+  it('R473: two-replica A -> B -> A staff-matter access changes update matters.restricted_access_user_ids_json and key-date visibility at every step with zero process-level digest cache', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const adminCtx = makeTenantCtx('not-a-law-firm', 'P-000001');
+    const adminSession = makeActorSession('P-000001');
+
+    // Find an active employee user U who is not initially permitted on the staff matter
+    const allPeople = await getPartyRepository().listAllPeople<
+      import('@/domain/types').Person
+    >(adminCtx);
+    const allMatters = await getMatterRepository().listAllMattersUnfiltered<
+      import('@/domain/types').Matter
+    >(adminCtx);
+    const positiveControlUserId = 'P-000001';
+    const staffMatter: import('@/domain/types').Matter = {
+      ...allMatters[0]!,
+      isStaffMatter: true,
+      hasEthicalWall: false,
+      responsiblePartnerId: positiveControlUserId,
+      supervisingPartnerId: positiveControlUserId,
+      leadFeeEarnerId: positiveControlUserId,
+      teamMemberIds: [],
+      restrictedAccessUserIds: [positiveControlUserId],
+    };
+    await getMatterRepository().putMatter(adminCtx, staffMatter, {
+      expectedRowVersion: null,
+      sqlRestrictedAccessUserIds: [positiveControlUserId],
+    });
+    const candidateUser = allPeople.find(
+      (p) =>
+        p.isEmployee &&
+        !p.mergedIntoId &&
+        p.id !== positiveControlUserId &&
+        p.id !== staffMatter.responsiblePartnerId &&
+        p.id !== staffMatter.supervisingPartnerId &&
+        p.id !== staffMatter.leadFeeEarnerId &&
+        !(staffMatter.teamMemberIds ?? []).includes(p.id) &&
+        !(staffMatter.restrictedAccessUserIds ?? []).includes(p.id) &&
+        !(p.roles ?? []).includes('admin') &&
+        !(p.roles ?? []).includes('managing_partner') &&
+        !(p.roles ?? []).includes('risk_compliance'),
+    )!;
+    expect(candidateUser).toBeDefined();
+    const userU = candidateUser.id;
+    const originalRoles = [...(candidateUser.roles ?? ['fee_earner'])];
+    const userUSession = makeActorSession(userU, ['fee_earner']);
+
+    const userUTeamId =
+      getStore().teams.find(
+        (t) =>
+          t.active &&
+          (t.memberIds.includes(userU) || t.leadIds.includes(userU)),
+      )?.id ?? 'TM-000001';
+
+    // Ensure the staff matter has a dedicated key date on userU's team for visibility assertions
+    const keyDateRepo = new TenantKeyDateRepository();
+    const testKeyDateId = 'KD-R473-STAFF-01';
+    const nowIso = new Date().toISOString();
+    await keyDateRepo.putKeyDate(adminCtx, {
+      id: testKeyDateId,
+      matterId: staffMatter.id,
+      keyDateTypeId: 'kd-type-limitation',
+      category: 'limitation',
+      title: 'R473 Staff Matter Key Date',
+      dueDate: '2027-06-15',
+      isCritical: true,
+      status: 'confirmed',
+      source: 'manual',
+      teamId: userUTeamId,
+      responsiblePersonIds: [positiveControlUserId],
+      verification: {
+        required: true,
+        proposedById: positiveControlUserId,
+        proposedAt: nowIso,
+        verifiedById: positiveControlUserId,
+        verifiedAt: nowIso,
+      },
+      createdById: positiveControlUserId,
+      createdAt: nowIso,
+      updatedById: positiveControlUserId,
+      updatedAt: nowIso,
+      version: 1,
+    });
+
+    const readRestrictedIdsOnFreshConnection = async (): Promise<string[]> => {
+      const freshPools = new TenantPostgresPoolManager();
+      try {
+        const freshMatterRepo = new TenantMatterRepository({
+          poolManager: freshPools,
+        });
+        return await freshMatterRepo.withTenantReadTransaction(
+          adminCtx,
+          async (tx) => {
+            const res = await tx.query<{
+              restricted_access_user_ids_json: string[];
+            }>(
+              'SELECT restricted_access_user_ids_json FROM public.matters WHERE tenant_id = $1 AND id = $2',
+              [adminCtx.tenantId, staffMatter.id],
+            );
+            return res.rows[0]?.restricted_access_user_ids_json ?? [];
+          },
+        );
+      } finally {
+        await freshPools.closeAllPools();
+      }
+    };
+
+    const userUCtx = makeTenantCtx('not-a-law-firm', userU, ['fee_earner']);
+
+    // Zero process-level digest cache exists on global
+    expect(
+      (globalThis as Record<string, unknown>)
+        .__oneSquaredMatterRestrictionSyncDigests,
+    ).toBeUndefined();
+
+    // Baseline before Step 1: U is not in restricted_access_user_ids_json, positive control is
+    const baselineIds = await readRestrictedIdsOnFreshConnection();
+    expect(baselineIds).toContain(positiveControlUserId);
+    expect(baselineIds).not.toContain(userU);
+
+    // Step 1 (Replica A): Add user U to staff matter access via role grant ('managing_partner')
+    vi.resetModules();
+    const replicaAEntra = await import('@/server/entraAuth');
+    const replicaA = await import('@/server/services');
+    const { runWithActiveActorSession: runInReplicaA } = await import(
+      '@/server/rbacRuntime'
+    );
+    const rebrandSession = (
+      entraMod: typeof replicaAEntra,
+      s: typeof adminSession,
+    ) => ({
+      ...s,
+      verifiedSession: entraMod.verifySignedEntraSessionCookie(
+        entraMod.createSignedEntraSessionCookie(s.verifiedSession),
+      )!,
+    });
+    const adminSessionA = rebrandSession(replicaAEntra, adminSession);
+    const userUSessionA = rebrandSession(replicaAEntra, userUSession);
+
+    const step1Res = await runInReplicaA(adminSessionA, () =>
+      replicaA.updateEmployeeRolesAndSupports(
+        userU,
+        { roles: Array.from(new Set([...originalRoles, 'managing_partner'])) },
+        positiveControlUserId,
+        { mfaVerified: true },
+      ),
+    );
+    expect(step1Res.ok).toBe(true);
+
+    const step1Ids = await readRestrictedIdsOnFreshConnection();
+    expect(step1Ids).toContain(positiveControlUserId);
+    expect(step1Ids).toContain(userU);
+
+    const step1RepoListU = await keyDateRepo.listKeyDatesForMatter(
+      userUCtx,
+      staffMatter.id,
+      userU,
+    );
+    expect(step1RepoListU.some((kd) => kd.id === testKeyDateId)).toBe(true);
+    const step1SnapU = await runInReplicaA(userUSessionA, () =>
+      replicaA.getMatterKeyDatesSnapshot(staffMatter.id, userU),
+    );
+    expect(step1SnapU.keyDates.some((kd) => kd.id === testKeyDateId)).toBe(
+      true,
+    );
+    const step1DiaryU = await runInReplicaA(userUSessionA, () =>
+      replicaA.queryKeyDatesTeamDiaryRecord({}, userU),
+    );
+    expect(step1DiaryU.some((d) => d.keyDateId === testKeyDateId)).toBe(true);
+    const step1ListControl = await keyDateRepo.listKeyDatesForMatter(
+      adminCtx,
+      staffMatter.id,
+      positiveControlUserId,
+    );
+    expect(step1ListControl.some((kd) => kd.id === testKeyDateId)).toBe(true);
+
+    // Step 2 (Replica B after vi.resetModules()): Remove user U from staff matter access
+    vi.resetModules();
+    const replicaBEntra = await import('@/server/entraAuth');
+    const replicaB = await import('@/server/services');
+    const { runWithActiveActorSession: runInReplicaB } = await import(
+      '@/server/rbacRuntime'
+    );
+    const adminSessionB = rebrandSession(replicaBEntra, adminSession);
+    const userUSessionB = rebrandSession(replicaBEntra, userUSession);
+
+    const step2Res = await runInReplicaB(adminSessionB, () =>
+      replicaB.updateEmployeeRolesAndSupports(
+        userU,
+        { roles: originalRoles },
+        positiveControlUserId,
+        { mfaVerified: true },
+      ),
+    );
+    expect(step2Res.ok).toBe(true);
+
+    const step2Ids = await readRestrictedIdsOnFreshConnection();
+    expect(step2Ids).toContain(positiveControlUserId);
+    expect(step2Ids).not.toContain(userU);
+
+    const step2RepoListU = await keyDateRepo.listKeyDatesForMatter(
+      userUCtx,
+      staffMatter.id,
+      userU,
+    );
+    expect(step2RepoListU).toHaveLength(0);
+    const step2SnapU = await runInReplicaB(userUSessionB, () =>
+      replicaB.getMatterKeyDatesSnapshot(staffMatter.id, userU),
+    );
+    expect(step2SnapU.keyDates).toHaveLength(0);
+    const step2DiaryU = await runInReplicaB(userUSessionB, () =>
+      replicaB.queryKeyDatesTeamDiaryRecord({}, userU),
+    );
+    expect(step2DiaryU.some((d) => d.keyDateId === testKeyDateId)).toBe(false);
+    const step2ListControl = await keyDateRepo.listKeyDatesForMatter(
+      adminCtx,
+      staffMatter.id,
+      positiveControlUserId,
+    );
+    expect(step2ListControl.some((kd) => kd.id === testKeyDateId)).toBe(true);
+
+    // Step 3 (Replica A adds U back — returning to Step 1's exact state A):
+    // Must not skip the write due to any stale in-memory digest from Step 1.
+    const step3Res = await runInReplicaA(adminSessionA, () =>
+      replicaA.updateEmployeeRolesAndSupports(
+        userU,
+        { roles: Array.from(new Set([...originalRoles, 'managing_partner'])) },
+        positiveControlUserId,
+        { mfaVerified: true },
+      ),
+    );
+    expect(step3Res.ok).toBe(true);
+
+    const step3Ids = await readRestrictedIdsOnFreshConnection();
+    expect(step3Ids).toContain(positiveControlUserId);
+    expect(step3Ids).toContain(userU);
+
+    const step3RepoListU = await keyDateRepo.listKeyDatesForMatter(
+      userUCtx,
+      staffMatter.id,
+      userU,
+    );
+    expect(step3RepoListU.some((kd) => kd.id === testKeyDateId)).toBe(true);
+    const step3SnapU = await runInReplicaA(userUSessionA, () =>
+      replicaA.getMatterKeyDatesSnapshot(staffMatter.id, userU),
+    );
+    expect(step3SnapU.keyDates.some((kd) => kd.id === testKeyDateId)).toBe(
+      true,
+    );
+    const step3DiaryU = await runInReplicaA(userUSessionA, () =>
+      replicaA.queryKeyDatesTeamDiaryRecord({}, userU),
+    );
+    expect(step3DiaryU.some((d) => d.keyDateId === testKeyDateId)).toBe(true);
+    const step3ListControl = await keyDateRepo.listKeyDatesForMatter(
+      adminCtx,
+      staffMatter.id,
+      positiveControlUserId,
+    );
+    expect(step3ListControl.some((kd) => kd.id === testKeyDateId)).toBe(true);
   });
 });

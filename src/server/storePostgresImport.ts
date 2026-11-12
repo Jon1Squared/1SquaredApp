@@ -556,7 +556,7 @@ export async function importFirmStoreModulesToPostgres(
     const matters =
       (store.matters?.length ?? 0) > 0
         ? store.matters!
-        : ((await new TenantMatterRepository().listAllMatters(
+        : ((await new TenantMatterRepository().listAllMattersUnfiltered(
             ctx,
           )) as unknown as Matter[]);
     const matterIdSet = new Set(matters.map((m) => m.id));

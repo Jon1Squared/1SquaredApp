@@ -603,7 +603,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       )!;
       expect(openEnquiry).toBeDefined();
       const baseMatter = (
-        await getMatterRepository().listAllMatters<import('@/domain/types').Matter>(
+        await getMatterRepository().listAllMattersUnfiltered<import('@/domain/types').Matter>(
           testTenantCtx('P-000004'),
         )
       ).find((m) => !m.isStaffMatter)!;
@@ -655,7 +655,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       clearStoreMemoryCache();
       const reloadedStore = getStore();
-      const reloadedMatters = await getMatterRepository().listAllMatters(
+      const reloadedMatters = await getMatterRepository().listAllMattersUnfiltered(
         testTenantCtx('P-000004'),
       );
       expect(reloadedMatters.some((m) => m.title === conversionTitle)).toBe(false);

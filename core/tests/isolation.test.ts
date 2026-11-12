@@ -1519,7 +1519,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       const allMatterIds = (
-        await getMatterRepository().listAllMatters(testTenantCtx(carys.id))
+        await getMatterRepository().listAllMattersUnfiltered(testTenantCtx(carys.id))
       ).map((m) => m.id);
       expect(new Set(allMatterIds).size).toBe(allMatterIds.length);
       const allPersonIds = (

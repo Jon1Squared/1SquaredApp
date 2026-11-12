@@ -414,19 +414,20 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
   if (row.has_ethical_wall || opening.hasEthicalWallFlag === true) {
     out.hasEthicalWall = Boolean(row.has_ethical_wall);
   }
-  if (
-    Array.isArray(opening.restrictedAccessUserIdsFallback) &&
-    opening.hasRestrictedAccessUserIds === true
-  ) {
-    out.restrictedAccessUserIds = [
-      ...(opening.restrictedAccessUserIdsFallback as string[]),
-    ];
+  if (opening.hasRestrictedAccessUserIds === true) {
+    out.restrictedAccessUserIds = Array.isArray(
+      opening.restrictedAccessUserIdsFallback,
+    )
+      ? [...(opening.restrictedAccessUserIdsFallback as string[])]
+      : Array.isArray(row.restricted_access_user_ids_json)
+        ? [...row.restricted_access_user_ids_json]
+        : [];
   } else if (
-    (Array.isArray(row.restricted_access_user_ids_json) &&
+    opening.hasRestrictedAccessUserIds === undefined &&
+    ((Array.isArray(row.restricted_access_user_ids_json) &&
       row.restricted_access_user_ids_json.length > 0) ||
-    opening.hasRestrictedAccessUserIds === true ||
-    row.is_staff_matter ||
-    row.has_ethical_wall
+      row.is_staff_matter ||
+      row.has_ethical_wall)
   ) {
     out.restrictedAccessUserIds = Array.isArray(
       row.restricted_access_user_ids_json,
@@ -1685,12 +1686,6 @@ export class TenantMatterRepository extends TenantScopedRepository {
         mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
       );
     });
-  }
-
-  public async listAllMatters<TMatter extends TenantMatterRecord = TenantMatterRecord>(
-    ctx: TenantContext,
-  ): Promise<TMatter[]> {
-    return this.listAllMattersUnfiltered<TMatter>(ctx);
   }
 
   public async searchVisibleMatters<TMatter extends TenantMatterRecord = TenantMatterRecord>(

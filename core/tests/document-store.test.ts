@@ -2598,7 +2598,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
 
         // R121: (3) A user without matter:create (e.g. finance role P-000009) cannot create a matter
         const countBeforeUnauthorisedCreate = (
-          await getMatterRepository().listAllMatters(testTenantCtx('P-000001'))
+          await getMatterRepository().listAllMattersUnfiltered(testTenantCtx('P-000001'))
         ).length;
         const unauthorisedCreateRes = await asEmployee('P-000009', async () =>
           saveMatterRecord(
@@ -2615,7 +2615,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           /matter:create/i,
         );
         expect(
-          (await getMatterRepository().listAllMatters(testTenantCtx('P-000001')))
+          (await getMatterRepository().listAllMattersUnfiltered(testTenantCtx('P-000001')))
             .length,
         ).toBe(countBeforeUnauthorisedCreate);
 
@@ -3914,7 +3914,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
 
         // R138: Passing an existing matter object with `id` into saveMatterRecord without `opts.id` returns errors.id and matter: null without creating a duplicate
         const matterCountBeforeMissingId = (
-          await getMatterRepository().listAllMatters(testTenantCtx('P-000001'))
+          await getMatterRepository().listAllMattersUnfiltered(testTenantCtx('P-000001'))
         ).length;
         const missingIdOptsRes = await runAsStoreEmployee('P-000001', async () =>
           saveMatterRecord(
@@ -3925,7 +3925,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(missingIdOptsRes.matter).toBeNull();
         expect(missingIdOptsRes.errors?.id).toMatch(/opts\.id/i);
         expect(
-          (await getMatterRepository().listAllMatters(testTenantCtx('P-000001')))
+          (await getMatterRepository().listAllMattersUnfiltered(testTenantCtx('P-000001')))
             .length,
         ).toBe(matterCountBeforeMissingId);
 

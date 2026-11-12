@@ -2314,7 +2314,7 @@ export async function applyAdminTemplateAdditionsToOpenMatters(
   const config = await loadActiveDocumentTenantConfig(ctx, repo);
 
   const deps = buildLifecycleDependencies(ctx, store, config, people);
-  const allMatters = await getMatterRepository().listAllMatters<Matter>(ctx);
+  const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
   const openSubjects = allMatters
     .map((m) => buildMatterRoutingSubject(m, store, people, organisations))
     .filter((s) => !s.isClosed);

@@ -2029,7 +2029,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         await getPartyRepository().putPerson(ctx, signedInFeeEarner);
 
         // Mark the first matter as a restricted staff matter where P-000002 is on restrictedAccessUserIds, and P-000006 is not
-        const staffMatter = (await getMatterRepository().listAllMatters<Matter>(ctx))[0]!;
+        const staffMatter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
         staffMatter.isStaffMatter = true;
         staffMatter.restrictedAccessUserIds = ['P-000001', 'P-000002'];
         await getMatterRepository().putMatter(ctx, staffMatter, { expectedRowVersion: null });
@@ -3128,7 +3128,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         };
         await getPartyRepository().putPerson(ctx, adminPerson);
         store.pmsLinks = store.pmsLinks.filter((l) => l.entityType !== 'matter');
-        const mattersCountBefore = (await getMatterRepository().listAllMatters(ctx)).length;
+        const mattersCountBefore = (await getMatterRepository().listAllMattersUnfiltered(ctx)).length;
         const matterFromPmsDenied = await createRecordFromPmsAction(
           'matter',
           'MAT-PMS-001',
@@ -3136,7 +3136,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(matterFromPmsDenied)).toBe(true);
         expect(matterFromPmsDenied.ok).toBe(false);
         expect(matterFromPmsDenied.error).toMatch(/matter:create/i);
-        expect((await getMatterRepository().listAllMatters(ctx)).length).toBe(mattersCountBefore);
+        expect((await getMatterRepository().listAllMattersUnfiltered(ctx)).length).toBe(mattersCountBefore);
       } finally {
         setTestEntraSessionOverride(undefined);
         await resetAllDemoData('P-000001', testDataResetContext());
@@ -3335,7 +3335,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // R267: Fee earner P-000002 holds quote:view, but quotes linked to a restricted matter or hidden enquiry are hidden
         const ctx = testDataResetContext();
-        const wallMatter = (await getMatterRepository().listAllMatters<Matter>(ctx))[0]!;
+        const wallMatter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
         wallMatter.hasEthicalWall = true;
         wallMatter.restrictedAccessUserIds = ['P-000001'];
         wallMatter.responsiblePartnerId = 'P-000001';
@@ -3430,7 +3430,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const ctx = testDataResetContext();
         const allPeople = await getPartyRepository().listAllPeople<Person>(ctx);
         const allOrgs = await getPartyRepository().listAllOrganisations<import('@/domain/types').Organisation>(ctx);
-        const allMatters = await getMatterRepository().listAllMatters<Matter>(ctx);
+        const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
         const actor = allPeople.find((p) => p.id === 'P-000001')!;
         const activeEmp = allPeople.find((p) => p.id === 'P-000002')!;
         const replacementEmp = allPeople.find((p) => p.id === 'P-000003')!;
@@ -4069,7 +4069,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
         const ctx = testDataResetContext();
-        const wallMatter = (await getMatterRepository().listAllMatters<Matter>(ctx))[0]!;
+        const wallMatter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
         wallMatter.hasEthicalWall = true;
         wallMatter.restrictedAccessUserIds = ['P-000001'];
         wallMatter.responsiblePartnerId = 'P-000001';
@@ -4169,7 +4169,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const ctx = testDataResetContext();
         await runAsTestActor('P-000001', async () => {
           // Find an opposing party on an existing matter to trigger a high-severity hit
-          const allMatters = await getMatterRepository().listAllMatters<Matter>(ctx);
+          const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
           const matterWithOpponent = allMatters.find(
             (m) =>
               !m.isStaffMatter &&
@@ -4507,7 +4507,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             unlinkedDeclinedNameEnqConv.conflictWarnings,
           );
           // R312: A user who cannot see the enquiry gets no warnings from the snapshot used by /matters/new
-          const restrictedMatter = (await getMatterRepository().listAllMatters<Matter>(ctx))[0]!;
+          const restrictedMatter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
           const savedMatterSnap = structuredClone(restrictedMatter);
           const prevConvertedMatterId = unlinkedDeclinedNameEnq.convertedMatterId;
           restrictedMatter.isStaffMatter = true;
@@ -4731,7 +4731,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         });
 
         // Set up an existing visible matter with instructingContactId, billingContactId, additionalClientIds, and employerOrg as Opponent
-        const initialMatters = await getMatterRepository().listAllMatters<Matter>(ctx);
+        const initialMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
         const baseMatter = initialMatters.find(
           (m) => !m.isStaffMatter && !m.hasEthicalWall,
         )!;
@@ -4750,7 +4750,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const allPeople = await getPartyRepository().listAllPeople<Person>(ctx);
         const allOrgs = await getPartyRepository().listAllOrganisations<import('@/domain/types').Organisation>(ctx);
         const allLinks = await getPartyRepository().listAllLinks<import('@/domain/types').PersonOrganisationLink>(ctx);
-        let allMatters = await getMatterRepository().listAllMatters<Matter>(ctx);
+        let allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
 
         // Verify buildEffectiveConflictParties includes billingContactId
         const builtParties = buildEffectiveConflictParties({
@@ -4922,7 +4922,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
         ];
         await getMatterRepository().putMatter(ctx, restrictedMatter, { expectedRowVersion: null });
-        allMatters = await getMatterRepository().listAllMatters<Matter>(ctx);
+        allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
 
         const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
         const blockedEnqRes = await runAsTestActor('P-000002', () =>
@@ -5183,7 +5183,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         )).organisation!;
 
         const ctx = testDataResetContext();
-        const matter = (await getMatterRepository().listAllMatters<Matter>(ctx))[0]!;
+        const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
         matter.clientId = mergedOrg.id;
         matter.additionalClientIds = [survivorPerson.id, mergedPerson.id];
         matter.instructingContactId = mergedPerson.id;
@@ -5719,7 +5719,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         const store = getStore();
         const resetCtx = testDataResetContext();
-        const matter = (await getMatterRepository().listAllMatters<Matter>(resetCtx))[0]!;
+        const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(resetCtx))[0]!;
         const tenantCfg = getActiveTenantConfiguration();
         const repo = getDocumentRepository();
         const adminActor = (await getPartyRepository().getPersonById<Person>(resetCtx, 'P-000004'))!;
@@ -5928,7 +5928,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         const store = getStore();
         const resetCtx = testDataResetContext();
-        const matter = (await getMatterRepository().listAllMatters<Matter>(resetCtx))[0]!;
+        const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(resetCtx))[0]!;
         matter.instructingContactId = mergedPerson.id;
         await getMatterRepository().putMatter(resetCtx, matter, { expectedRowVersion: null });
         const enq = store.enquiries[0]!;
@@ -6087,7 +6087,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         const store = getStore();
         const ctx = testDataResetContext();
-        const matter = (await getMatterRepository().listAllMatters<Matter>(ctx))[0]!;
+        const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
         matter.instructingContactId = mergedPerson.id;
         await getMatterRepository().putMatter(ctx, matter, { expectedRowVersion: null });
         const enq = store.enquiries[0]!;
@@ -6594,7 +6594,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const ctx = testTenantCtx('P-000001');
         const matterRepo = getMatterRepository();
         const partyRepo = getPartyRepository();
-        const allMatters = await matterRepo.listAllMatters<import('@/domain/types').Matter>(ctx);
+        const allMatters = await matterRepo.listAllMattersUnfiltered<import('@/domain/types').Matter>(ctx);
         const pms = getPmsSource();
         const extractInfo = pms.getExtractInfo();
 
@@ -7144,7 +7144,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // 3. Restore finance:credit_control, but restrict HAR001-0003 (M-000013) to P-000004 only: all 3 actions return FORBIDDEN
         partner.permissionOverrides = undefined;
         await getPartyRepository().putPerson(ctx, partner);
-        const allMatters = await getMatterRepository().listAllMatters<Matter>(ctx);
+        const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
         const targetMatter = allMatters.find((m) => m.matterNumber === 'HAR001-0003')!;
         targetMatter.isStaffMatter = true;
         targetMatter.restrictedAccessUserIds = ['P-000004'];

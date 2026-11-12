@@ -2540,7 +2540,7 @@ export const POST = guardedRoute(
       const [allPeople, allOrganisations, allMatters] = await Promise.all([
         partyRepo.listAllPeople<Person>(tenantContext),
         partyRepo.listAllOrganisations<Organisation>(tenantContext),
-        matterRepo.listAllMatters<Matter>(tenantContext),
+        matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
       ]);
       const actorPerson = allPeople.find((p) => p.id === byId) ?? null;
       const visibility = buildRecordVisibility(store, actorPerson, {
@@ -2728,7 +2728,7 @@ export const POST = guardedRoute(
           partyRepo.listAllPeople<Person>(tenantContext),
           partyRepo.listAllOrganisations<Organisation>(tenantContext),
           partyRepo.listAllLinks<PersonOrganisationLink>(tenantContext),
-          matterRepo.listAllMatters<Matter>(tenantContext),
+          matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
         ]);
       const latestVisibility = buildRecordVisibility(latestStore, actorPerson, {
         people: latestPeople,

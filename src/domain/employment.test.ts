@@ -572,7 +572,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
           getPartyRepository().listAllOrganisations<Organisation>(
             testDataResetContext(),
           ),
-          getMatterRepository().listAllMatters<Matter>(testDataResetContext()),
+          getMatterRepository().listAllMattersUnfiltered<Matter>(testDataResetContext()),
         ]);
         beforePeople[0].relationshipOwnerId = leaverUpdated.id;
         await getPartyRepository().putPerson(
@@ -602,7 +602,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
           getPartyRepository().listAllOrganisations<Organisation>(
             testDataResetContext(),
           ),
-          getMatterRepository().listAllMatters<Matter>(testDataResetContext()),
+          getMatterRepository().listAllMattersUnfiltered<Matter>(testDataResetContext()),
         ]);
         const ownedAfter = findRecordsOwnedByLeavers(
           afterPeople,

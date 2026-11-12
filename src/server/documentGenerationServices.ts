@@ -725,7 +725,7 @@ export async function getInitializedDocGenContext(
   const [people, organisations, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
-    getMatterRepository().listAllMatters<Matter>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
   ]);
   const repo = getDocumentRepository();
   const config = await getEffectiveTenantConfig(ctx, repo);

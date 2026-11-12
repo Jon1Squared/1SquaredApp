@@ -185,7 +185,7 @@ export async function verifyFinanceActorAndPermission(
   const store = getStore();
   const [people, matters] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(prelimTenantContext),
-    getMatterRepository().listAllMatters<Matter>(prelimTenantContext),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(prelimTenantContext),
   ]);
   const actor = people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
   if (!actor) {
