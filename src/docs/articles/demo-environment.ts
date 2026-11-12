@@ -6,7 +6,7 @@ export const demoEnvironmentArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How the standalone Not A Law Firm LLP demo environment is configured, how persona switching and sample document seeding work, and how the demo dataset is seeded and reset.',
-  updated: '2026-11-10',
+  updated: '2026-11-11',
   body: `
 The **Demo environment** (\`environment: "demo"\`) provides a standalone, isolated deployment of **Not A Law Firm LLP** (\`tenantId: "not-a-law-firm"\`) for product walkthroughs and role demonstrations without putting any demo logic, fallback strings, or auto-seeding into live client deployments (ADR 0026).
 
@@ -40,6 +40,6 @@ Demo data enters a non-live tenant store through two controlled paths only:
    - Available under **Administration → Demo data** (\`/admin/demo-data\`, **Load demo dataset**) only when \`isDataResetAllowedEnvironment()\` is \`true\` (non-live environment with \`featureFlags.enableDemoMode: true\`).
    - Requires the \`admin:data_reset\` permission (\`admin\` role only) with verified multi-factor authentication (\`mfaVerified === true\`).
    - Calls \`resetAllDemoData\`, which restores the seeded dataset with fresh relative dates (\`includeSyntheticEntraOids: false\` outside \`PLATFORM_ENVIRONMENT === 'test'\`), preserves \`entraObjectId\` bindings only when the pre-reset store was itself a seeded store (\`!prevStore.isCleanDeployment\`) and both the person ID and primary email match the seeded persona (so \`--entra-map\` bindings survive a reset without binding a user provisioned after **Clear all data** to a seeded persona), and writes a \`data-reset\` audit entry recording the acting administrator. The PostgreSQL clear and re-import run under the signed-in administrator's own verified tenant context; the web app never builds a system context (only CLI job entry points in \`scripts/\` do).
-   - Also reloads the key-dates and audit modules into the tenant PostgreSQL database. Because the audit log is reloaded from the demo data, audit reference numbers (\`AU-…\`) restart from the demo sequence after every reset.
+   - Also reloads all migrated PostgreSQL modules (\`parties\`, \`matters\`, \`intake\`, \`quotes\`, \`tasks\`, \`hr\`, \`catalogues\`, \`documents\`, \`document-store\`, \`key-dates\`, and \`audit\`) into the tenant PostgreSQL database. Because the audit log is reloaded from the demo data, audit reference numbers (\`AU-…\`) restart from the demo sequence after every reset.
 `.trim(),
 };

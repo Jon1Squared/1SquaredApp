@@ -71,7 +71,7 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
-| \`customFields\` | \`[]\` | Reserved (S0-17) | Reserved for moving custom field definitions off the transitional JSON store in S0-17 (runtime custom fields are currently managed in the firm store) |
+| \`customFields\` | \`[]\` | Active | Declarative custom field definitions in \`base.json\` merged at runtime with administrator-managed custom fields persisted in \`public.custom_field_definitions\` (\`TenantCatalogueRepository\`, \`S0-17c\`); administrator definitions with the same \`id\` take precedence over declarative entries |
 | \`enabledExtensions\` | \`[]\` | Active | Registered extension IDs active for the tenant |
 | \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules (\`requireApproval\` controls whether \`submitTemplateVersionForApproval\` requires a separate approval step or activates clean template versions directly on submit without a separate approver check, recording \`Document Template Activated (approval not required)\` in the audit trail; \`allowSelfApproval\` controls whether a builder may approve their own submitted version), and usage reporting |
 | \`documentGeneration.usage.retentionMonths\` | \`24\` | Reserved (S0-19) | Reserved for automated document usage event retention pruning |
