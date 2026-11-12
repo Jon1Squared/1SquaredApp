@@ -16,8 +16,10 @@ import {
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
+  TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantPartyRepository,
+  TenantTaskWorkflowRepository,
   validateExtensionManifest,
   type ExtensionManifest,
   type TenantConfiguration,
@@ -721,23 +723,25 @@ export function resolveCurrentTenantContext(
   });
 }
 
-declare global {
-  var __oneSquaredPartyRepo: TenantPartyRepository | undefined;
-  var __oneSquaredMatterRepo: TenantMatterRepository | undefined;
-}
+const partyRepositoryInstance = new TenantPartyRepository();
+const matterRepositoryInstance = new TenantMatterRepository();
+const intakeQuoteRepositoryInstance = new TenantIntakeQuoteRepository();
+const taskWorkflowRepositoryInstance = new TenantTaskWorkflowRepository();
 
 export function getPartyRepository(): TenantPartyRepository {
-  if (!global.__oneSquaredPartyRepo) {
-    global.__oneSquaredPartyRepo = new TenantPartyRepository();
-  }
-  return global.__oneSquaredPartyRepo;
+  return partyRepositoryInstance;
 }
 
 export function getMatterRepository(): TenantMatterRepository {
-  if (!global.__oneSquaredMatterRepo) {
-    global.__oneSquaredMatterRepo = new TenantMatterRepository();
-  }
-  return global.__oneSquaredMatterRepo;
+  return matterRepositoryInstance;
+}
+
+export function getIntakeQuoteRepository(): TenantIntakeQuoteRepository {
+  return intakeQuoteRepositoryInstance;
+}
+
+export function getTaskWorkflowRepository(): TenantTaskWorkflowRepository {
+  return taskWorkflowRepositoryInstance;
 }
 
 export function createVerifiedTenantContext(

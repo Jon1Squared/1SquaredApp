@@ -833,6 +833,9 @@ export function getStore(): FirmStore {
       if (!Array.isArray(parsed.quotes)) parsed.quotes = [];
       if (!Array.isArray(parsed.notifications)) parsed.notifications = [];
       if (!Array.isArray(parsed.signOffs)) parsed.signOffs = [];
+      if (!parsed.recentlyViewed || typeof parsed.recentlyViewed !== 'object') {
+        parsed.recentlyViewed = {};
+      }
       if (!Array.isArray(parsed.pmsLinks)) parsed.pmsLinks = [];
       if (!Array.isArray(parsed.notes)) parsed.notes = [];
       if (!Array.isArray(parsed.audit)) parsed.audit = [];
@@ -1025,6 +1028,14 @@ export function getStore(): FirmStore {
       if (!Array.isArray(parsed.people)) parsed.people = [];
       if (!Array.isArray(parsed.links)) parsed.links = [];
       if (!Array.isArray(parsed.matters)) parsed.matters = [];
+      if (!Array.isArray(parsed.tasks)) parsed.tasks = [];
+      if (!Array.isArray(parsed.enquiries)) parsed.enquiries = [];
+      if (!Array.isArray(parsed.quotes)) parsed.quotes = [];
+      if (!Array.isArray(parsed.notifications)) parsed.notifications = [];
+      if (!Array.isArray(parsed.signOffs)) parsed.signOffs = [];
+      if (!parsed.recentlyViewed || typeof parsed.recentlyViewed !== 'object') {
+        parsed.recentlyViewed = {};
+      }
       if (!Array.isArray(parsed.notes)) parsed.notes = [];
       if (!Array.isArray(parsed.audit)) parsed.audit = [];
       if (!Array.isArray(parsed.mergeHistory)) parsed.mergeHistory = [];
@@ -1069,6 +1080,12 @@ const MOVED_TO_POSTGRES_STORE_KEYS: ReadonlySet<string> = new Set([
   'matters',
   'notes',
   'mergeHistory',
+  'tasks',
+  'enquiries',
+  'quotes',
+  'notifications',
+  'signOffs',
+  'recentlyViewed',
 ]);
 
 function serializeUnmigratedStoreForPersistence(

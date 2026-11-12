@@ -15,7 +15,6 @@
  *   any other operation's records untouched.
  *
  * Retirement schedule:
- * - @remove-in S0-17a: Enquiries, Quotes, Tasks, Notifications, Sign-Offs, Recently Viewed
  * - @remove-in S0-17b: Employment, Sensitive/Payroll HR records, Teams, RBAC overrides
  * - @remove-in S0-17c: Firm settings, Choice Lists/Values, Custom Fields, Org Structure, Party Taxonomy, Home/Costs configs
  * - @remove-in S0-18: PMS Links (`pmsLinks`)
@@ -24,15 +23,23 @@
 
 import {
   TenantAuditRepository,
+  TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantPartyRepository,
+  TenantTaskWorkflowRepository,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
   type TenantContext,
 } from '@platform/core';
 import { getActiveActorSession } from '@/domain/rbac';
 import type { AuditEntry, EmployeeSensitiveRecord } from '@/domain/types';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import {
+  getActiveTenantConfiguration,
+  getIntakeQuoteRepository,
+  getMatterRepository,
+  getPartyRepository,
+  getTaskWorkflowRepository,
+} from '@/platform/tenantRuntime';
 import { resolveRequestCorrelationId } from './correlationId';
 import { getStore, saveStore, type FirmStore } from './store';
 import {
@@ -79,32 +86,34 @@ function getAuditStagingStorage(): AsyncLocalStorageLike<ActiveAuditStagingScope
   return cachedAuditStagingStorage;
 }
 
-declare global {
-  var __oneSquaredAuditRepo: TenantAuditRepository | undefined;
-  var __oneSquaredPartyRepo: TenantPartyRepository | undefined;
-  var __oneSquaredMatterRepo: TenantMatterRepository | undefined;
-}
+const auditRepositoryInstance = new TenantAuditRepository();
+let auditRepositoryOverrideForTesting: TenantAuditRepository | null = null;
 
 export function getAuditRepository(): TenantAuditRepository {
-  if (!global.__oneSquaredAuditRepo) {
-    global.__oneSquaredAuditRepo = new TenantAuditRepository();
-  }
-  return global.__oneSquaredAuditRepo;
+  return auditRepositoryOverrideForTesting ?? auditRepositoryInstance;
 }
 
-export function getPartyRepository(): TenantPartyRepository {
-  if (!global.__oneSquaredPartyRepo) {
-    global.__oneSquaredPartyRepo = new TenantPartyRepository();
+export function setAuditRepositoryOverrideForTesting(
+  override: TenantAuditRepository | null,
+): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setAuditRepositoryOverrideForTesting is only permitted when NODE_ENV === "test".',
+    );
   }
-  return global.__oneSquaredPartyRepo;
+  auditRepositoryOverrideForTesting = override;
 }
 
-export function getMatterRepository(): TenantMatterRepository {
-  if (!global.__oneSquaredMatterRepo) {
-    global.__oneSquaredMatterRepo = new TenantMatterRepository();
-  }
-  return global.__oneSquaredMatterRepo;
-}
+export {
+  getIntakeQuoteRepository,
+  getMatterRepository,
+  getPartyRepository,
+  getTaskWorkflowRepository,
+  TenantIntakeQuoteRepository,
+  TenantMatterRepository,
+  TenantPartyRepository,
+  TenantTaskWorkflowRepository,
+};
 
 /**
  * Keys on `FirmStore` that have already moved to PostgreSQL (or are monotonic sequence counters)
@@ -133,7 +142,13 @@ export type MovedToPostgresKeys =
   | 'links'
   | 'matters'
   | 'notes'
-  | 'mergeHistory';
+  | 'mergeHistory'
+  | 'tasks'
+  | 'enquiries'
+  | 'quotes'
+  | 'notifications'
+  | 'signOffs'
+  | 'recentlyViewed';
 
 export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>;
 
@@ -145,19 +160,13 @@ const ID_KEYED_ARRAY_COLLECTIONS = [
   { name: 'values', keyField: 'id' },
   { name: 'customFields', keyField: 'id' },
   { name: 'teams', keyField: 'id' },
-  { name: 'tasks', keyField: 'id' },
-  { name: 'enquiries', keyField: 'id' },
-  { name: 'quotes', keyField: 'id' },
-  { name: 'notifications', keyField: 'id' },
   { name: 'pmsLinks', keyField: 'id' },
-  { name: 'signOffs', keyField: 'id' },
 ] as const;
 
 /**
  * Unmoved per-key map properties on `FirmStore` tracked per entry (`R442`).
  */
 const PER_KEY_MAP_KEYS = [
-  'recentlyViewed',
   'employeeSensitiveRecords',
 ] as const;
 
@@ -205,7 +214,6 @@ interface CapturedItemEntry {
 
 export interface JsonStoreBaseline {
   readonly arraysByCollection: Map<string, Map<string, CapturedItemEntry>>;
-  readonly recentlyViewedByUser: Map<string, string>;
   readonly employeeSensitiveByPerson: Map<string, string>;
   readonly countersByPrefix: Map<string, number>;
   readonly scalarConfigsByKey: Map<string, { hadKey: boolean; json: string }>;
@@ -228,13 +236,6 @@ export function captureJsonStoreBaseline(store: FirmStore): JsonStoreBaseline {
       }
     }
     arraysByCollection.set(spec.name, itemMap);
-  }
-
-  const recentlyViewedByUser = new Map<string, string>();
-  if (store.recentlyViewed && typeof store.recentlyViewed === 'object') {
-    for (const [uid, list] of Object.entries(store.recentlyViewed)) {
-      recentlyViewedByUser.set(uid, JSON.stringify(list));
-    }
   }
 
   const employeeSensitiveByPerson = new Map<string, string>();
@@ -271,7 +272,6 @@ export function captureJsonStoreBaseline(store: FirmStore): JsonStoreBaseline {
 
   return {
     arraysByCollection,
-    recentlyViewedByUser,
     employeeSensitiveByPerson,
     countersByPrefix,
     scalarConfigsByKey,
@@ -360,24 +360,6 @@ export function registerJsonStoreRecordDeltas(
     }
   }
 
-  const recentChanges: Array<{
-    userId: string;
-    beforeJson: string | null;
-  }> = [];
-  const afterRecent = afterStore.recentlyViewed ?? {};
-  const allRecentUsers = new Set<string>([
-    ...baseline.recentlyViewedByUser.keys(),
-    ...Object.keys(afterRecent),
-  ]);
-  for (const uid of allRecentUsers) {
-    const beforeJson = baseline.recentlyViewedByUser.get(uid) ?? null;
-    const hasAfter = Object.prototype.hasOwnProperty.call(afterRecent, uid);
-    const afterJson = hasAfter ? JSON.stringify(afterRecent[uid]) : null;
-    if (beforeJson !== afterJson) {
-      recentChanges.push({ userId: uid, beforeJson });
-    }
-  }
-
   const sensitiveChanges: Array<{
     personId: string;
     beforeJson: string | null;
@@ -416,7 +398,6 @@ export function registerJsonStoreRecordDeltas(
 
   const hasAnyDelta =
     arrayDeltas.length > 0 ||
-    recentChanges.length > 0 ||
     sensitiveChanges.length > 0 ||
     scalarChanges.length > 0;
 
@@ -463,24 +444,6 @@ export function registerJsonStoreRecordDeltas(
           const restored = JSON.parse(del.beforeJson) as Record<string, unknown>;
           const insertAt = Math.min(Math.max(0, del.beforeIndex), arr.length);
           arr.splice(insertAt, 0, restored);
-        }
-      }
-    }
-
-    if (recentChanges.length > 0) {
-      if (
-        !liveStore.recentlyViewed ||
-        typeof liveStore.recentlyViewed !== 'object'
-      ) {
-        liveStore.recentlyViewed = {};
-      }
-      for (const rc of recentChanges) {
-        if (rc.beforeJson === null) {
-          delete liveStore.recentlyViewed[rc.userId];
-        } else {
-          liveStore.recentlyViewed[rc.userId] = JSON.parse(
-            rc.beforeJson,
-          ) as string[];
         }
       }
     }
@@ -671,42 +634,56 @@ export async function runUnmigratedJsonMutationWithAudit<T>(params: {
     const baseline = captureJsonStoreBaseline(store);
     const stagedEntries: FirmAuditEntryInput[] = [];
 
-    const executeMutate = async () => params.mutate(store, compensator);
-    let result: T;
-    try {
-      result = stagingStorage
-        ? await stagingStorage.run({ stagedEntries }, executeMutate)
-        : await executeMutate();
-    } catch (err) {
-      registerJsonStoreRecordDeltas(
+    const executeBody = async (): Promise<T> => {
+      const executeMutate = async () => params.mutate(store, compensator);
+      let result: T;
+      try {
+        result = stagingStorage
+          ? await stagingStorage.run({ stagedEntries }, executeMutate)
+          : await executeMutate();
+      } catch (err) {
+        registerJsonStoreRecordDeltas(
+          baseline,
+          store,
+          compensator,
+          params.label ?? 'json-store.record-delta',
+        );
+        throw err;
+      }
+
+      const storeMutated = registerJsonStoreRecordDeltas(
         baseline,
         store,
         compensator,
         params.label ?? 'json-store.record-delta',
       );
-      throw err;
+
+      if (stagedEntries.length > 0 || storeMutated) {
+        const ctx = params.resolveCtx(store, result);
+        if (!ctx) {
+          throw new Error(
+            'TENANCY_AUTH_ERROR: Cannot write firm audit entries without a resolved TenantContext.',
+          );
+        }
+        if (stagedEntries.length > 0) {
+          await appendUnmigratedModuleAuditEntries(ctx, stagedEntries);
+        }
+      }
+
+      return result;
+    };
+
+    let preCtx: TenantContext | null = null;
+    try {
+      preCtx = params.resolveCtx(store, undefined as unknown as T);
+    } catch {
+      preCtx = null;
     }
 
-    const storeMutated = registerJsonStoreRecordDeltas(
-      baseline,
-      store,
-      compensator,
-      params.label ?? 'json-store.record-delta',
-    );
-
-    if (stagedEntries.length > 0 || storeMutated) {
-      const ctx = params.resolveCtx(store, result);
-      if (!ctx) {
-        throw new Error(
-          'TENANCY_AUTH_ERROR: Cannot write firm audit entries without a resolved TenantContext.',
-        );
-      }
-      if (stagedEntries.length > 0) {
-        await appendUnmigratedModuleAuditEntries(ctx, stagedEntries);
-      }
+    if (preCtx) {
+      return getAuditRepository().withTenantTransaction(preCtx, executeBody);
     }
-
-    return result;
+    return executeBody();
   });
 }
 

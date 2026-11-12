@@ -16,16 +16,20 @@ import {
   flushStagedAuditEntries,
   getActiveCompensatorOrNull,
   getAuditRepository,
+  getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
   registerJsonStoreRecordDeltas,
   runUnmigratedJsonMutationWithAudit,
   runWithAuditStagingScope,
   stageUnmigratedAuditEntry,
 } from './auditAdapter';
 export {
+  getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
 };
 import {
   clearMigratedPostgresModulesForTenant,
@@ -357,7 +361,6 @@ import {
   type FirmStore,
   getStore,
   nextId,
-  nextQuoteReference,
   resetStore,
   saveStore,
 } from './store';
@@ -861,9 +864,12 @@ export async function listAuditEntriesForRecord(
   } catch {
     return [];
   }
-  const [people, matters] = await Promise.all([
+  const [people, matters, enquiries, quotes, tasks] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
+    getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
+    getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
   ]);
   const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
@@ -880,6 +886,8 @@ export async function listAuditEntriesForRecord(
   const prelimVisibility = buildRecordVisibility(store, viewer, {
     people,
     matters,
+    enquiries,
+    quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -891,6 +899,8 @@ export async function listAuditEntriesForRecord(
   const visibility = buildRecordVisibility(store, viewer, {
     people,
     matters,
+    enquiries,
+    quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
@@ -904,17 +914,17 @@ export async function listAuditEntriesForRecord(
       return [];
     }
   } else if (recordType === 'enquiry') {
-    const e = store.enquiries.find((x) => x.id === recordId);
+    const e = enquiries.find((x) => x.id === recordId);
     if (!e || !visibility.canViewEnquiry(e)) {
       return [];
     }
   } else if (recordType === 'quote') {
-    const q = (store.quotes ?? []).find((x) => x.id === recordId);
+    const q = quotes.find((x) => x.id === recordId);
     if (!q || !visibility.canViewQuote(q)) {
       return [];
     }
   } else if (recordType === 'task') {
-    const t = store.tasks.find((x) => x.id === recordId);
+    const t = tasks.find((x) => x.id === recordId);
     if (!t || !visibility.canViewTask(t)) {
       return [];
     }
@@ -973,9 +983,12 @@ export async function listFirmAuditEntriesPage(
       nextBeforeSeq: null,
     };
   }
-  const [people, matters] = await Promise.all([
+  const [people, matters, enquiries, quotes, tasks] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
+    getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
+    getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
   ]);
   const store = getStore();
   const viewer = people.find(
@@ -1008,6 +1021,8 @@ export async function listFirmAuditEntriesPage(
   const prelimVisibility = buildRecordVisibility(store, viewer, {
     people,
     matters,
+    enquiries,
+    quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -1019,11 +1034,13 @@ export async function listFirmAuditEntriesPage(
   const visibility = buildRecordVisibility(store, viewer, {
     people,
     matters,
+    enquiries,
+    quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
   const hiddenTaskIds = new Set(
-    store.tasks.filter((t) => !visibility.canViewTask(t)).map((t) => t.id),
+    tasks.filter((t) => !visibility.canViewTask(t)).map((t) => t.id),
   );
   const canPayroll = hasEmployeePermission(
     viewer,
@@ -1161,15 +1178,31 @@ async function getAppSnapshotInScope(
   const snapshotTenantCtx = resolveDefaultServiceTenantContext(store, userId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, links, notes, mergeHistory, matters] =
-    await Promise.all([
-      partyRepo.listAllPeople<Person>(snapshotTenantCtx),
-      partyRepo.listAllOrganisations<Organisation>(snapshotTenantCtx),
-      partyRepo.listAllLinks<PersonOrganisationLink>(snapshotTenantCtx),
-      partyRepo.listAllNotes<Note>(snapshotTenantCtx),
-      partyRepo.listAllMergeHistory<MergeHistory>(snapshotTenantCtx),
-      matterRepo.listAllMattersUnfiltered<Matter>(snapshotTenantCtx),
-    ]);
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const [
+    people,
+    organisations,
+    links,
+    notes,
+    mergeHistory,
+    matters,
+    enquiries,
+    quotes,
+    tasks,
+    signOffs,
+  ] = await Promise.all([
+    partyRepo.listAllPeople<Person>(snapshotTenantCtx),
+    partyRepo.listAllOrganisations<Organisation>(snapshotTenantCtx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(snapshotTenantCtx),
+    partyRepo.listAllNotes<Note>(snapshotTenantCtx),
+    partyRepo.listAllMergeHistory<MergeHistory>(snapshotTenantCtx),
+    matterRepo.listAllMattersUnfiltered<Matter>(snapshotTenantCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(snapshotTenantCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(snapshotTenantCtx),
+    taskRepo.listAllTasksUnfiltered<Task>(snapshotTenantCtx),
+    taskRepo.listAllSignOffsUnfiltered<SignOffItem>(snapshotTenantCtx),
+  ]);
   const user = people.find(
     (p) => p.id === userId && !p.mergedIntoId,
   );
@@ -1229,6 +1262,8 @@ async function getAppSnapshotInScope(
   const prelimVisibility = buildRecordVisibility(store, user, {
     people,
     matters,
+    enquiries,
+    quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -1239,6 +1274,8 @@ async function getAppSnapshotInScope(
   const visibility = buildRecordVisibility(store, user, {
     people,
     matters,
+    enquiries,
+    quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
   });
@@ -1248,7 +1285,7 @@ async function getAppSnapshotInScope(
 
   // Filter enquiries: hide personal Drafts belonging to another user and enquiries converted into a hidden matter,
   // and strip hidden matter conflict hits from conflictSnapshot.
-  const visibleEnquiries: Enquiry[] = store.enquiries
+  const visibleEnquiries: Enquiry[] = enquiries
     .filter(visibility.canViewEnquiry)
     .map((e) => {
       if (
@@ -1273,27 +1310,27 @@ async function getAppSnapshotInScope(
     });
   const visibleEnquiryIdSet = new Set(visibleEnquiries.map((e) => e.id));
   const hiddenEnquiryIds = new Set(
-    store.enquiries
+    enquiries
       .filter((e) => !visibleEnquiryIdSet.has(e.id))
       .map((e) => e.id),
   );
 
   // Filter quotes: require quote:view and hide quotes linked to or converted into a hidden matter or hidden enquiry.
   const visibleQuotes: Quote[] = currentUserPermissions.includes('quote:view')
-    ? (store.quotes ?? []).filter(visibility.canViewQuote)
+    ? quotes.filter(visibility.canViewQuote)
     : [];
   const visibleQuoteIdSet = new Set(visibleQuotes.map((q) => q.id));
   const hiddenQuoteIds = new Set(
-    (store.quotes ?? [])
+    quotes
       .filter((q) => !visibleQuoteIdSet.has(q.id))
       .map((q) => q.id),
   );
 
   // Filter tasks: hide any task linked to a hidden matter, hidden enquiry, hidden quote, or hidden key date.
-  const visibleTasks: Task[] = store.tasks.filter(visibility.canViewTask);
+  const visibleTasks: Task[] = tasks.filter(visibility.canViewTask);
   const visibleTaskIdSet = new Set(visibleTasks.map((t) => t.id));
   const hiddenTaskIds = new Set(
-    store.tasks.filter((t) => !visibleTaskIdSet.has(t.id)).map((t) => t.id),
+    tasks.filter((t) => !visibleTaskIdSet.has(t.id)).map((t) => t.id),
   );
 
   // Person-to-organisation links only connect People and Organisations.
@@ -1440,7 +1477,19 @@ async function getAppSnapshotInScope(
     pmsSummaryByMatterId: pmsSummaryByMatterIdForAttention,
     canViewFinance: finance.canViewMatter,
   });
-  const rawRecentIds = store.recentlyViewed[user.id] ?? store.recentlyViewed[effectiveWorkPerson.id] ?? [];
+  const primaryRecentIds = await taskRepo.getRecentlyViewedForUser(
+    snapshotTenantCtx,
+    user.id,
+    { includeRestricted: true },
+  );
+  const rawRecentIds =
+    primaryRecentIds.length > 0 || effectiveWorkPerson.id === user.id
+      ? primaryRecentIds
+      : await taskRepo.getRecentlyViewedForUser(
+          snapshotTenantCtx,
+          effectiveWorkPerson.id,
+          { includeRestricted: true },
+        );
   const recentIds = rawRecentIds.filter(
     (id) =>
       !hiddenMatterIds.has(id) &&
@@ -1448,10 +1497,26 @@ async function getAppSnapshotInScope(
       !hiddenEnquiryIds.has(id) &&
       !hiddenQuoteIds.has(id),
   );
-  const userNotifications = store.notifications
+  const primaryNotifications = await taskRepo.listNotificationsForUser<NotificationItem>(
+    snapshotTenantCtx,
+    user.id,
+    { includeRestricted: true },
+  );
+  const effectivePersonNotifications =
+    effectiveWorkPerson.id !== user.id
+      ? await taskRepo.listNotificationsForUser<NotificationItem>(
+          snapshotTenantCtx,
+          effectiveWorkPerson.id,
+          { includeRestricted: true },
+        )
+      : [];
+  const mergedNotificationsMap = new Map<string, NotificationItem>();
+  for (const n of [...primaryNotifications, ...effectivePersonNotifications]) {
+    mergedNotificationsMap.set(n.id, n);
+  }
+  const userNotifications = Array.from(mergedNotificationsMap.values())
     .filter(
       (n) =>
-        (n.recipientId === user.id || n.recipientId === effectiveWorkPerson.id) &&
         !(
           hiddenMatterIds.has(n.recordId) ||
           hiddenTaskIds.has(n.recordId) ||
@@ -1462,7 +1527,7 @@ async function getAppSnapshotInScope(
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const taskBadgeCount = countMyUrgentBadgeTasks(visibleTasks, effectiveWorkPerson.id, now);
 
-  const visibleSignOffs = (store.signOffs ?? []).filter(
+  const visibleSignOffs = signOffs.filter(
     (s) => !(s.matterId && hiddenMatterIds.has(s.matterId)),
   );
   const visibleNotes = notes.filter(
@@ -1498,6 +1563,7 @@ async function getAppSnapshotInScope(
           detail: `Valid-until date (${q.validUntil}) passed without an outcome.`,
         });
       }
+      await intakeRepo.putQuote(snapshotTenantCtx, q);
     }
   }
 
@@ -1663,21 +1729,8 @@ async function getAppSnapshotInScope(
 }
 
 export async function recordRecentlyViewed(userId: string, recordId: string): Promise<void> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'recordRecentlyViewed',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
-    mutate: async () => {
-  const store = getStore();
-  const current = store.recentlyViewed[userId] ?? [];
-  if (current[0] === recordId) {
-    return;
-  }
-  const next = [recordId, ...current.filter((id) => id !== recordId)].slice(0, 8);
-  store.recentlyViewed[userId] = next;
-  saveStore(store);
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, userId);
+  await getTaskWorkflowRepository().recordRecentlyViewed(ctx, userId, recordId, 8);
 }
 
 /**
@@ -1786,7 +1839,12 @@ export async function reassignLeaverOwnedRecords(
   toEmployeeId: string,
   byId: string,
 ): Promise<{ reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit<
+  const pendingLifecycleSyncs: Array<{
+    matter: Matter;
+    previousMatter: Matter;
+    store: FirmStore;
+  }> = [];
+  const res = await runUnmigratedJsonMutationWithAudit<
     { reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>
   >({
     label: 'reassignLeaverOwnedRecords',
@@ -1795,10 +1853,14 @@ export async function reassignLeaverOwnedRecords(
   const reassignCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, organisations, matters, tasks, enquiries] = await Promise.all([
     partyRepo.listAllPeople<Person>(reassignCtx),
     partyRepo.listAllOrganisations<Organisation>(reassignCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(reassignCtx),
+    taskRepo.listAllTasksUnfiltered<Task>(reassignCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(reassignCtx),
   ]);
   const now = new Date().toISOString();
   const actor = people.find((p) => p.id === byId) ?? null;
@@ -1848,7 +1910,8 @@ export async function reassignLeaverOwnedRecords(
     prevOrg: Organisation;
   }> = [];
   const changedMatters: Array<{ matter: Matter; prevMatter: Matter | null }> = [];
-  let unmigratedStoreMutated = false;
+  const changedTasks: Array<{ task: Task; prevTask: Task }> = [];
+  const changedEnquiries: Array<{ enquiry: Enquiry; prevEnquiry: Enquiry }> = [];
 
   for (const p of people) {
     if (p.mergedIntoId) continue;
@@ -1982,8 +2045,9 @@ export async function reassignLeaverOwnedRecords(
     }
   }
 
-  for (const t of store.tasks) {
+  for (const t of tasks) {
     if (t.status === 'Done' || t.status === 'Cancelled') continue;
+    const prevTask = structuredClone(t);
     let taskChanged = false;
     if (t.assignedPersonId === fromLeaverId) {
       t.assignedPersonId = toEmployeeId;
@@ -2002,7 +2066,7 @@ export async function reassignLeaverOwnedRecords(
     if (taskChanged) {
       t.updatedAt = now;
       t.updatedById = byId;
-      unmigratedStoreMutated = true;
+      changedTasks.push({ task: t, prevTask });
       writeAudit(store, {
         recordType: 'task',
         recordId: t.id,
@@ -2016,14 +2080,15 @@ export async function reassignLeaverOwnedRecords(
     }
   }
 
-  for (const e of store.enquiries) {
+  for (const e of enquiries) {
     if (!isEnquiryOpen(e)) continue;
     if (e.assignedToId === fromLeaverId) {
+      const prevEnquiry = structuredClone(e);
       e.assignedToId = toEmployeeId;
       e.updatedAt = now;
       e.updatedById = byId;
       count++;
-      unmigratedStoreMutated = true;
+      changedEnquiries.push({ enquiry: e, prevEnquiry });
       writeAudit(store, {
         recordType: 'enquiry',
         recordId: e.id,
@@ -2061,6 +2126,12 @@ export async function reassignLeaverOwnedRecords(
         expectedRowVersion: null,
       });
     }
+    for (const { task: t } of changedTasks) {
+      await taskRepo.putTask(reassignCtx, t);
+    }
+    for (const { enquiry: e } of changedEnquiries) {
+      await intakeRepo.putEnquiry(reassignCtx, e);
+    }
   });
   for (const { matter: m, prevMatter } of changedMatters) {
     const isRestricted =
@@ -2068,20 +2139,11 @@ export async function reassignLeaverOwnedRecords(
       m.hasEthicalWall ||
       (m.restrictedAccessUserIds?.length ?? 0) > 0;
     if (isRestricted && prevMatter) {
-      const syncCorrelationId = `corr-leaver-reassign-${m.id}-${Date.now()}`;
-      try {
-        void syncMatterLifecycleOnSaveSync({
-          matter: m,
-          previousMatter: prevMatter,
-          userId: byId,
-          correlationId: syncCorrelationId,
-          store,
-        }).catch((err) => {
-          logDocumentLifecycleSyncError(err, syncCorrelationId);
-        });
-      } catch (err) {
-        logDocumentLifecycleSyncError(err, syncCorrelationId);
-      }
+      pendingLifecycleSyncs.push({
+        matter: m,
+        previousMatter: prevMatter,
+        store,
+      });
     }
   }
   compensator.register('leaver.reassign', async () => {
@@ -2105,15 +2167,35 @@ export async function reassignLeaverOwnedRecords(
           sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
         });
       }
+      for (const { prevTask } of changedTasks) {
+        await taskRepo.putTask(reassignCtx, prevTask);
+      }
+      for (const { prevEnquiry } of changedEnquiries) {
+        await intakeRepo.putEnquiry(reassignCtx, prevEnquiry);
+      }
     });
   });
 
-  if (unmigratedStoreMutated) {
-    saveStore(store);
-  }
   return { reassignedCount: count };
     },
   });
+  for (const syncItem of pendingLifecycleSyncs) {
+    const syncCorrelationId = `corr-leaver-reassign-${syncItem.matter.id}-${Date.now()}`;
+    try {
+      void syncMatterLifecycleOnSaveSync({
+        matter: syncItem.matter,
+        previousMatter: syncItem.previousMatter,
+        userId: byId,
+        correlationId: syncCorrelationId,
+        store: syncItem.store,
+      }).catch((err) => {
+        logDocumentLifecycleSyncError(err, syncCorrelationId);
+      });
+    } catch (err) {
+      logDocumentLifecycleSyncError(err, syncCorrelationId);
+    }
+  }
+  return res;
 }
 
 export async function savePersonRecord(
@@ -2143,7 +2225,12 @@ export async function savePersonRecord(
     } | null;
   },
 ): Promise<({ person: Person; errors?: Record<string, string> } & Partial<ActionDenied>)> {
-  return runUnmigratedJsonMutationWithAudit({
+  const pendingLifecycleSyncs: Array<{
+    matter: Matter;
+    previousMatter: Matter;
+    store: FirmStore;
+  }> = [];
+  const res = await runUnmigratedJsonMutationWithAudit({
     label: 'savePersonRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
     mutate: async (_store, compensator) => {
@@ -2174,7 +2261,9 @@ export async function savePersonRecord(
   // any unknown or tampered `opts.id` (including a tampered `ENQ-...` ID) is rejected as not found.
   const existingEnquiryForPromotion =
     opts.id && opts.id.startsWith('ENQ-')
-      ? store.enquiries.find((e) => e.id === opts.id) ?? null
+      ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(personCtx, opts.id, {
+          includeRestricted: true,
+        })
       : null;
   if (opts.id && !existing && !existingEnquiryForPromotion) {
     return deny('FORBIDDEN', 'Person record not found.', 'id');
@@ -2874,8 +2963,9 @@ export async function savePersonRecord(
             (p.roles?.includes('risk_compliance') ||
               p.employeeRoleId === 'employee_role.risk_and_compliance'),
         )?.id ?? opts.byId;
-      store.notifications.unshift({
-        id: nextId(store, 'NTF'),
+      const notifId = await getTaskWorkflowRepository().allocateNextNotificationId(personCtx);
+      await getTaskWorkflowRepository().putNotification(personCtx, {
+        id: notifId,
         recipientId: riskOfficerId,
         kind: 'task_assigned',
         title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
@@ -2886,7 +2976,6 @@ export async function savePersonRecord(
         read: false,
         byId: opts.byId,
       });
-      unmigratedStoreMutated = true;
 
       writeAudit(store, {
         recordType: 'person',
@@ -2977,8 +3066,8 @@ export async function savePersonRecord(
       people,
       organisations,
       matters,
-      enquiries: store.enquiries,
-      tasks: store.tasks,
+      enquiries: [],
+      tasks: [],
       teams: store.teams,
       values: store.values,
     });
@@ -3071,20 +3160,11 @@ export async function savePersonRecord(
     }
   });
   for (const { matter: m, prevMatter } of changedMattersOnHire) {
-    const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
-    try {
-      void syncMatterLifecycleOnSaveSync({
-        matter: m,
-        previousMatter: prevMatter,
-        userId: opts.byId,
-        correlationId: syncCorrelationId,
-        store,
-      }).catch((err) => {
-        logDocumentLifecycleSyncError(err, syncCorrelationId);
-      });
-    } catch (err) {
-      logDocumentLifecycleSyncError(err, syncCorrelationId);
-    }
+    pendingLifecycleSyncs.push({
+      matter: m,
+      previousMatter: prevMatter,
+      store,
+    });
   }
   let createdInitialLinkId: string | null = null;
   compensator.register(`person.persist:${person.id}`, async () => {
@@ -3120,10 +3200,14 @@ export async function savePersonRecord(
   });
 
   if (person.createdFromEnquiryId) {
-    const srcEnq = store.enquiries.find((e) => e.id === person.createdFromEnquiryId);
+    const srcEnq = await getIntakeQuoteRepository().getEnquiryById<Enquiry>(
+      personCtx,
+      person.createdFromEnquiryId,
+      { includeRestricted: true },
+    );
     if (srcEnq && !srcEnq.linkedPersonId) {
       srcEnq.linkedPersonId = person.id;
-      unmigratedStoreMutated = true;
+      await getIntakeQuoteRepository().putEnquiry(personCtx, srcEnq);
     }
   }
 
@@ -3208,6 +3292,23 @@ export async function savePersonRecord(
 
     },
   });
+  for (const syncItem of pendingLifecycleSyncs) {
+    const syncCorrelationId = `corr-lifecycle-sync-${syncItem.matter.id}-${Date.now()}`;
+    try {
+      void syncMatterLifecycleOnSaveSync({
+        matter: syncItem.matter,
+        previousMatter: syncItem.previousMatter,
+        userId: opts.byId,
+        correlationId: syncCorrelationId,
+        store: syncItem.store,
+      }).catch((err) => {
+        logDocumentLifecycleSyncError(err, syncCorrelationId);
+      });
+    } catch (err) {
+      logDocumentLifecycleSyncError(err, syncCorrelationId);
+    }
+  }
+  return res;
 }
 
 export async function saveOrganisationRecord(
@@ -3393,8 +3494,8 @@ export async function saveOrganisationRecord(
       people,
       organisations,
       matters,
-      enquiries: store.enquiries,
-      tasks: store.tasks,
+      enquiries: [],
+      tasks: [],
       teams: store.teams,
       values: store.values,
     });
@@ -4201,13 +4302,20 @@ export async function saveMatterRecord(
   errors?: Record<string, string>;
 }> {
   let resolvedMatterCtx: TenantContext | null = null;
-  return runUnmigratedJsonMutationWithAudit({
+  let pendingLifecycleSync: {
+    matter: Matter;
+    previousMatter: Matter;
+    store: FirmStore;
+  } | null = null;
+  const res = await runUnmigratedJsonMutationWithAudit({
     label: 'saveMatterRecord',
     resolveCtx: (s) =>
       resolvedMatterCtx ?? resolveDefaultServiceTenantContext(s, opts.byId),
     mutate: async (store, compensator) => {
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
   const activeVerifiedSession = getActiveActorSession()?.verifiedSession as
     | VerifiedEntraSessionPayload
     | undefined;
@@ -4229,14 +4337,17 @@ export async function saveMatterRecord(
       }
     }
   }
-  const [people, organisations, links, matters] = lookupCtx
+  const [people, organisations, links, matters, enquiries, quotes, tasks] = lookupCtx
     ? await Promise.all([
         partyRepo.listAllPeople<Person>(lookupCtx),
         partyRepo.listAllOrganisations<Organisation>(lookupCtx),
         partyRepo.listAllLinks<PersonOrganisationLink>(lookupCtx),
         matterRepo.listAllMattersUnfiltered<Matter>(lookupCtx),
+        intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(lookupCtx),
+        intakeRepo.listAllQuotesUnfiltered<Quote>(lookupCtx),
+        taskRepo.listAllTasksUnfiltered<Task>(lookupCtx),
       ])
-    : [[], [], [], []];
+    : [[], [], [], [], [], [], []];
   const existingRef = opts.id ? matters.find((m) => m.id === opts.id) ?? null : null;
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingRowVersion = existing?.rowVersion ?? 1;
@@ -4488,7 +4599,7 @@ export async function saveMatterRecord(
 
   const pendingPeople: Person[] = [];
   const pendingOrganisations: Organisation[] = [];
-  const pendingEnquiryLinks: Array<{ enquiry: Enquiry; linkedPersonId: string }> = [];
+  const pendingEnquiryLinks: Array<{ enquiry: Enquiry; prevEnquiry: Enquiry; linkedPersonId: string }> = [];
 
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
   const cmiIncompleteStatus =
@@ -4499,7 +4610,7 @@ export async function saveMatterRecord(
   const promoteEnquiryPersonId = async (rawId: string | null | undefined): Promise<string | null> => {
     if (!rawId) return null;
     if (!rawId.startsWith('ENQ-')) return rawId;
-    const enq = store.enquiries.find((e) => e.id === rawId);
+    const enq = enquiries.find((e) => e.id === rawId);
     if (!enq) return rawId;
     if (
       enq.linkedPersonId &&
@@ -4516,7 +4627,11 @@ export async function saveMatterRecord(
       people.find((p) => p.createdFromEnquiryId === enq.id) ??
       pendingPeople.find((p) => p.createdFromEnquiryId === enq.id);
     if (existingFromEnq) {
-      pendingEnquiryLinks.push({ enquiry: enq, linkedPersonId: existingFromEnq.id });
+      pendingEnquiryLinks.push({
+        enquiry: enq,
+        prevEnquiry: structuredClone(enq),
+        linkedPersonId: existingFromEnq.id,
+      });
       return existingFromEnq.id;
     }
     const newPersonId = await partyRepo.allocateNextPersonId(extensionCtx);
@@ -4596,7 +4711,11 @@ export async function saveMatterRecord(
       createdFromEnquiryId: enq.id,
     };
     pendingPeople.push(newPerson);
-    pendingEnquiryLinks.push({ enquiry: enq, linkedPersonId: newPersonId });
+    pendingEnquiryLinks.push({
+      enquiry: enq,
+      prevEnquiry: structuredClone(enq),
+      linkedPersonId: newPersonId,
+    });
     return newPersonId;
   };
 
@@ -4897,6 +5016,8 @@ export async function saveMatterRecord(
     {
       people: allPeopleWithPending,
       matters,
+      enquiries,
+      quotes,
       hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     },
   );
@@ -4919,7 +5040,7 @@ export async function saveMatterRecord(
     },
     {
       matters,
-      enquiries: store.enquiries,
+      enquiries,
       people: allPeopleWithPending,
       organisations: allOrganisationsWithPending,
       links,
@@ -5424,8 +5545,8 @@ export async function saveMatterRecord(
       allPeopleWithPending,
       allOrganisationsWithPending,
       store.values,
-      store.enquiries,
-      store.quotes,
+      enquiries,
+      quotes,
       { riskAssessment: fullRiskAssessment },
     );
     openingSnapshot.saveMode = isDraftSave
@@ -5448,8 +5569,8 @@ export async function saveMatterRecord(
       allPeopleWithPending,
       allOrganisationsWithPending,
       store.values,
-      store.enquiries,
-      store.quotes,
+      enquiries,
+      quotes,
     );
     backfilledSnapshot.saveMode = 'backfilled';
     backfilledSnapshot.capturedAt = now;
@@ -5472,6 +5593,9 @@ export async function saveMatterRecord(
       }
       for (const org of pendingOrganisations) {
         await partyRepo.putOrganisation(extensionCtx, org);
+      }
+      for (const link of pendingEnquiryLinks) {
+        await intakeRepo.putEnquiry(extensionCtx, link.enquiry);
       }
       const saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
         expectedRowVersion: expectedRowVersionForPut,
@@ -5510,6 +5634,9 @@ export async function saveMatterRecord(
           extensionCtx.tenantId,
           matter.id,
         ]);
+      }
+      for (const link of pendingEnquiryLinks) {
+        await intakeRepo.putEnquiry(extensionCtx, link.prevEnquiry);
       }
       for (const person of pendingPeople) {
         await tx.query('DELETE FROM people WHERE tenant_id = $1 AND id = $2', [
@@ -5661,7 +5788,7 @@ export async function saveMatterRecord(
     (clientPerson ? personDisplayName(clientPerson) : matter.title || 'Untitled matter');
   const draftTaskTitle = `Conflict check · ${clientLabel} · Draft`;
 
-  const existingDraftTask = store.tasks.find(
+  const existingDraftTask = tasks.find(
     (t) =>
       t.status !== 'Done' &&
       t.status !== 'Cancelled' &&
@@ -5669,21 +5796,21 @@ export async function saveMatterRecord(
         (t.title.startsWith('Conflict check ·') &&
           t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id))),
   );
-
-  let unmigratedStoreMutated = pendingEnquiryLinks.length > 0 || Boolean(matter.sourceEnquiryId || matter.sourceQuoteId);
+  const prevDraftTask = existingDraftTask ? structuredClone(existingDraftTask) : null;
+  const createdMatterTaskIds: string[] = [];
 
   if (isDraftSave) {
-    unmigratedStoreMutated = true;
     if (existingDraftTask) {
       existingDraftTask.title = draftTaskTitle;
       existingDraftTask.updatedAt = now;
       existingDraftTask.updatedById = opts.byId;
+      await taskRepo.putTask(extensionCtx, existingDraftTask);
     } else {
-      const taskId = nextId(store, 'TSK');
+      const taskId = await taskRepo.allocateNextTaskId(extensionCtx);
       const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
       if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
       else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
-      store.tasks.unshift({
+      const newDraftTask: Task = {
         id: taskId,
         reference: taskId,
         title: draftTaskTitle,
@@ -5702,20 +5829,21 @@ export async function saveMatterRecord(
         completedById: null,
         completedAt: null,
         comments: [],
-      });
+      };
+      await taskRepo.putTask(extensionCtx, newDraftTask);
+      createdMatterTaskIds.push(taskId);
     }
   } else if (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred') {
     if (existingDraftTask) {
-      unmigratedStoreMutated = true;
       existingDraftTask.status = 'Done';
       existingDraftTask.completedById = opts.byId;
       existingDraftTask.completedAt = now;
       existingDraftTask.updatedAt = now;
       existingDraftTask.updatedById = opts.byId;
+      await taskRepo.putTask(extensionCtx, existingDraftTask);
     }
     if (opts.saveMode === 'submit_referred') {
-      unmigratedStoreMutated = true;
-      const riskTaskId = nextId(store, 'TSK');
+      const riskTaskId = await taskRepo.allocateNextTaskId(extensionCtx);
       const configuredTeamKey = tenantCfg.conflictReview?.assigneeTeamKey?.trim() || null;
       const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
       const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
@@ -5747,7 +5875,7 @@ export async function saveMatterRecord(
         if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
         else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
       }
-      store.tasks.unshift({
+      const riskTask: Task = {
         id: riskTaskId,
         reference: riskTaskId,
         title: canIncludeMatterNames
@@ -5771,23 +5899,53 @@ export async function saveMatterRecord(
         completedById: null,
         completedAt: null,
         comments: [],
-      });
+      };
+      await taskRepo.putTask(extensionCtx, riskTask);
+      createdMatterTaskIds.push(riskTaskId);
     }
   }
 
-  if (unmigratedStoreMutated) {
-    saveStore(store);
+  if (prevDraftTask || createdMatterTaskIds.length > 0) {
+    compensator.register(`matter.tasks:${matter.id}`, async () => {
+      await taskRepo.withTenantTransaction(extensionCtx, async (tx) => {
+        if (prevDraftTask) {
+          await taskRepo.putTask(extensionCtx, prevDraftTask);
+        }
+        for (const tid of createdMatterTaskIds) {
+          await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
+            extensionCtx.tenantId,
+            tid,
+          ]);
+        }
+      });
+    });
   }
 
   if (previousMatterSnapshot) {
-    const syncCorrelationId = `corr-lifecycle-sync-${matter.id}-${Date.now()}`;
+    pendingLifecycleSync = {
+      matter,
+      previousMatter: previousMatterSnapshot,
+      store,
+    };
+  }
+
+  return { matter };
+    },
+  });
+  if (pendingLifecycleSync) {
+    const syncItem = pendingLifecycleSync as {
+      matter: Matter;
+      previousMatter: Matter;
+      store: FirmStore;
+    };
+    const syncCorrelationId = `corr-lifecycle-sync-${syncItem.matter.id}-${Date.now()}`;
     try {
       void syncMatterLifecycleOnSaveSync({
-        matter,
-        previousMatter: previousMatterSnapshot,
+        matter: syncItem.matter,
+        previousMatter: syncItem.previousMatter,
         userId: opts.byId,
         correlationId: syncCorrelationId,
-        store,
+        store: syncItem.store,
       }).catch((err) => {
         logDocumentLifecycleSyncError(err, syncCorrelationId);
       });
@@ -5795,10 +5953,7 @@ export async function saveMatterRecord(
       logDocumentLifecycleSyncError(err, syncCorrelationId);
     }
   }
-
-  return { matter };
-    },
-  });
+  return res;
 }
 
 export async function markEngagementLetterDrafted(
@@ -6071,11 +6226,14 @@ export async function runMatterConflictSearchRecord(
   }
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, links, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
     partyRepo.listAllPeople<Person>(ctx),
     partyRepo.listAllOrganisations<Organisation>(ctx),
     partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
     matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
   ]);
   const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
@@ -6105,6 +6263,8 @@ export async function runMatterConflictSearchRecord(
   const visibility = buildRecordVisibility(store, actingUser, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const nowIso = new Date().toISOString();
@@ -6119,7 +6279,7 @@ export async function runMatterConflictSearchRecord(
     },
     {
       matters,
-      enquiries: store.enquiries,
+      enquiries,
       people,
       organisations,
       links,
@@ -6239,11 +6399,14 @@ export async function updateMatterConflictRecord(
     }
     const partyRepo = getPartyRepository();
     const matterRepo = getMatterRepository();
-    const [people, organisations, links, matters] = await Promise.all([
+    const intakeRepo = getIntakeQuoteRepository();
+    const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
       partyRepo.listAllPeople<Person>(conflictCtx),
       partyRepo.listAllOrganisations<Organisation>(conflictCtx),
       partyRepo.listAllLinks<PersonOrganisationLink>(conflictCtx),
       matterRepo.listAllMattersUnfiltered<Matter>(conflictCtx),
+      intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(conflictCtx),
+      intakeRepo.listAllQuotesUnfiltered<Quote>(conflictCtx),
     ]);
   const today = toIsoDate(new Date());
   const matter = matters.find((m) => m.id === matterId);
@@ -6251,6 +6414,8 @@ export async function updateMatterConflictRecord(
   const visibility = buildRecordVisibility(store, actingUser, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   if (
@@ -6339,7 +6504,7 @@ export async function updateMatterConflictRecord(
     },
     {
       matters,
-      enquiries: store.enquiries,
+      enquiries,
       people,
       organisations,
       links,
@@ -6473,8 +6638,8 @@ export async function updateMatterConflictRecord(
           people,
           organisations,
           store.values,
-          store.enquiries,
-          store.quotes,
+          enquiries,
+          quotes,
         );
         openingSnapshot.saveMode = 'opened';
         openingSnapshot.capturedAt = now;
@@ -6561,16 +6726,21 @@ export async function signOffMatterCostsRecord(
   }
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, organisations, matters, enquiries, quotes] = await Promise.all([
     partyRepo.listAllPeople<Person>(prelimCtx),
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(prelimCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(prelimCtx),
   ]);
   const matter = matters.find((m) => m.id === matterId) ?? null;
   const actingUser = people.find((p) => p.id === byId) ?? null;
   const visibility = buildRecordVisibility(store, actingUser, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   if (
@@ -6689,8 +6859,8 @@ export async function signOffMatterCostsRecord(
         people,
         organisations,
         store.values,
-        store.enquiries,
-        store.quotes,
+        enquiries,
+        quotes,
       );
       openingSnapshot.saveMode = 'opened';
       openingSnapshot.capturedAt = now;
@@ -7121,85 +7291,8 @@ export async function executeMerge(
     }
   }
 
-    // 4. Repoint Enquiry references and conflict snapshots
-    for (const enq of store.enquiries) {
-      if (enq.linkedOrganisationId === merged.id) {
-        enq.linkedOrganisationId = survivor.id;
-      }
-      if (enq.referrerPersonId === merged.id) {
-        enq.referrerPersonId = survivor.id;
-      }
-      if (enq.linkedPersonId === merged.id) {
-        enq.linkedPersonId = survivor.id;
-      }
-      if (enq.referredToOrganisationId === merged.id) {
-        enq.referredToOrganisationId = survivor.id;
-      }
-      if (enq.conflictSnapshot) {
-        for (const hit of enq.conflictSnapshot.conflicts ?? []) {
-          if (hit.recordId === merged.id) {
-            hit.recordId = survivor.id;
-            if (typeof hit.href === 'string' && hit.href.includes(merged.id)) {
-              hit.href = replaceRecordIdPathSegment(hit.href, merged.id, survivor.id);
-            }
-          }
-        }
-        if (Array.isArray(enq.conflictSnapshot.knownPeople)) {
-          const seen = new Set<string>();
-          const nextKnownPeople: typeof enq.conflictSnapshot.knownPeople = [];
-          for (const kp of enq.conflictSnapshot.knownPeople) {
-            const nextIdVal = kp.id === merged.id ? survivor.id : kp.id;
-            if (!seen.has(nextIdVal)) {
-              seen.add(nextIdVal);
-              nextKnownPeople.push({ ...kp, id: nextIdVal });
-            }
-          }
-          enq.conflictSnapshot.knownPeople = nextKnownPeople;
-        }
-        if (Array.isArray(enq.conflictSnapshot.knownOrganisations)) {
-          const seen = new Set<string>();
-          const nextKnownOrgs: typeof enq.conflictSnapshot.knownOrganisations = [];
-          for (const ko of enq.conflictSnapshot.knownOrganisations) {
-            const nextIdVal = ko.id === merged.id ? survivor.id : ko.id;
-            if (!seen.has(nextIdVal)) {
-              seen.add(nextIdVal);
-              nextKnownOrgs.push({ ...ko, id: nextIdVal });
-            }
-          }
-          enq.conflictSnapshot.knownOrganisations = nextKnownOrgs;
-        }
-      }
-    }
-
-    // 5. Repoint Quote references
-    for (const quote of store.quotes) {
-      if (quote.linkedOrganisationId === merged.id) {
-        quote.linkedOrganisationId = survivor.id;
-      }
-      if (quote.linkedPersonId === merged.id) {
-        quote.linkedPersonId = survivor.id;
-      }
-    }
-
-    // 6. Repoint Task linkedRecords (de-duplicated)
-    for (const task of store.tasks) {
-      if (
-        Array.isArray(task.linkedRecords) &&
-        task.linkedRecords.some((lr) => lr.recordId === merged.id)
-      ) {
-        const seen = new Set<string>();
-        const nextLinkedRecords: typeof task.linkedRecords = [];
-        for (const lr of task.linkedRecords) {
-          const nextRecId = lr.recordId === merged.id ? survivor.id : lr.recordId;
-          const key = `${lr.recordType}:${nextRecId}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            nextLinkedRecords.push({ ...lr, recordId: nextRecId });
-          }
-        }
-        task.linkedRecords = nextLinkedRecords;
-      }
-    }
+    // 4-6. Enquiries (including conflict_snapshot_json), quotes, tasks (task_linked_records),
+    // notifications, and recently_viewed are repointed atomically inside partyRepo.executeMergeInTransaction.
 
     // 7. Repoint PMS links (handle collision when survivor already has a PMS link)
     const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
@@ -7263,7 +7356,7 @@ export async function executeMerge(
       plan.fieldsTaken.push('Notes');
     }
 
-    // 10. Other references: Person.createdFromEnquiryId, store.recentlyViewed, store.notifications
+    // 10. Other references: Person.createdFromEnquiryId (notifications and recentlyViewed are repointed in partyRepo.executeMergeInTransaction)
     if (recordType === 'person') {
       const mergedPerson = merged as Person;
       const survivorPerson = plan.survivor as Person;
@@ -7272,34 +7365,6 @@ export async function executeMerge(
           survivorPerson.createdFromEnquiryId = mergedPerson.createdFromEnquiryId;
         }
         mergedPerson.createdFromEnquiryId = null;
-      }
-    }
-
-    if (store.recentlyViewed && typeof store.recentlyViewed === 'object') {
-      for (const [uid, viewedIds] of Object.entries(store.recentlyViewed)) {
-        if (Array.isArray(viewedIds) && viewedIds.includes(merged.id)) {
-          store.recentlyViewed[uid] = Array.from(
-            new Set(
-              viewedIds.map((id) => (id === merged.id ? survivor.id : id)),
-            ),
-          );
-        }
-      }
-    }
-
-    for (const notification of store.notifications ?? []) {
-      if (notification.recordId === merged.id) {
-        notification.recordId = survivor.id;
-      }
-      if (
-        typeof notification.href === 'string' &&
-        notification.href.includes(merged.id)
-      ) {
-        notification.href = replaceRecordIdPathSegment(
-          notification.href,
-          merged.id,
-          survivor.id,
-        );
       }
     }
 
@@ -7993,8 +8058,8 @@ export async function clearAllDataToCleanDeployment(
 }
 
 // ------------------------------------------------------------------ Notifications
-function pushNotification(
-  store: FirmStore,
+async function pushNotification(
+  ctx: TenantContext,
   input: {
     recipientId: string;
     kind: NotificationKind;
@@ -8005,11 +8070,13 @@ function pushNotification(
     byId: string;
     at?: string;
   },
-): NotificationItem | null {
+): Promise<NotificationItem | null> {
   // Don't notify someone about an action they took themselves unless it's an overdue alert
   if (input.recipientId === input.byId && input.kind !== 'task_overdue') return null;
+  const taskRepo = getTaskWorkflowRepository();
+  const id = await taskRepo.allocateNextNotificationId(ctx);
   const item: NotificationItem = {
-    id: nextId(store, 'NTF'),
+    id,
     recipientId: input.recipientId,
     kind: input.kind,
     title: input.title,
@@ -8020,39 +8087,18 @@ function pushNotification(
     read: false,
     byId: input.byId,
   };
-  store.notifications.unshift(item);
+  await taskRepo.putNotification(ctx, item);
   return item;
 }
 
 export async function markNotificationRead(id: string, userId: string): Promise<void> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'markNotificationRead',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
-    mutate: async () => {
-  const store = getStore();
-  const n = store.notifications.find((x) => x.id === id && x.recipientId === userId);
-  if (n) {
-    n.read = true;
-    saveStore(store);
-  }
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, userId);
+  await getTaskWorkflowRepository().markNotificationRead(ctx, id, userId);
 }
 
 export async function markAllNotificationsRead(userId: string): Promise<void> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'markAllNotificationsRead',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
-    mutate: async () => {
-  const store = getStore();
-  for (const n of store.notifications) {
-    if (n.recipientId === userId) n.read = true;
-  }
-  saveStore(store);
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, userId);
+  await getTaskWorkflowRepository().markAllNotificationsRead(ctx, userId);
 }
 
 // ------------------------------------------------------------------ Admin: Teams & Settings
@@ -8332,15 +8378,24 @@ export async function saveTaskRecord(
   const taskCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, organisations, matters, enquiries, quotes, existing] = await Promise.all([
     partyRepo.listAllPeople<Person>(taskCtx),
     partyRepo.listAllOrganisations<Organisation>(taskCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
+    input.id
+      ? taskRepo.getTaskById<Task>(taskCtx, input.id, { includeRestricted: true })
+      : Promise.resolve(null),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const prelimVis = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -8350,6 +8405,8 @@ export async function saveTaskRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
 
@@ -8365,7 +8422,6 @@ export async function saveTaskRecord(
     }
   }
 
-  const existing = input.id ? store.tasks.find((t) => t.id === input.id) ?? null : null;
   if (input.id && !existing) {
     const msg = 'Task not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -8384,13 +8440,13 @@ export async function saveTaskRecord(
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
       }
     } else if (lr.recordType === 'enquiry') {
-      const e = store.enquiries.find((x) => x.id === lr.recordId);
+      const e = enquiries.find((x) => x.id === lr.recordId);
       if (!e || !visibility.canViewEnquiry(e)) {
         const msg = 'Linked enquiry not found or access denied.';
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
       }
     } else if (lr.recordType === 'quote') {
-      const q = store.quotes.find((x) => x.id === lr.recordId);
+      const q = quotes.find((x) => x.id === lr.recordId);
       if (!q || !visibility.canViewQuote(q)) {
         const msg = 'Linked quote not found or access denied.';
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -8473,59 +8529,60 @@ export async function saveTaskRecord(
   // Separate task per assignee when creating a new task with multiAssigneeMode === 'separate'
   if (!existing && input.multiAssigneeMode === 'separate' && cleanPersonIds.length > 1) {
     const createdTasks: Task[] = [];
-    for (const pid of cleanPersonIds) {
-      const id = nextId(store, 'TSK');
-      const separateTask: Task = {
-        id,
-        reference: id,
-        title,
-        description: (input.description ?? '').trim(),
-        taskTypeId: input.taskTypeId || vid('task_type', 'General'),
-        priorityId: input.priorityId || vid('task_priority', 'Normal'),
-        dueAt: input.dueAt,
-        assignedTeamId: input.assignedTeamId ?? null,
-        assignedPersonId: pid,
-        assignedPersonIds: [pid],
-        multiAssigneeMode: 'separate',
-        status: input.status ?? 'To do',
-        linkedRecords: input.linkedRecords ?? [],
-        createdById: byId,
-        createdAt: now,
-        updatedById: byId,
-        updatedAt: now,
-        completedById: null,
-        completedAt: null,
-        comments: [],
-        autoTrigger: input.autoTrigger ?? null,
-      };
-      store.tasks.unshift(separateTask);
-      createdTasks.push(separateTask);
-      writeAudit(store, {
-        recordType: 'task',
-        recordId: separateTask.id,
-        action: 'create',
-        field: 'Task created',
-        oldValue: null,
-        newValue: `${separateTask.reference} — ${separateTask.title}`,
-        byId,
-        at: now,
-      });
-      pushNotification(store, {
-        recipientId: pid,
-        kind: 'task_assigned',
-        title: `Task assigned to you: ${separateTask.title}`,
-        detail: `${separateTask.reference} · Due ${formatDate(separateTask.dueAt)}`,
-        href: `/tasks/${separateTask.id}`,
-        recordId: separateTask.id,
-        byId,
-        at: now,
-      });
-    }
-    saveStore(store);
+    await taskRepo.withTenantTransaction(taskCtx, async () => {
+      for (const pid of cleanPersonIds) {
+        const id = await taskRepo.allocateNextTaskId(taskCtx);
+        const separateTask: Task = {
+          id,
+          reference: id,
+          title,
+          description: (input.description ?? '').trim(),
+          taskTypeId: input.taskTypeId || vid('task_type', 'General'),
+          priorityId: input.priorityId || vid('task_priority', 'Normal'),
+          dueAt: input.dueAt,
+          assignedTeamId: input.assignedTeamId ?? null,
+          assignedPersonId: pid,
+          assignedPersonIds: [pid],
+          multiAssigneeMode: 'separate',
+          status: input.status ?? 'To do',
+          linkedRecords: input.linkedRecords ?? [],
+          createdById: byId,
+          createdAt: now,
+          updatedById: byId,
+          updatedAt: now,
+          completedById: null,
+          completedAt: null,
+          comments: [],
+          autoTrigger: input.autoTrigger ?? null,
+        };
+        await taskRepo.putTask(taskCtx, separateTask);
+        createdTasks.push(separateTask);
+        writeAudit(store, {
+          recordType: 'task',
+          recordId: separateTask.id,
+          action: 'create',
+          field: 'Task created',
+          oldValue: null,
+          newValue: `${separateTask.reference} — ${separateTask.title}`,
+          byId,
+          at: now,
+        });
+        await pushNotification(taskCtx, {
+          recipientId: pid,
+          kind: 'task_assigned',
+          title: `Task assigned to you: ${separateTask.title}`,
+          detail: `${separateTask.reference} · Due ${formatDate(separateTask.dueAt)}`,
+          href: `/tasks/${separateTask.id}`,
+          recordId: separateTask.id,
+          byId,
+          at: now,
+        });
+      }
+    });
     return { task: createdTasks[0], tasks: createdTasks };
   }
 
-  const id = existing?.id ?? nextId(store, 'TSK');
+  const id = existing?.id ?? (await taskRepo.allocateNextTaskId(taskCtx));
   const status: TaskStatus = input.status ?? existing?.status ?? 'To do';
   const wasDone = existing?.status === 'Done';
   const isNowDone = status === 'Done';
@@ -8565,42 +8622,109 @@ export async function saveTaskRecord(
 
   const ctx = formatContext(store, { people, organisations, matters });
 
-  if (!existing) {
-    store.tasks.unshift(task);
-    writeAudit(store, {
-      recordType: 'task',
-      recordId: task.id,
-      action: 'create',
-      field: 'Task created',
-      oldValue: null,
-      newValue: `${task.reference} — ${task.title}`,
-      byId,
-      at: now,
-    });
+  await taskRepo.withTenantTransaction(taskCtx, async () => {
+    await taskRepo.putTask(taskCtx, task);
+    if (!existing) {
+      writeAudit(store, {
+        recordType: 'task',
+        recordId: task.id,
+        action: 'create',
+        field: 'Task created',
+        oldValue: null,
+        newValue: `${task.reference} — ${task.title}`,
+        byId,
+        at: now,
+      });
 
-    // Notify assignee(s) or team members
-    if (effectivePersonIds.length > 0) {
-      for (const pid of effectivePersonIds) {
-        pushNotification(store, {
-          recipientId: pid,
-          kind: 'task_assigned',
-          title: `Task assigned to you: ${task.title}`,
-          detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
-          href: `/tasks/${task.id}`,
+      // Notify assignee(s) or team members
+      if (effectivePersonIds.length > 0) {
+        for (const pid of effectivePersonIds) {
+          await pushNotification(taskCtx, {
+            recipientId: pid,
+            kind: 'task_assigned',
+            title: `Task assigned to you: ${task.title}`,
+            detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
+            href: `/tasks/${task.id}`,
+            recordId: task.id,
+            byId,
+            at: now,
+          });
+        }
+      } else if (task.assignedTeamId) {
+        const team = store.teams.find((tm) => tm.id === task.assignedTeamId);
+        if (team) {
+          for (const memberId of team.memberIds) {
+            await pushNotification(taskCtx, {
+              recipientId: memberId,
+              kind: 'team_task_arrived',
+              title: `New task in ${team.name} queue`,
+              detail: `${task.reference} — ${task.title}`,
+              href: `/tasks/${task.id}`,
+              recordId: task.id,
+              byId,
+              at: now,
+            });
+          }
+        }
+      }
+    } else {
+      if (existing.status !== task.status) {
+        writeAudit(store, {
+          recordType: 'task',
           recordId: task.id,
+          action: 'status-change',
+          field: 'Status',
+          oldValue: existing.status,
+          newValue: task.status,
           byId,
           at: now,
         });
       }
-    } else if (task.assignedTeamId) {
-      const team = store.teams.find((tm) => tm.id === task.assignedTeamId);
-      if (team) {
-        for (const memberId of team.memberIds) {
-          pushNotification(store, {
-            recipientId: memberId,
-            kind: 'team_task_arrived',
-            title: `New task in ${team.name} queue`,
-            detail: `${task.reference} — ${task.title}`,
+      if (existing.dueAt !== task.dueAt) {
+        writeAudit(store, {
+          recordType: 'task',
+          recordId: task.id,
+          action: 'update',
+          field: 'Due date',
+          oldValue: formatDate(existing.dueAt),
+          newValue: formatDate(task.dueAt),
+          byId,
+          at: now,
+        });
+      }
+      if (
+        existing.assignedPersonId !== task.assignedPersonId ||
+        existing.assignedTeamId !== task.assignedTeamId
+      ) {
+        const oldLabel = [
+          existing.assignedTeamId ? ctx.nameOf(existing.assignedTeamId) : '',
+          existing.assignedPersonId ? ctx.nameOf(existing.assignedPersonId) : 'Unclaimed',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        const newLabel = [
+          task.assignedTeamId ? ctx.nameOf(task.assignedTeamId) : '',
+          task.assignedPersonId ? ctx.nameOf(task.assignedPersonId) : 'Unclaimed',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        writeAudit(store, {
+          recordType: 'task',
+          recordId: task.id,
+          action: 'assign',
+          field: 'Assigned to',
+          oldValue: oldLabel,
+          newValue: newLabel,
+          byId,
+          at: now,
+        });
+
+        if (task.assignedPersonId && task.assignedPersonId !== existing.assignedPersonId) {
+          await pushNotification(taskCtx, {
+            recipientId: task.assignedPersonId,
+            kind: 'task_assigned',
+            title: `Task assigned to you: ${task.title}`,
+            detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
             href: `/tasks/${task.id}`,
             recordId: task.id,
             byId,
@@ -8609,119 +8733,51 @@ export async function saveTaskRecord(
         }
       }
     }
-  } else {
-    const idx = store.tasks.findIndex((t) => t.id === existing.id);
-    store.tasks[idx] = task;
 
-    if (existing.status !== task.status) {
-      writeAudit(store, {
-        recordType: 'task',
-        recordId: task.id,
-        action: 'status-change',
-        field: 'Status',
-        oldValue: existing.status,
-        newValue: task.status,
-        byId,
-        at: now,
-      });
-    }
-    if (existing.dueAt !== task.dueAt) {
-      writeAudit(store, {
-        recordType: 'task',
-        recordId: task.id,
-        action: 'update',
-        field: 'Due date',
-        oldValue: formatDate(existing.dueAt),
-        newValue: formatDate(task.dueAt),
-        byId,
-        at: now,
-      });
-    }
+    // If this task is linked to a New enquiry and now has an assignedPersonId, sync the enquiry!
     if (
-      existing.assignedPersonId !== task.assignedPersonId ||
-      existing.assignedTeamId !== task.assignedTeamId
+      task.assignedPersonId &&
+      hasPersonPermission(actor, 'enquiry:assign', {
+        allPeople: people,
+        teams: store.teams,
+      })
     ) {
-      const oldLabel = [
-        existing.assignedTeamId ? ctx.nameOf(existing.assignedTeamId) : '',
-        existing.assignedPersonId ? ctx.nameOf(existing.assignedPersonId) : 'Unclaimed',
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      const newLabel = [
-        task.assignedTeamId ? ctx.nameOf(task.assignedTeamId) : '',
-        task.assignedPersonId ? ctx.nameOf(task.assignedPersonId) : 'Unclaimed',
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      writeAudit(store, {
-        recordType: 'task',
-        recordId: task.id,
-        action: 'assign',
-        field: 'Assigned to',
-        oldValue: oldLabel,
-        newValue: newLabel,
-        byId,
-        at: now,
-      });
+      for (const lr of task.linkedRecords) {
+        if (lr.recordType === 'enquiry') {
+          const enq = enquiries.find((e) => e.id === lr.recordId);
+          if (
+            enq &&
+            visibility.canViewEnquiry(enq) &&
+            isEnquiryRouted(enq) &&
+            isEnquiryOpen(enq) &&
+            (enq.status === 'New' || !enq.assignedToId)
+          ) {
+            const prevStatus = enq.status;
+            const prevAssignee = enq.assignedToId;
+            enq.assignedToId = task.assignedPersonId;
+            if (enq.status === 'New') {
+              enq.status = 'Assigned';
+            }
+            enq.updatedAt = now;
+            enq.updatedById = byId;
+            await intakeRepo.putEnquiry(taskCtx, enq);
 
-      if (task.assignedPersonId && task.assignedPersonId !== existing.assignedPersonId) {
-        pushNotification(store, {
-          recipientId: task.assignedPersonId,
-          kind: 'task_assigned',
-          title: `Task assigned to you: ${task.title}`,
-          detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
-          href: `/tasks/${task.id}`,
-          recordId: task.id,
-          byId,
-          at: now,
-        });
-      }
-    }
-  }
-
-  // If this task is linked to a New enquiry and now has an assignedPersonId, sync the enquiry!
-  if (
-    task.assignedPersonId &&
-    hasPersonPermission(actor, 'enquiry:assign', {
-      allPeople: people,
-      teams: store.teams,
-    })
-  ) {
-    for (const lr of task.linkedRecords) {
-      if (lr.recordType === 'enquiry') {
-        const enq = store.enquiries.find((e) => e.id === lr.recordId);
-        if (
-          enq &&
-          visibility.canViewEnquiry(enq) &&
-          isEnquiryRouted(enq) &&
-          isEnquiryOpen(enq) &&
-          (enq.status === 'New' || !enq.assignedToId)
-        ) {
-          const prevStatus = enq.status;
-          const prevAssignee = enq.assignedToId;
-          enq.assignedToId = task.assignedPersonId;
-          if (enq.status === 'New') {
-            enq.status = 'Assigned';
+            writeAudit(store, {
+              recordType: 'enquiry',
+              recordId: enq.id,
+              action: 'assign',
+              field: 'Assigned to',
+              oldValue: prevAssignee ? ctx.nameOf(prevAssignee) : 'Unclaimed',
+              newValue: `${ctx.nameOf(task.assignedPersonId)} (status: ${prevStatus} → ${enq.status})`,
+              byId,
+              at: now,
+            });
           }
-          enq.updatedAt = now;
-          enq.updatedById = byId;
-
-          writeAudit(store, {
-            recordType: 'enquiry',
-            recordId: enq.id,
-            action: 'assign',
-            field: 'Assigned to',
-            oldValue: prevAssignee ? ctx.nameOf(prevAssignee) : 'Unclaimed',
-            newValue: `${ctx.nameOf(task.assignedPersonId)} (status: ${prevStatus} → ${enq.status})`,
-            byId,
-            at: now,
-          });
         }
       }
     }
-  }
+  });
 
-  saveStore(store);
   return { task };
     },
   });
@@ -8736,14 +8792,21 @@ export async function takeTaskRecord(
     const taskCtx = resolveDefaultServiceTenantContext(store, byId);
     const partyRepo = getPartyRepository();
     const matterRepo = getMatterRepository();
-    const [people, matters] = await Promise.all([
+    const intakeRepo = getIntakeQuoteRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const [people, matters, enquiries, quotes, existing] = await Promise.all([
       partyRepo.listAllPeople<Person>(taskCtx),
       matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
+      intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
+      intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
+      taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
     ]);
     const actor = people.find((p) => p.id === byId) ?? null;
     const prelimVis = buildRecordVisibility(store, actor, {
       people,
       matters,
+      enquiries,
+      quotes,
       hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     });
     const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -8753,9 +8816,10 @@ export async function takeTaskRecord(
     const visibility = buildRecordVisibility(store, actor, {
       people,
       matters,
+      enquiries,
+      quotes,
       hiddenMatterKeyDateIds: hiddenKdIds,
     });
-    const existing = store.tasks.find((t) => t.id === taskId);
     if (!existing || !visibility.canViewTask(existing)) {
       const msg = 'Task not found.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -8795,9 +8859,14 @@ export async function addTaskCommentRecord(
   const taskCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, matters, enquiries, quotes, task] = await Promise.all([
     partyRepo.listAllPeople<Person>(taskCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
+    taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -8812,6 +8881,8 @@ export async function addTaskCommentRecord(
   const prelimVis = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -8821,9 +8892,10 @@ export async function addTaskCommentRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
-  const task = store.tasks.find((t) => t.id === taskId);
   if (!task || !visibility.canViewTask(task)) {
     const msg = 'Task not found or access denied.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -8842,6 +8914,8 @@ export async function addTaskCommentRecord(
   task.updatedAt = now;
   task.updatedById = byId;
 
+  await taskRepo.putTask(taskCtx, task);
+
   writeAudit(store, {
     recordType: 'task',
     recordId: task.id,
@@ -8858,7 +8932,7 @@ export async function addTaskCommentRecord(
   if (task.assignedPersonId) recipients.add(task.assignedPersonId);
   if (task.createdById) recipients.add(task.createdById);
   for (const rId of recipients) {
-    pushNotification(store, {
+    await pushNotification(taskCtx, {
       recipientId: rId,
       kind: 'task_comment',
       title: `New comment on ${task.reference}`,
@@ -8870,14 +8944,14 @@ export async function addTaskCommentRecord(
     });
   }
 
-  saveStore(store);
   return { task };
     },
   });
 }
 
 // ------------------------------------------------------------------ Enquiries & Automatic Tasks
-function raiseAutomaticTask(
+async function raiseAutomaticTask(
+  ctx: TenantContext,
   store: FirmStore,
   trigger: AutoTaskTrigger,
   vars: { name?: string; matterNumber?: string },
@@ -8891,7 +8965,8 @@ function raiseAutomaticTask(
     now: string;
     overridePriorityId?: string;
   },
-): Task {
+): Promise<Task> {
+  const taskRepo = getTaskWorkflowRepository();
   const tpl = store.taskSettings.templates.find((t) => t.trigger === trigger);
   const rawTitle =
     tpl?.titleTemplate ??
@@ -8905,7 +8980,7 @@ function raiseAutomaticTask(
     .replace('{matterNumber}', vars.matterNumber ?? '')
     .trim();
 
-  const id = nextId(store, 'TSK');
+  const id = await taskRepo.allocateNextTaskId(ctx);
   const task: Task = {
     id,
     reference: id,
@@ -8934,7 +9009,7 @@ function raiseAutomaticTask(
     autoTrigger: trigger,
   };
 
-  store.tasks.unshift(task);
+  await taskRepo.putTask(ctx, task);
   writeAudit(store, {
     recordType: 'task',
     recordId: task.id,
@@ -8947,7 +9022,7 @@ function raiseAutomaticTask(
   });
 
   if (task.assignedPersonId) {
-    pushNotification(store, {
+    await pushNotification(ctx, {
       recipientId: task.assignedPersonId,
       kind: 'task_assigned',
       title: `Task assigned to you: ${task.title}`,
@@ -8961,7 +9036,7 @@ function raiseAutomaticTask(
     const team = store.teams.find((tm) => tm.id === task.assignedTeamId);
     if (team) {
       for (const memberId of team.memberIds) {
-        pushNotification(store, {
+        await pushNotification(ctx, {
           recipientId: memberId,
           kind: 'team_task_arrived',
           title: `New task in ${team.name} queue`,
@@ -8978,14 +9053,17 @@ function raiseAutomaticTask(
   return task;
 }
 
-function completeOpenContactTasksForEnquiry(
+async function completeOpenContactTasksForEnquiry(
+  ctx: TenantContext,
   store: FirmStore,
   enquiryId: string,
   reasonLabel: string,
   byId: string,
   now: string,
-): void {
-  for (const t of store.tasks) {
+): Promise<void> {
+  const taskRepo = getTaskWorkflowRepository();
+  const tasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+  for (const t of tasks) {
     const isLinked = t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === enquiryId);
     const isContactTask =
       t.autoTrigger === 'enquiry_contact' ||
@@ -8998,6 +9076,7 @@ function completeOpenContactTasksForEnquiry(
       t.completedAt = now;
       t.updatedById = byId;
       t.updatedAt = now;
+      await taskRepo.putTask(ctx, t);
       writeAudit(store, {
         recordType: 'task',
         recordId: t.id,
@@ -9048,19 +9127,24 @@ export async function saveEnquiryRecord(
   const enqCtx = resolveDefaultServiceTenantContext(store, opts.byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, links, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const existing = opts.id ? store.enquiries.find((e) => e.id === opts.id) ?? null : null;
+  const existing = opts.id ? enquiries.find((e) => e.id === opts.id) ?? null : null;
   if (opts.id && !existing) {
     const msg = 'Enquiry not found.';
     return {
@@ -9233,7 +9317,7 @@ export async function saveEnquiryRecord(
     {
       recordedAt: now,
       recordedById: opts.byId,
-      enquiries: store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
+      enquiries: enquiries.filter((e) => visibility.canViewEnquiry(e)),
       excludeEnquiryId: existing?.id ?? null,
       links,
       canViewMatter: visibility.canViewMatter,
@@ -9248,7 +9332,7 @@ export async function saveEnquiryRecord(
         ? `${conflictSnapshot.matchCount} ${conflictSnapshot.matchCount === 1 ? 'possible conflict' : 'possible conflicts'} (high severity)`
         : `${conflictSnapshot.matchCount} ${conflictSnapshot.matchCount === 1 ? 'match' : 'matches'} (${conflictSnapshot.highestSeverity} severity)`;
 
-  const id = existing?.id ?? nextId(store, 'ENQ');
+  const id = existing?.id ?? (await intakeRepo.allocateNextEnquiryId(enqCtx));
   const receivedAt = input.receivedAt || existing?.receivedAt || now;
 
   if (asDraft) {
@@ -9301,8 +9385,8 @@ export async function saveEnquiryRecord(
       updatedAt: now,
     };
 
+    await intakeRepo.putEnquiry(enqCtx, draftEnquiry);
     if (!existing) {
-      store.enquiries.unshift(draftEnquiry);
       const channelLabel = resolveLabel(store.values, draftEnquiry.channelId) || 'Phone';
       const areaLabel = draftEnquiry.practiceAreaId
         ? resolveLabel(store.values, draftEnquiry.practiceAreaId)
@@ -9323,9 +9407,6 @@ export async function saveEnquiryRecord(
         byId: draftEnquiry.takenById,
         at: receivedAt,
       });
-    } else {
-      const idx = store.enquiries.findIndex((e) => e.id === existing.id);
-      store.enquiries[idx] = draftEnquiry;
     }
 
     writeAudit(store, {
@@ -9351,7 +9432,6 @@ export async function saveEnquiryRecord(
       snapshot: conflictSnapshot,
     });
 
-    saveStore(store);
     return {
       enquiry: draftEnquiry,
       routedToIntakeFallback: false,
@@ -9458,8 +9538,8 @@ export async function saveEnquiryRecord(
   const practiceAreaLabel =
     resolveLabel(store.values, enquiry.practiceAreaId) || routedTeam?.name || 'Intake';
 
+  await intakeRepo.putEnquiry(enqCtx, enquiry);
   if (!existing) {
-    store.enquiries.unshift(enquiry);
     const channelLabel = resolveLabel(store.values, enquiry.channelId) || 'Phone';
     writeAudit(store, {
       recordType: 'enquiry',
@@ -9477,9 +9557,6 @@ export async function saveEnquiryRecord(
       byId: enquiry.takenById,
       at: receivedAt,
     });
-  } else {
-    const idx = store.enquiries.findIndex((e) => e.id === existing.id);
-    store.enquiries[idx] = enquiry;
   }
 
   writeAudit(store, {
@@ -9521,7 +9598,8 @@ export async function saveEnquiryRecord(
       linkedRecords.push({ recordType: 'organisation', recordId: enquiry.linkedOrganisationId });
     }
 
-    raiseAutomaticTask(
+    await raiseAutomaticTask(
+      enqCtx,
       store,
       'enquiry_contact',
       { name: enquiryDisplayName(enquiry) },
@@ -9549,7 +9627,6 @@ export async function saveEnquiryRecord(
     });
   }
 
-  saveStore(store);
   return {
     enquiry,
     routedTeamName: routedTeam?.name ?? 'Intake',
@@ -9572,9 +9649,14 @@ export async function assignEnquiryRecord(
     mutate: async () => {
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, matters, enquiries, quotes, tasks] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    taskRepo.listAllTasksUnfiltered<Task>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9589,9 +9671,11 @@ export async function assignEnquiryRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  const enq = enquiries.find((e) => e.id === enquiryId);
   if (
     !enq ||
     (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) ||
@@ -9623,6 +9707,8 @@ export async function assignEnquiryRecord(
   enq.updatedAt = now;
   enq.updatedById = byId;
 
+  await intakeRepo.putEnquiry(enqCtx, enq);
+
   const newAssignee = assignedToId ? ctx.nameOf(assignedToId) : 'Unassigned';
   writeAudit(store, {
     recordType: 'enquiry',
@@ -9637,7 +9723,7 @@ export async function assignEnquiryRecord(
 
   // Automatic task rule: When enquiry is assigned to someone, the open contact task moves to them (due unchanged)
   if (assignedToId) {
-    for (const t of store.tasks) {
+    for (const t of tasks) {
       const isLinked = t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === enq.id);
       const isContactTask =
         t.autoTrigger === 'enquiry_contact' ||
@@ -9649,6 +9735,7 @@ export async function assignEnquiryRecord(
         if (assignedTeamId) t.assignedTeamId = assignedTeamId;
         t.updatedAt = now;
         t.updatedById = byId;
+        await taskRepo.putTask(enqCtx, t);
         writeAudit(store, {
           recordType: 'task',
           recordId: t.id,
@@ -9662,7 +9749,7 @@ export async function assignEnquiryRecord(
       }
     }
 
-    pushNotification(store, {
+    await pushNotification(enqCtx, {
       recipientId: assignedToId,
       kind: 'enquiry_assigned',
       title: `Enquiry assigned to you: ${enq.reference} (${enquiryDisplayName(enq)})`,
@@ -9674,7 +9761,6 @@ export async function assignEnquiryRecord(
     });
   }
 
-  saveStore(store);
   return { enquiry: enq };
 
     },
@@ -9697,9 +9783,12 @@ export async function logEnquiryContactRecord(
     mutate: async () => {
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, enquiries, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9714,9 +9803,11 @@ export async function logEnquiryContactRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  const enq = enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -9742,7 +9833,8 @@ export async function logEnquiryContactRecord(
   if (input.outcome === 'Spoke' && (enq.status === 'New' || enq.status === 'Assigned')) {
     enq.status = 'In contact';
     // Complete the initial contact task once spoken
-    completeOpenContactTasksForEnquiry(
+    await completeOpenContactTasksForEnquiry(
+      enqCtx,
       store,
       enq.id,
       'Spoke to enquirer',
@@ -9755,6 +9847,7 @@ export async function logEnquiryContactRecord(
 
   enq.updatedAt = now;
   enq.updatedById = byId;
+  await intakeRepo.putEnquiry(enqCtx, enq);
 
   writeAudit(store, {
     recordType: 'enquiry',
@@ -9771,7 +9864,6 @@ export async function logEnquiryContactRecord(
   const hasSpoken = enq.contactLog.some((c) => c.outcome === 'Spoke');
   const failedCount = hasSpoken ? 0 : enq.contactLog.filter((c) => c.outcome !== 'Spoke').length;
 
-  saveStore(store);
   return {
     enquiry: enq,
     suggestNoResponse: isEnquiryOpen(enq) && failedCount >= threshold,
@@ -9797,9 +9889,12 @@ export async function sendEnquiryEmailRecord(
     mutate: async () => {
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, enquiries, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9814,9 +9909,11 @@ export async function sendEnquiryEmailRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  const enq = enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -9833,6 +9930,7 @@ export async function sendEnquiryEmailRecord(
   const now = new Date().toISOString();
   enq.updatedAt = now;
   enq.updatedById = byId;
+  await intakeRepo.putEnquiry(enqCtx, enq);
 
   const emailSnapshot: EnquirySentEmailSnapshot = {
     kind: 'sent_email',
@@ -9856,7 +9954,6 @@ export async function sendEnquiryEmailRecord(
     snapshot: emailSnapshot,
   });
 
-  saveStore(store);
   return { enquiry: enq };
 
     },
@@ -9882,9 +9979,12 @@ export async function closeEnquiryRecord(
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, enquiries, quotes] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -9899,9 +9999,11 @@ export async function closeEnquiryRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  const enq = enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -9957,7 +10059,8 @@ export async function closeEnquiryRecord(
   });
 
   // Complete open contact task automatically
-  completeOpenContactTasksForEnquiry(
+  await completeOpenContactTasksForEnquiry(
+    enqCtx,
     store,
     enq.id,
     `Enquiry closed as ${input.targetStatus}`,
@@ -9979,7 +10082,7 @@ export async function closeEnquiryRecord(
           m.additionalClientIds?.includes(linkedId) ||
           m.parties.some((pt) => pt.linkedRecordId === linkedId),
       );
-      const hasOtherActiveOrConvertedEnquiry = store.enquiries.some(
+      const hasOtherActiveOrConvertedEnquiry = enquiries.some(
         (other) =>
           other.id !== enq.id &&
           (other.linkedPersonId === linkedId || other.referrerPersonId === linkedId) &&
@@ -10001,7 +10104,7 @@ export async function closeEnquiryRecord(
     }
   }
 
-  saveStore(store);
+  await intakeRepo.putEnquiry(enqCtx, enq);
   return { enquiry: enq };
 
     },
@@ -10018,9 +10121,12 @@ export async function reopenEnquiryRecord(
     mutate: async () => {
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, enquiries, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -10035,9 +10141,11 @@ export async function reopenEnquiryRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  const enq = enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -10061,6 +10169,8 @@ export async function reopenEnquiryRecord(
   enq.updatedAt = now;
   enq.updatedById = byId;
 
+  await intakeRepo.putEnquiry(enqCtx, enq);
+
   writeAudit(store, {
     recordType: 'enquiry',
     recordId: enq.id,
@@ -10072,7 +10182,6 @@ export async function reopenEnquiryRecord(
     at: now,
   });
 
-  saveStore(store);
   return { enquiry: enq };
 
     },
@@ -10151,11 +10260,14 @@ export async function prepareEnquiryConversion(
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, links, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -10175,9 +10287,11 @@ export async function prepareEnquiryConversion(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  const enq = enquiries.find((e) => e.id === enquiryId);
   if (!enq) return { ok: false, conflictReasons: ['Enquiry not found.'] };
   if (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) {
     return { ok: false, conflictReasons: ['Enquiry not found.'] };
@@ -10213,7 +10327,7 @@ export async function prepareEnquiryConversion(
     organisations,
     matters,
     store.values,
-    store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
+    enquiries.filter((e) => visibility.canViewEnquiry(e)),
     enq.id,
     links,
     visibility.canViewMatter,
@@ -10289,7 +10403,6 @@ export async function prepareEnquiryConversion(
       at: nowIso,
       snapshot: blockedDecisionSnapshot,
     });
-    saveStore(store);
     return {
       ok: false,
       conflictBlocked: true,
@@ -10450,7 +10563,7 @@ export async function prepareEnquiryConversion(
     }
   }
 
-  saveStore(store);
+  await intakeRepo.putEnquiry(enqCtx, enq);
   return {
     ok: true,
     clientId,
@@ -10478,9 +10591,14 @@ async function finalizeEnquiryConversionToMatter(
   ctx: TenantContext,
   compensator: RecordDeltaCompensator,
 ): Promise<void> {
-  const enq = store.enquiries.find((e) => e.id === enquiryId);
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const enq = await intakeRepo.getEnquiryById<Enquiry>(ctx, enquiryId, {
+    includeRestricted: true,
+  });
   if (!enq) return;
 
+  const prevEnquirySnapshot = structuredClone(enq);
   const alreadyConvertedToThisMatter =
     enq.status === 'Converted' && enq.convertedMatterId === matter.id;
   const prevStatus = enq.status;
@@ -10492,6 +10610,10 @@ async function finalizeEnquiryConversionToMatter(
   if (enq.conflictDecision && !matter.conflictDecision) {
     matter.conflictDecision = enq.conflictDecision;
   }
+  await intakeRepo.putEnquiry(ctx, enq);
+  compensator.register(`enquiry.convert:${enq.id}`, async () => {
+    await intakeRepo.putEnquiry(ctx, prevEnquirySnapshot);
+  });
 
   if (!alreadyConvertedToThisMatter) {
     writeAudit(store, {
@@ -10517,7 +10639,8 @@ async function finalizeEnquiryConversionToMatter(
     });
   }
 
-  completeOpenContactTasksForEnquiry(
+  await completeOpenContactTasksForEnquiry(
+    ctx,
     store,
     enq.id,
     `Enquiry converted to matter ${matter.matterNumber}`,
@@ -10527,6 +10650,7 @@ async function finalizeEnquiryConversionToMatter(
 
   // Carry enquiry key dates across to the converted matter in PostgreSQL (`source: 'carried_from_enquiry'`) (§1, S0-15)
   const kdConfig = await getKeyDatesConfig({ ctx });
+  const existingTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
   if (kdConfig.enabled) {
     const keyDateRepo = getKeyDateRepository();
     const existingEnquiryKds = await keyDateRepo.listKeyDatesForEnquiry(ctx, enq.id);
@@ -10539,14 +10663,15 @@ async function finalizeEnquiryConversionToMatter(
         ? await keyDateRepo.allocateNextKeyDateId(ctx)
         : null;
     const carriedAudits: AuditEntry[] = [];
-    const { tasks: storeTasks } = store;
+    const workingTasks = existingTasks.map((t) => structuredClone(t));
+    const prevTaskById = new Map(existingTasks.map((t) => [t.id, structuredClone(t)]));
 
     const carried = carryEnquiryKeyDatesToMatter({
       enquiry: enq,
       matter,
       tenantId: ctx.tenantId,
       keyDates: workingKeyDates,
-      tasks: storeTasks,
+      tasks: workingTasks,
       teams: store.teams,
       config: kdConfig,
       actorId: byId,
@@ -10555,6 +10680,13 @@ async function finalizeEnquiryConversionToMatter(
       audit: carriedAudits,
       nextAuditId: () => 'AU-PENDING',
     });
+
+    for (const wt of workingTasks) {
+      const prev = prevTaskById.get(wt.id);
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(wt)) {
+        await taskRepo.putTask(ctx, wt);
+      }
+    }
 
     for (const entry of carriedAudits) {
       const { id: _unusedId, ...rest } = entry;
@@ -10580,7 +10712,7 @@ async function finalizeEnquiryConversionToMatter(
   }
 
   // Automatic task: Complete matter opening (5 working days) once the matter has a real reference (or if none exists yet)
-  const hasCompleteOpeningTask = store.tasks.some(
+  const hasCompleteOpeningTask = existingTasks.some(
     (t) =>
       t.autoTrigger === 'complete_matter_opening' &&
       t.linkedRecords.some((lr) => lr.recordType === 'matter' && lr.recordId === matter.id),
@@ -10591,7 +10723,8 @@ async function finalizeEnquiryConversionToMatter(
     const offsetDays = tpl?.dueWorkingDaysOffset ?? 5;
     const dueDate = toIsoDate(addWorkingDays(new Date(), offsetDays, whCfg));
 
-    raiseAutomaticTask(
+    const createdOpeningTask = await raiseAutomaticTask(
+      ctx,
       store,
       'complete_matter_opening',
       {
@@ -10615,6 +10748,14 @@ async function finalizeEnquiryConversionToMatter(
         overridePriorityId: vid('task_priority', 'High'),
       },
     );
+    compensator.register(`enquiry.opening_task:${createdOpeningTask.id}`, async () => {
+      await taskRepo.withTenantTransaction(ctx, async (tx) => {
+        await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
+          ctx.tenantId,
+          createdOpeningTask.id,
+        ]);
+      });
+    });
   }
 }
 
@@ -10626,7 +10767,11 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
     mutate: async () => {
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(enqCtx);
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, enquiries] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(enqCtx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+  ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
@@ -10638,7 +10783,7 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
   const months = store.enquirySettings.retentionMonths || 12;
   let count = 0;
 
-  for (const enq of store.enquiries) {
+  for (const enq of enquiries) {
     const matchTarget = specificEnquiryId
       ? enq.id === specificEnquiryId && isReadyForRetentionAnonymisation(enq, months, now)
       : isReadyForRetentionAnonymisation(enq, months, now);
@@ -10656,6 +10801,7 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
     enq.updatedAt = nowIso;
     enq.updatedById = byId;
     count++;
+    await intakeRepo.putEnquiry(enqCtx, enq);
 
     writeAudit(store, {
       recordType: 'enquiry',
@@ -10669,7 +10815,6 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
     });
   }
 
-  if (count > 0) saveStore(store);
   return count;
 
     },
@@ -12267,9 +12412,11 @@ export async function approveSignOff(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, matters, item] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    taskRepo.getSignOffById<SignOffItem>(ctx, signOffId, { includeRestricted: true }),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -12283,7 +12430,6 @@ export async function approveSignOff(
     );
   }
 
-  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
   if (!item) {
     return buildActionDenied('FORBIDDEN', 'Sign-off item not found or access denied.');
   }
@@ -12331,6 +12477,8 @@ export async function approveSignOff(
   item.approvedById = byId;
   item.approvedAt = nowIso;
 
+  await taskRepo.putSignOff(ctx, item);
+
   writeAudit(store, {
     recordType: item.matterId ? 'matter' : 'system',
     recordId: item.matterId ?? item.id,
@@ -12342,7 +12490,6 @@ export async function approveSignOff(
     at: nowIso,
   });
 
-  saveStore(store);
   return { ok: true };
 
     },
@@ -12361,9 +12508,11 @@ export async function discussSignOff(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, matters, item] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    taskRepo.getSignOffById<SignOffItem>(ctx, signOffId, { includeRestricted: true }),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -12377,7 +12526,6 @@ export async function discussSignOff(
     );
   }
 
-  const item = (store.signOffs ?? []).find((s) => s.id === signOffId);
   if (!item) {
     return buildActionDenied('FORBIDDEN', 'Sign-off item not found or access denied.');
   }
@@ -12424,6 +12572,8 @@ export async function discussSignOff(
   item.status = 'Discussing';
   item.discussionNote = note.trim() || 'Partner requested discussion before sign-off.';
 
+  await taskRepo.putSignOff(ctx, item);
+
   writeAudit(store, {
     recordType: item.matterId ? 'matter' : 'system',
     recordId: item.matterId ?? item.id,
@@ -12452,7 +12602,6 @@ export async function discussSignOff(
     { internalSystemStep: true },
   );
 
-  saveStore(store);
   return { ok: true };
 
     },
@@ -12563,7 +12712,9 @@ export async function flagMatterWriteOff(
     );
   }
 
-  const id = nextId(store, 'SO');
+  const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+  const taskRepo = getTaskWorkflowRepository();
+  const id = await taskRepo.allocateNextSignOffId(ctx);
   const nowIso = new Date().toISOString();
   const formattedAmt = amountGbp.toLocaleString('en-GB', {
     style: 'currency',
@@ -12596,9 +12747,7 @@ export async function flagMatterWriteOff(
     status: 'Pending',
   };
 
-  if (!Array.isArray(store.signOffs)) store.signOffs = [];
-  store.signOffs.unshift(signOff);
-  saveStore(store);
+  await taskRepo.putSignOff(ctx, signOff);
   return { ok: true, signOffId: id };
 
     },
@@ -12646,9 +12795,10 @@ export async function remindTeamLeadOverdueCompliance(
     return { ok: false };
   }
   const nowIso = new Date().toISOString();
-
-  store.notifications.unshift({
-    id: nextId(store, 'NTF'),
+  const taskRepo = getTaskWorkflowRepository();
+  const notifId = await taskRepo.allocateNextNotificationId(ctx);
+  await taskRepo.putNotification(ctx, {
+    id: notifId,
     recipientId: leadId,
     kind: 'task_overdue',
     title: `Compliance reminder: overdue onboarding / AML tasks in ${team.name}`,
@@ -12671,7 +12821,6 @@ export async function remindTeamLeadOverdueCompliance(
     at: nowIso,
   });
 
-  saveStore(store);
   return { ok: true };
 
     },
@@ -13210,10 +13359,13 @@ export async function saveQuoteRecord(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, opts.byId);
-  const [people, organisations, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, organisations, matters, enquiries, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
   ]);
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   if (
@@ -13228,12 +13380,14 @@ export async function saveQuoteRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const now = new Date();
   const nowIso = now.toISOString();
 
-  const existing = opts.id ? store.quotes.find((q) => q.id === opts.id) : undefined;
+  const existing = opts.id ? quotes.find((q) => q.id === opts.id) : undefined;
   if (opts.id && (!existing || !visibility.canViewQuote(existing))) {
     const msg = 'Quote not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -13251,7 +13405,7 @@ export async function saveQuoteRecord(
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   if (input.linkedEnquiryId) {
-    const linkedEnq = store.enquiries.find((e) => e.id === input.linkedEnquiryId);
+    const linkedEnq = enquiries.find((e) => e.id === input.linkedEnquiryId);
     if (!linkedEnq || !visibility.canViewEnquiry(linkedEnq)) {
       const msg = 'Linked enquiry not found or access denied.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -13313,7 +13467,7 @@ export async function saveQuoteRecord(
   }
 
   if (!existing) {
-    const reference = nextQuoteReference(store, now.getFullYear());
+    const reference = await intakeRepo.allocateNextQuoteReference(ctx, now.getFullYear());
     const timeline: Quote['timeline'] = [
       {
         id: `QT-${Date.now()}-1`,
@@ -13380,7 +13534,7 @@ export async function saveQuoteRecord(
       updatedAt: nowIso,
     };
 
-    store.quotes.unshift(created);
+    await intakeRepo.putQuote(ctx, created);
     writeAudit(store, {
       recordType: 'quote',
       recordId: created.id,
@@ -13391,7 +13545,6 @@ export async function saveQuoteRecord(
       byId: opts.byId,
       at: nowIso,
     });
-    saveStore(store);
     return { quote: created };
   }
 
@@ -13443,6 +13596,7 @@ export async function saveQuoteRecord(
     existing.status = evaluateQuoteEffectiveStatus(existing, now);
   }
 
+  await intakeRepo.putQuote(ctx, existing);
   writeAudit(store, {
     recordType: 'quote',
     recordId: existing.id,
@@ -13453,7 +13607,6 @@ export async function saveQuoteRecord(
     byId: opts.byId,
     at: nowIso,
   });
-  saveStore(store);
   return { quote: existing };
 
     },
@@ -13470,9 +13623,11 @@ export async function markQuoteSentRecord(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13487,9 +13642,10 @@ export async function markQuoteSentRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const quote = store.quotes.find((q) => q.id === quoteId);
+  const quote = quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -13515,6 +13671,7 @@ export async function markQuoteSentRecord(
     detail: `First follow-up scheduled for ${nextFollowUpDate} (${followUpDays} days)`,
   });
 
+  await intakeRepo.putQuote(ctx, quote);
   writeAudit(store, {
     recordType: 'quote',
     recordId: quote.id,
@@ -13526,7 +13683,6 @@ export async function markQuoteSentRecord(
     at: nowIso,
   });
 
-  saveStore(store);
   return { quote };
 
     },
@@ -13548,9 +13704,11 @@ export async function logQuoteFollowUpRecord(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13565,9 +13723,10 @@ export async function logQuoteFollowUpRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const quote = store.quotes.find((q) => q.id === quoteId);
+  const quote = quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -13607,6 +13766,7 @@ export async function logQuoteFollowUpRecord(
     detail: `${input.note.trim()}${nextDate ? ` · Next follow-up: ${nextDate}` : ''}`,
   });
 
+  await intakeRepo.putQuote(ctx, quote);
   writeAudit(store, {
     recordType: 'quote',
     recordId: quote.id,
@@ -13618,7 +13778,6 @@ export async function logQuoteFollowUpRecord(
     at: nowIso,
   });
 
-  saveStore(store);
   return { quote };
 
     },
@@ -13649,9 +13808,11 @@ export async function reviseQuoteRecord(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13666,9 +13827,10 @@ export async function reviseQuoteRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const quote = store.quotes.find((q) => q.id === quoteId);
+  const quote = quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -13775,6 +13937,7 @@ export async function reviseQuoteRecord(
     });
   }
 
+  await intakeRepo.putQuote(ctx, quote);
   writeAudit(store, {
     recordType: 'quote',
     recordId: quote.id,
@@ -13786,7 +13949,6 @@ export async function reviseQuoteRecord(
     at: nowIso,
   });
 
-  saveStore(store);
   return { quote };
 
     },
@@ -13808,9 +13970,11 @@ export async function recordQuoteOutcomeRecord(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, matters, quotes] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13825,9 +13989,10 @@ export async function recordQuoteOutcomeRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const quote = store.quotes.find((q) => q.id === quoteId);
+  const quote = quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -13875,6 +14040,7 @@ export async function recordQuoteOutcomeRecord(
     });
   }
 
+  await intakeRepo.putQuote(ctx, quote);
   writeAudit(store, {
     recordType: 'quote',
     recordId: quote.id,
@@ -13889,7 +14055,6 @@ export async function recordQuoteOutcomeRecord(
     at: nowIso,
   });
 
-  saveStore(store);
   return { quote };
 
     },
@@ -13923,11 +14088,14 @@ export async function prepareQuoteConversionRecord(
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, links, matters] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
     partyRepo.listAllPeople<Person>(ctx),
     partyRepo.listAllOrganisations<Organisation>(ctx),
     partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
     matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
@@ -13947,9 +14115,11 @@ export async function prepareQuoteConversionRecord(
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    enquiries,
+    quotes,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
-  const quote = store.quotes.find((q) => q.id === quoteId);
+  const quote = quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     return { ok: false, error: 'Quote not found.' };
   }
@@ -13968,7 +14138,7 @@ export async function prepareQuoteConversionRecord(
 
   // If linked to an enquiry that already has linkedPersonId / linkedOrganisationId, inherit if missing
   const linkedEnq = quote.linkedEnquiryId
-    ? store.enquiries.find((e) => e.id === quote.linkedEnquiryId)
+    ? enquiries.find((e) => e.id === quote.linkedEnquiryId)
     : undefined;
   if (linkedEnq) {
     if (!personId && linkedEnq.linkedPersonId) personId = linkedEnq.linkedPersonId;
@@ -14049,7 +14219,7 @@ export async function prepareQuoteConversionRecord(
     },
     {
       matters,
-      enquiries: store.enquiries,
+      enquiries,
       people,
       organisations,
       links,
@@ -14092,7 +14262,7 @@ export async function prepareQuoteConversionRecord(
     organisations,
     matters,
     store.values,
-    store.enquiries.filter((e) => visibility.canViewEnquiry(e)),
+    enquiries.filter((e) => visibility.canViewEnquiry(e)),
     quote.linkedEnquiryId ?? null,
     links,
     visibility.canViewMatter,
@@ -14160,7 +14330,6 @@ export async function prepareQuoteConversionRecord(
       at: nowIso,
       snapshot: decisionSnapshot,
     });
-    saveStore(store);
 
     return {
       ok: false,
@@ -14334,7 +14503,7 @@ export async function prepareQuoteConversionRecord(
   quote.updatedAt = nowIso;
   quote.updatedById = byId;
 
-  saveStore(store);
+  await intakeRepo.putQuote(ctx, quote);
 
   const clientId = orgId || personId || '';
   const instructingContactId = orgId ? personId : personId;
@@ -14361,8 +14530,12 @@ async function finalizeQuoteConversionToMatter(
   ctx: TenantContext,
   compensator: RecordDeltaCompensator,
 ): Promise<void> {
-  const quote = store.quotes.find((q) => q.id === quoteId);
+  const intakeRepo = getIntakeQuoteRepository();
+  const quote = await intakeRepo.getQuoteById<Quote>(ctx, quoteId, {
+    includeRestricted: true,
+  });
   if (!quote) return;
+  const prevQuoteSnapshot = structuredClone(quote);
 
   const alreadyConverted = quote.convertedMatterId === matter.id;
   quote.status = 'Accepted';
@@ -14396,6 +14569,11 @@ async function finalizeQuoteConversionToMatter(
       at: now,
     });
   }
+
+  await intakeRepo.putQuote(ctx, quote);
+  compensator.register(`finalizeQuoteConversionToMatter.quote:${quote.id}`, async () => {
+    await intakeRepo.putQuote(ctx, prevQuoteSnapshot);
+  });
 
   // Also close any linked enquiry and link it to the matter
   if (quote.linkedEnquiryId) {
@@ -14872,12 +15050,43 @@ async function commitKeyDateDomainWritesInPostgres(params: {
   ctx: TenantContext;
   keyDatesToUpsert?: readonly KeyDate[];
   notApplicableToUpsert?: readonly KeyDateNotApplicable[];
-  reminderStatesToUpsert?: readonly KeyDateReminderState[];
+  reminderStatesToUpsert?: KeyDateReminderState[];
   calendarSyncsToUpsert?: readonly KeyDateCalendarSync[];
-  auditEntries: readonly AuditEntry[];
+  tasksToUpsert?: Task[];
+  tasksToDeleteIds?: readonly string[];
+  notificationsToUpsert?: NotificationItem[];
+  auditEntries: AuditEntry[];
 }): Promise<void> {
   const keyDateRepo = getKeyDateRepository();
-  await keyDateRepo.withTenantTransaction(params.ctx, async () => {
+  const taskRepo = getTaskWorkflowRepository();
+  await keyDateRepo.withTenantTransaction(params.ctx, async (tx) => {
+    for (const deletedId of params.tasksToDeleteIds ?? []) {
+      await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
+        params.ctx.tenantId,
+        deletedId,
+      ]);
+    }
+    for (const t of params.tasksToUpsert ?? []) {
+      if (t.id.startsWith('TSK-PENDING-')) {
+        const oldId = t.id;
+        const realId = await taskRepo.allocateNextTaskId(params.ctx);
+        t.id = realId;
+        t.reference = realId;
+        for (const rs of params.reminderStatesToUpsert ?? []) {
+          if (rs.taskId === oldId) rs.taskId = realId;
+        }
+        for (const a of params.auditEntries) {
+          if (a.recordId === oldId) a.recordId = realId;
+        }
+      }
+      await taskRepo.putTask(params.ctx, t);
+    }
+    for (const n of params.notificationsToUpsert ?? []) {
+      if (n.id.startsWith('NTF-PENDING-')) {
+        n.id = await taskRepo.allocateNextNotificationId(params.ctx);
+      }
+      await taskRepo.putNotification(params.ctx, n);
+    }
     for (const kd of params.keyDatesToUpsert ?? []) {
       await keyDateRepo.putKeyDate(params.ctx, kd);
     }
@@ -15085,7 +15294,7 @@ export async function createOrProposeKeyDateRecord(
   message?: string;
 }> {
   try {
-    return await withJsonStoreWriteLock(async (compensator) => {
+    return await withJsonStoreWriteLock(async () => {
       const store = getStore();
       const resolved = await resolveKeyDatesActorAndData(store, byId);
       if (!resolved || !resolved.actor) {
@@ -15103,7 +15312,9 @@ export async function createOrProposeKeyDateRecord(
         ? matters.find((m) => m.id === input.matterId) ?? null
         : null;
       const enquiry = input.enquiryId
-        ? store.enquiries.find((e) => e.id === input.enquiryId) ?? null
+        ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(ctx, input.enquiryId, {
+            includeRestricted: true,
+          })
         : null;
 
       if (
@@ -15131,6 +15342,7 @@ export async function createOrProposeKeyDateRecord(
       }
 
       const keyDateRepo = getKeyDateRepository();
+      const taskRepo = getTaskWorkflowRepository();
       const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
       const stagedAudit: AuditEntry[] = [];
       let pendingIdx = 0;
@@ -15162,10 +15374,15 @@ export async function createOrProposeKeyDateRecord(
 
       const reminderStatesWorking: KeyDateReminderState[] = [];
       const calendarSyncsWorking: KeyDateCalendarSync[] = [];
-      const baseline = captureJsonStoreBaseline(store);
+      let changedTasks: Task[] = [];
+      let deletedTaskIds: string[] = [];
 
       if (kd.status === 'confirmed') {
-        const { tasks: storeTasks } = store;
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
         syncReminderForConfirmedKeyDate({
           keyDate: kd,
           config,
@@ -15179,8 +15396,15 @@ export async function createOrProposeKeyDateRecord(
           nowIso,
           actorId: actor.id,
           tenantId: ctx.tenantId,
-          nextTaskId: () => nextId(store, 'TSK'),
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
         });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
       }
 
       await syncKeyDateToOutlookCalendar({
@@ -15192,21 +15416,13 @@ export async function createOrProposeKeyDateRecord(
         nowIso,
       });
 
-      const storeMutated = registerJsonStoreRecordDeltas(
-        baseline,
-        store,
-        compensator,
-        'createOrProposeKeyDateRecord.tasks',
-      );
-      if (storeMutated) {
-        saveStore(store);
-      }
-
       await commitKeyDateDomainWritesInPostgres({
         ctx,
         keyDatesToUpsert: [kd],
         reminderStatesToUpsert: reminderStatesWorking,
         calendarSyncsToUpsert: calendarSyncsWorking,
+        tasksToUpsert: changedTasks,
+        tasksToDeleteIds: deletedTaskIds,
         auditEntries: stagedAudit,
       });
 
@@ -15225,7 +15441,7 @@ export async function proposeProvisionalKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async (compensator) => {
+    return await withJsonStoreWriteLock(async () => {
       const store = getStore();
       const resolved = await resolveKeyDatesActorAndData(store, byId);
       if (!resolved || !resolved.actor) {
@@ -15252,6 +15468,7 @@ export async function proposeProvisionalKeyDateRecord(
       }
       const { kd, matter, enquiry } = loaded;
       const keyDateRepo = getKeyDateRepository();
+      const taskRepo = getTaskWorkflowRepository();
 
       const stagedAudit: AuditEntry[] = [];
       let pendingIdx = 0;
@@ -15278,9 +15495,14 @@ export async function proposeProvisionalKeyDateRecord(
         ? [existingSync]
         : [];
 
-      const baseline = captureJsonStoreBaseline(store);
+      let changedTasks: Task[] = [];
+      let deletedTaskIds: string[] = [];
       if (kd.status === 'confirmed') {
-        const { tasks: storeTasks } = store;
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
         syncReminderForConfirmedKeyDate({
           keyDate: kd,
           config,
@@ -15294,8 +15516,15 @@ export async function proposeProvisionalKeyDateRecord(
           nowIso,
           actorId: actor.id,
           tenantId: ctx.tenantId,
-          nextTaskId: () => nextId(store, 'TSK'),
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
         });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
       }
 
       await syncKeyDateToOutlookCalendar({
@@ -15307,21 +15536,13 @@ export async function proposeProvisionalKeyDateRecord(
         nowIso,
       });
 
-      const storeMutated = registerJsonStoreRecordDeltas(
-        baseline,
-        store,
-        compensator,
-        'proposeProvisionalKeyDateRecord.tasks',
-      );
-      if (storeMutated) {
-        saveStore(store);
-      }
-
       await commitKeyDateDomainWritesInPostgres({
         ctx,
         keyDatesToUpsert: [kd],
         reminderStatesToUpsert: reminderStatesWorking,
         calendarSyncsToUpsert: calendarSyncsWorking,
+        tasksToUpsert: changedTasks,
+        tasksToDeleteIds: deletedTaskIds,
         auditEntries: stagedAudit,
       });
 
@@ -15363,7 +15584,9 @@ async function loadKeyDateForActorOrClassifyError(
     ? matters.find((m) => m.id === kd.matterId) ?? null
     : null;
   const enquiry = kd.enquiryId
-    ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
+    ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(ctx, kd.enquiryId, {
+        includeRestricted: true,
+      })
     : null;
   if (
     kd.matterId &&
@@ -15379,7 +15602,7 @@ export async function verifyProposedKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async (compensator) => {
+    return await withJsonStoreWriteLock(async () => {
       const store = getStore();
       const resolved = await resolveKeyDatesActorAndData(store, byId);
       if (!resolved || !resolved.actor) {
@@ -15420,6 +15643,7 @@ export async function verifyProposedKeyDateRecord(
       });
 
       const keyDateRepo = getKeyDateRepository();
+      const taskRepo = getTaskWorkflowRepository();
       const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
         ctx,
         verifier.id,
@@ -15429,8 +15653,11 @@ export async function verifyProposedKeyDateRecord(
         verifier.id,
       );
 
-      const baseline = captureJsonStoreBaseline(store);
-      const { tasks: storeTasks } = store;
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      );
+      let pendingTaskIdx = 0;
       syncReminderForConfirmedKeyDate({
         keyDate: kd,
         config,
@@ -15444,7 +15671,7 @@ export async function verifyProposedKeyDateRecord(
         nowIso,
         actorId: verifier.id,
         tenantId: ctx.tenantId,
-        nextTaskId: () => nextId(store, 'TSK'),
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
         transferredFromKeyDateId: kd.supersedesKeyDateId,
       });
 
@@ -15457,15 +15684,13 @@ export async function verifyProposedKeyDateRecord(
         nowIso,
       });
 
-      const storeMutated = registerJsonStoreRecordDeltas(
-        baseline,
-        store,
-        compensator,
-        'verifyProposedKeyDateRecord.tasks',
+      const changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
       );
-      if (storeMutated) {
-        saveStore(store);
-      }
+      const currentIds = new Set(storeTasks.map((t) => t.id));
+      const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+        (id) => !currentIds.has(id),
+      );
 
       const targetReminders = reminderStatesWorking.filter(
         (rs) => rs.keyDateId === kd.id || rs.keyDateId === kd.supersedesKeyDateId,
@@ -15477,6 +15702,8 @@ export async function verifyProposedKeyDateRecord(
         keyDatesToUpsert: [kd],
         reminderStatesToUpsert: targetReminders,
         calendarSyncsToUpsert: targetSyncs,
+        tasksToUpsert: changedTasks,
+        tasksToDeleteIds: deletedTaskIds,
         auditEntries: stagedAudit,
       });
 
@@ -15575,7 +15802,7 @@ export async function supersedeConfirmedKeyDateRecord(
   message?: string;
 }> {
   try {
-    return await withJsonStoreWriteLock(async (compensator) => {
+    return await withJsonStoreWriteLock(async () => {
       const store = getStore();
       const resolved = await resolveKeyDatesActorAndData(store, byId);
       if (!resolved || !resolved.actor) {
@@ -15621,6 +15848,7 @@ export async function supersedeConfirmedKeyDateRecord(
       }
 
       const keyDateRepo = getKeyDateRepository();
+      const taskRepo = getTaskWorkflowRepository();
       const newKeyDateId = await keyDateRepo.allocateNextKeyDateId(ctx);
       const stagedAudit: AuditEntry[] = [];
       let pendingIdx = 0;
@@ -15650,8 +15878,11 @@ export async function supersedeConfirmedKeyDateRecord(
         actor.id,
       );
 
-      const baseline = captureJsonStoreBaseline(store);
-      const { tasks: storeTasks } = store;
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      );
+      let pendingTaskIdx = 0;
       syncReminderForConfirmedKeyDate({
         keyDate: replacementKeyDate,
         config,
@@ -15665,7 +15896,7 @@ export async function supersedeConfirmedKeyDateRecord(
         nowIso,
         actorId: actor.id,
         tenantId: ctx.tenantId,
-        nextTaskId: () => nextId(store, 'TSK'),
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
         transferredFromKeyDateId: supersededKeyDate.id,
       });
 
@@ -15686,17 +15917,37 @@ export async function supersedeConfirmedKeyDateRecord(
         nowIso,
       });
 
-      const storeMutated = registerJsonStoreRecordDeltas(
-        baseline,
-        store,
-        compensator,
-        'supersedeConfirmedKeyDateRecord.tasks',
+      const changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
       );
-      if (storeMutated) {
-        saveStore(store);
-      }
+      const currentIds = new Set(storeTasks.map((t) => t.id));
+      const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+        (id) => !currentIds.has(id),
+      );
 
-      await keyDateRepo.withTenantTransaction(ctx, async () => {
+      await keyDateRepo.withTenantTransaction(ctx, async (tx) => {
+        for (const deletedId of deletedTaskIds) {
+          await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
+            ctx.tenantId,
+            deletedId,
+          ]);
+        }
+        for (const t of changedTasks) {
+          if (t.id.startsWith('TSK-PENDING-')) {
+            const oldId = t.id;
+            const realId = await taskRepo.allocateNextTaskId(ctx);
+            t.id = realId;
+            t.reference = realId;
+            for (const rs of reminderStatesWorking) {
+              if (rs.taskId === oldId) rs.taskId = realId;
+            }
+            for (const a of stagedAudit) {
+              if (a.recordId === oldId) a.recordId = realId;
+            }
+          }
+          await taskRepo.putTask(ctx, t);
+        }
+
         // Insert replacement first without supersededBy link on existing, then link both cleanly
         const replacementFirst = { ...replacementKeyDate };
         await keyDateRepo.putKeyDate(ctx, {
@@ -15760,7 +16011,7 @@ export async function resolveKeyDateOutcomeRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async (compensator) => {
+    return await withJsonStoreWriteLock(async () => {
       const store = getStore();
       const resolved = await resolveKeyDatesActorAndData(store, byId);
       if (!resolved || !resolved.actor) {
@@ -15802,13 +16053,16 @@ export async function resolveKeyDateOutcomeRecord(
       });
 
       const keyDateRepo = getKeyDateRepository();
+      const taskRepo = getTaskWorkflowRepository();
       const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
       const reminderStatesWorking = existingReminder ? [existingReminder] : [];
       const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
       const calendarSyncsWorking = existingSync ? [existingSync] : [];
 
-      const baseline = captureJsonStoreBaseline(store);
-      const { tasks: storeTasks } = store;
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      );
       closeReminderTaskForKeyDate({
         keyDateId: kd.id,
         tenantId: ctx.tenantId,
@@ -15827,21 +16081,16 @@ export async function resolveKeyDateOutcomeRecord(
         nowIso,
       });
 
-      const storeMutated = registerJsonStoreRecordDeltas(
-        baseline,
-        store,
-        compensator,
-        'resolveKeyDateOutcomeRecord.tasks',
+      const changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
       );
-      if (storeMutated) {
-        saveStore(store);
-      }
 
       await commitKeyDateDomainWritesInPostgres({
         ctx,
         keyDatesToUpsert: [kd],
         reminderStatesToUpsert: reminderStatesWorking,
         calendarSyncsToUpsert: calendarSyncsWorking,
+        tasksToUpsert: changedTasks,
         auditEntries: stagedAudit,
       });
 
@@ -15866,7 +16115,7 @@ export async function reassignKeyDateTeamRecord(
   options?: { calendarAdapter?: GraphCalendarAdapter },
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async (compensator) => {
+    return await withJsonStoreWriteLock(async () => {
       const store = getStore();
       const resolved = await resolveKeyDatesActorAndData(store, byId);
       if (!resolved || !resolved.actor) {
@@ -15893,8 +16142,11 @@ export async function reassignKeyDateTeamRecord(
       const stagedAudit: AuditEntry[] = [];
       let pendingIdx = 0;
 
-      const baseline = captureJsonStoreBaseline(store);
-      const { tasks: storeTasks } = store;
+      const taskRepo = getTaskWorkflowRepository();
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      );
       reassignKeyDateTeamAndOwners({
         keyDate: kd,
         tenantId: ctx.tenantId,
@@ -15926,20 +16178,15 @@ export async function reassignKeyDateTeamRecord(
         nowIso,
       });
 
-      const storeMutated = registerJsonStoreRecordDeltas(
-        baseline,
-        store,
-        compensator,
-        'reassignKeyDateTeamRecord.tasks',
+      const changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
       );
-      if (storeMutated) {
-        saveStore(store);
-      }
 
       await commitKeyDateDomainWritesInPostgres({
         ctx,
         keyDatesToUpsert: [kd],
         calendarSyncsToUpsert: calendarSyncsWorking,
+        tasksToUpsert: changedTasks,
         auditEntries: stagedAudit,
       });
 
@@ -16025,7 +16272,7 @@ export async function acknowledgeKeyDateReminderRecord(
   byId: string,
 ): Promise<{ ok: boolean; reminderState?: KeyDateReminderState; error?: string }> {
   try {
-    return await withJsonStoreWriteLock(async (compensator) => {
+    return await withJsonStoreWriteLock(async () => {
       const store = getStore();
       const resolved = await resolveKeyDatesActorAndData(store, byId);
       if (!resolved || !resolved.actor) {
@@ -16084,6 +16331,7 @@ export async function acknowledgeKeyDateReminderRecord(
       const nowIso = new Date().toISOString();
       const todayIso = toIsoDate(new Date());
       const keyDateRepo = getKeyDateRepository();
+      const taskRepo = getTaskWorkflowRepository();
       const existingReminder = await keyDateRepo.getReminderState(ctx, keyDateId, actor.id);
       const reminderStatesWorking: KeyDateReminderState[] = existingReminder
         ? [existingReminder]
@@ -16091,9 +16339,14 @@ export async function acknowledgeKeyDateReminderRecord(
       const stagedAudit: AuditEntry[] = [];
       let pendingIdx = 0;
 
-      const baseline = captureJsonStoreBaseline(store);
+      let changedTasks: Task[] = [];
+      let deletedTaskIds: string[] = [];
       if (reminderStatesWorking.length === 0) {
-        const { tasks: storeTasks } = store;
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
         syncReminderForConfirmedKeyDate({
           keyDate: kd,
           config,
@@ -16107,8 +16360,15 @@ export async function acknowledgeKeyDateReminderRecord(
           nowIso,
           actorId: actor.id,
           tenantId: ctx.tenantId,
-          nextTaskId: () => nextId(store, 'TSK'),
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
         });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
       }
 
       const state = acknowledgeKeyDateReminderStage({
@@ -16120,19 +16380,11 @@ export async function acknowledgeKeyDateReminderRecord(
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
 
-      const storeMutated = registerJsonStoreRecordDeltas(
-        baseline,
-        store,
-        compensator,
-        'acknowledgeKeyDateReminderRecord.tasks',
-      );
-      if (storeMutated) {
-        saveStore(store);
-      }
-
       await commitKeyDateDomainWritesInPostgres({
         ctx,
         reminderStatesToUpsert: reminderStatesWorking,
+        tasksToUpsert: changedTasks,
+        tasksToDeleteIds: deletedTaskIds,
         auditEntries: stagedAudit,
       });
 
@@ -16279,11 +16531,13 @@ export async function runKeyDateReminderSchedulerRecord(
     );
   }
 
-  return withJsonStoreWriteLock(async (compensator) => {
+  return withJsonStoreWriteLock(async () => {
     const store = getStore();
-    const [people, matters] = await Promise.all([
+    const taskRepo = getTaskWorkflowRepository();
+    const [people, matters, storeTasks] = await Promise.all([
       getPartyRepository().listAllPeople<Person>(effectiveTenantCtx!),
       getMatterRepository().listAllMattersUnfiltered<Matter>(effectiveTenantCtx!),
+      taskRepo.listAllTasksUnfiltered<Task>(effectiveTenantCtx!),
     ]);
     const config = await getKeyDatesConfig({
       ctx: effectiveTenantCtx!,
@@ -16330,11 +16584,15 @@ export async function runKeyDateReminderSchedulerRecord(
     const beforeReminderJsonByKd = new Map(
       reminderStatesWorking.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
     );
+    const beforeTaskJsonById = new Map(
+      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+    );
+    const createdNotifications: NotificationItem[] = [];
     const stagedAudit: AuditEntry[] = [];
     let pendingIdx = 0;
+    let pendingTaskIdx = 0;
+    let pendingNotifIdx = 0;
 
-    const baseline = captureJsonStoreBaseline(store);
-    const { tasks: storeTasks } = store;
     const result = runTenantBackgroundJob(
       {
         jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
@@ -16354,30 +16612,30 @@ export async function runKeyDateReminderSchedulerRecord(
           matters,
           teams: store.teams,
           people,
-          notifications: store.notifications,
+          notifications: createdNotifications,
           audit: stagedAudit,
-          nextTaskId: () => nextId(store, 'TSK'),
-          nextNotificationId: () => nextId(store, 'NTF'),
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+          nextNotificationId: () => `NTF-PENDING-${++pendingNotifIdx}`,
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
         }),
     );
 
-    const storeMutated = registerJsonStoreRecordDeltas(
-      baseline,
-      store,
-      compensator,
-      'runKeyDateReminderSchedulerRecord.tasks',
+    const changedTasks = storeTasks.filter(
+      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
     );
-    if (storeMutated) {
-      saveStore(store);
-    }
-
+    const currentIds = new Set(storeTasks.map((t) => t.id));
+    const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+      (id) => !currentIds.has(id),
+    );
     const changedReminders = reminderStatesWorking.filter(
       (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
     );
     await commitKeyDateDomainWritesInPostgres({
       ctx: effectiveTenantCtx!,
       reminderStatesToUpsert: changedReminders,
+      tasksToUpsert: changedTasks,
+      tasksToDeleteIds: deletedTaskIds,
+      notificationsToUpsert: createdNotifications,
       auditEntries: stagedAudit,
     });
 
@@ -16401,9 +16659,11 @@ export async function queryKeyDatesTeamDiaryRecord(
   const { ctx, actor: viewer, people, matters } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
   const keyDateRepo = getKeyDateRepository();
-  const [keyDates, reminderStates] = await Promise.all([
+  const intakeRepo = getIntakeQuoteRepository();
+  const [keyDates, reminderStates, enquiries] = await Promise.all([
     keyDateRepo.listAllVisibleKeyDates(ctx, viewer.id),
     keyDateRepo.listAllReminderStates(ctx, viewer.id),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
   ]);
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
@@ -16419,7 +16679,7 @@ export async function queryKeyDatesTeamDiaryRecord(
     keyDates,
     reminderStates,
     matters: visibleMatters,
-    enquiries: store.enquiries,
+    enquiries,
     teams: store.teams,
     people,
   });

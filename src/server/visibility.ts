@@ -17,21 +17,22 @@ export interface RecordVisibility {
 export const EMPTY_HIDDEN_KEY_DATE_IDS: ReadonlySet<string> = new Set<string>();
 
 export function buildRecordVisibility(
-  store: Pick<FirmStore, 'teams' | 'enquiries' | 'quotes'> & {
-    people?: readonly Person[];
-    matters?: readonly Matter[];
-  },
+  store: Pick<FirmStore, 'teams'>,
   user: Person | null | undefined,
   opts: {
     tokenRoles?: readonly string[];
     hiddenMatterKeyDateIds: ReadonlySet<string>;
     people?: readonly Person[];
     matters?: readonly Matter[];
+    enquiries?: readonly Enquiry[];
+    quotes?: readonly Quote[];
   },
 ): RecordVisibility {
   const userId = user?.id ?? '';
-  const allPeople = opts.people ?? store.people ?? [];
-  const allMatters = opts.matters ?? store.matters ?? [];
+  const allPeople = opts.people ?? [];
+  const allMatters = opts.matters ?? [];
+  const allEnquiries = opts.enquiries ?? [];
+  const allQuotes = opts.quotes ?? [];
   const canViewMatter = (m: Matter): boolean =>
     Boolean(userId) &&
     canPersonAccessMatter(m, userId, user ?? null, {
@@ -71,7 +72,7 @@ export function buildRecordVisibility(
   };
 
   const hiddenEnquiryIds = new Set<string>();
-  for (const e of store.enquiries) {
+  for (const e of allEnquiries) {
     if (!canViewEnquiry(e)) {
       hiddenEnquiryIds.add(e.id);
     }
@@ -92,7 +93,7 @@ export function buildRecordVisibility(
   };
 
   const hiddenQuoteIds = new Set<string>();
-  for (const q of store.quotes ?? []) {
+  for (const q of allQuotes) {
     if (!canViewQuote(q)) {
       hiddenQuoteIds.add(q.id);
     }
