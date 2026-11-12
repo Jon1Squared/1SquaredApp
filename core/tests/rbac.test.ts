@@ -2103,7 +2103,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const store = getStore();
         const r123Ctx = testDataResetContext();
         const templateTask = (await getTaskWorkflowRepository().listAllTasksUnfiltered(r123Ctx))[0]!;
-        const firstMatter = (await getMatterRepository().listAllMatters<Matter>(r123Ctx))[0]!;
+        const firstMatter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(r123Ctx))[0]!;
         // Create an unassigned open task on a team (TM-000004 Corporate) that P-000001 (Real Estate Partner with task:claim_any) is not a member of, while P-000002 (Real Estate Fee Earner without task:claim_any) is also not a member of
         const corpTeam =
           store.teams.find((t) => !t.memberIds.includes('P-000001') && !t.memberIds.includes('P-000002')) ??

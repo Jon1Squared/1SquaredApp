@@ -1849,7 +1849,7 @@ export async function reassignLeaverOwnedRecords(
   >({
     label: 'reassignLeaverOwnedRecords',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store, compensator): Promise<{ reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>> => {
+    mutate: async (store): Promise<{ reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>> => {
   const reassignCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -2132,6 +2132,7 @@ export async function reassignLeaverOwnedRecords(
     for (const { enquiry: e } of changedEnquiries) {
       await intakeRepo.putEnquiry(reassignCtx, e);
     }
+    await flushStagedAuditEntries(reassignCtx);
   });
   for (const { matter: m, prevMatter } of changedMatters) {
     const isRestricted =
@@ -2146,35 +2147,6 @@ export async function reassignLeaverOwnedRecords(
       });
     }
   }
-  compensator.register('leaver.reassign', async () => {
-    await partyRepo.withTenantTransaction(reassignCtx, async () => {
-      for (const { prevPerson } of changedPeople) {
-        await partyRepo.putPerson(reassignCtx, prevPerson);
-      }
-      for (const { prevOrg } of changedOrganisations) {
-        await partyRepo.putOrganisation(reassignCtx, prevOrg);
-      }
-      for (const { prevMatter } of changedMatters) {
-        if (!prevMatter) continue;
-        const prevMeta = computeMatterRestrictionMetadataForStore(
-          prevMatter,
-          people,
-          store.teams,
-          tenantCfg,
-        );
-        await matterRepo.putMatter(reassignCtx, prevMatter, {
-          expectedRowVersion: null,
-          sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
-        });
-      }
-      for (const { prevTask } of changedTasks) {
-        await taskRepo.putTask(reassignCtx, prevTask);
-      }
-      for (const { prevEnquiry } of changedEnquiries) {
-        await intakeRepo.putEnquiry(reassignCtx, prevEnquiry);
-      }
-    });
-  });
 
   return { reassignedCount: count };
     },
@@ -4311,7 +4283,7 @@ export async function saveMatterRecord(
     label: 'saveMatterRecord',
     resolveCtx: (s) =>
       resolvedMatterCtx ?? resolveDefaultServiceTenantContext(s, opts.byId),
-    mutate: async (store, compensator) => {
+    mutate: async (store) => {
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
@@ -5601,6 +5573,252 @@ export async function saveMatterRecord(
         expectedRowVersion: expectedRowVersionForPut,
       });
       matter = saved;
+
+      if (!existing) {
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: matter.id,
+          action: 'create',
+          field: null,
+          oldValue: null,
+          newValue: `${matter.matterNumber} — ${matter.title}`,
+          byId: opts.byId,
+          at: now,
+        });
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: matter.id,
+          action: 'create',
+          field: 'Conflict check record',
+          oldValue: null,
+          newValue: `${matter.conflictCheckRecord!.status} (${matter.conflictCheckRecord!.outcomeLabel}) · ${matter.conflictCheckRecord!.parties.length} parties checked`,
+          byId: opts.byId,
+          at: now,
+        });
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: matter.id,
+          action: 'create',
+          field: 'Matter risk assessment',
+          oldValue: null,
+          newValue: `Overall risk: ${fullRiskAssessment.overallRisk ?? 'Not assessed'} (${fullRiskAssessment.completedQuestions}/${fullRiskAssessment.totalQuestions} questions completed)`,
+          byId: opts.byId,
+          at: now,
+        });
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: matter.id,
+          action: 'create',
+          field: 'Matter opening snapshot (PDF)',
+          oldValue: null,
+          newValue: `Matter-Opening-Record-${matter.matterNumber}.pdf (Immutable historical copy captured at matter opening)`,
+          byId: opts.byId,
+          at: now,
+        });
+        if (isPmsImport && willOpen) {
+          writeAudit(store, {
+            recordType: 'matter',
+            recordId: matter.id,
+            action: 'matter-imported-open',
+            field: 'PMS import',
+            oldValue: null,
+            newValue: `Imported already-open matter ${matter.matterNumber} from PMS (opening gate skipped)`,
+            byId: opts.byId,
+            at: now,
+          });
+        }
+
+        if (matter.sourceEnquiryId) {
+          await finalizeEnquiryConversionToMatter(
+            store,
+            matter.sourceEnquiryId,
+            matter,
+            opts.byId,
+            now,
+            extensionCtx,
+          );
+        }
+        if (matter.sourceQuoteId) {
+          await finalizeQuoteConversionToMatter(
+            store,
+            matter.sourceQuoteId,
+            matter,
+            opts.byId,
+            now,
+            extensionCtx,
+          );
+        }
+      } else if (previousMatterSnapshot) {
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: matter.id,
+          action: 'update',
+          field: 'Matter details & type-specific fields',
+          oldValue: previousMatterSnapshot.title,
+          newValue: `${matter.matterNumber} — ${matter.title}`,
+          byId: opts.byId,
+          at: now,
+        });
+        if (
+          !existingHasOpened &&
+          (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred')
+        ) {
+          writeAudit(store, {
+            recordType: 'matter',
+            recordId: matter.id,
+            action: 'update',
+            field: 'Matter opening snapshot (PDF)',
+            oldValue: null,
+            newValue: `Matter-Opening-Record-${matter.matterNumber}.pdf (Immutable historical copy captured at matter opening)`,
+            byId: opts.byId,
+            at: now,
+          });
+        }
+
+        if (matter.sourceEnquiryId) {
+          await finalizeEnquiryConversionToMatter(
+            store,
+            matter.sourceEnquiryId,
+            matter,
+            opts.byId,
+            now,
+            extensionCtx,
+          );
+        }
+        if (matter.sourceQuoteId) {
+          await finalizeQuoteConversionToMatter(
+            store,
+            matter.sourceQuoteId,
+            matter,
+            opts.byId,
+            now,
+            extensionCtx,
+          );
+        }
+      }
+
+      // Handle To Do task creation / completion for Draft & Referred conflict checks
+      const clientOrg = allOrganisationsWithPending.find((o) => o.id === matter.clientId);
+      const clientPerson = allPeopleWithPending.find((p) => p.id === matter.clientId);
+      const clientLabel =
+        clientOrg?.legalName ||
+        (clientPerson ? personDisplayName(clientPerson) : matter.title || 'Untitled matter');
+      const draftTaskTitle = `Conflict check · ${clientLabel} · Draft`;
+
+      const existingDraftTask = tasks.find(
+        (t) =>
+          t.status !== 'Done' &&
+          t.status !== 'Cancelled' &&
+          (t.title === draftTaskTitle ||
+            (t.title.startsWith('Conflict check ·') &&
+              t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id))),
+      );
+
+      if (isDraftSave) {
+        if (existingDraftTask) {
+          existingDraftTask.title = draftTaskTitle;
+          existingDraftTask.updatedAt = now;
+          existingDraftTask.updatedById = opts.byId;
+          await taskRepo.putTask(extensionCtx, existingDraftTask);
+        } else {
+          const taskId = await taskRepo.allocateNextTaskId(extensionCtx);
+          const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
+          if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
+          else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
+          const newDraftTask: Task = {
+            id: taskId,
+            reference: taskId,
+            title: draftTaskTitle,
+            description: `Saved conflict check draft for ${matter.title}. Reopen to run fresh search and submit.`,
+            taskTypeId: vid('task_type', 'Conflict check'),
+            priorityId: vid('task_priority', 'High'),
+            dueAt: today,
+            assignedTeamId: null,
+            assignedPersonId: opts.byId,
+            status: 'To do',
+            linkedRecords,
+            createdById: opts.byId,
+            createdAt: now,
+            updatedById: opts.byId,
+            updatedAt: now,
+            completedById: null,
+            completedAt: null,
+            comments: [],
+          };
+          await taskRepo.putTask(extensionCtx, newDraftTask);
+        }
+      } else if (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred') {
+        if (existingDraftTask) {
+          existingDraftTask.status = 'Done';
+          existingDraftTask.completedById = opts.byId;
+          existingDraftTask.completedAt = now;
+          existingDraftTask.updatedAt = now;
+          existingDraftTask.updatedById = opts.byId;
+          await taskRepo.putTask(extensionCtx, existingDraftTask);
+        }
+        if (opts.saveMode === 'submit_referred') {
+          const riskTaskId = await taskRepo.allocateNextTaskId(extensionCtx);
+          const configuredTeamKey = tenantCfg.conflictReview?.assigneeTeamKey?.trim() || null;
+          const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
+          const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
+            resolveConflictReviewTaskRouting(
+              { people: allPeopleWithPending, teams: store.teams },
+              tenantCfg.conflictReview,
+              matter,
+            );
+
+          if (!assignedReviewerId) {
+            console.warn(
+              JSON.stringify({
+                level: 'warn',
+                event: 'conflict_review_task_unassigned',
+                tenantId: extensionCtx.tenantId,
+                correlationId: extensionCtx.correlationId,
+                matterId: matter.id,
+                configuredTeamKey,
+                configuredRoleKey,
+                assignedTeamId: resolvedRiskTeam?.id ?? null,
+              }),
+            );
+          }
+
+          const isRestrictedMatter = Boolean(matter.isStaffMatter || matter.hasEthicalWall);
+          const canIncludeMatterNames = !isRestrictedMatter || Boolean(assignedReviewerId);
+          const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
+          if (canIncludeMatterNames) {
+            if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
+            else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
+          }
+          const riskTask: Task = {
+            id: riskTaskId,
+            reference: riskTaskId,
+            title: canIncludeMatterNames
+              ? `Conflict review · ${clientLabel} — ${matter.title}`
+              : `Conflict review required: ${matter.id}`,
+            description: canIncludeMatterNames
+              ? matter.conflictCheckRecord?.reviewerMessage ||
+                `Referred to Risk & Compliance for conflict review on ${clientLabel}.`
+              : `Referred for conflict review on restricted matter ${matter.id}.`,
+            taskTypeId: vid('task_type', 'Conflict check'),
+            priorityId: vid('task_priority', 'High'),
+            dueAt: today,
+            assignedTeamId: resolvedRiskTeam?.id ?? null,
+            assignedPersonId: assignedReviewerId,
+            status: 'To do',
+            linkedRecords,
+            createdById: opts.byId,
+            createdAt: now,
+            updatedById: opts.byId,
+            updatedAt: now,
+            completedById: null,
+            completedAt: null,
+            comments: [],
+          };
+          await taskRepo.putTask(extensionCtx, riskTask);
+        }
+      }
+
+      await flushStagedAuditEntries(extensionCtx);
     });
   } catch (err) {
     if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
@@ -5614,311 +5832,6 @@ export async function saveMatterRecord(
       };
     }
     throw err;
-  }
-
-  compensator.register(`matter.persist:${matter.id}`, async () => {
-    await matterRepo.withTenantTransaction(extensionCtx, async (tx) => {
-      if (previousMatterSnapshot) {
-        const prevMeta = computeMatterRestrictionMetadataForStore(
-          previousMatterSnapshot,
-          people,
-          store.teams,
-          tenantCfg,
-        );
-        await matterRepo.putMatter(extensionCtx, previousMatterSnapshot, {
-          expectedRowVersion: null,
-          sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
-        });
-      } else {
-        await tx.query('DELETE FROM matters WHERE tenant_id = $1 AND id = $2', [
-          extensionCtx.tenantId,
-          matter.id,
-        ]);
-      }
-      for (const link of pendingEnquiryLinks) {
-        await intakeRepo.putEnquiry(extensionCtx, link.prevEnquiry);
-      }
-      for (const person of pendingPeople) {
-        await tx.query('DELETE FROM people WHERE tenant_id = $1 AND id = $2', [
-          extensionCtx.tenantId,
-          person.id,
-        ]);
-      }
-      for (const org of pendingOrganisations) {
-        await tx.query(
-          'DELETE FROM organisations WHERE tenant_id = $1 AND id = $2',
-          [extensionCtx.tenantId, org.id],
-        );
-      }
-    });
-  });
-
-  if (!existing) {
-    writeAudit(store, {
-      recordType: 'matter',
-      recordId: matter.id,
-      action: 'create',
-      field: null,
-      oldValue: null,
-      newValue: `${matter.matterNumber} — ${matter.title}`,
-      byId: opts.byId,
-      at: now,
-    });
-    writeAudit(store, {
-      recordType: 'matter',
-      recordId: matter.id,
-      action: 'create',
-      field: 'Conflict check record',
-      oldValue: null,
-      newValue: `${matter.conflictCheckRecord!.status} (${matter.conflictCheckRecord!.outcomeLabel}) · ${matter.conflictCheckRecord!.parties.length} parties checked`,
-      byId: opts.byId,
-      at: now,
-    });
-    writeAudit(store, {
-      recordType: 'matter',
-      recordId: matter.id,
-      action: 'create',
-      field: 'Matter risk assessment',
-      oldValue: null,
-      newValue: `Overall risk: ${fullRiskAssessment.overallRisk ?? 'Not assessed'} (${fullRiskAssessment.completedQuestions}/${fullRiskAssessment.totalQuestions} questions completed)`,
-      byId: opts.byId,
-      at: now,
-    });
-    writeAudit(store, {
-      recordType: 'matter',
-      recordId: matter.id,
-      action: 'create',
-      field: 'Matter opening snapshot (PDF)',
-      oldValue: null,
-      newValue: `Matter-Opening-Record-${matter.matterNumber}.pdf (Immutable historical copy captured at matter opening)`,
-      byId: opts.byId,
-      at: now,
-    });
-    if (isPmsImport && willOpen) {
-      writeAudit(store, {
-        recordType: 'matter',
-        recordId: matter.id,
-        action: 'matter-imported-open',
-        field: 'PMS import',
-        oldValue: null,
-        newValue: `Imported already-open matter ${matter.matterNumber} from PMS (opening gate skipped)`,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-
-    if (matter.sourceEnquiryId) {
-      await finalizeEnquiryConversionToMatter(
-        store,
-        matter.sourceEnquiryId,
-        matter,
-        opts.byId,
-        now,
-        extensionCtx,
-        compensator,
-      );
-    }
-    if (matter.sourceQuoteId) {
-      await finalizeQuoteConversionToMatter(
-        store,
-        matter.sourceQuoteId,
-        matter,
-        opts.byId,
-        now,
-        extensionCtx,
-        compensator,
-      );
-    }
-  } else if (previousMatterSnapshot) {
-    writeAudit(store, {
-      recordType: 'matter',
-      recordId: matter.id,
-      action: 'update',
-      field: 'Matter details & type-specific fields',
-      oldValue: previousMatterSnapshot.title,
-      newValue: `${matter.matterNumber} — ${matter.title}`,
-      byId: opts.byId,
-      at: now,
-    });
-    if (
-      !existingHasOpened &&
-      (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred')
-    ) {
-      writeAudit(store, {
-        recordType: 'matter',
-        recordId: matter.id,
-        action: 'update',
-        field: 'Matter opening snapshot (PDF)',
-        oldValue: null,
-        newValue: `Matter-Opening-Record-${matter.matterNumber}.pdf (Immutable historical copy captured at matter opening)`,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-
-    if (matter.sourceEnquiryId) {
-      await finalizeEnquiryConversionToMatter(
-        store,
-        matter.sourceEnquiryId,
-        matter,
-        opts.byId,
-        now,
-        extensionCtx,
-        compensator,
-      );
-    }
-    if (matter.sourceQuoteId) {
-      await finalizeQuoteConversionToMatter(
-        store,
-        matter.sourceQuoteId,
-        matter,
-        opts.byId,
-        now,
-        extensionCtx,
-        compensator,
-      );
-    }
-  }
-
-  // Handle To Do task creation / completion for Draft & Referred conflict checks
-  const clientOrg = allOrganisationsWithPending.find((o) => o.id === matter.clientId);
-  const clientPerson = allPeopleWithPending.find((p) => p.id === matter.clientId);
-  const clientLabel =
-    clientOrg?.legalName ||
-    (clientPerson ? personDisplayName(clientPerson) : matter.title || 'Untitled matter');
-  const draftTaskTitle = `Conflict check · ${clientLabel} · Draft`;
-
-  const existingDraftTask = tasks.find(
-    (t) =>
-      t.status !== 'Done' &&
-      t.status !== 'Cancelled' &&
-      (t.title === draftTaskTitle ||
-        (t.title.startsWith('Conflict check ·') &&
-          t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id))),
-  );
-  const prevDraftTask = existingDraftTask ? structuredClone(existingDraftTask) : null;
-  const createdMatterTaskIds: string[] = [];
-
-  if (isDraftSave) {
-    if (existingDraftTask) {
-      existingDraftTask.title = draftTaskTitle;
-      existingDraftTask.updatedAt = now;
-      existingDraftTask.updatedById = opts.byId;
-      await taskRepo.putTask(extensionCtx, existingDraftTask);
-    } else {
-      const taskId = await taskRepo.allocateNextTaskId(extensionCtx);
-      const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
-      if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
-      else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
-      const newDraftTask: Task = {
-        id: taskId,
-        reference: taskId,
-        title: draftTaskTitle,
-        description: `Saved conflict check draft for ${matter.title}. Reopen to run fresh search and submit.`,
-        taskTypeId: vid('task_type', 'Conflict check'),
-        priorityId: vid('task_priority', 'High'),
-        dueAt: today,
-        assignedTeamId: null,
-        assignedPersonId: opts.byId,
-        status: 'To do',
-        linkedRecords,
-        createdById: opts.byId,
-        createdAt: now,
-        updatedById: opts.byId,
-        updatedAt: now,
-        completedById: null,
-        completedAt: null,
-        comments: [],
-      };
-      await taskRepo.putTask(extensionCtx, newDraftTask);
-      createdMatterTaskIds.push(taskId);
-    }
-  } else if (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred') {
-    if (existingDraftTask) {
-      existingDraftTask.status = 'Done';
-      existingDraftTask.completedById = opts.byId;
-      existingDraftTask.completedAt = now;
-      existingDraftTask.updatedAt = now;
-      existingDraftTask.updatedById = opts.byId;
-      await taskRepo.putTask(extensionCtx, existingDraftTask);
-    }
-    if (opts.saveMode === 'submit_referred') {
-      const riskTaskId = await taskRepo.allocateNextTaskId(extensionCtx);
-      const configuredTeamKey = tenantCfg.conflictReview?.assigneeTeamKey?.trim() || null;
-      const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
-      const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
-        resolveConflictReviewTaskRouting(
-          { people: allPeopleWithPending, teams: store.teams },
-          tenantCfg.conflictReview,
-          matter,
-        );
-
-      if (!assignedReviewerId) {
-        console.warn(
-          JSON.stringify({
-            level: 'warn',
-            event: 'conflict_review_task_unassigned',
-            tenantId: extensionCtx.tenantId,
-            correlationId: extensionCtx.correlationId,
-            matterId: matter.id,
-            configuredTeamKey,
-            configuredRoleKey,
-            assignedTeamId: resolvedRiskTeam?.id ?? null,
-          }),
-        );
-      }
-
-      const isRestrictedMatter = Boolean(matter.isStaffMatter || matter.hasEthicalWall);
-      const canIncludeMatterNames = !isRestrictedMatter || Boolean(assignedReviewerId);
-      const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
-      if (canIncludeMatterNames) {
-        if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
-        else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
-      }
-      const riskTask: Task = {
-        id: riskTaskId,
-        reference: riskTaskId,
-        title: canIncludeMatterNames
-          ? `Conflict review · ${clientLabel} — ${matter.title}`
-          : `Conflict review required: ${matter.id}`,
-        description: canIncludeMatterNames
-          ? matter.conflictCheckRecord?.reviewerMessage ||
-            `Referred to Risk & Compliance for conflict review on ${clientLabel}.`
-          : `Referred for conflict review on restricted matter ${matter.id}.`,
-        taskTypeId: vid('task_type', 'Conflict check'),
-        priorityId: vid('task_priority', 'High'),
-        dueAt: today,
-        assignedTeamId: resolvedRiskTeam?.id ?? null,
-        assignedPersonId: assignedReviewerId,
-        status: 'To do',
-        linkedRecords,
-        createdById: opts.byId,
-        createdAt: now,
-        updatedById: opts.byId,
-        updatedAt: now,
-        completedById: null,
-        completedAt: null,
-        comments: [],
-      };
-      await taskRepo.putTask(extensionCtx, riskTask);
-      createdMatterTaskIds.push(riskTaskId);
-    }
-  }
-
-  if (prevDraftTask || createdMatterTaskIds.length > 0) {
-    compensator.register(`matter.tasks:${matter.id}`, async () => {
-      await taskRepo.withTenantTransaction(extensionCtx, async (tx) => {
-        if (prevDraftTask) {
-          await taskRepo.putTask(extensionCtx, prevDraftTask);
-        }
-        for (const tid of createdMatterTaskIds) {
-          await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
-            extensionCtx.tenantId,
-            tid,
-          ]);
-        }
-      });
-    });
   }
 
   if (previousMatterSnapshot) {
@@ -10411,166 +10324,169 @@ export async function prepareEnquiryConversion(
     };
   }
 
-  // Link or create Person
-  let personId = opts.usePersonId || enq.linkedPersonId;
-  if (!personId) {
-    const createdPerson = await savePersonRecord(
-      {
-        firstName: enq.firstName,
-        surname: enq.lastName,
-        emails: enq.email
-          ? [
-              {
-                id: `e_${Date.now()}`,
-                address: enq.email,
-                typeId: vid('email_type', enq.callingOnBehalfOf ? 'Work' : 'Personal'),
-                isPrimary: true,
-              },
-            ]
-          : [],
-        phones: enq.phone
-          ? [
-              {
-                id: `p_${Date.now()}`,
-                number: enq.phone,
-                typeId: vid('phone_type', 'Mobile'),
-              },
-            ]
-          : [],
-        addresses: enq.address ? [{ ...enq.address, id: `a_${Date.now()}` }] : [],
-        preferredContactMethodId: enq.preferredContactMethodId,
-        originId: enq.sourceId,
-        relationshipStatusId: vid('relationship_status', 'Prospective'),
-        relationshipRoleIds: [
-          vid('person_role', enq.callingOnBehalfOf ? 'Client contact' : 'Private client'),
-        ],
-        relationshipOwnerId: enq.assignedToId || byId,
-        sourceId: vid('data_source', 'Manual entry'),
-        createdFromEnquiryId: enq.id,
-      },
-      { byId, internalSystemStep: 'enquiry_conversion' },
-    );
-    personId = createdPerson.person.id;
-  }
-
-  enq.linkedPersonId = personId;
-
-  const conflictWarnings = redactRestrictedMatterReasons(
-    conflicts.allConflicts
-      .filter((h) => !h.blocking && h.severity !== 'high')
-      .map((h) => h.reason),
-  );
-  if (
-    declinedOrgAssessment.nameMatchWarning &&
-    !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
-  ) {
-    conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
-  }
-
-  const outcomeLabel: 'Cleared' | 'Potential conflict' =
-    conflicts.allConflicts.length > 0 || declinedOrgAssessment.hasDeclinedOrgNameMatch
-      ? 'Potential conflict'
-      : 'Cleared';
-  const decisionSummary = `${outcomeLabel} by ${actorName} on ${today} (${conflicts.allConflicts.length} ${conflicts.allConflicts.length === 1 ? 'match' : 'matches'})`;
-  const conflictReference = `${enq.reference} · ${decisionSummary}`;
-  const decisionSnapshot = {
-    outcome: outcomeLabel,
-    decidedById: byId,
-    decidedByName: actorName,
-    decidedAt: nowIso,
-    sourceRecordId: enq.id,
-    matchesCount: conflicts.allConflicts.length,
-    searchedSources: [...CONFLICT_SEARCHED_SOURCES],
-    summary: decisionSummary,
-    ...(conflictWarnings.length > 0 ? { warnings: [...conflictWarnings] } : {}),
-  };
-  enq.conflictDecision = decisionSnapshot;
-
-  // If enquiry was made on behalf of a business, link or create the Organisation and link caller as contact
-  let clientId = personId;
-  const instructingContactId: string | null = personId;
-
-  if (opts.createForBusiness || enq.callingOnBehalfOf.trim() || opts.useOrganisationId || enq.linkedOrganisationId) {
-    let orgId = opts.useOrganisationId || enq.linkedOrganisationId;
-
-    if (!orgId && enq.callingOnBehalfOf.trim()) {
-      const createdOrg = await saveOrganisationRecord(
+  return intakeRepo.withTenantTransaction(enqCtx, async () => {
+    // Link or create Person
+    let personId = opts.usePersonId || enq.linkedPersonId;
+    if (!personId) {
+      const createdPerson = await savePersonRecord(
         {
-          legalName: enq.callingOnBehalfOf.trim(),
-          generalEmail: enq.email,
-          mainPhone: enq.phone,
-          registeredAddress: enq.address,
-          correspondenceAddress: enq.address,
-          relationshipPartnerId: enq.assignedToId || byId,
-          relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
-          relationshipStatusId: vid('relationship_status', 'Prospective'),
+          firstName: enq.firstName,
+          surname: enq.lastName,
+          emails: enq.email
+            ? [
+                {
+                  id: `e_${Date.now()}`,
+                  address: enq.email,
+                  typeId: vid('email_type', enq.callingOnBehalfOf ? 'Work' : 'Personal'),
+                  isPrimary: true,
+                },
+              ]
+            : [],
+          phones: enq.phone
+            ? [
+                {
+                  id: `p_${Date.now()}`,
+                  number: enq.phone,
+                  typeId: vid('phone_type', 'Mobile'),
+                },
+              ]
+            : [],
+          addresses: enq.address ? [{ ...enq.address, id: `a_${Date.now()}` }] : [],
+          preferredContactMethodId: enq.preferredContactMethodId,
           originId: enq.sourceId,
-          conflictStatusId: vid('conflict_status', outcomeLabel),
-          conflictReference,
-          reviewDate: today,
-          reviewerId: byId,
+          relationshipStatusId: vid('relationship_status', 'Prospective'),
+          relationshipRoleIds: [
+            vid('person_role', enq.callingOnBehalfOf ? 'Client contact' : 'Private client'),
+          ],
+          relationshipOwnerId: enq.assignedToId || byId,
+          sourceId: vid('data_source', 'Manual entry'),
+          createdFromEnquiryId: enq.id,
         },
         { byId, internalSystemStep: 'enquiry_conversion' },
       );
-      orgId = createdOrg.organisation.id;
-      const orgRecord = await partyRepo.getOrganisationById<Organisation>(enqCtx, orgId);
-      if (orgRecord) {
-        orgRecord.conflictDecision = decisionSnapshot;
-        await partyRepo.putOrganisation(enqCtx, orgRecord);
-        writeAudit(store, {
-          recordType: 'organisation',
-          recordId: orgId,
-          action: 'conflict-decision',
-          field: 'Conflict check decision recorded on enquiry conversion',
-          oldValue: null,
-          newValue: conflictReference,
-          byId,
-          at: nowIso,
-          snapshot: orgRecord.conflictDecision,
-        });
-      }
+      personId = createdPerson.person.id;
     }
 
-    if (orgId) {
-      enq.linkedOrganisationId = orgId;
-      clientId = orgId;
-      const personLinks = await partyRepo.listLinksForPerson<PersonOrganisationLink>(
-        enqCtx,
-        personId,
-      );
-      const hasLink = personLinks.some(
-        (l) => l.organisationId === orgId && l.isCurrent,
-      );
-      if (!hasLink) {
-        await createOrUpdateLink(
+    enq.linkedPersonId = personId;
+
+    const conflictWarnings = redactRestrictedMatterReasons(
+      conflicts.allConflicts
+        .filter((h) => !h.blocking && h.severity !== 'high')
+        .map((h) => h.reason),
+    );
+    if (
+      declinedOrgAssessment.nameMatchWarning &&
+      !conflictWarnings.includes(declinedOrgAssessment.nameMatchWarning)
+    ) {
+      conflictWarnings.push(declinedOrgAssessment.nameMatchWarning);
+    }
+
+    const outcomeLabel: 'Cleared' | 'Potential conflict' =
+      conflicts.allConflicts.length > 0 || declinedOrgAssessment.hasDeclinedOrgNameMatch
+        ? 'Potential conflict'
+        : 'Cleared';
+    const decisionSummary = `${outcomeLabel} by ${actorName} on ${today} (${conflicts.allConflicts.length} ${conflicts.allConflicts.length === 1 ? 'match' : 'matches'})`;
+    const conflictReference = `${enq.reference} · ${decisionSummary}`;
+    const decisionSnapshot = {
+      outcome: outcomeLabel,
+      decidedById: byId,
+      decidedByName: actorName,
+      decidedAt: nowIso,
+      sourceRecordId: enq.id,
+      matchesCount: conflicts.allConflicts.length,
+      searchedSources: [...CONFLICT_SEARCHED_SOURCES],
+      summary: decisionSummary,
+      ...(conflictWarnings.length > 0 ? { warnings: [...conflictWarnings] } : {}),
+    };
+    enq.conflictDecision = decisionSnapshot;
+
+    // If enquiry was made on behalf of a business, link or create the Organisation and link caller as contact
+    let clientId = personId;
+    const instructingContactId: string | null = personId;
+
+    if (opts.createForBusiness || enq.callingOnBehalfOf.trim() || opts.useOrganisationId || enq.linkedOrganisationId) {
+      let orgId = opts.useOrganisationId || enq.linkedOrganisationId;
+
+      if (!orgId && enq.callingOnBehalfOf.trim()) {
+        const createdOrg = await saveOrganisationRecord(
           {
-            personId,
-            organisationId: orgId,
-            jobTitle: '',
-            department: '',
-            roleWithinOrganisation: 'Instructing contact',
-            contactRoleIds: [vid('contact_role', 'Key relationship contact')],
-            isPrimaryContact: true,
-            isCurrent: true,
-            startDate: today,
-            endDate: null,
-            contactStatusId: vid('contact_status', 'Active'),
+            legalName: enq.callingOnBehalfOf.trim(),
+            generalEmail: enq.email,
+            mainPhone: enq.phone,
+            registeredAddress: enq.address,
+            correspondenceAddress: enq.address,
+            relationshipPartnerId: enq.assignedToId || byId,
+            relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
+            relationshipStatusId: vid('relationship_status', 'Prospective'),
+            originId: enq.sourceId,
+            conflictStatusId: vid('conflict_status', outcomeLabel),
+            conflictReference,
+            reviewDate: today,
+            reviewerId: byId,
           },
-          byId,
-          { internalSystemStep: true },
+          { byId, internalSystemStep: 'enquiry_conversion' },
         );
+        orgId = createdOrg.organisation.id;
+        const orgRecord = await partyRepo.getOrganisationById<Organisation>(enqCtx, orgId);
+        if (orgRecord) {
+          orgRecord.conflictDecision = decisionSnapshot;
+          await partyRepo.putOrganisation(enqCtx, orgRecord);
+          writeAudit(store, {
+            recordType: 'organisation',
+            recordId: orgId,
+            action: 'conflict-decision',
+            field: 'Conflict check decision recorded on enquiry conversion',
+            oldValue: null,
+            newValue: conflictReference,
+            byId,
+            at: nowIso,
+            snapshot: orgRecord.conflictDecision,
+          });
+        }
+      }
+
+      if (orgId) {
+        enq.linkedOrganisationId = orgId;
+        clientId = orgId;
+        const personLinks = await partyRepo.listLinksForPerson<PersonOrganisationLink>(
+          enqCtx,
+          personId,
+        );
+        const hasLink = personLinks.some(
+          (l) => l.organisationId === orgId && l.isCurrent,
+        );
+        if (!hasLink) {
+          await createOrUpdateLink(
+            {
+              personId,
+              organisationId: orgId,
+              jobTitle: '',
+              department: '',
+              roleWithinOrganisation: 'Instructing contact',
+              contactRoleIds: [vid('contact_role', 'Key relationship contact')],
+              isPrimaryContact: true,
+              isCurrent: true,
+              startDate: today,
+              endDate: null,
+              contactStatusId: vid('contact_status', 'Active'),
+            },
+            byId,
+            { internalSystemStep: true },
+          );
+        }
       }
     }
-  }
 
-  await intakeRepo.putEnquiry(enqCtx, enq);
-  return {
-    ok: true,
-    clientId,
-    instructingContactId,
-    enquiryId: enq.id,
-    ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
-  };
+    await intakeRepo.putEnquiry(enqCtx, enq);
+    await flushStagedAuditEntries(enqCtx);
+    return {
+      ok: true,
+      clientId,
+      instructingContactId,
+      enquiryId: enq.id,
+      ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
+    };
+  });
 
     },
   });
@@ -10589,7 +10505,6 @@ async function finalizeEnquiryConversionToMatter(
   byId: string,
   now: string,
   ctx: TenantContext,
-  compensator: RecordDeltaCompensator,
 ): Promise<void> {
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
@@ -10598,7 +10513,6 @@ async function finalizeEnquiryConversionToMatter(
   });
   if (!enq) return;
 
-  const prevEnquirySnapshot = structuredClone(enq);
   const alreadyConvertedToThisMatter =
     enq.status === 'Converted' && enq.convertedMatterId === matter.id;
   const prevStatus = enq.status;
@@ -10611,9 +10525,6 @@ async function finalizeEnquiryConversionToMatter(
     matter.conflictDecision = enq.conflictDecision;
   }
   await intakeRepo.putEnquiry(ctx, enq);
-  compensator.register(`enquiry.convert:${enq.id}`, async () => {
-    await intakeRepo.putEnquiry(ctx, prevEnquirySnapshot);
-  });
 
   if (!alreadyConvertedToThisMatter) {
     writeAudit(store, {
@@ -10654,9 +10565,6 @@ async function finalizeEnquiryConversionToMatter(
   if (kdConfig.enabled) {
     const keyDateRepo = getKeyDateRepository();
     const existingEnquiryKds = await keyDateRepo.listKeyDatesForEnquiry(ctx, enq.id);
-    const beforeSnapshotsById = new Map(
-      existingEnquiryKds.map((kd) => [kd.id, structuredClone(kd)]),
-    );
     const workingKeyDates = existingEnquiryKds.map((kd) => structuredClone(kd));
     const preAllocatedNewKdId =
       existingEnquiryKds.length === 0 && enq.keyDate
@@ -10695,19 +10603,7 @@ async function finalizeEnquiryConversionToMatter(
     }
 
     for (const carriedKd of carried) {
-      const priorSnap = beforeSnapshotsById.get(carriedKd.id);
       await keyDateRepo.putKeyDate(ctx, carriedKd);
-      if (priorSnap) {
-        compensator.register(`keydates.carry:${carriedKd.id}`, async () => {
-          await keyDateRepo.putKeyDate(ctx, priorSnap, {
-            allowEntityRebindForCompensation: true,
-          });
-        });
-      } else {
-        compensator.register(`keydates.carry_seeded:${carriedKd.id}`, async () => {
-          await keyDateRepo.deleteKeyDateByIdForCompensation(ctx, carriedKd.id);
-        });
-      }
     }
   }
 
@@ -10723,7 +10619,7 @@ async function finalizeEnquiryConversionToMatter(
     const offsetDays = tpl?.dueWorkingDaysOffset ?? 5;
     const dueDate = toIsoDate(addWorkingDays(new Date(), offsetDays, whCfg));
 
-    const createdOpeningTask = await raiseAutomaticTask(
+    await raiseAutomaticTask(
       ctx,
       store,
       'complete_matter_opening',
@@ -10748,14 +10644,6 @@ async function finalizeEnquiryConversionToMatter(
         overridePriorityId: vid('task_priority', 'High'),
       },
     );
-    compensator.register(`enquiry.opening_task:${createdOpeningTask.id}`, async () => {
-      await taskRepo.withTenantTransaction(ctx, async (tx) => {
-        await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
-          ctx.tenantId,
-          createdOpeningTask.id,
-        ]);
-      });
-    });
   }
 }
 
@@ -14373,149 +14261,152 @@ export async function prepareQuoteConversionRecord(
     ...(conflictWarnings.length > 0 ? { warnings: [...conflictWarnings] } : {}),
   };
 
-  if (!personId && hasPersonName) {
-    const parts = quote.prospectName.trim().split(/\s+/);
-    const firstName = parts[0] || 'Client';
-    const surname = parts.slice(1).join(' ') || 'Contact';
+  return intakeRepo.withTenantTransaction(ctx, async () => {
+    if (!personId && hasPersonName) {
+      const parts = quote.prospectName.trim().split(/\s+/);
+      const firstName = parts[0] || 'Client';
+      const surname = parts.slice(1).join(' ') || 'Contact';
 
-    const createdPerson = await savePersonRecord(
-      {
-        firstName,
-        surname,
-        emails: quote.prospectEmail
-          ? [
-              {
-                id: `em_${Date.now()}`,
-                address: quote.prospectEmail,
-                typeId: vid('email_type', hasOrgName ? 'Work' : 'Personal'),
-                isPrimary: true,
-              },
-            ]
-          : [],
-        phones: quote.prospectPhone
-          ? [
-              {
-                id: `ph_${Date.now()}`,
-                number: quote.prospectPhone,
-                typeId: vid('phone_type', 'Mobile'),
-              },
-            ]
-          : [],
-        relationshipStatusId: vid('relationship_status', 'Prospective'),
-        relationshipRoleIds: [
-          vid('person_role', hasOrgName ? 'Client contact' : 'Private client'),
-        ],
-        relationshipOwnerId: quote.feeEarnerId || byId,
-        sourceId: vid('data_source', 'Manual entry'),
-      },
-      { byId, internalSystemStep: 'quote_conversion' },
-    );
-    personId = createdPerson.person.id;
-  }
-
-  let createdNewClientOrg = false;
-  if (!orgId && hasOrgName) {
-    const createdOrg = await saveOrganisationRecord(
-      {
-        legalName: quote.prospectOrganisationName.trim(),
-        generalEmail: quote.prospectEmail,
-        mainPhone: quote.prospectPhone,
-        relationshipPartnerId: quote.feeEarnerId || byId,
-        relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
-        relationshipStatusId: vid('relationship_status', 'Prospective'),
-        conflictStatusId: vid('conflict_status', outcomeLabel),
-        conflictReference,
-        reviewDate: today,
-        reviewerId: byId,
-      },
-      { byId, internalSystemStep: 'quote_conversion' },
-    );
-    orgId = createdOrg.organisation.id;
-    createdNewClientOrg = true;
-
-    if (personId && orgId) {
-      const personLinks = await partyRepo.listLinksForPerson<PersonOrganisationLink>(
-        ctx,
-        personId,
+      const createdPerson = await savePersonRecord(
+        {
+          firstName,
+          surname,
+          emails: quote.prospectEmail
+            ? [
+                {
+                  id: `em_${Date.now()}`,
+                  address: quote.prospectEmail,
+                  typeId: vid('email_type', hasOrgName ? 'Work' : 'Personal'),
+                  isPrimary: true,
+                },
+              ]
+            : [],
+          phones: quote.prospectPhone
+            ? [
+                {
+                  id: `ph_${Date.now()}`,
+                  number: quote.prospectPhone,
+                  typeId: vid('phone_type', 'Mobile'),
+                },
+              ]
+            : [],
+          relationshipStatusId: vid('relationship_status', 'Prospective'),
+          relationshipRoleIds: [
+            vid('person_role', hasOrgName ? 'Client contact' : 'Private client'),
+          ],
+          relationshipOwnerId: quote.feeEarnerId || byId,
+          sourceId: vid('data_source', 'Manual entry'),
+        },
+        { byId, internalSystemStep: 'quote_conversion' },
       );
-      const linkExists = personLinks.some((l) => l.organisationId === orgId);
-      if (!linkExists) {
-        await createOrUpdateLink(
-          {
-            personId,
-            organisationId: orgId,
-            jobTitle: '',
-            department: '',
-            roleWithinOrganisation: 'Instructing contact',
-            contactRoleIds: [vid('contact_role', 'Key relationship contact')],
-            isPrimaryContact: true,
-            isCurrent: true,
-            startDate: today,
-            endDate: null,
-            contactStatusId: vid('contact_status', 'Active'),
-          },
-          byId,
-          { internalSystemStep: true },
+      personId = createdPerson.person.id;
+    }
+
+    let createdNewClientOrg = false;
+    if (!orgId && hasOrgName) {
+      const createdOrg = await saveOrganisationRecord(
+        {
+          legalName: quote.prospectOrganisationName.trim(),
+          generalEmail: quote.prospectEmail,
+          mainPhone: quote.prospectPhone,
+          relationshipPartnerId: quote.feeEarnerId || byId,
+          relationshipTypeIds: [vid('organisation_relationship_type', 'Prospect')],
+          relationshipStatusId: vid('relationship_status', 'Prospective'),
+          conflictStatusId: vid('conflict_status', outcomeLabel),
+          conflictReference,
+          reviewDate: today,
+          reviewerId: byId,
+        },
+        { byId, internalSystemStep: 'quote_conversion' },
+      );
+      orgId = createdOrg.organisation.id;
+      createdNewClientOrg = true;
+
+      if (personId && orgId) {
+        const personLinks = await partyRepo.listLinksForPerson<PersonOrganisationLink>(
+          ctx,
+          personId,
         );
+        const linkExists = personLinks.some((l) => l.organisationId === orgId);
+        if (!linkExists) {
+          await createOrUpdateLink(
+            {
+              personId,
+              organisationId: orgId,
+              jobTitle: '',
+              department: '',
+              roleWithinOrganisation: 'Instructing contact',
+              contactRoleIds: [vid('contact_role', 'Key relationship contact')],
+              isPrimaryContact: true,
+              isCurrent: true,
+              startDate: today,
+              endDate: null,
+              contactStatusId: vid('contact_status', 'Active'),
+            },
+            byId,
+            { internalSystemStep: true },
+          );
+        }
       }
     }
-  }
 
-  // R254: Set conflict status and conflictDecision only on organisations created by this conversion.
-  if (createdNewClientOrg && orgId) {
-    const orgRecord = await partyRepo.getOrganisationById<Organisation>(ctx, orgId);
-    if (orgRecord) {
-      orgRecord.conflictStatusId = vid('conflict_status', outcomeLabel);
-      orgRecord.conflictReference = conflictReference;
-      orgRecord.reviewDate = today;
-      orgRecord.reviewerId = byId;
-      orgRecord.conflictDecision = decisionSnapshot;
-      await partyRepo.putOrganisation(ctx, orgRecord);
-      writeAudit(store, {
-        recordType: 'organisation',
-        recordId: orgId,
-        action: 'conflict-decision',
-        field: 'Conflict check decision recorded on quote conversion',
-        oldValue: null,
-        newValue: conflictReference,
-        byId,
-        at: nowIso,
-        snapshot: decisionSnapshot,
-      });
+    // R254: Set conflict status and conflictDecision only on organisations created by this conversion.
+    if (createdNewClientOrg && orgId) {
+      const orgRecord = await partyRepo.getOrganisationById<Organisation>(ctx, orgId);
+      if (orgRecord) {
+        orgRecord.conflictStatusId = vid('conflict_status', outcomeLabel);
+        orgRecord.conflictReference = conflictReference;
+        orgRecord.reviewDate = today;
+        orgRecord.reviewerId = byId;
+        orgRecord.conflictDecision = decisionSnapshot;
+        await partyRepo.putOrganisation(ctx, orgRecord);
+        writeAudit(store, {
+          recordType: 'organisation',
+          recordId: orgId,
+          action: 'conflict-decision',
+          field: 'Conflict check decision recorded on quote conversion',
+          oldValue: null,
+          newValue: conflictReference,
+          byId,
+          at: nowIso,
+          snapshot: decisionSnapshot,
+        });
+      }
     }
-  }
 
-  writeAudit(store, {
-    recordType: 'quote',
-    recordId: quote.id,
-    action: 'conflict-decision',
-    field: 'Conflict check completed on quote conversion',
-    oldValue: null,
-    newValue: conflictReference,
-    byId,
-    at: nowIso,
-    snapshot: decisionSnapshot,
+    writeAudit(store, {
+      recordType: 'quote',
+      recordId: quote.id,
+      action: 'conflict-decision',
+      field: 'Conflict check completed on quote conversion',
+      oldValue: null,
+      newValue: conflictReference,
+      byId,
+      at: nowIso,
+      snapshot: decisionSnapshot,
+    });
+
+    quote.conflictDecision = decisionSnapshot;
+    quote.linkedPersonId = personId;
+    quote.linkedOrganisationId = orgId;
+    quote.updatedAt = nowIso;
+    quote.updatedById = byId;
+
+    await intakeRepo.putQuote(ctx, quote);
+    await flushStagedAuditEntries(ctx);
+
+    const clientId = orgId || personId || '';
+    const instructingContactId = orgId ? personId : personId;
+
+    return {
+      ok: true,
+      clientId,
+      instructingContactId,
+      quoteId: quote.id,
+      enquiryId: quote.linkedEnquiryId,
+      ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
+    };
   });
-
-  quote.conflictDecision = decisionSnapshot;
-  quote.linkedPersonId = personId;
-  quote.linkedOrganisationId = orgId;
-  quote.updatedAt = nowIso;
-  quote.updatedById = byId;
-
-  await intakeRepo.putQuote(ctx, quote);
-
-  const clientId = orgId || personId || '';
-  const instructingContactId = orgId ? personId : personId;
-
-  return {
-    ok: true,
-    clientId,
-    instructingContactId,
-    quoteId: quote.id,
-    enquiryId: quote.linkedEnquiryId,
-    ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
-  };
 
     },
   });
@@ -14528,14 +14419,12 @@ async function finalizeQuoteConversionToMatter(
   byId: string,
   now: string,
   ctx: TenantContext,
-  compensator: RecordDeltaCompensator,
 ): Promise<void> {
   const intakeRepo = getIntakeQuoteRepository();
   const quote = await intakeRepo.getQuoteById<Quote>(ctx, quoteId, {
     includeRestricted: true,
   });
   if (!quote) return;
-  const prevQuoteSnapshot = structuredClone(quote);
 
   const alreadyConverted = quote.convertedMatterId === matter.id;
   quote.status = 'Accepted';
@@ -14571,9 +14460,6 @@ async function finalizeQuoteConversionToMatter(
   }
 
   await intakeRepo.putQuote(ctx, quote);
-  compensator.register(`finalizeQuoteConversionToMatter.quote:${quote.id}`, async () => {
-    await intakeRepo.putQuote(ctx, prevQuoteSnapshot);
-  });
 
   // Also close any linked enquiry and link it to the matter
   if (quote.linkedEnquiryId) {
@@ -14587,7 +14473,6 @@ async function finalizeQuoteConversionToMatter(
       byId,
       now,
       ctx,
-      compensator,
     );
   }
 }
