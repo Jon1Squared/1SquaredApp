@@ -1,8 +1,33 @@
-// Platform Infrastructure as Code (Bicep)
-// Supports both Model A (single_tenant in client Azure) and Model B (multi_tenant hosted in UK South/UK West).
-// Note: Local / early-stage environments use the tenant-isolated `local-fs` storage provider by default;
-// Azure Blob Storage, Microsoft Defender for Storage malware scanning, Key Vault, and optional PDF converter resources
-// are defined here so cloud deployments are 100% IaC-driven when enabled.
+// Platform Infrastructure as Code Orchestrator (ADR 0024, ADR 0028, ADR 0030)
+// Supports both Model A (single_tenant in client Azure) and Model B (multi_tenant hosted in UK South/UK West)
+// from a single Bicep entry point composing:
+// - modules/platform.bicep (shared compute, VNet, Private DNS, observability, alerts, PostgreSQL, jobs)
+// - modules/tenant.bicep (per-tenant Key Vault Private Endpoint, database, optional dedicated server, Blob storage & cost tags)
+
+type TenantDeploymentInput = {
+  @description('Tenant identifier slug')
+  @minLength(2)
+  slug: string
+
+  @description('Cost centre code for Azure billing attribution')
+  @minLength(1)
+  costCentre: string
+
+  @description('Optional operational owner tag value')
+  ownerTag: string?
+
+  @description('Whether to provision a dedicated PostgreSQL Flexible Server for own/CMK encryption keys')
+  deployDedicatedPostgresServer: bool?
+
+  @description('Optional Key Vault key URI for CMK encryption on a dedicated PostgreSQL server')
+  dedicatedPostgresCmkKeyUri: string?
+
+  @description('Optional User-Assigned Managed Identity resource ID for dedicated PostgreSQL CMK')
+  dedicatedPostgresCmkIdentityId: string?
+
+  @description('Whether to provision per-tenant Azure Blob Storage and Defender for Storage')
+  enableCloudBlobStorage: bool?
+}
 
 @description('Deployment environment')
 @allowed([
@@ -24,10 +49,27 @@ param hostingMode string = 'multi_tenant'
 @description('Primary Azure UK region')
 param location string = 'uksouth'
 
-@description('Tenant identifier slug for isolated database, storage container, and Key Vault prefix')
+@description('Primary tenant slug (used directly in Model A or as default single-entry fallback when tenants is empty)')
+@minLength(2)
 param tenantSlug string
 
-@description('Whether to provision Azure Blob Storage & Defender for Storage malware scanning (false when using local-fs)')
+@description('Default cost centre code when tenants array is omitted')
+@minLength(1)
+param defaultCostCentre string = 'CC-PLATFORM'
+
+@description('Per-tenant deployment entries for Model B hosted multi-tenant environments (defaults to [tenantSlug] when empty)')
+param tenants TenantDeploymentInput[] = []
+
+@description('Name of the Azure Container Registry hosting the immutable application image')
+@minLength(5)
+@maxLength(50)
+param containerRegistryName string
+
+@description('Immutable container image reference for the web Container App and jobs')
+@minLength(1)
+param appContainerImage string
+
+@description('Whether to provision Azure Blob Storage & Defender for Storage malware scanning by default')
 param enableCloudBlobStorage bool = false
 
 @description('Monthly GB cap for Microsoft Defender for Storage on-upload malware scanning')
@@ -35,6 +77,24 @@ param defenderMalwareScanCapGbPerMonth int = 500
 
 @description('Whether to deploy the optional headless LibreOffice PDF converter internal Container App')
 param enablePdfConverterContainerApp bool = false
+
+@description('Container image reference for the internal PDF converter Container App')
+param pdfConverterContainerImage string = ''
+
+@description('Whether to deploy the manual store-import Container Apps job used during S0-14..S0-18 cut-overs')
+param enableStoreImportJob bool = true
+
+@description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
+param enableSchedulerJobs bool = false
+
+@description('Enable the hourly key-date-reminders scheduled Container Apps job (S0-19)')
+param enableKeyDateRemindersJob bool = false
+
+@description('Enable the hourly usage-retention-purge scheduled Container Apps job (S0-19)')
+param enableUsageRetentionPurgeJob bool = false
+
+@description('Enable the hourly enquiry-retention-anonymise scheduled Container Apps job (S0-19b)')
+param enableEnquiryAnonymisationJob bool = false
 
 @description('Microsoft Entra ID application (client) ID for OIDC sign-in (required; no empty default)')
 @minLength(1)
@@ -50,280 +110,117 @@ param entraRedirectUri string
 @description('Tenant configuration package directory relative to application root')
 param tenantPackageDir string = 'client-${tenantSlug}'
 
-@description('Virtual network CIDR address prefix (parameterised per environment/spoke to avoid hub-and-spoke peering collisions)')
+@description('Virtual network CIDR address prefix')
 param vnetAddressPrefix string = '10.24.0.0/16'
 
-@description('Subnet CIDR address prefix for App Service regional VNet integration')
-param appServiceSubnetPrefix string = '10.24.1.0/24'
+@description('Subnet CIDR prefix (/27 or larger) delegated to Azure Container Apps')
+param containerAppsSubnetPrefix string = '10.24.0.0/27'
 
-var resourceSuffix = '${tenantSlug}-${environment}'
-var sanitizedSlug = replace(tenantSlug, '-', '')
-var storageAccountName = take('st${sanitizedSlug}${environment}', 24)
-var keyVaultResourceName = take('kv-${sanitizedSlug}-${environment}', 24)
-var appServicePlanName = take('asp-${resourceSuffix}', 40)
-var webAppResourceName = take('app-${resourceSuffix}', 60)
-var vnetResourceName = take('vnet-${resourceSuffix}', 60)
-var containerName = 'tenant-${resourceSuffix}'
-// Built-in Azure RBAC role: Key Vault Secrets User
-var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId(
-  'Microsoft.Authorization/roleDefinitions',
-  '4633458b-17de-408a-b874-0445c86b69e6'
-)
+@description('Subnet CIDR prefix (/28 or larger) delegated to PostgreSQL Flexible Server')
+param postgresSubnetPrefix string = '10.24.1.0/28'
 
-resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
-  name: vnetResourceName
-  location: location
-  properties: {
-    addressSpace: {
-      addressPrefixes: [
-        vnetAddressPrefix
-      ]
-    }
-    subnets: [
+@description('Subnet CIDR prefix for Private Endpoints')
+param privateEndpointsSubnetPrefix string = '10.24.2.0/27'
+
+@description('Optional Azure Monitor Action Group resource ID to notify on Container Apps job failures or timeouts')
+param alertActionGroupId string = ''
+
+var platformSlug = hostingMode == 'single_tenant' ? tenantSlug : 'platform'
+
+var effectiveTenants TenantDeploymentInput[] = !empty(tenants)
+  ? tenants
+  : [
       {
-        name: 'snet-appservice'
-        properties: {
-          addressPrefix: appServiceSubnetPrefix
-          serviceEndpoints: [
-            {
-              service: 'Microsoft.KeyVault'
-              locations: [
-                location
-              ]
-            }
-          ]
-          delegations: [
-            {
-              name: 'delegation-web-serverfarms'
-              properties: {
-                serviceName: 'Microsoft.Web/serverFarms'
-              }
-            }
-          ]
-        }
+        slug: tenantSlug
+        costCentre: defaultCostCentre
+        deployDedicatedPostgresServer: false
+        enableCloudBlobStorage: enableCloudBlobStorage
       }
     ]
+
+module platform 'modules/platform.bicep' = {
+  name: 'deploy-platform-${platformSlug}-${environment}'
+  params: {
+    environment: environment
+    hostingMode: hostingMode
+    location: location
+    platformSlug: platformSlug
+    vnetAddressPrefix: vnetAddressPrefix
+    containerAppsSubnetPrefix: containerAppsSubnetPrefix
+    postgresSubnetPrefix: postgresSubnetPrefix
+    privateEndpointsSubnetPrefix: privateEndpointsSubnetPrefix
+    containerRegistryName: containerRegistryName
+    appContainerImage: appContainerImage
+    enablePdfConverterContainerApp: enablePdfConverterContainerApp
+    pdfConverterContainerImage: pdfConverterContainerImage
+    enableStoreImportJob: enableStoreImportJob
+    enableSchedulerJobs: enableSchedulerJobs
+    enableKeyDateRemindersJob: enableKeyDateRemindersJob
+    enableUsageRetentionPurgeJob: enableUsageRetentionPurgeJob
+    enableEnquiryAnonymisationJob: enableEnquiryAnonymisationJob
+    entraClientId: entraClientId
+    entraTenantId: entraTenantId
+    entraRedirectUri: entraRedirectUri
+    tenantPackageDir: tenantPackageDir
+    alertActionGroupId: alertActionGroupId
   }
 }
 
-// Operator-populated Key Vault secrets (never stored in Bicep templates or source control):
-// - entra-client-secret: Microsoft Entra ID confidential client secret (or certificate thumbprint)
-// - auth-secret: 32+ byte HMAC-SHA256 session cookie signing key
-// - blob-signing-key: 32+ byte HMAC-SHA256 scoped blob download token signing key
-// - ideal-postcodes-api-key: Ideal Postcodes server-side UK address lookup API key
-// - anthropic-api-key: Anthropic Claude API key for server-side matter extraction
-// Network design (R68): publicNetworkAccess is Enabled with networkAcls defaultAction: 'Deny',
-// bypass: 'AzureServices', and virtualNetworkRules bound to the App Service regional VNet integration
-// subnet (snet-appservice) so Azure App Service can resolve @Microsoft.KeyVault(...) secret references.
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: keyVaultResourceName
-  location: location
-  properties: {
-    tenantId: subscription().tenantId
-    sku: {
-      family: 'A'
-      name: 'standard'
-    }
-    enableRbacAuthorization: true
-    enableSoftDelete: true
-    softDeleteRetentionInDays: 90
-    enablePurgeProtection: true
-    publicNetworkAccess: 'Enabled'
-    networkAcls: {
-      bypass: 'AzureServices'
-      defaultAction: 'Deny'
-      virtualNetworkRules: [
-        {
-          id: '${vnet.id}/subnets/snet-appservice'
-          ignoreMissingVnetServiceEndpoint: false
-        }
-      ]
-    }
-  }
-}
-
-resource appServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
-  name: appServicePlanName
-  location: location
-  kind: 'linux'
-  sku: {
-    name: 'P1v3'
-    tier: 'PremiumV3'
-  }
-  properties: {
-    reserved: true
-  }
-}
-
-var keyVaultSecretAppSettings = {
-  ENTRA_CLIENT_ID: entraClientId
-  ENTRA_TENANT_ID: entraTenantId
-  ENTRA_REDIRECT_URI: entraRedirectUri
-  ENTRA_CLIENT_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/entra-client-secret/)'
-  AUTH_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/auth-secret/)'
-  PLATFORM_BLOB_SIGNING_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/blob-signing-key/)'
-  IDEAL_POSTCODES_API_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/ideal-postcodes-api-key/)'
-  ANTHROPIC_API_KEY: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/anthropic-api-key/)'
-  PLATFORM_HOSTING_MODE: hostingMode
-  PLATFORM_ENVIRONMENT: environment
-  PLATFORM_TENANT_PACKAGE_DIR: tenantPackageDir
-}
-
-resource webApp 'Microsoft.Web/sites@2023-01-01' = {
-  name: webAppResourceName
-  location: location
-  kind: 'app,linux,container'
-  identity: {
-    type: 'SystemAssigned'
-  }
-  properties: {
-    serverFarmId: appServicePlan.id
-    httpsOnly: true
-    virtualNetworkSubnetId: '${vnet.id}/subnets/snet-appservice'
-    vnetRouteAllEnabled: true
-    siteConfig: {
-      minTlsVersion: '1.2'
-      ftpsState: 'Disabled'
-      alwaysOn: true
-      appSettings: [
-        {
-          name: 'ENTRA_CLIENT_ID'
-          value: keyVaultSecretAppSettings.ENTRA_CLIENT_ID
-        }
-        {
-          name: 'ENTRA_TENANT_ID'
-          value: keyVaultSecretAppSettings.ENTRA_TENANT_ID
-        }
-        {
-          name: 'ENTRA_REDIRECT_URI'
-          value: keyVaultSecretAppSettings.ENTRA_REDIRECT_URI
-        }
-        {
-          name: 'ENTRA_CLIENT_SECRET'
-          value: keyVaultSecretAppSettings.ENTRA_CLIENT_SECRET
-        }
-        {
-          name: 'AUTH_SECRET'
-          value: keyVaultSecretAppSettings.AUTH_SECRET
-        }
-        {
-          name: 'PLATFORM_BLOB_SIGNING_KEY'
-          value: keyVaultSecretAppSettings.PLATFORM_BLOB_SIGNING_KEY
-        }
-        {
-          name: 'IDEAL_POSTCODES_API_KEY'
-          value: keyVaultSecretAppSettings.IDEAL_POSTCODES_API_KEY
-        }
-        {
-          name: 'ANTHROPIC_API_KEY'
-          value: keyVaultSecretAppSettings.ANTHROPIC_API_KEY
-        }
-        {
-          name: 'PLATFORM_HOSTING_MODE'
-          value: keyVaultSecretAppSettings.PLATFORM_HOSTING_MODE
-        }
-        {
-          name: 'PLATFORM_ENVIRONMENT'
-          value: keyVaultSecretAppSettings.PLATFORM_ENVIRONMENT
-        }
-        {
-          name: 'PLATFORM_TENANT_PACKAGE_DIR'
-          value: keyVaultSecretAppSettings.PLATFORM_TENANT_PACKAGE_DIR
-        }
-      ]
-    }
-  }
-}
-
-resource webAppKeyVaultSecretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, webApp.id, '4633458b-17de-408a-b874-0445c86b69e6')
-  scope: keyVault
-  properties: {
-    roleDefinitionId: keyVaultSecretsUserRoleDefinitionId
-    principalId: webApp.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = if (enableCloudBlobStorage) {
-  name: storageAccountName
-  location: location
-  sku: {
-    name: 'Standard_ZRS'
-  }
-  kind: 'StorageV2'
-  properties: {
-    minimumTlsVersion: 'TLS1_2'
-    allowBlobPublicAccess: false
-    allowSharedKeyAccess: false
-    supportsHttpsTrafficOnly: true
-    encryption: {
-      keySource: 'Microsoft.Storage'
-      services: {
-        blob: {
-          enabled: true
-          keyType: 'Account'
-        }
-      }
-    }
-  }
-}
-
-resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-01-01' = if (enableCloudBlobStorage) {
-  parent: storageAccount
-  name: 'default'
-  properties: {
-    deleteRetentionPolicy: {
-      enabled: true
-      days: 30
-    }
-    containerDeleteRetentionPolicy: {
-      enabled: true
-      days: 30
-    }
-  }
-}
-
-resource tenantBlobContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = if (enableCloudBlobStorage) {
-  parent: blobServices
-  name: containerName
-  properties: {
-    publicAccess: 'None'
-    metadata: {
-      tenantSlug: tenantSlug
+module tenantDeployments 'modules/tenant.bicep' = [
+  for tenant in effectiveTenants: {
+    name: take('deploy-tenant-${tenant.slug}-${environment}', 64)
+    params: {
       environment: environment
       hostingMode: hostingMode
+      location: location
+      tenantSlug: tenant.slug
+      costCentre: tenant.costCentre
+      ownerTag: tenant.?ownerTag ?? ''
+      privateEndpointsSubnetId: platform.outputs.privateEndpointsSubnetId
+      postgresSubnetId: platform.outputs.postgresSubnetId
+      keyVaultPrivateDnsZoneId: platform.outputs.keyVaultPrivateDnsZoneId
+      postgresPrivateDnsZoneId: platform.outputs.postgresPrivateDnsZoneId
+      blobPrivateDnsZoneId: platform.outputs.blobPrivateDnsZoneId
+      runtimeIdentityPrincipalId: platform.outputs.runtimeIdentityPrincipalId
+      migrateIdentityPrincipalId: platform.outputs.migrateIdentityPrincipalId
+      migrateIdentityName: platform.outputs.migrateIdentityName
+      sharedPostgresServerName: platform.outputs.sharedPostgresServerName
+      sharedPostgresServerFqdn: platform.outputs.sharedPostgresServerFqdn
+      deployDedicatedPostgresServer: tenant.?deployDedicatedPostgresServer ?? false
+      dedicatedPostgresCmkKeyUri: tenant.?dedicatedPostgresCmkKeyUri ?? ''
+      dedicatedPostgresCmkIdentityId: tenant.?dedicatedPostgresCmkIdentityId ?? ''
+      enableCloudBlobStorage: tenant.?enableCloudBlobStorage ?? enableCloudBlobStorage
+      defenderMalwareScanCapGbPerMonth: defenderMalwareScanCapGbPerMonth
     }
   }
-}
-
-resource defenderForStorage 'Microsoft.Security/defenderForStorageSettings@2022-12-01-preview' = if (enableCloudBlobStorage) {
-  name: 'current'
-  scope: storageAccount
-  properties: {
-    isEnabled: true
-    malwareScanning: {
-      onUpload: {
-        isEnabled: true
-        capGBPerMonth: defenderMalwareScanCapGbPerMonth
-      }
-    }
-    sensitiveDataDiscovery: {
-      isEnabled: false
-    }
-    overrideSubscriptionLevelSettings: true
-  }
-}
+]
 
 output hostingModeConfigured string = hostingMode
 output primaryRegion string = location
-output keyVaultName string = keyVault.name
-output keyVaultUri string = keyVault.properties.vaultUri
-output webAppName string = webApp.name
-output webAppPrincipalId string = webApp.identity.principalId
-output keyVaultSecretsUserRoleAssignmentId string = webAppKeyVaultSecretsUserRole.id
-output appSettingsKeyVaultReferences object = keyVaultSecretAppSettings
-output storageContainerName string = containerName
-output postgresDatabaseName string = 'pg_tenant_${replace(tenantSlug, '-', '_')}_${environment}'
-output cloudBlobStorageEnabled bool = enableCloudBlobStorage
-output pdfConverterContainerEnabled bool = enablePdfConverterContainerApp
+output containerAppsEnvironmentId string = platform.outputs.containerAppsEnvironmentId
+output webContainerAppName string = platform.outputs.webContainerAppName
+output webContainerAppFqdn string = platform.outputs.webContainerAppFqdn
+output pdfConverterContainerEnabled bool = platform.outputs.pdfConverterContainerEnabled
+output runtimeIdentityClientId string = platform.outputs.runtimeIdentityClientId
+output runtimeIdentityPrincipalId string = platform.outputs.runtimeIdentityPrincipalId
+output migrateIdentityClientId string = platform.outputs.migrateIdentityClientId
+output migrateIdentityPrincipalId string = platform.outputs.migrateIdentityPrincipalId
+output platformKeyVaultName string = platform.outputs.platformKeyVaultName
+output platformKeyVaultUri string = platform.outputs.platformKeyVaultUri
+output applicationInsightsName string = platform.outputs.applicationInsightsName
+output jobFailureAlertRuleName string = platform.outputs.jobFailureAlertRuleName
+output sharedPostgresServerFqdn string = platform.outputs.sharedPostgresServerFqdn
+output migrateJobName string = platform.outputs.migrateJobName
+output storeImportJobName string = platform.outputs.storeImportJobName
+output tenantOutputs array = [
+  for (tenant, idx) in effectiveTenants: {
+    tenantSlug: tenantDeployments[idx].outputs.tenantSlug
+    keyVaultName: tenantDeployments[idx].outputs.keyVaultName
+    keyVaultUri: tenantDeployments[idx].outputs.keyVaultUri
+    postgresDatabaseName: tenantDeployments[idx].outputs.postgresDatabaseName
+    postgresHost: tenantDeployments[idx].outputs.postgresHost
+    dedicatedPostgresDeployed: tenantDeployments[idx].outputs.dedicatedPostgresDeployed
+    storageContainerName: tenantDeployments[idx].outputs.storageContainerName
+    cloudBlobStorageEnabled: tenantDeployments[idx].outputs.cloudBlobStorageEnabled
+  }
+]

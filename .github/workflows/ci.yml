@@ -40,6 +40,13 @@ jobs:
           rm -f "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
           gitleaks dir . --config .gitleaks.toml --redact
 
+      - name: Validate Bicep infrastructure templates (build & lint)
+        run: |
+          az bicep build --file core/infra/main.bicep --stdout > /dev/null
+          for f in core/infra/main.bicep core/infra/modules/*.bicep; do
+            az bicep lint --file "$f"
+          done
+
       - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:

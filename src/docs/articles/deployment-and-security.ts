@@ -6,13 +6,13 @@ export const deploymentAndSecurityArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared isolates every firm’s data in a dedicated database, supports firm-specific customisations without forking the core, and runs identically in 1Squared UK Cloud or your firm’s own Azure subscription.',
-  updated: '2026-11-07',
+  updated: '2026-11-09',
   body: `
 Law firms evaluating practice management platforms traditionally face an uncomfortable compromise between **multi-tenant SaaS** (easy upgrades, but your client and matter records sit in a shared database alongside rival firms) and **bespoke on-premises forks** (isolated infrastructure, but every customisation makes upgrades slow, expensive, and fragile).
 
 1Squared eliminates this compromise by separating **how the software is built and upgraded** from **where your data lives and how it is isolated**.
 
-> Every firm gets a single, continuously upgraded core application, a dedicated private repository for firm-specific configuration and extensions, a physically separate database and encryption boundary, and the freedom to run either in 1Squared’s UK-hosted cloud or inside the firm’s own Microsoft Azure tenant.
+> Every firm gets a single, continuously upgraded core application, a dedicated private repository for firm-specific configuration and extensions, a physically separate database and storage container (with a dedicated PostgreSQL server and customer-managed key whenever required), and the freedom to run either in 1Squared’s UK-hosted cloud or inside the firm’s own Microsoft Azure tenant.
 
 ## 1. The three-layer application architecture
 
@@ -34,16 +34,16 @@ When a firm needs custom business logic—such as a bespoke risk-scoring integra
 
 ## 2. Database, storage & cryptographic isolation
 
-Whether you choose 1Squared Hosted Cloud or Self-Hosted Azure, **no two law firms ever share a database, storage container, or encryption key**.
+Whether you choose 1Squared Hosted Cloud or Self-Hosted Azure, **no two law firms ever share a database or storage container**. In 1Squared Hosted Cloud (Model B), tenant databases on the shared Azure Database for PostgreSQL Flexible Server use a platform-managed encryption key (a recorded exception to Standard §8.5 in ADR 0028, stated openly to hosted firms), while any firm requiring its own or a Customer-Managed Key (CMK) is provisioned on a dedicated PostgreSQL Flexible Server (\`deployDedicatedPostgresServer: true\` in \`core/infra/modules/tenant.bicep\`).
 
 | Isolation Layer | How 1Squared Protects Your Firm |
 | --- | --- |
 | **Cryptographic Identity & Tenant Resolution** | The active tenant configuration is loaded via \`getActiveTenantConfiguration()\` (from the configured \`PLATFORM_TENANT_PACKAGE_DIR\`), and the request \`TenantContext\` is resolved by \`resolveCurrentTenantContext()\` from the user’s cryptographically verified Microsoft Entra ID (OIDC) session claims. The tenant configuration is loaded and validated once per process as a read-only cached configuration; a process restart is required to pick up configuration file changes. In the transitional Next.js host, \`resolveCurrentTenantContext()\` binds the session to the active tenant configuration’s \`tenantId\` and rejects any mismatched actor or request \`tenantId\` (\`TENANCY_FORGERY_DETECTED\`); in \`@platform/core\`’s \`resolveTenantFromVerifiedToken()\`, \`single_tenant\` mode cross-checks \`configuredSingleTenantId\` against \`verifiedToken.tenantId\` and \`multi_tenant\` mode binds the context to \`verifiedToken.tenantId\`, never trusting a URL parameter, HTTP header, or form field. |
-| **Dedicated Database per Firm** | Each firm has its own dedicated PostgreSQL database (database-per-tenant isolation) with a strict \`TenantContext\` required on every repository call. |
-| **Database Row-Level Security (RLS)** | Every table also carries a \`tenant_id\` column protected by PostgreSQL \`FORCE ROW LEVEL SECURITY\` bound to \`current_setting('app.current_tenant_id')\`. Even if an application query omitted a filter, the database kernel refuses to return rows without a matching session tenant. |
-| **Dedicated File Storage** | Exports and attachments stored by 1Squared reside in a dedicated Azure Blob Storage container per firm, accessed only through short-lived, tenant-scoped SAS tokens. |
-| **Isolated Cache, Search & Background Jobs** | Redis cache keys, search indices, and background queue jobs are mandatorily prefixed with the firm’s \`tenantId\`. Background workers refuse to execute any job payload lacking a verified tenant context. |
-| **Key Vault Secret Isolation** | Secrets, certificates, and encryption keys live in Azure Key Vault with per-tenant RBAC (\`Key Vault Secrets User\`) and support customer-managed keys (CMK). In \`core/infra/main.bicep\`, Key Vault enforces \`networkAcls.defaultAction: 'Deny'\` with \`publicNetworkAccess: 'Enabled'\`, \`bypass: 'AzureServices'\`, and \`virtualNetworkRules\` restricted to the App Service VNet integration subnet (\`snet-appservice\`) so App Service can resolve \`@Microsoft.KeyVault(...)\` secret references at runtime (\`entra-client-secret\`, \`auth-secret\`, \`blob-signing-key\`, \`ideal-postcodes-api-key\` for \`IDEAL_POSTCODES_API_KEY\`, and \`anthropic-api-key\` for \`ANTHROPIC_API_KEY\`), and \`entraClientId\` and \`entraRedirectUri\` are required deployment parameters with no empty defaults. Address lookup (\`/api/address-lookup\`) and AI matter extraction (\`/api/matters/extract\`) run strictly on the server; no API keys or secrets are stored in code or configuration files, sent to the browser, or accepted from browser requests. |
+| **Dedicated Database per Firm** | Each firm has its own dedicated PostgreSQL 16 database (\`pg_tenant_<slug>_<env>\`) on Azure Database for PostgreSQL Flexible Server with Microsoft Entra ID sign-in only (\`passwordAuth: 'Disabled'\`), TLS 1.2+ enforced, and explicit PgBouncer \`TRANSACTION\` pooling on port \`6432\`. |
+| **Separate Identities & Per-Tenant Database Privileges** | Infrastructure (\`core/infra/modules/platform.bicep\`) separates two User-Assigned Managed Identities: \`migrateIdentity\` (registered as the PostgreSQL Entra administrator and attached exclusively to the manual \`migrate\` job connecting directly on port \`5432\`) and \`runtimeIdentity\` (attached to the web app and background jobs on PgBouncer port \`6432\`, mapped in PostgreSQL to a non-admin \`NOINHERIT\` login with zero direct table privileges). Every table and sequence in a firm’s database is granted only to that firm’s PostgreSQL role (\`role_tenant_<slug>_<env>\`), and every unit of work runs inside a transaction starting with \`SET LOCAL ROLE\`. |
+| **Dedicated File Storage** | Exports and attachments stored by 1Squared reside in a dedicated Azure Blob Storage container per firm (\`tenant-<slug>-<env>\`, \`publicNetworkAccess: 'Disabled'\` behind a Private Endpoint with Microsoft Defender for Storage malware scanning), accessed only through short-lived, tenant-scoped tokens. |
+| **Isolated Cache, Search, Telemetry & Background Jobs** | Cache keys, search indices, Log Analytics / Application Insights telemetry, and Container Apps jobs (\`migrate\`, \`store-import\`, and hourly scheduled jobs running bundled \`dist/jobs/\` entry points) carry the firm’s \`tenantId\` and \`correlationId\` (with no client content or personal data) and are monitored by an Azure Monitor scheduled-query alert rule (\`Microsoft.Insights/scheduledQueryRules\`) for job failures or timeouts. |
+| **Key Vault Private Endpoints & Cost Attribution** | \`core/infra/main.bicep\` composes \`modules/platform.bicep\` (platform Key Vault for platform-wide secrets only: \`entra-client-secret\`, \`auth-secret\`, \`blob-signing-key\`, \`ideal-postcodes-api-key\`, and \`anthropic-api-key\`) and \`modules/tenant.bicep\` (a dedicated Key Vault per firm, \`kv-<slug>-<env>\`, exporting \`keyVaultName\` and \`keyVaultUri\` so 24-character truncated vault names are never re-derived). All Key Vaults enforce RBAC authorisation (\`Key Vault Secrets User\` granted before Container Apps and jobs are created), 90-day soft delete, purge protection, \`publicNetworkAccess: 'Disabled'\`, \`networkAcls.defaultAction: 'Deny'\`, and Private Endpoints on \`privatelink.vaultcore.azure.net\`. Every per-tenant resource carries mandatory \`tenant\`, \`environment\`, \`hostingMode\`, and \`costCentre\` tags, and \`entraClientId\` and \`entraRedirectUri\` are required deployment parameters with no empty defaults. Address lookup (\`/api/address-lookup\`) and AI matter extraction (\`/api/matters/extract\`) run strictly on the server; no API keys or secrets live in Bicep, code, or configuration files. |
 
 ## 3. External document store & SharePoint security
 
@@ -73,7 +73,7 @@ Designed for firms that want a turnkey, zero-maintenance SaaS experience with en
 Designed for firms with strict regulatory, sovereign, or client-mandated policies requiring all compute, network traffic, and data to reside inside their own cloud boundary.
 
 - **Hosting Location**: Deployed directly into the law firm’s own Microsoft Azure subscription via 1Squared’s automated Bicep Infrastructure-as-Code templates (\`core/infra/\`).
-- **Compute**: Dedicated Azure Container Apps running in \`single\` tenant mode inside the firm’s private Virtual Network (VNet).
+- **Compute**: Dedicated Azure Container Apps (plus optional internal-only PDF converter Container App and Container Apps jobs) running in \`single_tenant\` mode inside the firm’s private Virtual Network (VNet).
 - **Network & Keys**: Supports ExpressRoute/VPN private peering, Private Endpoints for PostgreSQL/Storage/Key Vault, and full Customer-Managed Keys (CMK) where the firm holds the master encryption keys and can revoke access at any time.
 - **Upgrades**: Delivered as signed container images and declarative Bicep templates into the firm’s change-controlled release pipeline.
 
@@ -82,11 +82,11 @@ Designed for firms with strict regulatory, sovereign, or client-mandated policie
 | Dimension | Model B: 1Squared Managed Cloud (Hosted) | Model A: Client Self-Hosted (Firm’s Azure) |
 | --- | --- | --- |
 | **Application Build** | Identical immutable container image | Identical immutable container image |
-| **Tenancy Mode** | \`multi\` (shared compute, isolated data) | \`single\` (dedicated compute & dedicated data) |
-| **Database Isolation** | Dedicated PostgreSQL database per firm + RLS | Dedicated PostgreSQL server & database in firm’s Azure + RLS |
+| **Tenancy Mode** | \`multi_tenant\` (shared Container Apps compute, isolated data) | \`single_tenant\` (dedicated Container Apps compute & dedicated data) |
+| **Database Isolation** | Dedicated PostgreSQL database & role per firm (\`SET LOCAL ROLE\` over PgBouncer \`TRANSACTION\` pooling) | Dedicated PostgreSQL Flexible Server, database & role in firm’s Azure |
 | **Document Storage** | Firm’s own M365 SharePoint Online (zero copies in 1Squared) | Firm’s own M365 SharePoint Online (zero copies in 1Squared) |
 | **Custom Code & Config** | Firm’s private config & sandboxed extension bundle | Firm’s private config & sandboxed extension bundle |
-| **Encryption Keys** | 1Squared-managed Key Vault (optional CMK) | Firm-owned Azure Key Vault & Customer-Managed Keys (CMK) |
+| **Encryption Keys** | Per-firm Key Vault Private Endpoint; shared Postgres server uses platform-managed key (recorded Standard §8.5 exception) or \`deployDedicatedPostgresServer: true\` for own/CMK key | Firm-owned Azure Key Vault Private Endpoint & Customer-Managed Keys (CMK) |
 | **Network Boundary** | TLS 1.3 public ingress with Entra Conditional Access | Optional full private VNet / ExpressRoute / Private Link |
 | **Infrastructure Management** | Fully managed by 1Squared SRE (24/7 SLA) | Automated Bicep deployment into firm’s subscription |
 
@@ -105,7 +105,7 @@ When presenting 1Squared’s security and deployment architecture to prospective
 
 1. **Slide 1 — The Law Firm Technology Dilemma**: Contrast legacy shared-table SaaS against un-upgradeable bespoke forks, introducing 1Squared’s principle: *One continuously upgraded core, dedicated firm customisation, and zero shared data*.
 2. **Slide 2 — The Three-Layer Architecture**: Visualise Layer 1 (Immutable Core), Layer 2 (Schema-Validated Firm Config), and Layer 3 (Sandboxed Client Extensions in a private repo per firm).
-3. **Slide 3 — Six-Layer Data Isolation**: Walk through OIDC Token Identity → Dedicated PostgreSQL Database per Firm → Row-Level Security (RLS) → Dedicated Blob Storage → Tenant-Prefixed Cache/Jobs → Azure Key Vault.
+3. **Slide 3 — Six-Layer Data Isolation**: Walk through OIDC Token Identity → Dedicated PostgreSQL Database per Firm → Per-Tenant Role & \`SET LOCAL ROLE\` Object Privileges (\`NOINHERIT\` runtime identity) → Dedicated Blob Storage → Tenant-Prefixed Cache/Jobs → Azure Key Vault Private Endpoints.
 4. **Slide 4 — Documents Stay in Your Microsoft 365**: Show how 1Squared stores only pointers while SharePoint enforces per-user permissions via On-Behalf-Of (OBO) tokens and \`Sites.Selected\` provisioning.
 5. **Slide 5 — Ethical Walls & Automated Drift Detection**: Show how Department/Team folder inheritance works alongside Restricted Matter lockdowns and automated SharePoint permission drift alerts.
 6. **Slide 6 — Deployment Choice: 1Squared UK Cloud vs Your Azure**: Present the side-by-side comparison of **Model B (Turnkey UK Hosted)** and **Model A (Self-Hosted in the Firm’s Azure VNet)**, noting that firms can migrate between models without rewriting config or extensions.
