@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 
 export default async function MattersPage() {
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
     const matterFinanceRes = snap.finance.canViewMatter
       ? getMatterFinanceRows(actor.personId)
       : null;

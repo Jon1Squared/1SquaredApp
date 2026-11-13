@@ -5,6 +5,7 @@ import {
   clearJwksCache,
   createPkceChallenge,
   createSignedEntraSessionCookie,
+  createSignInActorFromVerifiedOidcToken,
   ENTRA_PKCE_COOKIE,
   ENTRA_SESSION_COOKIE,
   exchangeCodeForVerifiedEntraClaims,
@@ -21,7 +22,10 @@ import {
   resetAllDemoData,
   saveHomePagesConfig,
 } from '../../src/server/services';
-import { getStore } from '../../src/server/store';
+import {
+  auditEntriesSince,
+  markAuditPosition,
+} from '../../src/server/testSupport/auditTestSupport';
 import { switchUserAction } from '../../src/app/actions';
 import { GET as callbackGet } from '../../src/app/api/auth/callback/microsoft-entra-id/route';
 import { GET as logoutGet } from '../../src/app/api/auth/logout/route';
@@ -419,9 +423,11 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
   it('validates x-correlation-id and x-request-id headers in the OIDC callback route, replacing unsafe or over-long values while keeping valid ones (R399)', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
+      let lastCallbackAuditMark = -1;
       const invokeCallbackWithHeaders = async (
         extraHeaders: Record<string, string>,
       ) => {
+        lastCallbackAuditMark = await markAuditPosition();
         const { signedCookieValue } = createPkceChallenge('/matters');
         const [encodedPart] = signedCookieValue.split('.');
         const pkceDecoded = JSON.parse(
@@ -469,8 +475,8 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         return callbackGet(req);
       };
 
-      const latestSignInAudit = () =>
-        getStore().audit.find(
+      const latestSignInAudit = async () =>
+        (await auditEntriesSince(lastCallbackAuditMark)).find(
           (a) =>
             a.field === 'Entra ID OIDC Sign-In' ||
             a.field === 'Entra ID OIDC Provisioned Employee',
@@ -482,7 +488,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         'x-correlation-id': semicolonInjected,
       });
       expect(semicolonRes.status).toBe(307);
-      const semicolonAudit = latestSignInAudit();
+      const semicolonAudit = await latestSignInAudit();
       expect(semicolonAudit).toBeDefined();
       expect(semicolonAudit?.newValue).toMatch(
         /correlationId=corr-rte-[0-9a-f-]{36}$/i,
@@ -496,7 +502,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         'x-correlation-id': spaceInjected,
       });
       expect(spaceRes.status).toBe(307);
-      const spaceAudit = latestSignInAudit();
+      const spaceAudit = await latestSignInAudit();
       expect(spaceAudit?.newValue).toMatch(
         /correlationId=corr-rte-[0-9a-f-]{36}$/i,
       );
@@ -508,7 +514,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         'x-correlation-id': overlongHeader,
       });
       expect(overlongRes.status).toBe(307);
-      const overlongAudit = latestSignInAudit();
+      const overlongAudit = await latestSignInAudit();
       expect(overlongAudit?.newValue).toMatch(
         /correlationId=corr-rte-[0-9a-f-]{36}$/i,
       );
@@ -519,7 +525,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         'x-request-id': unsafeRequestId,
       });
       expect(unsafeReqIdRes.status).toBe(307);
-      const unsafeReqIdAudit = latestSignInAudit();
+      const unsafeReqIdAudit = await latestSignInAudit();
       expect(unsafeReqIdAudit?.newValue).toMatch(
         /correlationId=corr-rte-[0-9a-f-]{36}$/i,
       );
@@ -531,7 +537,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         'x-correlation-id': validHeader,
       });
       expect(validRes.status).toBe(307);
-      const validAudit = latestSignInAudit();
+      const validAudit = await latestSignInAudit();
       expect(validAudit?.newValue).toContain(`correlationId=${validHeader}`);
 
       const maxLenValidHeader = 'v'.repeat(128);
@@ -539,7 +545,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         'x-request-id': maxLenValidHeader,
       });
       expect(maxLenRes.status).toBe(307);
-      const maxLenAudit = latestSignInAudit();
+      const maxLenAudit = await latestSignInAudit();
       expect(maxLenAudit?.newValue).toContain(
         `correlationId=${maxLenValidHeader}`,
       );
@@ -660,7 +666,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     expect(await getCurrentUserId()).toBe('P-000002');
 
     // R50: switchUserAction as a non-admin with demo mode off is rejected
-    saveHomePagesConfig({ firmSettings: { demoMode: false } }, 'P-000001');
+    await saveHomePagesConfig({ firmSettings: { demoMode: false } }, 'P-000001');
     await expect(switchUserAction('P-000001')).rejects.toThrow(
       /Demo Mode is enabled/i,
     );
@@ -753,5 +759,63 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     }
 
     await resetAllDemoData('P-000001', testDataResetContext());
+  });
+
+  it('R462: createSignInActorFromVerifiedOidcToken asserts __verifiedByOidcMiddleware === true and tenantId matches the active tenant', () => {
+    expect(() =>
+      createSignInActorFromVerifiedOidcToken(
+        {
+          // @ts-expect-error testing unbranded token rejection
+          __verifiedByOidcMiddleware: false,
+          sub: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          name: 'Carys Hughes',
+          email: 'carys.hughes@notalawfirm.example',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        {
+          oid: '00000000-0000-4000-8000-000000000001',
+          email: 'carys.hughes@notalawfirm.example',
+        },
+      ),
+    ).toThrow(/TENANCY_AUTH_ERROR.*__verifiedByOidcMiddleware/);
+
+    expect(() =>
+      createSignInActorFromVerifiedOidcToken(
+        {
+          __verifiedByOidcMiddleware: true,
+          sub: 'P-000001',
+          tenantId: 'other-tenant-id',
+          name: 'Carys Hughes',
+          email: 'carys.hughes@notalawfirm.example',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        {
+          oid: '00000000-0000-4000-8000-000000000001',
+          email: 'carys.hughes@notalawfirm.example',
+        },
+      ),
+    ).toThrow(/TENANCY_AUTH_ERROR.*does not match active tenant/);
+
+    const validActor = createSignInActorFromVerifiedOidcToken(
+      {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'not-a-law-firm',
+        name: 'Carys Hughes',
+        email: 'carys.hughes@notalawfirm.example',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      {
+        oid: '00000000-0000-4000-8000-000000000001',
+        email: 'carys.hughes@notalawfirm.example',
+        correlationId: 'corr-r462',
+      },
+    );
+    expect(validActor.tenantId).toBe('not-a-law-firm');
+    expect(validActor.sub).toBe('P-000001');
   });
 });

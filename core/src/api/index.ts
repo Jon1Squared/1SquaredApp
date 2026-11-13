@@ -1653,3 +1653,54 @@ export interface KeyDatesConfiguration {
   };
 }
 
+// ------------------------------------------------------------------ Firm-Wide Append-Only Audit Log Contracts (ADR-0028, S0-15)
+
+export type FirmAuditRecordType =
+  | 'person'
+  | 'organisation'
+  | 'matter'
+  | 'enquiry'
+  | 'quote'
+  | 'task'
+  | 'team'
+  | 'list'
+  | 'customField'
+  | 'system'
+  | 'employee_payroll'
+  | 'employee_sensitive'
+  | 'key_date';
+
+export interface FirmAuditEntryRecord {
+  id: string;
+  seq?: number;
+  recordType: FirmAuditRecordType | string;
+  recordId: string;
+  action: string;
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  byId: string;
+  at: string;
+  reason?: string | null;
+  snapshot?: unknown;
+}
+
+export interface FirmAuditEntryInput {
+  id?: string;
+  recordType: FirmAuditRecordType | string;
+  recordId: string;
+  action: string;
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  byId: string;
+  at?: string;
+  reason?: string | null;
+  snapshot?: unknown;
+}
+
+export interface FirmAuditPageResult {
+  entries: FirmAuditEntryRecord[];
+  nextBeforeSeq: number | null;
+}
+

@@ -20,7 +20,7 @@ export default async function NewMatterPage({
 }) {
   const params = await searchParams;
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
     const initialQuote = params.quoteId
       ? snap.quotes.find((q) => q.id === params.quoteId || q.reference === params.quoteId) ?? null
       : null;

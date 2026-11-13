@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CORE_API_VERSION,
   ExtensionHost,
@@ -34,6 +34,12 @@ import {
   verifyProposedKeyDateRecord,
 } from '@/server/services';
 import { getStore, resetStore } from '@/server/store';
+import {
+  getAuditRepository,
+  getKeyDateRepository,
+  runAsTestActor,
+  testTenantCtx,
+} from '@/server/testSupport/auditTestSupport';
 import notALawFirmBaseConfig from '../../../client-not-a-law-firm/config/base.json';
 import {
   canUserVerifyKeyDate,
@@ -234,7 +240,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
 
       resetStore();
       const store = getStore();
-      const auditCountBefore = store.audit.length;
+      const auditCountBefore = await getAuditRepository().countAuditEntries(testTenantCtx('P-000004'));
       const res = await createOrProposeKeyDateRecord(
         {
           matterId: store.matters[0]!.id,
@@ -244,7 +250,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         'P-DOES-NOT-EXIST',
       );
       expect(res.ok).toBe(false);
-      expect(store.audit.length).toBe(auditCountBefore);
+      expect(await getAuditRepository().countAuditEntries(testTenantCtx('P-000004'))).toBe(auditCountBefore);
     });
   });
 
@@ -347,7 +353,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       expect(migrationExports).toHaveLength(1);
     });
 
-    it('resolves keyDates from active tenant config and defaults to enabled:false for a tenant without a keyDates block (R33)', () => {
+    it('resolves keyDates from active tenant config and defaults to enabled:false for a tenant without a keyDates block (R33)', async () => {
       resetStore();
       const secondTenantConfig: Record<string, unknown> = {
         ...(notALawFirmBaseConfig as Record<string, unknown>),
@@ -358,7 +364,9 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         setActiveTenantConfigForTesting(secondTenantConfig, {});
         const store = getStore();
         store.keyDatesConfigOverride = undefined;
-        const resolved = getKeyDatesConfig(store);
+        const resolved = await runAsTestActor('P-000001', () =>
+          getKeyDatesConfig(store),
+        );
         expect(resolved.enabled).toBe(false);
       } finally {
         setActiveTenantConfigForTesting(null, undefined);
@@ -368,12 +376,15 @@ describe('Key Dates permissions, config schema validation, and extension contrac
     it('enforces MFA on saveKeyDatesConfigRecord (R27), refuses mutating services when enabled:false (R35), gates scheduler behind keydate:configure + MFA and runTenantBackgroundJob (R25), and enforces preview/acknowledge guards (R34)', async () => {
       resetStore();
       const store = getStore();
+      const currentConfig = await runAsTestActor('P-000001', () =>
+        getKeyDatesConfig(store),
+      );
       const admin = store.people.find(
         (p) =>
           p.isEmployee &&
           !p.mergedIntoId &&
           hasKeyDatePermission(p, 'keydate:configure', {
-            config: getKeyDatesConfig(store),
+            config: currentConfig,
             allPeople: store.people,
             teams: store.teams,
           }),
@@ -383,118 +394,210 @@ describe('Key Dates permissions, config schema validation, and extension contrac
           p.isEmployee &&
           !p.mergedIntoId &&
           hasKeyDatePermission(p, 'keydate:edit', {
-            config: getKeyDatesConfig(store),
+            config: currentConfig,
             allPeople: store.people,
             teams: store.teams,
           }) &&
           !hasKeyDatePermission(p, 'keydate:configure', {
-            config: getKeyDatesConfig(store),
+            config: currentConfig,
             allPeople: store.people,
             teams: store.teams,
           }),
       )!;
-      const currentConfig = getKeyDatesConfig(store);
 
       // R27: Admin with mfaVerified: false gets ok:false and config is unchanged
-      const saveNoMfa = saveKeyDatesConfigRecord(
-        { ...currentConfig, enabled: false },
-        'Disable without MFA',
-        admin.id,
+      const saveNoMfa = await runAsTestActor(admin.id, () =>
+        saveKeyDatesConfigRecord(
+          { ...currentConfig, enabled: false },
+          'Disable without MFA',
+          admin.id,
+          { mfaVerified: false },
+        ),
         { mfaVerified: false },
       );
       expect(saveNoMfa.ok).toBe(false);
-      expect(getKeyDatesConfig(store).enabled).toBe(true);
+      expect(
+        (await runAsTestActor(admin.id, () => getKeyDatesConfig(store))).enabled,
+      ).toBe(true);
 
       // R27: Same admin with MFA succeeds
-      const saveWithMfa = saveKeyDatesConfigRecord(
-        { ...currentConfig, enabled: false },
-        'Disable with MFA',
-        admin.id,
-        { mfaVerified: true },
+      const saveWithMfa = await runAsTestActor(admin.id, () =>
+        saveKeyDatesConfigRecord(
+          { ...currentConfig, enabled: false },
+          'Disable with MFA',
+          admin.id,
+          { mfaVerified: true },
+        ),
       );
       expect(saveWithMfa.ok).toBe(true);
-      expect(getKeyDatesConfig(store).enabled).toBe(false);
+      expect(
+        (await runAsTestActor(admin.id, () => getKeyDatesConfig(store))).enabled,
+      ).toBe(false);
 
-      // R35: With enabled: false, every mutating key-date service returns ok:false and store.keyDates is unchanged
-      const snapshotBefore = JSON.stringify(store.keyDates);
-      const kdId = store.keyDates![0]!.id;
+      // R35: With enabled: false, every mutating key-date service returns ok:false and the stored key dates are unchanged
+      const kdRepo = getKeyDateRepository();
+      const allKeyDatesBefore = await kdRepo.listAllVisibleKeyDates(testTenantCtx(admin.id));
+      const snapshotBefore = JSON.stringify(allKeyDatesBefore);
+      const kdId = allKeyDatesBefore[0]!.id;
       const matterId = store.matters[0]!.id;
       const teamId = store.teams.find((t) => t.active)!.id;
 
       expect(
         (
-          await createOrProposeKeyDateRecord(
-            { matterId, keyDateTypeId: 'limitation', dueDate: '2029-01-01' },
-            feeEarner.id,
-          )
-        ).ok,
-      ).toBe(false);
-      expect((await proposeProvisionalKeyDateRecord(kdId, feeEarner.id)).ok).toBe(
-        false,
-      );
-      expect((await verifyProposedKeyDateRecord(kdId, admin.id)).ok).toBe(false);
-      expect(
-        (await rejectProposedKeyDateRecord(kdId, 'Reason', admin.id)).ok,
-      ).toBe(false);
-      expect(
-        (
-          await supersedeConfirmedKeyDateRecord(
-            kdId,
-            { dueDate: '2029-02-01' },
-            'Reason',
-            feeEarner.id,
+          await runAsTestActor(feeEarner.id, () =>
+            createOrProposeKeyDateRecord(
+              { matterId, keyDateTypeId: 'limitation', dueDate: '2029-01-01' },
+              feeEarner.id,
+            ),
           )
         ).ok,
       ).toBe(false);
       expect(
         (
-          await resolveKeyDateOutcomeRecord(
-            kdId,
-            { kind: 'met', note: 'Met' },
-            feeEarner.id,
+          await runAsTestActor(feeEarner.id, () =>
+            proposeProvisionalKeyDateRecord(kdId, feeEarner.id),
           )
         ).ok,
       ).toBe(false);
       expect(
-        (await reassignKeyDateTeamRecord(kdId, { teamId }, feeEarner.id)).ok,
-      ).toBe(false);
-      expect(
-        recordKeyDateNotApplicableRecord(
-          { matterId, keyDateTypeId: 'limitation', reason: 'N/A' },
-          feeEarner.id,
+        (
+          await runAsTestActor(admin.id, () =>
+            verifyProposedKeyDateRecord(kdId, admin.id),
+          )
         ).ok,
       ).toBe(false);
-      expect(acknowledgeKeyDateReminderRecord(kdId, feeEarner.id).ok).toBe(false);
-      expect(JSON.stringify(store.keyDates)).toBe(snapshotBefore);
+      expect(
+        (
+          await runAsTestActor(admin.id, () =>
+            rejectProposedKeyDateRecord(kdId, 'Reason', admin.id),
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        (
+          await runAsTestActor(feeEarner.id, () =>
+            supersedeConfirmedKeyDateRecord(
+              kdId,
+              { dueDate: '2029-02-01' },
+              'Reason',
+              feeEarner.id,
+            ),
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        (
+          await runAsTestActor(feeEarner.id, () =>
+            resolveKeyDateOutcomeRecord(
+              kdId,
+              { kind: 'met', note: 'Met' },
+              feeEarner.id,
+            ),
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        (
+          await runAsTestActor(feeEarner.id, () =>
+            reassignKeyDateTeamRecord(kdId, { teamId }, feeEarner.id),
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        (
+          await runAsTestActor(feeEarner.id, () =>
+            recordKeyDateNotApplicableRecord(
+              { matterId, keyDateTypeId: 'limitation', reason: 'N/A' },
+              feeEarner.id,
+            ),
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        (
+          await runAsTestActor(feeEarner.id, () =>
+            acknowledgeKeyDateReminderRecord(kdId, feeEarner.id),
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        JSON.stringify(await kdRepo.listAllVisibleKeyDates(testTenantCtx(admin.id))),
+      ).toBe(snapshotBefore);
 
       // Re-enable module with MFA
-      saveKeyDatesConfigRecord(
-        { ...currentConfig, enabled: true },
-        'Re-enable with MFA',
-        admin.id,
-        { mfaVerified: true },
+      await runAsTestActor(admin.id, () =>
+        saveKeyDatesConfigRecord(
+          { ...currentConfig, enabled: true },
+          'Re-enable with MFA',
+          admin.id,
+          { mfaVerified: true },
+        ),
       );
 
-      // R25 & R84: Scheduler accepts only { tenantCtx, byId, mfaVerified }, checks keydate:configure + MFA, and throws TENANCY_JOB_ERROR when called with no context
-      expect(() => runKeyDateReminderSchedulerRecord(null)).toThrow(
+      // R25, R84 & R449: Scheduler accepts only { tenantCtx, byId, mfaVerified }, checks keydate:configure + MFA before any repository read, rejects actor mismatch, and throws TENANCY_JOB_ERROR when called with no context
+      await expect(runKeyDateReminderSchedulerRecord(null)).rejects.toThrow(
         /TENANCY_JOB_ERROR/,
       );
-      expect(() =>
+      await expect(
         // @ts-expect-error R84: Old positional/string arguments are rejected at compile time
         runKeyDateReminderSchedulerRecord('forged-tenant-id'),
-      ).toThrow(/TENANCY_JOB_ERROR/);
-      expect(
-        runKeyDateReminderSchedulerRecord({
-          byId: feeEarner.id,
-          mfaVerified: true,
-        }).ok,
-      ).toBe(false);
-      expect(
-        runKeyDateReminderSchedulerRecord({
-          byId: admin.id,
-          mfaVerified: false,
-        }).ok,
-      ).toBe(false);
+      ).rejects.toThrow(/TENANCY_JOB_ERROR/);
+
+      const repoCfgSpy = vi.spyOn(kdRepo, 'getKeyDatesTenantConfig');
+      const repoReadTxSpy = vi.spyOn(kdRepo, 'withTenantReadTransaction');
+      const repoGetByIdSpy = vi.spyOn(kdRepo, 'getKeyDateById');
+      const repoReminderSpy = vi.spyOn(kdRepo, 'listAllReminderStates');
+      try {
+        expect(
+          (
+            await runAsTestActor(feeEarner.id, () =>
+              runKeyDateReminderSchedulerRecord({
+                byId: feeEarner.id,
+                mfaVerified: true,
+              }),
+            )
+          ).ok,
+        ).toBe(false);
+        expect(
+          (
+            await runAsTestActor(
+              admin.id,
+              () =>
+                runKeyDateReminderSchedulerRecord({
+                  byId: admin.id,
+                  mfaVerified: false,
+                }),
+              { mfaVerified: false },
+            )
+          ).ok,
+        ).toBe(false);
+        // R449: Caller-supplied mfaVerified: true cannot override a context with mfaVerified: false
+        expect(
+          (await runKeyDateReminderSchedulerRecord({
+            tenantCtx: testTenantCtx(admin.id, { mfaVerified: false }),
+            byId: admin.id,
+            mfaVerified: true,
+          })).ok,
+        ).toBe(false);
+        // R449: Context actorId mismatch is rejected before any repository read
+        await expect(
+          runKeyDateReminderSchedulerRecord({
+            tenantCtx: testTenantCtx(feeEarner.id, { mfaVerified: true }),
+            byId: admin.id,
+            mfaVerified: true,
+          }),
+        ).rejects.toThrow(/TENANCY_ACTOR_MISMATCH/);
+
+        expect(repoCfgSpy).not.toHaveBeenCalled();
+        expect(repoReadTxSpy).not.toHaveBeenCalled();
+        expect(repoGetByIdSpy).not.toHaveBeenCalled();
+        expect(repoReminderSpy).not.toHaveBeenCalled();
+      } finally {
+        repoCfgSpy.mockRestore();
+        repoReadTxSpy.mockRestore();
+        repoGetByIdSpy.mockRestore();
+        repoReminderSpy.mockRestore();
+      }
       const signedAdminSession = verifySignedEntraSessionCookie(
         createSignedEntraSessionCookie({
           personId: admin.id,
@@ -513,7 +616,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
           expiresAt: '2099-10-31T18:00:00Z',
         }),
       )!;
-      const schedOk = runKeyDateReminderSchedulerRecord({
+      const schedOk = await runKeyDateReminderSchedulerRecord({
         byId: admin.id,
         mfaVerified: true,
         session: signedAdminSession,
@@ -522,7 +625,8 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       expect(schedOk.result?.tenantId).toBe('not-a-law-firm');
 
       // R34: Preview and acknowledge require keydate:view; acknowledge requires responsible person or team lead and confirmed status
-      const confirmedKd = store.keyDates!.find((k) => k.status === 'confirmed')!;
+      const keyDatesNow = await kdRepo.listAllVisibleKeyDates(testTenantCtx(admin.id));
+      const confirmedKd = keyDatesNow.find((k) => k.status === 'confirmed')!;
       const revokedViewer = makePerson({
         id: 'P-REVOKED-VIEW',
         firstName: 'No',
@@ -541,20 +645,27 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         ...confirmedKd.responsiblePersonIds,
         revokedViewer.id,
       ];
+      await kdRepo.putKeyDate(testTenantCtx(admin.id), confirmedKd);
 
       expect(
-        previewLimitationCalculationRecord(
-          {
-            ruleSetId: 'ew-sample',
-            ruleId: 'contract-simple',
-            triggerValues: { accrualDate: '2022-01-01' },
-          },
-          revokedViewer.id,
+        (
+          await runAsTestActor(revokedViewer.id, () =>
+            previewLimitationCalculationRecord(
+              {
+                ruleSetId: 'ew-sample',
+                ruleId: 'contract-simple',
+                triggerValues: { accrualDate: '2022-01-01' },
+              },
+              revokedViewer.id,
+            ),
+          )
         ).ok,
       ).toBe(false);
-      const ackRevoked = acknowledgeKeyDateReminderRecord(
-        confirmedKd.id,
-        revokedViewer.id,
+      const ackRevoked = await runAsTestActor(revokedViewer.id, () =>
+        acknowledgeKeyDateReminderRecord(
+          confirmedKd.id,
+          revokedViewer.id,
+        ),
       );
       expect(ackRevoked.ok).toBe(false);
       expect(ackRevoked.error).toMatch(/keydate:view/i);
@@ -578,18 +689,25 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       );
       expect(owningTeam.leadIds).not.toContain(unrelatedFeeEarner.id);
       expect(
-        acknowledgeKeyDateReminderRecord(confirmedKd.id, unrelatedFeeEarner.id)
-          .ok,
+        (
+          await runAsTestActor(unrelatedFeeEarner.id, () =>
+            acknowledgeKeyDateReminderRecord(confirmedKd.id, unrelatedFeeEarner.id),
+          )
+        ).ok,
       ).toBe(false);
 
       // Acknowledging a provisional or awaiting_verification date fails and creates no task
-      const unconfirmedKd = store.keyDates!.find(
+      const unconfirmedKd = keyDatesNow.find(
         (k) => k.status !== 'confirmed',
       )!;
       const tasksBefore = store.tasks.length;
-      const ackUnconfirmed = acknowledgeKeyDateReminderRecord(
-        unconfirmedKd.id,
+      const ackUnconfirmed = await runAsTestActor(
         unconfirmedKd.responsiblePersonIds[0]!,
+        () =>
+          acknowledgeKeyDateReminderRecord(
+            unconfirmedKd.id,
+            unconfirmedKd.responsiblePersonIds[0]!,
+          ),
       );
       expect(ackUnconfirmed.ok).toBe(false);
       expect(store.tasks.length).toBe(tasksBefore);

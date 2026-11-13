@@ -112,6 +112,7 @@ import {
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
   withPageActor,
+  listAuditEntriesForRecord,
 } from '../../src/server/services';
 import {
   flushDocumentLifecycleSyncForTesting,
@@ -131,6 +132,11 @@ import {
 import { getPmsSource } from '../../src/pms/pmsSource';
 import { attentionList } from '../../src/domain/attention';
 import { clearStoreMemoryCache, getStore, resetStore } from '../../src/server/store';
+import {
+  auditEntriesWrittenSince,
+  makeVerifiedTestEntraSession,
+  runAsTestActor,
+} from '../../src/server/testSupport/auditTestSupport';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -278,8 +284,15 @@ function makeTestPerson(overrides: Partial<Person> = {}): Person {
 }
 
 describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
+  // S0-15: firm audit lives in PostgreSQL audit_entries; each test only inspects entries written
+  // after it started. A time window is used because resetAllDemoData re-imports audit_entries and
+  // restarts the AU- sequence, so ID-based marks taken before a reset are not reliable.
+  let rbacAuditMark = 0;
+  const auditSinceTestStart = () => auditEntriesWrittenSince(rbacAuditMark);
+  const auditSinceIds = (at: string) => Date.parse(at) >= rbacAuditMark;
   beforeEach(() => {
     clearPermissionRequestCache();
+    rbacAuditMark = Date.now();
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
@@ -1192,52 +1205,61 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   describe('10. Server Services: Audited Per-Person Overrides & Tenant RBAC Config Updates', () => {
     it('enforces self-modification & unheld-grant blocks and logs before/after audit entries', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const snap0 = getAppSnapshot('P-000001');
+      const snap0 = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
       const adamAdmin = snap0.people.find((p) => p.roles?.includes('admin'))!;
       expect(adamAdmin).toBeDefined();
 
       // 1. Self-modification is blocked on the server service
-      const selfAttempt = updatePersonPermissionOverrides(
-        adamAdmin.id,
-        {
-          grant: ['finance:view'],
-          revoke: [],
-          reason: 'Trying to modify myself',
-        },
-        adamAdmin.id,
-        { mfaVerified: true },
+      const selfAttempt = await runAsTestActor(adamAdmin.id, () =>
+        updatePersonPermissionOverrides(
+          adamAdmin.id,
+          {
+            grant: ['finance:view'],
+            revoke: [],
+            reason: 'Trying to modify myself',
+          },
+          adamAdmin.id,
+          { mfaVerified: true },
+        ),
       );
       expect(selfAttempt.ok).toBe(false);
       expect(selfAttempt.error).toMatch(/cannot modify their own/i);
 
       // 1b. Admin without MFA is rejected with MFA_REQUIRED (R53)
-      const noMfaAttempt = updatePersonPermissionOverrides(
-        'P-000002',
-        {
-          grant: ['risk:view'],
-          revoke: [],
-          reason: 'Missing MFA test',
-        },
+      const noMfaAttempt = await runAsTestActor(
         adamAdmin.id,
+        () =>
+          updatePersonPermissionOverrides(
+            'P-000002',
+            {
+              grant: ['risk:view'],
+              revoke: [],
+              reason: 'Missing MFA test',
+            },
+            adamAdmin.id,
+          ),
+        { mfaVerified: false },
       );
       expect(noMfaAttempt.ok).toBe(false);
       expect(noMfaAttempt.code).toBe('MFA_REQUIRED');
 
       // 2. Admin grants risk:view and revokes finance:view_matter on Dafydd Evans (P-000002) with Entra Object ID binding
-      const validOverride = updatePersonPermissionOverrides(
-        'P-000002',
-        {
-          grant: ['risk:view'],
-          revoke: ['finance:view_matter'],
-          reason: 'Temporary secondment to Compliance review',
-          entraObjectId: '8f2e91c0-4a12-4b9e-9c01-dafydd000002',
-        },
-        adamAdmin.id,
-        { mfaVerified: true },
+      const validOverride = await runAsTestActor(adamAdmin.id, () =>
+        updatePersonPermissionOverrides(
+          'P-000002',
+          {
+            grant: ['risk:view'],
+            revoke: ['finance:view_matter'],
+            reason: 'Temporary secondment to Compliance review',
+            entraObjectId: '8f2e91c0-4a12-4b9e-9c01-dafydd000002',
+          },
+          adamAdmin.id,
+          { mfaVerified: true },
+        ),
       );
       expect(validOverride.ok).toBe(true);
 
-      const dafyddSnap = getAppSnapshot('P-000002');
+      const dafyddSnap = await runAsTestActor('P-000002', () => getAppSnapshot('P-000002'));
       expect(dafyddSnap.currentUserPermissions).toContain('risk:view');
       expect(dafyddSnap.currentUserPermissions).not.toContain(
         'finance:view_matter',
@@ -1247,7 +1269,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
 
       // Audit entry recorded with before/after JSON
-      const auditEntry = dafyddSnap.audit.find(
+      const auditEntry = (await auditSinceTestStart()).find(
         (a) =>
           a.recordId === 'P-000002' &&
           a.field === 'Permission overrides & Entra ID binding',
@@ -1256,42 +1278,51 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(auditEntry?.newValue).toContain('Temporary secondment');
 
       // 3. Updating Tenant RBAC Config by non-admin is rejected; by admin without MFA is rejected; by admin with MFA succeeds and audits
-      const unauthConfigAttempt = updateTenantRbacConfig(
-        {
-          departmentGrants: {
-            'DEPT-HR': ['employee:view_core'],
+      const unauthConfigAttempt = await runAsTestActor('P-000002', () =>
+        updateTenantRbacConfig(
+          {
+            departmentGrants: {
+              'DEPT-HR': ['employee:view_core'],
+            },
           },
-        },
-        'P-000002',
-        { mfaVerified: true },
+          'P-000002',
+          { mfaVerified: true },
+        ),
       );
       expect(unauthConfigAttempt.ok).toBe(false);
       expect(unauthConfigAttempt.error).toContain('rbac:manage_config');
 
-      const noMfaConfigAttempt = updateTenantRbacConfig(
-        {
-          departmentGrants: {
-            'DEPT-HR': ['employee:view_core'],
-          },
-        },
+      const noMfaConfigAttempt = await runAsTestActor(
         adamAdmin.id,
+        () =>
+          updateTenantRbacConfig(
+            {
+              departmentGrants: {
+                'DEPT-HR': ['employee:view_core'],
+              },
+            },
+            adamAdmin.id,
+            { mfaVerified: false },
+          ),
         { mfaVerified: false },
       );
       expect(noMfaConfigAttempt.ok).toBe(false);
       expect(noMfaConfigAttempt.code).toBe('MFA_REQUIRED');
 
-      const adminConfigUpdate = updateTenantRbacConfig(
-        {
-          identityMapping: {
-            ...dafyddSnap.rbacConfig.identityMapping,
-            entraGroupToRoleKey: {
-              ...dafyddSnap.rbacConfig.identityMapping.entraGroupToRoleKey,
-              '11111111-2222-3333-4444-555555555555': ['partner'],
+      const adminConfigUpdate = await runAsTestActor(adamAdmin.id, () =>
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...dafyddSnap.rbacConfig.identityMapping,
+              entraGroupToRoleKey: {
+                ...dafyddSnap.rbacConfig.identityMapping.entraGroupToRoleKey,
+                '11111111-2222-3333-4444-555555555555': ['partner'],
+              },
             },
           },
-        },
-        adamAdmin.id,
-        { mfaVerified: true },
+          adamAdmin.id,
+          { mfaVerified: true },
+        ),
       );
       expect(adminConfigUpdate.ok).toBe(true);
       expect(
@@ -1306,7 +1337,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
 
       // R52: resolveOrProvisionEntraEmployee with roles: [] creates a person without admin and without admin:access
-      const unmappedProvision = resolveOrProvisionEntraEmployee({
+      const unmappedProvision = await resolveOrProvisionEntraEmployee({
         oid: '00000000-0000-4000-8000-000000000502',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-unmapped-502',
@@ -1319,7 +1350,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(unmappedProvision.person.roles).toEqual([]);
       expect(unmappedProvision.person.roles).not.toContain('admin');
       expect(unmappedProvision.person.departmentId).toBeNull();
-      const unmappedSnap = getAppSnapshot(unmappedProvision.person.id);
+      const unmappedSnap = await runAsTestActor(unmappedProvision.person.id, () =>
+        getAppSnapshot(unmappedProvision.person.id),
+      );
       expect(unmappedSnap.currentUserPermissions).not.toContain('admin:access');
 
       // R53: updateTenantRbacConfigAction with mfaVerified: false returns MFA_REQUIRED
@@ -1346,26 +1379,35 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       setTestEntraSessionOverride(undefined);
 
       // R54: A fee earner giving themselves roles: ['admin'] gets ok: false; admin without MFA is rejected
-      const feeEarnerSelfEscalation = updateEmployeeRolesAndSupports(
-        'P-000002',
-        { roles: ['admin'] },
-        'P-000002',
-        { mfaVerified: true },
+      const feeEarnerSelfEscalation = await runAsTestActor('P-000002', () =>
+        updateEmployeeRolesAndSupports(
+          'P-000002',
+          { roles: ['admin'] },
+          'P-000002',
+          { mfaVerified: true },
+        ),
       );
       expect(feeEarnerSelfEscalation.ok).toBe(false);
-      const adminNoMfaRoleChange = updateEmployeeRolesAndSupports(
-        'P-000002',
-        { roles: ['partner', 'fee_earner'] },
+      const adminNoMfaRoleChange = await runAsTestActor(
         'P-000004',
+        () =>
+          updateEmployeeRolesAndSupports(
+            'P-000002',
+            { roles: ['partner', 'fee_earner'] },
+            'P-000004',
+            { mfaVerified: false },
+          ),
         { mfaVerified: false },
       );
       expect(adminNoMfaRoleChange.ok).toBe(false);
       expect(adminNoMfaRoleChange.code).toBe('MFA_REQUIRED');
-      const feeEarnerAppRoleEscalation = updateEmployeeRoleSetting(
-        'P-000002',
-        'admin',
-        'P-000002',
-        { mfaVerified: true },
+      const feeEarnerAppRoleEscalation = await runAsTestActor('P-000002', () =>
+        updateEmployeeRoleSetting(
+          'P-000002',
+          'admin',
+          'P-000002',
+          { mfaVerified: true },
+        ),
       );
       expect(feeEarnerAppRoleEscalation.ok).toBe(false);
 
@@ -1399,17 +1441,19 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
 
       // R61: Under token_only, a person who signs in with 1Squared.Admin and then again with no roles loses admin
-      updateTenantRbacConfig(
-        {
-          identityMapping: {
-            ...getDefaultTenantRbacConfig().identityMapping,
-            authorityMode: 'token_only',
+      await runAsTestActor('P-000004', () =>
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              authorityMode: 'token_only',
+            },
           },
-        },
-        'P-000004',
-        { mfaVerified: true },
+          'P-000004',
+          { mfaVerified: true },
+        ),
       );
-      const firstTokenSignIn = resolveOrProvisionEntraEmployee({
+      const firstTokenSignIn = await resolveOrProvisionEntraEmployee({
         oid: '00000000-0000-4000-8000-000000000601',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-601',
@@ -1419,7 +1463,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         amr: ['pwd', 'mfa'],
       });
       expect(firstTokenSignIn.person.roles).toContain('admin');
-      const secondTokenSignIn = resolveOrProvisionEntraEmployee({
+      const secondTokenSignIn = await resolveOrProvisionEntraEmployee({
         oid: '00000000-0000-4000-8000-000000000601',
         tid: '00000000-0000-4000-8000-000000000099',
         sub: 'sub-601',
@@ -1430,30 +1474,34 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(secondTokenSignIn.person.roles).toEqual([]);
       expect(secondTokenSignIn.person.roles).not.toContain('admin');
-      const tokenOnlySnap = getAppSnapshot(secondTokenSignIn.person.id);
+      const tokenOnlySnap = await runAsTestActor(secondTokenSignIn.person.id, () =>
+        getAppSnapshot(secondTokenSignIn.person.id),
+      );
       expect(tokenOnlySnap.currentUserPermissions).not.toContain('admin:access');
 
       // R61 (hybrid mode): Under hybrid authorityMode, token-derived roles apply for the current session
       // without mutating the stored person.roles on the employee record.
-      updateTenantRbacConfig(
-        {
-          identityMapping: {
-            ...getDefaultTenantRbacConfig().identityMapping,
-            authorityMode: 'hybrid',
+      await runAsTestActor('P-000004', () =>
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              authorityMode: 'hybrid',
+            },
           },
-        },
-        'P-000004',
-        { mfaVerified: true },
+          'P-000004',
+          { mfaVerified: true },
+        ),
       );
-      runWithActiveActorSession(
+      await runWithActiveActorSession(
         {
           tenantId: 'not-a-law-firm',
           personId: 'P-000002',
           tokenRoles: [],
           expiresAtMs: Date.now() + 3600_000,
         },
-        () => {
-          const hybridSignIn = resolveOrProvisionEntraEmployee({
+        async () => {
+          const hybridSignIn = await resolveOrProvisionEntraEmployee({
             oid: '00000000-0000-4000-8000-000000000002',
             tid: '00000000-0000-4000-8000-000000000099',
             sub: 'sub-002',
@@ -1467,18 +1515,21 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           // Stored employee roles remain ['fee_earner'] and do not permanently gain 'risk_compliance'
           expect(hybridSignIn.person.roles).toEqual(['fee_earner']);
           // Yet the active session permission set includes risk_compliance permissions (e.g. 'risk:view')
-          const hybridSnap = runWithActiveActorSession(
+          const hybridSnap = await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
               tokenRoles: hybridSignIn.verifiedToken.roles,
               expiresAtMs: Date.now() + 3600_000,
+              verifiedSession: makeVerifiedTestEntraSession('P-000002', {
+                roles: hybridSignIn.verifiedToken.roles,
+              }),
             },
-            () => getAppSnapshot('P-000002'),
+            async () => getAppSnapshot('P-000002'),
           );
           expect(hybridSnap.currentUserPermissions).toContain('risk:view');
           // When the subsequent session has no token roles, the user falls back to stored ['fee_earner'] roles only
-          const subsequentSignIn = resolveOrProvisionEntraEmployee({
+          const subsequentSignIn = await resolveOrProvisionEntraEmployee({
             oid: '00000000-0000-4000-8000-000000000002',
             tid: '00000000-0000-4000-8000-000000000099',
             sub: 'sub-002',
@@ -1487,14 +1538,17 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             roles: [],
             amr: ['pwd', 'mfa'],
           });
-          const hybridAfterSnap = runWithActiveActorSession(
+          const hybridAfterSnap = await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
               tokenRoles: subsequentSignIn.verifiedToken.roles,
               expiresAtMs: Date.now() + 3600_000,
+              verifiedSession: makeVerifiedTestEntraSession('P-000002', {
+                roles: subsequentSignIn.verifiedToken.roles,
+              }),
             },
-            () => getAppSnapshot('P-000002'),
+            async () => getAppSnapshot('P-000002'),
           );
           expect(hybridAfterSnap.currentUserPermissions).not.toContain(
             'risk:view',
@@ -1503,12 +1557,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
 
       // R63: getAppSnapshot(riskUser).employeeSensitiveRecords is empty; per-person read writes a view-sensitive audit entry
-      const riskSnap = getAppSnapshot('P-000003');
+      const riskSnap = await runAsTestActor('P-000003', () => getAppSnapshot('P-000003'));
       expect(riskSnap.employeeSensitiveRecords).toEqual({});
-      logEmployeeRestrictedAccess('P-000002', 'sensitive', 'P-000004', 'Viewed sensitive HR tab');
-      const afterSensitiveAuditSnap = getAppSnapshot('P-000004');
+      await runAsTestActor('P-000004', () =>
+        logEmployeeRestrictedAccess('P-000002', 'sensitive', 'P-000004', 'Viewed sensitive HR tab'),
+      );
+      const afterSensitiveAudit = (
+        await runAsTestActor('P-000004', () =>
+          listAuditEntriesForRecord('employee_sensitive', 'P-000002', 'P-000004', { limit: 1000 }),
+        )
+      ).filter((a) => auditSinceIds(a.at));
       expect(
-        afterSensitiveAuditSnap.audit.some(
+        afterSensitiveAudit.some(
           (a) => a.recordId === 'P-000002' && a.action === 'view-sensitive',
         ),
       ).toBe(true);
@@ -1554,7 +1614,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(feeEarnerSaveHomeRes.ok).toBe(false);
       expect(feeEarnerSaveHomeRes.code).toBe('FORBIDDEN');
-      expect(getAppSnapshot('P-000002').homePagesConfig.firmSettings.demoMode).toBe(
+      expect((await getAppSnapshot('P-000002')).homePagesConfig.firmSettings.demoMode).toBe(
         false,
       );
       const feeEarnerResetHomeRes = await resetHomePagesConfigAction();
@@ -1608,15 +1668,17 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('enforces R100 request/tenant-scoped token roles without cross-tenant, post-logout, or cross-user leakage', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
 
-      updateTenantRbacConfig(
-        {
-          identityMapping: {
-            ...getDefaultTenantRbacConfig().identityMapping,
-            authorityMode: 'hybrid',
+      await runAsTestActor('P-000004', () =>
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              authorityMode: 'hybrid',
+            },
           },
-        },
-        'P-000004',
-        { mfaVerified: true },
+          'P-000004',
+          { mfaVerified: true },
+        ),
       );
 
       // 1. Two-tenant isolation: P-000002 with ['admin'] token roles in tenant-a does NOT get admin permissions in tenant-b
@@ -1646,8 +1708,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setActiveTenantConfigForTesting(null);
       }
 
-      const dafydd = getAppSnapshot('P-000002').people.find((p) => p.id === 'P-000002')!;
-      const carys = getAppSnapshot('P-000001').people.find((p) => p.id === 'P-000001')!;
+      const dafydd = (
+        await runAsTestActor('P-000002', () => getAppSnapshot('P-000002'))
+      ).people.find((p) => p.id === 'P-000002')!;
+      const carys = (
+        await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'))
+      ).people.find((p) => p.id === 'P-000001')!;
       expect(dafydd.roles).toEqual(['fee_earner']);
 
       // 1a. Outside runWithActiveActorSession, resolvePersonPermissions(person) returns stored roles only
@@ -1703,7 +1769,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 2. Two overlapping async requests (A and B, with an await between setting and checking) see only their own token roles
       const [overlapA, overlapB] = await Promise.all([
-        runWithActiveActorSession(
+        await runWithActiveActorSession(
           {
             tenantId: 'not-a-law-firm',
             personId: 'P-000002',
@@ -1718,7 +1784,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             };
           },
         ),
-        runWithActiveActorSession(
+        await runWithActiveActorSession(
           {
             tenantId: 'not-a-law-firm',
             personId: 'P-000001',
@@ -1752,7 +1818,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // 2b. Two concurrent sessions for the SAME person (P-000002) with different roles (['admin'] vs ['fee_earner']) each see only their own roles without overwriting each other
       const [samePersonAdminSession, samePersonFeeEarnerSession] =
         await Promise.all([
-          runWithActiveActorSession(
+          await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
@@ -1764,7 +1830,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
               return resolvePersonPermissions(dafydd);
             },
           ),
-          runWithActiveActorSession(
+          await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
@@ -1879,7 +1945,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
 
       const { person, verifiedToken, rbacConfig } =
-        resolveOrProvisionEntraEmployee({
+        await resolveOrProvisionEntraEmployee({
           oid: '99999999-aaaa-bbbb-cccc-000000000001',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-demo-dev',
@@ -1919,7 +1985,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(signedCookie).toContain('.');
 
       // Subsequent sign-in with the same oid resolves the existing employee record
-      const secondSignIn = resolveOrProvisionEntraEmployee({
+      const secondSignIn = await resolveOrProvisionEntraEmployee({
         oid: '99999999-aaaa-bbbb-cccc-000000000001',
         tid: '11111111-2222-3333-4444-000000000000',
         name: 'Dev Admin User',
@@ -2050,8 +2116,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         store.tasks.push(unassignedCorpTask);
 
         // R123: Partner P-000001 holds task:claim_any and sees canTakeByTaskId['TSK-R123-CLAIM-ANY'] === true even though not in corpTeam; Fee Earner P-000002 does not hold task:claim_any and sees false
-        const partnerSnap = getAppSnapshot('P-000001');
-        const feeEarnerSnap = getAppSnapshot('P-000002');
+        const partnerSnap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
+        const feeEarnerSnap = await runAsTestActor('P-000002', () => getAppSnapshot('P-000002'));
         expect(partnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(true);
         expect(feeEarnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(false);
 
@@ -2069,20 +2135,26 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           RightToWorkStatus: 'Verified',
         } as unknown as (typeof store.employeeSensitiveRecords)[string];
 
-        const deniedRead = getEmployeeDetailsForUser('P-000002', 'P-000006', {
-          logViewSensitive: true,
-        });
+        const deniedRead = await runAsTestActor('P-000006', () =>
+          getEmployeeDetailsForUser('P-000002', 'P-000006', {
+            logViewSensitive: true,
+          }),
+        );
         expect(deniedRead.sensitive).toBeNull();
         expect(deniedRead.errors?.sensitivePermission).toBeDefined();
 
-        const unauditedRead = getEmployeeDetailsForUser('P-000002', 'P-000004', {
-          logViewSensitive: false,
-        });
+        const unauditedRead = await runAsTestActor('P-000004', () =>
+          getEmployeeDetailsForUser('P-000002', 'P-000004', {
+            logViewSensitive: false,
+          }),
+        );
         expect(unauditedRead.sensitive).toBeNull();
 
-        const auditedRead = getEmployeeDetailsForUser('P-000002', 'P-000004', {
-          logViewSensitive: true,
-        });
+        const auditedRead = await runAsTestActor('P-000004', () =>
+          getEmployeeDetailsForUser('P-000002', 'P-000004', {
+            logViewSensitive: true,
+          }),
+        );
         expect(auditedRead.sensitive).not.toBeNull();
 
         // R139: A fee earner who leads a team (isTeamLeadOfAnyTeam: true) does NOT hold matter:reassign_ownership
@@ -2397,8 +2469,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         });
         const okReset = await resetDemoDataAction();
         expect(isActionDenied(okReset)).toBe(false);
-        const storeAfterReset = getStore();
-        const resetAudit = storeAfterReset.audit.find(
+        const resetAudit = (await auditSinceTestStart()).find(
           (a) => a.action === 'data-reset',
         );
         expect(resetAudit).toBeDefined();
@@ -2409,7 +2480,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(okClear)).toBe(false);
         const storeAfterClear = getStore();
         expect(storeAfterClear.people).toHaveLength(0);
-        const clearAudit = storeAfterClear.audit.find(
+        const clearAudit = (await auditSinceTestStart()).find(
           (a) => a.action === 'data-cleared',
         );
         expect(clearAudit).toBeDefined();
@@ -2426,11 +2497,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const store = getStore();
       // SO-000001: requestedById P-000002, assignedPartnerId P-000001, matterId M-000002, status Pending
       // 1. Fee earner (P-000002) lacks signoff:approve
-      const feApprove = approveSignOff('SO-000001', 'P-000002');
+      const feApprove = await runAsTestActor('P-000002', () =>
+        approveSignOff('SO-000001', 'P-000002'),
+      );
       expect(isActionDenied(feApprove)).toBe(true);
 
       // 2. Partner who is NOT assignedPartnerId (P-000005 is another partner) is denied when assignedPartnerId is set
-      const otherPartnerApprove = approveSignOff('SO-000001', 'P-000005');
+      const otherPartnerApprove = await runAsTestActor('P-000005', () =>
+        approveSignOff('SO-000001', 'P-000005'),
+      );
       expect(isActionDenied(otherPartnerApprove)).toBe(true);
       if (isActionDenied(otherPartnerApprove)) {
         expect(otherPartnerApprove.message).toMatch(/assigned partner/i);
@@ -2439,12 +2514,16 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // 3. No self-approval even when actor holds signoff:approve and assignedPartnerId matches or is null
       const item1 = store.signOffs.find((s) => s.id === 'SO-000001')!;
       item1.requestedById = 'P-000001';
-      const selfApprove = approveSignOff('SO-000001', 'P-000001');
+      const selfApprove = await runAsTestActor('P-000001', () =>
+        approveSignOff('SO-000001', 'P-000001'),
+      );
       expect(isActionDenied(selfApprove)).toBe(true);
       if (isActionDenied(selfApprove)) {
         expect(selfApprove.message).toMatch(/self-approval/i);
       }
-      const selfDiscuss = discussSignOff('SO-000001', 'Self note', 'P-000001');
+      const selfDiscuss = await runAsTestActor('P-000001', () =>
+        discussSignOff('SO-000001', 'Self note', 'P-000001'),
+      );
       expect(isActionDenied(selfDiscuss)).toBe(true);
       item1.requestedById = 'P-000002';
 
@@ -2456,7 +2535,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       linkedMatter.supervisingPartnerId = 'P-000005';
       linkedMatter.leadFeeEarnerId = 'P-000005';
       linkedMatter.teamMemberIds = ['P-000005'];
-      const wallDenied = approveSignOff('SO-000001', 'P-000001');
+      const wallDenied = await runAsTestActor('P-000001', () =>
+        approveSignOff('SO-000001', 'P-000001'),
+      );
       expect(isActionDenied(wallDenied)).toBe(true);
       if (isActionDenied(wallDenied)) {
         expect(wallDenied.message).toMatch(/matter/i);
@@ -2467,10 +2548,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       linkedMatter.supervisingPartnerId = 'P-000001';
 
       // 5. discussSignOff writes an audit entry and transitions status to Discussing
-      const discRes = discussSignOff('SO-000001', 'Need client confirmation first', 'P-000001');
+      const discRes = await runAsTestActor('P-000001', () =>
+        discussSignOff('SO-000001', 'Need client confirmation first', 'P-000001'),
+      );
       expect(isActionDenied(discRes)).toBe(false);
       expect(item1.status).toBe('Discussing');
-      const discAudit = store.audit.find(
+      const discAudit = (await auditSinceTestStart()).find(
         (a) =>
           a.field === 'Partner sign-off' &&
           a.newValue?.includes('Discussing: Write-off'),
@@ -2479,21 +2562,29 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 6. When assignedPartnerId is null, any holder of signoff:approve (who is not requestedById and can access the matter) may approve
       item1.assignedPartnerId = null;
-      const unassignedApprove = approveSignOff('SO-000001', 'P-000038');
+      const unassignedApprove = await runAsTestActor('P-000038', () =>
+        approveSignOff('SO-000001', 'P-000038'),
+      );
       expect(isActionDenied(unassignedApprove)).toBe(false);
       expect(item1.status).toBe('Approved');
 
       // 7. Re-approving or discussing an already Approved sign-off is denied
-      const reApprove = approveSignOff('SO-000001', 'P-000038');
+      const reApprove = await runAsTestActor('P-000038', () =>
+        approveSignOff('SO-000001', 'P-000038'),
+      );
       expect(isActionDenied(reApprove)).toBe(true);
-      const reDiscuss = discussSignOff('SO-000001', 'Too late', 'P-000038');
+      const reDiscuss = await runAsTestActor('P-000038', () =>
+        discussSignOff('SO-000001', 'Too late', 'P-000038'),
+      );
       expect(isActionDenied(reDiscuss)).toBe(true);
     });
 
     it('1c (B3). anonymiseExpiredEnquiries requires enquiry:anonymise and enforces isReadyForRetentionAnonymisation for single enquiries as well as bulk', async () => {
       const store = getStore();
       // Fee earner (P-000002) is denied enquiry:anonymise
-      expect(() => anonymiseExpiredEnquiries('P-000002')).toThrow(AuthorisationError);
+      await expect(
+        runAsTestActor('P-000002', () => anonymiseExpiredEnquiries('P-000002')),
+      ).rejects.toThrow(AuthorisationError);
 
       // Find a closed unconverted enquiry that is RECENT (not past retentionMonths)
       const closedEnq = store.enquiries.find(
@@ -2503,7 +2594,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const origFirstName = closedEnq.firstName;
 
       // Single-enquiry call with Risk & Compliance (P-000003) must NOT anonymise a recent closed enquiry (B3 regression)
-      const prematureCount = anonymiseExpiredEnquiries('P-000003', closedEnq.id);
+      const prematureCount = await runAsTestActor('P-000003', () =>
+        anonymiseExpiredEnquiries('P-000003', closedEnq.id),
+      );
       expect(prematureCount).toBe(0);
       expect(closedEnq.firstName).toBe(origFirstName);
       expect(closedEnq.anonymisedAt).toBeNull();
@@ -2512,19 +2605,25 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const twoYearsAgo = new Date();
       twoYearsAgo.setMonth(twoYearsAgo.getMonth() - 24);
       closedEnq.receivedAt = twoYearsAgo.toISOString();
-      const expiredCount = anonymiseExpiredEnquiries('P-000003', closedEnq.id);
+      const expiredCount = await runAsTestActor('P-000003', () =>
+        anonymiseExpiredEnquiries('P-000003', closedEnq.id),
+      );
       expect(expiredCount).toBe(1);
       expect(closedEnq.firstName).toBe('Anonymised');
       expect(closedEnq.anonymisedAt).toBeTruthy();
     });
 
-    it('1d. remindTeamLeadOverdueCompliance requires risk:view', () => {
+    it('1d. remindTeamLeadOverdueCompliance requires risk:view', async () => {
       // Fee earner (P-000002) lacks risk:view
-      const denied = remindTeamLeadOverdueCompliance('TM-000001', 'P-000002');
+      const denied = await runAsTestActor('P-000002', () =>
+        remindTeamLeadOverdueCompliance('TM-000001', 'P-000002'),
+      );
       expect(isActionDenied(denied)).toBe(true);
 
       // Risk & compliance (P-000003) has risk:view
-      const allowed = remindTeamLeadOverdueCompliance('TM-000001', 'P-000003');
+      const allowed = await runAsTestActor('P-000003', () =>
+        remindTeamLeadOverdueCompliance('TM-000001', 'P-000003'),
+      );
       expect(isActionDenied(allowed)).toBe(false);
       expect(allowed.ok).toBe(true);
     });
@@ -2534,13 +2633,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
 
       // 1. A fee earner cannot add admin to their own roles by saving their person record
-      const selfEscalateRes = savePersonRecord(
-        {
-          firstName: feeEarner.firstName,
-          surname: feeEarner.surname,
-          roles: ['fee_earner', 'admin'],
-        },
-        { id: feeEarner.id, byId: feeEarner.id },
+      const selfEscalateRes = await runAsTestActor(feeEarner.id, () =>
+        savePersonRecord(
+          {
+            firstName: feeEarner.firstName,
+            surname: feeEarner.surname,
+            roles: ['fee_earner', 'admin'],
+          },
+          { id: feeEarner.id, byId: feeEarner.id },
+        ),
       );
       expect(isActionDenied(selfEscalateRes)).toBe(true);
       expect(
@@ -2548,70 +2649,82 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       ).not.toContain('admin');
 
       // Also rejected when spreading existing person and mutating roles or permissionOverrides
-      const spreadEscalateRes = savePersonRecord(
-        {
-          ...feeEarner,
-          permissionOverrides: { grant: ['admin:access'], revoke: [] },
-        },
-        { id: feeEarner.id, byId: feeEarner.id },
+      const spreadEscalateRes = await runAsTestActor(feeEarner.id, () =>
+        savePersonRecord(
+          {
+            ...feeEarner,
+            permissionOverrides: { grant: ['admin:access'], revoke: [] },
+          },
+          { id: feeEarner.id, byId: feeEarner.id },
+        ),
       );
       expect(isActionDenied(spreadEscalateRes)).toBe(true);
 
       // 2. worksAtFirm: false without employee:edit_core is denied
-      const leaverWithoutPermRes = savePersonRecord(
-        {
-          firstName: feeEarner.firstName,
-          surname: feeEarner.surname,
-        },
-        { id: feeEarner.id, byId: feeEarner.id, worksAtFirm: false },
+      const leaverWithoutPermRes = await runAsTestActor(feeEarner.id, () =>
+        savePersonRecord(
+          {
+            firstName: feeEarner.firstName,
+            surname: feeEarner.surname,
+          },
+          { id: feeEarner.id, byId: feeEarner.id, worksAtFirm: false },
+        ),
       );
       expect(isActionDenied(leaverWithoutPermRes)).toBe(true);
       expect(leaverWithoutPermRes.errors?.permission).toMatch(/employee:edit_core/);
 
       // Legacy isEmployee: true without rawEmpInput and without employee:edit_core is also denied
-      const legacyEmpCreateDenied = savePersonRecord(
-        {
-          firstName: 'Unauthorised',
-          surname: 'Hire',
-          isEmployee: true,
-          employeeRoleId: 'employee_role.fee_earner',
-        },
-        { byId: feeEarner.id },
+      const legacyEmpCreateDenied = await runAsTestActor(feeEarner.id, () =>
+        savePersonRecord(
+          {
+            firstName: 'Unauthorised',
+            surname: 'Hire',
+            isEmployee: true,
+            employeeRoleId: 'employee_role.fee_earner',
+          },
+          { byId: feeEarner.id },
+        ),
       );
       expect(isActionDenied(legacyEmpCreateDenied)).toBe(true);
 
       // 3. Contact create without contact:create (Finance P-000009 lacks contact:create and contact:edit) is denied
-      const finCreateContact = savePersonRecord(
-        {
-          firstName: 'Invented',
-          surname: 'Prospect',
-        },
-        { byId: 'P-000009' },
+      const finCreateContact = await runAsTestActor('P-000009', () =>
+        savePersonRecord(
+          {
+            firstName: 'Invented',
+            surname: 'Prospect',
+          },
+          { byId: 'P-000009' },
+        ),
       );
       expect(isActionDenied(finCreateContact)).toBe(true);
       expect(finCreateContact.errors?.permission).toMatch(/contact:create/);
 
       // Contact edit without contact:edit is denied
       const existingContact = store.people.find((p) => !p.isEmployee && !p.employment)!;
-      const finEditContact = savePersonRecord(
-        {
-          firstName: existingContact.firstName,
-          surname: 'ChangedByFinance',
-        },
-        { id: existingContact.id, byId: 'P-000009' },
+      const finEditContact = await runAsTestActor('P-000009', () =>
+        savePersonRecord(
+          {
+            firstName: existingContact.firstName,
+            surname: 'ChangedByFinance',
+          },
+          { id: existingContact.id, byId: 'P-000009' },
+        ),
       );
       expect(isActionDenied(finEditContact)).toBe(true);
       expect(finEditContact.errors?.permission).toMatch(/contact:edit/);
 
       // 4. entraObjectId survives a save
       feeEarner.entraObjectId = '00000000-0000-4000-8000-000000000002';
-      const partnerUpdateRes = savePersonRecord(
-        {
-          firstName: feeEarner.firstName,
-          surname: feeEarner.surname,
-          preferredName: 'Daf',
-        },
-        { id: feeEarner.id, byId: 'P-000001' },
+      const partnerUpdateRes = await runAsTestActor('P-000001', () =>
+        savePersonRecord(
+          {
+            firstName: feeEarner.firstName,
+            surname: feeEarner.surname,
+            preferredName: 'Daf',
+          },
+          { id: feeEarner.id, byId: 'P-000001' },
+        ),
       );
       expect(isActionDenied(partnerUpdateRes)).toBe(false);
       expect(partnerUpdateRes.errors).toBeUndefined();
@@ -3008,63 +3121,75 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         wallMatter.teamMemberIds = [];
 
         // Create a task linked to that restricted matter
-        const createRes = saveTaskRecord(
-          {
-            title: 'Confidential wall task',
-            dueAt: '2026-12-01',
-            assignedPersonId: 'P-000001',
-            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
-          },
-          'P-000001',
+        const createRes = await runAsTestActor('P-000001', () =>
+          saveTaskRecord(
+            {
+              title: 'Confidential wall task',
+              dueAt: '2026-12-01',
+              assignedPersonId: 'P-000001',
+              linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+            },
+            'P-000001',
+          ),
         );
         expect(createRes.task).toBeDefined();
         const wallTask = createRes.task!;
 
         // Fee earner P-000002 (not on allowlist) cannot see the task in getAppSnapshot
-        const snapFeeEarner = getAppSnapshot('P-000002');
+        const snapFeeEarner = await runAsTestActor('P-000002', () =>
+          getAppSnapshot('P-000002'),
+        );
         expect(snapFeeEarner.tasks.some((t) => t.id === wallTask.id)).toBe(false);
 
         // B9: P-000002 cannot comment on a task linked to a restricted matter
-        const commentDenied = addTaskCommentRecord(
-          wallTask.id,
-          'Attempted comment on restricted matter task',
-          'P-000002',
+        const commentDenied = await runAsTestActor('P-000002', () =>
+          addTaskCommentRecord(
+            wallTask.id,
+            'Attempted comment on restricted matter task',
+            'P-000002',
+          ),
         );
         expect(isActionDenied(commentDenied)).toBe(true);
 
         // P-000002 cannot link a new task to the restricted matter
-        const linkRestrictedDenied = saveTaskRecord(
-          {
-            title: 'Probe restricted matter',
-            dueAt: '2026-12-01',
-            assignedPersonId: 'P-000002',
-            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
-          },
-          'P-000002',
+        const linkRestrictedDenied = await runAsTestActor('P-000002', () =>
+          saveTaskRecord(
+            {
+              title: 'Probe restricted matter',
+              dueAt: '2026-12-01',
+              assignedPersonId: 'P-000002',
+              linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+            },
+            'P-000002',
+          ),
         );
         expect(isActionDenied(linkRestrictedDenied)).toBe(true);
 
         // Non-lead fee earner (P-000002) cannot reassign a task created by and assigned to P-000001
         const teamWithoutP2Lead = store.teams.find((t) => !t.leadIds.includes('P-000002'))!;
-        const normalTaskRes = saveTaskRecord(
-          {
-            title: 'Normal team task',
-            dueAt: '2026-12-01',
-            assignedPersonId: 'P-000001',
-            assignedTeamId: teamWithoutP2Lead.id,
-          },
-          'P-000001',
+        const normalTaskRes = await runAsTestActor('P-000001', () =>
+          saveTaskRecord(
+            {
+              title: 'Normal team task',
+              dueAt: '2026-12-01',
+              assignedPersonId: 'P-000001',
+              assignedTeamId: teamWithoutP2Lead.id,
+            },
+            'P-000001',
+          ),
         );
         const normalTask = normalTaskRes.task!;
-        const reassignDenied = saveTaskRecord(
-          {
-            id: normalTask.id,
-            title: normalTask.title,
-            dueAt: normalTask.dueAt,
-            assignedPersonId: 'P-000002',
-            assignedTeamId: normalTask.assignedTeamId,
-          },
-          'P-000002',
+        const reassignDenied = await runAsTestActor('P-000002', () =>
+          saveTaskRecord(
+            {
+              id: normalTask.id,
+              title: normalTask.title,
+              dueAt: normalTask.dueAt,
+              assignedPersonId: 'P-000002',
+              assignedTeamId: normalTask.assignedTeamId,
+            },
+            'P-000002',
+          ),
         );
         expect(isActionDenied(reassignDenied)).toBe(true);
       } finally {
@@ -3079,13 +3204,17 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
 
         // 1. Reopening an already-open enquiry is denied
-        const reopenOpenDenied = reopenEnquiryRecord(openEnq.id, 'P-000001');
+        const reopenOpenDenied = await runAsTestActor('P-000001', () =>
+          reopenEnquiryRecord(openEnq.id, 'P-000001'),
+        );
         expect(isActionDenied(reopenOpenDenied)).toBe(true);
 
         // 2. Reopening a Converted enquiry is denied
         const convertedEnq = store.enquiries.find((e) => e.status === 'Converted') ?? openEnq;
         convertedEnq.status = 'Converted';
-        const reopenConvertedDenied = reopenEnquiryRecord(convertedEnq.id, 'P-000001');
+        const reopenConvertedDenied = await runAsTestActor('P-000001', () =>
+          reopenEnquiryRecord(convertedEnq.id, 'P-000001'),
+        );
         expect(isActionDenied(reopenConvertedDenied)).toBe(true);
 
         // 3. Prepare a closed (Declined) enquiry with assignedToId = null on team 0
@@ -3113,7 +3242,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: ['enquiry:reopen'],
           revoke: [],
         };
-        const reopenByNonLead = reopenEnquiryRecord(closedEnq.id, nonLeadFeeEarner.id);
+        const reopenByNonLead = await runAsTestActor(nonLeadFeeEarner.id, () =>
+          reopenEnquiryRecord(closedEnq.id, nonLeadFeeEarner.id),
+        );
         expect(isActionDenied(reopenByNonLead)).toBe(true);
 
         // Team lead with enquiry:reopen revoked is refused (R267)
@@ -3122,12 +3253,16 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           grant: [],
           revoke: ['enquiry:reopen'],
         };
-        const reopenNoPerm = reopenEnquiryRecord(closedEnq.id, teamLeadId);
+        const reopenNoPerm = await runAsTestActor(teamLeadId, () =>
+          reopenEnquiryRecord(closedEnq.id, teamLeadId),
+        );
         expect(isActionDenied(reopenNoPerm)).toBe(true);
         teamLeadPerson.permissionOverrides = undefined;
 
         // Team lead reopens unassigned closed enquiry -> status becomes 'New' and assignedToId stays null (B8)
-        const reopenedRes = reopenEnquiryRecord(closedEnq.id, teamLeadId);
+        const reopenedRes = await runAsTestActor(teamLeadId, () =>
+          reopenEnquiryRecord(closedEnq.id, teamLeadId),
+        );
         expect(isActionDenied(reopenedRes)).toBe(false);
         expect(reopenedRes.enquiry?.status).toBe('New');
         expect(reopenedRes.enquiry?.assignedToId).toBeNull();
@@ -3146,7 +3281,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(financeUser).toBeDefined();
 
         // Finance user does not hold quote:view -> getAppSnapshot returns empty quotes
-        const snap = getAppSnapshot(financeUser.id);
+        const snap = await runAsTestActor(financeUser.id, () =>
+          getAppSnapshot(financeUser.id),
+        );
         expect(snap.currentUserPermissions).not.toContain('quote:view');
         expect(snap.currentUserPermissions).not.toContain('quote:edit');
         expect(snap.quotes).toEqual([]);
@@ -3173,7 +3310,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         quoteOnHiddenEnquiry.linkedEnquiryId = hiddenEnq.id;
         quoteOnHiddenEnquiry.convertedMatterId = null;
 
-        const feeEarnerSnap = getAppSnapshot('P-000002');
+        const feeEarnerSnap = await runAsTestActor('P-000002', () =>
+          getAppSnapshot('P-000002'),
+        );
         expect(feeEarnerSnap.currentUserPermissions).toContain('quote:view');
         expect(
           feeEarnerSnap.quotes.some((q) => q.id === quoteOnRestrictedMatter.id),
@@ -3183,53 +3322,55 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(false);
 
         const existingQuote = store.quotes[0]!;
-        expect(
-          isActionDenied(
-            saveQuoteRecord(
-              {
-                clientType: 'prospect',
-                prospectName: 'Test Prospect',
-                practiceAreaId: existingQuote.practiceAreaId,
-                scope: 'Test scope',
-                feeBasis: 'Fixed fee',
-                feeAmountExVat: 1500,
-              },
-              { byId: financeUser.id },
+        await runAsTestActor(financeUser.id, async () => {
+          expect(
+            isActionDenied(
+              await saveQuoteRecord(
+                {
+                  clientType: 'prospect',
+                  prospectName: 'Test Prospect',
+                  practiceAreaId: existingQuote.practiceAreaId,
+                  scope: 'Test scope',
+                  feeBasis: 'Fixed fee',
+                  feeAmountExVat: 1500,
+                },
+                { byId: financeUser.id },
+              ),
             ),
-          ),
-        ).toBe(true);
-        expect(isActionDenied(markQuoteSentRecord(existingQuote.id, financeUser.id))).toBe(true);
-        expect(
-          isActionDenied(
-            logQuoteFollowUpRecord(
-              existingQuote.id,
-              { method: 'Phone', note: 'Follow up', nextFollowUpDate: '2026-12-01' },
-              financeUser.id,
+          ).toBe(true);
+          expect(isActionDenied(await markQuoteSentRecord(existingQuote.id, financeUser.id))).toBe(true);
+          expect(
+            isActionDenied(
+              await logQuoteFollowUpRecord(
+                existingQuote.id,
+                { method: 'Phone', note: 'Follow up', nextFollowUpDate: '2026-12-01' },
+                financeUser.id,
+              ),
             ),
-          ),
-        ).toBe(true);
-        expect(
-          isActionDenied(
-            reviseQuoteRecord(
-              existingQuote.id,
-              {
-                feeBasis: 'Fixed fee',
-                feeAmountExVat: 2000,
-                scope: 'Revised scope',
-              },
-              financeUser.id,
+          ).toBe(true);
+          expect(
+            isActionDenied(
+              await reviseQuoteRecord(
+                existingQuote.id,
+                {
+                  feeBasis: 'Fixed fee',
+                  feeAmountExVat: 2000,
+                  scope: 'Revised scope',
+                },
+                financeUser.id,
+              ),
             ),
-          ),
-        ).toBe(true);
-        expect(
-          isActionDenied(
-            recordQuoteOutcomeRecord(
-              existingQuote.id,
-              { outcome: 'Accepted' },
-              financeUser.id,
+          ).toBe(true);
+          expect(
+            isActionDenied(
+              await recordQuoteOutcomeRecord(
+                existingQuote.id,
+                { outcome: 'Accepted' },
+                financeUser.id,
+              ),
             ),
-          ),
-        ).toBe(true);
+          ).toBe(true);
+        });
       } finally {
         await resetAllDemoData('P-000001', testDataResetContext());
       }
@@ -3265,7 +3406,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setTestEntraSessionOverride(verifiedActorSession);
 
         // 1. Rejects when source person is still an active employee (not a leaver)
-        const notLeaverRes = reassignLeaverOwnedRecords(
+        const notLeaverRes = await reassignLeaverOwnedRecords(
           activeEmp.id,
           replacementEmp.id,
           actor.id,
@@ -3291,7 +3432,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         };
         expect(
           isActionDenied(
-            reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+            await reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
           ),
         ).toBe(true);
 
@@ -3301,7 +3442,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         };
         expect(
           isActionDenied(
-            reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+            await reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
           ),
         ).toBe(true);
 
@@ -3347,8 +3488,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         openEnq.status = 'Assigned';
         openEnq.assignedToId = activeEmp.id;
 
-        const auditCountBefore = store.audit.length;
-        const okRes = runWithActiveActorSession(
+        const leaverAuditMark = Date.now();
+        const okRes = await runWithActiveActorSession(
           {
             personId: actor.id,
             tenantId: 'not-a-law-firm',
@@ -3356,7 +3497,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expiresAtMs: Date.now() + 3_600_000,
             verifiedSession: verifiedActorSession,
           },
-          () => reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
+          async () => reassignLeaverOwnedRecords(activeEmp.id, replacementEmp.id, actor.id),
         );
         await flushDocumentLifecycleSyncForTesting();
         expect(isActionDenied(okRes)).toBe(false);
@@ -3402,7 +3543,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(openEnq.assignedToId).toBe(replacementEmp.id);
 
         // Per-record audit entries written for moved matter, task, and open enquiry
-        const newAuditEntries = store.audit.slice(0, store.audit.length - auditCountBefore);
+        const newAuditEntries = await auditEntriesWrittenSince(leaverAuditMark);
         expect(
           newAuditEntries.some(
             (a) => a.recordType === 'matter' && a.recordId === restrictedMatter.id,
@@ -3437,86 +3578,110 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // 1. saveOrganisationRecord, createOrUpdateLink, and deleteLink enforce contact:create / contact:edit
         expect(
           isActionDenied(
-            saveOrganisationRecord(
-              { legalName: 'Denied Org' },
-              { byId: financeUser.id },
+            await runAsTestActor(financeUser.id, () =>
+              saveOrganisationRecord(
+                { legalName: 'Denied Org' },
+                { byId: financeUser.id },
+              ),
             ),
           ),
         ).toBe(true);
         expect(
           isActionDenied(
-            saveOrganisationRecord(
-              { legalName: 'Denied Org Edit' },
-              { id: existingOrg.id, byId: financeUser.id },
+            await runAsTestActor(financeUser.id, () =>
+              saveOrganisationRecord(
+                { legalName: 'Denied Org Edit' },
+                { id: existingOrg.id, byId: financeUser.id },
+              ),
             ),
           ),
         ).toBe(true);
 
-        const createdOrgRes = saveOrganisationRecord(
-          { legalName: 'Allowed Org Ltd' },
-          { byId: feeEarner.id },
+        const createdOrgRes = await runAsTestActor(feeEarner.id, () =>
+          saveOrganisationRecord(
+            { legalName: 'Allowed Org Ltd' },
+            { byId: feeEarner.id },
+          ),
         );
         expect(isActionDenied(createdOrgRes)).toBe(false);
 
-        const linkDeniedCreate = createOrUpdateLink(
-          {
-            personId: existingContact.id,
-            organisationId: existingOrg.id,
-            jobTitle: 'Director',
-            department: '',
-            roleWithinOrganisation: 'Director',
-            contactRoleIds: [],
-            isPrimaryContact: false,
-            isCurrent: true,
-            startDate: '2026-01-01',
-            endDate: null,
-            contactStatusId: null,
-          },
-          financeUser.id,
+        const linkDeniedCreate = await runAsTestActor(financeUser.id, () =>
+          createOrUpdateLink(
+            {
+              personId: existingContact.id,
+              organisationId: existingOrg.id,
+              jobTitle: 'Director',
+              department: '',
+              roleWithinOrganisation: 'Director',
+              contactRoleIds: [],
+              isPrimaryContact: false,
+              isCurrent: true,
+              startDate: '2026-01-01',
+              endDate: null,
+              contactStatusId: null,
+            },
+            financeUser.id,
+          ),
         );
         expect(isActionDenied(linkDeniedCreate)).toBe(true);
 
-        const linkCreated = createOrUpdateLink(
-          {
-            personId: existingContact.id,
-            organisationId: createdOrgRes.organisation.id,
-            jobTitle: 'Director',
-            department: '',
-            roleWithinOrganisation: 'Director',
-            contactRoleIds: [],
-            isPrimaryContact: false,
-            isCurrent: true,
-            startDate: '2026-01-01',
-            endDate: null,
-            contactStatusId: null,
-          },
-          feeEarner.id,
+        const linkCreated = await runAsTestActor(feeEarner.id, () =>
+          createOrUpdateLink(
+            {
+              personId: existingContact.id,
+              organisationId: createdOrgRes.organisation.id,
+              jobTitle: 'Director',
+              department: '',
+              roleWithinOrganisation: 'Director',
+              contactRoleIds: [],
+              isPrimaryContact: false,
+              isCurrent: true,
+              startDate: '2026-01-01',
+              endDate: null,
+              contactStatusId: null,
+            },
+            feeEarner.id,
+          ),
         );
         expect(isActionDenied(linkCreated)).toBe(false);
         if (!isActionDenied(linkCreated)) {
           expect(
             isActionDenied(
-              createOrUpdateLink(
-                {
-                  id: linkCreated.id,
-                  personId: existingContact.id,
-                  organisationId: createdOrgRes.organisation.id,
-                  jobTitle: 'Updated Director',
-                  department: '',
-                  roleWithinOrganisation: 'Director',
-                  contactRoleIds: [],
-                  isPrimaryContact: false,
-                  isCurrent: true,
-                  startDate: '2026-01-01',
-                  endDate: null,
-                  contactStatusId: null,
-                },
-                financeUser.id,
+              await runAsTestActor(financeUser.id, () =>
+                createOrUpdateLink(
+                  {
+                    id: linkCreated.id,
+                    personId: existingContact.id,
+                    organisationId: createdOrgRes.organisation.id,
+                    jobTitle: 'Updated Director',
+                    department: '',
+                    roleWithinOrganisation: 'Director',
+                    contactRoleIds: [],
+                    isPrimaryContact: false,
+                    isCurrent: true,
+                    startDate: '2026-01-01',
+                    endDate: null,
+                    contactStatusId: null,
+                  },
+                  financeUser.id,
+                ),
               ),
             ),
           ).toBe(true);
-          expect(isActionDenied(deleteLink(linkCreated.id, financeUser.id))).toBe(true);
-          expect(isActionDenied(deleteLink(linkCreated.id, feeEarner.id))).toBe(false);
+          expect(
+            isActionDenied(
+              await runAsTestActor(financeUser.id, () =>
+                deleteLink(linkCreated.id, financeUser.id),
+              ),
+            ),
+          ).toBe(true);
+          expect(
+            isActionDenied(
+              await runAsTestActor(feeEarner.id, () =>
+                deleteLink(linkCreated.id, feeEarner.id),
+              ),
+            ),
+          ).toBe(false);
         }
 
         // 2 (R252). saveOrganisationAction strips internalSystemStep so a user with contact:edit only cannot create an org
@@ -3549,39 +3714,48 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(spoofedOrgCreate)).toBe(true);
         expect(spoofedOrgCreate.errors?.permission).toMatch(/contact:create/);
         riskOfficer.permissionOverrides = undefined;
+        setTestEntraSessionOverride(undefined);
 
         // 3. record:merge on dismissDuplicateMatch and executeMerge
-        const secondOrgRes = saveOrganisationRecord(
-          { legalName: 'Duplicate Org Ltd' },
-          { byId: feeEarner.id },
+        const secondOrgRes = await runAsTestActor(feeEarner.id, () =>
+          saveOrganisationRecord(
+            { legalName: 'Duplicate Org Ltd' },
+            { byId: feeEarner.id },
+          ),
         );
         expect(
           isActionDenied(
-            dismissDuplicateMatch(
-              'organisation',
-              createdOrgRes.organisation.id,
-              secondOrgRes.organisation.id,
-              feeEarner.id,
+            await runAsTestActor(feeEarner.id, () =>
+              dismissDuplicateMatch(
+                'organisation',
+                createdOrgRes.organisation.id,
+                secondOrgRes.organisation.id,
+                feeEarner.id,
+              ),
             ),
           ),
         ).toBe(true);
         expect(
           isActionDenied(
-            await executeMerge(
-              'organisation',
-              createdOrgRes.organisation.id,
-              secondOrgRes.organisation.id,
-              feeEarner.id,
+            await runAsTestActor(feeEarner.id, () =>
+              executeMerge(
+                'organisation',
+                createdOrgRes.organisation.id,
+                secondOrgRes.organisation.id,
+                feeEarner.id,
+              ),
             ),
           ),
         ).toBe(true);
         expect(
           isActionDenied(
-            dismissDuplicateMatch(
-              'organisation',
-              createdOrgRes.organisation.id,
-              secondOrgRes.organisation.id,
-              riskOfficer.id,
+            await runAsTestActor(riskOfficer.id, () =>
+              dismissDuplicateMatch(
+                'organisation',
+                createdOrgRes.organisation.id,
+                secondOrgRes.organisation.id,
+                riskOfficer.id,
+              ),
             ),
           ),
         ).toBe(false);
@@ -3593,38 +3767,48 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           revoke: ['enquiry:assign'],
         };
         expect(
-          isActionDenied(assignEnquiryRecord(openEnq.id, feeEarner.id, null, financeUser.id)),
+          isActionDenied(
+            await runAsTestActor(financeUser.id, () =>
+              assignEnquiryRecord(openEnq.id, feeEarner.id, null, financeUser.id),
+            ),
+          ),
         ).toBe(true);
         financeUser.permissionOverrides = undefined;
         expect(
           isActionDenied(
-            closeEnquiryRecord(
-              openEnq.id,
-              { targetStatus: 'Declined', closeNotes: 'Denied close' },
-              financeUser.id,
+            await runAsTestActor(financeUser.id, () =>
+              closeEnquiryRecord(
+                openEnq.id,
+                { targetStatus: 'Declined', closeNotes: 'Denied close' },
+                financeUser.id,
+              ),
             ),
           ),
         ).toBe(true);
         expect(
           isActionDenied(
-            logEnquiryContactRecord(
-              openEnq.id,
-              { method: 'Phone', outcome: 'Spoke', note: 'Denied log' },
-              financeUser.id,
+            await runAsTestActor(financeUser.id, () =>
+              logEnquiryContactRecord(
+                openEnq.id,
+                { method: 'Phone', outcome: 'Spoke', note: 'Denied log' },
+                financeUser.id,
+              ),
             ),
           ),
         ).toBe(true);
         expect(
           isActionDenied(
-            sendEnquiryEmailRecord(
-              openEnq.id,
-              {
-                to: 'prospect@notalawfirm.example',
-                subject: 'Test',
-                bodyHtml: '<p>Test</p>',
-                bodyText: 'Test',
-              },
-              financeUser.id,
+            await runAsTestActor(financeUser.id, () =>
+              sendEnquiryEmailRecord(
+                openEnq.id,
+                {
+                  to: 'prospect@notalawfirm.example',
+                  subject: 'Test',
+                  bodyHtml: '<p>Test</p>',
+                  bodyText: 'Test',
+                },
+                financeUser.id,
+              ),
             ),
           ),
         ).toBe(true);
@@ -3635,170 +3819,172 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         closedEnq.status = 'Declined';
         closedEnq.assignedToId = feeEarner.id;
 
-        // 5a. Actor with enquiry:edit but enquiry:reopen revoked cannot reopen a closed enquiry via saveEnquiryRecord
-        feeEarner.permissionOverrides = {
-          grant: ['enquiry:edit', 'enquiry:close', 'enquiry:assign'],
-          revoke: ['enquiry:reopen'],
-        };
-        const bypassReopenRes = saveEnquiryRecord(
-          { status: 'Assigned', summary: closedEnq.summary },
-          { id: closedEnq.id, byId: feeEarner.id },
-        );
-        expect(isActionDenied(bypassReopenRes)).toBe(true);
-        if (isActionDenied(bypassReopenRes)) {
-          expect(bypassReopenRes.code).toBe('FORBIDDEN');
-          expect(bypassReopenRes.message).toMatch(/Use the assign, close, or reopen actions/i);
-        }
+        await runAsTestActor(feeEarner.id, async () => {
+          // 5a. Actor with enquiry:edit but enquiry:reopen revoked cannot reopen a closed enquiry via saveEnquiryRecord
+          feeEarner.permissionOverrides = {
+            grant: ['enquiry:edit', 'enquiry:close', 'enquiry:assign'],
+            revoke: ['enquiry:reopen'],
+          };
+          const bypassReopenRes = await saveEnquiryRecord(
+            { status: 'Assigned', summary: closedEnq.summary },
+            { id: closedEnq.id, byId: feeEarner.id },
+          );
+          expect(isActionDenied(bypassReopenRes)).toBe(true);
+          if (isActionDenied(bypassReopenRes)) {
+            expect(bypassReopenRes.code).toBe('FORBIDDEN');
+            expect(bypassReopenRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+          }
 
-        // 5b. Actor with enquiry:edit but enquiry:close revoked cannot close an open enquiry via saveEnquiryRecord
-        feeEarner.permissionOverrides = {
-          grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:assign'],
-          revoke: ['enquiry:close'],
-        };
-        const bypassCloseRes = saveEnquiryRecord(
-          { status: 'Declined', summary: openEnq.summary },
-          { id: openEnq.id, byId: feeEarner.id },
-        );
-        expect(isActionDenied(bypassCloseRes)).toBe(true);
-        if (isActionDenied(bypassCloseRes)) {
-          expect(bypassCloseRes.code).toBe('FORBIDDEN');
-          expect(bypassCloseRes.message).toMatch(/Use the assign, close, or reopen actions/i);
-        }
+          // 5b. Actor with enquiry:edit but enquiry:close revoked cannot close an open enquiry via saveEnquiryRecord
+          feeEarner.permissionOverrides = {
+            grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:assign'],
+            revoke: ['enquiry:close'],
+          };
+          const bypassCloseRes = await saveEnquiryRecord(
+            { status: 'Declined', summary: openEnq.summary },
+            { id: openEnq.id, byId: feeEarner.id },
+          );
+          expect(isActionDenied(bypassCloseRes)).toBe(true);
+          if (isActionDenied(bypassCloseRes)) {
+            expect(bypassCloseRes.code).toBe('FORBIDDEN');
+            expect(bypassCloseRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+          }
 
-        // 5c. Actor with enquiry:edit but enquiry:assign revoked cannot change assignedToId or assignedTeamId via saveEnquiryRecord
-        feeEarner.permissionOverrides = {
-          grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:close'],
-          revoke: ['enquiry:assign'],
-        };
-        const bypassAssignUserRes = saveEnquiryRecord(
-          { assignedToId: 'P-000001', summary: openEnq.summary },
-          { id: openEnq.id, byId: feeEarner.id },
-        );
-        expect(isActionDenied(bypassAssignUserRes)).toBe(true);
-        if (isActionDenied(bypassAssignUserRes)) {
-          expect(bypassAssignUserRes.code).toBe('FORBIDDEN');
-          expect(bypassAssignUserRes.message).toMatch(/Use the assign, close, or reopen actions/i);
-        }
-        const bypassAssignTeamRes = saveEnquiryRecord(
-          { assignedTeamId: 'TM-999999', summary: openEnq.summary },
-          { id: openEnq.id, byId: feeEarner.id },
-        );
-        expect(isActionDenied(bypassAssignTeamRes)).toBe(true);
-        if (isActionDenied(bypassAssignTeamRes)) {
-          expect(bypassAssignTeamRes.code).toBe('FORBIDDEN');
-          expect(bypassAssignTeamRes.message).toMatch(/Use the assign, close, or reopen actions/i);
-        }
-        feeEarner.permissionOverrides = undefined;
+          // 5c. Actor with enquiry:edit but enquiry:assign revoked cannot change assignedToId or assignedTeamId via saveEnquiryRecord
+          feeEarner.permissionOverrides = {
+            grant: ['enquiry:edit', 'enquiry:reopen', 'enquiry:close'],
+            revoke: ['enquiry:assign'],
+          };
+          const bypassAssignUserRes = await saveEnquiryRecord(
+            { assignedToId: 'P-000001', summary: openEnq.summary },
+            { id: openEnq.id, byId: feeEarner.id },
+          );
+          expect(isActionDenied(bypassAssignUserRes)).toBe(true);
+          if (isActionDenied(bypassAssignUserRes)) {
+            expect(bypassAssignUserRes.code).toBe('FORBIDDEN');
+            expect(bypassAssignUserRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+          }
+          const bypassAssignTeamRes = await saveEnquiryRecord(
+            { assignedTeamId: 'TM-999999', summary: openEnq.summary },
+            { id: openEnq.id, byId: feeEarner.id },
+          );
+          expect(isActionDenied(bypassAssignTeamRes)).toBe(true);
+          if (isActionDenied(bypassAssignTeamRes)) {
+            expect(bypassAssignTeamRes.code).toBe('FORBIDDEN');
+            expect(bypassAssignTeamRes.message).toMatch(/Use the assign, close, or reopen actions/i);
+          }
+          feeEarner.permissionOverrides = undefined;
 
-        // 5d (R292 positive control). A Draft enquiry can still be routed through saveEnquiryRecord with asDraft: false, status, assignedToId, and assignedTeamId
-        const draftToRouteCreateRes = saveEnquiryRecord(
-          {
-            firstName: 'Route',
-            lastName: 'FromDraft',
-            email: 'route.fromdraft@notalawfirm.example',
-            phone: '029 2000 1234',
-            channelId: openEnq.channelId,
-            practiceAreaId: openEnq.practiceAreaId,
-            summary: 'Draft enquiry ready for routing',
-            notes: 'Initial notes for routing from draft',
-            urgencyId: openEnq.urgencyId,
-            privacyNoticeGiven: true,
-          },
-          { asDraft: true, byId: feeEarner.id },
-        );
-        expect(isActionDenied(draftToRouteCreateRes)).toBe(false);
-        expect(draftToRouteCreateRes.enquiry?.status).toBe('Draft');
-        const targetTeamId = store.teams[0]!.id;
-        const routedFromDraftRes = saveEnquiryRecord(
-          {
-            status: 'Assigned',
-            assignedToId: feeEarner.id,
-            assignedTeamId: targetTeamId,
-          },
-          { id: draftToRouteCreateRes.enquiry!.id, asDraft: false, byId: feeEarner.id },
-        );
-        expect(isActionDenied(routedFromDraftRes)).toBe(false);
-        expect(routedFromDraftRes.enquiry?.status).toBe('Assigned');
-        expect(routedFromDraftRes.enquiry?.assignedToId).toBe(feeEarner.id);
-        expect(routedFromDraftRes.enquiry?.assignedTeamId).toBe(targetTeamId);
+          // 5d (R292 positive control). A Draft enquiry can still be routed through saveEnquiryRecord with asDraft: false, status, assignedToId, and assignedTeamId
+          const draftToRouteCreateRes = await saveEnquiryRecord(
+            {
+              firstName: 'Route',
+              lastName: 'FromDraft',
+              email: 'route.fromdraft@notalawfirm.example',
+              phone: '029 2000 1234',
+              channelId: openEnq.channelId,
+              practiceAreaId: openEnq.practiceAreaId,
+              summary: 'Draft enquiry ready for routing',
+              notes: 'Initial notes for routing from draft',
+              urgencyId: openEnq.urgencyId,
+              privacyNoticeGiven: true,
+            },
+            { asDraft: true, byId: feeEarner.id },
+          );
+          expect(isActionDenied(draftToRouteCreateRes)).toBe(false);
+          expect(draftToRouteCreateRes.enquiry?.status).toBe('Draft');
+          const targetTeamId = store.teams[0]!.id;
+          const routedFromDraftRes = await saveEnquiryRecord(
+            {
+              status: 'Assigned',
+              assignedToId: feeEarner.id,
+              assignedTeamId: targetTeamId,
+            },
+            { id: draftToRouteCreateRes.enquiry!.id, asDraft: false, byId: feeEarner.id },
+          );
+          expect(isActionDenied(routedFromDraftRes)).toBe(false);
+          expect(routedFromDraftRes.enquiry?.status).toBe('Assigned');
+          expect(routedFromDraftRes.enquiry?.assignedToId).toBe(feeEarner.id);
+          expect(routedFromDraftRes.enquiry?.assignedTeamId).toBe(targetTeamId);
 
-        // 6 (R267, R268, R293, R299). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft and closed enquiries
-        const draftEnqRes = saveEnquiryRecord(
-          { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
-          { asDraft: true, byId: feeEarner.id },
-        );
-        const draftEnq = draftEnqRes.enquiry!;
-        const draftTaskRes = saveTaskRecord(
-          {
-            title: 'Task on draft enquiry',
-            dueAt: '2026-12-01',
-            assignedPersonId: feeEarner.id,
-            linkedRecords: [{ recordType: 'enquiry', recordId: draftEnq.id }],
-          },
-          feeEarner.id,
-        );
-        expect(isActionDenied(draftTaskRes)).toBe(false);
-        expect(draftTaskRes.task?.id).toBeTruthy();
-        expect(draftTaskRes.task?.linkedRecords).toEqual([
-          { recordType: 'enquiry', recordId: draftEnq.id },
-        ]);
-        expect(draftEnq.status).toBe('Draft');
-        expect(draftEnq.assignedToId).toBeNull();
+          // 6 (R267, R268, R293, R299). Automatic enquiry assignment inside saveTaskRecord requires enquiry:assign and skips Draft and closed enquiries
+          const draftEnqRes = await saveEnquiryRecord(
+            { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
+            { asDraft: true, byId: feeEarner.id },
+          );
+          const draftEnq = draftEnqRes.enquiry!;
+          const draftTaskRes = await saveTaskRecord(
+            {
+              title: 'Task on draft enquiry',
+              dueAt: '2026-12-01',
+              assignedPersonId: feeEarner.id,
+              linkedRecords: [{ recordType: 'enquiry', recordId: draftEnq.id }],
+            },
+            feeEarner.id,
+          );
+          expect(isActionDenied(draftTaskRes)).toBe(false);
+          expect(draftTaskRes.task?.id).toBeTruthy();
+          expect(draftTaskRes.task?.linkedRecords).toEqual([
+            { recordType: 'enquiry', recordId: draftEnq.id },
+          ]);
+          expect(draftEnq.status).toBe('Draft');
+          expect(draftEnq.assignedToId).toBeNull();
 
-        // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293, R299)
-        closedEnq.status = 'Declined';
-        closedEnq.assignedToId = null;
-        const closedTaskRes = saveTaskRecord(
-          {
-            title: 'Task on declined enquiry',
-            dueAt: '2026-12-01',
-            assignedPersonId: feeEarner.id,
-            linkedRecords: [{ recordType: 'enquiry', recordId: closedEnq.id }],
-          },
-          feeEarner.id,
-        );
-        expect(isActionDenied(closedTaskRes)).toBe(false);
-        expect(closedTaskRes.task?.id).toBeTruthy();
-        expect(closedTaskRes.task?.linkedRecords).toEqual([
-          { recordType: 'enquiry', recordId: closedEnq.id },
-        ]);
-        expect(closedEnq.status).toBe('Declined');
-        expect(closedEnq.assignedToId).toBeNull();
+          // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293, R299)
+          closedEnq.status = 'Declined';
+          closedEnq.assignedToId = null;
+          const closedTaskRes = await saveTaskRecord(
+            {
+              title: 'Task on declined enquiry',
+              dueAt: '2026-12-01',
+              assignedPersonId: feeEarner.id,
+              linkedRecords: [{ recordType: 'enquiry', recordId: closedEnq.id }],
+            },
+            feeEarner.id,
+          );
+          expect(isActionDenied(closedTaskRes)).toBe(false);
+          expect(closedTaskRes.task?.id).toBeTruthy();
+          expect(closedTaskRes.task?.linkedRecords).toEqual([
+            { recordType: 'enquiry', recordId: closedEnq.id },
+          ]);
+          expect(closedEnq.status).toBe('Declined');
+          expect(closedEnq.assignedToId).toBeNull();
 
-        const routedNewEnq = store.enquiries.find((e) => e.id === openEnq.id)!;
-        routedNewEnq.status = 'New';
-        routedNewEnq.assignedToId = null;
+          const routedNewEnq = store.enquiries.find((e) => e.id === openEnq.id)!;
+          routedNewEnq.status = 'New';
+          routedNewEnq.assignedToId = null;
 
-        // Actor without enquiry:assign does not auto-assign the enquiry
-        feeEarner.permissionOverrides = {
-          grant: [],
-          revoke: ['enquiry:assign'],
-        };
-        saveTaskRecord(
-          {
-            title: 'Task without enquiry:assign',
-            dueAt: '2026-12-01',
-            assignedPersonId: feeEarner.id,
-            linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
-          },
-          feeEarner.id,
-        );
-        expect(routedNewEnq.assignedToId).toBeNull();
-        expect(routedNewEnq.status).toBe('New');
+          // Actor without enquiry:assign does not auto-assign the enquiry
+          feeEarner.permissionOverrides = {
+            grant: [],
+            revoke: ['enquiry:assign'],
+          };
+          await saveTaskRecord(
+            {
+              title: 'Task without enquiry:assign',
+              dueAt: '2026-12-01',
+              assignedPersonId: feeEarner.id,
+              linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
+            },
+            feeEarner.id,
+          );
+          expect(routedNewEnq.assignedToId).toBeNull();
+          expect(routedNewEnq.status).toBe('New');
 
-        // Actor with enquiry:assign auto-assigns the routed New enquiry
-        feeEarner.permissionOverrides = undefined;
-        saveTaskRecord(
-          {
-            title: 'Task with enquiry:assign',
-            dueAt: '2026-12-01',
-            assignedPersonId: feeEarner.id,
-            linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
-          },
-          feeEarner.id,
-        );
-        expect(routedNewEnq.assignedToId).toBe(feeEarner.id);
-        expect(routedNewEnq.status).toBe('Assigned');
+          // Actor with enquiry:assign auto-assigns the routed New enquiry
+          feeEarner.permissionOverrides = undefined;
+          await saveTaskRecord(
+            {
+              title: 'Task with enquiry:assign',
+              dueAt: '2026-12-01',
+              assignedPersonId: feeEarner.id,
+              linkedRecords: [{ recordType: 'enquiry', recordId: routedNewEnq.id }],
+            },
+            feeEarner.id,
+          );
+          expect(routedNewEnq.assignedToId).toBe(feeEarner.id);
+          expect(routedNewEnq.status).toBe('Assigned');
+        });
       } finally {
         setTestEntraSessionOverride(null);
         await resetAllDemoData('P-000001', testDataResetContext());
@@ -3818,7 +4004,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         wallMatter.teamMemberIds = [];
 
         // Fee earner P-000002 holds matter:edit and contact:edit, but cannot view wallMatter or edit employees
-        const noteOnRestrictedMatter = addNoteToRecord(
+        const noteOnRestrictedMatter = await addNoteToRecord(
           'matter',
           wallMatter.id,
           'Should fail on walled matter',
@@ -3826,7 +4012,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(noteOnRestrictedMatter)).toBe(true);
 
-        const noteOnEmployeeWithoutHrPerm = addNoteToRecord(
+        const noteOnEmployeeWithoutHrPerm = await addNoteToRecord(
           'person',
           'P-000001',
           'Should fail on employee record without employee:edit_core',
@@ -3874,7 +4060,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         if (isActionDenied(enqActionRes)) {
           expect(enqActionRes.code).toBe('FORBIDDEN');
         }
-        const enqSvcRes = prepareEnquiryConversion(
+        const enqSvcRes = await prepareEnquiryConversion(
           enqId,
           { createForBusiness: true },
           'P-000009',
@@ -3884,7 +4070,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const quoteId = store.quotes[0]!.id;
         const quoteActionRes = await prepareQuoteConversionAction(quoteId);
         expect(isActionDenied(quoteActionRes)).toBe(true);
-        const quoteSvcRes = prepareQuoteConversionRecord(quoteId, 'P-000009');
+        const quoteSvcRes = await prepareQuoteConversionRecord(quoteId, 'P-000009');
         expect(isActionDenied(quoteSvcRes)).toBe(true);
 
         expect(store.people.length).toBe(peopleBefore);
@@ -3900,502 +4086,506 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
         const store = getStore();
-        // Find an opposing party on an existing matter to trigger a high-severity hit
-        const matterWithOpponent = store.matters.find(
-          (m) =>
-            !m.isStaffMatter &&
-            !m.hasEthicalWall &&
-            m.parties.some((p) => p.role === 'Opponent' || p.role === 'Counterparty'),
-        )!;
-        const opponentParty = matterWithOpponent.parties.find(
-          (p) => p.role === 'Opponent' || p.role === 'Counterparty',
-        )!;
+        await runAsTestActor('P-000001', async () => {
+          // Find an opposing party on an existing matter to trigger a high-severity hit
+          const matterWithOpponent = store.matters.find(
+            (m) =>
+              !m.isStaffMatter &&
+              !m.hasEthicalWall &&
+              m.parties.some((p) => p.role === 'Opponent' || p.role === 'Counterparty'),
+          )!;
+          const opponentParty = matterWithOpponent.parties.find(
+            (p) => p.role === 'Opponent' || p.role === 'Counterparty',
+          )!;
 
-        // 1. Create a prospect quote for that opposing party
-        const blockedQuoteRes = saveQuoteRecord(
-          {
-            clientType: 'prospect',
-            prospectName: 'Gareth OpponentContact',
-            prospectOrganisationName: opponentParty.name,
-            prospectEmail: 'gareth@opponent.example',
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            scope: 'Blocked quote scope',
-            feeBasis: 'Fixed fee',
-            feeAmountExVat: 2500,
-          },
-          { byId: 'P-000001' },
-        );
-        expect(blockedQuoteRes.quote).toBeDefined();
-        const blockedQuote = blockedQuoteRes.quote!;
+          // 1. Create a prospect quote for that opposing party
+          const blockedQuoteRes = await saveQuoteRecord(
+            {
+              clientType: 'prospect',
+              prospectName: 'Gareth OpponentContact',
+              prospectOrganisationName: opponentParty.name,
+              prospectEmail: 'gareth@opponent.example',
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              scope: 'Blocked quote scope',
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 2500,
+            },
+            { byId: 'P-000001' },
+          );
+          expect(blockedQuoteRes.quote).toBeDefined();
+          const blockedQuote = blockedQuoteRes.quote!;
 
-        const peopleBeforeBlock = store.people.length;
-        const orgsBeforeBlock = store.organisations.length;
-        const linksBeforeBlock = store.links.length;
+          const peopleBeforeBlock = store.people.length;
+          const orgsBeforeBlock = store.organisations.length;
+          const linksBeforeBlock = store.links.length;
 
-        const blockedConv = prepareQuoteConversionRecord(blockedQuote.id, 'P-000001');
-        expect(blockedConv.ok).toBe(false);
-        expect(blockedConv.conflictBlocked).toBe(true);
-        expect(blockedConv.conflictReasons?.length).toBeGreaterThan(0);
-        // Nothing created when blocked
-        expect(store.people.length).toBe(peopleBeforeBlock);
-        expect(store.organisations.length).toBe(orgsBeforeBlock);
-        expect(store.links.length).toBe(linksBeforeBlock);
+          const blockedConv = await prepareQuoteConversionRecord(blockedQuote.id, 'P-000001');
+          expect(blockedConv.ok).toBe(false);
+          expect(blockedConv.conflictBlocked).toBe(true);
+          expect(blockedConv.conflictReasons?.length).toBeGreaterThan(0);
+          // Nothing created when blocked
+          expect(store.people.length).toBe(peopleBeforeBlock);
+          expect(store.organisations.length).toBe(orgsBeforeBlock);
+          expect(store.links.length).toBe(linksBeforeBlock);
 
-        // 2. Create a clean prospect quote -> creates person, organisation (Cleared), conflictDecision, and audit entry
-        const cleanQuoteRes = saveQuoteRecord(
-          {
-            clientType: 'prospect',
-            prospectName: 'Seren CleanProspect',
-            prospectOrganisationName: 'Solaris Clean Ventures Ltd',
-            prospectEmail: 'seren@solaris-clean.example',
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            scope: 'Clean quote scope',
-            feeBasis: 'Fixed fee',
-            feeAmountExVat: 3000,
-          },
-          { byId: 'P-000001' },
-        );
-        const cleanQuote = cleanQuoteRes.quote!;
-        const cleanConv = prepareQuoteConversionRecord(cleanQuote.id, 'P-000001');
-        expect(cleanConv.ok).toBe(true);
-        expect(cleanConv.clientId).toBeDefined();
-        expect(cleanConv.instructingContactId).toBeDefined();
+          // 2. Create a clean prospect quote -> creates person, organisation (Cleared), conflictDecision, and audit entry
+          const cleanQuoteRes = await saveQuoteRecord(
+            {
+              clientType: 'prospect',
+              prospectName: 'Seren CleanProspect',
+              prospectOrganisationName: 'Solaris Clean Ventures Ltd',
+              prospectEmail: 'seren@solaris-clean.example',
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              scope: 'Clean quote scope',
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 3000,
+            },
+            { byId: 'P-000001' },
+          );
+          const cleanQuote = cleanQuoteRes.quote!;
+          const cleanConv = await prepareQuoteConversionRecord(cleanQuote.id, 'P-000001');
+          expect(cleanConv.ok).toBe(true);
+          expect(cleanConv.clientId).toBeDefined();
+          expect(cleanConv.instructingContactId).toBeDefined();
 
-        const createdOrg = store.organisations.find((o) => o.id === cleanConv.clientId)!;
-        expect(createdOrg).toBeDefined();
-        expect(createdOrg.conflictDecision).toBeDefined();
-        expect(createdOrg.conflictDecision?.outcome).toBe('Cleared');
-        expect(createdOrg.conflictDecision?.decidedById).toBe('P-000001');
-        expect(createdOrg.conflictDecision?.searchedSources).toEqual([
-          ...CONFLICT_SEARCHED_SOURCES,
-        ]);
-        expect(
-          store.audit.some(
-            (a) =>
-              a.recordType === 'organisation' &&
-              a.recordId === createdOrg.id &&
-              a.action === 'conflict-decision' &&
-              a.field?.includes('Conflict check decision recorded on quote conversion'),
-          ),
-        ).toBe(true);
+          const createdOrg = store.organisations.find((o) => o.id === cleanConv.clientId)!;
+          expect(createdOrg).toBeDefined();
+          expect(createdOrg.conflictDecision).toBeDefined();
+          expect(createdOrg.conflictDecision?.outcome).toBe('Cleared');
+          expect(createdOrg.conflictDecision?.decidedById).toBe('P-000001');
+          expect(createdOrg.conflictDecision?.searchedSources).toEqual([
+            ...CONFLICT_SEARCHED_SOURCES,
+          ]);
+          expect(
+            (await auditSinceTestStart()).some(
+              (a) =>
+                a.recordType === 'organisation' &&
+                a.recordId === createdOrg.id &&
+                a.action === 'conflict-decision' &&
+                a.field?.includes('Conflict check decision recorded on quote conversion'),
+            ),
+          ).toBe(true);
 
-        // 2b. R254: An existing organisation set to "Conflict – declined" stays declined and blocks quote conversion
-        const declinedStatusId = 'conflict_status.conflict_declined';
-        const clearedWithConsentStatusId = 'conflict_status.cleared_with_consent';
+          // 2b. R254: An existing organisation set to "Conflict – declined" stays declined and blocks quote conversion
+          const declinedStatusId = 'conflict_status.conflict_declined';
+          const clearedWithConsentStatusId = 'conflict_status.cleared_with_consent';
 
-        const declinedOrg = saveOrganisationRecord(
-          {
-            legalName: 'Declined Existing Org Ltd',
-            conflictStatusId: declinedStatusId,
-            conflictReference: 'CR-KEEP-DECLINED',
-          },
-          { byId: 'P-000001' },
-        ).organisation!;
-        expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
+          const declinedOrg = (await saveOrganisationRecord(
+            {
+              legalName: 'Declined Existing Org Ltd',
+              conflictStatusId: declinedStatusId,
+              conflictReference: 'CR-KEEP-DECLINED',
+            },
+            { byId: 'P-000001' },
+          )).organisation!;
+          expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
 
-        const declinedOrgQuote = saveQuoteRecord(
-          {
-            clientType: 'existing',
-            linkedOrganisationId: declinedOrg.id,
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            scope: 'Quote for declined existing org',
-            feeBasis: 'Fixed fee',
-            feeAmountExVat: 1800,
-          },
-          { byId: 'P-000001' },
-        ).quote!;
-        const declinedOrgConv = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
-        expect(declinedOrgConv.ok).toBe(false);
-        expect(declinedOrgConv.conflictBlocked).toBe(true);
-        expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
-        expect(declinedOrg.conflictReference).toBe('CR-KEEP-DECLINED');
+          const declinedOrgQuote = (await saveQuoteRecord(
+            {
+              clientType: 'existing',
+              linkedOrganisationId: declinedOrg.id,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              scope: 'Quote for declined existing org',
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 1800,
+            },
+            { byId: 'P-000001' },
+          )).quote!;
+          const declinedOrgConv = await prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
+          expect(declinedOrgConv.ok).toBe(false);
+          expect(declinedOrgConv.conflictBlocked).toBe(true);
+          expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
+          expect(declinedOrg.conflictReference).toBe('CR-KEEP-DECLINED');
 
-        // 2c. R254: An existing organisation set to "Cleared with consent" keeps its status after a successful quote conversion
-        const consentOrg = saveOrganisationRecord(
-          {
-            legalName: 'Consent Existing Org Ltd',
-            conflictStatusId: clearedWithConsentStatusId,
-            conflictReference: 'CR-KEEP-CONSENT',
-          },
-          { byId: 'P-000001' },
-        ).organisation!;
-        const consentOrgQuote = saveQuoteRecord(
-          {
-            clientType: 'existing',
-            linkedOrganisationId: consentOrg.id,
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            scope: 'Quote for cleared-with-consent existing org',
-            feeBasis: 'Fixed fee',
-            feeAmountExVat: 2200,
-          },
-          { byId: 'P-000001' },
-        ).quote!;
-        const consentOrgConv = prepareQuoteConversionRecord(consentOrgQuote.id, 'P-000001');
-        expect(consentOrgConv.ok).toBe(true);
-        expect(consentOrg.conflictStatusId).toBe(clearedWithConsentStatusId);
-        expect(consentOrg.conflictReference).toBe('CR-KEEP-CONSENT');
-        expect(
-          store.audit.some(
+          // 2c. R254: An existing organisation set to "Cleared with consent" keeps its status after a successful quote conversion
+          const consentOrg = (await saveOrganisationRecord(
+            {
+              legalName: 'Consent Existing Org Ltd',
+              conflictStatusId: clearedWithConsentStatusId,
+              conflictReference: 'CR-KEEP-CONSENT',
+            },
+            { byId: 'P-000001' },
+          )).organisation!;
+          const consentOrgQuote = (await saveQuoteRecord(
+            {
+              clientType: 'existing',
+              linkedOrganisationId: consentOrg.id,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              scope: 'Quote for cleared-with-consent existing org',
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 2200,
+            },
+            { byId: 'P-000001' },
+          )).quote!;
+          const consentOrgConv = await prepareQuoteConversionRecord(consentOrgQuote.id, 'P-000001');
+          expect(consentOrgConv.ok).toBe(true);
+          expect(consentOrg.conflictStatusId).toBe(clearedWithConsentStatusId);
+          expect(consentOrg.conflictReference).toBe('CR-KEEP-CONSENT');
+          expect(
+            (await auditSinceTestStart()).some(
+              (a) =>
+                a.recordType === 'quote' &&
+                a.recordId === consentOrgQuote.id &&
+                a.action === 'conflict-decision',
+            ),
+          ).toBe(true);
+
+          // 2d. R255: A quote with a non-blocking amber warning (private client whose employer is an existing client) converts without blocking
+          const existingClientOrgId = matterWithOpponent.clientId;
+          const privateClientEmployee = (await savePersonRecord(
+            {
+              firstName: 'Nia',
+              surname: 'AmberWarningClient',
+            },
+            { byId: 'P-000001' },
+          )).person!;
+          store.links.push({
+            id: 'L-R255-AMBER',
+            personId: privateClientEmployee.id,
+            organisationId: existingClientOrgId,
+            jobTitle: 'Analyst',
+            department: 'Operations',
+            roleWithinOrganisation: 'Employee',
+            contactRoleIds: [],
+            isPrimaryContact: false,
+            isCurrent: true,
+            startDate: '2025-01-01',
+            endDate: null,
+            contactStatusId: null,
+            createdById: 'P-000001',
+            createdAt: '2025-01-01T09:00:00Z',
+            updatedById: 'P-000001',
+            updatedAt: '2025-01-01T09:00:00Z',
+          });
+          const amberQuote = (await saveQuoteRecord(
+            {
+              clientType: 'existing',
+              linkedPersonId: privateClientEmployee.id,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              scope: 'Private client quote with amber employer link',
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 1500,
+            },
+            { byId: 'P-000001' },
+          )).quote!;
+          const amberConv = await prepareQuoteConversionRecord(amberQuote.id, 'P-000001');
+          expect(amberConv.ok).toBe(true);
+          expect(amberConv.conflictBlocked).toBeFalsy();
+          expect(amberConv.conflictWarnings?.length).toBeGreaterThan(0);
+          expect(amberConv.conflictWarnings?.[0]).toContain('linked to');
+          const amberAudit = (await auditSinceTestStart()).find(
             (a) =>
               a.recordType === 'quote' &&
-              a.recordId === consentOrgQuote.id &&
+              a.recordId === amberQuote.id &&
               a.action === 'conflict-decision',
-          ),
-        ).toBe(true);
-
-        // 2d. R255: A quote with a non-blocking amber warning (private client whose employer is an existing client) converts without blocking
-        const existingClientOrgId = matterWithOpponent.clientId;
-        const privateClientEmployee = savePersonRecord(
-          {
-            firstName: 'Nia',
-            surname: 'AmberWarningClient',
-          },
-          { byId: 'P-000001' },
-        ).person!;
-        store.links.push({
-          id: 'L-R255-AMBER',
-          personId: privateClientEmployee.id,
-          organisationId: existingClientOrgId,
-          jobTitle: 'Analyst',
-          department: 'Operations',
-          roleWithinOrganisation: 'Employee',
-          contactRoleIds: [],
-          isPrimaryContact: false,
-          isCurrent: true,
-          startDate: '2025-01-01',
-          endDate: null,
-          contactStatusId: null,
-          createdById: 'P-000001',
-          createdAt: '2025-01-01T09:00:00Z',
-          updatedById: 'P-000001',
-          updatedAt: '2025-01-01T09:00:00Z',
-        });
-        const amberQuote = saveQuoteRecord(
-          {
-            clientType: 'existing',
-            linkedPersonId: privateClientEmployee.id,
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            scope: 'Private client quote with amber employer link',
-            feeBasis: 'Fixed fee',
-            feeAmountExVat: 1500,
-          },
-          { byId: 'P-000001' },
-        ).quote!;
-        const amberConv = prepareQuoteConversionRecord(amberQuote.id, 'P-000001');
-        expect(amberConv.ok).toBe(true);
-        expect(amberConv.conflictBlocked).toBeFalsy();
-        expect(amberConv.conflictWarnings?.length).toBeGreaterThan(0);
-        expect(amberConv.conflictWarnings?.[0]).toContain('linked to');
-        const amberAudit = store.audit.find(
-          (a) =>
-            a.recordType === 'quote' &&
-            a.recordId === amberQuote.id &&
-            a.action === 'conflict-decision',
-        );
-        expect(amberAudit).toBeDefined();
-        expect(amberAudit?.newValue).toContain('Potential conflict');
-
-        // 2e. R297: A quote matching a declined organisation by name (without linkedOrganisationId) does NOT block,
-        // emits the non-blocking warning even when the declined organisation is listed second among same-named organisations,
-        // and sets the new prospect organisation's conflictDecision.outcome to 'Potential conflict'
-        const clearedSameNameOrg = saveOrganisationRecord(
-          {
-            legalName: 'Declined Existing Org Ltd',
-            conflictStatusId: 'conflict_status.cleared',
-            conflictReference: 'CR-CLEARED-FIRST',
-          },
-          { byId: 'P-000001' },
-        ).organisation!;
-        // Move clearedSameNameOrg before declinedOrg so declinedOrg is listed second among same-named organisations
-        const clearedIdx = store.organisations.findIndex((o) => o.id === clearedSameNameOrg.id);
-        if (clearedIdx >= 0) {
-          store.organisations.splice(clearedIdx, 1);
-        }
-        const declinedIdx = store.organisations.findIndex((o) => o.id === declinedOrg.id);
-        store.organisations.splice(declinedIdx, 0, clearedSameNameOrg);
-
-        const declinedByNameQuote = saveQuoteRecord(
-          {
-            clientType: 'prospect',
-            prospectName: 'Dafydd NameMatch',
-            prospectOrganisationName: 'Declined Existing Org Ltd',
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            scope: 'Quote matching declined org by name',
-            feeBasis: 'Fixed fee',
-            feeAmountExVat: 1900,
-          },
-          { byId: 'P-000001' },
-        ).quote!;
-        const declinedByNameConv = prepareQuoteConversionRecord(
-          declinedByNameQuote.id,
-          'P-000001',
-        );
-        expect(declinedByNameConv.ok).toBe(true);
-        expect(declinedByNameConv.conflictBlocked).toBeFalsy();
-        expect(declinedByNameConv.conflictWarnings).toContain(
-          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
-        );
-        const createdSameNameProspectOrg = store.organisations.find(
-          (o) => o.id === declinedByNameConv.clientId,
-        )!;
-        expect(createdSameNameProspectOrg.conflictDecision?.outcome).toBe('Potential conflict');
-        expect(createdSameNameProspectOrg.conflictDecision?.matchesCount).toBe(0);
-        // R312: Quote conversion with a warning stores it on conflictDecision.warnings
-        expect(declinedByNameQuote.conflictDecision?.warnings).toContain(
-          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
-        );
-        expect(amberQuote.conflictDecision?.warnings).toEqual(
-          amberConv.conflictWarnings,
-        );
-
-        // Linked declined organisation still hard-blocks
-        const linkedDeclinedRecheck = prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
-        expect(linkedDeclinedRecheck.ok).toBe(false);
-        expect(linkedDeclinedRecheck.conflictBlocked).toBe(true);
-
-        // 3. Enquiry conversion for a new business also records conflictDecision and audit entry, and keeps conflictDecision on the converted matter (R304)
-        const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
-
-        // 3a. R307: An enquiry linked to a declined organisation is blocked on conversion, while an unlinked enquiry matching a declined organisation by name converts with the warning in conflictWarnings
-        const linkedDeclinedEnq = saveEnquiryRecord(
-          {
-            channelId: templateEnq.channelId,
-            firstName: 'Owain',
-            lastName: 'DeclinedLinkedCaller',
-            callingOnBehalfOf: declinedOrg.legalName,
-            linkedOrganisationId: declinedOrg.id,
-            email: 'owain@declined-linked.example',
-            phone: '029 2018 0771',
-            preferredContactMethodId: templateEnq.preferredContactMethodId,
-            sourceId: templateEnq.sourceId,
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            summary: 'Enquiry linked to declined organisation',
-            notes: 'High-level notes for linked declined organisation enquiry conversion test.',
-            otherPartiesNamed: '',
-            urgencyId: templateEnq.urgencyId,
-            privacyNoticeGiven: true,
-          },
-          { byId: 'P-000001', asDraft: false },
-        ).enquiry!;
-        const linkedDeclinedEnqConv = prepareEnquiryConversion(
-          linkedDeclinedEnq.id,
-          { useOrganisationId: declinedOrg.id, createForBusiness: true },
-          'P-000001',
-        );
-        expect(linkedDeclinedEnqConv.ok).toBe(false);
-        expect(linkedDeclinedEnqConv.conflictBlocked).toBe(true);
-        expect(linkedDeclinedEnqConv.conflictReasons).toContain(
-          'Client organisation has conflict status "Conflict – declined".',
-        );
-        expect(
-          store.audit.some(
-            (a) =>
-              a.recordType === 'enquiry' &&
-              a.recordId === linkedDeclinedEnq.id &&
-              a.action === 'conflict-decision' &&
-              a.field === 'Enquiry conversion blocked by conflict check',
-          ),
-        ).toBe(true);
-
-        const declinedEnqOrg = saveOrganisationRecord(
-          {
-            legalName: 'Declined Enquiry Org Ltd',
-            conflictStatusId: declinedStatusId,
-            conflictReference: 'CR-ENQ-DECLINED',
-          },
-          { byId: 'P-000001' },
-        ).organisation!;
-        const unlinkedDeclinedNameEnq = saveEnquiryRecord(
-          {
-            channelId: templateEnq.channelId,
-            firstName: 'Carys',
-            lastName: 'DeclinedNameCaller',
-            callingOnBehalfOf: declinedEnqOrg.legalName,
-            email: 'carys@declined-name.example',
-            phone: '029 2018 0772',
-            preferredContactMethodId: templateEnq.preferredContactMethodId,
-            sourceId: templateEnq.sourceId,
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            summary: 'Unlinked enquiry matching declined organisation by name',
-            notes: 'High-level notes for unlinked declined organisation name match enquiry test.',
-            otherPartiesNamed: '',
-            urgencyId: templateEnq.urgencyId,
-            privacyNoticeGiven: true,
-          },
-          { byId: 'P-000001', asDraft: false },
-        ).enquiry!;
-        const unlinkedDeclinedNameEnqConv = prepareEnquiryConversion(
-          unlinkedDeclinedNameEnq.id,
-          { createForBusiness: true },
-          'P-000001',
-        );
-        expect(unlinkedDeclinedNameEnqConv.ok).toBe(true);
-        expect(unlinkedDeclinedNameEnqConv.conflictBlocked).toBeFalsy();
-        expect(unlinkedDeclinedNameEnqConv.conflictWarnings).toContain(
-          "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
-        );
-        expect(unlinkedDeclinedNameEnq.conflictDecision?.outcome).toBe('Potential conflict');
-        expect(unlinkedDeclinedNameEnq.conflictDecision?.matchesCount).toBe(0);
-        // R312: Enquiry conversion with a warning stores it on conflictDecision.warnings
-        expect(unlinkedDeclinedNameEnq.conflictDecision?.warnings).toEqual(
-          unlinkedDeclinedNameEnqConv.conflictWarnings,
-        );
-        // R312: A user who cannot see the enquiry gets no warnings from the snapshot used by /matters/new
-        const restrictedMatter = store.matters[0]!;
-        const savedMatterSnap = structuredClone(restrictedMatter);
-        const prevConvertedMatterId = unlinkedDeclinedNameEnq.convertedMatterId;
-        restrictedMatter.isStaffMatter = true;
-        restrictedMatter.restrictedAccessUserIds = ['P-000001'];
-        restrictedMatter.responsiblePartnerId = 'P-000001';
-        restrictedMatter.supervisingPartnerId = 'P-000001';
-        restrictedMatter.leadFeeEarnerId = 'P-000001';
-        restrictedMatter.teamMemberIds = [];
-        unlinkedDeclinedNameEnq.convertedMatterId = restrictedMatter.id;
-        try {
-          const nonParticipantSnap = getAppSnapshot('P-000002');
-          const resolvedEnquiryForNonParticipant = nonParticipantSnap.enquiries.find(
-            (e) => e.id === unlinkedDeclinedNameEnq.id,
           );
-          expect(resolvedEnquiryForNonParticipant).toBeUndefined();
+          expect(amberAudit).toBeDefined();
+          expect(amberAudit?.newValue).toContain('Potential conflict');
+
+          // 2e. R297: A quote matching a declined organisation by name (without linkedOrganisationId) does NOT block,
+          // emits the non-blocking warning even when the declined organisation is listed second among same-named organisations,
+          // and sets the new prospect organisation's conflictDecision.outcome to 'Potential conflict'
+          const clearedSameNameOrg = (await saveOrganisationRecord(
+            {
+              legalName: 'Declined Existing Org Ltd',
+              conflictStatusId: 'conflict_status.cleared',
+              conflictReference: 'CR-CLEARED-FIRST',
+            },
+            { byId: 'P-000001' },
+          )).organisation!;
+          // Move clearedSameNameOrg before declinedOrg so declinedOrg is listed second among same-named organisations
+          const clearedIdx = store.organisations.findIndex((o) => o.id === clearedSameNameOrg.id);
+          if (clearedIdx >= 0) {
+            store.organisations.splice(clearedIdx, 1);
+          }
+          const declinedIdx = store.organisations.findIndex((o) => o.id === declinedOrg.id);
+          store.organisations.splice(declinedIdx, 0, clearedSameNameOrg);
+
+          const declinedByNameQuote = (await saveQuoteRecord(
+            {
+              clientType: 'prospect',
+              prospectName: 'Dafydd NameMatch',
+              prospectOrganisationName: 'Declined Existing Org Ltd',
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              scope: 'Quote matching declined org by name',
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 1900,
+            },
+            { byId: 'P-000001' },
+          )).quote!;
+          const declinedByNameConv = await prepareQuoteConversionRecord(
+            declinedByNameQuote.id,
+            'P-000001',
+          );
+          expect(declinedByNameConv.ok).toBe(true);
+          expect(declinedByNameConv.conflictBlocked).toBeFalsy();
+          expect(declinedByNameConv.conflictWarnings).toContain(
+            "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+          );
+          const createdSameNameProspectOrg = store.organisations.find(
+            (o) => o.id === declinedByNameConv.clientId,
+          )!;
+          expect(createdSameNameProspectOrg.conflictDecision?.outcome).toBe('Potential conflict');
+          expect(createdSameNameProspectOrg.conflictDecision?.matchesCount).toBe(0);
+          // R312: Quote conversion with a warning stores it on conflictDecision.warnings
+          expect(declinedByNameQuote.conflictDecision?.warnings).toContain(
+            "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+          );
+          expect(amberQuote.conflictDecision?.warnings).toEqual(
+            amberConv.conflictWarnings,
+          );
+
+          // Linked declined organisation still hard-blocks
+          const linkedDeclinedRecheck = await prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
+          expect(linkedDeclinedRecheck.ok).toBe(false);
+          expect(linkedDeclinedRecheck.conflictBlocked).toBe(true);
+
+          // 3. Enquiry conversion for a new business also records conflictDecision and audit entry, and keeps conflictDecision on the converted matter (R304)
+          const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
+
+          // 3a. R307: An enquiry linked to a declined organisation is blocked on conversion, while an unlinked enquiry matching a declined organisation by name converts with the warning in conflictWarnings
+          const linkedDeclinedEnq = (await saveEnquiryRecord(
+            {
+              channelId: templateEnq.channelId,
+              firstName: 'Owain',
+              lastName: 'DeclinedLinkedCaller',
+              callingOnBehalfOf: declinedOrg.legalName,
+              linkedOrganisationId: declinedOrg.id,
+              email: 'owain@declined-linked.example',
+              phone: '029 2018 0771',
+              preferredContactMethodId: templateEnq.preferredContactMethodId,
+              sourceId: templateEnq.sourceId,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              summary: 'Enquiry linked to declined organisation',
+              notes: 'High-level notes for linked declined organisation enquiry conversion test.',
+              otherPartiesNamed: '',
+              urgencyId: templateEnq.urgencyId,
+              privacyNoticeGiven: true,
+            },
+            { byId: 'P-000001', asDraft: false },
+          )).enquiry!;
+          const linkedDeclinedEnqConv = await prepareEnquiryConversion(
+            linkedDeclinedEnq.id,
+            { useOrganisationId: declinedOrg.id, createForBusiness: true },
+            'P-000001',
+          );
+          expect(linkedDeclinedEnqConv.ok).toBe(false);
+          expect(linkedDeclinedEnqConv.conflictBlocked).toBe(true);
+          expect(linkedDeclinedEnqConv.conflictReasons).toContain(
+            'Client organisation has conflict status "Conflict – declined".',
+          );
           expect(
-            normaliseConversionConflictWarnings(
-              resolvedEnquiryForNonParticipant?.conflictDecision?.warnings,
+            (await auditSinceTestStart()).some(
+              (a) =>
+                a.recordType === 'enquiry' &&
+                a.recordId === linkedDeclinedEnq.id &&
+                a.action === 'conflict-decision' &&
+                a.field === 'Enquiry conversion blocked by conflict check',
             ),
-          ).toEqual([]);
-        } finally {
-          Object.assign(restrictedMatter, savedMatterSnap);
-          unlinkedDeclinedNameEnq.convertedMatterId = prevConvertedMatterId;
-        }
-        // R311: Shared helper turns conflictWarnings into the user-visible notice for toast and new-matter banner
-        expect(
-          formatConversionConflictWarningsNotice(
+          ).toBe(true);
+
+          const declinedEnqOrg = (await saveOrganisationRecord(
+            {
+              legalName: 'Declined Enquiry Org Ltd',
+              conflictStatusId: declinedStatusId,
+              conflictReference: 'CR-ENQ-DECLINED',
+            },
+            { byId: 'P-000001' },
+          )).organisation!;
+          const unlinkedDeclinedNameEnq = (await saveEnquiryRecord(
+            {
+              channelId: templateEnq.channelId,
+              firstName: 'Carys',
+              lastName: 'DeclinedNameCaller',
+              callingOnBehalfOf: declinedEnqOrg.legalName,
+              email: 'carys@declined-name.example',
+              phone: '029 2018 0772',
+              preferredContactMethodId: templateEnq.preferredContactMethodId,
+              sourceId: templateEnq.sourceId,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              summary: 'Unlinked enquiry matching declined organisation by name',
+              notes: 'High-level notes for unlinked declined organisation name match enquiry test.',
+              otherPartiesNamed: '',
+              urgencyId: templateEnq.urgencyId,
+              privacyNoticeGiven: true,
+            },
+            { byId: 'P-000001', asDraft: false },
+          )).enquiry!;
+          const unlinkedDeclinedNameEnqConv = await prepareEnquiryConversion(
+            unlinkedDeclinedNameEnq.id,
+            { createForBusiness: true },
+            'P-000001',
+          );
+          expect(unlinkedDeclinedNameEnqConv.ok).toBe(true);
+          expect(unlinkedDeclinedNameEnqConv.conflictBlocked).toBeFalsy();
+          expect(unlinkedDeclinedNameEnqConv.conflictWarnings).toContain(
+            "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+          );
+          expect(unlinkedDeclinedNameEnq.conflictDecision?.outcome).toBe('Potential conflict');
+          expect(unlinkedDeclinedNameEnq.conflictDecision?.matchesCount).toBe(0);
+          // R312: Enquiry conversion with a warning stores it on conflictDecision.warnings
+          expect(unlinkedDeclinedNameEnq.conflictDecision?.warnings).toEqual(
             unlinkedDeclinedNameEnqConv.conflictWarnings,
-          ),
-        ).toBe(
-          "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
-        );
-        expect(
-          formatConversionConflictWarningsNotice(declinedByNameConv.conflictWarnings),
-        ).toContain(
-          "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
-        );
-        expect(formatConversionConflictWarningsNotice(undefined)).toBeNull();
-        expect(formatConversionConflictWarningsNotice([])).toBeNull();
-        expect(
-          normaliseConversionConflictWarnings([
-            '  First warning  ',
-            '',
-            'First warning',
-            'Second warning',
-          ]),
-        ).toEqual(['First warning', 'Second warning']);
+          );
+          // R312: A user who cannot see the enquiry gets no warnings from the snapshot used by /matters/new
+          const restrictedMatter = store.matters[0]!;
+          const savedMatterSnap = structuredClone(restrictedMatter);
+          const prevConvertedMatterId = unlinkedDeclinedNameEnq.convertedMatterId;
+          restrictedMatter.isStaffMatter = true;
+          restrictedMatter.restrictedAccessUserIds = ['P-000001'];
+          restrictedMatter.responsiblePartnerId = 'P-000001';
+          restrictedMatter.supervisingPartnerId = 'P-000001';
+          restrictedMatter.leadFeeEarnerId = 'P-000001';
+          restrictedMatter.teamMemberIds = [];
+          unlinkedDeclinedNameEnq.convertedMatterId = restrictedMatter.id;
+          try {
+            const nonParticipantSnap = await runAsTestActor('P-000002', () =>
+              getAppSnapshot('P-000002'),
+            );
+            const resolvedEnquiryForNonParticipant = nonParticipantSnap.enquiries.find(
+              (e) => e.id === unlinkedDeclinedNameEnq.id,
+            );
+            expect(resolvedEnquiryForNonParticipant).toBeUndefined();
+            expect(
+              normaliseConversionConflictWarnings(
+                resolvedEnquiryForNonParticipant?.conflictDecision?.warnings,
+              ),
+            ).toEqual([]);
+          } finally {
+            Object.assign(restrictedMatter, savedMatterSnap);
+            unlinkedDeclinedNameEnq.convertedMatterId = prevConvertedMatterId;
+          }
+          // R311: Shared helper turns conflictWarnings into the user-visible notice for toast and new-matter banner
+          expect(
+            formatConversionConflictWarningsNotice(
+              unlinkedDeclinedNameEnqConv.conflictWarnings,
+            ),
+          ).toBe(
+            "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+          );
+          expect(
+            formatConversionConflictWarningsNotice(declinedByNameConv.conflictWarnings),
+          ).toContain(
+            "Conflict warning: An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
+          );
+          expect(formatConversionConflictWarningsNotice(undefined)).toBeNull();
+          expect(formatConversionConflictWarningsNotice([])).toBeNull();
+          expect(
+            normaliseConversionConflictWarnings([
+              '  First warning  ',
+              '',
+              'First warning',
+              'Second warning',
+            ]),
+          ).toEqual(['First warning', 'Second warning']);
 
-        const cleanEnqRes = saveEnquiryRecord(
-          {
-            channelId: templateEnq.channelId,
-            firstName: 'Idris',
-            lastName: 'ClearCaller',
-            callingOnBehalfOf: 'Meridian Clear Holdings Ltd',
-            email: 'idris@meridian-clear.example',
-            phone: '029 2018 0999',
-            preferredContactMethodId: templateEnq.preferredContactMethodId,
-            sourceId: templateEnq.sourceId,
-            practiceAreaId: matterWithOpponent.practiceAreaId,
-            summary: 'Clean enquiry for conversion',
-            notes: 'High-level notes for clean enquiry conversion test.',
-            otherPartiesNamed: 'None',
-            urgencyId: templateEnq.urgencyId,
-            privacyNoticeGiven: true,
-          },
-          { byId: 'P-000001', asDraft: false },
-        );
-        const cleanEnq = cleanEnqRes.enquiry!;
-        const enqConv = prepareEnquiryConversion(
-          cleanEnq.id,
-          { createForBusiness: true },
-          'P-000001',
-        );
-        expect(enqConv.ok).toBe(true);
-        const enqCreatedOrg = store.organisations.find((o) => o.id === enqConv.clientId)!;
-        expect(enqCreatedOrg.conflictDecision).toBeDefined();
-        expect(enqCreatedOrg.conflictDecision?.outcome).toBe('Cleared');
-        expect(enqCreatedOrg.conflictDecision?.decidedById).toBe('P-000001');
-        expect(enqCreatedOrg.conflictDecision?.searchedSources).toEqual([
-          ...CONFLICT_SEARCHED_SOURCES,
-        ]);
-        expect(
-          store.audit.some(
-            (a) =>
-              a.recordType === 'organisation' &&
-              a.recordId === enqCreatedOrg.id &&
-              a.action === 'conflict-decision',
-          ),
-        ).toBe(true);
+          const cleanEnqRes = await saveEnquiryRecord(
+            {
+              channelId: templateEnq.channelId,
+              firstName: 'Idris',
+              lastName: 'ClearCaller',
+              callingOnBehalfOf: 'Meridian Clear Holdings Ltd',
+              email: 'idris@meridian-clear.example',
+              phone: '029 2018 0999',
+              preferredContactMethodId: templateEnq.preferredContactMethodId,
+              sourceId: templateEnq.sourceId,
+              practiceAreaId: matterWithOpponent.practiceAreaId,
+              summary: 'Clean enquiry for conversion',
+              notes: 'High-level notes for clean enquiry conversion test.',
+              otherPartiesNamed: 'None',
+              urgencyId: templateEnq.urgencyId,
+              privacyNoticeGiven: true,
+            },
+            { byId: 'P-000001', asDraft: false },
+          );
+          const cleanEnq = cleanEnqRes.enquiry!;
+          const enqConv = await prepareEnquiryConversion(
+            cleanEnq.id,
+            { createForBusiness: true },
+            'P-000001',
+          );
+          expect(enqConv.ok).toBe(true);
+          const enqCreatedOrg = store.organisations.find((o) => o.id === enqConv.clientId)!;
+          expect(enqCreatedOrg.conflictDecision).toBeDefined();
+          expect(enqCreatedOrg.conflictDecision?.outcome).toBe('Cleared');
+          expect(enqCreatedOrg.conflictDecision?.decidedById).toBe('P-000001');
+          expect(enqCreatedOrg.conflictDecision?.searchedSources).toEqual([
+            ...CONFLICT_SEARCHED_SOURCES,
+          ]);
+          expect(
+            (await auditSinceTestStart()).some(
+              (a) =>
+                a.recordType === 'organisation' &&
+                a.recordId === enqCreatedOrg.id &&
+                a.action === 'conflict-decision',
+            ),
+          ).toBe(true);
 
-        setTestEntraSessionOverride({
-          personId: 'P-000001',
-          tenantId: 'not-a-law-firm',
-          oid: '00000000-0000-4000-8000-000000000001',
-          tid: '11111111-2222-3333-4444-000000000000',
-          sub: 'P-000001',
-          email: 'glyn.morgan@notalawfirm.example',
-          displayName: 'Glyn Morgan',
-          entraRoles: ['managing_partner', 'admin'],
-          mappedRoles: ['managing_partner', 'admin'],
-          entraGroups: [],
-          mfaVerified: true,
-          amr: ['pwd', 'mfa'],
-          authenticatedAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          setTestEntraSessionOverride({
+            personId: 'P-000001',
+            tenantId: 'not-a-law-firm',
+            oid: '00000000-0000-4000-8000-000000000001',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'P-000001',
+            email: 'glyn.morgan@notalawfirm.example',
+            displayName: 'Glyn Morgan',
+            entraRoles: ['managing_partner', 'admin'],
+            mappedRoles: ['managing_partner', 'admin'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          });
+          const convertedMatterRes = await withPageActor(async () =>
+            saveMatterRecord(
+              {
+                title: 'Meridian Clear Converted Matter',
+                shortDescription: 'Matter created from enquiry conversion',
+                clientId: enqConv.clientId!,
+                instructingContactId: enqConv.instructingContactId,
+                sourceEnquiryId: cleanEnq.id,
+                practiceAreaId: matterWithOpponent.practiceAreaId,
+                workTypeSubcategoryId: matterWithOpponent.workTypeSubcategoryId,
+                matterTypeId: matterWithOpponent.matterTypeId,
+                billingBasisId: matterWithOpponent.billingBasisId,
+                jurisdictionGroupId: matterWithOpponent.jurisdictionGroupId,
+                leadFeeEarnerId: 'P-000001',
+                supervisingPartnerId: 'P-000001',
+              },
+              { byId: 'P-000001', saveMode: 'draft' },
+            ),
+          );
+          expect(convertedMatterRes.matter?.conflictDecision).toBeDefined();
+          expect(convertedMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
+          expect(convertedMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(cleanEnq.id);
+
+          // R308: Quote conversion conflictDecision is also carried onto matter.conflictDecision when opening a matter from a converted quote
+          const convertedFromQuoteMatterRes = await withPageActor(async () =>
+            saveMatterRecord(
+              {
+                title: 'Solaris Clean Quote Converted Matter',
+                shortDescription: 'Matter created from quote conversion',
+                clientId: cleanConv.clientId!,
+                instructingContactId: cleanConv.instructingContactId,
+                sourceQuoteId: cleanQuote.id,
+                practiceAreaId: matterWithOpponent.practiceAreaId,
+                workTypeSubcategoryId: matterWithOpponent.workTypeSubcategoryId,
+                matterTypeId: matterWithOpponent.matterTypeId,
+                billingBasisId: matterWithOpponent.billingBasisId,
+                jurisdictionGroupId: matterWithOpponent.jurisdictionGroupId,
+                leadFeeEarnerId: 'P-000001',
+                supervisingPartnerId: 'P-000001',
+              },
+              { byId: 'P-000001', saveMode: 'draft' },
+            ),
+          );
+          expect(convertedFromQuoteMatterRes.matter?.conflictDecision).toBeDefined();
+          expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
+          expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(
+            cleanQuote.id,
+          );
         });
-        const convertedMatterRes = await withPageActor(() =>
-          saveMatterRecord(
-            {
-              title: 'Meridian Clear Converted Matter',
-              shortDescription: 'Matter created from enquiry conversion',
-              clientId: enqConv.clientId!,
-              instructingContactId: enqConv.instructingContactId,
-              sourceEnquiryId: cleanEnq.id,
-              practiceAreaId: matterWithOpponent.practiceAreaId,
-              workTypeSubcategoryId: matterWithOpponent.workTypeSubcategoryId,
-              matterTypeId: matterWithOpponent.matterTypeId,
-              billingBasisId: matterWithOpponent.billingBasisId,
-              jurisdictionGroupId: matterWithOpponent.jurisdictionGroupId,
-              leadFeeEarnerId: 'P-000001',
-              supervisingPartnerId: 'P-000001',
-            },
-            { byId: 'P-000001', saveMode: 'draft' },
-          ),
-        );
-        expect(convertedMatterRes.matter?.conflictDecision).toBeDefined();
-        expect(convertedMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
-        expect(convertedMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(cleanEnq.id);
-
-        // R308: Quote conversion conflictDecision is also carried onto matter.conflictDecision when opening a matter from a converted quote
-        const convertedFromQuoteMatterRes = await withPageActor(() =>
-          saveMatterRecord(
-            {
-              title: 'Solaris Clean Quote Converted Matter',
-              shortDescription: 'Matter created from quote conversion',
-              clientId: cleanConv.clientId!,
-              instructingContactId: cleanConv.instructingContactId,
-              sourceQuoteId: cleanQuote.id,
-              practiceAreaId: matterWithOpponent.practiceAreaId,
-              workTypeSubcategoryId: matterWithOpponent.workTypeSubcategoryId,
-              matterTypeId: matterWithOpponent.matterTypeId,
-              billingBasisId: matterWithOpponent.billingBasisId,
-              jurisdictionGroupId: matterWithOpponent.jurisdictionGroupId,
-              leadFeeEarnerId: 'P-000001',
-              supervisingPartnerId: 'P-000001',
-            },
-            { byId: 'P-000001', saveMode: 'draft' },
-          ),
-        );
-        expect(convertedFromQuoteMatterRes.matter?.conflictDecision).toBeDefined();
-        expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.outcome).toBe('Cleared');
-        expect(convertedFromQuoteMatterRes.matter?.conflictDecision?.sourceRecordId).toBe(
-          cleanQuote.id,
-        );
       } finally {
         setTestEntraSessionOverride(undefined);
         await resetAllDemoData('P-000001', testDataResetContext());
@@ -4408,19 +4598,31 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const store = getStore();
 
         // Create dedicated test records for the 4 new search sources
-        const instrPerson = savePersonRecord(
-          { firstName: 'Iolo', surname: 'InstructingHit' },
-          { byId: 'P-000001' },
+        const instrPerson = (
+          await runAsTestActor('P-000001', () =>
+            savePersonRecord(
+              { firstName: 'Iolo', surname: 'InstructingHit' },
+              { byId: 'P-000001' },
+            ),
+          )
         ).person;
-        const billPerson = savePersonRecord(
-          { firstName: 'Bryn', surname: 'BillingHit' },
-          { byId: 'P-000001' },
+        const billPerson = (
+          await runAsTestActor('P-000001', () =>
+            savePersonRecord(
+              { firstName: 'Bryn', surname: 'BillingHit' },
+              { byId: 'P-000001' },
+            ),
+          )
         ).person;
         const addlClientOrg = store.organisations[1]!;
         const employerOrg = store.organisations[2]!;
-        const linkedEmployeePerson = savePersonRecord(
-          { firstName: 'Ceri', surname: 'LinkedToOpponentOrg' },
-          { byId: 'P-000001' },
+        const linkedEmployeePerson = (
+          await runAsTestActor('P-000001', () =>
+            savePersonRecord(
+              { firstName: 'Ceri', surname: 'LinkedToOpponentOrg' },
+              { byId: 'P-000001' },
+            ),
+          )
         ).person;
 
         // Link Ceri to employerOrg
@@ -4629,28 +4831,30 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ];
 
         const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
-        const blockedEnqRes = saveEnquiryRecord(
-          {
-            channelId: templateEnq.channelId,
-            firstName: 'Evan',
-            lastName: 'BlockedCaller',
-            callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd',
-            email: 'evan@vanguard.example',
-            phone: '029 2018 0777',
-            preferredContactMethodId: templateEnq.preferredContactMethodId,
-            sourceId: templateEnq.sourceId,
-            practiceAreaId: baseMatter.practiceAreaId,
-            summary: 'Enquiry hitting restricted matter',
-            notes: 'High-level notes for restricted matter hit test.',
-            otherPartiesNamed: 'None',
-            urgencyId: templateEnq.urgencyId,
-            privacyNoticeGiven: true,
-          },
-          { byId: 'P-000002', asDraft: false },
+        const blockedEnqRes = await runAsTestActor('P-000002', () =>
+          saveEnquiryRecord(
+            {
+              channelId: templateEnq.channelId,
+              firstName: 'Evan',
+              lastName: 'BlockedCaller',
+              callingOnBehalfOf: 'Vanguard Secret Counterparty Ltd',
+              email: 'evan@vanguard.example',
+              phone: '029 2018 0777',
+              preferredContactMethodId: templateEnq.preferredContactMethodId,
+              sourceId: templateEnq.sourceId,
+              practiceAreaId: baseMatter.practiceAreaId,
+              summary: 'Enquiry hitting restricted matter',
+              notes: 'High-level notes for restricted matter hit test.',
+              otherPartiesNamed: 'None',
+              urgencyId: templateEnq.urgencyId,
+              privacyNoticeGiven: true,
+            },
+            { byId: 'P-000002', asDraft: false },
+          ),
         );
         const blockedEnq = blockedEnqRes.enquiry!;
         // R280 (R258 follow-up): Quick conflict check recorded audit entry uses action 'conflict-decision' in both main and draft paths
-        const mainQuickAudit = store.audit.find(
+        const mainQuickAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordType === 'enquiry' &&
             a.recordId === blockedEnq.id &&
@@ -4659,18 +4863,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(mainQuickAudit).toBeDefined();
         expect(mainQuickAudit?.action).toBe('conflict-decision');
 
-        const draftCheckEnq = saveEnquiryRecord(
-          {
-            channelId: templateEnq.channelId,
-            firstName: 'Draft',
-            lastName: 'AuditCaller',
-            practiceAreaId: baseMatter.practiceAreaId,
-            summary: 'Draft enquiry conflict audit test',
-            urgencyId: templateEnq.urgencyId,
-          },
-          { byId: 'P-000002', asDraft: true },
+        const draftCheckEnq = (
+          await runAsTestActor('P-000002', () =>
+            saveEnquiryRecord(
+              {
+                channelId: templateEnq.channelId,
+                firstName: 'Draft',
+                lastName: 'AuditCaller',
+                practiceAreaId: baseMatter.practiceAreaId,
+                summary: 'Draft enquiry conflict audit test',
+                urgencyId: templateEnq.urgencyId,
+              },
+              { byId: 'P-000002', asDraft: true },
+            ),
+          )
         ).enquiry!;
-        const draftQuickAudit = store.audit.find(
+        const draftQuickAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordType === 'enquiry' &&
             a.recordId === draftCheckEnq.id &&
@@ -4749,7 +4957,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
 
         // Fee earner P-000002 cannot view restrictedMatter
-        const convDenied = prepareEnquiryConversion(blockedEnq.id, {}, 'P-000002');
+        const convDenied = await runAsTestActor('P-000002', () =>
+          prepareEnquiryConversion(blockedEnq.id, {}, 'P-000002'),
+        );
         expect(convDenied.ok).toBe(false);
         expect(convDenied.conflictBlocked).toBe(true);
         const combinedReasons = (convDenied.conflictReasons ?? []).join(' | ');
@@ -4790,26 +5000,40 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('denies merge without record:merge, refuses active employees, firm staff, or leavers, and fails closed without a verified session (R271)', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
-        const s1 = savePersonRecord(
-          { firstName: 'Gareth', surname: 'Survivor', isEmployee: false },
-          { byId: 'P-000001' },
+        const s1 = (
+          await runAsTestActor('P-000001', () =>
+            savePersonRecord(
+              { firstName: 'Gareth', surname: 'Survivor', isEmployee: false },
+              { byId: 'P-000001' },
+            ),
+          )
         ).person!;
-        const m1 = savePersonRecord(
-          { firstName: 'Gareth', surname: 'Duplicate', isEmployee: false },
-          { byId: 'P-000001' },
+        const m1 = (
+          await runAsTestActor('P-000001', () =>
+            savePersonRecord(
+              { firstName: 'Gareth', surname: 'Duplicate', isEmployee: false },
+              { byId: 'P-000001' },
+            ),
+          )
         ).person!;
 
         // 1. Denied without record:merge (fee earner P-000002 lacks record:merge)
-        const deniedNoPerm = await executeMerge('person', s1.id, m1.id, 'P-000002');
+        const deniedNoPerm = await runAsTestActor('P-000002', () =>
+          executeMerge('person', s1.id, m1.id, 'P-000002'),
+        );
         expect(isActionDenied(deniedNoPerm)).toBe(true);
         if (isActionDenied(deniedNoPerm)) {
           expect(deniedNoPerm.code).toBe('FORBIDDEN');
         }
 
         // 2. Denied when either record is an active employee (P-000002)
-        const deniedActiveEmpAsMerged = await executeMerge('person', s1.id, 'P-000002', 'P-000004');
+        const deniedActiveEmpAsMerged = await runAsTestActor('P-000004', () =>
+          executeMerge('person', s1.id, 'P-000002', 'P-000004'),
+        );
         expect(isActionDenied(deniedActiveEmpAsMerged)).toBe(true);
-        const deniedActiveEmpAsSurvivor = await executeMerge('person', 'P-000002', m1.id, 'P-000004');
+        const deniedActiveEmpAsSurvivor = await runAsTestActor('P-000004', () =>
+          executeMerge('person', 'P-000002', m1.id, 'P-000004'),
+        );
         expect(isActionDenied(deniedActiveEmpAsSurvivor)).toBe(true);
 
         // 3. Denied when a record has worksAtFirm or employment data (including a leaver)
@@ -4823,7 +5047,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           status: 'Leaver',
           primaryDomain: 'notalawfirm.example',
         });
-        const deniedLeaver = await executeMerge('person', s1.id, m1.id, 'P-000004');
+        const deniedLeaver = await runAsTestActor('P-000004', () =>
+          executeMerge('person', s1.id, m1.id, 'P-000004'),
+        );
         expect(isActionDenied(deniedLeaver)).toBe(true);
         if (isActionDenied(deniedLeaver)) {
           expect(deniedLeaver.code).toBe('FORBIDDEN');
@@ -4843,22 +5069,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MatterSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MatterDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Matter Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Matter Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -4984,22 +5210,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'EnqSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'EnqDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Enq Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Enq Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const enq = store.enquiries[0]!;
@@ -5091,22 +5317,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'QuoteSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'QuoteDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Quote Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Quote Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const quote = getStore().quotes[0]!;
         quote.linkedOrganisationId = mergedOrg.id;
@@ -5128,22 +5354,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'TaskSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'TaskDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Task Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Task Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const task = getStore().tasks[0]!;
         task.linkedRecords = [
@@ -5170,25 +5396,25 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'LinkSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'LinkDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Link Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const secondOrg = saveOrganisationRecord(
+        )).organisation!;
+        const secondOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Second Counterpart Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         // Survivor has a PAST non-primary link to survivorOrg; merged record has a CURRENT primary link with earlier startDate
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId: survivorPerson.id,
             organisationId: survivorOrg.id,
@@ -5204,7 +5430,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
           'P-000004',
         );
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId: mergedPerson.id,
             organisationId: survivorOrg.id,
@@ -5220,7 +5446,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
           'P-000004',
         );
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId: mergedPerson.id,
             organisationId: secondOrg.id,
@@ -5264,27 +5490,27 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorOrg = saveOrganisationRecord(
+        const survivorOrg = (await saveOrganisationRecord(
           {
             legalName: 'Bryn Parent Survivor Ltd',
             relationshipPartnerId: 'P-000001',
           },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           {
             legalName: 'Bryn Parent Duplicate Ltd',
             relationshipPartnerId: 'P-000003',
           },
           { byId: 'P-000004' },
-        ).organisation!;
-        const childOrg = saveOrganisationRecord(
+        )).organisation!;
+        const childOrg = (await saveOrganisationRecord(
           {
             legalName: 'Bryn Subsidiary Ltd',
             parentOrganisationId: mergedOrg.id,
           },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
 
@@ -5303,26 +5529,26 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'PmsSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'PmsDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Pms Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Pms Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
-        linkPmsRecord('person', mergedPerson.id, 'PMS-PER-MERGED', 'P-000004');
-        linkPmsRecord('organisation', survivorOrg.id, 'PMS-ORG-SURV', 'P-000004');
-        linkPmsRecord('organisation', mergedOrg.id, 'PMS-ORG-MERG', 'P-000004');
+        await linkPmsRecord('person', mergedPerson.id, 'PMS-PER-MERGED', 'P-000004');
+        await linkPmsRecord('organisation', survivorOrg.id, 'PMS-ORG-SURV', 'P-000004');
+        await linkPmsRecord('organisation', mergedOrg.id, 'PMS-ORG-MERG', 'P-000004');
 
         await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
         const orgMergeHistory = await executeMerge(
@@ -5354,7 +5580,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { keptPmsCode: 'PMS-ORG-SURV', discardedPmsCode: 'PMS-ORG-MERG' },
         ]);
         expect(
-          updatedStore.audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordId === survivorOrg.id &&
               a.action === 'merge' &&
@@ -5373,22 +5599,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'DocSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'DocDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Doc Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Doc Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -5499,28 +5725,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MiscSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'MiscDuplicate', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const survivorOrg = saveOrganisationRecord(
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Misc Survivor Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mergedOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
           { legalName: 'Bryn Misc Duplicate Ltd' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
 
         const store = getStore();
         const storeMergedPerson = store.people.find((p) => p.id === mergedPerson.id)!;
         storeMergedPerson.createdFromEnquiryId = 'ENQ-ORIGIN-99';
 
-        addNoteToRecord('person', mergedPerson.id, 'Merged person note', 'P-000004');
+        await addNoteToRecord('person', mergedPerson.id, 'Merged person note', 'P-000004');
         store.recentlyViewed['P-000001'] = [mergedPerson.id, survivorPerson.id, mergedOrg.id];
         store.notifications.push({
           id: 'NTF-MERGE-1',
@@ -5535,7 +5761,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           byId: 'P-000004',
         });
 
-        const preMergeAuditIdsForMergedPerson = store.audit
+        const preMergeAuditIdsForMergedPerson = (await auditSinceTestStart())
           .filter((a) => a.recordId === mergedPerson.id)
           .map((a) => a.id);
         expect(preMergeAuditIdsForMergedPerson.length).toBeGreaterThan(0);
@@ -5568,8 +5794,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(updatedNotif.recordId).toBe(survivorPerson.id);
         expect(updatedNotif.href).toBe(`/people/${survivorPerson.id}`);
 
+        const postMergeMergedPersonAudit = await auditSinceTestStart();
         for (const auditId of preMergeAuditIdsForMergedPerson) {
-          const entry = updatedStore.audit.find((a) => a.id === auditId)!;
+          const entry = postMergeMergedPersonAudit.find((a) => a.id === auditId)!;
           expect(entry.recordId).toBe(mergedPerson.id);
         }
       } finally {
@@ -5584,14 +5811,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackSurvivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackMerged', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -5741,14 +5968,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const origRepoint = repo.repointMergedEntityWithDelta.bind(repo);
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackSurvivorCase2', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackMergedCase2', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
 
         const store = getStore();
         const matter = store.matters[0]!;
@@ -5802,14 +6029,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
         setVerifiedAdminMergeSession();
-        const survivorPerson = savePersonRecord(
+        const survivorPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackSurvivorCase3', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mergedPerson = savePersonRecord(
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
           { firstName: 'Alun', surname: 'RollbackMergedCase3', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
 
         const priorSavedJson = global.__oneSquaredLastSavedStoreJson;
         let saveAttempts = 0;
@@ -5860,24 +6087,24 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         setVerifiedAdminMergeSession();
-        const sPerson = savePersonRecord(
+        const sPerson = (await savePersonRecord(
           { firstName: 'Nia', surname: 'Survivor', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
-        const mPerson = savePersonRecord(
+        )).person!;
+        const mPerson = (await savePersonRecord(
           { firstName: 'Nia', surname: 'Merged', isEmployee: false },
           { byId: 'P-000004' },
-        ).person!;
+        )).person!;
         await executeMerge('person', sPerson.id, mPerson.id, 'P-000004');
 
-        const sOrg = saveOrganisationRecord(
+        const sOrg = (await saveOrganisationRecord(
           { legalName: 'Nia Survivor Co' },
           { byId: 'P-000004' },
-        ).organisation!;
-        const mOrg = saveOrganisationRecord(
+        )).organisation!;
+        const mOrg = (await saveOrganisationRecord(
           { legalName: 'Nia Merged Co' },
           { byId: 'P-000004' },
-        ).organisation!;
+        )).organisation!;
         await executeMerge('organisation', sOrg.id, mOrg.id, 'P-000004');
 
         const captureRedirect = async (fn: () => Promise<unknown>): Promise<string> => {
@@ -5981,7 +6208,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       ];
 
       for (const { id, expected } of roleTestUsers) {
-        const snap = getAppSnapshot(id);
+        const snap = await runAsTestActor(id, () => getAppSnapshot(id));
         for (const removedKey of REMOVED_SNAPSHOT_FINANCE_KEYS) {
           expect(
             removedKey in (snap as unknown as Record<string, unknown>),
@@ -5998,7 +6225,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         grant: ['risk:view'],
         revoke: ['finance:view', 'finance:view_matter', 'finance:credit_control'],
       };
-      const riskSnap = getAppSnapshot('P-000003');
+      const riskSnap = await runAsTestActor('P-000003', () => getAppSnapshot('P-000003'));
       expect(riskSnap.finance).toEqual({
         canViewFirm: false,
         canViewMatter: false,
@@ -6008,7 +6235,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('2. canUserViewFinance(null) is false and attentionList hides PMS financial alerts by default or without capability', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const snap = getAppSnapshot('P-000001');
+      const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
       expect(canUserViewFinance(null, snap.teams, snap.values)).toBe(false);
       expect(canUserViewFinance(undefined, snap.teams, snap.values)).toBe(false);
 
@@ -6028,7 +6255,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(itemsDefault.some((i) => i.kind.startsWith('pms_'))).toBe(false);
 
       // Support staff / enquiries coordinator snapshot attention list has no PMS financial alerts
-      const supportSnap = getAppSnapshot('P-000010');
+      const supportSnap = await runAsTestActor('P-000010', () => getAppSnapshot('P-000010'));
       expect(
         supportSnap.attention.some((i) => i.kind.startsWith('pms_')),
       ).toBe(false);
@@ -6844,18 +7071,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const originalPrimaryAddr = targetEmployee.emails[0]!.address;
 
         // 1a. A contact:edit-only actor (fee_earner P-000002) changing an employee's primary email gets FORBIDDEN (code and message), and reloaded store is unchanged
-        const forbiddenRes = savePersonRecord(
-          {
-            firstName: targetEmployee.firstName,
-            surname: targetEmployee.surname,
-            emails: [
-              {
-                ...targetEmployee.emails[0]!,
-                address: 'hijack.attempt@notalawfirm.example',
-              },
-            ],
-          },
-          { id: targetEmployee.id, byId: feeEarner.id, mfaVerified: true },
+        const forbiddenRes = await runAsTestActor(feeEarner.id, () =>
+          savePersonRecord(
+            {
+              firstName: targetEmployee.firstName,
+              surname: targetEmployee.surname,
+              emails: [
+                {
+                  ...targetEmployee.emails[0]!,
+                  address: 'hijack.attempt@notalawfirm.example',
+                },
+              ],
+            },
+            { id: targetEmployee.id, byId: feeEarner.id, mfaVerified: true },
+          ),
         );
         expect(isActionDenied(forbiddenRes)).toBe(true);
         expect(forbiddenRes.code).toBe('FORBIDDEN');
@@ -6876,21 +7105,23 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           status: 'Leaver',
         };
         const leaverEmailsBefore = JSON.stringify(leaverPerson.emails);
-        const forbiddenLeaverRes = savePersonRecord(
-          {
-            firstName: leaverPerson.firstName,
-            surname: leaverPerson.surname,
-            emails: [
-              {
-                id: 'em-leaver-hijack',
-                address: 'leaver.hijack@notalawfirm.example',
-                typeId: 'email_type.personal',
-                isPrimary: true,
-                active: true,
-              },
-            ],
-          },
-          { id: leaverPerson.id, byId: feeEarner.id, mfaVerified: true },
+        const forbiddenLeaverRes = await runAsTestActor(feeEarner.id, () =>
+          savePersonRecord(
+            {
+              firstName: leaverPerson.firstName,
+              surname: leaverPerson.surname,
+              emails: [
+                {
+                  id: 'em-leaver-hijack',
+                  address: 'leaver.hijack@notalawfirm.example',
+                  typeId: 'email_type.personal',
+                  isPrimary: true,
+                  active: true,
+                },
+              ],
+            },
+            { id: leaverPerson.id, byId: feeEarner.id, mfaVerified: true },
+          ),
         );
         expect(isActionDenied(forbiddenLeaverRes)).toBe(true);
         expect(forbiddenLeaverRes.code).toBe('FORBIDDEN');
@@ -6904,23 +7135,25 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(leaverEmailsBefore);
 
         // Also denied if attempting to inject a new work email via employmentSubmitted.systems.firmWorkEmail
-        const forbiddenSysEmailRes = savePersonRecord(
-          {
-            firstName: targetEmployee.firstName,
-            surname: targetEmployee.surname,
-          },
-          {
-            id: targetEmployee.id,
-            byId: feeEarner.id,
-            mfaVerified: true,
-            employmentSubmitted: {
-              ...targetEmployee.employment!,
-              systems: {
-                ...targetEmployee.employment!.systems!,
-                firmWorkEmail: 'hijack.sys@notalawfirm.example',
+        const forbiddenSysEmailRes = await runAsTestActor(feeEarner.id, () =>
+          savePersonRecord(
+            {
+              firstName: targetEmployee.firstName,
+              surname: targetEmployee.surname,
+            },
+            {
+              id: targetEmployee.id,
+              byId: feeEarner.id,
+              mfaVerified: true,
+              employmentSubmitted: {
+                ...targetEmployee.employment!,
+                systems: {
+                  ...targetEmployee.employment!.systems!,
+                  firmWorkEmail: 'hijack.sys@notalawfirm.example',
+                },
               },
             },
-          },
+          ),
         );
         expect(isActionDenied(forbiddenSysEmailRes)).toBe(true);
         expect(forbiddenSysEmailRes.code).toBe('FORBIDDEN');
@@ -6958,23 +7191,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             active: false,
           },
         ];
-        const reorderRes = savePersonRecord(
-          {
-            firstName: targetEmployee.firstName,
-            surname: targetEmployee.surname,
-            emails: reorderedAndRelabelled,
-          },
-          {
-            id: targetEmployee.id,
-            byId: feeEarner.id,
-            mfaVerified: false,
-            employmentSubmitted: null,
-          },
+        const reorderRes = await runAsTestActor(
+          feeEarner.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: targetEmployee.firstName,
+                surname: targetEmployee.surname,
+                emails: reorderedAndRelabelled,
+              },
+              {
+                id: targetEmployee.id,
+                byId: feeEarner.id,
+                mfaVerified: false,
+                employmentSubmitted: null,
+              },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(reorderRes)).toBe(false);
         expect(reorderRes.errors).toBeUndefined();
         expect(
-          getStore().audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordId === targetEmployee.id &&
               a.field === 'Employee sign-in email',
@@ -6982,13 +7220,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(false);
 
         // R384: Saving an existing employee with an employment payload (hasEmploymentPayload === true) still requires employee:edit_core
-        const empPayloadWithoutPermRes = savePersonRecord(
-          {
-            firstName: targetEmployee.firstName,
-            surname: targetEmployee.surname,
-            preferredName: 'UnauthorisedEmpPayload',
-          },
-          { id: targetEmployee.id, byId: feeEarner.id, mfaVerified: true },
+        const empPayloadWithoutPermRes = await runAsTestActor(feeEarner.id, () =>
+          savePersonRecord(
+            {
+              firstName: targetEmployee.firstName,
+              surname: targetEmployee.surname,
+              preferredName: 'UnauthorisedEmpPayload',
+            },
+            { id: targetEmployee.id, byId: feeEarner.id, mfaVerified: true },
+          ),
         );
         expect(isActionDenied(empPayloadWithoutPermRes)).toBe(true);
         expect(empPayloadWithoutPermRes.code).toBe('FORBIDDEN');
@@ -6998,21 +7238,26 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // 1c. A contact:edit actor can still change a non-employee contact's email (positive control)
         const nonEmployee = store.people.find((p) => !p.isEmployee && !p.employment)!;
-        const contactEmailRes = savePersonRecord(
-          {
-            firstName: nonEmployee.firstName,
-            surname: nonEmployee.surname,
-            emails: [
+        const contactEmailRes = await runAsTestActor(
+          feeEarner.id,
+          () =>
+            savePersonRecord(
               {
-                id: 'em-contact-updated',
-                address: 'updated.contact@client.example',
-                typeId: 'email_type.personal',
-                isPrimary: true,
-                active: true,
+                firstName: nonEmployee.firstName,
+                surname: nonEmployee.surname,
+                emails: [
+                  {
+                    id: 'em-contact-updated',
+                    address: 'updated.contact@client.example',
+                    typeId: 'email_type.personal',
+                    isPrimary: true,
+                    active: true,
+                  },
+                ],
               },
-            ],
-          },
-          { id: nonEmployee.id, byId: feeEarner.id, mfaVerified: false },
+              { id: nonEmployee.id, byId: feeEarner.id, mfaVerified: false },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(contactEmailRes)).toBe(false);
         expect(contactEmailRes.errors).toBeUndefined();
@@ -7028,21 +7273,26 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const targetBeforeNoMfaJson = JSON.stringify(
           getStore().people.find((p) => p.id === targetEmployee.id)!,
         );
-        const noMfaReplaceRes = savePersonRecord(
-          {
-            firstName: targetEmployee.firstName,
-            surname: targetEmployee.surname,
-            emails: [
+        const noMfaReplaceRes = await runAsTestActor(
+          adminPerson.id,
+          () =>
+            savePersonRecord(
               {
-                id: targetEmployee.emails[0]!.id,
-                address: 'sian.renamed@notalawfirm.example',
-                typeId: 'email_type.work',
-                isPrimary: true,
-                active: true,
+                firstName: targetEmployee.firstName,
+                surname: targetEmployee.surname,
+                emails: [
+                  {
+                    id: targetEmployee.emails[0]!.id,
+                    address: 'sian.renamed@notalawfirm.example',
+                    typeId: 'email_type.work',
+                    isPrimary: true,
+                    active: true,
+                  },
+                ],
               },
-            ],
-          },
-          { id: targetEmployee.id, byId: adminPerson.id, mfaVerified: false },
+              { id: targetEmployee.id, byId: adminPerson.id, mfaVerified: false },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(noMfaReplaceRes)).toBe(true);
         expect(noMfaReplaceRes.code).toBe('MFA_REQUIRED');
@@ -7057,22 +7307,27 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const reloadedTargetForAdd = getStore().people.find(
           (p) => p.id === targetEmployee.id,
         )!;
-        const noMfaAddRes = savePersonRecord(
-          {
-            firstName: reloadedTargetForAdd.firstName,
-            surname: reloadedTargetForAdd.surname,
-            emails: [
-              ...reloadedTargetForAdd.emails,
+        const noMfaAddRes = await runAsTestActor(
+          adminPerson.id,
+          () =>
+            savePersonRecord(
               {
-                id: 'em-added-no-mfa',
-                address: 'sian.added@notalawfirm.example',
-                typeId: 'email_type.work',
-                isPrimary: false,
-                active: true,
+                firstName: reloadedTargetForAdd.firstName,
+                surname: reloadedTargetForAdd.surname,
+                emails: [
+                  ...reloadedTargetForAdd.emails,
+                  {
+                    id: 'em-added-no-mfa',
+                    address: 'sian.added@notalawfirm.example',
+                    typeId: 'email_type.work',
+                    isPrimary: false,
+                    active: true,
+                  },
+                ],
               },
-            ],
-          },
-          { id: reloadedTargetForAdd.id, byId: adminPerson.id, mfaVerified: false },
+              { id: reloadedTargetForAdd.id, byId: adminPerson.id, mfaVerified: false },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(noMfaAddRes)).toBe(true);
         expect(noMfaAddRes.code).toBe('MFA_REQUIRED');
@@ -7084,23 +7339,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const reloadedTargetForFirmWork = getStore().people.find(
           (p) => p.id === targetEmployee.id,
         )!;
-        const noMfaFirmWorkChangeRes = savePersonRecord(
-          {
-            firstName: reloadedTargetForFirmWork.firstName,
-            surname: reloadedTargetForFirmWork.surname,
-          },
-          {
-            id: reloadedTargetForFirmWork.id,
-            byId: adminPerson.id,
-            mfaVerified: false,
-            employmentSubmitted: {
-              ...reloadedTargetForFirmWork.employment!,
-              systems: {
-                ...reloadedTargetForFirmWork.employment!.systems!,
-                firmWorkEmail: 'sian.changed-firm@notalawfirm.example',
+        const noMfaFirmWorkChangeRes = await runAsTestActor(
+          adminPerson.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: reloadedTargetForFirmWork.firstName,
+                surname: reloadedTargetForFirmWork.surname,
               },
-            },
-          },
+              {
+                id: reloadedTargetForFirmWork.id,
+                byId: adminPerson.id,
+                mfaVerified: false,
+                employmentSubmitted: {
+                  ...reloadedTargetForFirmWork.employment!,
+                  systems: {
+                    ...reloadedTargetForFirmWork.employment!.systems!,
+                    firmWorkEmail: 'sian.changed-firm@notalawfirm.example',
+                  },
+                },
+              },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(noMfaFirmWorkChangeRes)).toBe(true);
         expect(noMfaFirmWorkChangeRes.code).toBe('MFA_REQUIRED');
@@ -7135,33 +7395,43 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(primaryOnlyEmails).toHaveLength(1);
 
-        const removeSecondaryForbiddenRes = savePersonRecord(
-          {
-            firstName: targetWithSecondary.firstName,
-            surname: targetWithSecondary.surname,
-            emails: primaryOnlyEmails,
-          },
-          {
-            id: targetWithSecondary.id,
-            byId: reloadedFeeEarner.id,
-            mfaVerified: false,
-            employmentSubmitted: null,
-          },
+        const removeSecondaryForbiddenRes = await runAsTestActor(
+          reloadedFeeEarner.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: targetWithSecondary.firstName,
+                surname: targetWithSecondary.surname,
+                emails: primaryOnlyEmails,
+              },
+              {
+                id: targetWithSecondary.id,
+                byId: reloadedFeeEarner.id,
+                mfaVerified: false,
+                employmentSubmitted: null,
+              },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(removeSecondaryForbiddenRes)).toBe(true);
         expect(removeSecondaryForbiddenRes.code).toBe('FORBIDDEN');
 
-        const removeSecondaryWithoutMfaRes = savePersonRecord(
-          {
-            firstName: targetWithSecondary.firstName,
-            surname: targetWithSecondary.surname,
-            emails: primaryOnlyEmails,
-          },
-          {
-            id: targetWithSecondary.id,
-            byId: reloadedAdmin.id,
-            mfaVerified: false,
-          },
+        const removeSecondaryWithoutMfaRes = await runAsTestActor(
+          reloadedAdmin.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: targetWithSecondary.firstName,
+                surname: targetWithSecondary.surname,
+                emails: primaryOnlyEmails,
+              },
+              {
+                id: targetWithSecondary.id,
+                byId: reloadedAdmin.id,
+                mfaVerified: false,
+              },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(removeSecondaryWithoutMfaRes)).toBe(false);
         expect(removeSecondaryWithoutMfaRes.errors).toBeUndefined();
@@ -7170,7 +7440,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             .filter((e) => e.active !== false)
             .map((e) => e.address.trim().toLowerCase()),
         ).toEqual([originalPrimaryAddr.toLowerCase()]);
-        const removeSecondaryAudit = getStore().audit.find(
+        const removeSecondaryAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === targetEmployee.id &&
             a.action === 'update' &&
@@ -7197,17 +7467,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           leaverCandidate.emails.some((e) => e.active !== false),
         ).toBe(true);
 
-        const markLeaverWithoutMfaRes = savePersonRecord(
-          {
-            firstName: leaverCandidate.firstName,
-            surname: leaverCandidate.surname,
-          },
-          {
-            id: leaverCandidate.id,
-            byId: reloadedAdmin.id,
-            mfaVerified: false,
-            worksAtFirm: false,
-          },
+        const markLeaverWithoutMfaRes = await runAsTestActor(
+          reloadedAdmin.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: leaverCandidate.firstName,
+                surname: leaverCandidate.surname,
+              },
+              {
+                id: leaverCandidate.id,
+                byId: reloadedAdmin.id,
+                mfaVerified: false,
+                worksAtFirm: false,
+              },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(markLeaverWithoutMfaRes)).toBe(false);
         expect(markLeaverWithoutMfaRes.errors).toBeUndefined();
@@ -7219,7 +7494,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(
           markLeaverWithoutMfaRes.person.employment?.systems?.firmWorkEmail,
         ).toBe(candidateOriginalFirmWorkEmail);
-        const leaverEmailAudit = getStore().audit.find(
+        const leaverEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === leaverCandidate.id &&
             a.action === 'update' &&
@@ -7232,23 +7507,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(leaverEmailAudit?.newValue).toBeNull();
 
         // R398: Clearing firmWorkEmail without adding a new address needs employee:edit_core and NO MFA, and is audited
-        const clearFirmWorkWithoutMfaRes = savePersonRecord(
-          {
-            firstName: leaverCandidate.firstName,
-            surname: leaverCandidate.surname,
-          },
-          {
-            id: leaverCandidate.id,
-            byId: reloadedAdmin.id,
-            mfaVerified: false,
-            employmentSubmitted: {
-              ...markLeaverWithoutMfaRes.person.employment!,
-              systems: {
-                ...markLeaverWithoutMfaRes.person.employment!.systems!,
-                firmWorkEmail: '',
+        const clearFirmWorkWithoutMfaRes = await runAsTestActor(
+          reloadedAdmin.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: leaverCandidate.firstName,
+                surname: leaverCandidate.surname,
               },
-            },
-          },
+              {
+                id: leaverCandidate.id,
+                byId: reloadedAdmin.id,
+                mfaVerified: false,
+                employmentSubmitted: {
+                  ...markLeaverWithoutMfaRes.person.employment!,
+                  systems: {
+                    ...markLeaverWithoutMfaRes.person.employment!.systems!,
+                    firmWorkEmail: '',
+                  },
+                },
+              },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(clearFirmWorkWithoutMfaRes)).toBe(false);
         expect(
@@ -7261,15 +7541,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           (p) => p.id === nonEmployee.id,
         )!;
         const nonEmployeeBeforePromoteJson = JSON.stringify(reloadedNonEmployee);
-        const promoteWithoutMfaRes = savePersonRecord(
-          {
-            firstName: reloadedNonEmployee.firstName,
-            surname: reloadedNonEmployee.surname,
-            isEmployee: true,
-            employeeRoleId: 'employee_role.solicitor',
-            departmentId: 'DEPT-RE',
-          },
-          { id: reloadedNonEmployee.id, byId: adminPerson.id, mfaVerified: false },
+        const promoteWithoutMfaRes = await runAsTestActor(
+          adminPerson.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: reloadedNonEmployee.firstName,
+                surname: reloadedNonEmployee.surname,
+                isEmployee: true,
+                employeeRoleId: 'employee_role.solicitor',
+                departmentId: 'DEPT-RE',
+              },
+              { id: reloadedNonEmployee.id, byId: adminPerson.id, mfaVerified: false },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(promoteWithoutMfaRes)).toBe(true);
         expect(promoteWithoutMfaRes.code).toBe('MFA_REQUIRED');
@@ -7284,19 +7569,21 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(nonEmployeeBeforePromoteJson);
 
         // Promoting that contact to an employee WITH MFA succeeds and writes the Employee sign-in email audit entry (including both existing and synthesised firm emails, R393)
-        const promoteWithMfaRes = savePersonRecord(
-          {
-            firstName: reloadedNonEmployee.firstName,
-            surname: reloadedNonEmployee.surname,
-            isEmployee: true,
-            employeeRoleId: 'employee_role.solicitor',
-            departmentId: 'DEPT-RE',
-          },
-          { id: reloadedNonEmployee.id, byId: adminPerson.id, mfaVerified: true },
+        const promoteWithMfaRes = await runAsTestActor(adminPerson.id, () =>
+          savePersonRecord(
+            {
+              firstName: reloadedNonEmployee.firstName,
+              surname: reloadedNonEmployee.surname,
+              isEmployee: true,
+              employeeRoleId: 'employee_role.solicitor',
+              departmentId: 'DEPT-RE',
+            },
+            { id: reloadedNonEmployee.id, byId: adminPerson.id, mfaVerified: true },
+          ),
         );
         expect(isActionDenied(promoteWithMfaRes)).toBe(false);
         expect(promoteWithMfaRes.person.isEmployee).toBe(true);
-        const promoteEmailAudit = getStore().audit.find(
+        const promoteEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === nonEmployee.id &&
             a.action === 'update' &&
@@ -7311,13 +7598,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // R393: Promoting a contact with NO emails to an employee synthesises first.surname@<primaryDomain>:
         // without MFA -> denied with MFA_REQUIRED and reloaded store unchanged; with MFA -> audit entry includes the synthesised address
-        const createdNoEmailContact = savePersonRecord(
-          {
-            firstName: 'Ceri',
-            surname: 'Noemail',
-            emails: [],
-          },
-          { byId: feeEarner.id, mfaVerified: false },
+        const createdNoEmailContact = await runAsTestActor(
+          feeEarner.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: 'Ceri',
+                surname: 'Noemail',
+                emails: [],
+              },
+              { byId: feeEarner.id, mfaVerified: false },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(createdNoEmailContact)).toBe(false);
         const noEmailContactId = createdNoEmailContact.person.id;
@@ -7326,15 +7618,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           getStore().people.find((p) => p.id === noEmailContactId)!,
         );
 
-        const promoteNoEmailsWithoutMfaRes = savePersonRecord(
-          {
-            firstName: 'Ceri',
-            surname: 'Noemail',
-            isEmployee: true,
-            employeeRoleId: 'employee_role.solicitor',
-            departmentId: 'DEPT-RE',
-          },
-          { id: noEmailContactId, byId: adminPerson.id, mfaVerified: false },
+        const promoteNoEmailsWithoutMfaRes = await runAsTestActor(
+          adminPerson.id,
+          () =>
+            savePersonRecord(
+              {
+                firstName: 'Ceri',
+                surname: 'Noemail',
+                isEmployee: true,
+                employeeRoleId: 'employee_role.solicitor',
+                departmentId: 'DEPT-RE',
+              },
+              { id: noEmailContactId, byId: adminPerson.id, mfaVerified: false },
+            ),
+          { mfaVerified: false },
         );
         expect(isActionDenied(promoteNoEmailsWithoutMfaRes)).toBe(true);
         expect(promoteNoEmailsWithoutMfaRes.code).toBe('MFA_REQUIRED');
@@ -7346,26 +7643,28 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           JSON.stringify(getStore().people.find((p) => p.id === noEmailContactId)!),
         ).toBe(noEmailContactBeforeJson);
         expect(
-          getStore().audit.some(
+          (await auditSinceTestStart()).some(
             (a) =>
               a.recordId === noEmailContactId &&
               a.field === 'Employee sign-in email',
           ),
         ).toBe(false);
 
-        const promoteNoEmailsWithMfaRes = savePersonRecord(
-          {
-            firstName: 'Ceri',
-            surname: 'Noemail',
-            isEmployee: true,
-            employeeRoleId: 'employee_role.solicitor',
-            departmentId: 'DEPT-RE',
-          },
-          { id: noEmailContactId, byId: adminPerson.id, mfaVerified: true },
+        const promoteNoEmailsWithMfaRes = await runAsTestActor(adminPerson.id, () =>
+          savePersonRecord(
+            {
+              firstName: 'Ceri',
+              surname: 'Noemail',
+              isEmployee: true,
+              employeeRoleId: 'employee_role.solicitor',
+              departmentId: 'DEPT-RE',
+            },
+            { id: noEmailContactId, byId: adminPerson.id, mfaVerified: true },
+          ),
         );
         expect(isActionDenied(promoteNoEmailsWithMfaRes)).toBe(false);
         expect(promoteNoEmailsWithMfaRes.person.isEmployee).toBe(true);
-        const synthesisedEmailAudit = getStore().audit.find(
+        const synthesisedEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === noEmailContactId &&
             a.action === 'update' &&
@@ -7459,7 +7758,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(allowedRes.person.entraObjectId).toBe(
           '00000000-0000-4000-8000-000000000005',
         );
-        const emailAudit = getStore().audit.find(
+        const emailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === targetEmployee.id &&
             a.action === 'update' &&
@@ -7503,7 +7802,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const pmsEmpRes = await createRecordFromPmsAction('employee', 'FE001');
         expect(pmsEmpRes.ok).toBe(true);
         expect(pmsEmpRes.createdId).toBeDefined();
-        const pmsEmpEmailAudit = getStore().audit.find(
+        const pmsEmpEmailAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === pmsEmpRes.createdId &&
             a.action === 'update' &&
@@ -7533,7 +7832,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const feeEarnerEmail = feeEarner.emails[0]!.address;
 
         // 2a. Unverified email claim alone (no preferred_username/upn and no xms_edov, or string xms_edov: "true") does NOT link, and does not store the unverified email on the provisioned record (R387, R389)
-        const unverifiedEmailAttempt = resolveOrProvisionEntraEmployee({
+        const unverifiedEmailAttempt = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000201',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-unverified-201',
@@ -7548,7 +7847,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
         ).toBeUndefined();
 
-        const stringEdovAttempt = resolveOrProvisionEntraEmployee({
+        const stringEdovAttempt = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000202',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-string-edov-202',
@@ -7565,7 +7864,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBeUndefined();
 
         // 2b. Sign-in with preferred_username in the tenant's linking domain binds ordinary unbound employee P-000002 and writes an entra-link audit entry
-        const linkedOrd = resolveOrProvisionEntraEmployee(
+        const linkedOrd = await resolveOrProvisionEntraEmployee(
           {
             oid: '11111111-0000-4000-8000-000000000002',
             tid: '11111111-2222-3333-4444-000000000000',
@@ -7585,7 +7884,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(
           getStore().people.find((p) => p.id === feeEarner.id)?.entraObjectId,
         ).toBe('11111111-0000-4000-8000-000000000002');
-        const linkAudit = getStore().audit.find(
+        const linkAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === feeEarner.id &&
             a.action === 'entra-link' &&
@@ -7596,7 +7895,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(linkAudit?.newValue).not.toContain(
           '11111111-0000-4000-8000-000000000002',
         );
-        const signInAudit = getStore().audit.find(
+        const signInAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === feeEarner.id &&
             a.action === 'update' &&
@@ -7621,7 +7920,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // Also verify verified email claim (xms_edov: true) when preferred_username/upn is absent binds an ordinary unbound employee (P-000009 Finance), and unsafe correlationId options are sanitised (R399)
         const financeUser = getStore().people.find((p) => p.id === 'P-000009')!;
         const financeEmail = financeUser.emails[0]!.address;
-        const linkedViaVerifiedEmail = resolveOrProvisionEntraEmployee(
+        const linkedViaVerifiedEmail = await resolveOrProvisionEntraEmployee(
           {
             oid: '11111111-0000-4000-8000-000000000009',
             tid: '11111111-2222-3333-4444-000000000009',
@@ -7638,7 +7937,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(linkedViaVerifiedEmail.person.entraObjectId).toBe(
           '11111111-0000-4000-8000-000000000009',
         );
-        const financeSignInAudit = getStore().audit.find(
+        const financeSignInAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === financeUser.id &&
             a.action === 'update' &&
@@ -7660,7 +7959,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             active: true,
           },
         ];
-        const outsideDomainSignIn = resolveOrProvisionEntraEmployee({
+        const outsideDomainSignIn = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000010',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-nia-010',
@@ -7678,8 +7977,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const adminPerson = getStore().people.find((p) => p.id === 'P-000004')!;
         const adminEmail = adminPerson.emails[0]!.address;
         const peopleCountBeforePrivRefusal = getStore().people.length;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '11111111-0000-4000-8000-000000000004',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-admin-004',
@@ -7689,8 +7987,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             xms_edov: true,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         clearStoreMemoryCache();
         expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
         expect(
@@ -7701,7 +7998,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000004',
           ),
         ).toBe(false);
-        const privRefusalAudit = getStore().audit.find(
+        const privRefusalAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.recordId === 'P-000004' &&
             a.action === 'entra-link' &&
@@ -7719,8 +8016,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         managingPartner.roles = ['admin'];
         saveStore(getStore());
         const mpEmail = managingPartner.emails[0]!.address;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '11111111-0000-4000-8000-000000000038',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-mp-038',
@@ -7730,8 +8026,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             xms_edov: true,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         clearStoreMemoryCache();
         expect(getStore().people.length).toBe(peopleCountBeforePrivRefusal);
         expect(
@@ -7772,8 +8067,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ];
         saveStore(getStore());
         const peopleCountBeforeAmbigRefusal = getStore().people.length;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '11111111-0000-4000-8000-000000000067',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-dup-067',
@@ -7781,8 +8075,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             preferred_username: sharedAddr,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         clearStoreMemoryCache();
         expect(getStore().people.length).toBe(peopleCountBeforeAmbigRefusal);
         expect(
@@ -7796,7 +8089,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             (p) => p.entraObjectId === '11111111-0000-4000-8000-000000000067',
           ),
         ).toBe(false);
-        const ambigAudit = getStore().audit.find(
+        const ambigAudit = (await auditSinceTestStart()).find(
           (a) =>
             a.action === 'entra-link' &&
             a.field === 'Entra ID Email Link Ambiguous',
@@ -7813,20 +8106,22 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         unboundIntake.roles = ['intake'];
         unboundIntake.employeeRoleId = 'employee_role.enquiries_coordinator';
         const intakeEmail = unboundIntake.emails[0]!.address;
-        updateTenantRbacConfig(
-          {
-            identityMapping: {
-              ...getDefaultTenantRbacConfig().identityMapping,
-              emailLinking: {
-                enabled: false,
-                domains: [],
+        await runAsTestActor('P-000004', () =>
+          updateTenantRbacConfig(
+            {
+              identityMapping: {
+                ...getDefaultTenantRbacConfig().identityMapping,
+                emailLinking: {
+                  enabled: false,
+                  domains: [],
+                },
               },
             },
-          },
-          'P-000004',
-          { mfaVerified: true },
+            'P-000004',
+            { mfaVerified: true },
+          ),
         );
-        const disabledEmailLinkAttempt = resolveOrProvisionEntraEmployee({
+        const disabledEmailLinkAttempt = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000008',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-intake-008',
@@ -7841,7 +8136,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBeUndefined();
 
         // Existing oid binding on feeEarner (P-000002) still resolves P-000002 even when emailLinking.enabled is false
-        const existingOidSignIn = resolveOrProvisionEntraEmployee({
+        const existingOidSignIn = await resolveOrProvisionEntraEmployee({
           oid: '11111111-0000-4000-8000-000000000002',
           tid: '11111111-2222-3333-4444-000000000000',
           sub: 'sub-dafydd-002',
@@ -7853,38 +8148,42 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(existingOidSignIn.person.id).toBe(feeEarner.id);
 
         // Re-enable emailLinking for the end-to-end R373 attack test
-        updateTenantRbacConfig(
-          {
-            identityMapping: {
-              ...getDefaultTenantRbacConfig().identityMapping,
-              emailLinking: {
-                enabled: true,
-                domains: [],
+        await runAsTestActor('P-000004', () =>
+          updateTenantRbacConfig(
+            {
+              identityMapping: {
+                ...getDefaultTenantRbacConfig().identityMapping,
+                emailLinking: {
+                  enabled: true,
+                  domains: [],
+                },
               },
             },
-          },
-          'P-000004',
-          { mfaVerified: true },
+            'P-000004',
+            { mfaVerified: true },
+          ),
         );
 
         // 2g. End-to-end R373 attack:
         // Step 1: Fee earner P-000002 tries to edit admin P-000004's email -> denied with FORBIDDEN
         const currentAdmin = getStore().people.find((p) => p.id === 'P-000004')!;
-        const attackerEditAttempt = savePersonRecord(
-          {
-            firstName: currentAdmin.firstName,
-            surname: currentAdmin.surname,
-            emails: [
-              {
-                id: 'em-attacker-controlled',
-                address: 'second.account@notalawfirm.example',
-                typeId: 'email_type.work',
-                isPrimary: true,
-                active: true,
-              },
-            ],
-          },
-          { id: currentAdmin.id, byId: feeEarner.id, mfaVerified: true },
+        const attackerEditAttempt = await runAsTestActor(feeEarner.id, () =>
+          savePersonRecord(
+            {
+              firstName: currentAdmin.firstName,
+              surname: currentAdmin.surname,
+              emails: [
+                {
+                  id: 'em-attacker-controlled',
+                  address: 'second.account@notalawfirm.example',
+                  typeId: 'email_type.work',
+                  isPrimary: true,
+                  active: true,
+                },
+              ],
+            },
+            { id: currentAdmin.id, byId: feeEarner.id, mfaVerified: true },
+          ),
         );
         expect(isActionDenied(attackerEditAttempt)).toBe(true);
         expect(attackerEditAttempt.code).toBe('FORBIDDEN');
@@ -7905,8 +8204,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         delete currentAdmin.entraObjectId;
 
         const peopleCountBeforeAttackerSignIn = getStore().people.length;
-        expect(() =>
-          resolveOrProvisionEntraEmployee({
+        await expect(resolveOrProvisionEntraEmployee({
             oid: '99999999-0000-4000-8000-999999999999',
             tid: '11111111-2222-3333-4444-000000000000',
             sub: 'sub-attacker-999',
@@ -7916,8 +8214,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             xms_edov: true,
             roles: [],
             amr: ['pwd', 'mfa'],
-          }),
-        ).toThrow('Your account needs to be linked by an administrator.');
+          })).rejects.toThrow('Your account needs to be linked by an administrator.');
         expect(getStore().people.length).toBe(peopleCountBeforeAttackerSignIn);
         expect(
           getStore().people.find((p) => p.id === 'P-000004')?.entraObjectId,
@@ -7934,7 +8231,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('3. validates rbac.identityMapping.emailLinking in TenantConfigurationSchema and updateTenantRbacConfig', () => {
+    it('3. validates rbac.identityMapping.emailLinking in TenantConfigurationSchema and updateTenantRbacConfig', async () => {
       const validCfg = structuredClone(notALawFirmBaseConfig) as Record<
         string,
         unknown
@@ -7984,36 +8281,40 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       ).toBe(false);
 
       // Also rejects invalid domain in updateTenantRbacConfig service
-      const badServiceUpdate = updateTenantRbacConfig(
-        {
-          identityMapping: {
-            ...getDefaultTenantRbacConfig().identityMapping,
-            emailLinking: {
-              enabled: true,
-              domains: ['not_a_valid_domain'],
+      const badServiceUpdate = await runAsTestActor('P-000004', () =>
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              emailLinking: {
+                enabled: true,
+                domains: ['not_a_valid_domain'],
+              },
             },
           },
-        },
-        'P-000004',
-        { mfaVerified: true },
+          'P-000004',
+          { mfaVerified: true },
+        ),
       );
       expect(badServiceUpdate.ok).toBe(false);
       expect(badServiceUpdate.error).toContain('emailLinking.domains');
 
       // R386: Rejects non-boolean emailLinking.enabled ("false" or null) in updateTenantRbacConfig and leaves stored configuration unchanged
       const configBeforeBadEnabled = JSON.stringify(getDefaultTenantRbacConfig());
-      const stringEnabledUpdate = updateTenantRbacConfig(
-        {
-          identityMapping: {
-            ...getDefaultTenantRbacConfig().identityMapping,
-            emailLinking: {
-              enabled: 'false' as unknown as boolean,
-              domains: [],
+      const stringEnabledUpdate = await runAsTestActor('P-000004', () =>
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              emailLinking: {
+                enabled: 'false' as unknown as boolean,
+                domains: [],
+              },
             },
           },
-        },
-        'P-000004',
-        { mfaVerified: true },
+          'P-000004',
+          { mfaVerified: true },
+        ),
       );
       expect(stringEnabledUpdate.ok).toBe(false);
       expect(stringEnabledUpdate.error).toBe(
@@ -8023,18 +8324,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         configBeforeBadEnabled,
       );
 
-      const nullEnabledUpdate = updateTenantRbacConfig(
-        {
-          identityMapping: {
-            ...getDefaultTenantRbacConfig().identityMapping,
-            emailLinking: {
-              enabled: null as unknown as boolean,
-              domains: [],
+      const nullEnabledUpdate = await runAsTestActor('P-000004', () =>
+        updateTenantRbacConfig(
+          {
+            identityMapping: {
+              ...getDefaultTenantRbacConfig().identityMapping,
+              emailLinking: {
+                enabled: null as unknown as boolean,
+                domains: [],
+              },
             },
           },
-        },
-        'P-000004',
-        { mfaVerified: true },
+          'P-000004',
+          { mfaVerified: true },
+        ),
       );
       expect(nullEnabledUpdate.ok).toBe(false);
       expect(nullEnabledUpdate.error).toBe(

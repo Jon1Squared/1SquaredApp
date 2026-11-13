@@ -5,6 +5,7 @@ import {
   findCandidateDuplicatesForRecord,
   getAppSnapshot,
   getClientPmsViewBundle,
+  listAuditEntriesForRecord,
   recordRecentlyViewed,
   withPageActor,
   type ClientPmsViewBundle,
@@ -24,7 +25,7 @@ export default async function PersonProfilePage({
   const { tab, mergedFrom } = await searchParams;
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
 
     if (id.startsWith('ENQ-')) {
       const enquiry = snap.enquiries.find((e) => e.id === id);
@@ -42,7 +43,7 @@ export default async function PersonProfilePage({
       redirect(`/people/${person.mergedIntoId}?mergedFrom=${person.id}`);
     }
 
-    recordRecentlyViewed(userId, person.id);
+    await recordRecentlyViewed(userId, person.id);
 
     const explicitMatches = person.possibleMatchIds
       .map((mid) => snap.people.find((p) => p.id === mid))
@@ -53,7 +54,9 @@ export default async function PersonProfilePage({
     );
 
     const notes = snap.notes.filter((n) => n.recordType === 'person' && n.recordId === person.id);
-    const audit = snap.audit.filter((a) => a.recordType === 'person' && a.recordId === person.id);
+    const audit = await listAuditEntriesForRecord('person', person.id, userId, {
+      limit: 200,
+    });
     const merges = snap.mergeHistory.filter(
       (m) => m.recordType === 'person' && (m.survivorId === person.id || m.mergedId === person.id),
     );

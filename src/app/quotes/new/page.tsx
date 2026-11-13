@@ -11,7 +11,7 @@ export default async function NewQuotePage({
 }) {
   const sp = await searchParams;
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
     if (
       !snap.currentUserPermissions.includes('quote:view') ||
       !snap.currentUserPermissions.includes('quote:edit')

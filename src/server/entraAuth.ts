@@ -8,6 +8,7 @@ import {
   type VerifiedOidcTokenClaims,
 } from '@/domain/rbac';
 import {
+  getActiveTenantConfiguration,
   type UnbrandedSessionActorInput,
   type VerifiedSessionActorInput,
 } from '@/platform/tenantRuntime';
@@ -622,6 +623,61 @@ export function createVerifiedSessionActorFromEntraSession(
     tenantId,
     untrustedRequestTenantOverride: overrides?.untrustedRequestTenantOverride,
     correlationId: overrides?.correlationId,
+  });
+}
+
+/**
+ * Mints a `VerifiedSessionActorInput` for the OIDC callback sign-in path from claims that were
+ * already signature-, issuer-, audience- and nonce-verified by `exchangeCodeForVerifiedEntraClaims`
+ * and mapped by `mapEntraTokenClaimsToVerifiedOidcToken`. Used before a session cookie exists, so
+ * sign-in audit entries can be written through the tenant-scoped data layer (S0-15).
+ */
+export function createSignInActorFromVerifiedOidcToken(
+  verifiedToken: VerifiedOidcTokenClaims,
+  params: { oid: string; email: string; correlationId?: string },
+): VerifiedSessionActorInput {
+  if (verifiedToken?.__verifiedByOidcMiddleware !== true) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token must carry the __verifiedByOidcMiddleware brand.',
+    );
+  }
+  const tenantId = (verifiedToken.tenantId ?? '').trim();
+  if (!tenantId) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token is missing required tenantId claim.',
+    );
+  }
+  const activeTenantId = getActiveTenantConfiguration().tenantId;
+  if (tenantId !== activeTenantId) {
+    throw new Error(
+      `TENANCY_AUTH_ERROR: Verified OIDC token tenantId "${tenantId}" does not match active tenant "${activeTenantId}".`,
+    );
+  }
+  const email = (params.email ?? '').trim();
+  if (!email) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token is missing required email/UPN claim.',
+    );
+  }
+  const oid = (params.oid ?? '').trim();
+  if (!oid) {
+    throw new Error(
+      'TENANCY_AUTH_ERROR: Verified OIDC token is missing required Entra Object ID (oid) claim.',
+    );
+  }
+  return brandVerifiedSessionActor({
+    id: verifiedToken.sub,
+    sub: verifiedToken.sub,
+    name: verifiedToken.name,
+    email,
+    upn: email,
+    roles: [...verifiedToken.roles],
+    groups: verifiedToken.groups ? [...verifiedToken.groups] : [],
+    entraObjectId: oid,
+    entraTenantId: verifiedToken.entraTenantId,
+    mfaVerified: verifiedToken.mfaVerified,
+    tenantId,
+    correlationId: params.correlationId,
   });
 }
 

@@ -6,9 +6,21 @@ import {
   repointMergedEntityWithCompensation,
   resolveTenantContextForStoreUser,
 } from './documentGenerationServices';
-import { withJsonStoreWriteLock } from './storeLock';
+import {
+  withJsonStoreWriteLock,
+  type RecordDeltaCompensator,
+} from './storeLock';
+import {
+  appendUnmigratedModuleAuditEntries,
+  captureJsonStoreBaseline,
+  getAuditRepository,
+  registerJsonStoreRecordDeltas,
+  runUnmigratedJsonMutationWithAudit,
+  stageUnmigratedAuditEntry,
+} from './auditAdapter';
 import {
   clearMigratedPostgresModulesForTenant,
+  computeMatterRestrictionMetadataForStore,
   importFirmStoreModulesToPostgres,
 } from './storePostgresImport';
 import { attentionList } from '@/domain/attention';
@@ -164,11 +176,13 @@ import {
   createVerifiedSessionActorFromEntraSession,
   ENTRA_SESSION_COOKIE,
   getEntraSession,
+  getTestEntraSessionOverride,
   persistEntraSessionCookie,
   setTestEntraSessionOverride,
   shouldUseSecureCookies,
   type EntraSessionPayload,
   type VerifiedEntraSessionPayload,
+  createSignInActorFromVerifiedOidcToken,
 } from './entraAuth';
 import {
   getActiveTenantConfiguration,
@@ -179,8 +193,12 @@ import {
 } from '@/platform/tenantRuntime';
 import {
   runTenantBackgroundJob,
+  TenantKeyDateRepository,
   validateKeyDatesConfig,
   validateRbacConfig,
+  type FirmAuditEntryInput,
+  type FirmAuditEntryRecord,
+  type KeyDatesConfiguration,
   type TenantContext,
 } from '@platform/core';
 import type {
@@ -244,7 +262,7 @@ import {
   resolveSuggestedConflictReviewer,
 } from './conflictReview';
 import { verifyFinanceActorAndPermission } from './financeServices';
-import { buildRecordVisibility } from './visibility';
+import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from './visibility';
 import type {
   Address,
   AnyRecord,
@@ -519,18 +537,27 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     expiresAt: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
   };
 
-  await persistEntraSessionCookie(nextSession);
-
-  writeAudit(store, {
-    recordType: 'person',
-    recordId: targetPerson.id,
-    action: 'update',
-    field: 'Demo user switch',
-    oldValue: actor.personId,
-    newValue: targetPerson.id,
-    byId: actor.personId,
+  await runUnmigratedJsonMutationWithAudit({
+    label: 'switchUserInDemoMode',
+    resolveCtx: (s) =>
+      resolveDefaultServiceTenantContext(s, actor.personId, {
+        session: actor.session,
+      }),
+    mutate: async (lockedStore) => {
+      writeAudit(lockedStore, {
+        recordType: 'person',
+        recordId: targetPerson.id,
+        action: 'update',
+        field: 'Demo user switch',
+        oldValue: actor.personId,
+        newValue: targetPerson.id,
+        byId: actor.personId,
+      });
+      saveStore(lockedStore);
+    },
   });
-  saveStore(store);
+
+  await persistEntraSessionCookie(nextSession);
 
   return { ok: true, personId: targetPerson.id };
 }
@@ -560,33 +587,430 @@ export function formatContext(store: FirmStore): FormatContext {
   };
 }
 
-function writeAudit(
-  store: FirmStore,
-  entry: Omit<AuditEntry, 'id' | 'at'> & { at?: string },
-): AuditEntry {
-  const full: AuditEntry = {
-    id: nextId(store, 'AU'),
-    at: entry.at ?? new Date().toISOString(),
-    recordType: entry.recordType,
-    recordId: entry.recordId,
-    action: entry.action,
-    field: entry.field,
-    oldValue: entry.oldValue,
-    newValue: entry.newValue,
-    byId: entry.byId,
-    ...(entry.snapshot !== undefined ? { snapshot: entry.snapshot } : {}),
-  };
-  store.audit.unshift(full);
-  return full;
+declare global {
+  var __oneSquaredKeyDateRepo: TenantKeyDateRepository | undefined;
+  var __oneSquaredMatterRestrictionSyncDigests: Map<string, string> | undefined;
 }
 
-export function getKeyDatesConfig(store: FirmStore = getStore()): KeyDatesConfig {
+export function getKeyDateRepository(): TenantKeyDateRepository {
+  if (!global.__oneSquaredKeyDateRepo) {
+    global.__oneSquaredKeyDateRepo = new TenantKeyDateRepository();
+  }
+  return global.__oneSquaredKeyDateRepo;
+}
+
+function getMatterRestrictionDigestCache(): Map<string, string> {
+  if (!global.__oneSquaredMatterRestrictionSyncDigests) {
+    global.__oneSquaredMatterRestrictionSyncDigests = new Map<string, string>();
+  }
+  return global.__oneSquaredMatterRestrictionSyncDigests;
+}
+
+function resolveDefaultServiceTenantContext(
+  _store: FirmStore,
+  preferredActorId?: string | null,
+  options?: {
+    tenantCtx?: TenantContext | null;
+    session?: VerifiedEntraSessionPayload | null;
+    correlationId?: string;
+  },
+): TenantContext {
+  if (options?.tenantCtx) {
+    return options.tenantCtx;
+  }
   const activeTenantConfig = getActiveTenantConfiguration();
-  const raw =
-    store.keyDatesConfigOverride ??
-    activeTenantConfig.keyDates ??
-    { enabled: false };
+  const activeActorSession = getActiveActorSession()?.verifiedSession as
+    | VerifiedEntraSessionPayload
+    | undefined;
+  const candidateSession =
+    options?.session ??
+    activeActorSession ??
+    getTestEntraSessionOverride() ??
+    undefined;
+
+  if (candidateSession) {
+    const cleanActor = preferredActorId?.trim();
+    if (
+      cleanActor &&
+      cleanActor !== 'system' &&
+      candidateSession.personId !== cleanActor
+    ) {
+      const err = new Error(
+        `TENANCY_ACTOR_MISMATCH: Verified session personId "${candidateSession.personId}" does not match requested actor "${cleanActor}".`,
+      ) as Error & { code: string };
+      err.code = 'TENANCY_ACTOR_MISMATCH';
+      throw err;
+    }
+    return resolveCurrentTenantContext(
+      createVerifiedSessionActorFromEntraSession(candidateSession, {
+        correlationId: options?.correlationId,
+      }),
+      activeTenantConfig,
+    );
+  }
+
+  const err = new Error(
+    'UNAUTHENTICATED: Verified Entra ID session is required for tenant data access.',
+  ) as Error & { code: string };
+  err.code = 'UNAUTHENTICATED';
+  throw err;
+}
+
+async function syncMatterRestrictionInPostgres(
+  ctx: TenantContext,
+  store: FirmStore,
+  matter: Matter,
+  compensator?: RecordDeltaCompensator | null,
+  previousMatter?: Matter | null,
+): Promise<void> {
+  const tenantConfig = getActiveTenantConfiguration();
+  const repo = getKeyDateRepository();
+  const nextMeta = computeMatterRestrictionMetadataForStore(
+    matter,
+    store.people,
+    store.teams,
+    tenantConfig,
+  );
+  if (compensator) {
+    if (previousMatter) {
+      const prevMeta = computeMatterRestrictionMetadataForStore(
+        previousMatter,
+        store.people,
+        store.teams,
+        tenantConfig,
+      );
+      compensator.register(`keydates.matter_restriction:${matter.id}`, async () => {
+        await repo.setMatterRestriction(ctx, prevMeta);
+        getMatterRestrictionDigestCache().delete(`${ctx.postgresDatabaseName}:${matter.id}`);
+      });
+    } else {
+      compensator.register(`keydates.matter_restriction:${matter.id}`, async () => {
+        await repo.setMatterRestriction(ctx, {
+          matterId: matter.id,
+          isRestricted: false,
+          restrictedAccessUserIds: [],
+        });
+        getMatterRestrictionDigestCache().delete(`${ctx.postgresDatabaseName}:${matter.id}`);
+      });
+    }
+  }
+  await repo.setMatterRestriction(ctx, nextMeta);
+  const cacheKey = `${ctx.postgresDatabaseName}:${matter.id}`;
+  getMatterRestrictionDigestCache().set(cacheKey, JSON.stringify(nextMeta));
+}
+
+async function ensureStoreMattersRestrictedMetadataSynced(
+  ctx: TenantContext,
+  store: FirmStore,
+): Promise<void> {
+  const tenantConfig = getActiveTenantConfiguration();
+  const repo = getKeyDateRepository();
+  const digestCache = getMatterRestrictionDigestCache();
+  for (const m of store.matters) {
+    const meta = computeMatterRestrictionMetadataForStore(
+      m,
+      store.people,
+      store.teams,
+      tenantConfig,
+    );
+    const cacheKey = `${ctx.postgresDatabaseName}:${m.id}`;
+    const serialized = JSON.stringify(meta);
+    if (digestCache.get(cacheKey) !== serialized) {
+      await repo.setMatterRestriction(ctx, meta);
+      digestCache.set(cacheKey, serialized);
+    }
+  }
+}
+
+function mapFirmAuditRecordToAuditEntry(rec: FirmAuditEntryRecord): AuditEntry {
+  return {
+    id: rec.id,
+    recordType: rec.recordType as AuditEntry['recordType'],
+    recordId: rec.recordId,
+    action: rec.action as AuditEntry['action'],
+    field: rec.field,
+    oldValue: rec.oldValue,
+    newValue: rec.newValue,
+    byId: rec.byId,
+    at: rec.at,
+    ...(rec.reason !== undefined ? { reason: rec.reason } : {}),
+    ...(rec.snapshot !== undefined ? { snapshot: rec.snapshot } : {}),
+  };
+}
+
+function writeAudit(
+  _store: FirmStore,
+  entry: Omit<AuditEntry, 'id' | 'at'> & { at?: string },
+): AuditEntry {
+  return stageUnmigratedAuditEntry(entry);
+}
+
+export async function getKeyDatesConfig(
+  storeOrOptions?:
+    | FirmStore
+    | { ctx?: TenantContext; userId?: string },
+): Promise<KeyDatesConfig> {
+  const activeTenantConfig = getActiveTenantConfiguration();
+  const isOptionsObj =
+    Boolean(storeOrOptions) &&
+    typeof storeOrOptions === 'object' &&
+    !('people' in (storeOrOptions as Record<string, unknown>));
+  const store = isOptionsObj
+    ? getStore()
+    : ((storeOrOptions as FirmStore | undefined) ?? getStore());
+  const opts = isOptionsObj
+    ? (storeOrOptions as { ctx?: TenantContext; userId?: string })
+    : undefined;
+
+  const ctx =
+    opts?.ctx ?? resolveDefaultServiceTenantContext(store, opts?.userId);
+  const override = await getKeyDateRepository().getKeyDatesTenantConfig(ctx);
+  const raw = override ?? activeTenantConfig.keyDates ?? { enabled: false };
   return validateKeyDatesConfig(raw) as unknown as KeyDatesConfig;
+}
+
+/**
+ * Record-scoped audit query for profile pages (R413), hitting idx_audit_entries_tenant_record
+ * and enforcing restricted-matter, task/enquiry/quote visibility, and HR payroll/sensitive permissions.
+ */
+export async function listAuditEntriesForRecord(
+  recordType: AuditEntry['recordType'],
+  recordId: string,
+  viewerId: string,
+  options?: { limit?: number; tokenRoles?: readonly string[] },
+): Promise<AuditEntry[]> {
+  const store = getStore();
+  const viewer = store.people.find(
+    (p) => p.id === viewerId && !p.mergedIntoId,
+  );
+  if (!viewer) {
+    return [];
+  }
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    options?.tokenRoles ??
+    (activeSession?.personId === viewer.id ? activeSession.tokenRoles : undefined);
+  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+
+  const prelimVisibility = buildRecordVisibility(store, viewer, {
+    tokenRoles: effectiveTokenRoles,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
+  const hiddenMatterKeyDateIds =
+    await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+      ctx,
+      prelimVisibility.hiddenMatterIds,
+    );
+  const visibility = buildRecordVisibility(store, viewer, {
+    tokenRoles: effectiveTokenRoles,
+    hiddenMatterKeyDateIds,
+  });
+
+  if (recordType === 'matter') {
+    const m = store.matters.find((x) => x.id === recordId);
+    if (m && !visibility.canViewMatter(m)) {
+      return [];
+    }
+    if (prelimVisibility.hiddenMatterIds.has(recordId)) {
+      return [];
+    }
+  } else if (recordType === 'enquiry') {
+    const e = store.enquiries.find((x) => x.id === recordId);
+    if (!e || !visibility.canViewEnquiry(e)) {
+      return [];
+    }
+  } else if (recordType === 'quote') {
+    const q = (store.quotes ?? []).find((x) => x.id === recordId);
+    if (!q || !visibility.canViewQuote(q)) {
+      return [];
+    }
+  } else if (recordType === 'task') {
+    const t = store.tasks.find((x) => x.id === recordId);
+    if (!t || !visibility.canViewTask(t)) {
+      return [];
+    }
+  } else if (recordType === 'key_date') {
+    if (hiddenMatterKeyDateIds.has(recordId)) {
+      return [];
+    }
+    const prefix = recordId.split(':')[0];
+    if (prefix && visibility.hiddenMatterIds.has(prefix)) {
+      return [];
+    }
+  } else if (recordType === 'employee_payroll') {
+    if (!hasEmployeePermission(viewer, 'employee:payroll', store.people, store.teams)) {
+      return [];
+    }
+  } else if (recordType === 'employee_sensitive') {
+    if (!hasEmployeePermission(viewer, 'employee:sensitive', store.people, store.teams)) {
+      return [];
+    }
+  }
+
+  const rows = await getAuditRepository().listAuditEntriesForRecord(
+    ctx,
+    recordType,
+    recordId,
+    { limit: options?.limit ?? 200 },
+  );
+  return rows.map(mapFirmAuditRecordToAuditEntry);
+}
+
+/**
+ * Paginated firm-wide audit query for Admin (R413, R451, R452, R457), hitting idx_audit_entries_tenant_seq,
+ * enforcing admin:access, and filling each page with visible entries after redacting restricted matters,
+ * hidden tasks/enquiries/quotes/key-dates, and unpermitted HR audit rows.
+ */
+export async function listFirmAuditEntriesPage(
+  viewerId: string,
+  options?: {
+    limit?: number;
+    beforeSeq?: number;
+    tokenRoles?: readonly string[];
+  },
+): Promise<
+  { entries: AuditEntry[]; nextBeforeSeq: number | null } & Partial<ActionDenied>
+> {
+  const store = getStore();
+  const viewer = store.people.find(
+    (p) => p.id === viewerId && !p.mergedIntoId,
+  );
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    options?.tokenRoles ??
+    (viewer && activeSession?.personId === viewer.id
+      ? activeSession.tokenRoles
+      : undefined);
+  if (
+    !viewer ||
+    !hasPersonPermission(viewer, 'admin:access', {
+      allPeople: store.people,
+      teams: store.teams,
+      tokenRoles: effectiveTokenRoles,
+    })
+  ) {
+    return {
+      ...buildActionDenied(
+        'FORBIDDEN',
+        'You need "admin:access" permission to view the firm audit log.',
+      ),
+      entries: [],
+      nextBeforeSeq: null,
+    };
+  }
+  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+
+  const prelimVisibility = buildRecordVisibility(store, viewer, {
+    tokenRoles: effectiveTokenRoles,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
+  const hiddenMatterKeyDateIds =
+    await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+      ctx,
+      prelimVisibility.hiddenMatterIds,
+    );
+  const visibility = buildRecordVisibility(store, viewer, {
+    tokenRoles: effectiveTokenRoles,
+    hiddenMatterKeyDateIds,
+  });
+  const hiddenTaskIds = new Set(
+    store.tasks.filter((t) => !visibility.canViewTask(t)).map((t) => t.id),
+  );
+  const canPayroll = hasEmployeePermission(
+    viewer,
+    'employee:payroll',
+    store.people,
+    store.teams,
+  );
+  const canSensitive = hasEmployeePermission(
+    viewer,
+    'employee:sensitive',
+    store.people,
+    store.teams,
+  );
+
+  const isVisibleAuditRow = (a: FirmAuditEntryRecord): boolean => {
+    if (a.recordType === 'matter' && visibility.hiddenMatterIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'task' && hiddenTaskIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'enquiry' && visibility.hiddenEnquiryIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'quote' && visibility.hiddenQuoteIds.has(a.recordId)) {
+      return false;
+    }
+    if (a.recordType === 'key_date') {
+      if (hiddenMatterKeyDateIds.has(a.recordId)) return false;
+      const prefix = a.recordId.split(':')[0];
+      if (prefix && visibility.hiddenMatterIds.has(prefix)) return false;
+    }
+    if (a.recordType === 'employee_payroll' && !canPayroll) {
+      return false;
+    }
+    if (a.recordType === 'employee_sensitive' && !canSensitive) {
+      return false;
+    }
+    return true;
+  };
+
+  const targetLimit = Math.min(
+    2000,
+    Math.max(1, Math.floor(options?.limit ?? 250)),
+  );
+  const collected: FirmAuditEntryRecord[] = [];
+  let cursor = options?.beforeSeq;
+  let hasMoreAfterCollected = false;
+
+  while (collected.length < targetLimit) {
+    const page = await getAuditRepository().listFirmAuditEntriesPage(ctx, {
+      limit: Math.max(targetLimit, 250),
+      beforeSeq: cursor,
+    });
+    if (page.entries.length === 0) {
+      hasMoreAfterCollected = false;
+      break;
+    }
+    let stoppedMidBatch = false;
+    for (let i = 0; i < page.entries.length; i++) {
+      const a = page.entries[i]!;
+      if (!isVisibleAuditRow(a)) continue;
+      if (collected.length < targetLimit) {
+        collected.push(a);
+      } else {
+        hasMoreAfterCollected = true;
+        stoppedMidBatch = true;
+        break;
+      }
+    }
+    if (stoppedMidBatch) {
+      break;
+    }
+    if (page.nextBeforeSeq === null) {
+      hasMoreAfterCollected = false;
+      break;
+    }
+    if (collected.length >= targetLimit) {
+      hasMoreAfterCollected = true;
+      break;
+    }
+    cursor = page.nextBeforeSeq;
+  }
+
+  const lastVisible = collected.at(-1);
+  const nextBeforeSeq =
+    hasMoreAfterCollected && lastVisible?.seq !== undefined
+      ? lastVisible.seq
+      : null;
+
+  return {
+    entries: collected.map(mapFirmAuditRecordToAuditEntry),
+    nextBeforeSeq,
+  };
 }
 
 function logDocumentLifecycleSyncError(
@@ -605,17 +1029,17 @@ function logDocumentLifecycleSyncError(
   );
 }
 
-export function getAppSnapshot(
+export async function getAppSnapshot(
   userId: string,
-  options?: { tokenRoles?: readonly string[] },
-): AppSnapshot {
+  options?: { tokenRoles?: readonly string[]; includeFirmAudit?: boolean },
+): Promise<AppSnapshot> {
   return getAppSnapshotInScope(userId, options);
 }
 
-function getAppSnapshotInScope(
+async function getAppSnapshotInScope(
   userId: string,
-  options?: { tokenRoles?: readonly string[] },
-): AppSnapshot {
+  options?: { tokenRoles?: readonly string[]; includeFirmAudit?: boolean },
+): Promise<AppSnapshot> {
   const store = getStore();
   const now = new Date();
   const user = store.people.find(
@@ -671,18 +1095,26 @@ function getAppSnapshotInScope(
   // Never bulk-return sensitive HR records in page snapshots (R63); serve only via audited per-person read service.
   const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
+  const snapshotTenantCtx = resolveDefaultServiceTenantContext(store, user.id);
+  const keyDateRepo = getKeyDateRepository();
+  await ensureStoreMattersRestrictedMetadataSynced(snapshotTenantCtx, store);
+
   // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
+  const prelimVisibility = buildRecordVisibility(store, user, {
+    tokenRoles: effectiveTokenRoles,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
+  const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
+    snapshotTenantCtx,
+    prelimVisibility.hiddenMatterIds,
+  );
   const visibility = buildRecordVisibility(store, user, {
     tokenRoles: effectiveTokenRoles,
+    hiddenMatterKeyDateIds,
   });
   const visibleMatters: Matter[] = store.matters.filter(visibility.canViewMatter);
   const hiddenMatterIds = visibility.hiddenMatterIds;
   const hiddenMatterSourceQuoteIds = visibility.hiddenMatterSourceQuoteIds;
-  const hiddenMatterKeyDateIds = new Set(
-    (store.keyDates ?? [])
-      .filter((kd) => Boolean(kd.matterId && hiddenMatterIds.has(kd.matterId)))
-      .map((kd) => kd.id),
-  );
 
   // Filter enquiries: hide personal Drafts belonging to another user and enquiries converted into a hidden matter,
   // and strip hidden matter conflict hits from conflictSnapshot.
@@ -761,7 +1193,7 @@ function getAppSnapshotInScope(
   };
   const currentUserRoles = resolveEmployeeRoles(user, store.teams);
   const activeViewingRole = resolveActiveViewingRole(user, homePagesConfig, store.teams);
-  const keyDatesConfig = getKeyDatesConfig(store);
+  const keyDatesConfig = await getKeyDatesConfig({ ctx: snapshotTenantCtx, userId: user.id });
   const currentUserKeyDatePermissions = resolveKeyDatePermissions(user, {
     config: keyDatesConfig,
     allPeople: store.people,
@@ -776,7 +1208,7 @@ function getAppSnapshotInScope(
       currentUserKeyDatePermissions.includes('keydate:view'),
   };
 
-  // Data-layer filtering of key dates for restricted (staff) matters and team scoping (R32, R37):
+  // Data-layer filtering of key dates from TenantKeyDateRepository for restricted matters & team scoping (R32, R37, S0-15):
   const permittedDiaryTeamIds = new Set(
     resolvePermittedDiaryTeamIds(user, undefined, store.teams, {
       config: keyDatesConfig,
@@ -785,25 +1217,36 @@ function getAppSnapshotInScope(
     }),
   );
   const matterByIdForKd = new Map(store.matters.map((m) => [m.id, m]));
-  const visibleKeyDates: KeyDate[] = currentUserKeyDatePermissions.includes('keydate:view')
-    ? (store.keyDates ?? []).filter((kd) => {
-        if (!permittedDiaryTeamIds.has(kd.teamId)) return false;
-        if (!kd.matterId) return true;
-        const m = matterByIdForKd.get(kd.matterId);
-        return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
-      })
+  const canViewKeyDates = currentUserKeyDatePermissions.includes('keydate:view');
+  const repoVisibleKeyDates = canViewKeyDates
+    ? await keyDateRepo.listAllVisibleKeyDates(snapshotTenantCtx, user.id)
     : [];
+  const visibleKeyDates: KeyDate[] = repoVisibleKeyDates.filter((kd) => {
+    if (!permittedDiaryTeamIds.has(kd.teamId)) return false;
+    if (!kd.matterId) return true;
+    const m = matterByIdForKd.get(kd.matterId);
+    return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
+  });
   const visibleKeyDateIdSet = new Set(visibleKeyDates.map((kd) => kd.id));
-  const visibleKeyDateNotApplicable: KeyDateNotApplicable[] = currentUserKeyDatePermissions.includes('keydate:view')
-    ? (store.keyDateNotApplicable ?? []).filter((na) => {
-        const m = matterByIdForKd.get(na.matterId);
-        return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
-      })
+  const repoVisibleNotApplicable = canViewKeyDates
+    ? await keyDateRepo.listAllVisibleNotApplicable(snapshotTenantCtx, user.id)
     : [];
-  const visibleKeyDateReminderStates: KeyDateReminderState[] = (store.keyDateReminderStates ?? []).filter(
+  const visibleKeyDateNotApplicable: KeyDateNotApplicable[] = repoVisibleNotApplicable.filter(
+    (na) => {
+      const m = matterByIdForKd.get(na.matterId);
+      return canViewerAccessMatterKeyDates(m, user.id, user, store.people);
+    },
+  );
+  const repoReminderStates = canViewKeyDates
+    ? await keyDateRepo.listAllReminderStates(snapshotTenantCtx, user.id)
+    : [];
+  const visibleKeyDateReminderStates: KeyDateReminderState[] = repoReminderStates.filter(
     (rs) => visibleKeyDateIdSet.has(rs.keyDateId),
   );
-  const visibleKeyDateCalendarSyncs: KeyDateCalendarSync[] = (store.keyDateCalendarSyncs ?? []).filter(
+  const repoCalendarSyncs = canViewKeyDates
+    ? await keyDateRepo.listAllVisibleCalendarSyncs(snapshotTenantCtx, user.id)
+    : [];
+  const visibleKeyDateCalendarSyncs: KeyDateCalendarSync[] = repoCalendarSyncs.filter(
     (cs) => visibleKeyDateIdSet.has(cs.keyDateId),
   );
 
@@ -899,18 +1342,16 @@ function getAppSnapshotInScope(
       !hiddenEnquiryIds.has(n.recordId) &&
       !hiddenQuoteIds.has(n.recordId),
   );
-  const visibleAudit = store.audit.filter((a) => {
-    if (a.recordType === 'matter' && hiddenMatterIds.has(a.recordId)) return false;
-    if (a.recordType === 'task' && hiddenTaskIds.has(a.recordId)) return false;
-    if (a.recordType === 'enquiry' && hiddenEnquiryIds.has(a.recordId)) return false;
-    if (a.recordType === 'quote' && hiddenQuoteIds.has(a.recordId)) return false;
-    if (a.recordType === 'key_date') {
-      if (hiddenMatterKeyDateIds.has(a.recordId)) return false;
-      const prefix = a.recordId.split(':')[0];
-      if (prefix && hiddenMatterIds.has(prefix)) return false;
-    }
-    return true;
-  });
+  // R413: Do not load the firm-wide audit_entries table on every page snapshot;
+  // profile pages use listAuditEntriesForRecord and Admin uses listFirmAuditEntriesPage.
+  const visibleAudit: AuditEntry[] = options?.includeFirmAudit
+    ? (
+        await listFirmAuditEntriesPage(user.id, {
+          limit: 250,
+          tokenRoles: effectiveTokenRoles,
+        })
+      ).entries
+    : [];
 
   // Keep quote statuses up to date when follow-up or valid-until dates pass
   for (const q of visibleQuotes) {
@@ -1091,7 +1532,11 @@ function getAppSnapshotInScope(
   };
 }
 
-export function recordRecentlyViewed(userId: string, recordId: string): void {
+export async function recordRecentlyViewed(userId: string, recordId: string): Promise<void> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'recordRecentlyViewed',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
+    mutate: async () => {
   const store = getStore();
   const current = store.recentlyViewed[userId] ?? [];
   if (current[0] === recordId) {
@@ -1100,22 +1545,25 @@ export function recordRecentlyViewed(userId: string, recordId: string): void {
   const next = [recordId, ...current.filter((id) => id !== recordId)].slice(0, 8);
   store.recentlyViewed[userId] = next;
   saveStore(store);
+
+    },
+  });
 }
 
 /**
  * API-level read of a person's employment and sensitive records, enforcing permissions
  * and optionally logging views of restricted payroll or sensitive sections.
  */
-export function getEmployeeDetailsForUser(
+export async function getEmployeeDetailsForUser(
   personId: string,
   byId: string,
   opts: { logViewPayroll?: boolean; logViewSensitive?: boolean } = {},
-): {
+): Promise<{
   employment: EmploymentRecord | null;
   sensitive: EmployeeSensitiveRecord | null;
   permissions: EmployeePermission[];
   errors?: Record<string, string>;
-} {
+}> {
   const store = getStore();
   const user = store.people.find((p) => p.id === byId) ?? null;
   const person = store.people.find((p) => p.id === personId) ?? null;
@@ -1127,7 +1575,7 @@ export function getEmployeeDetailsForUser(
   }
 
   if (opts.logViewPayroll) {
-    const payrollLogRes = logEmployeeRestrictedAccess(personId, 'payroll', byId);
+    const payrollLogRes = await logEmployeeRestrictedAccess(personId, 'payroll', byId);
     if (!payrollLogRes.auditEntry) {
       errors.payrollPermission = 'You do not have permission to view payroll details.';
     }
@@ -1135,7 +1583,7 @@ export function getEmployeeDetailsForUser(
 
   let sensitiveAuditWritten = false;
   if (opts.logViewSensitive) {
-    const sensitiveLogRes = logEmployeeRestrictedAccess(personId, 'sensitive', byId);
+    const sensitiveLogRes = await logEmployeeRestrictedAccess(personId, 'sensitive', byId);
     if (!sensitiveLogRes.auditEntry) {
       errors.sensitivePermission = 'You do not have permission to view sensitive employee information.';
     } else {
@@ -1164,14 +1612,14 @@ export function getEmployeeDetailsForUser(
 }
 
 /**
- * Logs every view of payroll and sensitive fields with user and timestamp.
+ * Logs every view of payroll and sensitive fields with user and timestamp to PostgreSQL audit_entries.
  */
-export function logEmployeeRestrictedAccess(
+export async function logEmployeeRestrictedAccess(
   personId: string,
   section: 'payroll' | 'sensitive',
   byId: string,
   fieldDetail?: string,
-): { auditEntry?: AuditEntry; error?: string } {
+): Promise<{ auditEntry?: AuditEntry; error?: string }> {
   const store = getStore();
   const user = store.people.find((p) => p.id === byId) ?? null;
   const requiredPerm: EmployeePermission =
@@ -1181,28 +1629,36 @@ export function logEmployeeRestrictedAccess(
     return { error: `Permission denied: ${requiredPerm} is required.` };
   }
 
-  const entry = writeAudit(store, {
-    recordType: section === 'payroll' ? 'employee_payroll' : 'employee_sensitive',
-    recordId: personId,
-    action: section === 'payroll' ? 'view-payroll' : 'view-sensitive',
-    field: fieldDetail ?? (section === 'payroll' ? 'Payroll & benefits' : 'Sensitive information'),
-    oldValue: null,
-    newValue: `Viewed by ${user ? personDisplayName(user) : byId}`,
-    byId,
-  });
-  saveStore(store);
-  return { auditEntry: entry };
+  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const persisted = await appendUnmigratedModuleAuditEntries(ctx, [
+    {
+      recordType: section === 'payroll' ? 'employee_payroll' : 'employee_sensitive',
+      recordId: personId,
+      action: section === 'payroll' ? 'view-payroll' : 'view-sensitive',
+      field: fieldDetail ?? (section === 'payroll' ? 'Payroll & benefits' : 'Sensitive information'),
+      oldValue: null,
+      newValue: `Viewed by ${user ? personDisplayName(user) : byId}`,
+      byId,
+      at: new Date().toISOString(),
+    },
+  ]);
+  return { auditEntry: mapFirmAuditRecordToAuditEntry(persisted[0]!) };
 }
 
 /**
  * Reassigns records owned by a leaver to another active employee.
  */
-export function reassignLeaverOwnedRecords(
+export async function reassignLeaverOwnedRecords(
   fromLeaverId: string,
   toEmployeeId: string,
   byId: string,
-): { reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied> {
-  const store = getStore();
+): Promise<{ reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit<
+    { reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>
+  >({
+    label: 'reassignLeaverOwnedRecords',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (store, compensator): Promise<{ reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>> => {
   const now = new Date().toISOString();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
@@ -1361,6 +1817,14 @@ export function reassignLeaverOwnedRecords(
         at: now,
       });
       if (isRestricted && prevMatter) {
+        const reassignCtx = resolveDefaultServiceTenantContext(store, byId);
+        await syncMatterRestrictionInPostgres(
+          reassignCtx,
+          store,
+          m,
+          compensator,
+          prevMatter,
+        );
         const syncCorrelationId = `corr-leaver-reassign-${m.id}-${Date.now()}`;
         try {
           void syncMatterLifecycleOnSaveSync({
@@ -1445,9 +1909,11 @@ export function reassignLeaverOwnedRecords(
 
   saveStore(store);
   return { reassignedCount: count };
+    },
+  });
 }
 
-export function savePersonRecord(
+export async function savePersonRecord(
   input: Partial<Person> & { firstName: string; surname: string },
   opts: {
     id?: string;
@@ -1473,7 +1939,11 @@ export function savePersonRecord(
       startDate?: string | null;
     } | null;
   },
-): ({ person: Person; errors?: Record<string, string> } & Partial<ActionDenied>) {
+): Promise<({ person: Person; errors?: Record<string, string> } & Partial<ActionDenied>)> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'savePersonRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
+    mutate: async () => {
   const store = getStore();
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
@@ -2380,7 +2850,7 @@ export function savePersonRecord(
   }
 
   if (!existing && opts.initialLink?.organisationId) {
-    createOrUpdateLink(
+    await createOrUpdateLink(
       {
         personId: person.id,
         organisationId: opts.initialLink.organisationId,
@@ -2446,9 +2916,12 @@ export function savePersonRecord(
 
   saveStore(store);
   return { person };
+
+    },
+  });
 }
 
-export function saveOrganisationRecord(
+export async function saveOrganisationRecord(
   input: Partial<Organisation> & { legalName: string },
   opts: {
     id?: string;
@@ -2458,7 +2931,13 @@ export function saveOrganisationRecord(
     matchedDuplicateIds?: string[];
     internalSystemStep?: 'enquiry_conversion' | 'quote_conversion';
   },
-): { organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied> {
+): Promise<{ organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit<
+    { organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>
+  >({
+    label: 'saveOrganisationRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
+    mutate: async (): Promise<{ organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>> => {
   const store = getStore();
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
@@ -2663,15 +3142,22 @@ export function saveOrganisationRecord(
 
   saveStore(store);
   return { organisation };
+
+    },
+  });
 }
 
-export function createOrUpdateLink(
+export async function createOrUpdateLink(
   input: Omit<PersonOrganisationLink, 'id' | 'createdById' | 'createdAt' | 'updatedById' | 'updatedAt'> & {
     id?: string;
   },
   byId: string,
   opts?: { internalSystemStep?: boolean },
-): PersonOrganisationLink & Partial<ActionDenied> {
+): Promise<PersonOrganisationLink & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'createOrUpdateLink',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const now = new Date().toISOString();
   const existing = input.id ? store.links.find((l) => l.id === input.id) ?? null : null;
@@ -2763,9 +3249,16 @@ export function createOrUpdateLink(
   }
   saveStore(store);
   return link;
+
+    },
+  });
 }
 
-export function deleteLink(linkId: string, byId: string): { ok: true } | ActionDenied {
+export async function deleteLink(linkId: string, byId: string): Promise<{ ok: true } | ActionDenied> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'deleteLink',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -2803,17 +3296,26 @@ export function deleteLink(linkId: string, byId: string): { ok: true } | ActionD
   }
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
-export function addNoteToRecord(
+export async function addNoteToRecord(
   recordType: RecordType | 'matter',
   recordId: string,
   text: string,
   byId: string,
-): Note & Partial<ActionDenied> {
+): Promise<Note & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'addNoteToRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
 
   const target: (AnyRecord | Matter) | undefined =
     recordType === 'person'
@@ -2904,6 +3406,9 @@ export function addNoteToRecord(
   });
   saveStore(store);
   return note;
+
+    },
+  });
 }
 
 export function generateMatterNumber(store: FirmStore, clientId: string): string {
@@ -3010,17 +3515,27 @@ async function runMatterOpeningGate(params: {
       "A required opening check couldn't run. Please contact your administrator.";
   }
 
-  // 2. Key-dates opening gate (when the Key Dates module is enabled for the tenant).
-  const kdConfig = getKeyDatesConfig(store);
+  // 2. Key-dates opening gate (when the Key Dates module is enabled for the tenant, S0-15).
+  const kdConfig = await getKeyDatesConfig({ ctx: extensionCtx });
   if (kdConfig.enabled) {
+    const keyDateRepo = getKeyDateRepository();
+    if (!isNewMatter) {
+      await ensureStoreMattersRestrictedMetadataSynced(extensionCtx, store);
+    }
     const targetMatterTypeId = matter.matterTypeId || matter.practiceAreaId;
     const matterKds = isNewMatter
       ? []
-      : (store.keyDates ?? []).filter((kd) => kd.matterId === matter.id);
+      : await keyDateRepo.listKeyDatesForMatter(
+          extensionCtx,
+          matter.id,
+          extensionCtx.actorId,
+        );
     const matterNas = isNewMatter
       ? []
-      : (store.keyDateNotApplicable ?? []).filter(
-          (na) => na.matterId === matter.id,
+      : await keyDateRepo.listNotApplicableForMatter(
+          extensionCtx,
+          matter.id,
+          extensionCtx.actorId,
         );
     const openGate = evaluateMatterKeyDateOpeningGate(
       kdConfig,
@@ -3349,7 +3864,12 @@ export async function saveMatterRecord(
     source?: 'pms_import';
   },
 ): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
-  const store = getStore();
+  let resolvedMatterCtx: TenantContext | null = null;
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveMatterRecord',
+    resolveCtx: (s) =>
+      resolvedMatterCtx ?? resolveDefaultServiceTenantContext(s, opts.byId),
+    mutate: async (store, compensator) => {
   const existingRef = opts.id ? store.matters.find((m) => m.id === opts.id) ?? null : null;
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingUpdatedAt = existing?.updatedAt ?? null;
@@ -3537,8 +4057,9 @@ export async function saveMatterRecord(
     }
   }
 
+  resolvedMatterCtx = extensionCtx;
   // Enforce Key Dates closure gate (§1; opening gate runs via runMatterOpeningGate)
-  const kdConfig = getKeyDatesConfig(store);
+  const kdConfig = await getKeyDatesConfig({ ctx: extensionCtx });
   if (kdConfig.enabled && !isDraftSave) {
     const targetMatterId = existing?.id;
     const targetMatterTypeId =
@@ -3554,8 +4075,11 @@ export async function saveMatterRecord(
       nextStatusId === 'matter_status.closed';
 
     if (targetMatterId && isClosing) {
-      const matterKds = (store.keyDates ?? []).filter(
-        (kd) => kd.matterId === targetMatterId,
+      await ensureStoreMattersRestrictedMetadataSynced(extensionCtx, store);
+      const matterKds = await getKeyDateRepository().listKeyDatesForMatter(
+        extensionCtx,
+        targetMatterId,
+        extensionCtx.actorId,
       );
       const closeGate = evaluateMatterKeyDateClosureGate(
         kdConfig,
@@ -3963,6 +4487,7 @@ export async function saveMatterRecord(
   const visibility = buildRecordVisibility(
     { ...store, people: allPeopleWithPending },
     actingUser,
+    { hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS },
   );
   const rawServerMatches = searchMatterConflicts(
     {
@@ -4455,6 +4980,7 @@ export async function saveMatterRecord(
     };
   }
 
+  // R448: superseded by S0-16 row_version
   if (existing) {
     const current = store.matters.find((m) => m.id === existing.id);
     if (!current || current.updatedAt !== existingUpdatedAt) {
@@ -4599,11 +5125,34 @@ export async function saveMatterRecord(
       });
     }
 
+    await syncMatterRestrictionInPostgres(
+      extensionCtx,
+      store,
+      matter,
+      compensator,
+      null,
+    );
     if (matter.sourceEnquiryId) {
-      finalizeEnquiryConversionToMatter(store, matter.sourceEnquiryId, matter, opts.byId, now);
+      await finalizeEnquiryConversionToMatter(
+        store,
+        matter.sourceEnquiryId,
+        matter,
+        opts.byId,
+        now,
+        extensionCtx,
+        compensator,
+      );
     }
     if (matter.sourceQuoteId) {
-      finalizeQuoteConversionToMatter(store, matter.sourceQuoteId, matter, opts.byId, now);
+      await finalizeQuoteConversionToMatter(
+        store,
+        matter.sourceQuoteId,
+        matter,
+        opts.byId,
+        now,
+        extensionCtx,
+        compensator,
+      );
     }
   } else {
     const idx = store.matters.findIndex((m) => m.id === existing.id);
@@ -4634,11 +5183,34 @@ export async function saveMatterRecord(
       });
     }
 
+    await syncMatterRestrictionInPostgres(
+      extensionCtx,
+      store,
+      matter,
+      compensator,
+      existing,
+    );
     if (matter.sourceEnquiryId) {
-      finalizeEnquiryConversionToMatter(store, matter.sourceEnquiryId, matter, opts.byId, now);
+      await finalizeEnquiryConversionToMatter(
+        store,
+        matter.sourceEnquiryId,
+        matter,
+        opts.byId,
+        now,
+        extensionCtx,
+        compensator,
+      );
     }
     if (matter.sourceQuoteId) {
-      finalizeQuoteConversionToMatter(store, matter.sourceQuoteId, matter, opts.byId, now);
+      await finalizeQuoteConversionToMatter(
+        store,
+        matter.sourceQuoteId,
+        matter,
+        opts.byId,
+        now,
+        extensionCtx,
+        compensator,
+      );
     }
   }
 
@@ -4775,12 +5347,21 @@ export async function saveMatterRecord(
   }
 
   return { matter };
+    },
+  });
 }
 
-export function markEngagementLetterDrafted(
+export async function markEngagementLetterDrafted(
   matterId: string,
   byId: string,
-): { matter: Matter | null; errors?: Record<string, string> } {
+): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
+  return runUnmigratedJsonMutationWithAudit<{
+    matter: Matter | null;
+    errors?: Record<string, string>;
+  }>({
+    label: 'markEngagementLetterDrafted',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (): Promise<{ matter: Matter | null; errors?: Record<string, string>; }> => {
   const store = getStore();
   const existing = store.matters.find((m) => m.id === matterId) ?? null;
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
@@ -4832,15 +5413,24 @@ export function markEngagementLetterDrafted(
   });
   saveStore(store);
   return { matter: existing };
+
+    },
+  });
 }
 
-export function liftMatterRestriction(
+export async function liftMatterRestriction(
   matterId: string,
   restriction: 'staff_matter' | 'ethical_wall',
   reason: string,
   byId: string,
-): { matter: Matter | null; errors?: Record<string, string> } {
-  const store = getStore();
+): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
+  return runUnmigratedJsonMutationWithAudit<{
+    matter: Matter | null;
+    errors?: Record<string, string>;
+  }>({
+    label: 'liftMatterRestriction',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (store, compensator): Promise<{ matter: Matter | null; errors?: Record<string, string>; }> => {
   const existing = store.matters.find((m) => m.id === matterId) ?? null;
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -4952,6 +5542,16 @@ export function liftMatterRestriction(
   });
 
   saveStore(store);
+  const liftCtx = resolveDefaultServiceTenantContext(store, byId, {
+    session: activeVerifiedSession,
+  });
+  await syncMatterRestrictionInPostgres(
+    liftCtx,
+    store,
+    existing,
+    compensator,
+    prevMatter,
+  );
 
   const syncCorrelationId = `corr-lifecycle-sync-${existing.id}-${Date.now()}`;
   try {
@@ -4969,16 +5569,22 @@ export function liftMatterRestriction(
   }
 
   return { matter: existing };
+    },
+  });
 }
 
-export function runMatterConflictSearchRecord(
+export async function runMatterConflictSearchRecord(
   input: MatterConflictSearchInput,
   byId: string,
-): {
+): Promise<{
   matches: ConflictCheckMatch[];
   run?: ConflictCheckRunAudit;
   errors?: Record<string, string>;
-} {
+}> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'runMatterConflictSearchRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -5005,7 +5611,9 @@ export function runMatterConflictSearchRecord(
     allPeople: store.people,
     teams: store.teams,
   });
-  const visibility = buildRecordVisibility(store, actingUser);
+  const visibility = buildRecordVisibility(store, actingUser, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const nowIso = new Date().toISOString();
   const actorDisplayName = personDisplayName(actingUser);
   const matches = searchMatterConflicts(
@@ -5100,18 +5708,30 @@ export function runMatterConflictSearchRecord(
     saveStore(store);
   }
   return { matches, run };
+
+    },
+  });
 }
 
-export function updateMatterConflictRecord(
+export async function updateMatterConflictRecord(
   matterId: string,
   record: ConflictCheckRecordInput | ConflictCheckRecord,
   byId: string,
-): { matter: Matter | null; errors?: Record<string, string>; warnings?: string[] } {
-  const store = getStore();
+): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[] }> {
+  return runUnmigratedJsonMutationWithAudit<{
+    matter: Matter | null;
+    errors?: Record<string, string>;
+    warnings?: string[];
+  }>({
+    label: 'updateMatterConflictRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (store, compensator): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[]; }> => {
   const today = toIsoDate(new Date());
   const matter = store.matters.find((m) => m.id === matterId);
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actingUser);
+  const visibility = buildRecordVisibility(store, actingUser, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   if (
     !matter ||
     !actingUser ||
@@ -5276,17 +5896,25 @@ export function updateMatterConflictRecord(
     matter.restrictedAccessUserIds = Array.from(allowed);
   }
 
+  const conflictCtx = resolveDefaultServiceTenantContext(store, byId);
+  await ensureStoreMattersRestrictedMetadataSynced(conflictCtx, store);
   const gate = matter.fieldValues?.['matterOpeningGate'] as
     | MatterOpeningGateRecord
     | undefined;
-  const kdConfig = getKeyDatesConfig(store);
+  const kdConfig = await getKeyDatesConfig({ ctx: conflictCtx });
   const keyDatesOpenGate = kdConfig.enabled
     ? evaluateMatterKeyDateOpeningGate(
         kdConfig,
         matter.matterTypeId || matter.practiceAreaId,
-        (store.keyDates ?? []).filter((kd) => kd.matterId === matter.id),
-        (store.keyDateNotApplicable ?? []).filter(
-          (na) => na.matterId === matter.id,
+        await getKeyDateRepository().listKeyDatesForMatter(
+          conflictCtx,
+          matter.id,
+          byId,
+        ),
+        await getKeyDateRepository().listNotApplicableForMatter(
+          conflictCtx,
+          matter.id,
+          byId,
         ),
       )
     : { canOpen: true, missingKeyDateTypes: [] };
@@ -5349,6 +5977,13 @@ export function updateMatterConflictRecord(
   });
 
   saveStore(store);
+  await syncMatterRestrictionInPostgres(
+    conflictCtx,
+    store,
+    matter,
+    compensator,
+    prevMatter,
+  );
 
   const syncCorrelationId = `corr-lifecycle-sync-${matter.id}-${Date.now()}`;
   try {
@@ -5366,6 +6001,8 @@ export function updateMatterConflictRecord(
   }
 
   return { matter, ...(warnings.length > 0 ? { warnings } : {}) };
+    },
+  });
 }
 
 export async function signOffMatterCostsRecord(
@@ -5388,10 +6025,23 @@ export async function signOffMatterCostsRecord(
       matter: null,
     };
   }
-  const store = getStore();
+  let resolvedSignOffCtx: TenantContext | null = null;
+  return runUnmigratedJsonMutationWithAudit<
+    {
+      matter: Matter | null;
+      errors?: Record<string, string>;
+      warnings?: string[];
+    } & Partial<ActionDenied>
+  >({
+    label: 'signOffMatterCostsRecord',
+    resolveCtx: (s) =>
+      resolvedSignOffCtx ?? resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (store): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[]; } & Partial<ActionDenied>> => {
   const matter = store.matters.find((m) => m.id === matterId) ?? null;
   const actingUser = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actingUser);
+  const visibility = buildRecordVisibility(store, actingUser, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   if (
     !matter ||
     !actingUser ||
@@ -5436,6 +6086,7 @@ export async function signOffMatterCostsRecord(
       }),
       tenantCfg,
     );
+    resolvedSignOffCtx = extensionCtx;
   } catch {
     return {
       matter: null,
@@ -5537,14 +6188,20 @@ export async function signOffMatterCostsRecord(
   });
   saveStore(store);
   return { matter, ...(warnings.length > 0 ? { warnings } : {}) };
+    },
+  });
 }
 
-export function dismissDuplicateMatch(
+export async function dismissDuplicateMatch(
   recordType: RecordType,
   recordId: string,
   otherId: string | null,
   byId: string,
-): { ok: true } | ActionDenied {
+): Promise<{ ok: true } | ActionDenied> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'dismissDuplicateMatch',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -5592,6 +6249,9 @@ export function dismissDuplicateMatch(
   });
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
 function mergeCollidingLinkIntoSurvivor(
@@ -5646,8 +6306,11 @@ export async function executeMerge(
   mergedId: string,
   byId: string,
 ): Promise<MergeHistory & Partial<ActionDenied>> {
-  return withJsonStoreWriteLock(async (compensator) => {
-  const store = getStore();
+  let mergeCtx: TenantContext | null = null;
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'executeMerge',
+    resolveCtx: (s) => mergeCtx ?? resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (store, compensator) => {
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'record:merge', {
@@ -5690,10 +6353,10 @@ export async function executeMerge(
   }
 
   // R271 & R272: Resolve verified tenant context before mutating any record
-  resolveTenantContextForStoreUser(
+  mergeCtx = resolveTenantContextForStoreUser(
     store,
     actor!.id,
-  );
+  ).ctx;
   const plan = planMerge(survivor, merged);
   const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
   const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
@@ -5703,12 +6366,8 @@ export async function executeMerge(
     'merged',
   )!.id;
 
-  // R272: Snapshot the store before changing anything so any failure restores the store atomically
-  const storeSnapshot = structuredClone(store);
-
-  try {
-    // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
-    let linksMoved = 0;
+  // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
+  let linksMoved = 0;
     const nextLinks: PersonOrganisationLink[] = [];
     for (const link of store.links) {
       if (recordType === 'person' && link.personId === merged.id) {
@@ -6103,31 +6762,7 @@ export async function executeMerge(
 
     saveStore(store);
     return history;
-  } catch (err) {
-    await compensator.compensateAll();
-    for (const key of Object.keys(store)) {
-      delete (store as unknown as Record<string, unknown>)[key];
-    }
-    Object.assign(store, storeSnapshot);
-    try {
-      saveStore(store);
-    } catch {
-      const tenantId = getActiveTenantConfiguration().tenantId;
-      const activeSession = getActiveActorSession();
-      const correlationId =
-        (activeSession as { correlationId?: string } | null)?.correlationId ??
-        `merge-rollback-${randomUUID()}`;
-      console.error(
-        JSON.stringify({
-          level: 'error',
-          event: 'merge.rollback_save_failed',
-          correlationId,
-          tenantId,
-        }),
-      );
-    }
-    throw err;
-  }
+    },
   });
 }
 
@@ -6173,7 +6808,7 @@ export function findCandidateDuplicatesForRecord(record: AnyRecord): AnyRecord[]
 }
 
 // ------------------------------------------------------------------ Admin: Choice lists
-export function addChoiceValue(
+export async function addChoiceValue(
   input: {
     listKey: string;
     label: string;
@@ -6183,7 +6818,11 @@ export function addChoiceValue(
     meta?: Record<string, string>;
   },
   byId: string,
-): ChoiceValue {
+): Promise<ChoiceValue> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'addChoiceValue',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const label = input.label.trim();
   if (!label) throw new Error('Label is required');
@@ -6224,9 +6863,12 @@ export function addChoiceValue(
   });
   saveStore(store);
   return val;
+
+    },
+  });
 }
 
-export function updateChoiceValue(
+export async function updateChoiceValue(
   id: string,
   patch: {
     label?: string;
@@ -6236,7 +6878,11 @@ export function updateChoiceValue(
     meta?: Record<string, string>;
   },
   byId: string,
-): { value?: ChoiceValue; error?: string } & Partial<ActionDenied> {
+): Promise<{ value?: ChoiceValue; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'updateChoiceValue',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const val = store.values.find((v) => v.id === id);
   if (!val) {
@@ -6283,9 +6929,16 @@ export function updateChoiceValue(
   });
   saveStore(store);
   return { value: val };
+
+    },
+  });
 }
 
-export function reorderChoiceValue(id: string, direction: -1 | 1, byId: string): void {
+export async function reorderChoiceValue(id: string, direction: -1 | 1, byId: string): Promise<void> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'reorderChoiceValue',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const changed = reorder(store.values, id, direction);
   if (!changed.length) return;
@@ -6304,9 +6957,12 @@ export function reorderChoiceValue(id: string, direction: -1 | 1, byId: string):
     byId,
   });
   saveStore(store);
+
+    },
+  });
 }
 
-export function createMatterStageGroup(
+export async function createMatterStageGroup(
   input: {
     label: string;
     description?: string;
@@ -6314,7 +6970,11 @@ export function createMatterStageGroup(
     selectedDefaultStageIds?: string[];
   },
   byId: string,
-): ChoiceValue {
+): Promise<ChoiceValue> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'createMatterStageGroup',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const label = input.label.trim();
   if (!label) throw new Error('Group name is required');
@@ -6424,10 +7084,13 @@ export function createMatterStageGroup(
   });
   saveStore(store);
   return groupVal;
+
+    },
+  });
 }
 
 // ------------------------------------------------------------------ Admin: Custom fields
-export function saveCustomFieldDefinition(
+export async function saveCustomFieldDefinition(
   input: {
     id?: string;
     recordType: CustomFieldRecordType;
@@ -6439,7 +7102,11 @@ export function saveCustomFieldDefinition(
     options?: string[];
   },
   byId: string,
-): CustomFieldDefinition {
+): Promise<CustomFieldDefinition> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveCustomFieldDefinition',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const existing = input.id ? store.customFields.find((d) => d.id === input.id) ?? null : null;
   const id = existing?.id ?? `cf_${slug(input.label)}_${Date.now().toString(36).slice(-4)}`;
@@ -6511,9 +7178,16 @@ export function saveCustomFieldDefinition(
   });
   saveStore(store);
   return def;
+
+    },
+  });
 }
 
-export function reorderCustomField(id: string, direction: -1 | 1, byId: string): void {
+export async function reorderCustomField(id: string, direction: -1 | 1, byId: string): Promise<void> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'reorderCustomField',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const target = store.customFields.find((d) => d.id === id);
   if (!target) return;
@@ -6537,6 +7211,9 @@ export function reorderCustomField(id: string, direction: -1 | 1, byId: string):
     byId,
   });
   saveStore(store);
+
+    },
+  });
 }
 
 export async function resetAllDemoData(
@@ -6571,17 +7248,21 @@ export async function resetAllDemoData(
       }
     }
   }
-  writeAudit(fresh, {
-    recordType: 'system',
-    recordId: 'demo-data',
-    action: 'data-reset',
-    field: 'Reset demo data',
-    oldValue: null,
-    newValue: `Restored initial ${fresh.firm.name} dataset (by ${actorName} [${byId}])`,
-    byId,
-  });
   saveStore(fresh);
+  getMatterRestrictionDigestCache().clear();
   await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
+  await appendUnmigratedModuleAuditEntries(ctx, [
+    {
+      recordType: 'system',
+      recordId: 'demo-data',
+      action: 'data-reset',
+      field: 'Reset demo data',
+      oldValue: null,
+      newValue: `Restored initial ${fresh.firm.name} dataset (by ${actorName} [${byId}])`,
+      byId,
+      at: new Date().toISOString(),
+    },
+  ]);
   });
 }
 
@@ -6594,17 +7275,21 @@ export async function clearAllDataToCleanDeployment(
   const actor = prevStore.people.find((p) => p.id === byId) ?? null;
   const actorName = actor ? personDisplayName(actor) : byId;
   const clean = clearStoreToCleanDeployment();
-  writeAudit(clean, {
-    recordType: 'system',
-    recordId: 'clean-deployment',
-    action: 'data-cleared',
-    field: 'Clear all data to clean deployment',
-    oldValue: null,
-    newValue: `Cleared store to clean deployment (by ${actorName} [${byId}])`,
-    byId,
-  });
   saveStore(clean);
+  getMatterRestrictionDigestCache().clear();
   await clearMigratedPostgresModulesForTenant({ ctx });
+  await appendUnmigratedModuleAuditEntries(ctx, [
+    {
+      recordType: 'system',
+      recordId: 'clean-deployment',
+      action: 'data-cleared',
+      field: 'Clear all data to clean deployment',
+      oldValue: null,
+      newValue: `Cleared store to clean deployment (by ${actorName} [${byId}])`,
+      byId,
+      at: new Date().toISOString(),
+    },
+  ]);
   });
 }
 
@@ -6640,25 +7325,39 @@ function pushNotification(
   return item;
 }
 
-export function markNotificationRead(id: string, userId: string): void {
+export async function markNotificationRead(id: string, userId: string): Promise<void> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'markNotificationRead',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
+    mutate: async () => {
   const store = getStore();
   const n = store.notifications.find((x) => x.id === id && x.recipientId === userId);
   if (n) {
     n.read = true;
     saveStore(store);
   }
+
+    },
+  });
 }
 
-export function markAllNotificationsRead(userId: string): void {
+export async function markAllNotificationsRead(userId: string): Promise<void> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'markAllNotificationsRead',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
+    mutate: async () => {
   const store = getStore();
   for (const n of store.notifications) {
     if (n.recipientId === userId) n.read = true;
   }
   saveStore(store);
+
+    },
+  });
 }
 
 // ------------------------------------------------------------------ Admin: Teams & Settings
-export function saveTeamRecord(
+export async function saveTeamRecord(
   input: {
     id?: string;
     name: string;
@@ -6669,7 +7368,11 @@ export function saveTeamRecord(
     active?: boolean;
   },
   byId: string,
-): { team?: Team; error?: string } & Partial<ActionDenied> {
+): Promise<{ team?: Team; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveTeamRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const now = new Date().toISOString();
   const name = input.name.trim();
@@ -6741,14 +7444,21 @@ export function saveTeamRecord(
   }
   saveStore(store);
   return { team };
+
+    },
+  });
 }
 
-export function updateEmployeeRoleSetting(
+export async function updateEmployeeRoleSetting(
   personId: string,
   appRole: AppRole | null,
   byId: string,
   options: { mfaVerified?: boolean } = {},
-): { ok: boolean; code?: string; error?: string } {
+): Promise<{ ok: boolean; code?: string; error?: string }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'updateEmployeeRoleSetting',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId);
   const person = store.people.find((p) => p.id === personId && p.isEmployee);
@@ -6815,12 +7525,19 @@ export function updateEmployeeRoleSetting(
   });
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
-export function saveEnquirySettingsRecord(
+export async function saveEnquirySettingsRecord(
   patch: Partial<EnquirySettings>,
   byId: string,
-): EnquirySettings {
+): Promise<EnquirySettings> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveEnquirySettingsRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   store.enquirySettings = {
     ...store.enquirySettings,
@@ -6837,12 +7554,19 @@ export function saveEnquirySettingsRecord(
   });
   saveStore(store);
   return store.enquirySettings;
+
+    },
+  });
 }
 
-export function saveTaskSettingsRecord(
+export async function saveTaskSettingsRecord(
   settings: TaskSettings,
   byId: string,
-): TaskSettings {
+): Promise<TaskSettings> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveTaskSettingsRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   store.taskSettings = settings;
   writeAudit(store, {
@@ -6856,6 +7580,9 @@ export function saveTaskSettingsRecord(
   });
   saveStore(store);
   return store.taskSettings;
+
+    },
+  });
 }
 
 // ------------------------------------------------------------------ Tasks
@@ -6868,7 +7595,7 @@ function workingHoursConfigFromStore(store: FirmStore): WorkingHoursConfig {
   };
 }
 
-export function saveTaskRecord(
+export async function saveTaskRecord(
   input: {
     id?: string;
     title: string;
@@ -6886,11 +7613,25 @@ export function saveTaskRecord(
   },
   byId: string,
   opts?: { viaTakeTask?: boolean; internalSystemStep?: boolean },
-): { task?: Task; tasks?: Task[]; error?: string } & Partial<ActionDenied> {
-  const store = getStore();
+): Promise<{ task?: Task; tasks?: Task[]; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveTaskRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (store) => {
   const now = new Date().toISOString();
   const actor = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actor);
+  const taskCtx = resolveDefaultServiceTenantContext(store, byId);
+  await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
+  const prelimVis = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
+  const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+    taskCtx,
+    prelimVis.hiddenMatterIds,
+  );
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: hiddenKdIds,
+  });
 
   if (!opts?.viaTakeTask && !opts?.internalSystemStep) {
     if (
@@ -7262,48 +8003,66 @@ export function saveTaskRecord(
 
   saveStore(store);
   return { task };
+    },
+  });
 }
 
-export function takeTaskRecord(
+export async function takeTaskRecord(
   taskId: string,
   byId: string,
-): { task?: Task; error?: string } & Partial<ActionDenied> {
-  const store = getStore();
-  const actor = store.people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actor);
-  const existing = store.tasks.find((t) => t.id === taskId);
-  if (!existing || !visibility.canViewTask(existing)) {
-    const msg = 'Task not found.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
-  if (!canUserTakeTask(byId, existing, store.teams, store.people, store.values)) {
-    const msg = 'You do not have permission to claim this task.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
-  return saveTaskRecord(
-    {
-      id: existing.id,
-      title: existing.title,
-      description: existing.description,
-      taskTypeId: existing.taskTypeId,
-      priorityId: existing.priorityId,
-      dueAt: existing.dueAt,
-      assignedTeamId: existing.assignedTeamId,
-      assignedPersonId: byId,
-      status: existing.status,
-      linkedRecords: existing.linkedRecords,
-    },
-    byId,
-    { viaTakeTask: true },
-  );
+): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
+  return withJsonStoreWriteLock(async () => {
+    const store = getStore();
+    const actor = store.people.find((p) => p.id === byId) ?? null;
+    const taskCtx = resolveDefaultServiceTenantContext(store, byId);
+    await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
+    const prelimVis = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
+    const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+      taskCtx,
+      prelimVis.hiddenMatterIds,
+    );
+    const visibility = buildRecordVisibility(store, actor, {
+      hiddenMatterKeyDateIds: hiddenKdIds,
+    });
+    const existing = store.tasks.find((t) => t.id === taskId);
+    if (!existing || !visibility.canViewTask(existing)) {
+      const msg = 'Task not found.';
+      return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+    }
+    if (!canUserTakeTask(byId, existing, store.teams, store.people, store.values)) {
+      const msg = 'You do not have permission to claim this task.';
+      return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+    }
+    return saveTaskRecord(
+      {
+        id: existing.id,
+        title: existing.title,
+        description: existing.description,
+        taskTypeId: existing.taskTypeId,
+        priorityId: existing.priorityId,
+        dueAt: existing.dueAt,
+        assignedTeamId: existing.assignedTeamId,
+        assignedPersonId: byId,
+        status: existing.status,
+        linkedRecords: existing.linkedRecords,
+      },
+      byId,
+      { viaTakeTask: true },
+    );
+  });
 }
 
-export function addTaskCommentRecord(
+export async function addTaskCommentRecord(
   taskId: string,
   text: string,
   byId: string,
-): { task?: Task; error?: string } & Partial<ActionDenied> {
-  const store = getStore();
+): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'addTaskCommentRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async (store) => {
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'task:comment', {
@@ -7314,7 +8073,18 @@ export function addTaskCommentRecord(
     const msg = 'You do not have permission (task:comment) to comment on tasks.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const taskCtx = resolveDefaultServiceTenantContext(store, byId);
+  await ensureStoreMattersRestrictedMetadataSynced(taskCtx, store);
+  const prelimVis = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
+  const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+    taskCtx,
+    prelimVis.hiddenMatterIds,
+  );
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: hiddenKdIds,
+  });
   const task = store.tasks.find((t) => t.id === taskId);
   if (!task || !visibility.canViewTask(task)) {
     const msg = 'Task not found or access denied.';
@@ -7364,6 +8134,8 @@ export function addTaskCommentRecord(
 
   saveStore(store);
   return { task };
+    },
+  });
 }
 
 // ------------------------------------------------------------------ Enquiries & Automatic Tasks
@@ -7502,7 +8274,7 @@ function completeOpenContactTasksForEnquiry(
   }
 }
 
-export function saveEnquiryRecord(
+export async function saveEnquiryRecord(
   input: Partial<Enquiry> & {
     firstName?: string;
     lastName?: string;
@@ -7514,17 +8286,31 @@ export function saveEnquiryRecord(
     privacyNoticeGiven?: boolean;
   },
   opts: { id?: string; byId: string; asDraft?: boolean; now?: string },
-): {
+): Promise<{
   enquiry?: Enquiry;
   routedTeamName?: string;
   routedToIntakeFallback?: boolean;
   errors?: Record<string, string>;
   missingFields?: string[];
-} & Partial<ActionDenied> {
+} & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit<
+    {
+      enquiry?: Enquiry;
+      routedTeamName?: string;
+      routedToIntakeFallback?: boolean;
+      errors?: Record<string, string>;
+      missingFields?: string[];
+    } & Partial<ActionDenied>
+  >({
+    label: 'saveEnquiryRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
+    mutate: async (): Promise<{ enquiry?: Enquiry; routedTeamName?: string; routedToIntakeFallback?: boolean; errors?: Record<string, string>; missingFields?: string[]; } & Partial<ActionDenied>> => {
   const store = getStore();
   const now = opts.now ?? new Date().toISOString();
   const actor = store.people.find((p) => p.id === opts.byId) ?? null;
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const existing = opts.id ? store.enquiries.find((e) => e.id === opts.id) ?? null : null;
   if (opts.id && !existing) {
     const msg = 'Enquiry not found.';
@@ -8020,14 +8806,21 @@ export function saveEnquiryRecord(
     routedTeamName: routedTeam?.name ?? 'Intake',
     routedToIntakeFallback,
   };
+
+    },
+  });
 }
 
-export function assignEnquiryRecord(
+export async function assignEnquiryRecord(
   enquiryId: string,
   assignedToId: string | null,
   assignedTeamId: string | null | undefined,
   byId: string,
-): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
+): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'assignEnquiryRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -8039,7 +8832,9 @@ export function assignEnquiryRecord(
     const msg = 'You do not have permission (enquiry:assign) to assign enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (
     !enq ||
@@ -8125,9 +8920,12 @@ export function assignEnquiryRecord(
 
   saveStore(store);
   return { enquiry: enq };
+
+    },
+  });
 }
 
-export function logEnquiryContactRecord(
+export async function logEnquiryContactRecord(
   enquiryId: string,
   input: {
     at?: string;
@@ -8136,7 +8934,11 @@ export function logEnquiryContactRecord(
     note: string;
   },
   byId: string,
-): { enquiry?: Enquiry; suggestNoResponse?: boolean; error?: string } & Partial<ActionDenied> {
+): Promise<{ enquiry?: Enquiry; suggestNoResponse?: boolean; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'logEnquiryContactRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -8148,7 +8950,9 @@ export function logEnquiryContactRecord(
     const msg = 'You do not have permission (enquiry:edit) to log contact on enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -8209,9 +9013,12 @@ export function logEnquiryContactRecord(
     enquiry: enq,
     suggestNoResponse: isEnquiryOpen(enq) && failedCount >= threshold,
   };
+
+    },
+  });
 }
 
-export function sendEnquiryEmailRecord(
+export async function sendEnquiryEmailRecord(
   enquiryId: string,
   input: {
     to: string;
@@ -8220,7 +9027,11 @@ export function sendEnquiryEmailRecord(
     bodyText: string;
   },
   byId: string,
-): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
+): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'sendEnquiryEmailRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -8232,7 +9043,9 @@ export function sendEnquiryEmailRecord(
     const msg = 'You do not have permission (enquiry:edit) to send enquiry emails.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -8275,9 +9088,12 @@ export function sendEnquiryEmailRecord(
 
   saveStore(store);
   return { enquiry: enq };
+
+    },
+  });
 }
 
-export function closeEnquiryRecord(
+export async function closeEnquiryRecord(
   enquiryId: string,
   input: {
     targetStatus: 'Declined' | 'Referred out' | 'No response';
@@ -8287,7 +9103,11 @@ export function closeEnquiryRecord(
     referredToName?: string;
   },
   byId: string,
-): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
+): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'closeEnquiryRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -8299,7 +9119,9 @@ export function closeEnquiryRecord(
     const msg = 'You do not have permission (enquiry:close) to close enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -8394,12 +9216,19 @@ export function closeEnquiryRecord(
 
   saveStore(store);
   return { enquiry: enq };
+
+    },
+  });
 }
 
-export function reopenEnquiryRecord(
+export async function reopenEnquiryRecord(
   enquiryId: string,
   byId: string,
-): { enquiry?: Enquiry; error?: string } & Partial<ActionDenied> {
+): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'reopenEnquiryRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -8411,7 +9240,9 @@ export function reopenEnquiryRecord(
     const msg = 'You do not have permission (enquiry:reopen) to reopen enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq || !visibility.canViewEnquiry(enq)) {
     const msg = 'Enquiry not found.';
@@ -8449,6 +9280,9 @@ export function reopenEnquiryRecord(
 
   saveStore(store);
   return { enquiry: enq };
+
+    },
+  });
 }
 
 const DECLINED_ORG_BLOCKED_REASON =
@@ -8497,7 +9331,7 @@ function assessDeclinedOrganisation(
  * - If clear, links or creates the Person (and Organisation + contact link if calling for a business).
  * - Returns the clientId and instructingContactId so the user is routed to the pre-filled New Matter form.
  */
-export function prepareEnquiryConversion(
+export async function prepareEnquiryConversion(
   enquiryId: string,
   opts: {
     usePersonId?: string | null;
@@ -8505,7 +9339,7 @@ export function prepareEnquiryConversion(
     createForBusiness?: boolean;
   },
   byId: string,
-): {
+): Promise<{
   ok: boolean;
   conflictBlocked?: boolean;
   conflictReasons?: string[];
@@ -8514,7 +9348,11 @@ export function prepareEnquiryConversion(
   instructingContactId?: string | null;
   enquiryId?: string;
   error?: string;
-} & Partial<Omit<ActionDenied, 'ok'>> {
+} & Partial<Omit<ActionDenied, 'ok'>>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'prepareEnquiryConversion',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -8531,7 +9369,9 @@ export function prepareEnquiryConversion(
       conflictReasons: [msg],
     };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq) return { ok: false, conflictReasons: ['Enquiry not found.'] };
   if (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) {
@@ -8656,7 +9496,7 @@ export function prepareEnquiryConversion(
   // Link or create Person
   let personId = opts.usePersonId || enq.linkedPersonId;
   if (!personId) {
-    const createdPerson = savePersonRecord(
+    const createdPerson = await savePersonRecord(
       {
         firstName: enq.firstName,
         surname: enq.lastName,
@@ -8736,7 +9576,7 @@ export function prepareEnquiryConversion(
     let orgId = opts.useOrganisationId || enq.linkedOrganisationId;
 
     if (!orgId && enq.callingOnBehalfOf.trim()) {
-      const createdOrg = saveOrganisationRecord(
+      const createdOrg = await saveOrganisationRecord(
         {
           legalName: enq.callingOnBehalfOf.trim(),
           generalEmail: enq.email,
@@ -8779,7 +9619,7 @@ export function prepareEnquiryConversion(
         (l) => l.personId === personId && l.organisationId === orgId && l.isCurrent,
       );
       if (!hasLink) {
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId,
             organisationId: orgId,
@@ -8808,6 +9648,9 @@ export function prepareEnquiryConversion(
     enquiryId: enq.id,
     ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
   };
+
+    },
+  });
 }
 
 /**
@@ -8816,13 +9659,15 @@ export function prepareEnquiryConversion(
  * - Completes the open contact task.
  * - Raises the automatic "Complete matter opening" task assigned to the matter lead fee earner (5 working days).
  */
-function finalizeEnquiryConversionToMatter(
+async function finalizeEnquiryConversionToMatter(
   store: FirmStore,
   enquiryId: string,
   matter: Matter,
   byId: string,
   now: string,
-): void {
+  ctx: TenantContext,
+  compensator: RecordDeltaCompensator,
+): Promise<void> {
   const enq = store.enquiries.find((e) => e.id === enquiryId);
   if (!enq) return;
 
@@ -8870,25 +9715,58 @@ function finalizeEnquiryConversionToMatter(
     now,
   );
 
-  // Carry enquiry key dates across to the converted matter (`source: 'carried_from_enquiry'`) (§1)
-  const kdConfig = getKeyDatesConfig(store);
+  // Carry enquiry key dates across to the converted matter in PostgreSQL (`source: 'carried_from_enquiry'`) (§1, S0-15)
+  const kdConfig = await getKeyDatesConfig({ ctx });
   if (kdConfig.enabled) {
-    store.keyDates = store.keyDates ?? [];
+    const keyDateRepo = getKeyDateRepository();
+    const existingEnquiryKds = await keyDateRepo.listKeyDatesForEnquiry(ctx, enq.id);
+    const beforeSnapshotsById = new Map(
+      existingEnquiryKds.map((kd) => [kd.id, structuredClone(kd)]),
+    );
+    const workingKeyDates = existingEnquiryKds.map((kd) => structuredClone(kd));
+    const preAllocatedNewKdId =
+      existingEnquiryKds.length === 0 && enq.keyDate
+        ? await keyDateRepo.allocateNextKeyDateId(ctx)
+        : null;
+    const carriedAudits: AuditEntry[] = [];
     const { tasks: storeTasks } = store;
-    carryEnquiryKeyDatesToMatter({
+
+    const carried = carryEnquiryKeyDatesToMatter({
       enquiry: enq,
       matter,
-      tenantId: store.firmId || getActiveTenantConfiguration().tenantId,
-      keyDates: store.keyDates,
+      tenantId: ctx.tenantId,
+      keyDates: workingKeyDates,
       tasks: storeTasks,
       teams: store.teams,
       config: kdConfig,
       actorId: byId,
       nowIso: now,
-      nextKeyDateId: () => nextId(store, 'KD'),
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
+      nextKeyDateId: () => preAllocatedNewKdId ?? `KD-${randomUUID().slice(0, 8)}`,
+      audit: carriedAudits,
+      nextAuditId: () => 'AU-PENDING',
     });
+
+    for (const entry of carriedAudits) {
+      const { id: _unusedId, ...rest } = entry;
+      void _unusedId;
+      writeAudit(store, rest);
+    }
+
+    for (const carriedKd of carried) {
+      const priorSnap = beforeSnapshotsById.get(carriedKd.id);
+      await keyDateRepo.putKeyDate(ctx, carriedKd);
+      if (priorSnap) {
+        compensator.register(`keydates.carry:${carriedKd.id}`, async () => {
+          await keyDateRepo.putKeyDate(ctx, priorSnap, {
+            allowEntityRebindForCompensation: true,
+          });
+        });
+      } else {
+        compensator.register(`keydates.carry_seeded:${carriedKd.id}`, async () => {
+          await keyDateRepo.deleteKeyDateByIdForCompensation(ctx, carriedKd.id);
+        });
+      }
+    }
   }
 
   // Automatic task: Complete matter opening (5 working days) once the matter has a real reference (or if none exists yet)
@@ -8931,7 +9809,11 @@ function finalizeEnquiryConversionToMatter(
 }
 
 /** Anonymise unconverted closed enquiries past the firm's retention period (or a specific enquiry). */
-export function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: string): number {
+export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: string): Promise<number> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'anonymiseExpiredEnquiries',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -8977,6 +9859,9 @@ export function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: stri
 
   if (count > 0) saveStore(store);
   return count;
+
+    },
+  });
 }
 
 // ============================================================================
@@ -9320,12 +10205,16 @@ export function getPmsAdminSnapshot(byId?: string): PmsAdminSnapshot {
   };
 }
 
-export function linkPmsRecord(
+export async function linkPmsRecord(
   entityType: PmsEntityType,
   onesquaredId: string,
   pmsCode: string,
   byId: string,
-): PmsLink {
+): Promise<PmsLink> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'linkPmsRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const now = new Date().toISOString();
 
@@ -9367,9 +10256,16 @@ export function linkPmsRecord(
 
   saveStore(store);
   return link;
+
+    },
+  });
 }
 
-export function unlinkPmsRecord(linkId: string, byId: string): void {
+export async function unlinkPmsRecord(linkId: string, byId: string): Promise<void> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'unlinkPmsRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const existing = store.pmsLinks.find((l) => l.id === linkId);
   if (!existing) return;
@@ -9392,9 +10288,16 @@ export function unlinkPmsRecord(linkId: string, byId: string): void {
   });
 
   saveStore(store);
+
+    },
+  });
 }
 
-export function rerunAutomaticPmsMatching(byId: string): { totalLinks: number } {
+export async function rerunAutomaticPmsMatching(byId: string): Promise<{ totalLinks: number }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'rerunAutomaticPmsMatching',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const pms = getPmsSource();
   const now = new Date().toISOString();
@@ -9412,6 +10315,9 @@ export function rerunAutomaticPmsMatching(byId: string): { totalLinks: number } 
   void byId;
   saveStore(store);
   return { totalLinks: store.pmsLinks.length };
+
+    },
+  });
 }
 
 function mapPmsPracticeAreaId(store: FirmStore, pmsPracticeArea: string): string {
@@ -9536,7 +10442,7 @@ export async function createRecordFromPms(
 
     const paId = mapPmsPracticeAreaId(store, fe.department);
 
-    const res = savePersonRecord(
+    const res = await savePersonRecord(
       {
         firstName: fe.first_name,
         surname: fe.last_name,
@@ -9565,7 +10471,7 @@ export async function createRecordFromPms(
     }
     if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
 
-    linkPmsRecord('employee', res.person.id, pmsCode, byId);
+    await linkPmsRecord('employee', res.person.id, pmsCode, byId);
     return { ok: true, createdId: res.person.id };
   }
 
@@ -9580,7 +10486,7 @@ export async function createRecordFromPms(
         ? findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', client.client_partner_id)
         : null) ?? byId;
 
-    const res = saveOrganisationRecord(
+    const res = await saveOrganisationRecord(
       {
         legalName: client.client_name,
         organisationTypeId: vid('organisation_type', 'Private Limited Company (Ltd)'),
@@ -9606,7 +10512,7 @@ export async function createRecordFromPms(
     );
     if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
 
-    linkPmsRecord('organisation', res.organisation.id, pmsCode, byId);
+    await linkPmsRecord('organisation', res.organisation.id, pmsCode, byId);
     return { ok: true, createdId: res.organisation.id };
   }
 
@@ -9624,7 +10530,7 @@ export async function createRecordFromPms(
         ? findOneSquaredIdForPmsCode(store.pmsLinks, 'employee', client.client_partner_id)
         : null) ?? byId;
 
-    const res = savePersonRecord(
+    const res = await savePersonRecord(
       {
         firstName,
         surname,
@@ -9669,7 +10575,7 @@ export async function createRecordFromPms(
     );
     if (res.errors) return { ok: false, error: Object.values(res.errors).join(' ') };
 
-    linkPmsRecord('person', res.person.id, pmsCode, byId);
+    await linkPmsRecord('person', res.person.id, pmsCode, byId);
     return { ok: true, createdId: res.person.id };
   }
 
@@ -9746,7 +10652,7 @@ export async function createRecordFromPms(
       return { ok: false, error: res.errors ? Object.values(res.errors).join(' ') : 'Matter could not be saved.' };
     }
 
-    linkPmsRecord('matter', res.matter.id, pmsCode, byId);
+    await linkPmsRecord('matter', res.matter.id, pmsCode, byId);
     return { ok: true, createdId: res.matter.id };
   }
 
@@ -9755,10 +10661,14 @@ export async function createRecordFromPms(
 
 // ------------------------------------------------------------------ Role-based Home Pages & Actions
 
-export function switchViewingRole(
+export async function switchViewingRole(
   userId: string,
   roleKey: string,
-): { ok: boolean; error?: string; roleKey?: string } {
+): Promise<{ ok: boolean; error?: string; roleKey?: string }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'switchViewingRole',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
+    mutate: async () => {
   const store = getStore();
   const user = store.people.find((p) => p.id === userId);
   if (!user) return { ok: false, error: 'User not found.' };
@@ -9787,16 +10697,23 @@ export function switchViewingRole(
   };
   saveStore(store);
   return { ok: true, roleKey };
+
+    },
+  });
 }
 
-export function saveHomePagesConfig(
+export async function saveHomePagesConfig(
   input: {
     roles?: RoleHomeConfig[];
     firmSettings?: Partial<HomeFirmSettings>;
   },
   byId: string,
   options: { mfaVerified?: boolean } = {},
-): { ok: boolean; code?: string; error?: string; config: HomePagesConfig } {
+): Promise<{ ok: boolean; code?: string; error?: string; config: HomePagesConfig }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveHomePagesConfig',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const nowIso = new Date().toISOString();
   const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
@@ -9868,12 +10785,19 @@ export function saveHomePagesConfig(
 
   saveStore(store);
   return { ok: true, config: store.homePagesConfig };
+
+    },
+  });
 }
 
-export function resetHomePagesConfig(
+export async function resetHomePagesConfig(
   byId: string,
   options: { mfaVerified?: boolean } = {},
-): { ok: boolean; code?: string; error?: string; config: HomePagesConfig } {
+): Promise<{ ok: boolean; code?: string; error?: string; config: HomePagesConfig }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'resetHomePagesConfig',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const nowIso = new Date().toISOString();
   const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
@@ -9929,9 +10853,12 @@ export function resetHomePagesConfig(
   });
   saveStore(store);
   return { ok: true, config: store.homePagesConfig };
+
+    },
+  });
 }
 
-export function addHomeRole(
+export async function addHomeRole(
   input: {
     key?: string;
     label: string;
@@ -9941,7 +10868,11 @@ export function addHomeRole(
   },
   byId: string,
   options: { mfaVerified?: boolean } = {},
-): { ok: boolean; code?: string; error?: string; role?: RoleHomeConfig } {
+): Promise<{ ok: boolean; code?: string; error?: string; role?: RoleHomeConfig }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'addHomeRole',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const nowIso = new Date().toISOString();
   const actor = store.people.find((p) => p.id === byId) ?? null;
@@ -10022,9 +10953,12 @@ export function addHomeRole(
 
   saveStore(store);
   return { ok: true, role: newRole };
+
+    },
+  });
 }
 
-export function updateEmployeeRolesAndSupports(
+export async function updateEmployeeRolesAndSupports(
   personId: string,
   input: {
     roles?: string[];
@@ -10032,7 +10966,11 @@ export function updateEmployeeRolesAndSupports(
   },
   byId: string,
   options: { mfaVerified?: boolean } = {},
-): { ok: boolean; code?: string; error?: string } {
+): Promise<{ ok: boolean; code?: string; error?: string }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'updateEmployeeRolesAndSupports',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId);
   const person = store.people.find((p) => p.id === personId);
@@ -10103,6 +11041,9 @@ export function updateEmployeeRolesAndSupports(
 
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
 /**
@@ -10208,7 +11149,7 @@ export function previewRbacOverrides(
  * Enforces `rbac:manage_user_overrides` + MFA + blocks self-modification + blocks granting unheld permissions,
  * and writes a before/after audit entry (ADR-0015).
  */
-export function updatePersonPermissionOverrides(
+export async function updatePersonPermissionOverrides(
   personId: string,
   input: {
     grant: PermissionKey[];
@@ -10218,7 +11159,11 @@ export function updatePersonPermissionOverrides(
   },
   byId: string,
   options: { mfaVerified?: boolean } = {},
-): { ok: boolean; code?: string; error?: string; person?: Person } {
+): Promise<{ ok: boolean; code?: string; error?: string; person?: Person }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'updatePersonPermissionOverrides',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId);
   const target = store.people.find((p) => p.id === personId);
@@ -10301,17 +11246,24 @@ export function updatePersonPermissionOverrides(
 
   saveStore(store);
   return { ok: true, person: target };
+
+    },
+  });
 }
 
 /**
  * Updates the tenant's RBAC configuration (`roles`, `departmentGrants`, `relationshipGrants`, `identityMapping`).
  * Enforces `rbac:manage_config` + MFA, validates all permission and role keys, and writes a before/after audit log.
  */
-export function updateTenantRbacConfig(
+export async function updateTenantRbacConfig(
   patch: Partial<RbacConfiguration>,
   byId: string,
   options: { mfaVerified?: boolean } = {},
-): { ok: boolean; code?: string; error?: string; rbacConfig?: RbacConfiguration } {
+): Promise<{ ok: boolean; code?: string; error?: string; rbacConfig?: RbacConfiguration }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'updateTenantRbacConfig',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId);
   if (!actor) return { ok: false, error: 'Acting user not found.' };
@@ -10449,12 +11401,19 @@ export function updateTenantRbacConfig(
 
   saveStore(store);
   return { ok: true, rbacConfig: nextRbac };
+
+    },
+  });
 }
 
-export function approveSignOff(
+export async function approveSignOff(
   signOffId: string,
   byId: string,
-): { ok: true } | ActionDenied {
+): Promise<{ ok: true } | ActionDenied> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'approveSignOff',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -10529,14 +11488,21 @@ export function approveSignOff(
 
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
 
-export function discussSignOff(
+export async function discussSignOff(
   signOffId: string,
   note: string,
   byId: string,
-): { ok: true } | ActionDenied {
+): Promise<{ ok: true } | ActionDenied> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'discussSignOff',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -10611,7 +11577,7 @@ export function discussSignOff(
   // Create a follow-up task for the requester
   const linkedRecords: TaskLinkedRecord[] = [];
   if (item.matterId) linkedRecords.push({ recordType: 'matter', recordId: item.matterId });
-  saveTaskRecord(
+  await saveTaskRecord(
     {
       title: `Discuss partner sign-off: ${item.title}`,
       description: item.discussionNote,
@@ -10627,13 +11593,16 @@ export function discussSignOff(
 
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
 
-export function requestMatterBill(
+export async function requestMatterBill(
   matterCode: string,
   byId: string,
-): { ok: true; taskId?: string } | ActionDenied {
+): Promise<{ ok: true; taskId?: string } | ActionDenied> {
   const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
@@ -10675,7 +11644,7 @@ export function requestMatterBill(
     { recordType: 'matter', recordId: targetMatter.id },
   ];
 
-  const res = saveTaskRecord(
+  const res = await saveTaskRecord(
     {
       title: `Approve draft bill on ${matterCode} (${targetMatter.title})`,
       description: `Billing request raised from Home page for unbilled WIP on ${matterCode}.`,
@@ -10693,11 +11662,15 @@ export function requestMatterBill(
   return { ok: true, taskId: res.task?.id };
 }
 
-export function flagMatterWriteOff(
+export async function flagMatterWriteOff(
   matterCode: string,
   amountGbp: number,
   byId: string,
-): { ok: true; signOffId?: string } | ActionDenied {
+): Promise<{ ok: true; signOffId?: string } | ActionDenied> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'flagMatterWriteOff',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
@@ -10766,12 +11739,19 @@ export function flagMatterWriteOff(
   store.signOffs.unshift(signOff);
   saveStore(store);
   return { ok: true, signOffId: id };
+
+    },
+  });
 }
 
-export function remindTeamLeadOverdueCompliance(
+export async function remindTeamLeadOverdueCompliance(
   teamId: string,
   byId: string,
-): { ok: boolean } | ActionDenied {
+): Promise<{ ok: boolean } | ActionDenied> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'remindTeamLeadOverdueCompliance',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
@@ -10830,10 +11810,13 @@ export function remindTeamLeadOverdueCompliance(
 
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
 
-export function recordInvoiceCreditControlAction(
+export async function recordInvoiceCreditControlAction(
   input: {
     invoiceNumber: string;
     matterCode: string;
@@ -10842,7 +11825,11 @@ export function recordInvoiceCreditControlAction(
     note?: string;
   },
   byId: string,
-): { ok: true; taskId?: string } | ActionDenied {
+): Promise<{ ok: true; taskId?: string } | ActionDenied> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'recordInvoiceCreditControlAction',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const auth = verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
@@ -10922,7 +11909,7 @@ export function recordInvoiceCreditControlAction(
         }),
       );
     }
-    const res = saveTaskRecord(
+    const res = await saveTaskRecord(
       {
         title: `Partner escalation: overdue invoice ${input.invoiceNumber} (${input.matterCode})`,
         description:
@@ -10974,13 +11961,20 @@ export function recordInvoiceCreditControlAction(
 
   saveStore(store);
   return { ok: true };
+
+    },
+  });
 }
 
 
-export function saveOrgStructure(
+export async function saveOrgStructure(
   nextCatalogue: OrgStructureCatalogue,
   byId: string,
-): { orgStructure: OrgStructureCatalogue } {
+): Promise<{ orgStructure: OrgStructureCatalogue }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveOrgStructure',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   store.orgStructure = nextCatalogue;
   writeAudit(store, {
@@ -10995,9 +11989,12 @@ export function saveOrgStructure(
   });
   saveStore(store);
   return { orgStructure: store.orgStructure };
+
+    },
+  });
 }
 
-export function saveMatterPartyRelationship(
+export async function saveMatterPartyRelationship(
   input: {
     code: string;
     label: string;
@@ -11006,7 +12003,11 @@ export function saveMatterPartyRelationship(
     isNew?: boolean;
   },
   byId: string,
-): { relationship?: MatterPartyRelationshipDef; taxonomy: MatterPartyTaxonomy; error?: string } {
+): Promise<{ relationship?: MatterPartyRelationshipDef; taxonomy: MatterPartyTaxonomy; error?: string }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveMatterPartyRelationship',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
@@ -11065,13 +12066,20 @@ export function saveMatterPartyRelationship(
   });
   saveStore(store);
   return { relationship: updated, taxonomy };
+
+    },
+  });
 }
 
-export function reorderMatterPartyRelationship(
+export async function reorderMatterPartyRelationship(
   code: string,
   direction: -1 | 1,
   byId: string,
-): { taxonomy: MatterPartyTaxonomy } {
+): Promise<{ taxonomy: MatterPartyTaxonomy }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'reorderMatterPartyRelationship',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
@@ -11097,12 +12105,19 @@ export function reorderMatterPartyRelationship(
   });
   saveStore(store);
   return { taxonomy };
+
+    },
+  });
 }
 
-export function deleteMatterPartyRelationship(
+export async function deleteMatterPartyRelationship(
   code: string,
   byId: string,
-): { taxonomy: MatterPartyTaxonomy; error?: string } {
+): Promise<{ taxonomy: MatterPartyTaxonomy; error?: string }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'deleteMatterPartyRelationship',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
@@ -11128,9 +12143,12 @@ export function deleteMatterPartyRelationship(
   });
   saveStore(store);
   return { taxonomy };
+
+    },
+  });
 }
 
-export function saveMatterPartyCapacity(
+export async function saveMatterPartyCapacity(
   input: {
     code: string;
     label: string;
@@ -11142,7 +12160,11 @@ export function saveMatterPartyCapacity(
     isNew?: boolean;
   },
   byId: string,
-): { capacity?: MatterPartyCapacityDef; taxonomy: MatterPartyTaxonomy; error?: string } {
+): Promise<{ capacity?: MatterPartyCapacityDef; taxonomy: MatterPartyTaxonomy; error?: string }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveMatterPartyCapacity',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
@@ -11207,12 +12229,19 @@ export function saveMatterPartyCapacity(
   });
   saveStore(store);
   return { capacity: updated, taxonomy };
+
+    },
+  });
 }
 
-export function deleteMatterPartyCapacity(
+export async function deleteMatterPartyCapacity(
   code: string,
   byId: string,
-): { taxonomy: MatterPartyTaxonomy; error?: string } {
+): Promise<{ taxonomy: MatterPartyTaxonomy; error?: string }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'deleteMatterPartyCapacity',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
@@ -11238,13 +12267,20 @@ export function deleteMatterPartyCapacity(
   });
   saveStore(store);
   return { taxonomy };
+
+    },
+  });
 }
 
-export function updateWorkTypeProfiles(
+export async function updateWorkTypeProfiles(
   workTypeSubcategoryId: string,
   profiles: WorkTypeProfileCode[],
   byId: string,
-): { taxonomy: MatterPartyTaxonomy } {
+): Promise<{ taxonomy: MatterPartyTaxonomy }> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'updateWorkTypeProfiles',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
   store.matterPartyTaxonomy = taxonomy;
@@ -11262,6 +12298,9 @@ export function updateWorkTypeProfiles(
   });
   saveStore(store);
   return { taxonomy };
+
+    },
+  });
 }
 
 // ============================================================================
@@ -11292,10 +12331,14 @@ export interface SaveQuoteInput {
   followUpAfterDays?: number;
 }
 
-export function saveQuoteRecord(
+export async function saveQuoteRecord(
   input: SaveQuoteInput,
   opts: { id?: string; byId: string; markAsSent?: boolean },
-): { quote?: Quote; error?: string } & Partial<ActionDenied> {
+): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveQuoteRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === opts.byId) ?? null;
   if (
@@ -11307,7 +12350,9 @@ export function saveQuoteRecord(
     const msg = 'You do not have permission (quote:edit) to create or edit quotes.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const now = new Date();
   const nowIso = now.toISOString();
 
@@ -11533,12 +12578,19 @@ export function saveQuoteRecord(
   });
   saveStore(store);
   return { quote: existing };
+
+    },
+  });
 }
 
-export function markQuoteSentRecord(
+export async function markQuoteSentRecord(
   quoteId: string,
   byId: string,
-): { quote?: Quote; error?: string } & Partial<ActionDenied> {
+): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'markQuoteSentRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -11550,7 +12602,9 @@ export function markQuoteSentRecord(
     const msg = 'You do not have permission (quote:edit) to mark a quote as sent.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -11590,9 +12644,12 @@ export function markQuoteSentRecord(
 
   saveStore(store);
   return { quote };
+
+    },
+  });
 }
 
-export function logQuoteFollowUpRecord(
+export async function logQuoteFollowUpRecord(
   quoteId: string,
   input: {
     method: ContactLogMethod;
@@ -11600,7 +12657,11 @@ export function logQuoteFollowUpRecord(
     nextFollowUpDate: string | null;
   },
   byId: string,
-): { quote?: Quote; error?: string } & Partial<ActionDenied> {
+): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'logQuoteFollowUpRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -11612,7 +12673,9 @@ export function logQuoteFollowUpRecord(
     const msg = 'You do not have permission (quote:edit) to log quote follow-ups.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -11666,9 +12729,12 @@ export function logQuoteFollowUpRecord(
 
   saveStore(store);
   return { quote };
+
+    },
+  });
 }
 
-export function reviseQuoteRecord(
+export async function reviseQuoteRecord(
   quoteId: string,
   input: {
     feeBasis: QuoteFeeBasis;
@@ -11685,7 +12751,11 @@ export function reviseQuoteRecord(
     markAsSent?: boolean;
   },
   byId: string,
-): { quote?: Quote; error?: string } & Partial<ActionDenied> {
+): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'reviseQuoteRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -11697,7 +12767,9 @@ export function reviseQuoteRecord(
     const msg = 'You do not have permission (quote:edit) to revise quotes.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -11818,9 +12890,12 @@ export function reviseQuoteRecord(
 
   saveStore(store);
   return { quote };
+
+    },
+  });
 }
 
-export function recordQuoteOutcomeRecord(
+export async function recordQuoteOutcomeRecord(
   quoteId: string,
   input: {
     outcome: 'Accepted' | 'Declined';
@@ -11828,7 +12903,11 @@ export function recordQuoteOutcomeRecord(
     note?: string;
   },
   byId: string,
-): { quote?: Quote; error?: string } & Partial<ActionDenied> {
+): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'recordQuoteOutcomeRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -11840,7 +12919,9 @@ export function recordQuoteOutcomeRecord(
     const msg = 'You do not have permission (quote:edit) to record a quote outcome.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     const msg = 'Quote not found.';
@@ -11905,6 +12986,9 @@ export function recordQuoteOutcomeRecord(
 
   saveStore(store);
   return { quote };
+
+    },
+  });
 }
 
 /**
@@ -11912,10 +12996,10 @@ export function recordQuoteOutcomeRecord(
  * Ensures a Person and/or Organisation record exists for the client/prospect,
  * links them on the quote, and returns clientId & instructingContactId for /matters/new.
  */
-export function prepareQuoteConversionRecord(
+export async function prepareQuoteConversionRecord(
   quoteId: string,
   byId: string,
-): {
+): Promise<{
   ok: boolean;
   conflictBlocked?: boolean;
   conflictReasons?: string[];
@@ -11925,7 +13009,11 @@ export function prepareQuoteConversionRecord(
   quoteId?: string;
   enquiryId?: string | null;
   error?: string;
-} & Partial<Omit<ActionDenied, 'ok'>> {
+} & Partial<Omit<ActionDenied, 'ok'>>> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'prepareQuoteConversionRecord',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const store = getStore();
   const actor = store.people.find((p) => p.id === byId) ?? null;
   if (
@@ -11942,7 +13030,9 @@ export function prepareQuoteConversionRecord(
       conflictReasons: [msg],
     };
   }
-  const visibility = buildRecordVisibility(store, actor);
+  const visibility = buildRecordVisibility(store, actor, {
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote || !visibility.canViewQuote(quote)) {
     return { ok: false, error: 'Quote not found.' };
@@ -12203,7 +13293,7 @@ export function prepareQuoteConversionRecord(
     const firstName = parts[0] || 'Client';
     const surname = parts.slice(1).join(' ') || 'Contact';
 
-    const createdPerson = savePersonRecord(
+    const createdPerson = await savePersonRecord(
       {
         firstName,
         surname,
@@ -12240,7 +13330,7 @@ export function prepareQuoteConversionRecord(
 
   let createdNewClientOrg = false;
   if (!orgId && hasOrgName) {
-    const createdOrg = saveOrganisationRecord(
+    const createdOrg = await saveOrganisationRecord(
       {
         legalName: quote.prospectOrganisationName.trim(),
         generalEmail: quote.prospectEmail,
@@ -12263,7 +13353,7 @@ export function prepareQuoteConversionRecord(
         (l) => l.personId === personId && l.organisationId === orgId,
       );
       if (!linkExists) {
-        createOrUpdateLink(
+        await createOrUpdateLink(
           {
             personId,
             organisationId: orgId,
@@ -12338,15 +13428,20 @@ export function prepareQuoteConversionRecord(
     enquiryId: quote.linkedEnquiryId,
     ...(conflictWarnings.length > 0 ? { conflictWarnings } : {}),
   };
+
+    },
+  });
 }
 
-function finalizeQuoteConversionToMatter(
+async function finalizeQuoteConversionToMatter(
   store: FirmStore,
   quoteId: string,
   matter: Matter,
   byId: string,
   now: string,
-): void {
+  ctx: TenantContext,
+  compensator: RecordDeltaCompensator,
+): Promise<void> {
   const quote = store.quotes.find((q) => q.id === quoteId);
   if (!quote) return;
 
@@ -12388,14 +13483,26 @@ function finalizeQuoteConversionToMatter(
     if (!matter.sourceEnquiryId) {
       matter.sourceEnquiryId = quote.linkedEnquiryId;
     }
-    finalizeEnquiryConversionToMatter(store, quote.linkedEnquiryId, matter, byId, now);
+    await finalizeEnquiryConversionToMatter(
+      store,
+      quote.linkedEnquiryId,
+      matter,
+      byId,
+      now,
+      ctx,
+      compensator,
+    );
   }
 }
 
-export function saveMatterCostsConfig(
+export async function saveMatterCostsConfig(
   config: MatterCostsConfig,
   byId: string,
-): MatterCostsConfig {
+): Promise<MatterCostsConfig> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'saveMatterCostsConfig',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
     throw new AuthorisationError({
@@ -12427,11 +13534,18 @@ export function saveMatterCostsConfig(
   });
   saveStore(store);
   return next;
+
+    },
+  });
 }
 
-export function syncMatterCostsRatesFromPms(
+export async function syncMatterCostsRatesFromPms(
   byId: string,
-): MatterCostsConfig {
+): Promise<MatterCostsConfig> {
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'syncMatterCostsRatesFromPms',
+    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
+    mutate: async () => {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enablePmsLiveRateSync) {
     throw new AuthorisationError({
@@ -12474,16 +13588,19 @@ export function syncMatterCostsRatesFromPms(
   });
   saveStore(store);
   return next;
+
+    },
+  });
 }
 
-export function resolveOrProvisionEntraEmployee(
+export async function resolveOrProvisionEntraEmployee(
   claims: EntraIdRawTokenClaims & Record<string, unknown>,
   options?: { correlationId?: string },
-): {
+): Promise<{
   person: Person;
   verifiedToken: VerifiedOidcTokenClaims;
   rbacConfig: RbacConfiguration;
-} {
+}> {
   const activeTenantConfig = getActiveTenantConfiguration();
   const activeTenantId = activeTenantConfig.tenantId;
   const correlationId = resolveRequestCorrelationId(
@@ -12492,18 +13609,16 @@ export function resolveOrProvisionEntraEmployee(
         ?.correlationId,
     'corr-entra-signin',
   );
-  const store = getStore();
+  const prelimStore = getStore();
   const rbacConfig = getDefaultTenantRbacConfig(activeTenantId);
   const {
-    person: matchedPerson,
-    matchedByEmailOnly,
     ambiguousEmailMatchPersonIds,
     refusedPrivilegedEmailLinkPersonId,
     verifiedToken,
   } = resolvePersonForEntraClaims({
     claims,
-    people: store.people,
-    teams: store.teams,
+    people: prelimStore.people,
+    teams: prelimStore.teams,
     tenantId: activeTenantId,
     rbacConfig,
     primaryDomain: activeTenantConfig.branding.primaryDomain,
@@ -12517,19 +13632,31 @@ export function resolveOrProvisionEntraEmployee(
     (claims.xms_edov === true ? claims.email : '') ||
     ''
   ).trim();
+  const signInCtx = resolveCurrentTenantContext(
+    createSignInActorFromVerifiedOidcToken(verifiedToken, {
+      oid,
+      email:
+        verifiedToken.email ||
+        `${verifiedToken.sub}@${activeTenantConfig.branding.primaryDomain}`,
+      correlationId,
+    }),
+    activeTenantConfig,
+  );
   const authorityMode = rbacConfig.identityMapping?.authorityMode ?? 'hybrid';
 
   if (refusedPrivilegedEmailLinkPersonId) {
-    writeAudit(store, {
-      recordType: 'person',
-      recordId: refusedPrivilegedEmailLinkPersonId,
-      action: 'entra-link',
-      field: 'Entra ID Email Link Refused',
-      oldValue: 'unlinked',
-      newValue: `Refused automatic email link for privileged employee ${refusedPrivilegedEmailLinkPersonId} (correlationId=${correlationId})`,
-      byId: 'system',
-      at: now,
-    });
+    await appendUnmigratedModuleAuditEntries(signInCtx, [
+      {
+        recordType: 'person',
+        recordId: refusedPrivilegedEmailLinkPersonId,
+        action: 'entra-link',
+        field: 'Entra ID Email Link Refused',
+        oldValue: 'unlinked',
+        newValue: `Refused automatic email link for privileged employee ${refusedPrivilegedEmailLinkPersonId} (correlationId=${correlationId})`,
+        byId: 'system',
+        at: now,
+      },
+    ]);
     console.warn(
       JSON.stringify({
         event: 'ENTRA_EMAIL_LINK_PRIVILEGED_REFUSED',
@@ -12538,21 +13665,22 @@ export function resolveOrProvisionEntraEmployee(
         personId: refusedPrivilegedEmailLinkPersonId,
       }),
     );
-    saveStore(store);
     throw new Error('Your account needs to be linked by an administrator.');
   }
 
   if (ambiguousEmailMatchPersonIds && ambiguousEmailMatchPersonIds.length > 1) {
-    writeAudit(store, {
-      recordType: 'person',
-      recordId: ambiguousEmailMatchPersonIds[0]!,
-      action: 'entra-link',
-      field: 'Entra ID Email Link Ambiguous',
-      oldValue: 'unlinked',
-      newValue: `Refused automatic email link across ${ambiguousEmailMatchPersonIds.length} unbound employees (${ambiguousEmailMatchPersonIds.join(', ')}; correlationId=${correlationId})`,
-      byId: 'system',
-      at: now,
-    });
+    await appendUnmigratedModuleAuditEntries(signInCtx, [
+      {
+        recordType: 'person',
+        recordId: ambiguousEmailMatchPersonIds[0]!,
+        action: 'entra-link',
+        field: 'Entra ID Email Link Ambiguous',
+        oldValue: 'unlinked',
+        newValue: `Refused automatic email link across ${ambiguousEmailMatchPersonIds.length} unbound employees (${ambiguousEmailMatchPersonIds.join(', ')}; correlationId=${correlationId})`,
+        byId: 'system',
+        at: now,
+      },
+    ]);
     console.warn(
       JSON.stringify({
         event: 'ENTRA_EMAIL_LINK_AMBIGUOUS',
@@ -12561,9 +13689,24 @@ export function resolveOrProvisionEntraEmployee(
         candidateCount: ambiguousEmailMatchPersonIds.length,
       }),
     );
-    saveStore(store);
     throw new Error('Your account needs to be linked by an administrator.');
   }
+
+  return runUnmigratedJsonMutationWithAudit({
+    label: 'resolveOrProvisionEntraEmployee',
+    resolveCtx: () => signInCtx,
+    mutate: async (store) => {
+      const {
+        person: matchedPerson,
+        matchedByEmailOnly,
+      } = resolvePersonForEntraClaims({
+        claims,
+        people: store.people,
+        teams: store.teams,
+        tenantId: activeTenantId,
+        rbacConfig,
+        primaryDomain: activeTenantConfig.branding.primaryDomain,
+      });
 
   if (matchedPerson) {
     const prevOid = matchedPerson.entraObjectId?.trim() || null;
@@ -12727,6 +13870,8 @@ export function resolveOrProvisionEntraEmployee(
   saveStore(store);
 
   return { person: newEmployee, verifiedToken, rbacConfig };
+    },
+  });
 }
 
 // ============================================================================
@@ -12754,21 +13899,71 @@ function assertKeyDatesModuleEnabled(
   return null;
 }
 
-export function getMatterKeyDatesSnapshot(
+async function commitKeyDateDomainWritesInPostgres(params: {
+  ctx: TenantContext;
+  keyDatesToUpsert?: readonly KeyDate[];
+  notApplicableToUpsert?: readonly KeyDateNotApplicable[];
+  reminderStatesToUpsert?: readonly KeyDateReminderState[];
+  calendarSyncsToUpsert?: readonly KeyDateCalendarSync[];
+  auditEntries: readonly AuditEntry[];
+}): Promise<void> {
+  const keyDateRepo = getKeyDateRepository();
+  await keyDateRepo.withTenantTransaction(params.ctx, async () => {
+    for (const kd of params.keyDatesToUpsert ?? []) {
+      await keyDateRepo.putKeyDate(params.ctx, kd);
+    }
+    for (const na of params.notApplicableToUpsert ?? []) {
+      await keyDateRepo.putNotApplicable(params.ctx, na);
+    }
+    for (const rs of params.reminderStatesToUpsert ?? []) {
+      await keyDateRepo.putReminderState(params.ctx, rs);
+    }
+    for (const cs of params.calendarSyncsToUpsert ?? []) {
+      await keyDateRepo.putCalendarSync(params.ctx, cs);
+    }
+    if (params.auditEntries.length > 0) {
+      const auditInputs: FirmAuditEntryInput[] = params.auditEntries.map((a) => ({
+        ...(a.id && !a.id.startsWith('AU-PENDING') ? { id: a.id } : {}),
+        recordType: a.recordType,
+        recordId: a.recordId,
+        action: a.action,
+        field: a.field,
+        oldValue: a.oldValue,
+        newValue: a.newValue,
+        byId: a.byId,
+        at: a.at,
+        ...(a.reason !== undefined ? { reason: a.reason } : {}),
+        ...(a.snapshot !== undefined ? { snapshot: a.snapshot } : {}),
+      }));
+      await appendUnmigratedModuleAuditEntries(params.ctx, auditInputs);
+    }
+  });
+}
+
+export async function getMatterKeyDatesSnapshot(
   matterId: string,
   userId: string,
-): {
+): Promise<{
   keyDates: KeyDate[];
   keyDateNotApplicable: KeyDateNotApplicable[];
   keyDateReminderStates: KeyDateReminderState[];
   keyDateCalendarSyncs: KeyDateCalendarSync[];
   canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
-} {
+}> {
   const store = getStore();
   const user = resolveActorForKeyDates(store, userId);
-  const config = getKeyDatesConfig(store);
+  if (!user) {
+    return {
+      keyDates: [],
+      keyDateNotApplicable: [],
+      keyDateReminderStates: [],
+      keyDateCalendarSyncs: [],
+      canVerifyByKeyDateId: {},
+    };
+  }
+  const ctx = resolveDefaultServiceTenantContext(store, user.id);
+  const config = await getKeyDatesConfig({ ctx, userId: user.id });
   if (
-    !user ||
     !hasKeyDatePermission(user, 'keydate:view', {
       config,
       allPeople: store.people,
@@ -12793,15 +13988,20 @@ export function getMatterKeyDatesSnapshot(
       canVerifyByKeyDateId: {},
     };
   }
-  const keyDates = (store.keyDates ?? []).filter((kd) => kd.matterId === matter.id);
+  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  const keyDateRepo = getKeyDateRepository();
+  const [keyDates, keyDateNotApplicable, allReminders, allCalendarSyncs] =
+    await Promise.all([
+      keyDateRepo.listKeyDatesForMatter(ctx, matter.id, user.id),
+      keyDateRepo.listNotApplicableForMatter(ctx, matter.id, user.id),
+      keyDateRepo.listAllReminderStates(ctx, user.id),
+      keyDateRepo.listAllVisibleCalendarSyncs(ctx, user.id),
+    ]);
   const keyDateIdSet = new Set(keyDates.map((kd) => kd.id));
-  const keyDateNotApplicable = (store.keyDateNotApplicable ?? []).filter(
-    (na) => na.matterId === matter.id,
-  );
-  const keyDateReminderStates = (store.keyDateReminderStates ?? []).filter((rs) =>
+  const keyDateReminderStates = allReminders.filter((rs) =>
     keyDateIdSet.has(rs.keyDateId),
   );
-  const keyDateCalendarSyncs = (store.keyDateCalendarSyncs ?? []).filter((cs) =>
+  const keyDateCalendarSyncs = allCalendarSyncs.filter((cs) =>
     keyDateIdSet.has(cs.keyDateId),
   );
   const canVerifyByKeyDateId: Record<
@@ -12824,7 +14024,7 @@ export function getMatterKeyDatesSnapshot(
   };
 }
 
-export function previewLimitationCalculationRecord(
+export async function previewLimitationCalculationRecord(
   input: {
     ruleSetId: string;
     ruleId: string;
@@ -12833,14 +14033,15 @@ export function previewLimitationCalculationRecord(
     calendarCodeOverride?: string;
   },
   byId: string,
-): { ok: boolean; result?: CalculationResult; error?: string } {
+): Promise<{ ok: boolean; result?: CalculationResult; error?: string }> {
   try {
     const store = getStore();
-    const config = getKeyDatesConfig(store);
     const actor = resolveActorForKeyDates(store, byId);
     if (!actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
+    const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     if (
       !hasKeyDatePermission(actor, 'keydate:view', {
         config,
@@ -12911,109 +14112,134 @@ export async function createOrProposeKeyDateRecord(
   message?: string;
 }> {
   try {
-    const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
-      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-    }
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
+    return await withJsonStoreWriteLock(async (compensator) => {
+      const store = getStore();
+      const actor = resolveActorForKeyDates(store, byId);
+      if (!actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const matter = input.matterId
-      ? store.matters.find((m) => m.id === input.matterId) ?? null
-      : null;
-    const enquiry = input.enquiryId
-      ? store.enquiries.find((e) => e.id === input.enquiryId) ?? null
-      : null;
+      const nowIso = new Date().toISOString();
+      const todayIso = toIsoDate(new Date());
 
-    if (
-      input.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
+      const matter = input.matterId
+        ? store.matters.find((m) => m.id === input.matterId) ?? null
+        : null;
+      const enquiry = input.enquiryId
+        ? store.enquiries.find((e) => e.id === input.enquiryId) ?? null
+        : null;
 
-    const resolvedSource = resolveKeyDateSource({
-      source: input.source,
-      hasCalculation: Boolean(input.calculation),
-      allowSystemSource: false,
-    });
-    if (!resolvedSource.ok) {
-      return buildActionDenied('FORBIDDEN', resolvedSource.error);
-    }
-    const manualCheck = validateKeyDateManualEntry(
-      config,
-      input.keyDateTypeId,
-      resolvedSource.source,
-    );
-    if (!manualCheck.ok) {
-      return buildActionDenied('FORBIDDEN', manualCheck.error);
-    }
+      if (
+        input.matterId &&
+        (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+      ) {
+        return { ok: false, error: 'Matter not found or restricted.' };
+      }
 
-    store.keyDates = store.keyDates ?? [];
-    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
-    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
+      const resolvedSource = resolveKeyDateSource({
+        source: input.source,
+        hasCalculation: Boolean(input.calculation),
+        allowSystemSource: false,
+      });
+      if (!resolvedSource.ok) {
+        return buildActionDenied('FORBIDDEN', resolvedSource.error);
+      }
+      const manualCheck = validateKeyDateManualEntry(
+        config,
+        input.keyDateTypeId,
+        resolvedSource.source,
+      );
+      if (!manualCheck.ok) {
+        return buildActionDenied('FORBIDDEN', manualCheck.error);
+      }
 
-    const kd = createOrProposeKeyDate({
-      id: nextId(store, 'KD'),
-      matter,
-      enquiry,
-      keyDateTypeId: input.keyDateTypeId,
-      title: input.title,
-      dueDate: input.dueDate,
-      dueTime: input.dueTime,
-      isCritical: input.isCritical,
-      source: resolvedSource.source,
-      teamId: input.teamId,
-      responsiblePersonIds: input.responsiblePersonIds,
-      calculation: input.calculation,
-      notes: input.notes,
-      sourceDocumentId: input.sourceDocumentId,
-      intent: input.intent,
-      actor,
-      nowIso,
-      config,
-      teams: store.teams,
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
-    });
+      await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+      const keyDateRepo = getKeyDateRepository();
+      const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
 
-    store.keyDates.unshift(kd);
+      const kd = createOrProposeKeyDate({
+        id: newKdId,
+        matter,
+        enquiry,
+        keyDateTypeId: input.keyDateTypeId,
+        title: input.title,
+        dueDate: input.dueDate,
+        dueTime: input.dueTime,
+        isCritical: input.isCritical,
+        source: resolvedSource.source,
+        teamId: input.teamId,
+        responsiblePersonIds: input.responsiblePersonIds,
+        calculation: input.calculation,
+        notes: input.notes,
+        sourceDocumentId: input.sourceDocumentId,
+        intent: input.intent,
+        actor,
+        nowIso,
+        config,
+        teams: store.teams,
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
 
-    if (kd.status === 'confirmed') {
-      const { tasks: storeTasks } = store;
-      syncReminderForConfirmedKeyDate({
+      const reminderStatesWorking: KeyDateReminderState[] = [];
+      const calendarSyncsWorking: KeyDateCalendarSync[] = [];
+      const baseline = captureJsonStoreBaseline(store);
+
+      if (kd.status === 'confirmed') {
+        const { tasks: storeTasks } = store;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people: store.people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => nextId(store, 'TSK'),
+        });
+      }
+
+      await syncKeyDateToOutlookCalendar({
         keyDate: kd,
         config,
-        tasks: storeTasks,
-        reminderStates: store.keyDateReminderStates,
-        matters: matter ? [matter] : [],
-        people: store.people,
-        audit: store.audit,
-        nextAuditId: () => nextId(store, 'AU'),
-        todayIso,
+        matter,
+        enquiry,
+        calendarSyncs: calendarSyncsWorking,
         nowIso,
-        actorId: actor.id,
-        tenantId: store.firmId,
-        nextTaskId: () => nextId(store, 'TSK'),
       });
-    }
 
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: store.keyDateCalendarSyncs,
-      nowIso,
+      const storeMutated = registerJsonStoreRecordDeltas(
+        baseline,
+        store,
+        compensator,
+        'createOrProposeKeyDateRecord.tasks',
+      );
+      if (storeMutated) {
+        saveStore(store);
+      }
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        keyDatesToUpsert: [kd],
+        reminderStatesToUpsert: reminderStatesWorking,
+        calendarSyncsToUpsert: calendarSyncsWorking,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, keyDate: kd };
     });
-
-    saveStore(store);
-    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -13027,77 +14253,106 @@ export async function proposeProvisionalKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
-      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-    }
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
+    return await withJsonStoreWriteLock(async (compensator) => {
+      const store = getStore();
+      const actor = resolveActorForKeyDates(store, byId);
+      if (!actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
-    if (!kd) return { ok: false, error: 'Key date not found.' };
+      const nowIso = new Date().toISOString();
+      const todayIso = toIsoDate(new Date());
 
-    const matter = kd.matterId
-      ? store.matters.find((m) => m.id === kd.matterId) ?? null
-      : null;
-    const enquiry = kd.enquiryId
-      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
-      : null;
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        store,
+        keyDateId,
+        actor,
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd, matter, enquiry } = loaded;
+      const keyDateRepo = getKeyDateRepository();
 
-    if (
-      kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
 
-    proposeProvisionalKeyDate({
-      keyDate: kd,
-      actor,
-      nowIso,
-      config,
-      matter,
-      enquiry,
-      teams: store.teams,
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
-    });
+      proposeProvisionalKeyDate({
+        keyDate: kd,
+        actor,
+        nowIso,
+        config,
+        matter,
+        enquiry,
+        teams: store.teams,
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
 
-    if (kd.status === 'confirmed') {
-      const { tasks: storeTasks } = store;
-      syncReminderForConfirmedKeyDate({
+      const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
+      const reminderStatesWorking: KeyDateReminderState[] = existingReminder
+        ? [existingReminder]
+        : [];
+      const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+      const calendarSyncsWorking: KeyDateCalendarSync[] = existingSync
+        ? [existingSync]
+        : [];
+
+      const baseline = captureJsonStoreBaseline(store);
+      if (kd.status === 'confirmed') {
+        const { tasks: storeTasks } = store;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people: store.people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => nextId(store, 'TSK'),
+        });
+      }
+
+      await syncKeyDateToOutlookCalendar({
         keyDate: kd,
         config,
-        tasks: storeTasks,
-        reminderStates: store.keyDateReminderStates ?? [],
-        matters: matter ? [matter] : [],
-        people: store.people,
-        audit: store.audit,
-        nextAuditId: () => nextId(store, 'AU'),
-        todayIso,
+        matter,
+        enquiry,
+        calendarSyncs: calendarSyncsWorking,
         nowIso,
-        actorId: actor.id,
-        tenantId: store.firmId,
-        nextTaskId: () => nextId(store, 'TSK'),
       });
-    }
 
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: store.keyDateCalendarSyncs ?? [],
-      nowIso,
+      const storeMutated = registerJsonStoreRecordDeltas(
+        baseline,
+        store,
+        compensator,
+        'proposeProvisionalKeyDateRecord.tasks',
+      );
+      if (storeMutated) {
+        saveStore(store);
+      }
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        keyDatesToUpsert: [kd],
+        reminderStatesToUpsert: reminderStatesWorking,
+        calendarSyncsToUpsert: calendarSyncsWorking,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, keyDate: kd };
     });
-
-    saveStore(store);
-    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -13106,81 +14361,150 @@ export async function proposeProvisionalKeyDateRecord(
   }
 }
 
+async function loadKeyDateForActorOrClassifyError(
+  ctx: TenantContext,
+  store: FirmStore,
+  keyDateId: string,
+  actor: Person,
+): Promise<{ kd: KeyDate | null; error?: string; matter: Matter | null; enquiry: Enquiry | null }> {
+  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  const keyDateRepo = getKeyDateRepository();
+  const kd = await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
+  if (!kd) {
+    // Distinguish missing key date vs restricted/orphan matter key date (R30, R82):
+    const probeExists = await keyDateRepo.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ matter_id: string | null }>(
+        'SELECT matter_id FROM key_dates WHERE tenant_id = $1 AND id = $2',
+        [ctx.tenantId, keyDateId],
+      );
+      return res.rows[0] ?? null;
+    });
+    if (probeExists?.matter_id) {
+      return { kd: null, error: 'Matter not found or restricted.', matter: null, enquiry: null };
+    }
+    return { kd: null, error: 'Key date not found.', matter: null, enquiry: null };
+  }
+  const matter = kd.matterId
+    ? store.matters.find((m) => m.id === kd.matterId) ?? null
+    : null;
+  const enquiry = kd.enquiryId
+    ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
+    : null;
+  if (
+    kd.matterId &&
+    (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
+  ) {
+    return { kd: null, error: 'Matter not found or restricted.', matter: null, enquiry: null };
+  }
+  return { kd, matter, enquiry };
+}
+
 export async function verifyProposedKeyDateRecord(
   keyDateId: string,
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-    const verifier = resolveActorForKeyDates(store, byId);
-    if (!verifier) {
-      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-    }
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
+    return await withJsonStoreWriteLock(async (compensator) => {
+      const store = getStore();
+      const verifier = resolveActorForKeyDates(store, byId);
+      if (!verifier) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const ctx = resolveDefaultServiceTenantContext(store, verifier.id);
+      const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
-    if (!kd) return { ok: false, error: 'Key date not found.' };
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        store,
+        keyDateId,
+        verifier,
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd, matter, enquiry } = loaded;
+      const nowIso = new Date().toISOString();
+      const todayIso = toIsoDate(new Date());
 
-    const matter = kd.matterId
-      ? store.matters.find((m) => m.id === kd.matterId) ?? null
-      : null;
-    const enquiry = kd.enquiryId
-      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
-      : null;
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
 
-    if (
-      kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
+      verifyProposedKeyDate({
+        keyDate: kd,
+        verifier,
+        nowIso,
+        config,
+        teams: store.teams,
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
 
-    verifyProposedKeyDate({
-      keyDate: kd,
-      verifier,
-      nowIso,
-      config,
-      teams: store.teams,
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
+      const keyDateRepo = getKeyDateRepository();
+      const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+        ctx,
+        verifier.id,
+      );
+      const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
+        ctx,
+        verifier.id,
+      );
+
+      const baseline = captureJsonStoreBaseline(store);
+      const { tasks: storeTasks } = store;
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
+        config,
+        tasks: storeTasks,
+        reminderStates: reminderStatesWorking,
+        matters: matter ? [matter] : [],
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        todayIso,
+        nowIso,
+        actorId: verifier.id,
+        tenantId: ctx.tenantId,
+        nextTaskId: () => nextId(store, 'TSK'),
+        transferredFromKeyDateId: kd.supersedesKeyDateId,
+      });
+
+      await syncKeyDateToOutlookCalendar({
+        keyDate: kd,
+        config,
+        matter,
+        enquiry,
+        calendarSyncs: calendarSyncsWorking,
+        nowIso,
+      });
+
+      const storeMutated = registerJsonStoreRecordDeltas(
+        baseline,
+        store,
+        compensator,
+        'verifyProposedKeyDateRecord.tasks',
+      );
+      if (storeMutated) {
+        saveStore(store);
+      }
+
+      const targetReminders = reminderStatesWorking.filter(
+        (rs) => rs.keyDateId === kd.id || rs.keyDateId === kd.supersedesKeyDateId,
+      );
+      const targetSyncs = calendarSyncsWorking.filter((cs) => cs.keyDateId === kd.id);
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        keyDatesToUpsert: [kd],
+        reminderStatesToUpsert: targetReminders,
+        calendarSyncsToUpsert: targetSyncs,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, keyDate: kd };
     });
-
-    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
-    const { tasks: storeTasks } = store;
-    syncReminderForConfirmedKeyDate({
-      keyDate: kd,
-      config,
-      tasks: storeTasks,
-      reminderStates: store.keyDateReminderStates,
-      matters: matter ? [matter] : [],
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
-      todayIso,
-      nowIso,
-      actorId: verifier.id,
-      tenantId: store.firmId,
-      nextTaskId: () => nextId(store, 'TSK'),
-      transferredFromKeyDateId: kd.supersedesKeyDateId,
-    });
-
-    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: store.keyDateCalendarSyncs,
-      nowIso,
-    });
-
-    saveStore(store);
-    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -13196,27 +14520,28 @@ export async function rejectProposedKeyDateRecord(
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
     const verifier = resolveActorForKeyDates(store, byId);
     if (!verifier) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const nowIso = new Date().toISOString();
+    const ctx = resolveDefaultServiceTenantContext(store, verifier.id);
+    const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
-    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
-    if (!kd) return { ok: false, error: 'Key date not found.' };
-
-    const matter = kd.matterId
-      ? store.matters.find((m) => m.id === kd.matterId) ?? null
-      : null;
-    if (
-      kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, verifier.id, verifier, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
+    const loaded = await loadKeyDateForActorOrClassifyError(
+      ctx,
+      store,
+      keyDateId,
+      verifier,
+    );
+    if (!loaded.kd) {
+      return { ok: false, error: loaded.error ?? 'Key date not found.' };
     }
+    const { kd } = loaded;
+    const nowIso = new Date().toISOString();
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
 
     rejectProposedKeyDate({
       keyDate: kd,
@@ -13226,11 +14551,16 @@ export async function rejectProposedKeyDateRecord(
       config,
       teams: store.teams,
       people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
 
-    saveStore(store);
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      keyDatesToUpsert: [kd],
+      auditEntries: stagedAudit,
+    });
+
     return { ok: true, keyDate: kd };
   } catch (err) {
     return {
@@ -13266,112 +14596,171 @@ export async function supersedeConfirmedKeyDateRecord(
   message?: string;
 }> {
   try {
-    const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
-      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-    }
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
+    return await withJsonStoreWriteLock(async (compensator) => {
+      const store = getStore();
+      const actor = resolveActorForKeyDates(store, byId);
+      if (!actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const existing = (store.keyDates ?? []).find((x) => x.id === keyDateId);
-    if (!existing) return { ok: false, error: 'Key date not found.' };
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        store,
+        keyDateId,
+        actor,
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd: existing, matter, enquiry } = loaded;
+      const nowIso = new Date().toISOString();
+      const todayIso = toIsoDate(new Date());
 
-    const matter = existing.matterId
-      ? store.matters.find((m) => m.id === existing.matterId) ?? null
-      : null;
-    const enquiry = existing.enquiryId
-      ? store.enquiries.find((e) => e.id === existing.enquiryId) ?? null
-      : null;
+      const resolvedSupersede = resolveSupersedeKeyDateSource({
+        existingKeyDate: existing,
+        updates,
+        reason,
+        config,
+        allowSystemSource: false,
+      });
+      if (!resolvedSupersede.ok) {
+        return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
+      }
+      const manualCheck = validateKeyDateManualEntry(
+        config,
+        existing.keyDateTypeId,
+        resolvedSupersede.source,
+      );
+      if (!manualCheck.ok) {
+        return buildActionDenied('FORBIDDEN', manualCheck.error);
+      }
 
-    if (
-      existing.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
+      const keyDateRepo = getKeyDateRepository();
+      const newKeyDateId = await keyDateRepo.allocateNextKeyDateId(ctx);
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
 
-    const resolvedSupersede = resolveSupersedeKeyDateSource({
-      existingKeyDate: existing,
-      updates,
-      reason,
-      config,
-      allowSystemSource: false,
+      const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
+        existingKeyDate: existing,
+        newKeyDateId,
+        updates,
+        reason,
+        actor,
+        nowIso,
+        config,
+        matter,
+        enquiry,
+        teams: store.teams,
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
+
+      const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+        ctx,
+        actor.id,
+      );
+      const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
+        ctx,
+        actor.id,
+      );
+
+      const baseline = captureJsonStoreBaseline(store);
+      const { tasks: storeTasks } = store;
+      syncReminderForConfirmedKeyDate({
+        keyDate: replacementKeyDate,
+        config,
+        tasks: storeTasks,
+        reminderStates: reminderStatesWorking,
+        matters: matter ? [matter] : [],
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        todayIso,
+        nowIso,
+        actorId: actor.id,
+        tenantId: ctx.tenantId,
+        nextTaskId: () => nextId(store, 'TSK'),
+        transferredFromKeyDateId: supersededKeyDate.id,
+      });
+
+      await syncKeyDateToOutlookCalendar({
+        keyDate: supersededKeyDate,
+        config,
+        matter,
+        enquiry,
+        calendarSyncs: calendarSyncsWorking,
+        nowIso,
+      });
+      await syncKeyDateToOutlookCalendar({
+        keyDate: replacementKeyDate,
+        config,
+        matter,
+        enquiry,
+        calendarSyncs: calendarSyncsWorking,
+        nowIso,
+      });
+
+      const storeMutated = registerJsonStoreRecordDeltas(
+        baseline,
+        store,
+        compensator,
+        'supersedeConfirmedKeyDateRecord.tasks',
+      );
+      if (storeMutated) {
+        saveStore(store);
+      }
+
+      await keyDateRepo.withTenantTransaction(ctx, async () => {
+        // Insert replacement first without supersededBy link on existing, then link both cleanly
+        const replacementFirst = { ...replacementKeyDate };
+        await keyDateRepo.putKeyDate(ctx, {
+          ...supersededKeyDate,
+          supersededByKeyDateId: undefined,
+        });
+        await keyDateRepo.putKeyDate(ctx, replacementFirst);
+        await keyDateRepo.putKeyDate(ctx, supersededKeyDate);
+
+        if (!reminderStatesWorking.some((rs) => rs.keyDateId === supersededKeyDate.id)) {
+          await keyDateRepo.removeReminderState(ctx, supersededKeyDate.id);
+        }
+        for (const rs of reminderStatesWorking) {
+          if (
+            rs.keyDateId === replacementKeyDate.id ||
+            rs.keyDateId === supersededKeyDate.id
+          ) {
+            await keyDateRepo.putReminderState(ctx, rs);
+          }
+        }
+        for (const cs of calendarSyncsWorking) {
+          if (
+            cs.keyDateId === replacementKeyDate.id ||
+            cs.keyDateId === supersededKeyDate.id
+          ) {
+            await keyDateRepo.putCalendarSync(ctx, cs);
+          }
+        }
+        const auditInputs: FirmAuditEntryInput[] = stagedAudit.map((a) => ({
+          recordType: a.recordType,
+          recordId: a.recordId,
+          action: a.action,
+          field: a.field,
+          oldValue: a.oldValue,
+          newValue: a.newValue,
+          byId: a.byId,
+          at: a.at,
+          ...(a.reason !== undefined ? { reason: a.reason } : {}),
+          ...(a.snapshot !== undefined ? { snapshot: a.snapshot } : {}),
+        }));
+        await appendUnmigratedModuleAuditEntries(ctx, auditInputs);
+      });
+
+      return { ok: true, supersededKeyDate, replacementKeyDate };
     });
-    if (!resolvedSupersede.ok) {
-      return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
-    }
-    const manualCheck = validateKeyDateManualEntry(
-      config,
-      existing.keyDateTypeId,
-      resolvedSupersede.source,
-    );
-    if (!manualCheck.ok) {
-      return buildActionDenied('FORBIDDEN', manualCheck.error);
-    }
-
-    const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
-      existingKeyDate: existing,
-      newKeyDateId: nextId(store, 'KD'),
-      updates,
-      reason,
-      actor,
-      nowIso,
-      config,
-      matter,
-      enquiry,
-      teams: store.teams,
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
-    });
-
-    store.keyDates = store.keyDates ?? [];
-    store.keyDates.unshift(replacementKeyDate);
-    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
-    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
-
-    // Transfer the single reminder task to the superseding key date (never create a second task)
-    const { tasks: storeTasks } = store;
-    syncReminderForConfirmedKeyDate({
-      keyDate: replacementKeyDate,
-      config,
-      tasks: storeTasks,
-      reminderStates: store.keyDateReminderStates,
-      matters: matter ? [matter] : [],
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
-      todayIso,
-      nowIso,
-      actorId: actor.id,
-      tenantId: store.firmId,
-      nextTaskId: () => nextId(store, 'TSK'),
-      transferredFromKeyDateId: supersededKeyDate.id,
-    });
-
-    await syncKeyDateToOutlookCalendar({
-      keyDate: supersededKeyDate,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: store.keyDateCalendarSyncs,
-      nowIso,
-    });
-    await syncKeyDateToOutlookCalendar({
-      keyDate: replacementKeyDate,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: store.keyDateCalendarSyncs,
-      nowIso,
-    });
-
-    saveStore(store);
-    return { ok: true, supersededKeyDate, replacementKeyDate };
   } catch (err) {
     return {
       ok: false,
@@ -13390,68 +14779,91 @@ export async function resolveKeyDateOutcomeRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
-      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-    }
-    const nowIso = new Date().toISOString();
+    return await withJsonStoreWriteLock(async (compensator) => {
+      const store = getStore();
+      const actor = resolveActorForKeyDates(store, byId);
+      if (!actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
-    if (!kd) return { ok: false, error: 'Key date not found.' };
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        store,
+        keyDateId,
+        actor,
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd, matter, enquiry } = loaded;
+      const nowIso = new Date().toISOString();
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
 
-    const matter = kd.matterId
-      ? store.matters.find((m) => m.id === kd.matterId) ?? null
-      : null;
-    const enquiry = kd.enquiryId
-      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
-      : null;
+      resolveKeyDateOutcome({
+        keyDate: kd,
+        kind: input.kind,
+        note: input.note,
+        evidenceDocumentId: input.evidenceDocumentId,
+        actor,
+        nowIso,
+        config,
+        teams: store.teams,
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
 
-    if (
-      kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
+      const keyDateRepo = getKeyDateRepository();
+      const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
+      const reminderStatesWorking = existingReminder ? [existingReminder] : [];
+      const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+      const calendarSyncsWorking = existingSync ? [existingSync] : [];
 
-    resolveKeyDateOutcome({
-      keyDate: kd,
-      kind: input.kind,
-      note: input.note,
-      evidenceDocumentId: input.evidenceDocumentId,
-      actor,
-      nowIso,
-      config,
-      teams: store.teams,
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
+      const baseline = captureJsonStoreBaseline(store);
+      const { tasks: storeTasks } = store;
+      closeReminderTaskForKeyDate({
+        keyDateId: kd.id,
+        tenantId: ctx.tenantId,
+        tasks: storeTasks,
+        reminderStates: reminderStatesWorking,
+        nowIso,
+        actorId: actor.id,
+      });
+
+      await syncKeyDateToOutlookCalendar({
+        keyDate: kd,
+        config,
+        matter,
+        enquiry,
+        calendarSyncs: calendarSyncsWorking,
+        nowIso,
+      });
+
+      const storeMutated = registerJsonStoreRecordDeltas(
+        baseline,
+        store,
+        compensator,
+        'resolveKeyDateOutcomeRecord.tasks',
+      );
+      if (storeMutated) {
+        saveStore(store);
+      }
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        keyDatesToUpsert: [kd],
+        reminderStatesToUpsert: reminderStatesWorking,
+        calendarSyncsToUpsert: calendarSyncsWorking,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, keyDate: kd };
     });
-
-    const { tasks: storeTasks } = store;
-    closeReminderTaskForKeyDate({
-      keyDateId: kd.id,
-      tenantId: store.firmId || getActiveTenantConfiguration().tenantId,
-      tasks: storeTasks,
-      reminderStates: store.keyDateReminderStates ?? [],
-      nowIso,
-      actorId: actor.id,
-    });
-
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: store.keyDateCalendarSyncs ?? [],
-      nowIso,
-    });
-
-    saveStore(store);
-    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -13471,63 +14883,83 @@ export async function reassignKeyDateTeamRecord(
   options?: { calendarAdapter?: GraphCalendarAdapter },
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
-      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-    }
-    const nowIso = new Date().toISOString();
+    return await withJsonStoreWriteLock(async (compensator) => {
+      const store = getStore();
+      const actor = resolveActorForKeyDates(store, byId);
+      if (!actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
-    if (!kd) return { ok: false, error: 'Key date not found.' };
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        store,
+        keyDateId,
+        actor,
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd, matter, enquiry } = loaded;
+      const nowIso = new Date().toISOString();
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
 
-    const matter = kd.matterId
-      ? store.matters.find((m) => m.id === kd.matterId) ?? null
-      : null;
-    const enquiry = kd.enquiryId
-      ? store.enquiries.find((e) => e.id === kd.enquiryId) ?? null
-      : null;
-    if (
-      kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
+      const baseline = captureJsonStoreBaseline(store);
+      const { tasks: storeTasks } = store;
+      reassignKeyDateTeamAndOwners({
+        keyDate: kd,
+        tenantId: ctx.tenantId,
+        teamId: input.teamId,
+        responsiblePersonIds: input.responsiblePersonIds,
+        reason: input.reason,
+        actor,
+        nowIso,
+        config,
+        matter,
+        tasks: storeTasks,
+        teams: store.teams,
+        people: store.people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
 
-    const { tasks: storeTasks } = store;
-    reassignKeyDateTeamAndOwners({
-      keyDate: kd,
-      tenantId: store.firmId || getActiveTenantConfiguration().tenantId,
-      teamId: input.teamId,
-      responsiblePersonIds: input.responsiblePersonIds,
-      reason: input.reason,
-      actor,
-      nowIso,
-      config,
-      matter,
-      tasks: storeTasks,
-      teams: store.teams,
-      people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
+      const keyDateRepo = getKeyDateRepository();
+      const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+      const calendarSyncsWorking = existingSync ? [existingSync] : [];
+
+      await syncKeyDateToOutlookCalendar({
+        keyDate: kd,
+        config,
+        matter,
+        enquiry,
+        calendarSyncs: calendarSyncsWorking,
+        adapter: options?.calendarAdapter,
+        nowIso,
+      });
+
+      const storeMutated = registerJsonStoreRecordDeltas(
+        baseline,
+        store,
+        compensator,
+        'reassignKeyDateTeamRecord.tasks',
+      );
+      if (storeMutated) {
+        saveStore(store);
+      }
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        keyDatesToUpsert: [kd],
+        calendarSyncsToUpsert: calendarSyncsWorking,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, keyDate: kd };
     });
-
-    store.keyDateCalendarSyncs = store.keyDateCalendarSyncs ?? [];
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: store.keyDateCalendarSyncs,
-      adapter: options?.calendarAdapter,
-      nowIso,
-    });
-
-    saveStore(store);
-    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -13536,31 +14968,41 @@ export async function reassignKeyDateTeamRecord(
   }
 }
 
-export function recordKeyDateNotApplicableRecord(
+export async function recordKeyDateNotApplicableRecord(
   input: {
     matterId: string;
     keyDateTypeId: string;
     reason: string;
   },
   byId: string,
-): { ok: boolean; record?: KeyDateNotApplicable; error?: string } {
+): Promise<{ ok: boolean; record?: KeyDateNotApplicable; error?: string }> {
   try {
     const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
     const actor = resolveActorForKeyDates(store, byId);
     if (!actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const nowIso = new Date().toISOString();
+    const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const disabledErr = assertKeyDatesModuleEnabled(config);
+    if (disabledErr) return disabledErr;
 
     const matter = store.matters.find((m) => m.id === input.matterId);
     if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people)) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
-    store.keyDateNotApplicable = store.keyDateNotApplicable ?? [];
+    await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+    const keyDateRepo = getKeyDateRepository();
+    const existingNaList = await keyDateRepo.listNotApplicableForMatter(
+      ctx,
+      matter.id,
+      actor.id,
+    );
+    const nowIso = new Date().toISOString();
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
+
     const rec = recordKeyDateNotApplicable({
       matterId: matter.id,
       matterTypeId: matter.matterTypeId || matter.practiceAreaId,
@@ -13569,14 +15011,19 @@ export function recordKeyDateNotApplicableRecord(
       actor,
       nowIso,
       config,
-      notApplicableList: store.keyDateNotApplicable,
+      notApplicableList: existingNaList,
       teams: store.teams,
       people: store.people,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
+      audit: stagedAudit,
+      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
 
-    saveStore(store);
+    await commitKeyDateDomainWritesInPostgres({
+      ctx,
+      notApplicableToUpsert: [rec],
+      auditEntries: stagedAudit,
+    });
+
     return { ok: true, record: rec };
   } catch (err) {
     return {
@@ -13589,97 +15036,122 @@ export function recordKeyDateNotApplicableRecord(
   }
 }
 
-export function acknowledgeKeyDateReminderRecord(
+export async function acknowledgeKeyDateReminderRecord(
   keyDateId: string,
   byId: string,
-): { ok: boolean; reminderState?: KeyDateReminderState; error?: string } {
+): Promise<{ ok: boolean; reminderState?: KeyDateReminderState; error?: string }> {
   try {
-    const store = getStore();
-    const config = getKeyDatesConfig(store);
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-    const actor = resolveActorForKeyDates(store, byId);
-    if (!actor) {
-      return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
-    }
-    if (
-      !hasKeyDatePermission(actor, 'keydate:view', {
-        config,
-        allPeople: store.people,
-        teams: store.teams,
-      })
-    ) {
-      return {
-        ok: false,
-        error:
-          'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to acknowledge key date reminders.',
-      };
-    }
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
+    return await withJsonStoreWriteLock(async (compensator) => {
+      const store = getStore();
+      const actor = resolveActorForKeyDates(store, byId);
+      if (!actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const kd = (store.keyDates ?? []).find((x) => x.id === keyDateId);
-    if (!kd) return { ok: false, error: 'Key date not found.' };
+      if (
+        !hasKeyDatePermission(actor, 'keydate:view', {
+          config,
+          allPeople: store.people,
+          teams: store.teams,
+        })
+      ) {
+        return {
+          ok: false,
+          error:
+            'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to acknowledge key date reminders.',
+        };
+      }
 
-    const matter = kd.matterId
-      ? store.matters.find((m) => m.id === kd.matterId) ?? null
-      : null;
-    if (
-      kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, store.people))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        store,
+        keyDateId,
+        actor,
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd, matter } = loaded;
 
-    if (kd.status !== 'confirmed') {
-      return {
-        ok: false,
-        error: `KEY_DATE_INVALID_STATE: Reminders can only be acknowledged for confirmed key dates (current status: "${kd.status}").`,
-      };
-    }
+      if (kd.status !== 'confirmed') {
+        return {
+          ok: false,
+          error: `KEY_DATE_INVALID_STATE: Reminders can only be acknowledged for confirmed key dates (current status: "${kd.status}").`,
+        };
+      }
 
-    const owningTeam = store.teams.find((t) => t.id === kd.teamId);
-    const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
-    const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
-    if (!isResponsiblePerson && !isOwningTeamLead) {
-      return {
-        ok: false,
-        error:
-          'KEY_DATE_PERMISSION_DENIED: Only a responsible person on the key date or the owning team lead may acknowledge a reminder stage.',
-      };
-    }
+      const owningTeam = store.teams.find((t) => t.id === kd.teamId);
+      const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
+      const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
+      if (!isResponsiblePerson && !isOwningTeamLead) {
+        return {
+          ok: false,
+          error:
+            'KEY_DATE_PERMISSION_DENIED: Only a responsible person on the key date or the owning team lead may acknowledge a reminder stage.',
+        };
+      }
 
-    store.keyDateReminderStates = store.keyDateReminderStates ?? [];
-    if (!store.keyDateReminderStates.some((rs) => rs.keyDateId === keyDateId)) {
-      const { tasks: storeTasks } = store;
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: store.keyDateReminderStates,
-        matters: matter ? [matter] : [],
-        people: store.people,
-        audit: store.audit,
-        nextAuditId: () => nextId(store, 'AU'),
-        todayIso,
-        nowIso,
+      const nowIso = new Date().toISOString();
+      const todayIso = toIsoDate(new Date());
+      const keyDateRepo = getKeyDateRepository();
+      const existingReminder = await keyDateRepo.getReminderState(ctx, keyDateId, actor.id);
+      const reminderStatesWorking: KeyDateReminderState[] = existingReminder
+        ? [existingReminder]
+        : [];
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
+
+      const baseline = captureJsonStoreBaseline(store);
+      if (reminderStatesWorking.length === 0) {
+        const { tasks: storeTasks } = store;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people: store.people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => nextId(store, 'TSK'),
+        });
+      }
+
+      const state = acknowledgeKeyDateReminderStage({
+        keyDateId,
         actorId: actor.id,
-        tenantId: store.firmId,
-        nextTaskId: () => nextId(store, 'TSK'),
+        nowIso,
+        reminderStates: reminderStatesWorking,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
       });
-    }
 
-    const state = acknowledgeKeyDateReminderStage({
-      keyDateId,
-      actorId: actor.id,
-      nowIso,
-      reminderStates: store.keyDateReminderStates,
-      audit: store.audit,
-      nextAuditId: () => nextId(store, 'AU'),
+      const storeMutated = registerJsonStoreRecordDeltas(
+        baseline,
+        store,
+        compensator,
+        'acknowledgeKeyDateReminderRecord.tasks',
+      );
+      if (storeMutated) {
+        saveStore(store);
+      }
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        reminderStatesToUpsert: reminderStatesWorking,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, reminderState: state };
     });
-
-    saveStore(store);
-    return { ok: true, reminderState: state };
   } catch (err) {
     return {
       ok: false,
@@ -13691,20 +15163,25 @@ export function acknowledgeKeyDateReminderRecord(
   }
 }
 
-export function runKeyDateReminderSchedulerRecord(
+export async function runKeyDateReminderSchedulerRecord(
   options?: {
     tenantCtx?: TenantContext | null;
     session?: VerifiedEntraSessionPayload | null;
     byId: string;
-    mfaVerified: boolean;
+    mfaVerified?: boolean;
   } | null,
-): {
+): Promise<{
   ok: boolean;
   result?: ReturnType<typeof runTenantKeyDateReminderJob>;
   triggeredBy?: string;
   error?: string;
-} {
-  if (!options || options.tenantCtx === null || (!options.tenantCtx && !options.byId)) {
+}> {
+  if (
+    !options ||
+    typeof options !== 'object' ||
+    options.tenantCtx === null ||
+    (!options.tenantCtx && !options.byId && !options.session)
+  ) {
     runTenantBackgroundJob(
       {
         jobId: 'keydate-reminder-job:missing-context',
@@ -13716,23 +15193,67 @@ export function runKeyDateReminderSchedulerRecord(
     );
   }
 
-  const store = getStore();
-  const config = getKeyDatesConfig(store);
-
-  const byId = options?.byId ?? '';
+  const requestedById = (options?.byId ?? '').trim();
   const providedCtx = options?.tenantCtx ?? null;
-  const mfaVerified = options?.mfaVerified ?? providedCtx?.mfaVerified ?? false;
+  const verifiedSession =
+    options?.session ??
+    (getActiveActorSession()?.verifiedSession as
+      | VerifiedEntraSessionPayload
+      | undefined);
 
-  const actor = resolveActorForKeyDates(store, byId);
-  if (!actor) {
-    return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+  if (providedCtx && requestedById && providedCtx.actorId !== requestedById) {
+    throw new Error(
+      `TENANCY_ACTOR_MISMATCH: Tenant context actorId "${providedCtx.actorId}" does not match requested actor "${requestedById}".`,
+    );
+  }
+  if (verifiedSession && requestedById && verifiedSession.personId !== requestedById) {
+    throw new Error(
+      `TENANCY_ACTOR_MISMATCH: Verified session personId "${verifiedSession.personId}" does not match requested actor "${requestedById}".`,
+    );
   }
 
+  const effectiveTenantCtx =
+    providedCtx ??
+    (verifiedSession
+      ? resolveCurrentTenantContext(
+          createVerifiedSessionActorFromEntraSession(verifiedSession),
+        )
+      : null);
+
+  if (
+    effectiveTenantCtx &&
+    requestedById &&
+    effectiveTenantCtx.actorId !== requestedById
+  ) {
+    throw new Error(
+      `TENANCY_ACTOR_MISMATCH: Tenant context actorId "${effectiveTenantCtx.actorId}" does not match requested actor "${requestedById}".`,
+    );
+  }
+
+  const actorId = effectiveTenantCtx?.actorId ?? requestedById;
+  // Take MFA from the verified context when present; never let a caller flag override a non-MFA context (R449).
+  const mfaVerified = effectiveTenantCtx
+    ? effectiveTenantCtx.mfaVerified === true && options?.mfaVerified !== false
+    : options?.mfaVerified === true;
+
+  const prelimStore = getStore();
+  const actor = resolveActorForKeyDates(prelimStore, actorId);
+  if (!actor) {
+    return { ok: false, error: `Unknown or unauthenticated user "${actorId}".` };
+  }
+
+  // Evaluate permission and MFA before reading any key-date repository or configuration rows from PostgreSQL (R449).
+  const inMemoryKeyDatesConfig =
+    prelimStore.keyDatesConfigOverride ??
+    (getActiveTenantConfiguration().keyDates as KeyDatesConfig | undefined);
   if (
     !hasKeyDatePermission(actor, 'keydate:configure', {
-      config,
-      allPeople: store.people,
-      teams: store.teams,
+      config: inMemoryKeyDatesConfig,
+      allPeople: prelimStore.people,
+      teams: prelimStore.teams,
+      rbac: effectiveTenantCtx
+        ? { tokenRoles: effectiveTenantCtx.actorRoles }
+        : undefined,
     })
   ) {
     return {
@@ -13751,24 +15272,6 @@ export function runKeyDateReminderSchedulerRecord(
     };
   }
 
-  const nowIso = new Date().toISOString();
-  const verifiedSession =
-    options?.session ??
-    (getActiveActorSession()?.verifiedSession as
-      | VerifiedEntraSessionPayload
-      | undefined);
-  if (verifiedSession && verifiedSession.personId !== actor.id) {
-    throw new Error(
-      `TENANCY_ACTOR_MISMATCH: Verified session personId "${verifiedSession.personId}" does not match requested actor "${actor.id}".`,
-    );
-  }
-  const effectiveTenantCtx =
-    providedCtx ??
-    (verifiedSession
-      ? resolveCurrentTenantContext(
-          createVerifiedSessionActorFromEntraSession(verifiedSession),
-        )
-      : null);
   if (!effectiveTenantCtx) {
     runTenantBackgroundJob(
       {
@@ -13781,51 +15284,125 @@ export function runKeyDateReminderSchedulerRecord(
     );
   }
 
-  const todayIso = toIsoDate(new Date());
-  store.keyDates = store.keyDates ?? [];
-  store.keyDateReminderStates = store.keyDateReminderStates ?? [];
-
-  const { tasks: storeTasks, matters: storeMatters } = store;
-  const result = runTenantBackgroundJob(
-    {
-      jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
-      tenantId: effectiveTenantCtx!.tenantId,
-      correlationId: effectiveTenantCtx!.correlationId,
-      payload: { todayIso, nowIso },
-    },
-    (job) =>
-      runTenantKeyDateReminderJob({
-        tenantId: job.tenantId,
-        todayIso: job.payload.todayIso,
-        nowIso: job.payload.nowIso,
+  return withJsonStoreWriteLock(async (compensator) => {
+    const store = getStore();
+    const config = await getKeyDatesConfig({
+      ctx: effectiveTenantCtx!,
+      userId: actor.id,
+    });
+    if (
+      !hasKeyDatePermission(actor, 'keydate:configure', {
         config,
-        keyDates: store.keyDates!,
-        reminderStates: store.keyDateReminderStates!,
-        tasks: storeTasks,
-        matters: storeMatters,
+        allPeople: store.people,
         teams: store.teams,
-        people: store.people,
-        notifications: store.notifications,
-        audit: store.audit,
-        nextTaskId: () => nextId(store, 'TSK'),
-        nextNotificationId: () => nextId(store, 'NTF'),
-        nextAuditId: () => nextId(store, 'AU'),
-      }),
-  );
+        rbac: { tokenRoles: effectiveTenantCtx!.actorRoles },
+      })
+    ) {
+      return {
+        ok: false,
+        error:
+          'KEY_DATE_PERMISSION_DENIED: You need "keydate:configure" permission to trigger the key date reminder scheduler.',
+      };
+    }
+    const nowIso = new Date().toISOString();
+    const todayIso = toIsoDate(new Date());
 
-  saveStore(store);
-  return { ok: true, result, triggeredBy: actor.id };
+    await ensureStoreMattersRestrictedMetadataSynced(effectiveTenantCtx!, store);
+    const keyDateRepo = getKeyDateRepository();
+    // Scheduler evaluates all key dates in the tenant database (including restricted matters via system/admin visibility)
+    const allTenantKeyDates = await keyDateRepo.withTenantReadTransaction(
+      effectiveTenantCtx!,
+      async (tx) => {
+        const res = await tx.query<{ id: string }>(
+          'SELECT id FROM key_dates WHERE tenant_id = $1 ORDER BY due_date ASC, id ASC',
+          [effectiveTenantCtx!.tenantId],
+        );
+        return res.rows.map((r) => r.id);
+      },
+    );
+    const keyDatesWorking: KeyDate[] = [];
+    for (const id of allTenantKeyDates) {
+      const kd = await keyDateRepo.getKeyDateById(effectiveTenantCtx!, id, actor.id);
+      if (kd) keyDatesWorking.push(kd);
+    }
+    const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+      effectiveTenantCtx!,
+      actor.id,
+    );
+    const beforeReminderJsonByKd = new Map(
+      reminderStatesWorking.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
+    );
+    const stagedAudit: AuditEntry[] = [];
+    let pendingIdx = 0;
+
+    const baseline = captureJsonStoreBaseline(store);
+    const { tasks: storeTasks, matters: storeMatters } = store;
+    const result = runTenantBackgroundJob(
+      {
+        jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
+        tenantId: effectiveTenantCtx!.tenantId,
+        correlationId: effectiveTenantCtx!.correlationId,
+        payload: { todayIso, nowIso },
+      },
+      (job) =>
+        runTenantKeyDateReminderJob({
+          tenantId: job.tenantId,
+          todayIso: job.payload.todayIso,
+          nowIso: job.payload.nowIso,
+          config,
+          keyDates: keyDatesWorking,
+          reminderStates: reminderStatesWorking,
+          tasks: storeTasks,
+          matters: storeMatters,
+          teams: store.teams,
+          people: store.people,
+          notifications: store.notifications,
+          audit: stagedAudit,
+          nextTaskId: () => nextId(store, 'TSK'),
+          nextNotificationId: () => nextId(store, 'NTF'),
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        }),
+    );
+
+    const storeMutated = registerJsonStoreRecordDeltas(
+      baseline,
+      store,
+      compensator,
+      'runKeyDateReminderSchedulerRecord.tasks',
+    );
+    if (storeMutated) {
+      saveStore(store);
+    }
+
+    const changedReminders = reminderStatesWorking.filter(
+      (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
+    );
+    await commitKeyDateDomainWritesInPostgres({
+      ctx: effectiveTenantCtx!,
+      reminderStatesToUpsert: changedReminders,
+      auditEntries: stagedAudit,
+    });
+
+    return { ok: true, result, triggeredBy: actor.id };
+  });
 }
 
-export function queryKeyDatesTeamDiaryRecord(
+export async function queryKeyDatesTeamDiaryRecord(
   query: TeamDiaryQuery,
   byId: string,
   todayIso: string = toIsoDate(new Date()),
-): TeamDiaryEntry[] {
+): Promise<TeamDiaryEntry[]> {
   const store = getStore();
-  const config = getKeyDatesConfig(store);
   const viewer = resolveActorForKeyDates(store, byId);
   if (!viewer) return [];
+  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
+  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  const keyDateRepo = getKeyDateRepository();
+  const [keyDates, reminderStates] = await Promise.all([
+    keyDateRepo.listAllVisibleKeyDates(ctx, viewer.id),
+    keyDateRepo.listAllReminderStates(ctx, viewer.id),
+  ]);
   const visibleMatters = store.matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
       allPeople: store.people,
@@ -13837,8 +15414,8 @@ export function queryKeyDatesTeamDiaryRecord(
     query,
     todayIso,
     config,
-    keyDates: store.keyDates ?? [],
-    reminderStates: store.keyDateReminderStates ?? [],
+    keyDates,
+    reminderStates,
     matters: visibleMatters,
     enquiries: store.enquiries,
     teams: store.teams,
@@ -13846,15 +15423,32 @@ export function queryKeyDatesTeamDiaryRecord(
   });
 }
 
-export function getKeyDateExceptionsReportRecord(
+export async function getKeyDateExceptionsReportRecord(
   filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
   byId: string,
   todayIso: string = toIsoDate(new Date()),
-): KeyDateException[] {
+): Promise<KeyDateException[]> {
   const store = getStore();
-  const config = getKeyDatesConfig(store);
   const viewer = resolveActorForKeyDates(store, byId);
   if (!viewer) return [];
+  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
+  await ensureStoreMattersRestrictedMetadataSynced(ctx, store);
+  const canConfigure = hasKeyDatePermission(viewer, 'keydate:configure', {
+    config,
+    allPeople: store.people,
+    teams: store.teams,
+  });
+  const keyDateRepo = getKeyDateRepository();
+  const [keyDates, notApplicable, reminderStates, calendarSyncs] =
+    await Promise.all([
+      keyDateRepo.listKeyDatesForExceptionsReport(ctx, viewer.id, {
+        includeMissingMatterOrphans: canConfigure,
+      }),
+      keyDateRepo.listAllVisibleNotApplicable(ctx, viewer.id),
+      keyDateRepo.listAllReminderStates(ctx, viewer.id),
+      keyDateRepo.listAllVisibleCalendarSyncs(ctx, viewer.id),
+    ]);
   const visibleMatters = store.matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
       allPeople: store.people,
@@ -13866,10 +15460,10 @@ export function getKeyDateExceptionsReportRecord(
     todayIso,
     nowIso: new Date().toISOString(),
     config,
-    keyDates: store.keyDates ?? [],
-    notApplicable: store.keyDateNotApplicable ?? [],
-    reminderStates: store.keyDateReminderStates ?? [],
-    calendarSyncs: store.keyDateCalendarSyncs ?? [],
+    keyDates,
+    notApplicable,
+    reminderStates,
+    calendarSyncs,
     matters: visibleMatters,
     teams: store.teams,
     people: store.people,
@@ -13879,7 +15473,7 @@ export function getKeyDateExceptionsReportRecord(
   });
 }
 
-export function exportKeyDateExceptionsReportRecord(
+export async function exportKeyDateExceptionsReportRecord(
   filter: {
     teamIds?: string[];
     kinds?: KeyDateExceptionKind[];
@@ -13887,13 +15481,14 @@ export function exportKeyDateExceptionsReportRecord(
   } = {},
   byId: string,
   todayIso: string = toIsoDate(new Date()),
-): { ok: boolean; content?: string; filename?: string; count?: number; error?: string } {
+): Promise<{ ok: boolean; content?: string; filename?: string; count?: number; error?: string }> {
   const store = getStore();
-  const config = getKeyDatesConfig(store);
   const viewer = resolveActorForKeyDates(store, byId);
   if (!viewer) {
     return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
   }
+  const ctx = resolveDefaultServiceTenantContext(store, viewer.id);
+  const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
 
   if (
     !hasKeyDatePermission(viewer, 'keydate:view_any_team', {
@@ -13908,24 +15503,24 @@ export function exportKeyDateExceptionsReportRecord(
     };
   }
 
-  const exceptions = getKeyDateExceptionsReportRecord(filter, byId, todayIso);
+  const exceptions = await getKeyDateExceptionsReportRecord(filter, byId, todayIso);
   const format = filter.format ?? 'csv';
   const nowIso = new Date().toISOString();
 
-  // Audit the compliance exceptions export (§6, R41: action is 'keydate-export')
-  store.audit.unshift({
-    id: nextId(store, 'AU'),
-    recordType: 'key_date',
-    recordId: 'KEY-DATE-EXCEPTIONS-EXPORT',
-    action: 'keydate-export',
-    field: 'Compliance exceptions export',
-    oldValue: null,
-    newValue: `Exported ${exceptions.length} exception(s) as ${format.toUpperCase()}`,
-    byId: viewer.id,
-    at: nowIso,
-    reason: `Filter teams=${filter.teamIds?.join(',') || 'all'} kinds=${filter.kinds?.join(',') || 'all'}`,
-  });
-  saveStore(store);
+  // Audit the compliance exceptions export in PostgreSQL audit_entries (§6, R41, S0-15)
+  await appendUnmigratedModuleAuditEntries(ctx, [
+    {
+      recordType: 'key_date',
+      recordId: 'KEY-DATE-EXCEPTIONS-EXPORT',
+      action: 'keydate-export',
+      field: 'Compliance exceptions export',
+      oldValue: null,
+      newValue: `Exported ${exceptions.length} exception(s) as ${format.toUpperCase()}`,
+      byId: viewer.id,
+      at: nowIso,
+      reason: `Filter teams=${filter.teamIds?.join(',') || 'all'} kinds=${filter.kinds?.join(',') || 'all'}`,
+    },
+  ]);
 
   if (format === 'json') {
     return {
@@ -13957,19 +15552,20 @@ export function exportKeyDateExceptionsReportRecord(
   };
 }
 
-export function saveKeyDatesConfigRecord(
+export async function saveKeyDatesConfigRecord(
   newConfigInput: KeyDatesConfig,
   reason: string,
   byId: string,
   options?: { mfaVerified?: boolean } | boolean,
-): { ok: boolean; config?: KeyDatesConfig; error?: string } {
+): Promise<{ ok: boolean; config?: KeyDatesConfig; error?: string }> {
   try {
     const store = getStore();
-    const currentConfig = getKeyDatesConfig(store);
     const actor = resolveActorForKeyDates(store, byId);
     if (!actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
+    const ctx = resolveDefaultServiceTenantContext(store, actor.id);
+    const currentConfig = await getKeyDatesConfig({ ctx, userId: actor.id });
 
     if (
       !hasKeyDatePermission(actor, 'keydate:configure', {
@@ -14035,25 +15631,32 @@ export function saveKeyDatesConfigRecord(
       });
     }
 
-    store.keyDatesConfigOverride = validated;
-    store.audit.unshift({
-      id: nextId(store, 'AU'),
-      recordType: 'key_date',
-      recordId: 'FIRM-KEY-DATES-CONFIG',
-      action: 'keydate-config-change',
-      field: 'keyDates',
-      oldValue: `enabled=${currentConfig.enabled}; types=${currentConfig.keyDateTypes?.length ?? 0}; ruleSets=${currentConfig.limitationRuleSets?.length ?? 0}`,
-      newValue: `enabled=${validated.enabled}; types=${validated.keyDateTypes?.length ?? 0}; ruleSets=${validated.limitationRuleSets?.length ?? 0}`,
-      byId: actor.id,
-      at: nowIso,
-      reason: reason?.trim() || 'Updated Key Dates configuration in Admin',
-      snapshot: {
-        before: currentConfig,
-        after: validated,
-      },
+    const keyDateRepo = getKeyDateRepository();
+    await keyDateRepo.withTenantTransaction(ctx, async () => {
+      await keyDateRepo.putKeyDatesTenantConfig(
+        ctx,
+        validated as unknown as KeyDatesConfiguration,
+        actor.id,
+      );
+      await appendUnmigratedModuleAuditEntries(ctx, [
+        {
+          recordType: 'key_date',
+          recordId: 'FIRM-KEY-DATES-CONFIG',
+          action: 'keydate-config-change',
+          field: 'keyDates',
+          oldValue: `enabled=${currentConfig.enabled}; types=${currentConfig.keyDateTypes?.length ?? 0}; ruleSets=${currentConfig.limitationRuleSets?.length ?? 0}`,
+          newValue: `enabled=${validated.enabled}; types=${validated.keyDateTypes?.length ?? 0}; ruleSets=${validated.limitationRuleSets?.length ?? 0}`,
+          byId: actor.id,
+          at: nowIso,
+          reason: reason?.trim() || 'Updated Key Dates configuration in Admin',
+          snapshot: {
+            before: currentConfig,
+            after: validated,
+          },
+        },
+      ]);
     });
 
-    saveStore(store);
     return { ok: true, config: validated };
   } catch (err) {
     return {
@@ -14065,9 +15668,3 @@ export function saveKeyDatesConfigRecord(
     };
   }
 }
-
-
-
-
-
-

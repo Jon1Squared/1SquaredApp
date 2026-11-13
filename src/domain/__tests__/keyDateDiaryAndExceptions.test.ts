@@ -21,6 +21,13 @@ import {
   verifyProposedKeyDateRecord,
 } from '@/server/services';
 import { getStore, resetStore } from '@/server/store';
+import {
+  auditEntriesForRecord,
+  getKeyDateRepository,
+  markAuditPosition,
+  runAsTestActor,
+  testTenantCtx,
+} from '@/server/testSupport/auditTestSupport';
 
 const config = exampleConfig as unknown as KeyDatesConfig;
 
@@ -819,13 +826,21 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     const managingPartner = store.people.find(
       (p) => p.isEmployee && p.roles?.includes('managing_partner'),
     )!;
-    const exportRes = exportKeyDateExceptionsReportRecord(
-      { format: 'csv' },
-      managingPartner.id,
-      todayIso,
+    const exportAuditMark = await markAuditPosition();
+    const exportRes = await runAsTestActor(managingPartner.id, () =>
+      exportKeyDateExceptionsReportRecord(
+        { format: 'csv' },
+        managingPartner.id,
+        todayIso,
+      ),
     );
     expect(exportRes.ok).toBe(true);
-    expect(store.audit[0]?.action).toBe('keydate-export');
+    const exportAudit = await auditEntriesForRecord(
+      'key_date',
+      'KEY-DATE-EXCEPTIONS-EXPORT',
+      exportAuditMark,
+    );
+    expect(exportAudit[0]?.action).toBe('keydate-export');
 
     // R29: A staff matter with no permitted assignee, updated through the services, writes an audit entry and produces an exceptions-report entry
     const unpermittedAssignee = store.people.find(
@@ -845,41 +860,55 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     };
     store.matters.push(staffMatterNoAssignee);
     const activeTeamId = store.teams.find((t) => t.active)!.id;
-    store.keyDates = [
-      {
-        ...store.keyDates![0]!,
-        id: 'KD-R29-NO-ASSIGNEE',
-        matterId: staffMatterNoAssignee.id,
-        title: 'Staff Matter Unassignable Deadline',
-        dueDate: '2026-12-01',
-        status: 'awaiting_verification',
-        teamId: activeTeamId,
-        responsiblePersonIds: [unpermittedAssignee.id],
-        verification: {
-          required: true,
-          proposedById: unpermittedAssignee.id,
-          proposedAt: '2026-11-01T10:00:00.000Z',
-        },
+    const kdRepo = getKeyDateRepository();
+    const partnerCtx = testTenantCtx(managingPartner.id);
+    const baseKd = (await kdRepo.listAllVisibleKeyDates(partnerCtx)).find((k) =>
+      Boolean(k.matterId),
+    )!;
+    expect(baseKd).toBeDefined();
+    await kdRepo.setMatterRestriction(partnerCtx, {
+      matterId: staffMatterNoAssignee.id,
+      isRestricted: true,
+      restrictedAccessUserIds: [managingPartner.id],
+    });
+    await kdRepo.putKeyDate(partnerCtx, {
+      ...baseKd,
+      id: 'KD-R29-NO-ASSIGNEE',
+      matterId: staffMatterNoAssignee.id,
+      enquiryId: undefined,
+      title: 'Staff Matter Unassignable Deadline',
+      dueDate: '2026-12-01',
+      status: 'awaiting_verification',
+      teamId: activeTeamId,
+      responsiblePersonIds: [unpermittedAssignee.id],
+      verification: {
+        required: true,
+        proposedById: unpermittedAssignee.id,
+        proposedAt: '2026-11-01T10:00:00.000Z',
       },
-      ...(store.keyDates ?? []),
-    ];
-    const verifyStaffRes = await verifyProposedKeyDateRecord(
-      'KD-R29-NO-ASSIGNEE',
-      managingPartner.id,
+    });
+    const verifyAuditMark = await markAuditPosition();
+    const verifyStaffRes = await runAsTestActor(managingPartner.id, () =>
+      verifyProposedKeyDateRecord(
+        'KD-R29-NO-ASSIGNEE',
+        managingPartner.id,
+      ),
     );
     expect(verifyStaffRes.ok).toBe(true);
     expect(
-      store.audit.some(
+      (await auditEntriesForRecord('key_date', 'KD-R29-NO-ASSIGNEE', verifyAuditMark)).some(
         (a) =>
           a.recordId === 'KD-R29-NO-ASSIGNEE' &&
           a.action === 'keydate-reminder-escalate' &&
           a.newValue === 'no_permitted_assignees',
       ),
     ).toBe(true);
-    const exceptionsForPartner = getKeyDateExceptionsReportRecord(
-      {},
-      managingPartner.id,
-      todayIso,
+    const exceptionsForPartner = await runAsTestActor(managingPartner.id, () =>
+      getKeyDateExceptionsReportRecord(
+        {},
+        managingPartner.id,
+        todayIso,
+      ),
     );
     expect(
       exceptionsForPartner.some(
@@ -911,16 +940,15 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     const otherTeam = store.teams.find(
       (t) => t.active && !ownTeamIds.has(t.id),
     )!;
-    store.keyDates = [
-      ...(store.keyDates ?? []),
-      {
-        ...store.keyDates![0]!,
-        id: 'KD-OTHER-TEAM-999',
-        teamId: otherTeam.id,
-        title: 'Other Team Key Date',
-      },
-    ];
-    const snap = getAppSnapshot(feeEarner.id);
+    await kdRepo.putKeyDate(partnerCtx, {
+      ...baseKd,
+      id: 'KD-OTHER-TEAM-999',
+      teamId: otherTeam.id,
+      title: 'Other Team Key Date',
+    });
+    const snap = await runAsTestActor(feeEarner.id, () =>
+      getAppSnapshot(feeEarner.id),
+    );
     expect(snap.keyDates.some((kd) => kd.id === 'KD-OTHER-TEAM-999')).toBe(
       false,
     );

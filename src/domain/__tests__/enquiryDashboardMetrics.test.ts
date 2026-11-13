@@ -9,6 +9,7 @@ import {
 import { valueBySystemKey } from '../lists';
 import { saveEnquiryRecord } from '../../server/services';
 import { getStore } from '../../server/store';
+import { runAsTestActor } from '../../server/testSupport/auditTestSupport';
 import type { Enquiry } from '../types';
 
 function makeEnquiry(overrides: Partial<Enquiry>): Enquiry {
@@ -302,7 +303,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
     ]);
   });
 
-  it('saveEnquiryRecord rejects non-draft saves without privacyNoticeGiven while leaving store.enquiries unchanged, allows draft saves to store privacyNoticeGiven = false, and allows legacy non-draft enquiries with privacyNoticeGiven = false to be edited and fixed (R362, R376, R380)', () => {
+  it('saveEnquiryRecord rejects non-draft saves without privacyNoticeGiven while leaving store.enquiries unchanged, allows draft saves to store privacyNoticeGiven = false, and allows legacy non-draft enquiries with privacyNoticeGiven = false to be edited and fixed (R362, R376, R380)', async () => {
     const store = getStore();
     const channelId =
       valueBySystemKey(store.values, 'enquiry_channel', 'phone')?.id ??
@@ -316,126 +317,128 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
 
     const beforeEnquiriesSnapshot = structuredClone(store.enquiries);
 
-    // 1. Non-draft save with privacyNoticeGiven omitted is rejected on the server and leaves store.enquiries unchanged
-    const omittedNonDraft = saveEnquiryRecord(
-      {
-        channelId,
-        firstName: 'Elin',
-        lastName: 'Bryn',
-        phone: '01632 960222',
-        practiceAreaId,
-        summary: 'Residential purchase enquiry',
-        notes: 'Caller enquiring about conveyancing fees.',
-        urgencyId,
-      },
-      { byId: 'P-000018', asDraft: false },
-    );
-    expect(omittedNonDraft.enquiry).toBeUndefined();
-    expect(omittedNonDraft.errors?.privacyNoticeGiven).toBe(
-      'Please confirm the privacy notice was read or sent to the caller.',
-    );
-    expect(getStore().enquiries).toEqual(beforeEnquiriesSnapshot);
+    await runAsTestActor('P-000018', async () => {
+      // 1. Non-draft save with privacyNoticeGiven omitted is rejected on the server and leaves store.enquiries unchanged
+      const omittedNonDraft = await saveEnquiryRecord(
+        {
+          channelId,
+          firstName: 'Elin',
+          lastName: 'Bryn',
+          phone: '01632 960222',
+          practiceAreaId,
+          summary: 'Residential purchase enquiry',
+          notes: 'Caller enquiring about conveyancing fees.',
+          urgencyId,
+        },
+        { byId: 'P-000018', asDraft: false },
+      );
+      expect(omittedNonDraft.enquiry).toBeUndefined();
+      expect(omittedNonDraft.errors?.privacyNoticeGiven).toBe(
+        'Please confirm the privacy notice was read or sent to the caller.',
+      );
+      expect(getStore().enquiries).toEqual(beforeEnquiriesSnapshot);
 
-    // 2. Non-draft save with privacyNoticeGiven: false is rejected on the server and leaves store.enquiries unchanged
-    const falseNonDraft = saveEnquiryRecord(
-      {
-        channelId,
-        firstName: 'Elin',
-        lastName: 'Bryn',
-        phone: '01632 960222',
-        practiceAreaId,
-        summary: 'Residential purchase enquiry',
-        notes: 'Caller enquiring about conveyancing fees.',
-        urgencyId,
+      // 2. Non-draft save with privacyNoticeGiven: false is rejected on the server and leaves store.enquiries unchanged
+      const falseNonDraft = await saveEnquiryRecord(
+        {
+          channelId,
+          firstName: 'Elin',
+          lastName: 'Bryn',
+          phone: '01632 960222',
+          practiceAreaId,
+          summary: 'Residential purchase enquiry',
+          notes: 'Caller enquiring about conveyancing fees.',
+          urgencyId,
+          privacyNoticeGiven: false,
+        },
+        { byId: 'P-000018', asDraft: false },
+      );
+      expect(falseNonDraft.enquiry).toBeUndefined();
+      expect(falseNonDraft.errors?.privacyNoticeGiven).toBe(
+        'Please confirm the privacy notice was read or sent to the caller.',
+      );
+      expect(getStore().enquiries).toEqual(beforeEnquiriesSnapshot);
+
+      // 3. Draft save with privacyNoticeGiven omitted succeeds and stores privacyNoticeGiven: false
+      const draftSaved = await saveEnquiryRecord(
+        {
+          channelId,
+          firstName: 'Elin',
+          lastName: 'Bryn',
+          phone: '01632 960222',
+          practiceAreaId,
+          summary: 'Draft residential purchase enquiry',
+          notes: 'Draft notes.',
+          urgencyId,
+        },
+        { byId: 'P-000018', asDraft: true },
+      );
+      expect(draftSaved.errors).toBeUndefined();
+      expect(draftSaved.enquiry).toBeDefined();
+      expect(draftSaved.enquiry?.status).toBe('Draft');
+      expect(draftSaved.enquiry?.privacyNoticeGiven).toBe(false);
+
+      // 4. Routing that draft to non-draft without privacyNoticeGiven: true is rejected and leaves store.enquiries unchanged
+      const afterDraftSnapshot = structuredClone(getStore().enquiries);
+      const routeDraftWithoutPrivacy = await saveEnquiryRecord(
+        {
+          notes: 'Attempting to route draft without privacy notice.',
+          privacyNoticeGiven: false,
+        },
+        { id: draftSaved.enquiry!.id, byId: 'P-000018', asDraft: false },
+      );
+      expect(routeDraftWithoutPrivacy.enquiry).toBeUndefined();
+      expect(routeDraftWithoutPrivacy.errors?.privacyNoticeGiven).toBe(
+        'Please confirm the privacy notice was read or sent to the caller.',
+      );
+      expect(getStore().enquiries).toEqual(afterDraftSnapshot);
+
+      // 5. Legacy non-draft enquiry stored with privacyNoticeGiven: false can be edited from its profile and fixed to privacyNoticeGiven: true
+      const legacyEnquiry: Enquiry = {
+        ...draftSaved.enquiry!,
+        id: 'ENQ-LEGACY-PRIVACY',
+        reference: 'ENQ-LEGACY-PRIVACY',
+        status: 'New',
         privacyNoticeGiven: false,
-      },
-      { byId: 'P-000018', asDraft: false },
-    );
-    expect(falseNonDraft.enquiry).toBeUndefined();
-    expect(falseNonDraft.errors?.privacyNoticeGiven).toBe(
-      'Please confirm the privacy notice was read or sent to the caller.',
-    );
-    expect(getStore().enquiries).toEqual(beforeEnquiriesSnapshot);
+      };
+      getStore().enquiries.unshift(legacyEnquiry);
 
-    // 3. Draft save with privacyNoticeGiven omitted succeeds and stores privacyNoticeGiven: false
-    const draftSaved = saveEnquiryRecord(
-      {
-        channelId,
-        firstName: 'Elin',
-        lastName: 'Bryn',
-        phone: '01632 960222',
-        practiceAreaId,
-        summary: 'Draft residential purchase enquiry',
-        notes: 'Draft notes.',
-        urgencyId,
-      },
-      { byId: 'P-000018', asDraft: true },
-    );
-    expect(draftSaved.errors).toBeUndefined();
-    expect(draftSaved.enquiry).toBeDefined();
-    expect(draftSaved.enquiry?.status).toBe('Draft');
-    expect(draftSaved.enquiry?.privacyNoticeGiven).toBe(false);
+      const editedLegacy = await saveEnquiryRecord(
+        {
+          notes: 'Updated notes on legacy enquiry before confirming privacy notice.',
+          privacyNoticeGiven: false,
+        },
+        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
+      );
+      expect(editedLegacy.errors).toBeUndefined();
+      expect(editedLegacy.enquiry?.notes).toBe(
+        'Updated notes on legacy enquiry before confirming privacy notice.',
+      );
+      expect(editedLegacy.enquiry?.privacyNoticeGiven).toBe(false);
 
-    // 4. Routing that draft to non-draft without privacyNoticeGiven: true is rejected and leaves store.enquiries unchanged
-    const afterDraftSnapshot = structuredClone(getStore().enquiries);
-    const routeDraftWithoutPrivacy = saveEnquiryRecord(
-      {
-        notes: 'Attempting to route draft without privacy notice.',
-        privacyNoticeGiven: false,
-      },
-      { id: draftSaved.enquiry!.id, byId: 'P-000018', asDraft: false },
-    );
-    expect(routeDraftWithoutPrivacy.enquiry).toBeUndefined();
-    expect(routeDraftWithoutPrivacy.errors?.privacyNoticeGiven).toBe(
-      'Please confirm the privacy notice was read or sent to the caller.',
-    );
-    expect(getStore().enquiries).toEqual(afterDraftSnapshot);
+      const fixedLegacy = await saveEnquiryRecord(
+        {
+          notes: 'Updated notes and confirmed privacy notice given.',
+          privacyNoticeGiven: true,
+        },
+        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
+      );
+      expect(fixedLegacy.errors).toBeUndefined();
+      expect(fixedLegacy.enquiry?.privacyNoticeGiven).toBe(true);
 
-    // 5. Legacy non-draft enquiry stored with privacyNoticeGiven: false can be edited from its profile and fixed to privacyNoticeGiven: true
-    const legacyEnquiry: Enquiry = {
-      ...draftSaved.enquiry!,
-      id: 'ENQ-LEGACY-PRIVACY',
-      reference: 'ENQ-LEGACY-PRIVACY',
-      status: 'New',
-      privacyNoticeGiven: false,
-    };
-    getStore().enquiries.unshift(legacyEnquiry);
-
-    const editedLegacy = saveEnquiryRecord(
-      {
-        notes: 'Updated notes on legacy enquiry before confirming privacy notice.',
-        privacyNoticeGiven: false,
-      },
-      { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
-    );
-    expect(editedLegacy.errors).toBeUndefined();
-    expect(editedLegacy.enquiry?.notes).toBe(
-      'Updated notes on legacy enquiry before confirming privacy notice.',
-    );
-    expect(editedLegacy.enquiry?.privacyNoticeGiven).toBe(false);
-
-    const fixedLegacy = saveEnquiryRecord(
-      {
-        notes: 'Updated notes and confirmed privacy notice given.',
-        privacyNoticeGiven: true,
-      },
-      { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
-    );
-    expect(fixedLegacy.errors).toBeUndefined();
-    expect(fixedLegacy.enquiry?.privacyNoticeGiven).toBe(true);
-
-    // Once privacyNoticeGiven is true, unsetting it back to false is rejected and leaves store.enquiries unchanged
-    const afterFixedSnapshot = structuredClone(getStore().enquiries);
-    const revertPrivacy = saveEnquiryRecord(
-      {
-        privacyNoticeGiven: false,
-      },
-      { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
-    );
-    expect(revertPrivacy.enquiry).toBeUndefined();
-    expect(revertPrivacy.errors?.privacyNoticeGiven).toBe(
-      'Please confirm the privacy notice was read or sent to the caller.',
-    );
-    expect(getStore().enquiries).toEqual(afterFixedSnapshot);
+      // Once privacyNoticeGiven is true, unsetting it back to false is rejected and leaves store.enquiries unchanged
+      const afterFixedSnapshot = structuredClone(getStore().enquiries);
+      const revertPrivacy = await saveEnquiryRecord(
+        {
+          privacyNoticeGiven: false,
+        },
+        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
+      );
+      expect(revertPrivacy.enquiry).toBeUndefined();
+      expect(revertPrivacy.errors?.privacyNoticeGiven).toBe(
+        'Please confirm the privacy notice was read or sent to the caller.',
+      );
+      expect(getStore().enquiries).toEqual(afterFixedSnapshot);
+    });
   });
 });

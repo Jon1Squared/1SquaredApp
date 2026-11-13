@@ -39,13 +39,19 @@ import {
   updateEmployeeRolesAndSupports,
 } from '@/server/services';
 import { testDataResetContext } from '@/test/testTenantContexts';
+import {
+  runAsTestActor,
+  setTestActorSession,
+} from '@/server/testSupport/auditTestSupport';
 
 describe('Role-based Home pages & configuration', () => {
   beforeEach(async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
+    setTestActorSession('P-000001');
   });
 
   afterAll(async () => {
+    setTestActorSession(null);
     await resetAllDemoData('P-000001', testDataResetContext());
   });
 
@@ -72,8 +78,8 @@ describe('Role-based Home pages & configuration', () => {
     expect(partner.summaryPanels).toContain('to_do');
   });
 
-  it('seeds all 8 demo personas and underlying real employees with showsWorkOfId and supportsIds', () => {
-    const snap = getAppSnapshot('P-000001');
+  it('seeds all 8 demo personas and underlying real employees with showsWorkOfId and supportsIds', async () => {
+    const snap = await getAppSnapshot('P-000001');
     const demoUsers = snap.people.filter((p) => p.isEmployee && p.demo);
     expect(demoUsers.length).toBe(8);
 
@@ -118,7 +124,7 @@ describe('Role-based Home pages & configuration', () => {
     expect(simone?.supportsIds).toContain('P-000002');
   });
 
-  it('computes left-rail visibility accurately per role', () => {
+  it('computes left-rail visibility accurately per role', async () => {
     // Fee earner: no Finance, no Risk
     const feRail = getLeftRailVisibility('fee_earner', ['fee_earner']);
     expect(feRail.finance).toBe(false);
@@ -147,11 +153,15 @@ describe('Role-based Home pages & configuration', () => {
 
     // R244: getAppSnapshot keeps leftRailVisibility.keyDates false when the Home role hides key dates
     // even if the employee (P-000009, Finance, team lead of Accounts) holds keydate:view via team-lead grant
-    const financeSnapshot = getAppSnapshot('P-000009');
+    const financeSnapshot = await runAsTestActor('P-000009', () =>
+      getAppSnapshot('P-000009'),
+    );
     expect(financeSnapshot.activeViewingRole).toBe('finance');
     expect(financeSnapshot.leftRailVisibility?.keyDates).toBe(false);
 
-    const feeEarnerSnapshot = getAppSnapshot('P-000002');
+    const feeEarnerSnapshot = await runAsTestActor('P-000002', () =>
+      getAppSnapshot('P-000002'),
+    );
     expect(feeEarnerSnapshot.activeViewingRole).toBe('fee_earner');
     expect(feeEarnerSnapshot.leftRailVisibility?.keyDates).toBe(true);
 
@@ -166,53 +176,67 @@ describe('Role-based Home pages & configuration', () => {
     expect(mpRail.risk).toBe(true);
   });
 
-  it('remembers Viewing As selection per user and validates against user roles', () => {
-    const snap1 = getAppSnapshot('P-000001'); // Rhian Morgan: ['partner', 'fee_earner']
+  it('remembers Viewing As selection per user and validates against user roles', async () => {
+    const snap1 = await getAppSnapshot('P-000001'); // Rhian Morgan: ['partner', 'fee_earner']
     expect(snap1.activeViewingRole).toBe('partner');
 
     // Switch Rhian to 'fee_earner'
-    const res = switchViewingRole('P-000001', 'fee_earner');
+    const res = await switchViewingRole('P-000001', 'fee_earner');
     expect(res.ok).toBe(true);
 
-    const snap2 = getAppSnapshot('P-000001');
+    const snap2 = await getAppSnapshot('P-000001');
     expect(snap2.activeViewingRole).toBe('fee_earner');
 
     // Attempting to switch Rhian to a role she does not hold ('finance') is rejected
-    const badSwitch = switchViewingRole('P-000001', 'finance');
+    const badSwitch = await switchViewingRole('P-000001', 'finance');
     expect(badSwitch.ok).toBe(false);
 
     // Negative test (R215): a user with only ['fee_earner'] (P-000002) switching to 'finance' gets ok: false
-    const feeEarnerSwitch = switchViewingRole('P-000002', 'finance');
+    const feeEarnerSwitch = await runAsTestActor('P-000002', () =>
+      switchViewingRole('P-000002', 'finance'),
+    );
     expect(feeEarnerSwitch.ok).toBe(false);
 
     // Positive test (R215): an administrator holding ['admin'] can preview any configured role via Viewing As
     const adamAdmin = snap1.people.find(
       (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
-    updateEmployeeRolesAndSupports(
-      'P-000004',
-      { roles: ['admin'] },
-      adamAdmin.id,
-      { mfaVerified: true },
+    await runAsTestActor(adamAdmin.id, () =>
+      updateEmployeeRolesAndSupports(
+        'P-000004',
+        { roles: ['admin'] },
+        adamAdmin.id,
+        { mfaVerified: true },
+      ),
     );
-    const adminSnap1 = getAppSnapshot('P-000004');
+    const adminSnap1 = await runAsTestActor('P-000004', () =>
+      getAppSnapshot('P-000004'),
+    );
     expect(adminSnap1.currentUserRoles).toEqual(['admin']);
     expect(canPreviewAnyHomeRole(adminSnap1.currentUserRoles)).toBe(true);
-    const adminSwitch = switchViewingRole('P-000004', 'finance');
+    const adminSwitch = await runAsTestActor('P-000004', () =>
+      switchViewingRole('P-000004', 'finance'),
+    );
     expect(adminSwitch.ok).toBe(true);
-    const adminSnap2 = getAppSnapshot('P-000004');
+    const adminSnap2 = await runAsTestActor('P-000004', () =>
+      getAppSnapshot('P-000004'),
+    );
     expect(adminSnap2.activeViewingRole).toBe('finance');
 
     // Negative test (R215): an undefined legacy key (not 'admin') does not grant role preview
     const undefinedLegacyKey = ['system', 'admin'].join('_');
     expect(canPreviewAnyHomeRole([undefinedLegacyKey])).toBe(false);
-    updateEmployeeRolesAndSupports(
-      'P-000002',
-      { roles: [undefinedLegacyKey] },
-      adamAdmin.id,
-      { mfaVerified: true },
+    await runAsTestActor(adamAdmin.id, () =>
+      updateEmployeeRolesAndSupports(
+        'P-000002',
+        { roles: [undefinedLegacyKey] },
+        adamAdmin.id,
+        { mfaVerified: true },
+      ),
     );
-    const invalidKeySwitch = switchViewingRole('P-000002', 'finance');
+    const invalidKeySwitch = await runAsTestActor('P-000002', () =>
+      switchViewingRole('P-000002', 'finance'),
+    );
     expect(invalidKeySwitch.ok).toBe(false);
   });
 
@@ -299,7 +323,7 @@ describe('Role-based Home pages & configuration', () => {
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     });
     try {
-      const snap = getAppSnapshot('P-000004');
+      const snap = await getAppSnapshot('P-000004');
       const felicity = snap.people.find(
         (p) => primaryEmail(p) === 'felicity.fee-earner@notalawfirm.example',
       )!;
@@ -313,7 +337,7 @@ describe('Role-based Home pages & configuration', () => {
     }
   });
 
-  it('cycles panel placements Primary -> Summary -> Off and persists Admin › Home pages changes and resets', () => {
+  it('cycles panel placements Primary -> Summary -> Off and persists Admin › Home pages changes and resets', async () => {
     const defaults = createDefaultHomePagesConfig('2026-11-09T09:00:00Z');
     const partnerRole = defaults.roles.find((r) => r.key === 'partner')!;
 
@@ -329,59 +353,69 @@ describe('Role-based Home pages & configuration', () => {
     const updatedPartner = setRolePanelPlacement(partnerRole, 'aged_debt_by_age_band', 'summary');
     expect(updatedPartner.summaryPanels).toContain('aged_debt_by_age_band');
 
-    const adminUser = getAppSnapshot('P-000001').people.find(
+    const adminUser = (await getAppSnapshot('P-000001')).people.find(
       (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
     const updatedRoles = defaults.roles.map((r) => (r.key === 'partner' ? updatedPartner : r));
-    const saveRes = saveHomePagesConfig(
-      {
-        roles: updatedRoles,
-        firmSettings: { demoMode: true },
-      },
-      adminUser.id,
-      { mfaVerified: true },
+    const saveRes = await runAsTestActor(adminUser.id, () =>
+      saveHomePagesConfig(
+        {
+          roles: updatedRoles,
+          firmSettings: { demoMode: true },
+        },
+        adminUser.id,
+        { mfaVerified: true },
+      ),
     );
     expect(saveRes.ok).toBe(true);
 
-    const snapAfterSave = getAppSnapshot('P-000001');
+    const snapAfterSave = await getAppSnapshot('P-000001');
     const savedPartner = snapAfterSave.homePagesConfig.roles.find((r) => r.key === 'partner')!;
     expect(savedPartner.summaryPanels).toContain('aged_debt_by_age_band');
     // demoMode comes strictly from schema-validated tenant configuration, never from user-writable store state
     expect(snapAfterSave.homePagesConfig.firmSettings.demoMode).toBe(false);
 
     // Reset to defaults removes 'aged_debt_by_age_band' from Partner summary
-    const resetRes = resetHomePagesConfig(adminUser.id, { mfaVerified: true });
+    const resetRes = await runAsTestActor(adminUser.id, () =>
+      resetHomePagesConfig(adminUser.id, { mfaVerified: true }),
+    );
     expect(resetRes.ok).toBe(true);
-    const snapAfterReset = getAppSnapshot('P-000001');
+    const snapAfterReset = await getAppSnapshot('P-000001');
     const resetPartner = snapAfterReset.homePagesConfig.roles.find((r) => r.key === 'partner')!;
     expect(resetPartner.summaryPanels).not.toContain('aged_debt_by_age_band');
   });
 
-  it('allows adding a custom role in Admin › Home pages and assigning roles/supports to employees', () => {
-    const adminUser = getAppSnapshot('P-000001').people.find(
+  it('allows adding a custom role in Admin › Home pages and assigning roles/supports to employees', async () => {
+    const adminUser = (await getAppSnapshot('P-000001')).people.find(
       (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
-    const res = addHomeRole(
-      {
-        label: 'Business Development',
-        shortLabel: 'Bus Dev',
-        purpose: 'Enquiry pipeline, referral sources and key client relationships.',
-        copyFromRoleKey: 'partner',
-      },
-      adminUser.id,
-      { mfaVerified: true },
+    const res = await runAsTestActor(adminUser.id, () =>
+      addHomeRole(
+        {
+          label: 'Business Development',
+          shortLabel: 'Bus Dev',
+          purpose: 'Enquiry pipeline, referral sources and key client relationships.',
+          copyFromRoleKey: 'partner',
+        },
+        adminUser.id,
+        { mfaVerified: true },
+      ),
     );
     expect(res.ok).toBe(true);
     expect(res.role?.key).toBe('business_development');
-    const empUpdate = updateEmployeeRolesAndSupports(
-      'P-000002',
-      { roles: ['fee_earner', 'business_development'] },
-      adminUser.id,
-      { mfaVerified: true },
+    const empUpdate = await runAsTestActor(adminUser.id, () =>
+      updateEmployeeRolesAndSupports(
+        'P-000002',
+        { roles: ['fee_earner', 'business_development'] },
+        adminUser.id,
+        { mfaVerified: true },
+      ),
     );
     expect(empUpdate.ok).toBe(true);
 
-    const snap = getAppSnapshot('P-000002');
+    const snap = await runAsTestActor('P-000002', () =>
+      getAppSnapshot('P-000002'),
+    );
     const dafydd = snap.people.find((p) => p.id === 'P-000002')!;
     expect(resolveEmployeeRoles(dafydd, snap.teams)).toEqual([
       'fee_earner',
@@ -440,39 +474,39 @@ describe('Role-based Home pages & configuration', () => {
     expect(depts.firmTotal.currentMonthHours).toBe(90.3);
   });
 
-  it('supports inline Home actions: approve/discuss sign-offs and request bill / flag write-off', () => {
-    const snapBefore = getAppSnapshot('P-000001');
+  it('supports inline Home actions: approve/discuss sign-offs and request bill / flag write-off', async () => {
+    const snapBefore = await getAppSnapshot('P-000001');
     expect(snapBefore.signOffs.filter((s) => s.status === 'Pending').length).toBe(3);
 
     // Approve SO-000001
-    const appRes = approveSignOff('SO-000001', 'P-000001');
+    const appRes = await approveSignOff('SO-000001', 'P-000001');
     expect(appRes.ok).toBe(true);
 
     // Discuss SO-000002
-    const discRes = discussSignOff('SO-000002', 'Please confirm cap ceiling first', 'P-000001');
+    const discRes = await discussSignOff('SO-000002', 'Please confirm cap ceiling first', 'P-000001');
     expect(discRes.ok).toBe(true);
 
-    const snapAfter = getAppSnapshot('P-000001');
+    const snapAfter = await getAppSnapshot('P-000001');
     expect(snapAfter.signOffs.find((s) => s.id === 'SO-000001')?.status).toBe('Approved');
     expect(snapAfter.signOffs.find((s) => s.id === 'SO-000002')?.status).toBe('Discussing');
 
     // Request bill on PEN001-0001 by partner (finance:credit_control) creates a Billing task
-    const billRes = requestMatterBill('PEN001-0001', 'P-000001');
+    const billRes = await requestMatterBill('PEN001-0001', 'P-000001');
     expect(isActionDenied(billRes)).toBe(false);
     expect(billRes.ok).toBe(true);
 
     // Flag write-off on linked PMS matter SEV001-0001 by partner (finance:credit_control) creates a new SignOffItem, while unlinked TGL001-0002 is rejected (R337)
-    const unlinkedWo = flagMatterWriteOff('TGL001-0002', 350, 'P-000001');
+    const unlinkedWo = await flagMatterWriteOff('TGL001-0002', 350, 'P-000001');
     expect(isActionDenied(unlinkedWo)).toBe(true);
-    const woRes = flagMatterWriteOff('SEV001-0001', 2984, 'P-000001');
+    const woRes = await flagMatterWriteOff('SEV001-0001', 2984, 'P-000001');
     expect(isActionDenied(woRes)).toBe(false);
     expect(woRes.ok).toBe(true);
-    const snapFinal = getAppSnapshot('P-000001');
+    const snapFinal = await getAppSnapshot('P-000001');
     expect(snapFinal.signOffs.some((s) => s.matterNumber === 'SEV001-0001')).toBe(true);
   });
 
-  it('links configurable Home page roles to Employee Roles in the People taxonomy and removes test_role', () => {
-    const snapBefore = getAppSnapshot('P-000001');
+  it('links configurable Home page roles to Employee Roles in the People taxonomy and removes test_role', async () => {
+    const snapBefore = await getAppSnapshot('P-000001');
     const synced = syncHomeRolesWithEmployeeRoles(
       [
         ...snapBefore.homePagesConfig.roles,
@@ -497,7 +531,7 @@ describe('Role-based Home pages & configuration', () => {
     );
 
     // Adding a new Employee Role in Taxonomy › People › Employee roles automatically creates a configurable Home role
-    addChoiceValue(
+    await addChoiceValue(
       {
         listKey: 'employee_role',
         label: 'Costs Lawyer',
@@ -505,7 +539,7 @@ describe('Role-based Home pages & configuration', () => {
       },
       'P-000001',
     );
-    const snapAfter = getAppSnapshot('P-000001');
+    const snapAfter = await getAppSnapshot('P-000001');
     const costsRole = snapAfter.homePagesConfig.roles.find(
       (r) => r.employeeRoleId === 'employee_role.costs_lawyer',
     );

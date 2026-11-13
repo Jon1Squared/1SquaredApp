@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic';
 export default async function NewOrganisationPage() {
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
 
     return (
       <OrganisationFormClient

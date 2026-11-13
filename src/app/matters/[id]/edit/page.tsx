@@ -12,7 +12,7 @@ export default async function EditMatterPage({
 }) {
   const { id } = await params;
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
     const matter = snap.matters.find((m) => m.id === id);
     if (!matter) notFound();
 

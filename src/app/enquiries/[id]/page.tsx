@@ -3,6 +3,7 @@ import { EnquiryFormClient } from '@/components/EnquiryFormClient';
 import { KeyDatesPanel } from '@/components/KeyDatesPanel';
 import {
   getAppSnapshot,
+  listAuditEntriesForRecord,
   recordRecentlyViewed,
   withPageActor,
 } from '@/server/services';
@@ -17,15 +18,15 @@ export default async function EnquiryDetailPage({
   const { id } = await params;
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
     const enquiry = snap.enquiries.find((e) => e.id === id);
     if (!enquiry) notFound();
 
-    recordRecentlyViewed(userId, enquiry.id);
+    await recordRecentlyViewed(userId, enquiry.id);
 
-    const audit = snap.audit.filter(
-      (a) => a.recordType === 'enquiry' && a.recordId === enquiry.id,
-    );
+    const audit = await listAuditEntriesForRecord('enquiry', enquiry.id, userId, {
+      limit: 200,
+    });
 
     return (
       <div>

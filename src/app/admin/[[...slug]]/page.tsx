@@ -4,7 +4,12 @@ import { createDefaultRoleConfigs } from '@/domain/homeConfig';
 import { hasPersonPermission } from '@/server/rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { getEntraEnvStatus } from '@/server/entraAuth';
-import { getAppSnapshot, getPmsAdminSnapshot, withPageActor } from '@/server/services';
+import {
+  getAppSnapshot,
+  getPmsAdminSnapshot,
+  listFirmAuditEntriesPage,
+  withPageActor,
+} from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,12 +18,26 @@ export default async function AdminCatchAllPage({
   searchParams,
 }: {
   params: Promise<{ slug?: string[] }>;
-  searchParams: Promise<{ list?: string; section?: string; authError?: string; authSuccess?: string }>;
+  searchParams: Promise<{
+    list?: string;
+    section?: string;
+    authError?: string;
+    authSuccess?: string;
+    auditBeforeSeq?: string;
+    beforeSeq?: string;
+  }>;
 }) {
   const { slug } = await params;
-  const { list, section, authError, authSuccess } = await searchParams;
+  const {
+    list,
+    section,
+    authError,
+    authSuccess,
+    auditBeforeSeq,
+    beforeSeq,
+  } = await searchParams;
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
 
     const canAccessAdmin = hasPersonPermission(snap.currentUser, 'admin:access', {
       allPeople: snap.people,
@@ -29,6 +48,13 @@ export default async function AdminCatchAllPage({
     if (!canAccessAdmin) {
       redirect('/');
     }
+
+    const rawBeforeSeq = auditBeforeSeq ?? beforeSeq;
+    const parsedBeforeSeq = rawBeforeSeq ? Number.parseInt(rawBeforeSeq, 10) : NaN;
+    const firmAuditPage = await listFirmAuditEntriesPage(actor.personId, {
+      limit: 250,
+      ...(Number.isFinite(parsedBeforeSeq) ? { beforeSeq: parsedBeforeSeq } : {}),
+    });
 
     const pmsAdmin = getPmsAdminSnapshot();
     const entraEnvStatus = getEntraEnvStatus();
@@ -90,6 +116,7 @@ export default async function AdminCatchAllPage({
         currentUserKeyDatePermissions={snap.currentUserKeyDatePermissions}
         entraSession={actor.session}
         entraEnvStatus={entraEnvStatus}
+        firmAuditPage={firmAuditPage}
         firmName={snap.firm.name}
         authError={authError}
         authSuccess={authSuccess === '1'}

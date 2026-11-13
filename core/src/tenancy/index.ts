@@ -32,6 +32,7 @@ export * from './tenantRegistry';
 export * from './postgresPoolManager';
 export * from './tenantScopedRepository';
 export * from './keyDateRepository';
+export * from './auditRepository';
 
 export {
   isEntraMfaVerified,

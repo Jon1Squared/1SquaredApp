@@ -12,7 +12,7 @@ export default async function EditPersonPage({
   const { id } = await params;
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
 
     const person = snap.people.find((p) => p.id === id);
     if (!person) notFound();

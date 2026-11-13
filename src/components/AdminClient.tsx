@@ -185,6 +185,10 @@ interface Props {
   currentUserKeyDatePermissions?: KeyDatePermission[];
   entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
   entraEnvStatus?: import('@/server/entraAuth').EntraEnvStatus;
+  firmAuditPage?: {
+    entries: import('@/domain/types').AuditEntry[];
+    nextBeforeSeq: number | null;
+  };
   authError?: string;
   authSuccess?: boolean;
   firmName?: string;
@@ -223,6 +227,7 @@ export function AdminClient({
   currentUserKeyDatePermissions = [],
   entraSession,
   entraEnvStatus,
+  firmAuditPage,
   authError,
   authSuccess,
   firmName = 'Firm',
@@ -4095,6 +4100,80 @@ export function AdminClient({
           </div>
         </div>
       )}
+
+      {firmAuditPage ? (
+        <section
+          className="subcard"
+          aria-label="Firm audit log"
+          data-testid="admin-firm-audit-log"
+          style={{ marginTop: 24 }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 12,
+              marginBottom: 12,
+            }}
+          >
+            <div>
+              <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
+                Firm audit log
+              </h2>
+              <p className="muted" style={{ fontSize: 13 }}>
+                Showing {firmAuditPage.entries.length} visible audit{' '}
+                {firmAuditPage.entries.length === 1 ? 'entry' : 'entries'} in
+                reverse sequence order. Restricted staff matters and unpermitted
+                HR entries are excluded.
+              </p>
+            </div>
+            {firmAuditPage.nextBeforeSeq !== null ? (
+              <Link
+                href={`/admin?auditBeforeSeq=${firmAuditPage.nextBeforeSeq}`}
+                className="btn btn--secondary"
+                data-testid="admin-firm-audit-next"
+              >
+                Next
+              </Link>
+            ) : null}
+          </div>
+          {firmAuditPage.entries.length === 0 ? (
+            <p className="muted">No visible audit entries on this page.</p>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table" style={{ width: '100%', fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>When</th>
+                    <th>Record</th>
+                    <th>Action</th>
+                    <th>Field</th>
+                    <th>New value</th>
+                    <th>By</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {firmAuditPage.entries.slice(0, 50).map((entry) => (
+                    <tr key={entry.id}>
+                      <td>{entry.id}</td>
+                      <td>{entry.at}</td>
+                      <td>
+                        {entry.recordType}:{entry.recordId}
+                      </td>
+                      <td>{entry.action}</td>
+                      <td>{entry.field}</td>
+                      <td>{entry.newValue ?? '—'}</td>
+                      <td>{entry.byId}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      ) : null}
     </div>
   );
 }

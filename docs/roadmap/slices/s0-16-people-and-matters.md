@@ -112,7 +112,7 @@ Expand-only migration in S0-16 (`CORE_REQUIRED_SCHEMA_VERSION = '0008'`):
 ## Acceptance criteria
 
 - Directory (`people`, `person_emails`, `organisations`, `person_organisation_links`, `notes`, `merge_history`) and matters (`matters`, `matter_parties`, `matter_number_sequences`) run solely on PostgreSQL with same-transaction `audit_entries`; `TenantKeyDateRepository` reads restrictions from `matters` only and nothing reads or writes `matter_restriction_metadata` (`R417`), while dropping the table stays deferred to `S0-20` (`R408`).
-- `B6` is fixed via `matter_number_sequences`; `row_version` is carried from `MatterFormClient` / `MatterProfileClient` through `saveMatterAction` and incremented by all 8 matter writers (`R409`); all S0-30 (`B13`) email checks pass via `person_emails` (`R410`).
+- `B6` is fixed via `matter_number_sequences`; `row_version` is carried from `MatterFormClient` / `MatterProfileClient` through `saveMatterAction` and incremented by all 8 matter writers (`R409`), rejecting any save based on a missing or stale `row_version` (`CONFLICT_CONCURRENT_MODIFICATION`, replacing the `S0-15` `updatedAt` backstop and implementing the `it.todo('rejects a save based on a stale row_version (S0-16)')` test in `core/tests/isolation.test.ts`, `R448`); all S0-30 (`B13`) email checks pass via `person_emails` (`R410`).
 - `npm run ci` passes (`MAX_KNOWN_GAPS = 0`).
 
 ## Manual blockers

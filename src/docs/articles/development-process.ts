@@ -6,7 +6,7 @@ export const developmentProcessArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared designs, tests, audits (including independent Claude Code verification on develop), and releases software safely across isolated branches and deployment rings.',
-  updated: '2026-11-09',
+  updated: '2026-11-10',
   body: `
 For a law firm, a software update cannot be a leap of faith. 1Squared is engineered around a **Zero-Trust, Architecture-First Software Development Lifecycle (SDLC)** where every change passes through **six independent quality and security gates** before reaching live production.
 
@@ -55,6 +55,8 @@ Every push and Pull Request triggers the automated **Platform CI** workflow (\`.
 3. **Adversarial Two-Tenant Isolation Suite**: Automatically provisions two separate firms (*Tenant A* and *Tenant B*) and attempts cross-tenant record reads, updates, deletes, and forged \`tenantId\` claim injection. Any boundary failure immediately blocks the Pull Request.
 4. **Clean Production Build (\`npm run build\`)**: Verifies the immutable production build succeeds.
 5. **Browser Role Journey Smoke Tests (\`npm run e2e\`)**: Runs Playwright browser tests against a production \`next start\` server across the eight seeded roles.
+
+**Running PostgreSQL-backed tests**: Test files share one local PostgreSQL instance, so run Vitest serially (the default \`npx vitest run\`); running several Vitest processes in parallel can cause deadlocks. Tests that reset demo data should find new audit entries by time window (\`auditEntriesWrittenSince\`), not by \`AU-…\` number, because a demo reset restarts the audit sequence. Writes to the transitional JSON store and the audit log run under a single first-in, first-out write lock, which pre-empts the earlier stale-write (R144) conflict path.
 
 ### End-to-end tests
 Browser-level role journey smoke tests live in \`e2e/\` and are configured in \`playwright.config.ts\` (\`npm run e2e\`). Before each run, \`e2e/global-setup.ts\` restores \`data/seed-not-a-law-firm.json\` into the runtime store and mints HMAC-SHA256 signed \`onesquared_entra_session\` cookies in test code only (never via a sign-in bypass in product code).

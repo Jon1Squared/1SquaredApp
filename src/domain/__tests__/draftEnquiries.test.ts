@@ -25,14 +25,22 @@ import {
   saveEnquiryRecord,
 } from '@/server/services';
 import { createSeedStore, getStore } from '@/server/store';
+import {
+  auditEntriesForRecord,
+  markAuditPosition,
+  runAsTestActor,
+  setTestActorSession,
+} from '@/server/testSupport/auditTestSupport';
 
 describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   beforeEach(() => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
     global.__oneSquaredStore = createSeedStore(new Date('2026-10-18T09:00:00Z'));
+    setTestActorSession('P-000018');
   });
 
   afterEach(() => {
+    setTestActorSession(null);
     vi.restoreAllMocks();
   });
 
@@ -40,15 +48,16 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     global.__oneSquaredStore = undefined;
   });
 
-  it('1. Save as draft sets status Draft and creates no task, no queue routing and no SLA target', () => {
+  it('1. Save as draft sets status Draft and creates no task, no queue routing and no SLA target', async () => {
     const store = getStore();
     const initialTaskCount = store.tasks.length;
+    const auditMark = await markAuditPosition();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =
       store.values.find((v) => v.listKey === 'work_type' && !v.parentId && v.active)?.id ?? '';
 
-    const res = saveEnquiryRecord(
+    const res = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Lisa',
@@ -81,7 +90,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     // Server-side conflict snapshot is persisted on the draft and in the audit trail
     expect(draft.conflictStatus).toBeDefined();
     expect(draft.conflictSnapshot).toBeDefined();
-    const draftAudits = store.audit.filter(
+    const draftAudits = (await auditEntriesForRecord('enquiry', draft.id, auditMark)).filter(
       (a) => a.recordType === 'enquiry' && a.recordId === draft.id,
     );
     expect(draftAudits.some((a) => a.field === 'Enquiry saved as draft')).toBe(true);
@@ -92,7 +101,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     ).toBe(true);
   });
 
-  it('2. Save and route on a complete draft sets status New, creates the callback task, routes to the team and sets the SLA from the routing time', () => {
+  it('2. Save and route on a complete draft sets status New, creates the callback task, routes to the team and sets the SLA from the routing time', async () => {
     vi.useFakeTimers();
     try {
       // Create draft at 10:00 on Sunday 18 Oct 2026
@@ -108,8 +117,9 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       const urgentUrgencyId =
         store.values.find((v) => v.listKey === 'enquiry_urgency' && v.label === 'Urgent')?.id ??
         '';
+      const auditMark = await markAuditPosition();
 
-      const draftRes = saveEnquiryRecord(
+      const draftRes = await saveEnquiryRecord(
         {
           channelId,
           firstName: 'Evan',
@@ -131,7 +141,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       const routeTime = new Date('2026-10-21T11:00:00.000Z');
       vi.setSystemTime(routeTime);
 
-      const routedRes = saveEnquiryRecord(
+      const routedRes = await saveEnquiryRecord(
         {
           channelId,
           firstName: 'Evan',
@@ -165,7 +175,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       expect(linkedTasks[0].autoTrigger).toBe('enquiry_contact');
 
       // Audit trail records routing to practice area team
-      const audits = store.audit.filter(
+      const audits = (await auditEntriesForRecord('enquiry', routed.id, auditMark)).filter(
         (a) => a.recordType === 'enquiry' && a.recordId === routed.id,
       );
       expect(audits.some((a) => a.field?.startsWith('Enquiry routed to '))).toBe(true);
@@ -174,12 +184,12 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     }
   });
 
-  it('3. Save and route on an incomplete draft does not save, and returns the list of missing fields', () => {
+  it('3. Save and route on an incomplete draft does not save, and returns the list of missing fields', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
 
-    const draftRes = saveEnquiryRecord(
+    const draftRes = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Lisa',
@@ -197,7 +207,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     const savedUpdatedAt = draft.updatedAt;
 
     // Attempt to save and route while missing contact, practice area, and summary
-    const routeAttempt = saveEnquiryRecord(
+    const routeAttempt = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Lisa',
@@ -254,7 +264,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     );
   });
 
-  it('4. Reopening a draft loads every field correctly, including How they heard about us and Privacy notice given', () => {
+  it('4. Reopening a draft loads every field correctly, including How they heard about us and Privacy notice given', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Email')?.id ?? '';
@@ -273,7 +283,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.values.find((v) => v.listKey === 'country' && v.label === 'United Kingdom')?.id ??
       null;
 
-    const draftRes = saveEnquiryRecord(
+    const draftRes = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Morgan',
@@ -344,7 +354,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     });
   });
 
-  it('5. Editing a field in a draft re-runs the conflict check and shows "Unsaved changes"', () => {
+  it('5. Editing a field in a draft re-runs the conflict check and shows "Unsaved changes"', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
@@ -355,7 +365,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(clientOrg).toBeDefined();
 
     // Create a clean draft with no conflicts
-    const draftRes = saveEnquiryRecord(
+    const draftRes = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Jane',
@@ -453,12 +463,12 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(updatedSnapshot.conflictStatus).toBe('Possible conflict');
   });
 
-  it('6. Take / Assign / Convert to matter are not available on a Draft', () => {
+  it('6. Take / Assign / Convert to matter are not available on a Draft', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
 
-    const draftRes = saveEnquiryRecord(
+    const draftRes = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Lisa',
@@ -477,22 +487,26 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(draftActions).toEqual(['Decline', 'Save changes', 'Save and route enquiry']);
 
     // Server actions also reject Assign and Convert to matter on a Draft
-    const assignAttempt = assignEnquiryRecord(draft.id, 'P-000012', null, 'P-000012');
+    const assignAttempt = await runAsTestActor('P-000012', () =>
+      assignEnquiryRecord(draft.id, 'P-000012', null, 'P-000012'),
+    );
     expect(assignAttempt.error).toMatch(/Cannot assign a draft/i);
 
-    const convertAttempt = prepareEnquiryConversion(draft.id, {}, 'P-000012');
+    const convertAttempt = await runAsTestActor('P-000012', () =>
+      prepareEnquiryConversion(draft.id, {}, 'P-000012'),
+    );
     expect(convertAttempt.ok).toBe(false);
     expect(convertAttempt.conflictReasons?.[0]).toMatch(/Cannot convert a draft enquiry/i);
   });
 
-  it('7. Drafts do not appear in team queues but do appear in "My drafts"', () => {
+  it('7. Drafts do not appear in team queues but do appear in "My drafts"', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =
       store.values.find((v) => v.listKey === 'work_type' && !v.parentId && v.active)?.id ?? '';
 
-    const draftRes = saveEnquiryRecord(
+    const draftRes = await saveEnquiryRecord(
       {
         channelId,
         takenById: 'P-000018',
@@ -568,7 +582,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(formatted).not.toContain('(P-000026) (P-000026)');
   });
 
-  it('9. Enquiry-stage people appear in the people list, convert to a Person on matter conversion, and are removed on Declined / Referred out / No response', () => {
+  it('9. Enquiry-stage people appear in the people list, convert to a Person on matter conversion, and are removed on Declined / Referred out / No response', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
@@ -578,7 +592,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.values.find((v) => v.listKey === 'enquiry_close_reason' && v.active)?.id ?? '';
 
     // 1. Add a routed enquiry for a new person -> appears in getEnquiryStagePeople
-    const saved = saveEnquiryRecord(
+    const saved = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Nia',
@@ -601,7 +615,9 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     );
 
     // 2. Convert the enquiry -> creates a Person record and removes the duplicate enquiry-stage row
-    const conv = prepareEnquiryConversion(enq1.id, {}, 'P-000001');
+    const conv = await runAsTestActor('P-000001', () =>
+      prepareEnquiryConversion(enq1.id, {}, 'P-000001'),
+    );
     expect(conv.ok).toBe(true);
     expect(enq1.linkedPersonId).toBeTruthy();
     expect(store.people.some((p) => p.id === enq1.linkedPersonId)).toBe(true);
@@ -610,7 +626,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(stageList.some((p) => p.enquiryId === enq1.id)).toBe(false);
 
     // 3. Declined enquiry removes the enquiry person from the people list
-    const savedDecline = saveEnquiryRecord(
+    const savedDecline = (await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Owen',
@@ -622,7 +638,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         privacyNoticeGiven: true,
       },
       { byId: 'P-000018', asDraft: false },
-    ).enquiry!;
+    )).enquiry!;
 
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
@@ -630,10 +646,12 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       ),
     ).toBe(true);
 
-    closeEnquiryRecord(
-      savedDecline.id,
-      { targetStatus: 'Declined', closeReasonId: declineReasonId },
-      'P-000001',
+    await runAsTestActor('P-000001', () =>
+      closeEnquiryRecord(
+        savedDecline.id,
+        { targetStatus: 'Declined', closeReasonId: declineReasonId },
+        'P-000001',
+      ),
     );
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
@@ -642,7 +660,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     ).toBe(false);
 
     // 4. Referred out enquiry removes the enquiry person from the people list
-    const savedRefer = saveEnquiryRecord(
+    const savedRefer = (await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Teleri',
@@ -654,7 +672,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         privacyNoticeGiven: true,
       },
       { byId: 'P-000018', asDraft: false },
-    ).enquiry!;
+    )).enquiry!;
 
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
@@ -662,10 +680,12 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       ),
     ).toBe(true);
 
-    closeEnquiryRecord(
-      savedRefer.id,
-      { targetStatus: 'Referred out', referredToName: 'Cardiff Defence Chambers' },
-      'P-000001',
+    await runAsTestActor('P-000001', () =>
+      closeEnquiryRecord(
+        savedRefer.id,
+        { targetStatus: 'Referred out', referredToName: 'Cardiff Defence Chambers' },
+        'P-000001',
+      ),
     );
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
@@ -674,7 +694,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     ).toBe(false);
 
     // 5. Closed (No response) enquiry removes the enquiry person from the people list
-    const savedNoResp = saveEnquiryRecord(
+    const savedNoResp = (await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Iwan',
@@ -686,19 +706,21 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         privacyNoticeGiven: true,
       },
       { byId: 'P-000018', asDraft: false },
-    ).enquiry!;
+    )).enquiry!;
 
-    logEnquiryContactRecord(
-      savedNoResp.id,
-      { method: 'Phone', outcome: 'No answer', note: 'Attempt 1' },
-      'P-000001',
-    );
-    logEnquiryContactRecord(
-      savedNoResp.id,
-      { method: 'Phone', outcome: 'Left Voicemail', note: 'Attempt 2' },
-      'P-000001',
-    );
-    closeEnquiryRecord(savedNoResp.id, { targetStatus: 'No response' }, 'P-000001');
+    await runAsTestActor('P-000001', async () => {
+      await logEnquiryContactRecord(
+        savedNoResp.id,
+        { method: 'Phone', outcome: 'No answer', note: 'Attempt 1' },
+        'P-000001',
+      );
+      await logEnquiryContactRecord(
+        savedNoResp.id,
+        { method: 'Phone', outcome: 'Left Voicemail', note: 'Attempt 2' },
+        'P-000001',
+      );
+      await closeEnquiryRecord(savedNoResp.id, { targetStatus: 'No response' }, 'P-000001');
+    });
     expect(
       getEnquiryStagePeople(store.enquiries, store.people, store.values).some(
         (p) => p.enquiryId === savedNoResp.id,
@@ -706,14 +728,14 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     ).toBe(false);
   });
 
-  it('9. People details saved in enquiries are included in person lookups, duplicate checks, and quick/full conflict checks', () => {
+  it('9. People details saved in enquiries are included in person lookups, duplicate checks, and quick/full conflict checks', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =
       store.values.find((v) => v.listKey === 'work_type' && !v.parentId && v.active)?.id ?? '';
 
-    const savedEnq = saveEnquiryRecord(
+    const savedEnq = (await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Gethin',
@@ -727,7 +749,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         notes: 'Seeking representation against landlord.',
       },
       { byId: 'P-000018', asDraft: true },
-    ).enquiry!;
+    )).enquiry!;
 
     // 1. mergePeopleWithEnquiries includes Gethin Maddox as a synthetic Person record
     const mergedPeople = mergePeopleWithEnquiries(store.people, store.enquiries, store.values);
@@ -791,14 +813,14 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     ).toBe(true);
   });
 
-  it('11. Client-configured custom fields on the Enquiry screen support screen locations and mandatory validation', () => {
+  it('11. Client-configured custom fields on the Enquiry screen support screen locations and mandatory validation', async () => {
     const store = getStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =
       store.values.find((v) => v.listKey === 'work_type' && !v.parentId && v.active)?.id ?? '';
 
-    const mandatoryCallerField = saveCustomFieldDefinition(
+    const mandatoryCallerField = await saveCustomFieldDefinition(
       {
         recordType: 'enquiry',
         label: 'Referral campaign code',
@@ -808,7 +830,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       },
       'P-000018',
     );
-    const optionalDetailsField = saveCustomFieldDefinition(
+    const optionalDetailsField = await saveCustomFieldDefinition(
       {
         recordType: 'enquiry',
         label: 'Legal aid eligibility checked',
@@ -820,7 +842,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     );
 
     // Routing without the mandatory custom field fails and lists the missing field
-    const blocked = saveEnquiryRecord(
+    const blocked = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Carys',
@@ -842,7 +864,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     );
 
     // Completing the mandatory custom field routes and persists customFields on the Enquiry
-    const routed = saveEnquiryRecord(
+    const routed = await saveEnquiryRecord(
       {
         channelId,
         firstName: 'Carys',

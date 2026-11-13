@@ -48,7 +48,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   }
 
   return withPageActor(async (actor) => {
-    const snap = getAppSnapshot(actor.personId);
+    const snap = await getAppSnapshot(actor.personId);
 
     return (
       <html lang="en-GB" className={`${manrope.variable} ${sourceSans.variable}`}>

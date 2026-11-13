@@ -5,6 +5,7 @@ import {
   getAppSnapshot,
   getMatterKeyDatesSnapshot,
   getMatterPmsViewBundle,
+  listAuditEntriesForRecord,
   recordRecentlyViewed,
   withPageActor,
 } from '@/server/services';
@@ -24,11 +25,11 @@ export default async function MatterProfilePage({
   const search = searchParams ? await searchParams : {};
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
     const matter = snap.matters.find((m) => m.id === id);
     if (!matter) notFound();
 
-    recordRecentlyViewed(userId, matter.id);
+    await recordRecentlyViewed(userId, matter.id);
 
     if (
       matter.matterNumber === 'DRAFT' ||
@@ -81,7 +82,10 @@ export default async function MatterProfilePage({
       : null;
     const pmsView =
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined;
-    const matterKeyDates = getMatterKeyDatesSnapshot(matter.id, userId);
+    const [matterKeyDates, matterAudit] = await Promise.all([
+      getMatterKeyDatesSnapshot(matter.id, userId),
+      listAuditEntriesForRecord('matter', matter.id, userId, { limit: 200 }),
+    ]);
 
     return (
       <MatterProfileClient
@@ -110,7 +114,7 @@ export default async function MatterProfilePage({
         canLiftRestriction={snap.currentUserPermissions.includes('matter:restriction:lift')}
         pmsView={pmsView}
         notes={snap.notes.filter((n) => n.recordType === 'matter' && n.recordId === matter.id)}
-        audit={snap.audit.filter((a) => a.recordType === 'matter' && a.recordId === matter.id)}
+        audit={matterAudit}
       />
     );
   });

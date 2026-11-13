@@ -15,14 +15,14 @@ export default async function QuoteDetailPage({
   const sp = await searchParams;
   return withPageActor(async (actor) => {
     const userId = actor.personId;
-    const snap = getAppSnapshot(userId);
+    const snap = await getAppSnapshot(userId);
 
     const quote = snap.quotes.find((q) => q.id === id || q.reference === id);
     if (!quote) {
       notFound();
     }
 
-    recordRecentlyViewed(userId, quote.id);
+    await recordRecentlyViewed(userId, quote.id);
 
     return (
       <QuoteDetailClient

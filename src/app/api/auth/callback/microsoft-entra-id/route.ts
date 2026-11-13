@@ -50,7 +50,7 @@ export const GET = guardedRoute(
         'corr-rte',
       );
       const { person, verifiedToken, rbacConfig } =
-        resolveOrProvisionEntraEmployee(rawClaims, {
+        await resolveOrProvisionEntraEmployee(rawClaims, {
           correlationId: requestCorrelationId,
         });
 

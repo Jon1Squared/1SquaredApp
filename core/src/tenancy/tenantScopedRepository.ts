@@ -23,7 +23,7 @@ import {
   type TenantPostgresPoolManager,
 } from './postgresPoolManager';
 
-export const CORE_REQUIRED_SCHEMA_VERSION = '0006';
+export const CORE_REQUIRED_SCHEMA_VERSION = '0008';
 
 export interface TenantQueryResult<TRow = Record<string, unknown>> {
   readonly rows: TRow[];

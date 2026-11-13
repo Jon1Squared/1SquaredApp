@@ -380,3 +380,4 @@ runStep(
 );
 
 console.log('\n=== [CI Verify] All Platform CI checks passed ===\n');
+process.exit(0);

@@ -46,6 +46,13 @@ import {
 import { validateKeyDateManualEntry } from '../../src/domain/keyDates';
 import { isActionDenied } from '../../src/domain/actionResult';
 import { getStore, saveStore } from '../../src/server/store';
+import {
+  auditEntriesForRecord,
+  getKeyDateRepository,
+  markAuditPosition,
+  runAsTestActor,
+  testTenantCtx,
+} from '../../src/server/testSupport/auditTestSupport';
 import { runWithActiveActorSession } from '../../src/server/rbacRuntime';
 import { createDefaultMatterCostsConfig } from '../../src/domain/matterCosts';
 
@@ -984,10 +991,10 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         },
       });
 
-      expect(() => saveMatterCostsConfig(sampleConfig, 'P-0001')).toThrow(
+      await expect(saveMatterCostsConfig(sampleConfig, 'P-0001')).rejects.toThrow(
         AuthorisationError,
       );
-      expect(() => syncMatterCostsRatesFromPms('P-0001')).toThrow(
+      await expect(syncMatterCostsRatesFromPms('P-0001')).rejects.toThrow(
         AuthorisationError,
       );
 
@@ -1012,7 +1019,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
             expiresAt: new Date(Date.now() + 60_000).toISOString(),
           },
         },
-        () =>
+        async () =>
           signOffMatterCostsRecord(
             targetMatter.id,
             'P-0001',
@@ -1034,6 +1041,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
   it('audits submitTemplateVersionService accurately under requireApproval true vs false (R287)', async () => {
     const store = getStore();
     const snapshot = structuredClone(store);
+    const templateAuditMark = await markAuditPosition();
     try {
       const docxBase64 = Buffer.from(
         buildValidDocxArchive({
@@ -1098,7 +1106,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         sessionPayload,
       );
       expect(submitReq.version.status).toBe('Submitted');
-      const submittedAudit = getStore().audit.find(
+      const submittedAudit = (
+        await auditEntriesForRecord('matter', draftReq.template.id, templateAuditMark)
+      ).find(
         (a) =>
           a.recordId === draftReq.template.id &&
           a.field === 'Document Template Submitted for Approval (TPL-SVC-REQ v1)',
@@ -1140,7 +1150,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         sessionPayload,
       );
       expect(submitAuto.version.status).toBe('Active');
-      const activatedAudit = getStore().audit.find(
+      const activatedAudit = (
+        await auditEntriesForRecord('matter', draftAuto.template.id, templateAuditMark)
+      ).find(
         (a) =>
           a.recordId === draftAuto.template.id &&
           a.field ===
@@ -1154,301 +1166,305 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     }
   });
 
-  it('enforces server-side reviewedBy and reviewedOn from the authenticated actor and rejects invalid reviewStatus in saveKeyDatesConfigRecord (R284, R295)', () => {
+  it('enforces server-side reviewedBy and reviewedOn from the authenticated actor and rejects invalid reviewStatus in saveKeyDatesConfigRecord (R284, R295)', async () => {
     const store = getStore();
     const snapshot = structuredClone(store);
+    const kdRepo = getKeyDateRepository();
+    const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx('P-000004'));
     try {
-      const current = structuredClone(getKeyDatesConfig(store));
-      expect((current.limitationRuleSets ?? []).length).toBeGreaterThan(0);
+      await runAsTestActor('P-000004', async () => {
+        const current = structuredClone(await getKeyDatesConfig(store));
+        expect((current.limitationRuleSets ?? []).length).toBeGreaterThan(0);
+        // Prepare rule set 0 as newly reviewed, attempting to spoof reviewedBy as P-000001 and backdate reviewedOn to 2020-01-01 while saving as P-000004 (admin)
+        const firstRuleSet = current.limitationRuleSets![0]!;
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const nextForReview = structuredClone(current);
+        nextForReview.limitationRuleSets![0] = {
+          ...firstRuleSet,
+          version: firstRuleSet.version + 1,
+          reviewStatus: 'reviewed',
+          reviewedBy: 'P-000001',
+          reviewedOn: '2020-01-01',
+        };
 
-      // Prepare rule set 0 as newly reviewed, attempting to spoof reviewedBy as P-000001 and backdate reviewedOn to 2020-01-01 while saving as P-000004 (admin)
-      const firstRuleSet = current.limitationRuleSets![0]!;
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const nextForReview = structuredClone(current);
-      nextForReview.limitationRuleSets![0] = {
-        ...firstRuleSet,
-        version: firstRuleSet.version + 1,
-        reviewStatus: 'reviewed',
-        reviewedBy: 'P-000001',
-        reviewedOn: '2020-01-01',
-      };
+        const savedReviewed = await saveKeyDatesConfigRecord(
+          nextForReview,
+          'Mark rule set reviewed in test',
+          'P-000004',
+          { mfaVerified: true },
+        );
+        expect(savedReviewed.ok).toBe(true);
+        expect(
+          savedReviewed.config?.limitationRuleSets?.[0]?.reviewStatus,
+        ).toBe('reviewed');
+        expect(savedReviewed.config?.limitationRuleSets?.[0]?.reviewedBy).toBe(
+          'P-000004',
+        );
+        expect(savedReviewed.config?.limitationRuleSets?.[0]?.reviewedOn).toBe(
+          todayIso,
+        );
 
-      const savedReviewed = saveKeyDatesConfigRecord(
-        nextForReview,
-        'Mark rule set reviewed in test',
-        'P-000004',
-        { mfaVerified: true },
-      );
-      expect(savedReviewed.ok).toBe(true);
-      expect(
-        savedReviewed.config?.limitationRuleSets?.[0]?.reviewStatus,
-      ).toBe('reviewed');
-      expect(savedReviewed.config?.limitationRuleSets?.[0]?.reviewedBy).toBe(
-        'P-000004',
-      );
-      expect(savedReviewed.config?.limitationRuleSets?.[0]?.reviewedOn).toBe(
-        todayIso,
-      );
+        // R310: An unchanged reviewed rule set (same version) keeps its stored reviewedOn as well as reviewedBy
+        const storedWithPastReview = structuredClone(savedReviewed.config!);
+        storedWithPastReview.limitationRuleSets![0] = {
+          ...storedWithPastReview.limitationRuleSets![0]!,
+          reviewedBy: 'P-000001',
+          reviewedOn: '2025-05-10',
+        };
+        await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000004'), storedWithPastReview);
 
-      // R310: An unchanged reviewed rule set (same version) keeps its stored reviewedOn as well as reviewedBy
-      const storedWithPastReview = structuredClone(savedReviewed.config!);
-      storedWithPastReview.limitationRuleSets![0] = {
-        ...storedWithPastReview.limitationRuleSets![0]!,
-        reviewedBy: 'P-000001',
-        reviewedOn: '2025-05-10',
-      };
-      store.keyDatesConfigOverride = storedWithPastReview;
-      saveStore(store);
+        const unchangedReviewedPayload = structuredClone(storedWithPastReview);
+        unchangedReviewedPayload.limitationRuleSets![0] = {
+          ...unchangedReviewedPayload.limitationRuleSets![0]!,
+          // Same version and reviewStatus: 'reviewed', attempting to spoof reviewedBy and reviewedOn
+          reviewedBy: 'P-000004',
+          reviewedOn: '2020-01-01',
+        };
+        const savedUnchangedReviewed = await saveKeyDatesConfigRecord(
+          unchangedReviewedPayload,
+          'Save config without changing reviewed rule set version',
+          'P-000004',
+          { mfaVerified: true },
+        );
+        expect(savedUnchangedReviewed.ok).toBe(true);
+        expect(
+          savedUnchangedReviewed.config?.limitationRuleSets?.[0]?.reviewedBy,
+        ).toBe('P-000001');
+        expect(
+          savedUnchangedReviewed.config?.limitationRuleSets?.[0]?.reviewedOn,
+        ).toBe('2025-05-10');
 
-      const unchangedReviewedPayload = structuredClone(storedWithPastReview);
-      unchangedReviewedPayload.limitationRuleSets![0] = {
-        ...unchangedReviewedPayload.limitationRuleSets![0]!,
-        // Same version and reviewStatus: 'reviewed', attempting to spoof reviewedBy and reviewedOn
-        reviewedBy: 'P-000004',
-        reviewedOn: '2020-01-01',
-      };
-      const savedUnchangedReviewed = saveKeyDatesConfigRecord(
-        unchangedReviewedPayload,
-        'Save config without changing reviewed rule set version',
-        'P-000004',
-        { mfaVerified: true },
-      );
-      expect(savedUnchangedReviewed.ok).toBe(true);
-      expect(
-        savedUnchangedReviewed.config?.limitationRuleSets?.[0]?.reviewedBy,
-      ).toBe('P-000001');
-      expect(
-        savedUnchangedReviewed.config?.limitationRuleSets?.[0]?.reviewedOn,
-      ).toBe('2025-05-10');
+        // R295: Reject unknown reviewStatus values rather than coercing them to 'unreviewed'
+        const invalidStatusConfig = structuredClone(savedReviewed.config!);
+        (
+          invalidStatusConfig.limitationRuleSets![0] as unknown as {
+            reviewStatus: string;
+          }
+        ).reviewStatus = 'invalid_status';
+        const rejectedInvalidStatus = await saveKeyDatesConfigRecord(
+          invalidStatusConfig,
+          'Attempt invalid reviewStatus',
+          'P-000004',
+          { mfaVerified: true },
+        );
+        expect(rejectedInvalidStatus.ok).toBe(false);
+        expect(rejectedInvalidStatus.error).toMatch(/Invalid reviewStatus/i);
 
-      // R295: Reject unknown reviewStatus values rather than coercing them to 'unreviewed'
-      const invalidStatusConfig = structuredClone(savedReviewed.config!);
-      (
-        invalidStatusConfig.limitationRuleSets![0] as unknown as {
-          reviewStatus: string;
-        }
-      ).reviewStatus = 'invalid_status';
-      const rejectedInvalidStatus = saveKeyDatesConfigRecord(
-        invalidStatusConfig,
-        'Attempt invalid reviewStatus',
-        'P-000004',
-        { mfaVerified: true },
-      );
-      expect(rejectedInvalidStatus.ok).toBe(false);
-      expect(rejectedInvalidStatus.error).toMatch(/Invalid reviewStatus/i);
+        // Unmarking reviewStatus clears both reviewedBy and reviewedOn even if the client sends them
+        const nextUnreviewed = structuredClone(savedReviewed.config!);
+        nextUnreviewed.limitationRuleSets![0] = {
+          ...nextUnreviewed.limitationRuleSets![0]!,
+          reviewStatus: 'unreviewed',
+          reviewedBy: 'P-000004',
+          reviewedOn: '2020-01-01',
+        };
 
-      // Unmarking reviewStatus clears both reviewedBy and reviewedOn even if the client sends them
-      const nextUnreviewed = structuredClone(savedReviewed.config!);
-      nextUnreviewed.limitationRuleSets![0] = {
-        ...nextUnreviewed.limitationRuleSets![0]!,
-        reviewStatus: 'unreviewed',
-        reviewedBy: 'P-000004',
-        reviewedOn: '2020-01-01',
-      };
-
-      const savedUnreviewed = saveKeyDatesConfigRecord(
-        nextUnreviewed,
-        'Unmark rule set review status in test',
-        'P-000004',
-        { mfaVerified: true },
-      );
-      expect(savedUnreviewed.ok).toBe(true);
-      expect(
-        savedUnreviewed.config?.limitationRuleSets?.[0]?.reviewStatus,
-      ).toBe('unreviewed');
-      expect(
-        savedUnreviewed.config?.limitationRuleSets?.[0]?.reviewedBy,
-      ).toBeUndefined();
-      expect(
-        savedUnreviewed.config?.limitationRuleSets?.[0]?.reviewedOn,
-      ).toBeUndefined();
+        const savedUnreviewed = await saveKeyDatesConfigRecord(
+          nextUnreviewed,
+          'Unmark rule set review status in test',
+          'P-000004',
+          { mfaVerified: true },
+        );
+        expect(savedUnreviewed.ok).toBe(true);
+        expect(
+          savedUnreviewed.config?.limitationRuleSets?.[0]?.reviewStatus,
+        ).toBe('unreviewed');
+        expect(
+          savedUnreviewed.config?.limitationRuleSets?.[0]?.reviewedBy,
+        ).toBeUndefined();
+        expect(
+          savedUnreviewed.config?.limitationRuleSets?.[0]?.reviewedOn,
+        ).toBeUndefined();
+      });
     } finally {
       saveStore(snapshot);
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000004'), originalOverride);
     }
   });
 
   it('returns structured ActionDenied (without throwing) when allowManualEntry is false on manual creation, supersede, or spoofed system source (R285, R294)', async () => {
     const store = getStore();
     const snapshot = structuredClone(store);
+    const kdRepo = getKeyDateRepository();
+    const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx('P-000001'));
     try {
-      const current = structuredClone(getKeyDatesConfig(store));
-      const targetType = current.keyDateTypes![0]!;
-      current.keyDateTypes![0] = {
-        ...targetType,
-        allowManualEntry: false,
-      };
-      store.keyDatesConfigOverride = current;
-      saveStore(store);
+      await runAsTestActor('P-000001', async () => {
+        const current = structuredClone(await getKeyDatesConfig(store));
+        const targetType = current.keyDateTypes![0]!;
+        current.keyDateTypes![0] = {
+          ...targetType,
+          allowManualEntry: false,
+        };
+        await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000001'), current);
 
-      const directDenied = validateKeyDateManualEntry(
-        current,
-        targetType.id,
-        'manual',
-      );
-      expect(directDenied.ok).toBe(false);
-      if (!directDenied.ok) {
-        expect(directDenied.error).toContain('Manual entry is disabled');
-      }
-
-      const directCalculated = validateKeyDateManualEntry(
-        current,
-        targetType.id,
-        'calculated',
-      );
-      expect(directCalculated).toEqual({ ok: true });
-
-      const matter = store.matters[0]!;
-      const manualAttempt = await createOrProposeKeyDateRecord(
-        {
-          matterId: matter.id,
-          keyDateTypeId: targetType.id,
-          title: 'Manual attempt on calculator-only type',
-          dueDate: '2027-06-01',
-          source: 'manual',
-          intent: 'propose',
-        },
-        'P-000001',
-      );
-      expect(manualAttempt.ok).toBe(false);
-      expect(isActionDenied(manualAttempt)).toBe(true);
-      if (isActionDenied(manualAttempt)) {
-        expect(manualAttempt.code).toBe('FORBIDDEN');
-        expect(manualAttempt.message).toContain('Manual entry is disabled');
-      }
-
-      // R294: A client-sent source: 'document_extraction' is rejected with ActionDenied
-      const spoofedDocExtraction = await createOrProposeKeyDateRecord(
-        {
-          matterId: matter.id,
-          keyDateTypeId: targetType.id,
-          title: 'Spoofed document_extraction attempt',
-          dueDate: '2027-06-01',
-          source: 'document_extraction',
-          intent: 'propose',
-        },
-        'P-000001',
-      );
-      expect(spoofedDocExtraction.ok).toBe(false);
-      expect(isActionDenied(spoofedDocExtraction)).toBe(true);
-      if (isActionDenied(spoofedDocExtraction)) {
-        expect(spoofedDocExtraction.code).toBe('FORBIDDEN');
-        expect(spoofedDocExtraction.message).toMatch(
-          /cannot be set by a client request|Manual entry is disabled/i,
+        const directDenied = validateKeyDateManualEntry(
+          current,
+          targetType.id,
+          'manual',
         );
-      }
+        expect(directDenied.ok).toBe(false);
+        if (!directDenied.ok) {
+          expect(directDenied.error).toContain('Manual entry is disabled');
+        }
 
-      const firstRuleSet = current.limitationRuleSets![0]!;
-      const firstRule = firstRuleSet.rules[0]!;
-      const triggers = {
-        accrualDate: '2021-06-01',
-        dateOfKnowledge: '2021-06-01',
-      };
-      const calculatedAttempt = await createOrProposeKeyDateRecord(
-        {
-          matterId: matter.id,
-          keyDateTypeId: targetType.id,
-          title: 'Calculated attempt on calculator-only type',
-          dueDate: '2027-06-01',
-          source: 'calculated',
-          calculation: {
-            ruleSetId: firstRuleSet.id,
-            ruleSetVersion: firstRuleSet.version,
-            ruleSetReviewStatus: firstRuleSet.reviewStatus,
-            ruleId: firstRule.id,
-            triggers,
-            calculatedDate: '2027-06-01',
-            explanation: ['Calculated from rule'],
-            overridden: false,
-            overrideReason: 'Rule test date',
+        const directCalculated = validateKeyDateManualEntry(
+          current,
+          targetType.id,
+          'calculated',
+        );
+        expect(directCalculated).toEqual({ ok: true });
+
+        const matter = store.matters[0]!;
+        const manualAttempt = await createOrProposeKeyDateRecord(
+          {
+            matterId: matter.id,
+            keyDateTypeId: targetType.id,
+            title: 'Manual attempt on calculator-only type',
+            dueDate: '2027-06-01',
+            source: 'manual',
+            intent: 'propose',
           },
-          intent: 'propose',
-        },
-        'P-000001',
-      );
-      expect(calculatedAttempt.ok).toBe(true);
-      expect(calculatedAttempt.keyDate?.source).toBe('calculated');
-
-      const createdKd = calculatedAttempt.keyDate!;
-      createdKd.status = 'confirmed';
-      saveStore(getStore());
-
-      // R294: Superseding into a manual date on a type with allowManualEntry: false is denied with ActionDenied
-      const configWithoutRuleSets = structuredClone(getKeyDatesConfig(getStore()));
-      configWithoutRuleSets.limitationRuleSets = [];
-      getStore().keyDatesConfigOverride = configWithoutRuleSets;
-      saveStore(getStore());
-
-      const supersedeToManualAttempt = await supersedeConfirmedKeyDateRecord(
-        createdKd.id,
-        {
-          dueDate: '2027-07-01',
-          notes: 'Attempted supersede to manual when rule removed and allowManualEntry is false',
-        },
-        'Rule removed supersede test',
-        'P-000001',
-      );
-      expect(supersedeToManualAttempt.ok).toBe(false);
-      expect(isActionDenied(supersedeToManualAttempt)).toBe(true);
-      if (isActionDenied(supersedeToManualAttempt)) {
-        expect(supersedeToManualAttempt.code).toBe('FORBIDDEN');
-        expect(supersedeToManualAttempt.message).toContain(
-          'Manual entry is disabled',
+          'P-000001',
         );
-      }
+        expect(manualAttempt.ok).toBe(false);
+        expect(isActionDenied(manualAttempt)).toBe(true);
+        if (isActionDenied(manualAttempt)) {
+          expect(manualAttempt.code).toBe('FORBIDDEN');
+          expect(manualAttempt.message).toContain('Manual entry is disabled');
+        }
 
-      // R306: Superseding a carried_from_enquiry key date with a new due date on a type with allowManualEntry: false is denied with ActionDenied (FORBIDDEN)
-      const carriedKd = structuredClone(createdKd);
-      carriedKd.id = 'KD-R306-CARRIED';
-      carriedKd.source = 'carried_from_enquiry';
-      carriedKd.calculation = undefined;
-      carriedKd.dueDate = '2027-06-01';
-      carriedKd.status = 'confirmed';
-      getStore().keyDates!.push(carriedKd);
-      saveStore(getStore());
-
-      const supersedeCarriedDenied = await supersedeConfirmedKeyDateRecord(
-        carriedKd.id,
-        {
-          dueDate: '2027-08-15',
-          notes: 'Attempted manual date change on carried_from_enquiry key date',
-        },
-        'Manual date change on carried_from_enquiry test',
-        'P-000001',
-      );
-      expect(supersedeCarriedDenied.ok).toBe(false);
-      expect(isActionDenied(supersedeCarriedDenied)).toBe(true);
-      if (isActionDenied(supersedeCarriedDenied)) {
-        expect(supersedeCarriedDenied.code).toBe('FORBIDDEN');
-        expect(supersedeCarriedDenied.message).toContain(
-          'Manual entry is disabled',
+        // R294: A client-sent source: 'document_extraction' is rejected with ActionDenied
+        const spoofedDocExtraction = await createOrProposeKeyDateRecord(
+          {
+            matterId: matter.id,
+            keyDateTypeId: targetType.id,
+            title: 'Spoofed document_extraction attempt',
+            dueDate: '2027-06-01',
+            source: 'document_extraction',
+            intent: 'propose',
+          },
+          'P-000001',
         );
-      }
+        expect(spoofedDocExtraction.ok).toBe(false);
+        expect(isActionDenied(spoofedDocExtraction)).toBe(true);
+        if (isActionDenied(spoofedDocExtraction)) {
+          expect(spoofedDocExtraction.code).toBe('FORBIDDEN');
+          expect(spoofedDocExtraction.message).toMatch(
+            /cannot be set by a client request|Manual entry is disabled/i,
+          );
+        }
 
-      // R306: The same supersede on a type that allows manual entry succeeds and stores source: 'manual'
-      const configAllowingManual = structuredClone(getKeyDatesConfig(getStore()));
-      configAllowingManual.keyDateTypes![0] = {
-        ...configAllowingManual.keyDateTypes![0]!,
-        allowManualEntry: true,
-      };
-      getStore().keyDatesConfigOverride = configAllowingManual;
-      saveStore(getStore());
+        const firstRuleSet = current.limitationRuleSets![0]!;
+        const firstRule = firstRuleSet.rules[0]!;
+        const triggers = {
+          accrualDate: '2021-06-01',
+          dateOfKnowledge: '2021-06-01',
+        };
+        const calculatedAttempt = await createOrProposeKeyDateRecord(
+          {
+            matterId: matter.id,
+            keyDateTypeId: targetType.id,
+            title: 'Calculated attempt on calculator-only type',
+            dueDate: '2027-06-01',
+            source: 'calculated',
+            calculation: {
+              ruleSetId: firstRuleSet.id,
+              ruleSetVersion: firstRuleSet.version,
+              ruleSetReviewStatus: firstRuleSet.reviewStatus,
+              ruleId: firstRule.id,
+              triggers,
+              calculatedDate: '2027-06-01',
+              explanation: ['Calculated from rule'],
+              overridden: false,
+              overrideReason: 'Rule test date',
+            },
+            intent: 'propose',
+          },
+          'P-000001',
+        );
+        expect(calculatedAttempt.ok).toBe(true);
+        expect(calculatedAttempt.keyDate?.source).toBe('calculated');
 
-      const supersedeCarriedAllowed = await supersedeConfirmedKeyDateRecord(
-        carriedKd.id,
-        {
-          dueDate: '2027-08-15',
-          notes: 'Allowed manual date change on carried_from_enquiry key date',
-        },
-        'Manual date change allowed test',
-        'P-000001',
-      );
-      expect(supersedeCarriedAllowed.ok).toBe(true);
-      expect(supersedeCarriedAllowed.replacementKeyDate?.source).toBe('manual');
-      expect(supersedeCarriedAllowed.replacementKeyDate?.dueDate).toBe(
-        '2027-08-15',
-      );
+        const createdKd = calculatedAttempt.keyDate!;
+        createdKd.status = 'confirmed';
+        await kdRepo.putKeyDate(testTenantCtx('P-000001'), createdKd);
+
+        // R294: Superseding into a manual date on a type with allowManualEntry: false is denied with ActionDenied
+        const configWithoutRuleSets = structuredClone(await getKeyDatesConfig(getStore()));
+        configWithoutRuleSets.limitationRuleSets = [];
+        await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000001'), configWithoutRuleSets);
+
+        const supersedeToManualAttempt = await supersedeConfirmedKeyDateRecord(
+          createdKd.id,
+          {
+            dueDate: '2027-07-01',
+            notes: 'Attempted supersede to manual when rule removed and allowManualEntry is false',
+          },
+          'Rule removed supersede test',
+          'P-000001',
+        );
+        expect(supersedeToManualAttempt.ok).toBe(false);
+        expect(isActionDenied(supersedeToManualAttempt)).toBe(true);
+        if (isActionDenied(supersedeToManualAttempt)) {
+          expect(supersedeToManualAttempt.code).toBe('FORBIDDEN');
+          expect(supersedeToManualAttempt.message).toContain(
+            'Manual entry is disabled',
+          );
+        }
+
+        // R306: Superseding a carried_from_enquiry key date with a new due date on a type with allowManualEntry: false is denied with ActionDenied (FORBIDDEN)
+        const carriedKd = structuredClone(createdKd);
+        carriedKd.id = 'KD-R306-CARRIED';
+        carriedKd.source = 'carried_from_enquiry';
+        carriedKd.calculation = undefined;
+        carriedKd.dueDate = '2027-06-01';
+        carriedKd.status = 'confirmed';
+        await kdRepo.putKeyDate(testTenantCtx('P-000001'), carriedKd);
+
+        const supersedeCarriedDenied = await supersedeConfirmedKeyDateRecord(
+          carriedKd.id,
+          {
+            dueDate: '2027-08-15',
+            notes: 'Attempted manual date change on carried_from_enquiry key date',
+          },
+          'Manual date change on carried_from_enquiry test',
+          'P-000001',
+        );
+        expect(supersedeCarriedDenied.ok).toBe(false);
+        expect(isActionDenied(supersedeCarriedDenied)).toBe(true);
+        if (isActionDenied(supersedeCarriedDenied)) {
+          expect(supersedeCarriedDenied.code).toBe('FORBIDDEN');
+          expect(supersedeCarriedDenied.message).toContain(
+            'Manual entry is disabled',
+          );
+        }
+
+        // R306: The same supersede on a type that allows manual entry succeeds and stores source: 'manual'
+        const configAllowingManual = structuredClone(await getKeyDatesConfig(getStore()));
+        configAllowingManual.keyDateTypes![0] = {
+          ...configAllowingManual.keyDateTypes![0]!,
+          allowManualEntry: true,
+        };
+        await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000001'), configAllowingManual);
+
+        const supersedeCarriedAllowed = await supersedeConfirmedKeyDateRecord(
+          carriedKd.id,
+          {
+            dueDate: '2027-08-15',
+            notes: 'Allowed manual date change on carried_from_enquiry key date',
+          },
+          'Manual date change allowed test',
+          'P-000001',
+        );
+        expect(supersedeCarriedAllowed.ok).toBe(true);
+        expect(supersedeCarriedAllowed.replacementKeyDate?.source).toBe('manual');
+        expect(supersedeCarriedAllowed.replacementKeyDate?.dueDate).toBe(
+          '2027-08-15',
+        );
+      });
     } finally {
       saveStore(snapshot);
+      await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000001'), originalOverride);
     }
   });
   it('validates optional keyVault.vaultName and keyVault.vaultUri deployment outputs including 24-character truncated vault names and rejects cross-tenant kv:// references (S0-13b, R413)', () => {

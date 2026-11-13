@@ -185,7 +185,7 @@ export async function savePersonAction(
     } | null;
   },
 ) {
-  return guardedAction('savePersonAction', ({ personId: byId, tenantContext }) => {
+  return guardedAction('savePersonAction', async ({ personId: byId, tenantContext }) => {
     const PERSON_SECURITY_FIELDS = [
       'roles',
       'permissionOverrides',
@@ -208,7 +208,7 @@ export async function savePersonAction(
         errors: { permission: msg },
       };
     }
-    const res = savePersonRecord(payload, {
+    const res = await savePersonRecord(payload, {
       id: opts?.id,
       byId,
       mfaVerified: tenantContext.mfaVerified,
@@ -233,16 +233,16 @@ export async function logEmployeeRestrictedAccessAction(
   section: 'payroll' | 'sensitive',
   fieldDetail?: string,
 ) {
-  return guardedAction('logEmployeeRestrictedAccessAction', ({ personId: byId }) => {
-    const res = logEmployeeRestrictedAccess(personId, section, byId, fieldDetail);
+  return guardedAction('logEmployeeRestrictedAccessAction', async ({ personId: byId }) => {
+    const res = await logEmployeeRestrictedAccess(personId, section, byId, fieldDetail);
     revalidateAll();
     return res;
   });
 }
 
 export async function revealEmployeeSensitiveRecordAction(personId: string) {
-  return guardedAction('revealEmployeeSensitiveRecordAction', ({ personId: byId }) => {
-    const res = getEmployeeDetailsForUser(personId, byId, { logViewSensitive: true });
+  return guardedAction('revealEmployeeSensitiveRecordAction', async ({ personId: byId }) => {
+    const res = await getEmployeeDetailsForUser(personId, byId, { logViewSensitive: true });
     revalidateAll();
     return {
       ok: !res.errors?.sensitivePermission && !res.errors?.notFound,
@@ -256,8 +256,8 @@ export async function reassignLeaverOwnedRecordsAction(
   fromLeaverId: string,
   toEmployeeId: string,
 ) {
-  return guardedAction('reassignLeaverOwnedRecordsAction', ({ personId: byId }) => {
-    const res = reassignLeaverOwnedRecords(fromLeaverId, toEmployeeId, byId);
+  return guardedAction('reassignLeaverOwnedRecordsAction', async ({ personId: byId }) => {
+    const res = await reassignLeaverOwnedRecords(fromLeaverId, toEmployeeId, byId);
     revalidateAll();
     return res;
   });
@@ -272,8 +272,8 @@ export async function saveOrganisationAction(
     matchedDuplicateIds?: string[];
   },
 ) {
-  return guardedAction('saveOrganisationAction', ({ personId: byId }) => {
-    const res = saveOrganisationRecord(payload, {
+  return guardedAction('saveOrganisationAction', async ({ personId: byId }) => {
+    const res = await saveOrganisationRecord(payload, {
       id: opts?.id,
       byId,
       customFieldsSubmitted: opts?.customFieldsSubmitted,
@@ -321,8 +321,8 @@ export async function signOffMatterCostsAction(matterId: string, note?: string) 
 }
 
 export async function markEngagementLetterDraftedAction(matterId: string) {
-  return guardedAction('markEngagementLetterDraftedAction', ({ personId: byId }) => {
-    const res = markEngagementLetterDrafted(matterId, byId);
+  return guardedAction('markEngagementLetterDraftedAction', async ({ personId: byId }) => {
+    const res = await markEngagementLetterDrafted(matterId, byId);
     revalidateAll();
     return res;
   });
@@ -333,8 +333,8 @@ export async function liftMatterRestrictionAction(
   restriction: 'staff_matter' | 'ethical_wall',
   reason: string,
 ) {
-  return guardedAction('liftMatterRestrictionAction', ({ personId: byId }) => {
-    const res = liftMatterRestriction(matterId, restriction, reason, byId);
+  return guardedAction('liftMatterRestrictionAction', async ({ personId: byId }) => {
+    const res = await liftMatterRestriction(matterId, restriction, reason, byId);
     revalidateAll();
     return res;
   });
@@ -343,7 +343,7 @@ export async function liftMatterRestrictionAction(
 export async function runMatterConflictSearchAction(
   input: Parameters<typeof runMatterConflictSearchRecord>[0],
 ) {
-  return guardedAction('runMatterConflictSearchAction', (actor) => {
+  return guardedAction('runMatterConflictSearchAction', async (actor) => {
     return runMatterConflictSearchRecord(input, actor.personId);
   });
 }
@@ -352,8 +352,8 @@ export async function updateMatterConflictRecordAction(
   matterId: string,
   record: ConflictCheckRecordInput,
 ) {
-  return guardedAction('updateMatterConflictRecordAction', ({ personId: byId }) => {
-    const res = updateMatterConflictRecord(matterId, record, byId);
+  return guardedAction('updateMatterConflictRecordAction', async ({ personId: byId }) => {
+    const res = await updateMatterConflictRecord(matterId, record, byId);
     revalidateAll();
     return res;
   });
@@ -373,32 +373,32 @@ export async function saveLinkAction(input: {
   endDate: string | null;
   contactStatusId: string | null;
 }) {
-  return guardedAction('saveLinkAction', ({ personId: byId }) => {
-    const link = createOrUpdateLink(input, byId);
+  return guardedAction('saveLinkAction', async ({ personId: byId }) => {
+    const link = await createOrUpdateLink(input, byId);
     revalidateAll();
     return link;
   });
 }
 
 export async function deleteLinkAction(linkId: string) {
-  return guardedAction('deleteLinkAction', ({ personId: byId }) => {
-    const res = deleteLink(linkId, byId);
+  return guardedAction('deleteLinkAction', async ({ personId: byId }) => {
+    const res = await deleteLink(linkId, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function addNoteAction(recordType: RecordType | 'matter', recordId: string, text: string) {
-  return guardedAction('addNoteAction', ({ personId: byId }) => {
-    const note = addNoteToRecord(recordType, recordId, text, byId);
+  return guardedAction('addNoteAction', async ({ personId: byId }) => {
+    const note = await addNoteToRecord(recordType, recordId, text, byId);
     revalidateAll();
     return note;
   });
 }
 
 export async function dismissDuplicateAction(recordType: RecordType, recordId: string, otherId: string | null) {
-  return guardedAction('dismissDuplicateAction', ({ personId: byId }) => {
-    const res = dismissDuplicateMatch(recordType, recordId, otherId, byId);
+  return guardedAction('dismissDuplicateAction', async ({ personId: byId }) => {
+    const res = await dismissDuplicateMatch(recordType, recordId, otherId, byId);
     revalidateAll();
     return res;
   });
@@ -421,8 +421,8 @@ export async function addChoiceValueAction(input: {
   parentId?: string | null;
   meta?: Record<string, string>;
 }) {
-  return guardedAction('addChoiceValueAction', ({ personId: byId }) => {
-    const val = addChoiceValue(input, byId);
+  return guardedAction('addChoiceValueAction', async ({ personId: byId }) => {
+    const val = await addChoiceValue(input, byId);
     revalidateAll();
     return val;
   });
@@ -438,20 +438,20 @@ export async function updateChoiceValueAction(
     meta?: Record<string, string>;
   },
 ) {
-  return guardedAction('updateChoiceValueAction', ({ personId: byId }) => {
-    const res = updateChoiceValue(id, patch, byId);
+  return guardedAction('updateChoiceValueAction', async ({ personId: byId }) => {
+    const res = await updateChoiceValue(id, patch, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function reorderChoiceValueAction(id: string, direction: -1 | 1) {
-  return guardedAction('reorderChoiceValueAction', ({ personId: byId }) => {
+  return guardedAction('reorderChoiceValueAction', async ({ personId: byId }) => {
     const store = getStore();
     if (!store.values.some((v) => v.id === id)) {
       return buildActionDenied('FORBIDDEN', `Choice value "${id}" not found.`);
     }
-    reorderChoiceValue(id, direction, byId);
+    await reorderChoiceValue(id, direction, byId);
     revalidateAll();
     return { ok: true as const };
   });
@@ -463,8 +463,8 @@ export async function createMatterStageGroupAction(input: {
   mode: 'from_default' | 'scratch';
   selectedDefaultStageIds?: string[];
 }) {
-  return guardedAction('createMatterStageGroupAction', ({ personId: byId }) => {
-    const res = createMatterStageGroup(input, byId);
+  return guardedAction('createMatterStageGroupAction', async ({ personId: byId }) => {
+    const res = await createMatterStageGroup(input, byId);
     revalidateAll();
     return res;
   });
@@ -480,22 +480,22 @@ export async function saveCustomFieldAction(input: {
   active?: boolean;
   options?: string[];
 }) {
-  return guardedAction('saveCustomFieldAction', ({ personId: byId }) => {
+  return guardedAction('saveCustomFieldAction', async ({ personId: byId }) => {
     if (input.id && !getStore().customFields.some((d) => d.id === input.id)) {
       return buildActionDenied('FORBIDDEN', `Custom field "${input.id}" not found.`);
     }
-    const def = saveCustomFieldDefinition(input, byId);
+    const def = await saveCustomFieldDefinition(input, byId);
     revalidateAll();
     return def;
   });
 }
 
 export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
-  return guardedAction('reorderCustomFieldAction', ({ personId: byId }) => {
+  return guardedAction('reorderCustomFieldAction', async ({ personId: byId }) => {
     if (!getStore().customFields.some((d) => d.id === id)) {
       return buildActionDenied('FORBIDDEN', `Custom field "${id}" not found.`);
     }
-    reorderCustomField(id, direction, byId);
+    await reorderCustomField(id, direction, byId);
     revalidateAll();
     return { ok: true as const };
   });
@@ -536,15 +536,15 @@ export async function clearAllDataAction() {
 }
 
 export async function markNotificationReadAction(id: string) {
-  return guardedAction('markNotificationReadAction', ({ personId: userId }) => {
-    markNotificationRead(id, userId);
+  return guardedAction('markNotificationReadAction', async ({ personId: userId }) => {
+    await markNotificationRead(id, userId);
     revalidateAll();
   });
 }
 
 export async function markAllNotificationsReadAction() {
-  return guardedAction('markAllNotificationsReadAction', ({ personId: userId }) => {
-    markAllNotificationsRead(userId);
+  return guardedAction('markAllNotificationsReadAction', async ({ personId: userId }) => {
+    await markAllNotificationsRead(userId);
     revalidateAll();
   });
 }
@@ -558,16 +558,16 @@ export async function saveTeamAction(input: {
   practiceAreaIds: string[];
   active?: boolean;
 }) {
-  return guardedAction('saveTeamAction', ({ personId: byId }) => {
-    const res = saveTeamRecord(input, byId);
+  return guardedAction('saveTeamAction', async ({ personId: byId }) => {
+    const res = await saveTeamRecord(input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function updateEmployeeRoleAction(personId: string, appRole: AppRole | null) {
-  return guardedAction('updateEmployeeRoleAction', (actor) => {
-    const res = updateEmployeeRoleSetting(personId, appRole, actor.personId, {
+  return guardedAction('updateEmployeeRoleAction', async (actor) => {
+    const res = await updateEmployeeRoleSetting(personId, appRole, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
@@ -576,16 +576,16 @@ export async function updateEmployeeRoleAction(personId: string, appRole: AppRol
 }
 
 export async function saveEnquirySettingsAction(patch: Partial<EnquirySettings>) {
-  return guardedAction('saveEnquirySettingsAction', ({ personId: byId }) => {
-    const res = saveEnquirySettingsRecord(patch, byId);
+  return guardedAction('saveEnquirySettingsAction', async ({ personId: byId }) => {
+    const res = await saveEnquirySettingsRecord(patch, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function saveTaskSettingsAction(settings: TaskSettings) {
-  return guardedAction('saveTaskSettingsAction', ({ personId: byId }) => {
-    const res = saveTaskSettingsRecord(settings, byId);
+  return guardedAction('saveTaskSettingsAction', async ({ personId: byId }) => {
+    const res = await saveTaskSettingsRecord(settings, byId);
     revalidateAll();
     return res;
   });
@@ -606,24 +606,24 @@ export async function saveTaskAction(input: {
   linkedRecords?: TaskLinkedRecord[];
   autoTrigger?: AutoTaskTrigger | null;
 }) {
-  return guardedAction('saveTaskAction', ({ personId: byId }) => {
-    const res = saveTaskRecord(input, byId);
+  return guardedAction('saveTaskAction', async ({ personId: byId }) => {
+    const res = await saveTaskRecord(input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function takeTaskAction(taskId: string) {
-  return guardedAction('takeTaskAction', ({ personId: byId }) => {
-    const res = takeTaskRecord(taskId, byId);
+  return guardedAction('takeTaskAction', async ({ personId: byId }) => {
+    const res = await takeTaskRecord(taskId, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function addTaskCommentAction(taskId: string, text: string) {
-  return guardedAction('addTaskCommentAction', ({ personId: byId }) => {
-    const res = addTaskCommentRecord(taskId, text, byId);
+  return guardedAction('addTaskCommentAction', async ({ personId: byId }) => {
+    const res = await addTaskCommentRecord(taskId, text, byId);
     revalidateAll();
     return res;
   });
@@ -642,8 +642,8 @@ export async function saveEnquiryAction(
   },
   opts: { id?: string; asDraft?: boolean } = {},
 ) {
-  return guardedAction('saveEnquiryAction', ({ personId: byId }) => {
-    const res = saveEnquiryRecord(payload, {
+  return guardedAction('saveEnquiryAction', async ({ personId: byId }) => {
+    const res = await saveEnquiryRecord(payload, {
       id: opts.id,
       asDraft: opts.asDraft,
       byId,
@@ -658,8 +658,8 @@ export async function assignEnquiryAction(
   assignedToId: string | null,
   assignedTeamId?: string | null,
 ) {
-  return guardedAction('assignEnquiryAction', ({ personId: byId }) => {
-    const res = assignEnquiryRecord(enquiryId, assignedToId, assignedTeamId, byId);
+  return guardedAction('assignEnquiryAction', async ({ personId: byId }) => {
+    const res = await assignEnquiryRecord(enquiryId, assignedToId, assignedTeamId, byId);
     revalidateAll();
     return res;
   });
@@ -674,8 +674,8 @@ export async function logEnquiryContactAction(
     note: string;
   },
 ) {
-  return guardedAction('logEnquiryContactAction', ({ personId: byId }) => {
-    const res = logEnquiryContactRecord(enquiryId, input, byId);
+  return guardedAction('logEnquiryContactAction', async ({ personId: byId }) => {
+    const res = await logEnquiryContactRecord(enquiryId, input, byId);
     revalidateAll();
     return res;
   });
@@ -690,8 +690,8 @@ export async function sendEnquiryEmailAction(
     bodyText: string;
   },
 ) {
-  return guardedAction('sendEnquiryEmailAction', ({ personId: byId }) => {
-    const res = sendEnquiryEmailRecord(enquiryId, input, byId);
+  return guardedAction('sendEnquiryEmailAction', async ({ personId: byId }) => {
+    const res = await sendEnquiryEmailRecord(enquiryId, input, byId);
     revalidateAll();
     return res;
   });
@@ -707,16 +707,16 @@ export async function closeEnquiryAction(
     referredToName?: string;
   },
 ) {
-  return guardedAction('closeEnquiryAction', ({ personId: byId }) => {
-    const res = closeEnquiryRecord(enquiryId, input, byId);
+  return guardedAction('closeEnquiryAction', async ({ personId: byId }) => {
+    const res = await closeEnquiryRecord(enquiryId, input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function reopenEnquiryAction(enquiryId: string) {
-  return guardedAction('reopenEnquiryAction', ({ personId: byId }) => {
-    const res = reopenEnquiryRecord(enquiryId, byId);
+  return guardedAction('reopenEnquiryAction', async ({ personId: byId }) => {
+    const res = await reopenEnquiryRecord(enquiryId, byId);
     revalidateAll();
     return res;
   });
@@ -730,8 +730,8 @@ export async function prepareEnquiryConversionAction(
     createForBusiness?: boolean;
   } = {},
 ) {
-  return guardedAction('prepareEnquiryConversionAction', ({ personId: byId }) => {
-    const res = prepareEnquiryConversion(
+  return guardedAction('prepareEnquiryConversionAction', async ({ personId: byId }) => {
+    const res = await prepareEnquiryConversion(
       enquiryId,
       {
         usePersonId: opts?.usePersonId,
@@ -746,8 +746,8 @@ export async function prepareEnquiryConversionAction(
 }
 
 export async function anonymiseExpiredEnquiriesAction(specificEnquiryId?: string) {
-  return guardedAction('anonymiseExpiredEnquiriesAction', ({ personId: byId }) => {
-    const count = anonymiseExpiredEnquiries(byId, specificEnquiryId);
+  return guardedAction('anonymiseExpiredEnquiriesAction', async ({ personId: byId }) => {
+    const count = await anonymiseExpiredEnquiries(byId, specificEnquiryId);
     revalidateAll();
     return { count };
   });
@@ -758,7 +758,7 @@ export async function linkPmsRecordAction(
   onesquaredId: string,
   pmsCode: string,
 ) {
-  return guardedAction('linkPmsRecordAction', ({ personId: byId }) => {
+  return guardedAction('linkPmsRecordAction', async ({ personId: byId }) => {
     const store = getStore();
     const recordExists =
       entityType === 'employee'
@@ -774,26 +774,26 @@ export async function linkPmsRecordAction(
         `Target ${entityType} "${onesquaredId}" not found.`,
       );
     }
-    const res = linkPmsRecord(entityType, onesquaredId, pmsCode, byId);
+    const res = await linkPmsRecord(entityType, onesquaredId, pmsCode, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function unlinkPmsRecordAction(linkId: string) {
-  return guardedAction('unlinkPmsRecordAction', ({ personId: byId }) => {
+  return guardedAction('unlinkPmsRecordAction', async ({ personId: byId }) => {
     if (!getStore().pmsLinks.some((l) => l.id === linkId)) {
       return buildActionDenied('FORBIDDEN', `PMS link "${linkId}" not found.`);
     }
-    unlinkPmsRecord(linkId, byId);
+    await unlinkPmsRecord(linkId, byId);
     revalidateAll();
     return { ok: true as const };
   });
 }
 
 export async function rerunAutomaticPmsMatchingAction() {
-  return guardedAction('rerunAutomaticPmsMatchingAction', ({ personId: byId }) => {
-    const res = rerunAutomaticPmsMatching(byId);
+  return guardedAction('rerunAutomaticPmsMatchingAction', async ({ personId: byId }) => {
+    const res = await rerunAutomaticPmsMatching(byId);
     revalidateAll();
     return res;
   });
@@ -808,8 +808,8 @@ export async function createRecordFromPmsAction(entityType: PmsEntityType, pmsCo
 }
 
 export async function switchViewingRoleAction(roleKey: string) {
-  return guardedAction('switchViewingRoleAction', ({ personId: userId }) => {
-    const res = switchViewingRole(userId, roleKey);
+  return guardedAction('switchViewingRoleAction', async ({ personId: userId }) => {
+    const res = await switchViewingRole(userId, roleKey);
     revalidateAll();
     return res;
   });
@@ -819,8 +819,8 @@ export async function saveHomePagesConfigAction(input: {
   roles?: RoleHomeConfig[];
   firmSettings?: Partial<HomeFirmSettings>;
 }) {
-  return guardedAction('saveHomePagesConfigAction', (actor) => {
-    const res = saveHomePagesConfig(input, actor.personId, {
+  return guardedAction('saveHomePagesConfigAction', async (actor) => {
+    const res = await saveHomePagesConfig(input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
@@ -829,8 +829,8 @@ export async function saveHomePagesConfigAction(input: {
 }
 
 export async function resetHomePagesConfigAction() {
-  return guardedAction('resetHomePagesConfigAction', (actor) => {
-    const res = resetHomePagesConfig(actor.personId, {
+  return guardedAction('resetHomePagesConfigAction', async (actor) => {
+    const res = await resetHomePagesConfig(actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
@@ -845,8 +845,8 @@ export async function addHomeRoleAction(input: {
   purpose: string;
   copyFromRoleKey?: string;
 }) {
-  return guardedAction('addHomeRoleAction', (actor) => {
-    const res = addHomeRole(input, actor.personId, {
+  return guardedAction('addHomeRoleAction', async (actor) => {
+    const res = await addHomeRole(input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
@@ -861,8 +861,8 @@ export async function updateEmployeeRolesAndSupportsAction(
     supportsIds?: string[];
   },
 ) {
-  return guardedAction('updateEmployeeRolesAndSupportsAction', (actor) => {
-    const res = updateEmployeeRolesAndSupports(personId, input, actor.personId, {
+  return guardedAction('updateEmployeeRolesAndSupportsAction', async (actor) => {
+    const res = await updateEmployeeRolesAndSupports(personId, input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
@@ -894,8 +894,8 @@ export async function updatePersonPermissionOverridesAction(
     entraObjectId?: string | null;
   },
 ) {
-  return guardedAction('updatePersonPermissionOverridesAction', (actor) => {
-    const res = updatePersonPermissionOverrides(personId, input, actor.personId, {
+  return guardedAction('updatePersonPermissionOverridesAction', async (actor) => {
+    const res = await updatePersonPermissionOverrides(personId, input, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
@@ -906,8 +906,8 @@ export async function updatePersonPermissionOverridesAction(
 export async function updateTenantRbacConfigAction(
   patch: Partial<RbacConfiguration>,
 ) {
-  return guardedAction('updateTenantRbacConfigAction', (actor) => {
-    const res = updateTenantRbacConfig(patch, actor.personId, {
+  return guardedAction('updateTenantRbacConfigAction', async (actor) => {
+    const res = await updateTenantRbacConfig(patch, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
@@ -916,40 +916,40 @@ export async function updateTenantRbacConfigAction(
 }
 
 export async function approveSignOffAction(signOffId: string) {
-  return guardedAction('approveSignOffAction', ({ personId: byId }) => {
-    const res = approveSignOff(signOffId, byId);
+  return guardedAction('approveSignOffAction', async ({ personId: byId }) => {
+    const res = await approveSignOff(signOffId, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function discussSignOffAction(signOffId: string, note: string) {
-  return guardedAction('discussSignOffAction', ({ personId: byId }) => {
-    const res = discussSignOff(signOffId, note, byId);
+  return guardedAction('discussSignOffAction', async ({ personId: byId }) => {
+    const res = await discussSignOff(signOffId, note, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function requestMatterBillAction(matterCode: string) {
-  return guardedAction('requestMatterBillAction', ({ personId: byId }) => {
-    const res = requestMatterBill(matterCode, byId);
+  return guardedAction('requestMatterBillAction', async ({ personId: byId }) => {
+    const res = await requestMatterBill(matterCode, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function flagMatterWriteOffAction(matterCode: string, amountGbp: number) {
-  return guardedAction('flagMatterWriteOffAction', ({ personId: byId }) => {
-    const res = flagMatterWriteOff(matterCode, amountGbp, byId);
+  return guardedAction('flagMatterWriteOffAction', async ({ personId: byId }) => {
+    const res = await flagMatterWriteOff(matterCode, amountGbp, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function remindTeamLeadOverdueComplianceAction(teamId: string) {
-  return guardedAction('remindTeamLeadOverdueComplianceAction', ({ personId: byId }) => {
-    const res = remindTeamLeadOverdueCompliance(teamId, byId);
+  return guardedAction('remindTeamLeadOverdueComplianceAction', async ({ personId: byId }) => {
+    const res = await remindTeamLeadOverdueCompliance(teamId, byId);
     revalidateAll();
     return res;
   });
@@ -962,16 +962,16 @@ export async function recordInvoiceCreditControlActionAction(input: {
   actionType: 'log_call' | 'send_reminder' | 'escalate';
   note?: string;
 }) {
-  return guardedAction('recordInvoiceCreditControlActionAction', ({ personId: byId }) => {
-    const res = recordInvoiceCreditControlAction(input, byId);
+  return guardedAction('recordInvoiceCreditControlActionAction', async ({ personId: byId }) => {
+    const res = await recordInvoiceCreditControlAction(input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function saveOrgStructureAction(nextCatalogue: OrgStructureCatalogue) {
-  return guardedAction('saveOrgStructureAction', ({ personId: byId }) => {
-    const res = saveOrgStructure(nextCatalogue, byId);
+  return guardedAction('saveOrgStructureAction', async ({ personId: byId }) => {
+    const res = await saveOrgStructure(nextCatalogue, byId);
     revalidateAll();
     return res;
   });
@@ -984,24 +984,24 @@ export async function saveMatterPartyRelationshipAction(input: {
   active?: boolean;
   isNew?: boolean;
 }) {
-  return guardedAction('saveMatterPartyRelationshipAction', ({ personId: byId }) => {
-    const res = saveMatterPartyRelationship(input, byId);
+  return guardedAction('saveMatterPartyRelationshipAction', async ({ personId: byId }) => {
+    const res = await saveMatterPartyRelationship(input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function reorderMatterPartyRelationshipAction(code: string, direction: -1 | 1) {
-  return guardedAction('reorderMatterPartyRelationshipAction', ({ personId: byId }) => {
-    const res = reorderMatterPartyRelationship(code, direction, byId);
+  return guardedAction('reorderMatterPartyRelationshipAction', async ({ personId: byId }) => {
+    const res = await reorderMatterPartyRelationship(code, direction, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function deleteMatterPartyRelationshipAction(code: string) {
-  return guardedAction('deleteMatterPartyRelationshipAction', ({ personId: byId }) => {
-    const res = deleteMatterPartyRelationship(code, byId);
+  return guardedAction('deleteMatterPartyRelationshipAction', async ({ personId: byId }) => {
+    const res = await deleteMatterPartyRelationship(code, byId);
     revalidateAll();
     return res;
   });
@@ -1017,16 +1017,16 @@ export async function saveMatterPartyCapacityAction(input: {
   active?: boolean;
   isNew?: boolean;
 }) {
-  return guardedAction('saveMatterPartyCapacityAction', ({ personId: byId }) => {
-    const res = saveMatterPartyCapacity(input, byId);
+  return guardedAction('saveMatterPartyCapacityAction', async ({ personId: byId }) => {
+    const res = await saveMatterPartyCapacity(input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function deleteMatterPartyCapacityAction(code: string) {
-  return guardedAction('deleteMatterPartyCapacityAction', ({ personId: byId }) => {
-    const res = deleteMatterPartyCapacity(code, byId);
+  return guardedAction('deleteMatterPartyCapacityAction', async ({ personId: byId }) => {
+    const res = await deleteMatterPartyCapacity(code, byId);
     revalidateAll();
     return res;
   });
@@ -1036,8 +1036,8 @@ export async function updateWorkTypeProfilesAction(
   workTypeSubcategoryId: string,
   profiles: WorkTypeProfileCode[],
 ) {
-  return guardedAction('updateWorkTypeProfilesAction', ({ personId: byId }) => {
-    const res = updateWorkTypeProfiles(workTypeSubcategoryId, profiles, byId);
+  return guardedAction('updateWorkTypeProfilesAction', async ({ personId: byId }) => {
+    const res = await updateWorkTypeProfiles(workTypeSubcategoryId, profiles, byId);
     revalidateAll();
     return res;
   });
@@ -1047,8 +1047,8 @@ export async function saveQuoteAction(
   input: SaveQuoteInput,
   opts: { id?: string; markAsSent?: boolean } = {},
 ) {
-  return guardedAction('saveQuoteAction', ({ personId: byId }) => {
-    const res = saveQuoteRecord(input, {
+  return guardedAction('saveQuoteAction', async ({ personId: byId }) => {
+    const res = await saveQuoteRecord(input, {
       id: opts?.id,
       markAsSent: opts?.markAsSent,
       byId,
@@ -1059,8 +1059,8 @@ export async function saveQuoteAction(
 }
 
 export async function markQuoteSentAction(quoteId: string) {
-  return guardedAction('markQuoteSentAction', ({ personId: byId }) => {
-    const res = markQuoteSentRecord(quoteId, byId);
+  return guardedAction('markQuoteSentAction', async ({ personId: byId }) => {
+    const res = await markQuoteSentRecord(quoteId, byId);
     revalidateAll();
     return res;
   });
@@ -1074,8 +1074,8 @@ export async function logQuoteFollowUpAction(
     nextFollowUpDate: string | null;
   },
 ) {
-  return guardedAction('logQuoteFollowUpAction', ({ personId: byId }) => {
-    const res = logQuoteFollowUpRecord(quoteId, input, byId);
+  return guardedAction('logQuoteFollowUpAction', async ({ personId: byId }) => {
+    const res = await logQuoteFollowUpRecord(quoteId, input, byId);
     revalidateAll();
     return res;
   });
@@ -1098,8 +1098,8 @@ export async function reviseQuoteAction(
     markAsSent?: boolean;
   },
 ) {
-  return guardedAction('reviseQuoteAction', ({ personId: byId }) => {
-    const res = reviseQuoteRecord(quoteId, input, byId);
+  return guardedAction('reviseQuoteAction', async ({ personId: byId }) => {
+    const res = await reviseQuoteRecord(quoteId, input, byId);
     revalidateAll();
     return res;
   });
@@ -1113,32 +1113,32 @@ export async function recordQuoteOutcomeAction(
     note?: string;
   },
 ) {
-  return guardedAction('recordQuoteOutcomeAction', ({ personId: byId }) => {
-    const res = recordQuoteOutcomeRecord(quoteId, input, byId);
+  return guardedAction('recordQuoteOutcomeAction', async ({ personId: byId }) => {
+    const res = await recordQuoteOutcomeRecord(quoteId, input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function prepareQuoteConversionAction(quoteId: string) {
-  return guardedAction('prepareQuoteConversionAction', ({ personId: byId }) => {
-    const res = prepareQuoteConversionRecord(quoteId, byId);
+  return guardedAction('prepareQuoteConversionAction', async ({ personId: byId }) => {
+    const res = await prepareQuoteConversionRecord(quoteId, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function saveMatterCostsConfigAction(config: MatterCostsConfig) {
-  return guardedAction('saveMatterCostsConfigAction', ({ personId: byId }) => {
-    const res = saveMatterCostsConfig(config, byId);
+  return guardedAction('saveMatterCostsConfigAction', async ({ personId: byId }) => {
+    const res = await saveMatterCostsConfig(config, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function syncMatterCostsRatesFromPmsAction() {
-  return guardedAction('syncMatterCostsRatesFromPmsAction', ({ personId: byId }) => {
-    const res = syncMatterCostsRatesFromPms(byId);
+  return guardedAction('syncMatterCostsRatesFromPmsAction', async ({ personId: byId }) => {
+    const res = await syncMatterCostsRatesFromPms(byId);
     revalidateAll();
     return res;
   });
@@ -1421,7 +1421,7 @@ export async function previewLimitationCalculationAction(input: {
   standstillPeriods?: StandstillPeriod[];
   calendarCodeOverride?: string;
 }) {
-  return guardedAction('previewLimitationCalculationAction', ({ personId: byId }) =>
+  return guardedAction('previewLimitationCalculationAction', async ({ personId: byId }) =>
     previewLimitationCalculationRecord(input, byId),
   );
 }
@@ -1538,27 +1538,27 @@ export async function recordKeyDateNotApplicableAction(input: {
   keyDateTypeId: string;
   reason: string;
 }) {
-  return guardedAction('recordKeyDateNotApplicableAction', ({ personId: byId }) => {
-    const res = recordKeyDateNotApplicableRecord(input, byId);
+  return guardedAction('recordKeyDateNotApplicableAction', async ({ personId: byId }) => {
+    const res = await recordKeyDateNotApplicableRecord(input, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
-  return guardedAction('acknowledgeKeyDateReminderAction', ({ personId: byId }) => {
-    const res = acknowledgeKeyDateReminderRecord(keyDateId, byId);
+  return guardedAction('acknowledgeKeyDateReminderAction', async ({ personId: byId }) => {
+    const res = await acknowledgeKeyDateReminderRecord(keyDateId, byId);
     revalidateAll();
     return res;
   });
 }
 
 export async function runKeyDateReminderSchedulerAction() {
-  return guardedAction('runKeyDateReminderSchedulerAction', (actor) => {
+  return guardedAction('runKeyDateReminderSchedulerAction', async (actor) => {
     const tenantCtx = resolveCurrentTenantContext(
       createVerifiedSessionActorFromEntraSession(actor.session),
     );
-    const res = runKeyDateReminderSchedulerRecord({
+    const res = await runKeyDateReminderSchedulerRecord({
       tenantCtx,
       session: actor.session,
       byId: actor.personId,
@@ -1573,7 +1573,7 @@ export async function queryKeyDatesTeamDiaryAction(
   query: TeamDiaryQuery,
   todayIso?: string,
 ) {
-  return guardedAction('queryKeyDatesTeamDiaryAction', ({ personId: byId }) =>
+  return guardedAction('queryKeyDatesTeamDiaryAction', async ({ personId: byId }) =>
     queryKeyDatesTeamDiaryRecord(query, byId, todayIso),
   );
 }
@@ -1582,7 +1582,7 @@ export async function getKeyDateExceptionsReportAction(
   filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
   todayIso?: string,
 ) {
-  return guardedAction('getKeyDateExceptionsReportAction', ({ personId: byId }) =>
+  return guardedAction('getKeyDateExceptionsReportAction', async ({ personId: byId }) =>
     getKeyDateExceptionsReportRecord(filter, byId, todayIso),
   );
 }
@@ -1595,8 +1595,8 @@ export async function exportKeyDateExceptionsReportAction(
   } = {},
   todayIso?: string,
 ) {
-  return guardedAction('exportKeyDateExceptionsReportAction', ({ personId: byId }) => {
-    const res = exportKeyDateExceptionsReportRecord(filter, byId, todayIso);
+  return guardedAction('exportKeyDateExceptionsReportAction', async ({ personId: byId }) => {
+    const res = await exportKeyDateExceptionsReportRecord(filter, byId, todayIso);
     revalidateAll();
     return res;
   });
@@ -1606,8 +1606,8 @@ export async function saveKeyDatesConfigAction(
   newConfig: KeyDatesConfig,
   reason: string,
 ) {
-  return guardedAction('saveKeyDatesConfigAction', (actor) => {
-    const res = saveKeyDatesConfigRecord(newConfig, reason, actor.personId, {
+  return guardedAction('saveKeyDatesConfigAction', async (actor) => {
+    const res = await saveKeyDatesConfigRecord(newConfig, reason, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
     revalidateAll();
