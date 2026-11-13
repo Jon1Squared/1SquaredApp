@@ -201,6 +201,7 @@ import {
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
+  getActiveTenantTransactionState,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   runTenantBackgroundJob,
@@ -710,109 +711,95 @@ function resolveDefaultServiceTenantContext(
   throw err;
 }
 
-async function syncMatterRestrictionInPostgres(
+/**
+ * Recomputes and writes `is_staff_matter`, `has_ethical_wall`, and `restricted_access_user_ids_json`
+ * for only the affected matter rows inside the caller's active `withTenantTransaction` (`R478`).
+ * Takes `SELECT ... FOR UPDATE` on the affected matter rows and reads `people` inside the same
+ * transaction so stale pre-transaction reads or read-only paths can never overwrite access lists.
+ */
+async function syncAffectedMattersRestrictionsInTx(
   ctx: TenantContext,
-  people: readonly Person[],
-  teams: readonly Team[],
-  matter: Matter,
-  compensator?: RecordDeltaCompensator | null,
-  previousMatter?: Matter | null,
+  options: {
+    matterIds?: readonly string[];
+    includeAllRestrictedMatters?: boolean;
+    teams?: readonly Team[];
+    rbacConfig?: RbacConfiguration | null;
+  } = {},
 ): Promise<void> {
-  const tenantConfig = getActiveTenantConfiguration();
-  const nextMeta = computeMatterRestrictionMetadataForStore(
-    matter,
-    people as Person[],
-    teams as Team[],
-    tenantConfig,
-  );
-  const prevMeta = previousMatter
-    ? computeMatterRestrictionMetadataForStore(
-        previousMatter,
-        people as Person[],
-        teams as Team[],
-        tenantConfig,
-      )
-    : null;
-  const repo = getKeyDateRepository();
-  await repo.setMatterRestriction(ctx, nextMeta);
-  const activeComp = compensator ?? getActiveCompensatorOrNull();
-  if (activeComp) {
-    activeComp.register(
-      `keydates.matter_restriction:${matter.id}`,
-      async () => {
-        if (prevMeta) {
-          await repo.setMatterRestriction(ctx, prevMeta);
-        } else {
-          await repo.withTenantTransaction(ctx, async (tx) => {
-            await tx.query(
-              "DELETE FROM public.matters WHERE tenant_id = $1 AND id = $2 AND client_id = 'O-KEYDATE-STUB'",
-              [ctx.tenantId, matter.id],
-            );
-          });
-        }
-      },
+  const activeTx = getActiveTenantTransactionState();
+  if (!activeTx || activeTx.tenantId !== ctx.tenantId) {
+    const err = new Error(
+      `TENANCY_TRANSACTION_REQUIRED: syncAffectedMattersRestrictionsInTx requires an active withTenantTransaction for tenant "${ctx.tenantId}".`,
+    ) as Error & { code: string };
+    err.code = 'TENANCY_TRANSACTION_REQUIRED';
+    throw err;
+  }
+  const matterRepo = getMatterRepository();
+  const lockedMatters =
+    await matterRepo.lockMattersForRestrictionRecompute<Matter>(ctx, {
+      matterIds: options.matterIds,
+      includeAllRestrictedMatters: options.includeAllRestrictedMatters,
+    });
+  if (lockedMatters.length === 0) {
+    return;
+  }
+  const txPeople = await getPartyRepository().listAllPeople<Person>(ctx);
+  const txTeams = options.teams ?? getStore().teams;
+  const baseTenantConfig = getActiveTenantConfiguration();
+  const effectiveTenantConfig = options.rbacConfig
+    ? { ...baseTenantConfig, rbac: options.rbacConfig }
+    : baseTenantConfig;
+  for (const m of lockedMatters) {
+    const meta = computeMatterRestrictionMetadataForStore(
+      m,
+      txPeople,
+      txTeams,
+      effectiveTenantConfig,
     );
+    await matterRepo.updateLockedMatterRestrictionColumnsInTx(ctx, m.id, {
+      isStaffMatter: Boolean(m.isStaffMatter),
+      hasEthicalWall: Boolean(m.hasEthicalWall),
+      sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+    });
   }
 }
 
-async function ensureMattersRestrictedMetadataSynced(
+async function putMatterWithInTxRestrictions(
   ctx: TenantContext,
-  matters: readonly Matter[],
-  people: readonly Person[],
-  teams: readonly Team[],
-): Promise<void> {
-  if (matters.length === 0) return;
-  const tenantConfig = getActiveTenantConfiguration();
-  const repo = getKeyDateRepository();
-  await repo.withTenantTransaction(ctx, async (tx) => {
-    const existingRes = await tx.query<{
-      id: string;
-      is_staff_matter: boolean;
-      has_ethical_wall: boolean;
-      restricted_access_user_ids_json: string[] | null;
-    }>(
-      `SELECT id, is_staff_matter, has_ethical_wall, restricted_access_user_ids_json
-         FROM public.matters
-        WHERE tenant_id = $1`,
-      [ctx.tenantId],
-    );
-    const existingById = new Map(
-      existingRes.rows.map((row) => [
-        row.id,
-        {
-          isRestricted:
-            Boolean(row.is_staff_matter) ||
-            Boolean(row.has_ethical_wall) ||
-            (Array.isArray(row.restricted_access_user_ids_json) &&
-              row.restricted_access_user_ids_json.length > 0),
-          restrictedAccessUserIds: Array.isArray(
-            row.restricted_access_user_ids_json,
-          )
-            ? [...row.restricted_access_user_ids_json].sort()
-            : [],
-        },
-      ]),
-    );
-    for (const m of matters) {
-      const meta = computeMatterRestrictionMetadataForStore(
-        m,
-        people as Person[],
-        teams as Team[],
-        tenantConfig,
-      );
-      const currentRow = existingById.get(m.id);
-      const desiredIds = [...meta.restrictedAccessUserIds].sort();
-      const differs =
-        !currentRow ||
-        currentRow.isRestricted !== Boolean(meta.isRestricted) ||
-        currentRow.restrictedAccessUserIds.length !== desiredIds.length ||
-        currentRow.restrictedAccessUserIds.some(
-          (id, idx) => id !== desiredIds[idx],
-        );
-      if (differs) {
-        await repo.setMatterRestriction(ctx, meta);
-      }
-    }
+  matter: Matter,
+  options: {
+    expectedRowVersion?: number | null;
+    teams?: readonly Team[];
+    rbacConfig?: RbacConfiguration | null;
+  } = {},
+): Promise<Matter> {
+  const activeTx = getActiveTenantTransactionState();
+  if (!activeTx || activeTx.tenantId !== ctx.tenantId) {
+    const err = new Error(
+      `TENANCY_TRANSACTION_REQUIRED: putMatterWithInTxRestrictions requires an active withTenantTransaction for tenant "${ctx.tenantId}".`,
+    ) as Error & { code: string };
+    err.code = 'TENANCY_TRANSACTION_REQUIRED';
+    throw err;
+  }
+  const matterRepo = getMatterRepository();
+  await matterRepo.lockMattersForRestrictionRecompute<Matter>(ctx, {
+    matterIds: [matter.id],
+  });
+  const txPeople = await getPartyRepository().listAllPeople<Person>(ctx);
+  const txTeams = options.teams ?? getStore().teams;
+  const baseTenantConfig = getActiveTenantConfiguration();
+  const effectiveTenantConfig = options.rbacConfig
+    ? { ...baseTenantConfig, rbac: options.rbacConfig }
+    : baseTenantConfig;
+  const meta = computeMatterRestrictionMetadataForStore(
+    matter,
+    txPeople,
+    txTeams,
+    effectiveTenantConfig,
+  );
+  return matterRepo.putMatter<Matter>(ctx, matter, {
+    expectedRowVersion: options.expectedRowVersion,
+    sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
   });
 }
 
@@ -891,7 +878,6 @@ export async function listAuditEntriesForRecord(
   const effectiveTokenRoles =
     options?.tokenRoles ??
     (activeSession?.personId === viewer.id ? activeSession.tokenRoles : undefined);
-  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
     people,
@@ -1020,7 +1006,6 @@ export async function listFirmAuditEntriesPage(
       nextBeforeSeq: null,
     };
   }
-  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
 
   const prelimVisibility = buildRecordVisibility(store, viewer, {
     people,
@@ -1241,12 +1226,6 @@ async function getAppSnapshotInScope(
   const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
   const keyDateRepo = getKeyDateRepository();
-  await ensureMattersRestrictedMetadataSynced(
-    snapshotTenantCtx,
-    matters,
-    people,
-    store.teams,
-  );
 
   // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
   const prelimVisibility = buildRecordVisibility(store, user, {
@@ -2002,16 +1981,6 @@ export async function reassignLeaverOwnedRecords(
         byId,
         at: now,
       });
-      if (isRestricted && prevMatter) {
-        await syncMatterRestrictionInPostgres(
-          reassignCtx,
-          people,
-          store.teams,
-          m,
-          compensator,
-          prevMatter,
-        );
-      }
     }
   }
 
@@ -2090,23 +2059,11 @@ export async function reassignLeaverOwnedRecords(
       await partyRepo.putOrganisation(reassignCtx, o);
     }
     for (const { matter: m } of changedMatters) {
-      const meta = computeMatterRestrictionMetadataForStore(
-        m,
-        people,
-        store.teams,
-        tenantCfg,
-      );
-      await matterRepo.putMatter(reassignCtx, m, {
+      await putMatterWithInTxRestrictions(reassignCtx, m, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        teams: store.teams,
       });
     }
-    await ensureMattersRestrictedMetadataSynced(
-      reassignCtx,
-      matters,
-      people,
-      store.teams,
-    );
   });
   for (const { matter: m, prevMatter } of changedMatters) {
     const isRestricted =
@@ -3096,28 +3053,22 @@ export async function savePersonRecord(
     for (const { person: dupPerson } of changedDuplicatePeople) {
       await partyRepo.putPerson(personCtx, dupPerson);
     }
-    const peopleWithUpdatedPerson = people.some((p) => p.id === person.id)
-      ? people.map((p) => (p.id === person.id ? person : p))
-      : [...people, person];
-    const tenantCfg = getActiveTenantConfiguration();
     for (const { matter: m } of changedMattersOnHire) {
-      const meta = computeMatterRestrictionMetadataForStore(
-        m,
-        peopleWithUpdatedPerson,
-        store.teams,
-        tenantCfg,
-      );
-      await matterRepo.putMatter(personCtx, m, {
+      await putMatterWithInTxRestrictions(personCtx, m, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        teams: store.teams,
       });
     }
-    await ensureMattersRestrictedMetadataSynced(
-      personCtx,
-      matters,
-      peopleWithUpdatedPerson,
-      store.teams,
-    );
+    if (
+      person.isEmployee ||
+      existing?.isEmployee ||
+      changedMattersOnHire.length > 0
+    ) {
+      await syncAffectedMattersRestrictionsInTx(personCtx, {
+        includeAllRestrictedMatters: true,
+        teams: store.teams,
+      });
+    }
   });
   for (const { matter: m, prevMatter } of changedMattersOnHire) {
     const syncCorrelationId = `corr-lifecycle-sync-${m.id}-${Date.now()}`;
@@ -3775,15 +3726,9 @@ export async function addNoteToRecord(
     } else if (recordType === 'organisation') {
       await partyRepo.putOrganisation(noteCtx, target as Organisation);
     } else {
-      const meta = computeMatterRestrictionMetadataForStore(
-        target as Matter,
-        people,
-        store.teams,
-        getActiveTenantConfiguration(),
-      );
-      await matterRepo.putMatter(noteCtx, target as Matter, {
+      await putMatterWithInTxRestrictions(noteCtx, target as Matter, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        teams: store.teams,
       });
     }
     writeAudit(store, {
@@ -3908,18 +3853,6 @@ async function runMatterOpeningGate(params: {
   const kdConfig = await getKeyDatesConfig({ ctx: extensionCtx });
   if (kdConfig.enabled) {
     const keyDateRepo = getKeyDateRepository();
-    if (!isNewMatter) {
-      const [people, matters] = await Promise.all([
-        getPartyRepository().listAllPeople<Person>(extensionCtx),
-        getMatterRepository().listAllMattersUnfiltered<Matter>(extensionCtx),
-      ]);
-      await ensureMattersRestrictedMetadataSynced(
-        extensionCtx,
-        matters,
-        people,
-        store.teams,
-      );
-    }
     const targetMatterTypeId = matter.matterTypeId || matter.practiceAreaId;
     const matterKds = isNewMatter
       ? []
@@ -4534,12 +4467,6 @@ export async function saveMatterRecord(
       nextStatusId === 'matter_status.closed';
 
     if (targetMatterId && isClosing) {
-      await ensureMattersRestrictedMetadataSynced(
-        extensionCtx,
-        matters,
-        people,
-        store.teams,
-      );
       const matterKds = await getKeyDateRepository().listKeyDatesForMatter(
         extensionCtx,
         targetMatterId,
@@ -5539,12 +5466,6 @@ export async function saveMatterRecord(
   const expectedRowVersionForPut = existing
     ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
     : undefined;
-  const restrictionMeta = computeMatterRestrictionMetadataForStore(
-    matter,
-    allPeopleWithPending,
-    store.teams,
-    tenantCfg,
-  );
   try {
     await matterRepo.withTenantTransaction(extensionCtx, async () => {
       for (const person of pendingPeople) {
@@ -5553,9 +5474,9 @@ export async function saveMatterRecord(
       for (const org of pendingOrganisations) {
         await partyRepo.putOrganisation(extensionCtx, org);
       }
-      const saved = await matterRepo.putMatter<Matter>(extensionCtx, matter, {
+      const saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
         expectedRowVersion: expectedRowVersionForPut,
-        sqlRestrictedAccessUserIds: restrictionMeta.restrictedAccessUserIds,
+        teams: store.teams,
       });
       matter = saved;
     });
@@ -5942,18 +5863,12 @@ export async function markEngagementLetterDrafted(
   const prevStatus = existing.engagementLetterStatus;
   existing.engagementLetterStatus = 'Drafted';
   const now = touchMatter(existing, byId);
-  const meta = computeMatterRestrictionMetadataForStore(
-    existing,
-    people,
-    store.teams,
-    getActiveTenantConfiguration(),
-  );
   let saved!: Matter;
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(ctx, async () => {
-      saved = await matterRepo.putMatter<Matter>(ctx, existing, {
+      saved = await putMatterWithInTxRestrictions(ctx, existing, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        teams: store.teams,
       });
       writeAudit(store, {
         recordType: 'matter',
@@ -6096,18 +6011,12 @@ export async function liftMatterRestriction(
   const liftCtx = resolveDefaultServiceTenantContext(store, byId, {
     session: activeVerifiedSession,
   });
-  const meta = computeMatterRestrictionMetadataForStore(
-    existing,
-    people,
-    store.teams,
-    getActiveTenantConfiguration(),
-  );
   let saved!: Matter;
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(liftCtx, async () => {
-      saved = await matterRepo.putMatter<Matter>(liftCtx, existing, {
+      saved = await putMatterWithInTxRestrictions(liftCtx, existing, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        teams: store.teams,
       });
       writeAudit(store, {
         recordType: 'matter',
@@ -6298,15 +6207,9 @@ export async function runMatterConflictSearchRecord(
     if (matterUpdated || auditWritten) {
       await matterRepo.withTenantTransaction(ctx, async () => {
         if (matterUpdated && savedMatter) {
-          const meta = computeMatterRestrictionMetadataForStore(
-            savedMatter,
-            people,
-            store.teams,
-            getActiveTenantConfiguration(),
-          );
-          savedMatter = await matterRepo.putMatter<Matter>(ctx, savedMatter, {
+          savedMatter = await putMatterWithInTxRestrictions(ctx, savedMatter, {
             expectedRowVersion: null,
-            sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+            teams: store.teams,
           });
         }
         if (auditWritten) {
@@ -6519,12 +6422,6 @@ export async function updateMatterConflictRecord(
     matter.restrictedAccessUserIds = Array.from(allowed);
   }
 
-  await ensureMattersRestrictedMetadataSynced(
-    conflictCtx,
-    matters,
-    people,
-    store.teams,
-  );
   const gate = matter.fieldValues?.['matterOpeningGate'] as
     | MatterOpeningGateRecord
     | undefined;
@@ -6592,18 +6489,12 @@ export async function updateMatterConflictRecord(
     }
   }
 
-  const meta = computeMatterRestrictionMetadataForStore(
-    matter,
-    people,
-    store.teams,
-    getActiveTenantConfiguration(),
-  );
   let saved!: Matter;
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(conflictCtx, async () => {
-      saved = await matterRepo.putMatter<Matter>(conflictCtx, matter, {
+      saved = await putMatterWithInTxRestrictions(conflictCtx, matter, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        teams: store.teams,
       });
       writeAudit(store, {
         recordType: 'matter',
@@ -6815,18 +6706,12 @@ export async function signOffMatterCostsRecord(
     if (firstErr) warnings.push(firstErr);
   }
 
-  const meta = computeMatterRestrictionMetadataForStore(
-    matter,
-    people,
-    store.teams,
-    tenantCfg,
-  );
   let saved!: Matter;
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(extensionCtx, async () => {
-      saved = await matterRepo.putMatter<Matter>(extensionCtx, matter, {
+      saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+        teams: store.teams,
       });
       writeAudit(store, {
         recordType: 'matter',
@@ -7478,15 +7363,9 @@ export async function executeMerge(
         mergeHistory: history,
       });
       for (const m of repointedMatters) {
-        const meta = computeMatterRestrictionMetadataForStore(
-          m,
-          people,
-          store.teams,
-          tenantCfg,
-        );
-        await matterRepo.putMatter(activeMergeCtx, m, {
+        await putMatterWithInTxRestrictions(activeMergeCtx, m, {
           expectedRowVersion: null,
-          sqlRestrictedAccessUserIds: meta.restrictedAccessUserIds,
+          teams: store.teams,
         });
       }
       writeAudit(store, {
@@ -8267,18 +8146,11 @@ export async function saveTeamRecord(
   saveStore(store);
   const teamCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
-  const matterRepo = getMatterRepository();
   await partyRepo.withTenantTransaction(teamCtx, async () => {
-    const [people, matters] = await Promise.all([
-      partyRepo.listAllPeople<Person>(teamCtx),
-      matterRepo.listAllMattersUnfiltered<Matter>(teamCtx),
-    ]);
-    await ensureMattersRestrictedMetadataSynced(
-      teamCtx,
-      matters,
-      people,
-      store.teams,
-    );
+    await syncAffectedMattersRestrictionsInTx(teamCtx, {
+      includeAllRestrictedMatters: true,
+      teams: store.teams,
+    });
   });
   return { team };
 
@@ -8352,13 +8224,10 @@ export async function updateEmployeeRoleSetting(
     person.updatedById = byId;
     const afterJson = JSON.stringify({ appRole: person.appRole ?? null });
     await partyRepo.putPerson(ctx, person);
-    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-    await ensureMattersRestrictedMetadataSynced(
-      ctx,
-      matters,
-      people,
-      store.teams,
-    );
+    await syncAffectedMattersRestrictionsInTx(ctx, {
+      includeAllRestrictedMatters: true,
+      teams: store.teams,
+    });
     await runWithAuditStagingScope(async () => {
       writeAudit(store, {
         recordType: 'person',
@@ -8473,7 +8342,6 @@ export async function saveTaskRecord(
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
-  await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
   const prelimVis = buildRecordVisibility(store, actor, {
     people,
     matters,
@@ -8877,7 +8745,6 @@ export async function takeTaskRecord(
       matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
     ]);
     const actor = people.find((p) => p.id === byId) ?? null;
-    await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
     const prelimVis = buildRecordVisibility(store, actor, {
       people,
       matters,
@@ -8946,7 +8813,6 @@ export async function addTaskCommentRecord(
     const msg = 'You do not have permission (task:comment) to comment on tasks.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  await ensureMattersRestrictedMetadataSynced(taskCtx, matters, people, store.teams);
   const prelimVis = buildRecordVisibility(store, actor, {
     people,
     matters,
@@ -12001,13 +11867,10 @@ export async function updateEmployeeRolesAndSupports(
     });
 
     await partyRepo.putPerson(ctx, person);
-    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-    await ensureMattersRestrictedMetadataSynced(
-      ctx,
-      matters,
-      people,
-      store.teams,
-    );
+    await syncAffectedMattersRestrictionsInTx(ctx, {
+      includeAllRestrictedMatters: true,
+      teams: store.teams,
+    });
     await runWithAuditStagingScope(async () => {
       writeAudit(store, {
         recordType: 'person',
@@ -12215,13 +12078,10 @@ export async function updatePersonPermissionOverrides(
     });
 
     await partyRepo.putPerson(ctx, target);
-    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-    await ensureMattersRestrictedMetadataSynced(
-      ctx,
-      matters,
-      people,
-      store.teams,
-    );
+    await syncAffectedMattersRestrictionsInTx(ctx, {
+      includeAllRestrictedMatters: true,
+      teams: store.teams,
+    });
     await runWithAuditStagingScope(async () => {
       writeAudit(store, {
         recordType: 'person',
@@ -12392,13 +12252,11 @@ export async function updateTenantRbacConfig(
 
   saveStore(store);
   await getPartyRepository().withTenantTransaction(ctx, async () => {
-    const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-    await ensureMattersRestrictedMetadataSynced(
-      ctx,
-      matters,
-      people,
-      store.teams,
-    );
+    await syncAffectedMattersRestrictionsInTx(ctx, {
+      includeAllRestrictedMatters: true,
+      teams: store.teams,
+      rbacConfig: nextRbac,
+    });
   });
   return { ok: true, rbacConfig: nextRbac };
 
@@ -15111,7 +14969,6 @@ export async function getMatterKeyDatesSnapshot(
       canVerifyByKeyDateId: {},
     };
   }
-  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const keyDateRepo = getKeyDateRepository();
   const [keyDates, keyDateNotApplicable, allReminders, allCalendarSyncs] =
     await Promise.all([
@@ -15280,7 +15137,6 @@ export async function createOrProposeKeyDateRecord(
         return buildActionDenied('FORBIDDEN', manualCheck.error);
       }
 
-      await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
       const keyDateRepo = getKeyDateRepository();
       const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
       const stagedAudit: AuditEntry[] = [];
@@ -15494,7 +15350,6 @@ async function loadKeyDateForActorOrClassifyError(
   people: readonly Person[],
   matters: readonly Matter[],
 ): Promise<{ kd: KeyDate | null; error?: string; matter: Matter | null; enquiry: Enquiry | null }> {
-  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const keyDateRepo = getKeyDateRepository();
   const kd = await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
   if (!kd) {
@@ -16129,7 +15984,6 @@ export async function recordKeyDateNotApplicableRecord(
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
-    await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
     const keyDateRepo = getKeyDateRepository();
     const existingNaList = await keyDateRepo.listNotApplicableForMatter(
       ctx,
@@ -16459,12 +16313,6 @@ export async function runKeyDateReminderSchedulerRecord(
     const nowIso = new Date().toISOString();
     const todayIso = toIsoDate(new Date());
 
-    await ensureMattersRestrictedMetadataSynced(
-      effectiveTenantCtx!,
-      matters,
-      people,
-      store.teams,
-    );
     const keyDateRepo = getKeyDateRepository();
     // Scheduler evaluates all key dates in the tenant database (including restricted matters via system/admin visibility)
     const allTenantKeyDates = await keyDateRepo.withTenantReadTransaction(
@@ -16559,7 +16407,6 @@ export async function queryKeyDatesTeamDiaryRecord(
   if (!resolved || !resolved.actor) return [];
   const { ctx, actor: viewer, people, matters } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
-  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const keyDateRepo = getKeyDateRepository();
   const [keyDates, reminderStates] = await Promise.all([
     keyDateRepo.listAllVisibleKeyDates(ctx, viewer.id),
@@ -16600,7 +16447,6 @@ export async function getKeyDateExceptionsReportRecord(
   if (!resolved || !resolved.actor) return [];
   const { ctx, actor: viewer, people, matters } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
-  await ensureMattersRestrictedMetadataSynced(ctx, matters, people, store.teams);
   const canConfigure = hasKeyDatePermission(viewer, 'keydate:configure', {
     config,
     allPeople: people,

@@ -18,6 +18,7 @@
 
 import type { TenantContext } from '../api/index';
 import {
+  getActiveTenantTransactionState,
   TenantScopedRepository,
   toIsoString,
   type TenantSqlClient,
@@ -601,7 +602,22 @@ function buildMatterDbParameters(
     updatedAt: safePgTimestampIso(matter.updatedAt),
     additionalClientIdsJson: JSON.stringify(matter.additionalClientIds ?? []),
     restrictedAccessUserIdsJson: JSON.stringify(
-      sqlRestrictedAccessUserIds ?? matter.restrictedAccessUserIds ?? [],
+      sqlRestrictedAccessUserIds ??
+        (matter.isStaffMatter ||
+        matter.hasEthicalWall ||
+        (matter.restrictedAccessUserIds?.length ?? 0) > 0
+          ? Array.from(
+              new Set(
+                [
+                  ...(matter.restrictedAccessUserIds ?? []),
+                  matter.responsiblePartnerId,
+                  matter.supervisingPartnerId,
+                  matter.leadFeeEarnerId,
+                  ...(matter.teamMemberIds ?? []),
+                ].filter((id): id is string => Boolean(id)),
+              ),
+            )
+          : []),
     ),
     fieldsJson: JSON.stringify(matter.fieldValues ?? {}),
     customFieldsJson: JSON.stringify(matter.customFields ?? {}),
@@ -876,6 +892,10 @@ export class TenantMatterRepository extends TenantScopedRepository {
     options?: { sqlRestrictedAccessUserIds?: readonly string[] },
   ): Promise<TMatter> {
     return this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matter.id],
+      );
       const p = buildMatterDbParameters(
         ctx,
         matter,
@@ -1069,6 +1089,10 @@ export class TenantMatterRepository extends TenantScopedRepository {
     }
 
     return this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matter.id],
+      );
       const p = buildMatterDbParameters(
         ctx,
         matter,
@@ -1222,6 +1246,10 @@ export class TenantMatterRepository extends TenantScopedRepository {
       });
     }
     return this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matter.id],
+      );
       const p = buildMatterDbParameters(
         ctx,
         matter,
@@ -1684,6 +1712,116 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return res.rows.map((row) =>
         mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+      );
+    });
+  }
+
+  /**
+   * Locks (`SELECT ... FOR UPDATE`) and returns only the affected matter rows inside an active
+   * tenant transaction so restriction metadata (`is_staff_matter`, `has_ethical_wall`,
+   * `restricted_access_user_ids_json`) can be recomputed from in-transaction inputs (`R478`).
+   */
+  public async lockMattersForRestrictionRecompute<
+    TMatter extends TenantMatterRecord = TenantMatterRecord,
+  >(
+    ctx: TenantContext,
+    options?: {
+      matterIds?: readonly string[];
+      includeAllRestrictedMatters?: boolean;
+    },
+  ): Promise<TMatter[]> {
+    const activeTx = getActiveTenantTransactionState();
+    if (!activeTx || activeTx.tenantId !== ctx.tenantId) {
+      const err = new Error(
+        `TENANCY_TRANSACTION_REQUIRED: lockMattersForRestrictionRecompute requires an active withTenantTransaction for tenant "${ctx.tenantId}".`,
+      ) as Error & { code: string };
+      err.code = 'TENANCY_TRANSACTION_REQUIRED';
+      throw err;
+    }
+    const explicitIds = Array.from(
+      new Set((options?.matterIds ?? []).filter(Boolean)),
+    );
+    const includeAllRestricted = Boolean(options?.includeAllRestrictedMatters);
+    if (!includeAllRestricted && explicitIds.length === 0) {
+      return [];
+    }
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = includeAllRestricted
+        ? await tx.query<DbMatterRow>(
+            `SELECT *
+               FROM public.matters
+              WHERE tenant_id = $1
+                AND client_id <> 'O-KEYDATE-STUB'
+                AND (
+                  is_staff_matter = TRUE
+                  OR has_ethical_wall = TRUE
+                  OR jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) > 0
+                  OR id = ANY($2::text[])
+                )
+              ORDER BY id ASC
+                FOR UPDATE`,
+            [ctx.tenantId, explicitIds],
+          )
+        : await tx.query<DbMatterRow>(
+            `SELECT *
+               FROM public.matters
+              WHERE tenant_id = $1
+                AND client_id <> 'O-KEYDATE-STUB'
+                AND id = ANY($2::text[])
+              ORDER BY id ASC
+                FOR UPDATE`,
+            [ctx.tenantId, explicitIds],
+          );
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'Matter');
+      }
+      const partiesMap = await this.loadPartiesByMatterIdsInTx(
+        tx,
+        ctx,
+        res.rows.map((r) => r.id),
+      );
+      return res.rows.map((row) =>
+        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+      );
+    });
+  }
+
+  /**
+   * Updates restriction columns on a matter row that was locked via `SELECT ... FOR UPDATE`
+   * in the same active tenant transaction (`R478`).
+   */
+  public async updateLockedMatterRestrictionColumnsInTx(
+    ctx: TenantContext,
+    matterId: string,
+    params: {
+      isStaffMatter: boolean;
+      hasEthicalWall: boolean;
+      sqlRestrictedAccessUserIds: readonly string[];
+    },
+  ): Promise<void> {
+    const activeTx = getActiveTenantTransactionState();
+    if (!activeTx || activeTx.tenantId !== ctx.tenantId) {
+      const err = new Error(
+        `TENANCY_TRANSACTION_REQUIRED: updateLockedMatterRestrictionColumnsInTx requires an active withTenantTransaction for tenant "${ctx.tenantId}".`,
+      ) as Error & { code: string };
+      err.code = 'TENANCY_TRANSACTION_REQUIRED';
+      throw err;
+    }
+    await this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        `UPDATE public.matters
+            SET is_staff_matter = $3,
+                has_ethical_wall = $4,
+                restricted_access_user_ids_json = $5::jsonb
+          WHERE tenant_id = $1
+            AND id = $2`,
+        [
+          ctx.tenantId,
+          matterId,
+          Boolean(params.isStaffMatter),
+          Boolean(params.hasEthicalWall),
+          JSON.stringify([...params.sqlRestrictedAccessUserIds]),
+        ],
       );
     });
   }

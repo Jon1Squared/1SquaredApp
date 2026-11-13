@@ -1862,4 +1862,291 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     );
     expect(step3ListControl.some((kd) => kd.id === testKeyDateId)).toBe(true);
   });
+
+  it('R478: two-replica interleaving test — when Replica A loads inputs, Replica B removes user U and commits, and Replica A runs former read-path callers or a concurrent person write, U is not written back to restricted_access_user_ids_json and cannot see the matter key dates', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const adminCtx = makeTenantCtx('not-a-law-firm', 'P-000001');
+    const adminSession = makeActorSession('P-000001');
+
+    const allPeople = await getPartyRepository().listAllPeople<
+      import('@/domain/types').Person
+    >(adminCtx);
+    const allMatters = await getMatterRepository().listAllMattersUnfiltered<
+      import('@/domain/types').Matter
+    >(adminCtx);
+    const positiveControlUserId = 'P-000001';
+    const staffMatter: import('@/domain/types').Matter = {
+      ...allMatters[0]!,
+      isStaffMatter: true,
+      hasEthicalWall: false,
+      responsiblePartnerId: positiveControlUserId,
+      supervisingPartnerId: positiveControlUserId,
+      leadFeeEarnerId: positiveControlUserId,
+      teamMemberIds: [],
+      restrictedAccessUserIds: [positiveControlUserId],
+    };
+    await getMatterRepository().putMatter(adminCtx, staffMatter, {
+      expectedRowVersion: null,
+      sqlRestrictedAccessUserIds: [positiveControlUserId],
+    });
+
+    const nonOversightEmployees = allPeople.filter(
+      (p) =>
+        p.isEmployee &&
+        !p.mergedIntoId &&
+        p.id !== positiveControlUserId &&
+        p.id !== staffMatter.responsiblePartnerId &&
+        p.id !== staffMatter.supervisingPartnerId &&
+        p.id !== staffMatter.leadFeeEarnerId &&
+        !(staffMatter.teamMemberIds ?? []).includes(p.id) &&
+        !(staffMatter.restrictedAccessUserIds ?? []).includes(p.id) &&
+        !(p.roles ?? []).includes('admin') &&
+        !(p.roles ?? []).includes('managing_partner') &&
+        !(p.roles ?? []).includes('risk_compliance'),
+    );
+    expect(nonOversightEmployees.length).toBeGreaterThanOrEqual(2);
+    const candidateUser = nonOversightEmployees[0]!;
+    const unrelatedEmployee = nonOversightEmployees[1]!;
+    const userU = candidateUser.id;
+    const originalRoles = [...(candidateUser.roles ?? ['fee_earner'])];
+    const userUSession = makeActorSession(userU, ['fee_earner']);
+    const userUCtx = makeTenantCtx('not-a-law-firm', userU, ['fee_earner']);
+
+    const userUTeamId =
+      getStore().teams.find(
+        (t) =>
+          t.active &&
+          (t.memberIds.includes(userU) || t.leadIds.includes(userU)),
+      )?.id ?? 'TM-000001';
+
+    const keyDateRepo = new TenantKeyDateRepository();
+    const testKeyDateId = 'KD-R478-STAFF-01';
+    const nowIso = new Date().toISOString();
+    await keyDateRepo.putKeyDate(adminCtx, {
+      id: testKeyDateId,
+      matterId: staffMatter.id,
+      keyDateTypeId: 'kd-type-limitation',
+      category: 'limitation',
+      title: 'R478 Interleaved Staff Matter Key Date',
+      dueDate: '2027-07-01',
+      isCritical: true,
+      status: 'confirmed',
+      source: 'manual',
+      teamId: userUTeamId,
+      responsiblePersonIds: [positiveControlUserId],
+      verification: {
+        required: true,
+        proposedById: positiveControlUserId,
+        proposedAt: nowIso,
+        verifiedById: positiveControlUserId,
+        verifiedAt: nowIso,
+      },
+      createdById: positiveControlUserId,
+      createdAt: nowIso,
+      updatedById: positiveControlUserId,
+      updatedAt: nowIso,
+      version: 1,
+    });
+
+    const readRestrictedIdsOnFreshConnection = async (): Promise<string[]> => {
+      const freshPools = new TenantPostgresPoolManager();
+      try {
+        const freshMatterRepo = new TenantMatterRepository({
+          poolManager: freshPools,
+        });
+        return await freshMatterRepo.withTenantReadTransaction(
+          adminCtx,
+          async (tx) => {
+            const res = await tx.query<{
+              restricted_access_user_ids_json: string[];
+            }>(
+              'SELECT restricted_access_user_ids_json FROM public.matters WHERE tenant_id = $1 AND id = $2',
+              [adminCtx.tenantId, staffMatter.id],
+            );
+            return res.rows[0]?.restricted_access_user_ids_json ?? [];
+          },
+        );
+      } finally {
+        await freshPools.closeAllPools();
+      }
+    };
+
+    // Build two isolated replica module graphs
+    vi.resetModules();
+    const replicaAEntra = await import('@/server/entraAuth');
+    const replicaA = await import('@/server/services');
+    const { runWithActiveActorSession: runInReplicaA } = await import(
+      '@/server/rbacRuntime'
+    );
+
+    vi.resetModules();
+    const replicaBEntra = await import('@/server/entraAuth');
+    const replicaB = await import('@/server/services');
+    const { runWithActiveActorSession: runInReplicaB } = await import(
+      '@/server/rbacRuntime'
+    );
+
+    const rebrandSession = (
+      entraMod: typeof replicaAEntra,
+      s: typeof adminSession,
+    ) => ({
+      ...s,
+      verifiedSession: entraMod.verifySignedEntraSessionCookie(
+        entraMod.createSignedEntraSessionCookie(s.verifiedSession),
+      )!,
+    });
+    const adminSessionA = rebrandSession(replicaAEntra, adminSession);
+    const userUSessionA = rebrandSession(replicaAEntra, userUSession);
+    const adminSessionB = rebrandSession(replicaBEntra, adminSession);
+    const userUSessionB = rebrandSession(replicaBEntra, userUSession);
+
+    // Initial setup: grant user U 'managing_partner' so U is in restricted_access_user_ids_json
+    const grantRes = await runInReplicaA(adminSessionA, () =>
+      replicaA.updateEmployeeRolesAndSupports(
+        userU,
+        { roles: Array.from(new Set([...originalRoles, 'managing_partner'])) },
+        positiveControlUserId,
+        { mfaVerified: true },
+      ),
+    );
+    expect(grantRes.ok).toBe(true);
+    expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
+
+    // Interleaving 1 (Read path):
+    // 1. Replica A starts getAppSnapshot and loads people + matters while U is still permitted.
+    // 2. Right after Replica A loads matters, Replica B removes U and commits.
+    // 3. Replica A finishes getAppSnapshot, listAuditEntriesForRecord, listFirmAuditEntriesPage, and getKeyDateExceptionsReportRecord.
+    const matterRepoA = replicaA.getMatterRepository();
+    const origListAllMattersA =
+      matterRepoA.listAllMattersUnfiltered.bind(matterRepoA);
+    let bRemovedDuringARead = false;
+    const spyReadInterleave = vi
+      .spyOn(matterRepoA, 'listAllMattersUnfiltered')
+      .mockImplementationOnce(async (ctx) => {
+        const loadedMatters = await origListAllMattersA(ctx);
+        // Confirm Replica A loaded inputs while U was still in restricted_access_user_ids_json in SQL
+        expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
+
+        // Step 2: Replica B removes U and commits while Replica A is mid-flight with stale inputs
+        const removeRes = await runInReplicaB(adminSessionB, () =>
+          replicaB.updateEmployeeRolesAndSupports(
+            userU,
+            { roles: originalRoles },
+            positiveControlUserId,
+            { mfaVerified: true },
+          ),
+        );
+        expect(removeRes.ok).toBe(true);
+        bRemovedDuringARead = true;
+        return loadedMatters;
+      });
+
+    try {
+      // Step 3: Replica A completes getAppSnapshot (which loaded stale people & matters before B committed)
+      await runInReplicaA(adminSessionA, () =>
+        replicaA.getAppSnapshot(positiveControlUserId),
+      );
+      expect(bRemovedDuringARead).toBe(true);
+
+      // Run additional former read-path callers on Replica A
+      await runInReplicaA(adminSessionA, () =>
+        replicaA.listAuditEntriesForRecord(
+          'matter',
+          staffMatter.id,
+          positiveControlUserId,
+        ),
+      );
+      await runInReplicaA(adminSessionA, () =>
+        replicaA.listFirmAuditEntriesPage(positiveControlUserId, { limit: 10 }),
+      );
+      await runInReplicaA(adminSessionA, () =>
+        replicaA.getKeyDateExceptionsReportRecord({}, positiveControlUserId),
+      );
+    } finally {
+      spyReadInterleave.mockRestore();
+    }
+
+    // Step 4: On a fresh connection, U is NOT in restricted_access_user_ids_json and cannot see the matter's key dates
+    const afterReadIds = await readRestrictedIdsOnFreshConnection();
+    expect(afterReadIds).toContain(positiveControlUserId);
+    expect(afterReadIds).not.toContain(userU);
+    expect(
+      await keyDateRepo.listKeyDatesForMatter(userUCtx, staffMatter.id, userU),
+    ).toHaveLength(0);
+    const snapAfterReadU = await runInReplicaA(userUSessionA, () =>
+      replicaA.getMatterKeyDatesSnapshot(staffMatter.id, userU),
+    );
+    expect(snapAfterReadU.keyDates).toHaveLength(0);
+    const diaryAfterReadU = await runInReplicaB(userUSessionB, () =>
+      replicaB.queryKeyDatesTeamDiaryRecord({}, userU),
+    );
+    expect(diaryAfterReadU.some((d) => d.keyDateId === testKeyDateId)).toBe(
+      false,
+    );
+    expect(
+      (
+        await keyDateRepo.listKeyDatesForMatter(
+          adminCtx,
+          staffMatter.id,
+          positiveControlUserId,
+        )
+      ).some((kd) => kd.id === testKeyDateId),
+    ).toBe(true);
+
+    // Interleaving 2 (Concurrent write path with pre-transaction reads):
+    // Re-grant U, then have Replica A start savePersonRecord on an unrelated employee;
+    // right after Replica A's pre-transaction listAllMattersUnfiltered resolves (with stale people & matters),
+    // Replica B removes U and commits, and Replica A enters its write transaction.
+    const regrantRes = await runInReplicaA(adminSessionA, () =>
+      replicaA.updateEmployeeRolesAndSupports(
+        userU,
+        { roles: Array.from(new Set([...originalRoles, 'managing_partner'])) },
+        positiveControlUserId,
+        { mfaVerified: true },
+      ),
+    );
+    expect(regrantRes.ok).toBe(true);
+    expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
+
+    let bRemovedDuringAWrite = false;
+    const spyWriteInterleave = vi
+      .spyOn(matterRepoA, 'listAllMattersUnfiltered')
+      .mockImplementationOnce(async (ctx) => {
+        const loadedMatters = await origListAllMattersA(ctx);
+        const removeRes = await runInReplicaB(adminSessionB, () =>
+          replicaB.updateEmployeeRolesAndSupports(
+            userU,
+            { roles: originalRoles },
+            positiveControlUserId,
+            { mfaVerified: true },
+          ),
+        );
+        expect(removeRes.ok).toBe(true);
+        bRemovedDuringAWrite = true;
+        return loadedMatters;
+      });
+
+    try {
+      const saveUnrelatedRes = await runInReplicaA(adminSessionA, () =>
+        replicaA.savePersonRecord(
+          {
+            ...unrelatedEmployee,
+            jobTitle: `${unrelatedEmployee.jobTitle || 'Solicitor'} (Updated)`,
+          },
+          { id: unrelatedEmployee.id, byId: positiveControlUserId },
+        ),
+      );
+      expect(saveUnrelatedRes.person).not.toBeNull();
+      expect(bRemovedDuringAWrite).toBe(true);
+    } finally {
+      spyWriteInterleave.mockRestore();
+    }
+
+    const afterWriteIds = await readRestrictedIdsOnFreshConnection();
+    expect(afterWriteIds).toContain(positiveControlUserId);
+    expect(afterWriteIds).not.toContain(userU);
+    expect(
+      await keyDateRepo.listKeyDatesForMatter(userUCtx, staffMatter.id, userU),
+    ).toHaveLength(0);
+  });
 });

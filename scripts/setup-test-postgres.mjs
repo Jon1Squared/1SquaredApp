@@ -111,7 +111,7 @@ async function ensureLocalWindowsPostgresIfNeeded() {
           '-o',
           `-F -h 127.0.0.1 -p ${pgMigratePort}`,
         ],
-        { stdio: 'inherit', shell: false },
+        { stdio: 'ignore', shell: false, windowsHide: true },
       );
       if (startRes.status !== 0 && !(await checkTcpPort(pgHost, pgMigratePort))) {
         console.error('[setup-test-postgres] pg_ctl start failed.');
