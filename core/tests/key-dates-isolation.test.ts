@@ -12,6 +12,8 @@ import {
 } from '../src/index';
 import {
   acknowledgeKeyDateReminderRecord,
+  getMatterRepository,
+  getPartyRepository,
   reassignKeyDateTeamRecord,
   resolveKeyDateOutcomeRecord,
   supersedeConfirmedKeyDateRecord,
@@ -465,6 +467,9 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     });
     const kdRepo = getKeyDateRepository();
     const staffCtx = testTenantCtx(staffPartner.id);
+    await getMatterRepository().putMatter(staffCtx, staffMatter, {
+      expectedRowVersion: null,
+    });
     await kdRepo.setMatterRestriction(staffCtx, {
       matterId: staffMatter.id,
       isRestricted: true,

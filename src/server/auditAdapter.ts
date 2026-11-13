@@ -2,7 +2,7 @@
  * Temporary PostgreSQL Audit Adapter & Per-Record JSON Delta Compensator
  * (`src/server/auditAdapter.ts`).
  *
- * Implements ADR 0028 §§4–5 & `S0-15` (`Owner Decision 4`, `Owner Decision 5`, `R406`, `R418`, `R420`):
+ * Implements ADR 0028 §§4–5 & `S0-15`/`S0-16` (`Owner Decision 4`, `Owner Decision 5`, `R406`, `R418`, `R420`, `R469`):
  * - While unmoved modules still persist primary records in `FirmStore` (`src/server/store.ts`),
  *   their audit entries write to PostgreSQL `public.audit_entries` (`TenantAuditRepository`) inside
  *   `withJsonStoreWriteLock`.
@@ -11,11 +11,10 @@
  *   (`inserted`, `updated`, `deleted` items by ID, plus touched scalar settings keys) and register a
  *   record-level compensating callback onto `RecordDeltaCompensator`. If the PostgreSQL `audit_entries`
  *   transaction (or an outer cross-module step in a nested re-entrant lock chain, `R418`) fails, ONLY
- *   this operation's record deltas are reverted in memory and on disk (`saveStore`), leaving any other
- *   operation's records untouched.
+ *   this operation's unmoved JSON record deltas are reverted in memory and on disk (`saveStore`), leaving
+ *   any other operation's records untouched.
  *
  * Retirement schedule:
- * - @remove-in S0-16: People, Organisations, Person-Organisation Links, Notes, Merge History, Matters
  * - @remove-in S0-17a: Enquiries, Quotes, Tasks, Notifications, Sign-Offs, Recently Viewed
  * - @remove-in S0-17b: Employment, Sensitive/Payroll HR records, Teams, RBAC overrides
  * - @remove-in S0-17c: Firm settings, Choice Lists/Values, Custom Fields, Org Structure, Party Taxonomy, Home/Costs configs
@@ -25,6 +24,8 @@
 
 import {
   TenantAuditRepository,
+  TenantMatterRepository,
+  TenantPartyRepository,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
   type TenantContext,
@@ -80,6 +81,8 @@ function getAuditStagingStorage(): AsyncLocalStorageLike<ActiveAuditStagingScope
 
 declare global {
   var __oneSquaredAuditRepo: TenantAuditRepository | undefined;
+  var __oneSquaredPartyRepo: TenantPartyRepository | undefined;
+  var __oneSquaredMatterRepo: TenantMatterRepository | undefined;
 }
 
 export function getAuditRepository(): TenantAuditRepository {
@@ -89,9 +92,23 @@ export function getAuditRepository(): TenantAuditRepository {
   return global.__oneSquaredAuditRepo;
 }
 
+export function getPartyRepository(): TenantPartyRepository {
+  if (!global.__oneSquaredPartyRepo) {
+    global.__oneSquaredPartyRepo = new TenantPartyRepository();
+  }
+  return global.__oneSquaredPartyRepo;
+}
+
+export function getMatterRepository(): TenantMatterRepository {
+  if (!global.__oneSquaredMatterRepo) {
+    global.__oneSquaredMatterRepo = new TenantMatterRepository();
+  }
+  return global.__oneSquaredMatterRepo;
+}
+
 /**
  * Keys on `FirmStore` that have already moved to PostgreSQL (or are monotonic sequence counters)
- * and are therefore excluded from JSON store delta compensation (`R442`).
+ * and are therefore excluded from JSON store delta compensation (`R442`, `R469`).
  */
 export type MovedToPostgresKeys =
   | 'audit'
@@ -110,7 +127,13 @@ export type MovedToPostgresKeys =
   | 'keyDateNotApplicable'
   | 'keyDateReminderStates'
   | 'keyDateCalendarSyncs'
-  | 'keyDatesConfigOverride';
+  | 'keyDatesConfigOverride'
+  | 'people'
+  | 'organisations'
+  | 'links'
+  | 'matters'
+  | 'notes'
+  | 'mergeHistory';
 
 export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>;
 
@@ -121,17 +144,11 @@ const ID_KEYED_ARRAY_COLLECTIONS = [
   { name: 'lists', keyField: 'key' },
   { name: 'values', keyField: 'id' },
   { name: 'customFields', keyField: 'id' },
-  { name: 'people', keyField: 'id' },
-  { name: 'organisations', keyField: 'id' },
-  { name: 'links', keyField: 'id' },
-  { name: 'matters', keyField: 'id' },
   { name: 'teams', keyField: 'id' },
   { name: 'tasks', keyField: 'id' },
   { name: 'enquiries', keyField: 'id' },
   { name: 'quotes', keyField: 'id' },
   { name: 'notifications', keyField: 'id' },
-  { name: 'notes', keyField: 'id' },
-  { name: 'mergeHistory', keyField: 'id' },
   { name: 'pmsLinks', keyField: 'id' },
   { name: 'signOffs', keyField: 'id' },
 ] as const;
@@ -276,7 +293,7 @@ interface ArrayRecordDelta {
 /**
  * Computes the exact per-record diff between `baseline` and `afterStore` and registers
  * a record-level compensating undo step on `compensator` (`R406`).
- * Returns `true` if any JSON store record or scalar setting changed.
+ * Returns `true` if any unmoved JSON store record or scalar setting changed.
  */
 export function registerJsonStoreRecordDeltas(
   baseline: JsonStoreBaseline,
@@ -451,7 +468,12 @@ export function registerJsonStoreRecordDeltas(
     }
 
     if (recentChanges.length > 0) {
-      liveStore.recentlyViewed = liveStore.recentlyViewed ?? {};
+      if (
+        !liveStore.recentlyViewed ||
+        typeof liveStore.recentlyViewed !== 'object'
+      ) {
+        liveStore.recentlyViewed = {};
+      }
       for (const rc of recentChanges) {
         if (rc.beforeJson === null) {
           delete liveStore.recentlyViewed[rc.userId];
@@ -464,8 +486,12 @@ export function registerJsonStoreRecordDeltas(
     }
 
     if (sensitiveChanges.length > 0) {
-      liveStore.employeeSensitiveRecords =
-        liveStore.employeeSensitiveRecords ?? {};
+      if (
+        !liveStore.employeeSensitiveRecords ||
+        typeof liveStore.employeeSensitiveRecords !== 'object'
+      ) {
+        liveStore.employeeSensitiveRecords = {};
+      }
       for (const sc of sensitiveChanges) {
         if (sc.beforeJson === null) {
           delete liveStore.employeeSensitiveRecords[sc.personId];
@@ -489,15 +515,15 @@ export function registerJsonStoreRecordDeltas(
       saveStore(liveStore);
     } catch (saveErr) {
       if (label === 'executeMerge') {
-        let tenantId = 'unknown';
-        try {
-          tenantId = getActiveTenantConfiguration().tenantId || 'unknown';
-        } catch {
-          // ignore
-        }
+        const session = getActiveActorSession();
+        const tenantId =
+          session?.tenantId ?? getActiveTenantConfiguration().tenantId;
         const correlationId = resolveRequestCorrelationId(
-          (getActiveActorSession() as { correlationId?: string } | null)
-            ?.correlationId ?? null,
+          (
+            session?.verifiedSession as
+              | { correlationId?: string }
+              | undefined
+          )?.correlationId,
           'corr-merge-rollback',
         );
         console.error(
@@ -581,6 +607,38 @@ export async function appendUnmigratedModuleAuditEntries(
   }
   const repo = getAuditRepository();
   return repo.appendAuditEntries(ctx, entries);
+}
+
+/**
+ * Runs a PostgreSQL-backed service mutation inside an active audit staging scope
+ * so `writeAudit` + `flushStagedAuditEntries(ctx)` commit atomically inside `withTenantTransaction`.
+ */
+export async function runWithAuditStagingScope<T>(
+  fn: () => Promise<T>,
+): Promise<T> {
+  const stagingStorage = getAuditStagingStorage();
+  if (!stagingStorage) {
+    return fn();
+  }
+  return stagingStorage.run({ stagedEntries: [] }, fn);
+}
+
+/**
+ * Drains and appends all currently staged audit entries inside the active scope
+ * (joining an active `withTenantTransaction` if called inside one).
+ */
+export async function flushStagedAuditEntries(
+  ctx: TenantContext,
+): Promise<FirmAuditEntryRecord[]> {
+  const activeScope = getAuditStagingStorage()?.getStore();
+  if (!activeScope || activeScope.stagedEntries.length === 0) {
+    return [];
+  }
+  const entries = activeScope.stagedEntries.splice(
+    0,
+    activeScope.stagedEntries.length,
+  );
+  return appendUnmigratedModuleAuditEntries(ctx, entries);
 }
 
 /**

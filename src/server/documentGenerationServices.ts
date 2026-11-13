@@ -76,10 +76,13 @@ import {
   getActiveActorSession,
   hasPersonPermission,
 } from './rbacRuntime';
-import type { Person } from '@/domain/types';
+import type { Matter, Organisation, Person } from '@/domain/types';
 import { resolveRequestCorrelationId } from './correlationId';
 import {
+  createVerifiedTenantContext,
   getActiveTenantConfiguration,
+  getMatterRepository,
+  getPartyRepository,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -243,20 +246,11 @@ export async function getEffectiveTenantConfig(
   };
 }
 
-export function resolveTenantContextForStoreUser(
-  store: FirmStore,
+export async function resolveTenantContextForStoreUser(
+  _store: FirmStore,
   userId: string,
   session?: VerifiedEntraSessionPayload,
-): { ctx: TenantContext; user: Person } {
-  const user = store.people.find(
-    (p) => p.id === userId && p.isEmployee && !p.mergedIntoId,
-  );
-  if (!user) {
-    throw new Error(
-      `UNAUTHENTICATED: User "${userId}" was not found or is not an active employee.`,
-    );
-  }
-
+): Promise<{ ctx: TenantContext; user: Person }> {
   const verifiedSession =
     session ??
     (getActiveActorSession()?.verifiedSession as
@@ -264,6 +258,33 @@ export function resolveTenantContextForStoreUser(
       | undefined) ??
     getTestEntraSessionOverride() ??
     undefined;
+
+  const tenantCfg = getActiveTenantConfiguration();
+  const prelimCtx = verifiedSession
+    ? resolveCurrentTenantContext(
+        createVerifiedSessionActorFromEntraSession(verifiedSession),
+        tenantCfg,
+      )
+    : createVerifiedTenantContext(
+        {
+          sub: userId || 'anonymous',
+          tenantId: tenantCfg.tenantId,
+          roles: ['fee-earner'],
+          mfaVerified: false,
+        },
+        tenantCfg,
+      );
+
+  const user = await getPartyRepository().getPersonById<Person>(
+    prelimCtx,
+    userId,
+  );
+  if (!user || !user.isEmployee || user.mergedIntoId) {
+    throw new Error(
+      `UNAUTHENTICATED: User "${userId}" was not found or is not an active employee.`,
+    );
+  }
+
   if (!verifiedSession) {
     throw new Error(
       `UNAUTHENTICATED: Verified Entra ID session is required for user "${user.id}".`,
@@ -275,11 +296,7 @@ export function resolveTenantContextForStoreUser(
     );
   }
 
-  const ctx = resolveCurrentTenantContext(
-    createVerifiedSessionActorFromEntraSession(verifiedSession),
-  );
-
-  return { ctx, user };
+  return { ctx: prelimCtx, user };
 }
 
 export function getDocumentRepository(): TenantDocumentRepository {
@@ -305,7 +322,7 @@ export async function repointMergedEntityWithCompensation(
   const activeVerified = getActiveActorSession()?.verifiedSession as
     | VerifiedEntraSessionPayload
     | undefined;
-  const { ctx } = resolveTenantContextForStoreUser(
+  const { ctx } = await resolveTenantContextForStoreUser(
     store,
     actor.id,
     activeVerified,
@@ -373,6 +390,7 @@ const inFlightSeedTemplatesByTenant = new Map<string, Promise<void>>();
 async function ensureSeedDocumentTemplates(
   ctx: TenantContext,
   store: FirmStore,
+  people: Person[],
   repo: TenantDocumentRepository,
   storage: DocumentStorageProvider,
 ): Promise<void> {
@@ -385,7 +403,7 @@ async function ensureSeedDocumentTemplates(
     await inflight;
     return;
   }
-  const runPromise = ensureSeedDocumentTemplatesInner(ctx, store, repo, storage)
+  const runPromise = ensureSeedDocumentTemplatesInner(ctx, store, people, repo, storage)
     .catch((err: unknown) => {
       const sqlState = (err as { sqlState?: string; code?: string })?.sqlState;
       if (sqlState === '23505') {
@@ -403,6 +421,7 @@ async function ensureSeedDocumentTemplates(
 async function ensureSeedDocumentTemplatesInner(
   ctx: TenantContext,
   store: FirmStore,
+  people: Person[],
   repo: TenantDocumentRepository,
   storage: DocumentStorageProvider,
 ): Promise<void> {
@@ -447,7 +466,7 @@ async function ensureSeedDocumentTemplatesInner(
     bytes: cclBytes,
   });
 
-  const activeEmployees = store.people.filter(
+  const activeEmployees = people.filter(
     (p) => p.isEmployee && !p.demo && !p.mergedIntoId,
   );
   const seedPartnerId =
@@ -690,30 +709,38 @@ export async function getInitializedDocGenContext(
   store: FirmStore;
   ctx: TenantContext;
   user: Person;
+  people: Person[];
+  organisations: Organisation[];
+  matters: Matter[];
   config: TenantConfiguration;
   repo: TenantDocumentRepository;
   storage: DocumentStorageProvider;
 }> {
   const store = getStore();
-  const { ctx, user } = resolveTenantContextForStoreUser(
+  const { ctx, user } = await resolveTenantContextForStoreUser(
     store,
     userId,
     session,
   );
+  const [people, organisations, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getPartyRepository().listAllOrganisations<Organisation>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+  ]);
   const repo = getDocumentRepository();
   const config = await getEffectiveTenantConfig(ctx, repo);
   const storage = getDocumentStorage(config);
 
-  await ensureSeedDocumentTemplates(ctx, store, repo, storage);
+  await ensureSeedDocumentTemplates(ctx, store, people, repo, storage);
 
-  return { store, ctx, user, config, repo, storage };
+  return { store, ctx, user, people, organisations, matters, config, repo, storage };
 }
 
 export async function getDocumentGenerationSnapshotForUser(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<DocumentGenerationClientSnapshot> {
-  const { store, ctx, user, config, repo } =
+  const { store, ctx, user, matters, config, repo } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
   const userPermissions = resolveDocumentPermissions(actor, config);
@@ -749,7 +776,7 @@ export async function getDocumentGenerationSnapshotForUser(
   ).length;
 
   const mattersById = new Map(
-    store.matters.map((m) => [m.id, toMatterAccessSubject(m)!]),
+    matters.map((m) => [m.id, toMatterAccessSubject(m)!]),
   );
 
   const linksByDocId = new Map<string, DocumentLinkRecord[]>();
@@ -1211,16 +1238,16 @@ export async function previewTemplateService(
   mimeType: string;
   missingRequiredFields: string[];
 }> {
-  const { store, ctx, user, config, repo, storage } =
+  const { store, ctx, user, people, organisations, matters, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
   const pdfConverter = new BuiltInOpenXmlPdfConverter();
 
-  const accessibleMatters = store.matters.filter((m) =>
+  const accessibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, user.id, user, {
-      allPeople: store.people,
+      allPeople: people,
       teams: store.teams,
       config,
     }),
@@ -1237,10 +1264,10 @@ export async function previewTemplateService(
     ? accessibleMatters.find((m) => m.id === input.matterId)
     : accessibleMatters.find((m) => !m.isStaffMatter) ?? accessibleMatters[0];
   const organisation = input.organisationId
-    ? store.organisations.find((o) => o.id === input.organisationId)
+    ? organisations.find((o) => o.id === input.organisationId)
     : undefined;
   const person = input.personId
-    ? store.people.find((p) => p.id === input.personId)
+    ? people.find((p) => p.id === input.personId)
     : undefined;
 
   const resolutionContext = buildFieldResolutionContextForRecord({
@@ -1251,8 +1278,8 @@ export async function previewTemplateService(
     currentUser: user,
     recipientPartyId: input.recipientPartyId,
     promptedValues: input.promptedValues,
-    people: store.people,
-    organisations: store.organisations,
+    people,
+    organisations,
     values: store.values,
     firm: {
       name: store.firm.shortName,
@@ -1306,7 +1333,7 @@ export async function generateDocumentService(
   fileBase64?: string;
   missingRequiredFields: string[];
 }> {
-  const { store, ctx, user, config, repo, storage } =
+  const { store, ctx, user, people, organisations, matters, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
@@ -1314,17 +1341,17 @@ export async function generateDocumentService(
   const pdfConverter = new BuiltInOpenXmlPdfConverter();
 
   const matter = input.matterId
-    ? store.matters.find((m) => m.id === input.matterId)
+    ? matters.find((m) => m.id === input.matterId)
     : null;
   const organisation = input.organisationId
-    ? store.organisations.find((o) => o.id === input.organisationId)
+    ? organisations.find((o) => o.id === input.organisationId)
     : matter?.clientId
-      ? store.organisations.find((o) => o.id === matter.clientId)
+      ? organisations.find((o) => o.id === matter.clientId)
       : null;
   const person = input.personId
-    ? store.people.find((p) => p.id === input.personId)
+    ? people.find((p) => p.id === input.personId)
     : matter?.clientId
-      ? store.people.find((p) => p.id === matter.clientId)
+      ? people.find((p) => p.id === matter.clientId)
       : null;
 
   const primaryClientId = organisation?.id ?? person?.id ?? null;
@@ -1354,8 +1381,8 @@ export async function generateDocumentService(
     currentUser: user,
     recipientPartyId: input.recipientPartyId,
     promptedValues: input.promptedValues,
-    people: store.people,
-    organisations: store.organisations,
+    people,
+    organisations,
     values: store.values,
     firm: {
       name: store.firm.shortName,
@@ -1430,7 +1457,7 @@ export async function downloadGeneratedDocumentService(
   mimeType: string;
   downloadToken: ScopedDownloadToken;
 }> {
-  const { store, ctx, user, config, repo, storage } =
+  const { ctx, user, matters, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
 
@@ -1441,12 +1468,12 @@ export async function downloadGeneratedDocumentService(
 
   const linkedMatters = [];
   if (doc.primaryMatterId) {
-    const m = store.matters.find((x) => x.id === doc.primaryMatterId);
+    const m = matters.find((x) => x.id === doc.primaryMatterId);
     if (m) linkedMatters.push(toMatterAccessSubject(m)!);
   }
   for (const link of await repo.listLinksForDocument(ctx, doc.id)) {
     if (link.entityType === 'matter') {
-      const m = store.matters.find((x) => x.id === link.entityId);
+      const m = matters.find((x) => x.id === link.entityId);
       if (m && !linkedMatters.some((x) => x.id === m.id)) {
         linkedMatters.push(toMatterAccessSubject(m)!);
       }
@@ -1481,7 +1508,7 @@ export async function deleteGeneratedDocumentService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<GeneratedDocumentRecord> {
-  const { store, ctx, user, config, repo, storage } =
+  const { ctx, user, matters, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
 
@@ -1494,7 +1521,7 @@ export async function deleteGeneratedDocumentService(
       config,
       documentId,
       resolveMatterSubject: (matterId) => {
-        const m = store.matters.find((x) => x.id === matterId);
+        const m = matters.find((x) => x.id === matterId);
         return m ? toMatterAccessSubject(m) : null;
       },
     });
@@ -1524,7 +1551,7 @@ export async function getTemplateUsageReportService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<EnrichedTemplateUsageReportResult> {
-  const { store, ctx, user, config, repo } =
+  const { ctx, user, people, config, repo } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
 
@@ -1539,7 +1566,7 @@ export async function getTemplateUsageReportService(
   const userDisplayNamesById: Record<string, string> = {};
   if (report.userLevelDetailPermitted && report.byUser) {
     for (const u of report.byUser) {
-      const found = store.people.find((p) => p.id === u.userId);
+      const found = people.find((p) => p.id === u.userId);
       userDisplayNamesById[u.userId] = found
         ? `${found.firstName} ${found.surname}`.trim() || found.id
         : u.userId;

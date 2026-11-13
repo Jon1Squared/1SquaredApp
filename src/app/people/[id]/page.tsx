@@ -48,7 +48,10 @@ export default async function PersonProfilePage({
     const explicitMatches = person.possibleMatchIds
       .map((mid) => snap.people.find((p) => p.id === mid))
       .filter((p): p is Person => Boolean(p && !p.mergedIntoId));
-    const autoMatches = findCandidateDuplicatesForRecord(person) as Person[];
+    const autoMatches = (await findCandidateDuplicatesForRecord(person, {
+      people: snap.people,
+      organisations: snap.organisations,
+    })) as Person[];
     const duplicateCandidates = Array.from(
       new Map([...explicitMatches, ...autoMatches].map((p) => [p.id, p])).values(),
     );
@@ -62,7 +65,7 @@ export default async function PersonProfilePage({
     );
     let pmsView: ClientPmsViewBundle | undefined;
     if (snap.finance.canViewMatter) {
-      const personPmsRes = getClientPmsViewBundle('person', person.id, userId);
+      const personPmsRes = await getClientPmsViewBundle('person', person.id, userId);
       const personPmsView = !isActionDenied(personPmsRes) ? personPmsRes : undefined;
       const primaryOrgLink =
         snap.links.find((l) => l.personId === person.id && l.isCurrent && l.isPrimaryContact) ??
@@ -70,7 +73,7 @@ export default async function PersonProfilePage({
       if (personPmsView?.clientBundle || !primaryOrgLink) {
         pmsView = personPmsView;
       } else {
-        const orgPmsRes = getClientPmsViewBundle(
+        const orgPmsRes = await getClientPmsViewBundle(
           'organisation',
           primaryOrgLink.organisationId,
           userId,

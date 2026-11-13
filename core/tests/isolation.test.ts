@@ -93,6 +93,8 @@ import {
   getClientPmsViewBundle,
   getKeyDateExceptionsReportRecord,
   getMatterPmsViewBundle,
+  getMatterRepository,
+  getPartyRepository,
   liftMatterRestriction,
   listAuditEntriesForRecord,
   listFirmAuditEntriesPage,
@@ -1516,15 +1518,20 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         concurrentNewMatterRes.matter!.id,
       );
 
-      const allMatterIds = store.matters.map((m) => m.id);
+      const allMatterIds = (
+        await getMatterRepository().listAllMattersUnfiltered(testTenantCtx(carys.id))
+      ).map((m) => m.id);
       expect(new Set(allMatterIds).size).toBe(allMatterIds.length);
-      const allPersonIds = store.people.map((p) => p.id);
+      const allPersonIds = (
+        await getPartyRepository().listAllPeople(testTenantCtx(carys.id))
+      ).map((p) => p.id);
       expect(new Set(allPersonIds).size).toBe(allPersonIds.length);
 
       // Verify the concurrent conflict-record update on targetMatter is still intact
-      const refreshedTarget = store.matters.find(
-        (m) => m.id === targetMatter.id,
-      )!;
+      const refreshedTarget = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+        testTenantCtx(carys.id),
+        targetMatter.id,
+      ))!;
       expect(refreshedTarget.conflictCheckRecord?.reviewerMessage).toBe(
         'Updated concurrently while hook was waiting',
       );
@@ -1581,9 +1588,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // persisting its reviewerMessage on top of the opened matter (R448).
       expect(queuedUpdateRes.errors).toBeUndefined();
       expect(queuedUpdateRes.matter).not.toBeNull();
-      const finalTarget = getStore().matters.find(
-        (m) => m.id === refreshedTarget.id,
-      )!;
+      const finalTarget = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+        testTenantCtx(carys.id),
+        refreshedTarget.id,
+      ))!;
       expect(finalTarget.title).toBe('Concurrent Matter Save During Allow Hook');
       expect(finalTarget.conflictCheckRecord?.reviewerMessage).toBe(
         'Second concurrent update during allow hook',
@@ -1671,6 +1679,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             grant: p.permissionOverrides?.grant ?? [],
             revoke: ['matter:restricted:access'],
           };
+          await getPartyRepository().putPerson(testTenantCtx(carys.id), p);
         }
       }
 
@@ -1915,7 +1924,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           (a) => a.recordId === staffMatterId || a.recordId === wallMatterId,
         ),
       ).toBe(false);
-      const outsiderRows = runWithActiveActorSession(outsiderSession, () =>
+      const outsiderRows = await runWithActiveActorSession(outsiderSession, () =>
         getMatterFinanceRows(outsiderFeeEarner.id),
       );
       expect(isActionDenied(outsiderRows)).toBe(false);
@@ -1929,7 +1938,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
 
       // Direct PMS bundle lookup and tampered-ID actions by non-participant fail closed
-      const outsiderPmsView = runWithActiveActorSession(outsiderSession, () =>
+      const outsiderPmsView = await runWithActiveActorSession(outsiderSession, () =>
         getMatterPmsViewBundle(staffMatterId, outsiderFeeEarner.id),
       );
       expect(isActionDenied(outsiderPmsView)).toBe(true);
@@ -2106,9 +2115,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(hireRaceSaveRes.matter?.title).toBe(
         'R144 Concurrent Client Hire Matter Opened',
       );
-      const finalDraftMatter = getStore().matters.find(
-        (m) => m.id === draftMatter.id,
-      )!;
+      const finalDraftMatter = (await getMatterRepository().getMatterById(
+        testTenantCtx(draftMatter.responsiblePartnerId || carys.id),
+        draftMatter.id,
+      ))!;
       expect(finalDraftMatter.title).toBe(
         'R144 Concurrent Client Hire Matter Opened',
       );
@@ -2119,7 +2129,94 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it.todo('rejects a save based on a stale row_version (S0-16)');
+  it('rejects a save based on a stale row_version (S0-16)', async () => {
+    try {
+      const store = getStore();
+      const carys = store.people.find((p) => p.id === 'P-000001')!;
+      const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const cookieVal = createSignedEntraSessionCookie({
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        oid: carys.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: carys.id,
+        email: carys.emails[0]?.address ?? 'carys.hughes@notalawfirm.example',
+        displayName: 'Carys Hughes',
+        entraRoles: ['partner', 'managing_partner', 'admin'],
+        mappedRoles: ['partner', 'managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verifiedSession = verifySignedEntraSessionCookie(cookieVal)!;
+      const carysSession = {
+        personId: carys.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: verifiedSession.mappedRoles,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession,
+      };
+
+      const initialRowVersion = baseMatter.rowVersion ?? 1;
+
+      // Save 1 succeeds and increments rowVersion
+      const save1Res = await runWithActiveActorSession(carysSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseMatter,
+            title: 'R448 Save 1 Updated Title',
+          },
+          {
+            id: baseMatter.id,
+            byId: carys.id,
+            expectedRowVersion: initialRowVersion,
+          },
+        ),
+      );
+      expect(save1Res.errors).toBeUndefined();
+      expect(save1Res.matter).not.toBeNull();
+      expect(save1Res.matter!.rowVersion).toBe(initialRowVersion + 1);
+
+      // Save 2 with stale initialRowVersion is rejected with both code and message
+      const staleSaveRes = await runWithActiveActorSession(
+        carysSession,
+        async () =>
+          saveMatterRecord(
+            {
+              ...baseMatter,
+              title: 'R448 Stale Save Should Fail',
+            },
+            {
+              id: baseMatter.id,
+              byId: carys.id,
+              expectedRowVersion: initialRowVersion,
+            },
+          ),
+      );
+      expect(staleSaveRes.matter).toBeNull();
+      expect(staleSaveRes).toMatchObject({
+        code: 'MATTER_CONCURRENCY_CONFLICT',
+        message: expect.stringMatching(/MATTER_CONCURRENCY_CONFLICT:.*changed by someone else/i),
+      });
+      expect(staleSaveRes.errors?.conflict).toMatch(
+        /MATTER_CONCURRENCY_CONFLICT:.*changed by someone else/i,
+      );
+
+      // Verify the winning title from Save 1 remains intact
+      const afterStale = (await getMatterRepository().getMatterById(
+        testTenantCtx(carys.id),
+        baseMatter.id,
+      ))!;
+      expect(afterStale.title).toBe('R448 Save 1 Updated Title');
+      expect(afterStale.rowVersion).toBe(initialRowVersion + 1);
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
 
   it('R153: updateMatterConflictRecord enforces risk:view, never opens a draft matter, never satisfies partnerSignOffCompleted via Cleared, and preserves stored comments and server timestamps', async () => {
     try {
@@ -3014,7 +3111,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         async () =>
           saveMatterRecord(
             {
-              ...referredMatter,
+              ...riskApproveRes.matter!,
               parties: [
                 ...referredMatter.parties,
                 {
@@ -3167,6 +3264,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       targetMatter.leadFeeEarnerId = null;
       targetMatter.responsiblePartnerId = null;
       targetMatter.supervisingPartnerId = null;
+      await getMatterRepository().putMatter(
+        testTenantCtx('P-000001'),
+        targetMatter,
+        { expectedRowVersion: null },
+      );
 
       const billRes = await runAsTestActor('P-000001', () =>
         requestMatterBill(targetMatter.matterNumber, 'P-000001'),
@@ -3551,7 +3653,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const baseEnquiry = store.enquiries[0]!;
 
       // Create a restricted staff matter invisible to feeEarner
-      store.matters.push({
+      const r170StaffMatter = {
         ...structuredClone(baseMatter),
         id: 'M-R170-STAFF',
         matterNumber: 'STF999-0001',
@@ -3562,7 +3664,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         supervisingPartnerId: partner.id,
         leadFeeEarnerId: partner.id,
         teamMemberIds: [partner.id],
-      });
+      };
+      await getMatterRepository().putMatter(
+        testTenantCtx(partner.id),
+        r170StaffMatter,
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [partner.id] },
+      );
 
       // Create an enquiry converted into that restricted staff matter
       store.enquiries.push({
@@ -3595,28 +3702,31 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         createdAt: new Date().toISOString(),
         takenById: partner.id,
       });
+      saveStore(store);
 
-      const res = await runMatterConflictSearchRecord(
-        {
-          currentMatterId: null,
-          parties: [
-            {
-              id: 'pty-r170-1',
-              name: 'Private StaffCaller',
-              entityType: 'person',
-              role: 'Opponent',
-              linkedRecordId: null,
-            },
-            {
-              id: 'pty-r170-2',
-              name: 'DraftOnly PrivateEnquirer',
-              entityType: 'person',
-              role: 'Opponent',
-              linkedRecordId: null,
-            },
-          ],
-        },
-        feeEarner.id,
+      const res = await runAsTestActor(feeEarner.id, () =>
+        runMatterConflictSearchRecord(
+          {
+            currentMatterId: null,
+            parties: [
+              {
+                id: 'pty-r170-1',
+                name: 'Private StaffCaller',
+                entityType: 'person',
+                role: 'Opponent',
+                linkedRecordId: null,
+              },
+              {
+                id: 'pty-r170-2',
+                name: 'DraftOnly PrivateEnquirer',
+                entityType: 'person',
+                role: 'Opponent',
+                linkedRecordId: null,
+              },
+            ],
+          },
+          feeEarner.id,
+        ),
       );
 
       expect(res.errors).toBeUndefined();
@@ -3987,6 +4097,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // 2. Custom assigneeRoleKey selects a holder of that role, not a holder of risk_compliance (and R180d: scopes to assigneeTeamKey when configured)
       nonRiskEmployee.employeeRoleId = 'employee_role.custom_conflict_reviewer';
+      await getPartyRepository().putPerson(
+        testTenantCtx(partner.id),
+        nonRiskEmployee,
+      );
       const emptyCustomTeamId = 'TM-R174-EMPTY-TEAM';
       store.teams.push({
         id: emptyCustomTeamId,
@@ -4052,7 +4166,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
 
       // Create a restricted staff matter invisible to customReviewer (since customReviewer lacks matter:restricted:access)
-      store.matters.push({
+      const r175StaffMatter = {
         ...structuredClone(baseMatter),
         id: 'M-R175-STAFF',
         matterNumber: 'STF175-0001',
@@ -4067,15 +4181,20 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           {
             id: 'pty-r175-secret',
             name: 'ConfidentialStaffTarget Ltd',
-            entityType: 'organisation',
+            entityType: 'organisation' as const,
             role: 'Opponent',
             relationshipCode: 'OP',
             capacityCodes: ['CAP_DEFENDANT'],
-            alignment: 'adverse',
+            alignment: 'adverse' as const,
             linkedRecordId: null,
           },
         ],
-      });
+      };
+      await getMatterRepository().putMatter(
+        testTenantCtx(partner.id),
+        r175StaffMatter,
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [partner.id] },
+      );
 
       // Grant customReviewer a role with risk:view, matter:create, and matter:edit, but NOT matter:restricted:access
       const currentRbac = getActiveTenantConfiguration().rbac;
@@ -4098,6 +4217,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         roles: customRoles,
       });
       customReviewer.roles = ['junior_risk_reviewer' as never];
+      await getPartyRepository().putPerson(
+        testTenantCtx(partner.id),
+        customReviewer,
+      );
 
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
@@ -4848,7 +4971,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         async () =>
           saveMatterRecord(
             {
-              ...draftRes.matter!,
+              ...riskApproveWithoutKd.matter!,
               title: 'R179 Litigation Matter Requiring Limitation Date',
             },
             { id: draftId, byId: partner.id, saveMode: 'submit_cleared' },
@@ -5003,7 +5126,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         /cannot open until its conflict check is cleared or approved by Risk/i,
       );
       expect(
-        getStore().matters.find((m) => m.id === referredId)?.matterStatusId,
+        (
+          await getMatterRepository().getMatterById(
+            testTenantCtx(partner.id),
+            referredId,
+          )
+        )?.matterStatusId,
       ).toBe(prospectiveStatusId);
 
       // 2. Edit while waiting for Risk: a referred matter above the £50,000 sign-off threshold with no sign-off allows a stage change (no saveMode) while keeping the matter Prospective and matterOpeningGate.allowProceed === false
@@ -5422,9 +5550,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(feeEarnerSelfClearRes.errors?.conflict).toMatch(
         /referred to Risk.*Only Risk & Compliance can clear or approve/i,
       );
-      const storedAfterSelfClear = getStore().matters.find(
-        (m) => m.id === referredMatterId,
-      )!;
+      const storedAfterSelfClear = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+        testTenantCtx(partner.id),
+        referredMatterId,
+      ))!;
       expect(storedAfterSelfClear.conflictCheckRecord?.status).toBe('Referred');
       expect(storedAfterSelfClear.matterStatusId).toBe(prospectiveStatusId);
 
@@ -5590,6 +5719,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'Potential conflict — escalated',
       );
       delete fixtureM6.conflictCheckRecord;
+      const savedFixtureM6 = await getMatterRepository().putMatter(
+        testTenantCtx(partner.id),
+        fixtureM6,
+        { expectedRowVersion: null },
+      );
+      fixtureM6.rowVersion = savedFixtureM6.rowVersion;
 
       const m6Save1Res = await runWithActiveActorSession(
         feeEarnerSession,
@@ -5631,8 +5766,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         /referred to Risk.*Only Risk & Compliance can clear or approve/i,
       );
       expect(
-        getStore().matters.find((m) => m.id === fixtureM6.id)
-          ?.conflictCheckRecord?.status,
+        (
+          await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+            testTenantCtx(partner.id),
+            fixtureM6.id,
+          )
+        )?.conflictCheckRecord?.status,
       ).toBe('Referred');
 
       // 2. Newly referred matter: two-save bypass attempt (conflictCheckRecord: null + conflictCheckStatus: 'Clear', then submit_cleared) is refused
@@ -5740,7 +5879,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         /cannot open until its conflict check is cleared or approved by Risk/i,
       );
       expect(
-        getStore().matters.find((m) => m.id === referredId)?.matterStatusId,
+        (
+          await getMatterRepository().getMatterById(
+            testTenantCtx(partner.id),
+            referredId,
+          )
+        )?.matterStatusId,
       ).toBe(prospectiveStatusId);
 
       // 4. After a Risk user records Approved through updateMatterConflictRecord, matter.conflictCheckStatus is set to match, and the fee earner can then open the matter
@@ -6166,9 +6310,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           async () =>
             saveMatterRecord(
               {
-                ...save1Res.matter!,
+                ...saveInProgressRes.matter!,
                 conflictCheckRecord: {
-                  ...save1Res.matter!.conflictCheckRecord!,
+                  ...saveInProgressRes.matter!.conflictCheckRecord!,
                   status: 'Not started',
                   outcomeLabel: 'Pending',
                 },
@@ -6206,9 +6350,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           expect(updateResetRes.errors?.conflict).toMatch(
             /opened.*cannot be reset.*referred to Risk/i,
           );
-          const storedAfterResetAttempt = getStore().matters.find(
-            (m) => m.id === openMatterId,
-          )!;
+          const storedAfterResetAttempt = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+            testTenantCtx(feeEarner.id),
+            openMatterId,
+          ))!;
           expect(storedAfterResetAttempt.conflictCheckRecord?.status).toBe(
             'Cleared',
           );
@@ -6221,9 +6366,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           async () =>
             saveMatterRecord(
               {
-                ...save1Res.matter!,
+                ...saveNotStartedRes.matter!,
                 conflictCheckRecord: {
-                  ...save1Res.matter!.conflictCheckRecord!,
+                  ...saveNotStartedRes.matter!.conflictCheckRecord!,
                   status: 'Referred',
                   outcomeLabel: 'Referred to risk for review',
                 },
@@ -6611,11 +6756,16 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ),
       );
       expect(wallSaveRes.matter).not.toBeNull();
-      const wallMatter = store.matters.find((m) => m.id === wallSaveRes.matter!.id)!;
+      const wallMatter = structuredClone(wallSaveRes.matter!);
       // Force restrictedAccessUserIds to empty array (B12 condition: hasEthicalWall === true, isStaffMatter === false, restrictedAccessUserIds === [])
       wallMatter.isStaffMatter = false;
       wallMatter.hasEthicalWall = true;
       wallMatter.restrictedAccessUserIds = [];
+      await getMatterRepository().putMatter(
+        testTenantCtx(namedPartner.id),
+        wallMatter,
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
 
       // Create a key date and a sign-off linked to wallMatter
       await runWithActiveActorSession(namedSession, async () =>
@@ -6650,6 +6800,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         grant: [],
         revoke: ['matter:restricted:access'],
       };
+      await getPartyRepository().putPerson(
+        testTenantCtx(unnamedPartner.id),
+        adminPerson,
+      );
 
       for (const excludedActor of [unnamedPartner, unnamedFeeEarner, adminPerson]) {
         const snap = await runAsTestActor(excludedActor.id, () =>
@@ -6680,7 +6834,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toBe(false);
 
       // Tampered matterId / signOffId attempts by unnamedPartner and unnamedFeeEarner are denied
-      const tamperedPmsView = runAsTestActor(unnamedPartner.id, () =>
+      const tamperedPmsView = await runAsTestActor(unnamedPartner.id, () =>
         getMatterPmsViewBundle(wallMatter.id, unnamedPartner.id),
       );
       expect(isActionDenied(tamperedPmsView)).toBe(true);
@@ -7381,7 +7535,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(isActionDenied(validOrgSave)).toBe(false);
       expect(
-        store.organisations.find((o) => o.id === validOrg.id)?.clientReference,
+        (await getPartyRepository().getOrganisationById(testTenantCtx('P-000001'), validOrg.id))?.clientReference,
       ).toBe('TA-CTRL-01');
 
       const validContact = store.people.find((p) => !p.isEmployee)!;
@@ -7400,7 +7554,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
       expect(isActionDenied(validLinkSave)).toBe(false);
       expect(
-        store.links.some(
+        (await getPartyRepository().listAllLinks(testTenantCtx('P-000001'))).some(
           (l) =>
             l.id === validLinkSave.id &&
             l.jobTitle === 'Tenant A General Counsel',
@@ -7409,7 +7563,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const validLinkDelete = await deleteLinkAction(validLinkSave.id);
       expect(isActionDenied(validLinkDelete)).toBe(false);
-      expect(store.links.some((l) => l.id === validLinkSave.id)).toBe(false);
+      expect(
+        (await getPartyRepository().listAllLinks(testTenantCtx('P-000001'))).some(
+          (l) => l.id === validLinkSave.id,
+        ),
+      ).toBe(false);
 
       const validMatterNote = await addNoteAction(
         'matter',
@@ -7418,7 +7576,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(isActionDenied(validMatterNote)).toBe(false);
       expect(
-        store.notes.some(
+        (
+          await getPartyRepository().listNotesForRecord(
+            testTenantCtx('P-000001'),
+            'matter',
+            store.matters[0]!.id,
+          )
+        ).some(
           (n) =>
             n.recordType === 'matter' &&
             n.recordId === store.matters[0]!.id &&
@@ -7443,9 +7607,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(isActionDenied(validDismissDup)).toBe(false);
       expect(
-        store.organisations
-          .find((o) => o.id === dupOrgA.organisation.id)
-          ?.notDuplicateOf.includes(dupOrgB.organisation.id),
+        (
+          await getPartyRepository().getOrganisationById(
+            testTenantCtx('P-000001'),
+            dupOrgA.organisation.id,
+          )
+        )?.notDuplicateOf.includes(dupOrgB.organisation.id),
       ).toBe(true);
 
       const mergeOrgSurvivor = await saveOrganisationAction(
@@ -7465,8 +7632,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(isActionDenied(validMerge)).toBe(false);
       expect(
-        store.organisations.find((o) => o.id === mergeOrgTarget.organisation.id)
-          ?.mergedIntoId,
+        (
+          await getPartyRepository().getOrganisationById(
+            testTenantCtx('P-000001'),
+            mergeOrgTarget.organisation.id,
+          )
+        )?.mergedIntoId,
       ).toBe(mergeOrgSurvivor.organisation.id);
 
       const dupPersonA = await savePersonAction(
@@ -7486,9 +7657,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(isActionDenied(validDismissPersonDup)).toBe(false);
       expect(
-        store.people
-          .find((p) => p.id === dupPersonA.person.id)
-          ?.notDuplicateOf.includes(dupPersonB.person.id),
+        (
+          await getPartyRepository().getPersonById(
+            testTenantCtx('P-000001'),
+            dupPersonA.person.id,
+          )
+        )?.notDuplicateOf.includes(dupPersonB.person.id),
       ).toBe(true);
 
       const mergePersonSurvivor = await savePersonAction(
@@ -7508,8 +7682,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(isActionDenied(validPersonMerge)).toBe(false);
       expect(
-        store.people.find((p) => p.id === mergePersonTarget.person.id)
-          ?.mergedIntoId,
+        (
+          await getPartyRepository().getPersonById(
+            testTenantCtx('P-000001'),
+            mergePersonTarget.person.id,
+          )
+        )?.mergedIntoId,
       ).toBe(mergePersonSurvivor.person.id);
 
       const leaverCandidate = store.people.find(
@@ -7520,6 +7698,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ...(leaverCandidate.employment!),
         status: 'Leaver',
       };
+      await getPartyRepository().putPerson(testTenantCtx('P-000001'), leaverCandidate);
       const taskInStore = store.tasks.find((t) => t.id === validTask.id)!;
       taskInStore.assignedPersonId = leaverCandidate.id;
       taskInStore.assignedPersonIds = [leaverCandidate.id];
@@ -8078,8 +8257,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedOrg.code).toBe('FORBIDDEN');
         expect(tamperedOrg.message).toBe('Record not found for merge.');
       }
-      expect(getStore().people.find((p) => p.id === sA.id)?.mergedIntoId).toBeNull();
-      expect(getStore().people.find((p) => p.id === mA.id)?.mergedIntoId).toBeNull();
+      expect((await getPartyRepository().getPersonById(testTenantCtx('P-000004'), sA.id))?.mergedIntoId).toBeNull();
+      expect((await getPartyRepository().getPersonById(testTenantCtx('P-000004'), mA.id))?.mergedIntoId).toBeNull();
 
       // 3. Data-layer isolation checks (TenantDocumentRepository and PostgresTenantCluster) + positive Tenant A merge controls
       const repo = getDocumentRepository();
@@ -8124,12 +8303,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const mergeARes = await mergeRecordsAction('person', sA.id, mA.id);
       expect(isActionDenied(mergeARes)).toBe(false);
       expect((mergeARes as { survivorId: string }).survivorId).toBe(sA.id);
-      expect(getStore().people.find((p) => p.id === mA.id)?.mergedIntoId).toBe(sA.id);
+      expect((await getPartyRepository().getPersonById(testTenantCtx('P-000004'), mA.id))?.mergedIntoId).toBe(sA.id);
 
       const mergeOrgARes = await mergeRecordsAction('organisation', sOrgA.id, mOrgA.id);
       expect(isActionDenied(mergeOrgARes)).toBe(false);
       expect((mergeOrgARes as { survivorId: string }).survivorId).toBe(sOrgA.id);
-      expect(getStore().organisations.find((o) => o.id === mOrgA.id)?.mergedIntoId).toBe(
+      expect((await getPartyRepository().getOrganisationById(testTenantCtx('P-000004'), mOrgA.id))?.mergedIntoId).toBe(
         sOrgA.id,
       );
 
@@ -8205,13 +8384,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // --- 1. getMatterFinanceRows ---
       // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
-      expect(() =>
+      await expect(
         runWithActiveActorSession(forgedActorScope, () =>
           getMatterFinanceRows('P-000001', ['M-000008']),
         ),
-      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       // (b) Tampered record ID and real restricted matter ID -> ActionDenied FORBIDDEN
-      const tamperedRows = runWithActiveActorSession(validActorScope, () =>
+      const tamperedRows = await runWithActiveActorSession(validActorScope, () =>
         getMatterFinanceRows('P-000001', ['M-TENANT-B-999']),
       );
       expect(isActionDenied(tamperedRows)).toBe(true);
@@ -8220,12 +8399,20 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedRows.message).toBe('Matter not found or access denied.');
       }
       const store = getStore();
-      const restrictedStaffMatter = store.matters.find((m) => m.id === 'M-000014')!;
+      const restrictedStaffMatter = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+        testTenantCtx('P-000004'),
+        'M-000014',
+      ))!;
       restrictedStaffMatter.isStaffMatter = true;
       restrictedStaffMatter.responsiblePartnerId = 'P-000004';
       restrictedStaffMatter.supervisingPartnerId = 'P-000004';
       restrictedStaffMatter.leadFeeEarnerId = 'P-000004';
       restrictedStaffMatter.restrictedAccessUserIds = ['P-000004'];
+      await getMatterRepository().putMatter(
+        testTenantCtx('P-000004'),
+        restrictedStaffMatter,
+        { expectedRowVersion: null },
+      );
       const validFeeEarnerSession = verifySignedEntraSessionCookie(
         createSignedEntraSessionCookie({
           personId: 'P-000002',
@@ -8244,7 +8431,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           expiresAt: new Date(Date.now() + 3600_000).toISOString(),
         }),
       )!;
-      const restrictedRows = runWithActiveActorSession(
+      const restrictedRows = await runWithActiveActorSession(
         {
           tenantId: validFeeEarnerSession.tenantId,
           personId: validFeeEarnerSession.personId,
@@ -8260,7 +8447,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(restrictedRows.message).toBe('Matter not found or access denied.');
       }
       // (c) Positive control: valid Tenant A session + valid linked matter ID -> succeeds
-      const okRows = runWithActiveActorSession(validActorScope, () =>
+      const okRows = await runWithActiveActorSession(validActorScope, () =>
         getMatterFinanceRows('P-000001', ['M-000001']),
       );
       expect(isActionDenied(okRows)).toBe(false);
@@ -8270,13 +8457,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // --- 2. getMyFinanceFigures ---
       // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
-      expect(() =>
+      await expect(
         runWithActiveActorSession(forgedActorScope, () =>
           getMyFinanceFigures('P-000001'),
         ),
-      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       // (b) Tampered actor ID -> ActionDenied FORBIDDEN
-      const tamperedMine = runWithActiveActorSession(validActorScope, () =>
+      const tamperedMine = await runWithActiveActorSession(validActorScope, () =>
         getMyFinanceFigures('P-TENANT-B-999'),
       );
       expect(isActionDenied(tamperedMine)).toBe(true);
@@ -8284,7 +8471,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedMine.code).toBe('FORBIDDEN');
       }
       // (c) Positive control: valid Tenant A session + valid actor ID -> succeeds
-      const okMine = runWithActiveActorSession(validActorScope, () =>
+      const okMine = await runWithActiveActorSession(validActorScope, () =>
         getMyFinanceFigures('P-000001'),
       );
       expect(isActionDenied(okMine)).toBe(false);
@@ -8294,13 +8481,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // --- 3. getFirmFinance ---
       // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
-      expect(() =>
+      await expect(
         runWithActiveActorSession(forgedActorScope, () =>
           getFirmFinance('P-000001'),
         ),
-      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       // (b) Tampered actor ID -> ActionDenied FORBIDDEN
-      const tamperedFirm = runWithActiveActorSession(validActorScope, () =>
+      const tamperedFirm = await runWithActiveActorSession(validActorScope, () =>
         getFirmFinance('P-TENANT-B-999'),
       );
       expect(isActionDenied(tamperedFirm)).toBe(true);
@@ -8308,7 +8495,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedFirm.code).toBe('FORBIDDEN');
       }
       // (c) Positive control: valid Tenant A session + valid actor ID -> succeeds
-      const okFirm = runWithActiveActorSession(validActorScope, () =>
+      const okFirm = await runWithActiveActorSession(validActorScope, () =>
         getFirmFinance('P-000001'),
       );
       expect(isActionDenied(okFirm)).toBe(false);
@@ -8318,13 +8505,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // --- 4. getMatterPmsViewBundle ---
       // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
-      expect(() =>
+      await expect(
         runWithActiveActorSession(forgedActorScope, () =>
           getMatterPmsViewBundle('M-000008', 'P-000001'),
         ),
-      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       // (b) Tampered matter ID -> ActionDenied FORBIDDEN
-      const tamperedMatterView = runWithActiveActorSession(validActorScope, () =>
+      const tamperedMatterView = await runWithActiveActorSession(validActorScope, () =>
         getMatterPmsViewBundle('M-TENANT-B-999', 'P-000001'),
       );
       expect(isActionDenied(tamperedMatterView)).toBe(true);
@@ -8332,7 +8519,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedMatterView.code).toBe('FORBIDDEN');
       }
       // (c) Positive control: valid Tenant A session + valid linked matter ID -> succeeds
-      const okMatterView = runWithActiveActorSession(validActorScope, () =>
+      const okMatterView = await runWithActiveActorSession(validActorScope, () =>
         getMatterPmsViewBundle('M-000008', 'P-000001'),
       );
       expect(isActionDenied(okMatterView)).toBe(false);
@@ -8342,13 +8529,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // --- 5. getClientPmsViewBundle ---
       // (a) Forged tenant claim -> TENANCY_FORGERY_DETECTED
-      expect(() =>
+      await expect(
         runWithActiveActorSession(forgedActorScope, () =>
           getClientPmsViewBundle('organisation', 'O-000001', 'P-000001'),
         ),
-      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       // (b) Tampered client record ID -> ActionDenied FORBIDDEN
-      const tamperedClientView = runWithActiveActorSession(validActorScope, () =>
+      const tamperedClientView = await runWithActiveActorSession(validActorScope, () =>
         getClientPmsViewBundle('organisation', 'O-TENANT-B-999', 'P-000001'),
       );
       expect(isActionDenied(tamperedClientView)).toBe(true);
@@ -8356,7 +8543,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedClientView.code).toBe('FORBIDDEN');
       }
       // (c) Positive control: valid Tenant A session + valid client ID -> succeeds
-      const okClientView = runWithActiveActorSession(validActorScope, () =>
+      const okClientView = await runWithActiveActorSession(validActorScope, () =>
         getClientPmsViewBundle('organisation', 'O-000001', 'P-000001'),
       );
       expect(isActionDenied(okClientView)).toBe(false);
@@ -8478,6 +8665,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const targetEmployeeA = store.people.find((p) => p.id === 'P-000002')!;
       delete targetEmployeeA.entraObjectId;
       saveStore(store);
+      await getPartyRepository().putPerson(testTenantCtx('P-000004'), targetEmployeeA);
       const originalEmailsJson = JSON.stringify(targetEmployeeA.emails);
       const tamperedPersonId = 'P-TENANT-B-EMP-99';
       const tamperedEnquiryId = 'ENQ-TENANT-B-99';
@@ -8592,11 +8780,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // Clear in-memory store cache and reload from disk to confirm nothing was written under forged tenant claims
       clearStoreMemoryCache();
-      const reloadedAfterForgery = getStore();
-      const reloadedEmployeeA = reloadedAfterForgery.people.find(
-        (p) => p.id === targetEmployeeA.id,
-      )!;
-      expect(JSON.stringify(reloadedEmployeeA.emails)).toBe(originalEmailsJson);
+      const reloadedEmployeeA = (await getPartyRepository().getPersonById(
+        testTenantCtx('P-000004'),
+        targetEmployeeA.id,
+      ))!;
+      expect(reloadedEmployeeA.emails).toEqual(JSON.parse(originalEmailsJson));
       expect(reloadedEmployeeA.entraObjectId).toBeUndefined();
 
       // 2. Tampered person ID (an ID not in active Tenant A, including a tampered ENQ- ID) is refused on both person save and identity binding
@@ -8662,7 +8850,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(tamperedServiceRes.code).toBe('FORBIDDEN');
       expect(tamperedServiceRes.message).toBe('Person record not found.');
 
-      const peopleCountBeforeTamperedEnq = getStore().people.length;
+      const peopleCountBeforeTamperedEnq = (
+        await getPartyRepository().listAllPeople(testTenantCtx('P-000004'))
+      ).length;
       const tamperedEnqServiceRes = await savePersonRecord(
         {
           firstName: 'Tampered',
@@ -8673,7 +8863,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(tamperedEnqServiceRes)).toBe(true);
       expect(tamperedEnqServiceRes.code).toBe('FORBIDDEN');
       expect(tamperedEnqServiceRes.message).toBe('Person record not found.');
-      expect(getStore().people.length).toBe(peopleCountBeforeTamperedEnq);
+      expect(
+        (await getPartyRepository().listAllPeople(testTenantCtx('P-000004')))
+          .length,
+      ).toBe(peopleCountBeforeTamperedEnq);
 
       const tamperedBindRes = await updatePersonPermissionOverrides(
         tamperedPersonId,
@@ -8688,7 +8881,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(tamperedBindRes.ok).toBe(false);
       expect(tamperedBindRes.error).toBe('Target employee not found.');
 
-      expect(getStore().people.some((p) => p.id === tamperedPersonId)).toBe(false);
+      expect(
+        (await getPartyRepository().listAllPeople(testTenantCtx('P-000004'))).some(
+          (p) => p.id === tamperedPersonId,
+        ),
+      ).toBe(false);
 
       // 3. Positive controls: valid Tenant A session updates Tenant A employee email and valid Tenant A JWT binds unbound non-privileged employee on sign-in
       const validEmailUpdate = await savePersonAction(
@@ -8710,7 +8907,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(validEmailUpdate)).toBe(false);
       clearStoreMemoryCache();
       expect(
-        getStore().people.find((p) => p.id === targetEmployeeA.id)?.emails[0]?.address,
+        (
+          await getPartyRepository().getPersonById(
+            testTenantCtx('P-000004'),
+            targetEmployeeA.id,
+          )
+        )?.emails[0]?.address,
       ).toBe('dafydd.verified@notalawfirm.example');
 
       const validTenantAToken = signJwt({
@@ -8741,7 +8943,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       clearStoreMemoryCache();
       expect(
-        getStore().people.find((p) => p.id === targetEmployeeA.id)?.entraObjectId,
+        (
+          await getPartyRepository().getPersonById(
+            testTenantCtx('P-000004'),
+            targetEmployeeA.id,
+          )
+        )?.entraObjectId,
       ).toBe('33333333-0000-4000-8000-000000000002');
     } finally {
       clearJwksCache();

@@ -23,7 +23,7 @@ import {
   type TenantPostgresPoolManager,
 } from './postgresPoolManager';
 
-export const CORE_REQUIRED_SCHEMA_VERSION = '0008';
+export const CORE_REQUIRED_SCHEMA_VERSION = '0009';
 
 export interface TenantQueryResult<TRow = Record<string, unknown>> {
   readonly rows: TRow[];
@@ -50,33 +50,53 @@ interface AsyncLocalStorageLike<T> {
   run<R>(store: T, callback: () => R): R;
 }
 
-let cachedActiveTenantTxStorage:
-  | AsyncLocalStorageLike<ActiveTenantTransactionScope>
-  | null
-  | undefined;
+const ACTIVE_TENANT_TX_STORAGE_SYMBOL = Symbol.for(
+  'platform.core.activeTenantTxStorage',
+);
 
 function getActiveTenantTxStorage(): AsyncLocalStorageLike<ActiveTenantTransactionScope> | null {
-  if (cachedActiveTenantTxStorage !== undefined) {
-    return cachedActiveTenantTxStorage;
+  const g = globalThis as Record<symbol, unknown>;
+  const existing = g[ACTIVE_TENANT_TX_STORAGE_SYMBOL] as
+    | AsyncLocalStorageLike<ActiveTenantTransactionScope>
+    | null
+    | undefined;
+  if (existing !== undefined) {
+    return existing;
   }
   if (
     typeof window !== 'undefined' ||
     typeof process.getBuiltinModule !== 'function'
   ) {
-    cachedActiveTenantTxStorage = null;
+    g[ACTIVE_TENANT_TX_STORAGE_SYMBOL] = null;
     return null;
   }
   try {
     const asyncHooks = process.getBuiltinModule('node:async_hooks') as
       | typeof import('node:async_hooks')
       | undefined;
-    cachedActiveTenantTxStorage = asyncHooks?.AsyncLocalStorage
+    const created = asyncHooks?.AsyncLocalStorage
       ? new asyncHooks.AsyncLocalStorage<ActiveTenantTransactionScope>()
       : null;
+    g[ACTIVE_TENANT_TX_STORAGE_SYMBOL] = created;
+    return created;
   } catch {
-    cachedActiveTenantTxStorage = null;
+    g[ACTIVE_TENANT_TX_STORAGE_SYMBOL] = null;
+    return null;
   }
-  return cachedActiveTenantTxStorage;
+}
+
+export function getActiveTenantTransactionState(): {
+  readonly tenantId: string;
+  readonly databaseName: string;
+  readonly readOnly: boolean;
+} | null {
+  const store = getActiveTenantTxStorage()?.getStore();
+  if (!store) return null;
+  return {
+    tenantId: store.tenantId,
+    databaseName: store.databaseName,
+    readOnly: store.readOnly,
+  };
 }
 
 function createSchemaNotReadyError(params: {
@@ -163,25 +183,33 @@ export abstract class TenantScopedRepository {
     ctx: TenantContext,
     fn: (tx: TenantSqlClient) => Promise<T>,
   ): Promise<T> {
-    return this.executeTransaction(ctx, true, fn);
+    return this.executeTransaction(ctx, true, fn, true);
   }
 
   public async withTenantTransaction<T>(
     ctx: TenantContext,
     fn: (tx: TenantSqlClient) => Promise<T>,
   ): Promise<T> {
-    return this.executeTransaction(ctx, false, fn);
+    return this.executeTransaction(ctx, false, fn, true);
+  }
+
+  public async withAutonomousTenantTransaction<T>(
+    ctx: TenantContext,
+    fn: (tx: TenantSqlClient) => Promise<T>,
+  ): Promise<T> {
+    return this.executeTransaction(ctx, false, fn, false);
   }
 
   private async executeTransaction<T>(
     ctx: TenantContext,
     readOnly: boolean,
     fn: (tx: TenantSqlClient) => Promise<T>,
+    joinExistingScope = true,
   ): Promise<T> {
     assertValidPostgresTenantContext(ctx);
 
     const txStorage = getActiveTenantTxStorage();
-    const existingScope = txStorage?.getStore();
+    const existingScope = joinExistingScope ? txStorage?.getStore() : undefined;
     if (
       existingScope &&
       existingScope.poolManager === this.poolManager &&

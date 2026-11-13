@@ -3391,6 +3391,9 @@ export function MatterFormClient({
         `${currentUser.firstName} ${currentUser.surname[0] || ''}.`.trim();
 
       setMatches(computed);
+      if (serverRes.matter?.rowVersion != null) {
+        setSavedMatterRowVersion(serverRes.matter.rowVersion);
+      }
       setHasRunSearch(true);
       setLastRunAtDisplay(runTime);
       setLastRunByName(runnerName);
@@ -3920,6 +3923,9 @@ export function MatterFormClient({
   const [savedDraftMatterId, setSavedDraftMatterId] = useState<string | null>(
     existing?.id ?? null,
   );
+  const [savedMatterRowVersion, setSavedMatterRowVersion] = useState<number>(
+    existing?.rowVersion ?? 1,
+  );
   const [serverSaveErrors, setServerSaveErrors] = useState<Record<string, string>>({});
   const [partnerCostSignOff, setPartnerCostSignOff] =
     useState<PartnerCostSignOffRecord | null>(
@@ -3980,6 +3986,9 @@ export function MatterFormClient({
         return;
       }
       if (res.matter) {
+        if (res.matter.rowVersion != null) {
+          setSavedMatterRowVersion(res.matter.rowVersion);
+        }
         const record =
           (res.matter.fieldValues?.['partnerCostSignOff'] as
             | PartnerCostSignOffRecord
@@ -4126,7 +4135,11 @@ export function MatterFormClient({
             },
           },
         },
-        { id: savedDraftMatterId ?? existing?.id, saveMode: 'draft' },
+        {
+          id: savedDraftMatterId ?? existing?.id,
+          saveMode: 'draft',
+          expectedRowVersion: savedMatterRowVersion,
+        },
       );
       setSaving(false);
       if (res.errors && Object.keys(res.errors).length > 0) {
@@ -4136,6 +4149,9 @@ export function MatterFormClient({
       }
       if (res.matter) {
         setSavedDraftMatterId(res.matter.id);
+        if (res.matter.rowVersion != null) {
+          setSavedMatterRowVersion(res.matter.rowVersion);
+        }
         setSavedEstimateGbp(currentFormEstimateGbp);
         setPartnerCostSignOff(
           (res.matter.fieldValues?.['partnerCostSignOff'] as
@@ -4234,7 +4250,11 @@ export function MatterFormClient({
               },
             },
           },
-          { id: targetMatterId ?? undefined, saveMode: 'draft' },
+          {
+            id: targetMatterId ?? undefined,
+            saveMode: 'draft',
+            expectedRowVersion: savedMatterRowVersion,
+          },
         );
         if (draftRes.errors && Object.keys(draftRes.errors).length > 0) {
           setServerSaveErrors(draftRes.errors);
@@ -4245,6 +4265,9 @@ export function MatterFormClient({
         if (draftRes.matter) {
           targetMatterId = draftRes.matter.id;
           setSavedDraftMatterId(draftRes.matter.id);
+          if (draftRes.matter.rowVersion != null) {
+            setSavedMatterRowVersion(draftRes.matter.rowVersion);
+          }
           setSavedEstimateGbp(currentFormEstimateGbp);
           setPartnerCostSignOff(
             (draftRes.matter.fieldValues?.['partnerCostSignOff'] as
@@ -4497,7 +4520,7 @@ export function MatterFormClient({
             : undefined,
           fieldValues: updatedFieldValues,
         },
-        { id: existing.id },
+        { id: existing.id, expectedRowVersion: savedMatterRowVersion },
       );
       setSaving(false);
       if (res.errors && Object.keys(res.errors).length > 0) {
@@ -4506,6 +4529,9 @@ export function MatterFormClient({
         return;
       }
       if (res.matter) {
+        if (res.matter.rowVersion != null) {
+          setSavedMatterRowVersion(res.matter.rowVersion);
+        }
         showToast(`Saved changes to ${res.matter.matterNumber}`);
         router.push(`/matters/${res.matter.id}`);
         router.refresh();
@@ -4618,7 +4644,11 @@ export function MatterFormClient({
             conflictCheckRecord: snapshot,
             fieldValues: updatedFieldValues,
           },
-          { id: savedDraftMatterId ?? existing?.id, saveMode: 'submit_cleared' },
+          {
+            id: savedDraftMatterId ?? existing?.id,
+            saveMode: 'submit_cleared',
+            expectedRowVersion: savedMatterRowVersion,
+          },
         );
         setSaving(false);
         if (res.errors && Object.keys(res.errors).length > 0) {
@@ -4627,6 +4657,9 @@ export function MatterFormClient({
           return;
         }
         if (res.matter) {
+          if (res.matter.rowVersion != null) {
+            setSavedMatterRowVersion(res.matter.rowVersion);
+          }
           if (typeof window !== 'undefined') {
             try {
               sessionStorage.removeItem(sessionDraftKey);
@@ -4691,7 +4724,11 @@ export function MatterFormClient({
             conflictCheckRecord: snapshot,
             fieldValues: updatedFieldValues,
           },
-          { id: savedDraftMatterId ?? existing?.id, saveMode: 'submit_referred' },
+          {
+            id: savedDraftMatterId ?? existing?.id,
+            saveMode: 'submit_referred',
+            expectedRowVersion: savedMatterRowVersion,
+          },
         );
         setSaving(false);
         if (res.errors && Object.keys(res.errors).length > 0) {
@@ -4701,6 +4738,9 @@ export function MatterFormClient({
         }
         if (res.matter) {
           setSavedDraftMatterId(res.matter.id);
+          if (res.matter.rowVersion != null) {
+            setSavedMatterRowVersion(res.matter.rowVersion);
+          }
           setSavedEstimateGbp(currentFormEstimateGbp);
         }
         setWorkflowState('referred_readonly');
@@ -4737,6 +4777,9 @@ export function MatterFormClient({
     let warningMsg: string | undefined;
     if (existing?.id) {
       const res = await updateMatterConflictRecordAction(existing.id, snapshot);
+      if (res?.matter?.rowVersion != null) {
+        setSavedMatterRowVersion(res.matter.rowVersion);
+      }
       warningMsg = res?.warnings?.[0];
     }
     setSaving(false);

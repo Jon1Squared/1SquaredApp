@@ -706,6 +706,360 @@ DROP INDEX IF EXISTS public.idx_audit_entries_tenant_seq;
 `.trim(),
 };
 
+export const PARTIES_AND_MATTERS_MIGRATION_0009: TenantMigrationDefinition = {
+  version: '0009',
+  name: '0009_parties_and_matters_expand',
+  description:
+    'Expand-phase migration creating people, person_emails, organisations, person_organisation_links, notes, merge_history, matters (with row_version optimistic concurrency), matter_parties, matter_number_sequences, tenant_record_sequences, and per-tenant sequences (ADR 0028, S0-16, B6, R408, R409, R410, R448).',
+  tablesChanged: [
+    'tenant_record_sequences',
+    'matter_number_sequences',
+    'people',
+    'person_emails',
+    'organisations',
+    'person_organisation_links',
+    'notes',
+    'merge_history',
+    'matters',
+    'matter_parties',
+  ],
+  dependsOn: ['0008'],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS tenant_person_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_organisation_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_link_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_note_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_merge_history_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_matter_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS tenant_matter_number_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS tenant_record_sequences (
+  tenant_id TEXT NOT NULL,
+  counter_key TEXT NOT NULL,
+  last_value BIGINT NOT NULL,
+  PRIMARY KEY (tenant_id, counter_key)
+);
+
+CREATE TABLE IF NOT EXISTS matter_number_sequences (
+  tenant_id TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  last_number BIGINT NOT NULL CHECK (last_number >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, prefix)
+);
+
+CREATE TABLE IF NOT EXISTS people (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  first_name TEXT NOT NULL DEFAULT '',
+  preferred_name TEXT NOT NULL DEFAULT '',
+  other_names TEXT NOT NULL DEFAULT '',
+  surname TEXT NOT NULL DEFAULT '',
+  title_id TEXT NULL,
+  date_of_birth TEXT NULL,
+  is_employee BOOLEAN NOT NULL DEFAULT FALSE,
+  employee_role_id TEXT NULL,
+  app_role TEXT NULL,
+  entra_object_id TEXT NULL,
+  primary_email_lower TEXT NULL,
+  job_title TEXT NOT NULL DEFAULT '',
+  department_id TEXT NULL,
+  office_id TEXT NULL,
+  supervisor_id TEXT NULL,
+  is_fee_earner BOOLEAN NOT NULL DEFAULT FALSE,
+  default_hourly_rate_gbp NUMERIC(12,2) NULL,
+  client_status_id TEXT NULL,
+  aml_status_id TEXT NULL,
+  id_verified_on TEXT NULL,
+  id_expiry_date TEXT NULL,
+  created_from_enquiry_id TEXT NULL,
+  merged_into_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  emails_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  phones_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  addresses_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  relationship_role_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  roles_json JSONB NULL,
+  permission_overrides_json JSONB NULL,
+  dismissed_duplicate_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  custom_fields_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  employment_json JSONB NULL,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_people_tenant_entra_oid
+  ON people (tenant_id, entra_object_id)
+  WHERE entra_object_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_people_tenant_surname
+  ON people (tenant_id, lower(surname), lower(first_name));
+
+CREATE INDEX IF NOT EXISTS idx_people_tenant_employee
+  ON people (tenant_id, is_employee)
+  WHERE merged_into_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS person_emails (
+  tenant_id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  email_lower TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('contact_email', 'firm_work_email')),
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, person_id, email_lower, source),
+  FOREIGN KEY (tenant_id, person_id) REFERENCES people (tenant_id, id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_person_emails_tenant_active
+  ON person_emails (tenant_id, email_lower)
+  WHERE active = TRUE;
+
+CREATE TABLE IF NOT EXISTS organisations (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  legal_name TEXT NOT NULL DEFAULT '',
+  trading_name TEXT NOT NULL DEFAULT '',
+  organisation_type_id TEXT NULL,
+  company_number TEXT NOT NULL DEFAULT '',
+  vat_number TEXT NOT NULL DEFAULT '',
+  client_reference TEXT NOT NULL DEFAULT '',
+  general_email TEXT NOT NULL DEFAULT '',
+  main_phone TEXT NOT NULL DEFAULT '',
+  website TEXT NOT NULL DEFAULT '',
+  parent_organisation_id TEXT NULL,
+  relationship_partner_id TEXT NULL,
+  conflict_status TEXT NULL,
+  aml_status_id TEXT NULL,
+  client_status_id TEXT NULL,
+  created_from_enquiry_id TEXT NULL,
+  merged_into_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  registered_address_json JSONB NULL,
+  trading_address_json JSONB NULL,
+  relationship_type_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sector_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  dismissed_duplicate_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  custom_fields_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_organisations_tenant_name
+  ON organisations (tenant_id, lower(legal_name));
+
+CREATE INDEX IF NOT EXISTS idx_organisations_tenant_company_no
+  ON organisations (tenant_id, company_number)
+  WHERE company_number <> '';
+
+CREATE INDEX IF NOT EXISTS idx_organisations_tenant_parent
+  ON organisations (tenant_id, parent_organisation_id)
+  WHERE parent_organisation_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS person_organisation_links (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  organisation_id TEXT NOT NULL,
+  job_title TEXT NOT NULL DEFAULT '',
+  department TEXT NOT NULL DEFAULT '',
+  role_within_organisation TEXT NOT NULL DEFAULT '',
+  is_primary_contact BOOLEAN NOT NULL DEFAULT FALSE,
+  is_current BOOLEAN NOT NULL DEFAULT TRUE,
+  start_date TEXT NULL,
+  end_date TEXT NULL,
+  contact_status_id TEXT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  contact_role_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_po_links_tenant_person
+  ON person_organisation_links (tenant_id, person_id);
+
+CREATE INDEX IF NOT EXISTS idx_po_links_tenant_org
+  ON person_organisation_links (tenant_id, organisation_id);
+
+CREATE TABLE IF NOT EXISTS notes (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  record_type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  visibility TEXT NOT NULL DEFAULT 'standard',
+  pinned BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by_id TEXT NOT NULL,
+  merged_from_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notes_tenant_record
+  ON notes (tenant_id, record_type, record_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS merge_history (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  record_type TEXT NOT NULL,
+  survivor_id TEXT NOT NULL,
+  merged_id TEXT NOT NULL,
+  merged_by_id TEXT NOT NULL,
+  merged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_history_tenant_survivor
+  ON merge_history (tenant_id, record_type, survivor_id);
+
+CREATE INDEX IF NOT EXISTS idx_merge_history_tenant_merged
+  ON merge_history (tenant_id, record_type, merged_id);
+
+CREATE TABLE IF NOT EXISTS matters (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  row_version INTEGER NOT NULL DEFAULT 1,
+  matter_number TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  client_type TEXT NOT NULL DEFAULT 'organisation',
+  client_id TEXT NOT NULL DEFAULT '',
+  instructing_contact_id TEXT NULL,
+  billing_contact_id TEXT NULL,
+  referrer_person_id TEXT NULL,
+  referrer_organisation_id TEXT NULL,
+  legal_entity_id TEXT NULL,
+  department_id TEXT NULL,
+  team_id TEXT NULL,
+  office_id TEXT NULL,
+  practice_area_id TEXT NOT NULL DEFAULT '',
+  work_type_subcategory_id TEXT NOT NULL DEFAULT '',
+  status_id TEXT NOT NULL DEFAULT '',
+  stage_group_id TEXT NULL,
+  current_stage_id TEXT NOT NULL DEFAULT '',
+  responsible_partner_id TEXT NULL,
+  responsible_fee_earner_id TEXT NULL,
+  supervisor_id TEXT NULL,
+  risk_rating_id TEXT NOT NULL DEFAULT '',
+  conflict_check_status TEXT NOT NULL DEFAULT '',
+  conflict_cleared_by_id TEXT NULL,
+  is_staff_matter BOOLEAN NOT NULL DEFAULT FALSE,
+  has_ethical_wall BOOLEAN NOT NULL DEFAULT FALSE,
+  source_enquiry_id TEXT NULL,
+  source_quote_id TEXT NULL,
+  opened_on TEXT NULL,
+  closed_on TEXT NULL,
+  destruction_date TEXT NULL,
+  engagement_letter_status TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  additional_client_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  restricted_access_user_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  fields_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  custom_fields_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  conflict_check_record_json JSONB NULL,
+  risk_assessment_json JSONB NULL,
+  costs_json JSONB NULL,
+  opening_record_json JSONB NULL,
+  milestones_json JSONB NULL,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_matters_tenant_number
+  ON matters (tenant_id, matter_number);
+
+CREATE INDEX IF NOT EXISTS idx_matters_tenant_client
+  ON matters (tenant_id, client_id);
+
+CREATE INDEX IF NOT EXISTS idx_matters_tenant_status
+  ON matters (tenant_id, status_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_matters_tenant_fee_earner
+  ON matters (tenant_id, responsible_fee_earner_id);
+
+CREATE INDEX IF NOT EXISTS idx_matters_tenant_restricted
+  ON matters (tenant_id, is_staff_matter, has_ethical_wall);
+
+CREATE TABLE IF NOT EXISTS matter_parties (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  matter_id TEXT NOT NULL,
+  entity_type TEXT NULL,
+  entity_id TEXT NULL,
+  relationship_id TEXT NULL,
+  capacity_id TEXT NULL,
+  reference TEXT NULL,
+  acting_solicitor_organisation_id TEXT NULL,
+  acting_solicitor_person_id TEXT NULL,
+  notes TEXT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, matter_id) REFERENCES matters (tenant_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_matter_parties_tenant_matter
+  ON matter_parties (tenant_id, matter_id, sort_order);
+
+CREATE INDEX IF NOT EXISTS idx_matter_parties_tenant_entity
+  ON matter_parties (tenant_id, entity_type, entity_id);
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS idx_matter_parties_tenant_entity;
+DROP INDEX IF EXISTS idx_matter_parties_tenant_matter;
+DROP TABLE IF EXISTS matter_parties;
+
+DROP INDEX IF EXISTS idx_matters_tenant_restricted;
+DROP INDEX IF EXISTS idx_matters_tenant_fee_earner;
+DROP INDEX IF EXISTS idx_matters_tenant_status;
+DROP INDEX IF EXISTS idx_matters_tenant_client;
+DROP INDEX IF EXISTS idx_matters_tenant_number;
+DROP TABLE IF EXISTS matters;
+
+DROP INDEX IF EXISTS idx_merge_history_tenant_merged;
+DROP INDEX IF EXISTS idx_merge_history_tenant_survivor;
+DROP TABLE IF EXISTS merge_history;
+
+DROP INDEX IF EXISTS idx_notes_tenant_record;
+DROP TABLE IF EXISTS notes;
+
+DROP INDEX IF EXISTS idx_po_links_tenant_org;
+DROP INDEX IF EXISTS idx_po_links_tenant_person;
+DROP TABLE IF EXISTS person_organisation_links;
+
+DROP INDEX IF EXISTS idx_organisations_tenant_parent;
+DROP INDEX IF EXISTS idx_organisations_tenant_company_no;
+DROP INDEX IF EXISTS idx_organisations_tenant_name;
+DROP TABLE IF EXISTS organisations;
+
+DROP INDEX IF EXISTS idx_person_emails_tenant_active;
+DROP TABLE IF EXISTS person_emails;
+
+DROP INDEX IF EXISTS idx_people_tenant_employee;
+DROP INDEX IF EXISTS idx_people_tenant_surname;
+DROP INDEX IF EXISTS idx_people_tenant_entra_oid;
+DROP TABLE IF EXISTS people;
+
+DROP TABLE IF EXISTS matter_number_sequences;
+DROP TABLE IF EXISTS tenant_record_sequences;
+
+DROP SEQUENCE IF EXISTS tenant_matter_number_seq;
+DROP SEQUENCE IF EXISTS tenant_matter_id_seq;
+DROP SEQUENCE IF EXISTS tenant_merge_history_id_seq;
+DROP SEQUENCE IF EXISTS tenant_note_id_seq;
+DROP SEQUENCE IF EXISTS tenant_link_id_seq;
+DROP SEQUENCE IF EXISTS tenant_organisation_id_seq;
+DROP SEQUENCE IF EXISTS tenant_person_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -715,6 +1069,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_TENANT_CONFIG_MIGRATION_0006,
   FIRM_AUDIT_LOG_MIGRATION_0007,
   NON_LIVE_AUDIT_RESET_MIGRATION_0008,
+  PARTIES_AND_MATTERS_MIGRATION_0009,
 ];
 
 export function validateMigrationCatalogueOrder(

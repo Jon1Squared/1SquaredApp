@@ -27,7 +27,7 @@ export const GET = guardedRoute(
       }
 
       return await withAuthenticatedActor(async (actor) => {
-        const { store, ctx, user, config, repo, storage } =
+        const { ctx, user, matters, config, repo, storage } =
           await getInitializedDocGenContext(actor.personId, actor.session);
         tenantIdForLog = ctx.tenantId;
         correlationIdForLog = ctx.correlationId;
@@ -57,12 +57,12 @@ export const GET = guardedRoute(
 
         const linkedMatters = [];
         if (doc.primaryMatterId) {
-          const m = store.matters.find((x) => x.id === doc.primaryMatterId);
+          const m = matters.find((x) => x.id === doc.primaryMatterId);
           if (m) linkedMatters.push(toMatterAccessSubject(m)!);
         }
         for (const link of await repo.listLinksForDocument(ctx, doc.id)) {
           if (link.entityType === 'matter') {
-            const m = store.matters.find((x) => x.id === link.entityId);
+            const m = matters.find((x) => x.id === link.entityId);
             if (m && !linkedMatters.some((x) => x.id === m.id)) {
               linkedMatters.push(toMatterAccessSubject(m)!);
             }

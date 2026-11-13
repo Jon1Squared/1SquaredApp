@@ -56,7 +56,7 @@ export default async function AdminCatchAllPage({
       ...(Number.isFinite(parsedBeforeSeq) ? { beforeSeq: parsedBeforeSeq } : {}),
     });
 
-    const pmsAdmin = getPmsAdminSnapshot();
+    const pmsAdmin = await getPmsAdminSnapshot(actor.personId);
     const entraEnvStatus = getEntraEnvStatus();
 
     const first = slug?.[0];

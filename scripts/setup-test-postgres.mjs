@@ -105,11 +105,13 @@ async function ensureLocalWindowsPostgresIfNeeded() {
           '-l',
           pgLogFile,
           '-w',
+          '-t',
+          '180',
           'start',
           '-o',
-          `-h 127.0.0.1 -p ${pgMigratePort}`,
+          `-F -h 127.0.0.1 -p ${pgMigratePort}`,
         ],
-        { stdio: 'inherit', shell: false },
+        { stdio: 'ignore', shell: false, windowsHide: true },
       );
       if (startRes.status !== 0 && !(await checkTcpPort(pgHost, pgMigratePort))) {
         console.error('[setup-test-postgres] pg_ctl start failed.');
@@ -134,7 +136,32 @@ async function ensureLocalWindowsPostgresIfNeeded() {
 async function run() {
   await ensureLocalWindowsPostgresIfNeeded();
 
-  const args = ['tsx', 'scripts/provision-test-postgres.ts'];
+  const generatedRegistryPath = path.join(
+    process.cwd(),
+    'src',
+    'platform',
+    'generated',
+    'extensionRegistry.ts',
+  );
+  if (!fs.existsSync(generatedRegistryPath)) {
+    const genArgs = ['tsx', 'scripts/generate-extension-registry.ts'];
+    const genRes = isWin
+      ? spawnSync([npxCmd, ...genArgs].join(' '), {
+          stdio: 'inherit',
+          env: process.env,
+          shell: true,
+        })
+      : spawnSync(npxCmd, genArgs, {
+          stdio: 'inherit',
+          env: process.env,
+          shell: false,
+        });
+    if (genRes.status !== 0) {
+      process.exit(genRes.status ?? 1);
+    }
+  }
+
+  const args = ['tsx', '--conditions', 'react-server', 'scripts/provision-test-postgres.ts'];
   const res = isWin
     ? spawnSync([npxCmd, ...args].join(' '), {
         stdio: 'inherit',

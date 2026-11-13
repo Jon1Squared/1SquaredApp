@@ -24,19 +24,19 @@ export default async function HomePage({
     const resolvedParams = searchParams ? await searchParams : {};
 
     const matterFinanceRes = snap.finance.canViewMatter
-      ? getMatterFinanceRows(actor.personId)
+      ? await getMatterFinanceRows(actor.personId)
       : null;
     const matterFinance =
       matterFinanceRes && !isActionDenied(matterFinanceRes) ? matterFinanceRes : undefined;
 
     const myFinanceRes = snap.finance.canViewMatter
-      ? getMyFinanceFigures(actor.personId)
+      ? await getMyFinanceFigures(actor.personId)
       : null;
     const myFinance =
       myFinanceRes && !isActionDenied(myFinanceRes) ? myFinanceRes : undefined;
 
     const firmFinanceRes = snap.finance.canViewFirm
-      ? getFirmFinance(actor.personId)
+      ? await getFirmFinance(actor.personId)
       : null;
     const firmFinance =
       firmFinanceRes && !isActionDenied(firmFinanceRes) ? firmFinanceRes : undefined;

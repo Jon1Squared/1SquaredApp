@@ -183,8 +183,34 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0008 -> 0007 -> 0006 -> 0005 and re-apply
-    for (const v of [...expectedVersions].filter((v) => v >= '0008').reverse()) {
+    // Round-trip rollback 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    expect(await runner.getActiveTables(ctx)).toEqual(
+      expect.arrayContaining([
+        'people',
+        'person_emails',
+        'organisations',
+        'person_organisation_links',
+        'notes',
+        'merge_history',
+        'matters',
+        'matter_parties',
+        'matter_number_sequences',
+        'tenant_record_sequences',
+      ]),
+    );
+    expect(await runner.rollbackVersion(ctx, '0009')).toBe(true);
+    const activeAfter0009Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0009Rollback).not.toContain('people');
+    expect(activeAfter0009Rollback).not.toContain('person_emails');
+    expect(activeAfter0009Rollback).not.toContain('organisations');
+    expect(activeAfter0009Rollback).not.toContain('person_organisation_links');
+    expect(activeAfter0009Rollback).not.toContain('notes');
+    expect(activeAfter0009Rollback).not.toContain('merge_history');
+    expect(activeAfter0009Rollback).not.toContain('matters');
+    expect(activeAfter0009Rollback).not.toContain('matter_parties');
+    expect(activeAfter0009Rollback).not.toContain('matter_number_sequences');
+    expect(activeAfter0009Rollback).not.toContain('tenant_record_sequences');
+    for (const v of [...expectedVersions].filter((v) => v >= '0008' && v < '0009').reverse()) {
       expect(await runner.rollbackVersion(ctx, v)).toBe(true);
     }
     expect(await runner.rollbackVersion(ctx, '0007')).toBe(true);
@@ -202,7 +228,21 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect(reapplied.map((m) => m.version)).toEqual(
       expectedVersions.filter((v) => v >= '0005'),
     );
-    expect(await runner.getActiveTables(ctx)).toContain('audit_entries');
+    expect(await runner.getActiveTables(ctx)).toEqual(
+      expect.arrayContaining([
+        'audit_entries',
+        'people',
+        'person_emails',
+        'organisations',
+        'person_organisation_links',
+        'notes',
+        'merge_history',
+        'matters',
+        'matter_parties',
+        'matter_number_sequences',
+        'tenant_record_sequences',
+      ]),
+    );
   });
 
   it('fails closed with TENANCY_DB_CONFIG_ERROR when password auth has no password env var, and core holds no built-in passwords (R435)', async () => {

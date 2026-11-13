@@ -102,6 +102,8 @@ export function sanitizePostgresError(
       (existingCode.startsWith('TENANCY_') ||
         existingCode === 'TENANT_SCHEMA_NOT_READY' ||
         existingCode.startsWith('KEY_DATE_') ||
+        existingCode.startsWith('MATTER_') ||
+        existingCode.startsWith('PARTY_') ||
         existingCode.startsWith('MIGRATION_') ||
         existingCode.startsWith('DOCUMENT_') ||
         existingCode.startsWith('TEMPLATE_'))
@@ -112,6 +114,8 @@ export function sanitizePostgresError(
       err.message.startsWith('TENANCY_') ||
       err.message.startsWith('TENANT_SCHEMA_NOT_READY') ||
       err.message.startsWith('KEY_DATE_') ||
+      err.message.startsWith('MATTER_') ||
+      err.message.startsWith('PARTY_') ||
       err.message.startsWith('MIGRATION_') ||
       err.message.startsWith('DOCUMENT_') ||
       err.message.startsWith('TEMPLATE_')

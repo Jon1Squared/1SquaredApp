@@ -71,16 +71,16 @@ Added behind `TenantDirectoryRepository` (`core/src/tenancy/directoryRepository.
 
 ## Migrations (`R408`, `R417`)
 
-Expand-only migration in S0-16 (`CORE_REQUIRED_SCHEMA_VERSION = '0008'`):
+Expand-only migration in S0-16 (`CORE_REQUIRED_SCHEMA_VERSION = '0009'`):
 
-1. **`0008_directory_and_matters_expand`** (`kind: 'expand'`, `requiresAppliedVersion: '0007'`):
-   - **`upSql`:** creates `tenant_record_sequences`, `matter_number_sequences`, `people`, `person_emails`, `organisations`, `person_organisation_links`, `notes`, `merge_history`, `matters`, and `matter_parties` + indexes (`SELECT, INSERT, UPDATE, DELETE` granted to `role_tenant_<slug>_<env>`).
-   - **`downSql`:** drops indexes and those 10 tables in reverse dependency order.
+1. **`0009_parties_and_matters_expand`** (`kind: 'expand'`, `requiresAppliedVersion: '0008'`):
+   - **`upSql`:** creates sequences (`tenant_person_id_seq`, `tenant_organisation_id_seq`, `tenant_link_id_seq`, `tenant_note_id_seq`, `tenant_merge_history_id_seq`, `tenant_matter_id_seq`, `tenant_matter_number_seq`) and tables (`tenant_record_sequences`, `matter_number_sequences`, `people`, `person_emails`, `organisations`, `person_organisation_links`, `notes`, `merge_history`, `matters`, and `matter_parties`) + indexes (`SELECT, INSERT, UPDATE, DELETE` on tables and `USAGE, SELECT` on sequences granted to `role_tenant_<slug>_<env>`, `R460`).
+   - **`downSql`:** drops indexes, those 10 tables, and 7 sequences in reverse dependency order.
    - **Deferred contract & zero fallback reads (`R408`, `R417`, Rule 8):** `matter_restriction_metadata` (from `0005`) is **NOT** dropped in S0-16 because running S0-15 replicas still read it while `migrate` executes. **From S0-16 onwards, `TenantKeyDateRepository` reads restriction flags from `matters` only — nothing reads or writes `matter_restriction_metadata` any more** (`docs/runbooks/store-cut-over.md` imports `matters` before the S0-16 revision takes traffic, so no fallback is needed, and stopping all reads/writes in S0-16 guarantees S0-19b replicas never query `matter_restriction_metadata` when S0-20's `migrate` drops it). Dropping `matter_restriction_metadata` is deferred to **`0014_transitional_bridges_contract` in S0-20**.
 
 ## Import and release cut-over (`R407`)
 
-1. **Entry point & cut-over:** follows **`docs/runbooks/store-cut-over.md`** (stop web writes -> `migrate` `0008` -> `node dist/jobs/import-store.mjs --modules directory,matters` / `npm run db:import -- --modules directory,matters` -> verify fresh-connection counts -> start new revision).
+1. **Entry point & cut-over:** follows **`docs/runbooks/store-cut-over.md`** (stop web writes -> `migrate` `0009` -> `node dist/jobs/import-store.mjs --modules parties,matters` / `npm run db:import -- --modules parties,matters` -> verify fresh-connection counts -> start new revision).
 2. **Idempotency & `B6` counter seeding:** inside `withTenantTransaction`, upserts `people`, `person_emails`, `organisations`, `person_organisation_links`, `notes`, `merge_history`, `matters` (`row_version = COALESCE(existing.row_version, 1)`), and `matter_parties`, seeds `matter_number_sequences` via `GREATEST(...)` across all imported matter prefixes, and verifies exact counts on a fresh connection. Wired into `seed-demo-tenant.ts`, `resetAllDemoData`, `clearAllDataToCleanDeployment`, and `e2e/global-setup.ts`.
 
 ## Async conversion and effort estimate

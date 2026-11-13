@@ -909,6 +909,8 @@ export type ConflictCheckRecordInput = Omit<
 
 export interface Matter extends RecordBase {
   recordType: 'matter';
+  /** Optimistic concurrency row version (`matters.row_version` in PostgreSQL, R409, R448). */
+  rowVersion?: number;
   // CORE-001..008 Identification
   matterNumber: string; // e.g. ABC001-0001
   title: string; // CORE-002

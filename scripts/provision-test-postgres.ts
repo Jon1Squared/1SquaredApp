@@ -8,13 +8,29 @@
 
 import {
   CORE_TENANT_MIGRATIONS,
+  getGlobalTenantPostgresPoolManager,
   resolveTenantFromVerifiedToken,
   TenantMigrationRunner,
+  TenantPartyRepository,
   type PlatformEnvironment,
 } from '@platform/core';
 import '../core/src/tenancy/pgNodePreload';
 // Local/CI provisioning helper; deliberately not exported from @platform/core (R435).
 import { provisionPostgresClusterRolesAndDatabases } from '../core/src/tenancy/postgresAdminBootstrap';
+import { createSeedStore } from '../src/server/store';
+import { importFirmStoreModulesToPostgres } from '../src/server/storePostgresImport';
+
+process.env.PLATFORM_HOSTING_MODE ||= 'multi_tenant';
+process.env.PLATFORM_POSTGRES_HOST ||= '127.0.0.1';
+process.env.PLATFORM_POSTGRES_PORT ||=
+  process.env.PLATFORM_POSTGRES_MIGRATE_PORT || '5432';
+process.env.PLATFORM_POSTGRES_MIGRATE_PORT ||= '5432';
+process.env.PLATFORM_POSTGRES_ADMIN_USER ||= 'postgres';
+process.env.PLATFORM_POSTGRES_ADMIN_PASSWORD ||= 'postgres';
+process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ||= 'onesquared_local_runtime';
+process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD ||= 'onesquared_local_migrate';
+process.env.PLATFORM_TENANT_PACKAGE_DIR ||= 'client-not-a-law-firm';
+process.env.PLATFORM_ENVIRONMENT ||= 'test';
 
 const TEST_CLUSTER_TENANTS: ReadonlyArray<{
   readonly tenantId: string;
@@ -76,7 +92,24 @@ async function main(): Promise<void> {
       correlationId: `corr-bootstrap-${t.tenantId}-${t.environment}`,
     });
     await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    if (
+      t.tenantId === 'not-a-law-firm' &&
+      (t.environment === 'test' || t.environment === 'dev')
+    ) {
+      const partyRepo = new TenantPartyRepository();
+      const existingCounts = await partyRepo.countAllTenantPartyRows(ctx);
+      if (existingCounts.people === 0) {
+        const seedStore = createSeedStore(new Date(), {
+          includeSyntheticEntraOids: t.environment === 'test',
+        });
+        await importFirmStoreModulesToPostgres({
+          ctx,
+          store: seedStore,
+        });
+      }
+    }
   }
+  await getGlobalTenantPostgresPoolManager().closeAllPools();
 
   console.log(
     JSON.stringify({

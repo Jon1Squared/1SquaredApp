@@ -15,7 +15,12 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import { AuthorisationError } from '@/domain/rbac';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import type { Matter, Organisation, Person, PersonOrganisationLink } from '@/domain/types';
+import {
+  getActiveTenantConfiguration,
+  getMatterRepository,
+  getPartyRepository,
+} from '@/platform/tenantRuntime';
 import { vid } from '@/seed/lists';
 import { guardedRoute } from '@/server/authorize';
 import { hasPersonPermission } from '@/server/rbacRuntime';
@@ -2368,13 +2373,13 @@ Important rules for speed and accuracy:
 }
 
 async function ensureContactInCrm(
+  tenantContext: NonNullable<Parameters<Parameters<typeof guardedRoute>[1]>[2]>['tenantContext'],
   contact: NonNullable<MatterAiExtractionResult['instructingContact']>,
   orgId: string | undefined,
   byId: string,
   isPrimaryContact: boolean,
   canCreateContacts: boolean,
 ) {
-  const store = getStore();
   if (!contact.matchedPersonId) {
     if (!canCreateContacts) return;
     const parts = contact.name.trim().split(/\s+/);
@@ -2432,7 +2437,10 @@ async function ensureContactInCrm(
     }
   } else if (orgId) {
     if (!canCreateContacts) return;
-    const hasLink = store.links.some(
+    const allLinks = await getPartyRepository().listAllLinks<PersonOrganisationLink>(
+      tenantContext,
+    );
+    const hasLink = allLinks.some(
       (l) =>
         l.personId === contact.matchedPersonId &&
         l.organisationId === orgId &&
@@ -2526,17 +2534,27 @@ export const POST = guardedRoute(
       }
 
       const store = getStore();
-      const actorPerson = store.people.find((p) => p.id === byId) ?? null;
+      const tenantContext = guardedActor!.tenantContext;
+      const partyRepo = getPartyRepository();
+      const matterRepo = getMatterRepository();
+      const [allPeople, allOrganisations, allMatters] = await Promise.all([
+        partyRepo.listAllPeople<Person>(tenantContext),
+        partyRepo.listAllOrganisations<Organisation>(tenantContext),
+        matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
+      ]);
+      const actorPerson = allPeople.find((p) => p.id === byId) ?? null;
       const visibility = buildRecordVisibility(store, actorPerson, {
+        people: allPeople,
+        matters: allMatters,
         hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
       });
-      const visiblePeople = store.people.filter(
+      const visiblePeople = allPeople.filter(
         (p) =>
           !p.mergedIntoId &&
           !(p.createdFromEnquiryId && visibility.hiddenEnquiryIds.has(p.createdFromEnquiryId)),
       );
-      const visibleOrganisations = store.organisations.filter((o) => !o.mergedIntoId);
-      const employees = store.people.filter((p) => p.isEmployee && !p.mergedIntoId);
+      const visibleOrganisations = allOrganisations.filter((o) => !o.mergedIntoId);
+      const employees = allPeople.filter((p) => p.isEmployee && !p.mergedIntoId);
 
       const practiceAreas = store.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
@@ -2569,7 +2587,7 @@ export const POST = guardedRoute(
       const canCreateContacts =
         Boolean(guardedActor?.permissions.has('contact:create')) &&
         hasPersonPermission(actorPerson, 'contact:create', {
-          allPeople: store.people,
+          allPeople,
           teams: store.teams,
         });
 
@@ -2653,6 +2671,7 @@ export const POST = guardedRoute(
       // 2. Ensure Instructing Contact exists and is linked to Client Organisation (requires contact:create)
       if (enriched.instructingContact) {
         await ensureContactInCrm(
+          tenantContext,
           enriched.instructingContact,
           clientOrgId,
           byId,
@@ -2664,6 +2683,7 @@ export const POST = guardedRoute(
       // 3. Ensure Billing Contact exists and is linked to Client Organisation (requires contact:create)
       if (enriched.billingContact) {
         await ensureContactInCrm(
+          tenantContext,
           enriched.billingContact,
           clientOrgId,
           byId,
@@ -2703,13 +2723,22 @@ export const POST = guardedRoute(
       }
 
       const latestStore = getStore();
+      const [latestPeople, latestOrganisations, latestLinks, latestMatters] =
+        await Promise.all([
+          partyRepo.listAllPeople<Person>(tenantContext),
+          partyRepo.listAllOrganisations<Organisation>(tenantContext),
+          partyRepo.listAllLinks<PersonOrganisationLink>(tenantContext),
+          matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
+        ]);
       const latestVisibility = buildRecordVisibility(latestStore, actorPerson, {
+        people: latestPeople,
+        matters: latestMatters,
         hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
       });
-      const returnedOrganisations = latestStore.organisations.filter(
+      const returnedOrganisations = latestOrganisations.filter(
         (o) => matchedOrgIds.has(o.id) && !o.mergedIntoId,
       );
-      const returnedPeople = latestStore.people
+      const returnedPeople = latestPeople
         .filter(
           (p) =>
             matchedPersonIds.has(p.id) &&
@@ -2721,7 +2750,7 @@ export const POST = guardedRoute(
             ),
         )
         .map((p) => ({ ...p, employment: undefined }));
-      const returnedLinks = latestStore.links.filter(
+      const returnedLinks = latestLinks.filter(
         (l) =>
           l.isCurrent &&
           matchedPersonIds.has(l.personId) &&

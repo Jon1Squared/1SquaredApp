@@ -31,6 +31,16 @@ import {
 } from '../entraAuth';
 import { getKeyDateRepository } from '../services';
 import { getStore } from '../store';
+import { loadCommittedSeedStore } from '../../seed/seedSnapshot';
+import type { Person } from '../../domain/types';
+
+let committedSeedPeopleCache: readonly Person[] | null = null;
+function findCommittedSeedPerson(actorId: string): Person | null {
+  if (!committedSeedPeopleCache) {
+    committedSeedPeopleCache = loadCommittedSeedStore().people;
+  }
+  return committedSeedPeopleCache.find((p) => p.id === actorId) ?? null;
+}
 
 export type AuditAdapterTestFailureHook = (params: {
   ctx: TenantContext;
@@ -113,7 +123,9 @@ export function buildTestEntraSessionPayload(
   }
   const tenantConfig = getActiveTenantConfiguration();
   const store = getStore();
-  const person = store.people.find((p) => p.id === cleanActorId) ?? null;
+  const person =
+    store.people.find((p) => p.id === cleanActorId) ??
+    findCommittedSeedPerson(cleanActorId);
   const roles = options?.roles
     ? [...options.roles]
     : person

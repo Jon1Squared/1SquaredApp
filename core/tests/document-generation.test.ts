@@ -57,6 +57,7 @@ import {
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
 import { getStore, saveStore } from '@/server/store';
+import { getMatterRepository } from '@/server/services';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 
@@ -1424,6 +1425,12 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     // R11: getDocumentGenerationSnapshotForUser omits a document linked to a matter with hasEthicalWall: true (even when isStaffMatter: false) for an excluded employee
     const store = getStore();
     const snapshotMatters = structuredClone(store.matters);
+    const origWallMatter = structuredClone(
+      store.matters.find((m) => m.id === 'M-000002')!,
+    );
+    const { ctx, repo: hostRepo } = await runAsTestEmployee('P-000001', () =>
+      getInitializedDocGenContext('P-000001'),
+    );
     try {
       const wallMatter = store.matters.find((m) => m.id === 'M-000002')!;
       wallMatter.isStaffMatter = false;
@@ -1433,10 +1440,10 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       wallMatter.supervisingPartnerId = 'P-000001';
       wallMatter.responsiblePartnerId = 'P-000001';
       wallMatter.teamMemberIds = ['P-000001'];
-
-      const { ctx, repo: hostRepo } = await runAsTestEmployee('P-000001', () =>
-        getInitializedDocGenContext('P-000001'),
-      );
+      await getMatterRepository().putMatter(ctx, wallMatter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000001'],
+      });
       const docRecord = {
         id: 'DOC-WALL-R11',
         tenantId: ctx.tenantId,
@@ -1477,6 +1484,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         allowedSnap.documents.some((d) => d.id === 'DOC-WALL-R11'),
       ).toBe(true);
     } finally {
+      await getMatterRepository().putMatter(ctx, origWallMatter, {
+        expectedRowVersion: null,
+      });
       store.matters = snapshotMatters;
       saveStore(store);
     }

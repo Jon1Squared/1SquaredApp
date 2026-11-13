@@ -33,6 +33,8 @@ import {
 import { buildSystemJobTenantContext } from './lib/systemJobTenantContext';
 
 const VALID_MODULES = new Set<ImportableStoreModule>([
+  'parties',
+  'matters',
   'documents',
   'document-store',
   'key-dates',
@@ -45,8 +47,8 @@ function printUsage(): void {
       'Usage: import-store [--modules <csv>] [--store-path <path>] [--clear] [--help]',
       '',
       'Options:',
-      '  --modules <csv>      Comma-separated modules to import (default: documents,document-store,key-dates,audit)',
-      '                       Supported: documents, document-store, key-dates, audit',
+      '  --modules <csv>      Comma-separated modules to import (default: parties,matters,documents,document-store,key-dates,audit)',
+      '                       Supported: parties (or directory), matters, documents, document-store, key-dates, audit',
       '  --store-path <path>  Optional JSON store file path to import instead of the active runtime store',
       '  --clear              Clear target PostgreSQL module tables for the tenant before importing (non-live only for audit)',
       '  --help, -h           Print usage and exit 0',
@@ -103,12 +105,13 @@ export function parseStoreImportCliArgs(argv: readonly string[]): {
         .map((m) => m.trim())
         .filter(Boolean)
         .map((m) => {
-          if (!VALID_MODULES.has(m as ImportableStoreModule)) {
+          const normalized = m === 'directory' ? 'parties' : m;
+          if (!VALID_MODULES.has(normalized as ImportableStoreModule)) {
             throw new Error(
               `CLI_USAGE_ERROR: Unsupported import module "${m}". Expected one of: ${Array.from(VALID_MODULES).join(', ')}.`,
             );
           }
-          return m as ImportableStoreModule;
+          return normalized as ImportableStoreModule;
         })
     : [...DEFAULT_MIGRATED_POSTGRES_MODULES];
 

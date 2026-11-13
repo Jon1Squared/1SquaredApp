@@ -8,9 +8,9 @@ import 'server-only';
  * computing any summary or roll-up.
  */
 
-import type { PermissionKey } from '@platform/core';
+import type { PermissionKey, TenantContext } from '@platform/core';
 import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
-import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
+import { createDefaultHomePagesConfig, resolveEmployeeRoles } from '@/domain/homeConfig';
 import {
   buildFeeEarnerWeeklyTime,
   buildFirmFinanceRollups,
@@ -19,9 +19,12 @@ import {
   PMS_AS_AT_UNAVAILABLE_LABEL,
 } from '@/domain/pms';
 import { getActiveActorSession } from '@/domain/rbac';
-import type { Person, PmsLink } from '@/domain/types';
+import type { Matter, Person, PmsLink } from '@/domain/types';
 import {
+  createVerifiedTenantContext,
   getActiveTenantConfiguration,
+  getMatterRepository,
+  getPartyRepository,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import { getPmsSource } from '@/pms/pmsSource';
@@ -105,13 +108,17 @@ function extractActorId(actor: FinanceActorInput): string | null {
   return sessionPersonId ? sessionPersonId.trim() : null;
 }
 
-export function verifyFinanceActorAndPermission(
+export async function verifyFinanceActorAndPermission(
   actorInput: FinanceActorInput,
   requiredPermission: PermissionKey,
-):
+): Promise<
   | {
       ok: true;
       store: FirmStore;
+      ctx: TenantContext;
+      tenantContext: TenantContext;
+      people: Person[];
+      matters: Matter[];
       actor: Person;
       effectiveWorkPerson: Person;
       permSet: ReturnType<typeof resolvePersonPermissionSet>;
@@ -121,14 +128,16 @@ export function verifyFinanceActorAndPermission(
       accessibleLinkedPmsMatterCodes: Set<string>;
       visiblePmsLinks: PmsLink[];
     }
-  | ActionDenied {
+  | ActionDenied
+> {
   const tenantCfg = getActiveTenantConfiguration();
   const activeSession = getActiveActorSession();
   const activeVerifiedSession = activeSession?.verifiedSession as
     | VerifiedEntraSessionPayload
     | undefined;
+  let verifiedTenantContext: TenantContext | null = null;
   if (activeVerifiedSession) {
-    resolveCurrentTenantContext(
+    verifiedTenantContext = resolveCurrentTenantContext(
       createVerifiedSessionActorFromEntraSession(activeVerifiedSession),
       tenantCfg,
     );
@@ -161,8 +170,24 @@ export function verifyFinanceActorAndPermission(
     );
   }
 
+  const prelimTenantContext: TenantContext =
+    verifiedTenantContext ??
+    createVerifiedTenantContext(
+      {
+        sub: actorId,
+        tenantId: tenantCfg.tenantId,
+        roles: [...(activeSession?.tokenRoles ?? ['fee-earner'])],
+        mfaVerified: activeSession?.mfaVerified === true,
+      },
+      tenantCfg,
+    );
+
   const store = getStore();
-  const actor = store.people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
+  const [people, matters] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(prelimTenantContext),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(prelimTenantContext),
+  ]);
+  const actor = people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
   if (!actor) {
     return buildActionDenied(
       'FORBIDDEN',
@@ -171,9 +196,11 @@ export function verifyFinanceActorAndPermission(
   }
 
   const tokenRoles =
-    activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined;
+    activeSession?.personId === actor.id
+      ? activeSession?.tokenRoles
+      : undefined;
   const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: store.people,
+    allPeople: people,
     teams: store.teams,
     tokenRoles,
   });
@@ -184,7 +211,22 @@ export function verifyFinanceActorAndPermission(
     );
   }
 
+  const actorRoles = resolveEmployeeRoles(actor, store.teams);
+  const tenantContext: TenantContext =
+    verifiedTenantContext ??
+    createVerifiedTenantContext(
+      {
+        sub: actor.id,
+        tenantId: tenantCfg.tenantId,
+        roles: actorRoles.length > 0 ? [...actorRoles] : ['fee-earner'],
+        mfaVerified: activeSession?.mfaVerified === true,
+      },
+      tenantCfg,
+    );
+
   const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
     tokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
@@ -195,7 +237,7 @@ export function verifyFinanceActorAndPermission(
       .map((l) => l.pmsCode),
   );
   const accessibleMatterIds = new Set(
-    store.matters.filter((m) => !hiddenMatterIds.has(m.id)).map((m) => m.id),
+    matters.filter((m) => !hiddenMatterIds.has(m.id)).map((m) => m.id),
   );
   const accessibleLinkedPmsMatterCodes = new Set(
     store.pmsLinks
@@ -209,12 +251,16 @@ export function verifyFinanceActorAndPermission(
   );
   const effectiveWorkPerson: Person =
     actor.demo && actor.showsWorkOfId
-      ? (store.people.find((p) => p.id === actor.showsWorkOfId) ?? actor)
+      ? (people.find((p) => p.id === actor.showsWorkOfId) ?? actor)
       : actor;
 
   return {
     ok: true,
     store,
+    ctx: tenantContext,
+    tenantContext,
+    people,
+    matters,
     actor,
     effectiveWorkPerson,
     permSet,
@@ -232,15 +278,17 @@ export function verifyFinanceActorAndPermission(
  *
  * Requires `finance:view_matter` and fails closed on unlinked PMS matters.
  */
-export function getMatterFinanceRows(
+export async function getMatterFinanceRows(
   actorInput: FinanceActorInput,
   matterIds?: readonly string[],
-): MatterFinanceRowsResult | ActionDenied {
-  const auth = verifyFinanceActorAndPermission(actorInput, 'finance:view_matter');
+): Promise<MatterFinanceRowsResult | ActionDenied> {
+  const auth = await verifyFinanceActorAndPermission(actorInput, 'finance:view_matter');
   if (!auth.ok) return auth;
 
   const {
     store,
+    people,
+    matters,
     actor,
     tokenRoles,
     accessibleLinkedPmsMatterCodes,
@@ -254,11 +302,11 @@ export function getMatterFinanceRows(
     allowedMatterIdsFilter = new Set<string>();
     allowedPmsCodesFilter = new Set<string>();
     for (const matterId of matterIds) {
-      const matter = store.matters.find((m) => m.id === matterId && !m.mergedIntoId);
+      const matter = matters.find((m) => m.id === matterId && !m.mergedIntoId);
       if (
         !matter ||
         !canPersonAccessMatter(matter, actor.id, actor, {
-          allPeople: store.people,
+          allPeople: people,
           teams: store.teams,
           tokenRoles,
         })
@@ -374,10 +422,10 @@ export function getMatterFinanceRows(
  *
  * Requires `finance:view_matter` and fails closed on unlinked PMS matters.
  */
-export function getMyFinanceFigures(
+export async function getMyFinanceFigures(
   actorInput: FinanceActorInput,
-): MyFinanceFiguresResult | ActionDenied {
-  const auth = verifyFinanceActorAndPermission(actorInput, 'finance:view_matter');
+): Promise<MyFinanceFiguresResult | ActionDenied> {
+  const auth = await verifyFinanceActorAndPermission(actorInput, 'finance:view_matter');
   if (!auth.ok) return auth;
 
   const {
@@ -454,10 +502,10 @@ export function getMyFinanceFigures(
  *
  * Requires `finance:view`.
  */
-export function getFirmFinance(
+export async function getFirmFinance(
   actorInput: FinanceActorInput,
-): FirmFinanceResult | ActionDenied {
-  const auth = verifyFinanceActorAndPermission(actorInput, 'finance:view');
+): Promise<FirmFinanceResult | ActionDenied> {
+  const auth = await verifyFinanceActorAndPermission(actorInput, 'finance:view');
   if (!auth.ok) return auth;
 
   const { store, hiddenPmsMatterCodes, visiblePmsLinks } = auth;

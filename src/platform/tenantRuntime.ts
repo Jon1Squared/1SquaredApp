@@ -16,6 +16,8 @@ import {
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
+  TenantMatterRepository,
+  TenantPartyRepository,
   validateExtensionManifest,
   type ExtensionManifest,
   type TenantConfiguration,
@@ -709,6 +711,74 @@ export function resolveCurrentTenantContext(
     environment: cfg.environment,
     correlationId: resolveRequestCorrelationId(actor.correlationId, 'req'),
     untrustedRequestTenantOverride: actor.untrustedRequestTenantOverride,
+    configuredPostgresHost: cfg.database?.dedicatedServerHost,
+    configuredKeyVault: cfg.keyVault
+      ? {
+          vaultName: cfg.keyVault.vaultName,
+          vaultUri: cfg.keyVault.vaultUri,
+        }
+      : undefined,
+  });
+}
+
+declare global {
+  var __oneSquaredPartyRepo: TenantPartyRepository | undefined;
+  var __oneSquaredMatterRepo: TenantMatterRepository | undefined;
+}
+
+export function getPartyRepository(): TenantPartyRepository {
+  if (!global.__oneSquaredPartyRepo) {
+    global.__oneSquaredPartyRepo = new TenantPartyRepository();
+  }
+  return global.__oneSquaredPartyRepo;
+}
+
+export function getMatterRepository(): TenantMatterRepository {
+  if (!global.__oneSquaredMatterRepo) {
+    global.__oneSquaredMatterRepo = new TenantMatterRepository();
+  }
+  return global.__oneSquaredMatterRepo;
+}
+
+export function createVerifiedTenantContext(
+  claims: {
+    sub: string;
+    tenantId: string;
+    name?: string;
+    email?: string;
+    upn?: string;
+    roles?: readonly string[];
+    groups?: readonly string[];
+    entraObjectId?: string;
+    entraTenantId?: string;
+    mfaVerified?: boolean;
+    correlationId?: string;
+  },
+  configOverride?: Pick<
+    TenantConfiguration,
+    'tenantId' | 'hostingMode' | 'environment' | 'branding' | 'keyVault' | 'database'
+  >,
+): TenantContext {
+  const cfg = configOverride ?? getActiveTenantConfiguration();
+  return resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: claims.sub,
+      tenantId: claims.tenantId,
+      name: claims.name ?? claims.sub,
+      email:
+        claims.email ??
+        `${claims.sub.toLowerCase()}@${claims.tenantId}.local`,
+      ...(claims.upn ? { upn: claims.upn } : {}),
+      roles: claims.roles ? [...claims.roles] : [],
+      ...(claims.groups ? { groups: [...claims.groups] } : {}),
+      ...(claims.entraObjectId ? { entraObjectId: claims.entraObjectId } : {}),
+      ...(claims.entraTenantId ? { entraTenantId: claims.entraTenantId } : {}),
+      mfaVerified: claims.mfaVerified ?? false,
+    },
+    hostingMode: cfg.hostingMode,
+    environment: cfg.environment,
+    correlationId: resolveRequestCorrelationId(claims.correlationId, 'req'),
     configuredPostgresHost: cfg.database?.dedicatedServerHost,
     configuredKeyVault: cfg.keyVault
       ? {
