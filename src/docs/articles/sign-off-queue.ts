@@ -6,9 +6,9 @@ export const signOffQueueArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'Who can approve or discuss partner sign-off items, how matter access and assigned-partner checks work, and how the no-self-approval rule is enforced.',
-  updated: '2026-11-07',
+  updated: '2026-11-11',
   body: `
-The **Partner sign-offs & approvals** queue on the Partner and Managing Partner Home workspaces surfaces items that require partner authorisation, such as matter opening approvals on higher-risk instructions, write-off requests over a fee cap, and undertakings.
+The **Partner sign-offs & approvals** queue on the Partner and Managing Partner Home workspaces surfaces items that require partner authorisation, such as matter opening approvals on higher-risk instructions, write-off requests over a fee cap, and undertakings. Sign-off records are stored in per-tenant PostgreSQL (\`public.sign_offs\` in \`TenantTaskWorkflowRepository\`, \`0010_intake_quotes_tasks_expand\`, \`S0-17a\`) and commit atomically in the same PostgreSQL transaction as follow-up tasks (\`public.tasks\`) and \`public.audit_entries\`.
 
 ## 1. Who can approve or request discussion (\`signoff:approve\`)
 

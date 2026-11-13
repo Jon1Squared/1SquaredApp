@@ -35,6 +35,9 @@ import { buildSystemJobTenantContext } from './lib/systemJobTenantContext';
 const VALID_MODULES = new Set<ImportableStoreModule>([
   'parties',
   'matters',
+  'intake',
+  'quotes',
+  'tasks',
   'documents',
   'document-store',
   'key-dates',
@@ -47,8 +50,8 @@ function printUsage(): void {
       'Usage: import-store [--modules <csv>] [--store-path <path>] [--clear] [--help]',
       '',
       'Options:',
-      '  --modules <csv>      Comma-separated modules to import (default: parties,matters,documents,document-store,key-dates,audit)',
-      '                       Supported: parties (or directory), matters, documents, document-store, key-dates, audit',
+      '  --modules <csv>      Comma-separated modules to import (default: parties,matters,intake,quotes,tasks,documents,document-store,key-dates,audit)',
+      '                       Supported: parties (or directory), matters, intake, quotes (or intake-quotes), tasks (or tasks-workflows), documents, document-store, key-dates, audit',
       '  --store-path <path>  Optional JSON store file path to import instead of the active runtime store',
       '  --clear              Clear target PostgreSQL module tables for the tenant before importing (non-live only for audit)',
       '  --help, -h           Print usage and exit 0',
@@ -104,14 +107,16 @@ export function parseStoreImportCliArgs(argv: readonly string[]): {
         .split(',')
         .map((m) => m.trim())
         .filter(Boolean)
-        .map((m) => {
-          const normalized = m === 'directory' ? 'parties' : m;
-          if (!VALID_MODULES.has(normalized as ImportableStoreModule)) {
+        .flatMap((m): ImportableStoreModule[] => {
+          if (m === 'directory') return ['parties'];
+          if (m === 'intake-quotes') return ['intake', 'quotes'];
+          if (m === 'tasks-workflows') return ['tasks'];
+          if (!VALID_MODULES.has(m as ImportableStoreModule)) {
             throw new Error(
               `CLI_USAGE_ERROR: Unsupported import module "${m}". Expected one of: ${Array.from(VALID_MODULES).join(', ')}.`,
             );
           }
-          return normalized as ImportableStoreModule;
+          return [m as ImportableStoreModule];
         })
     : [...DEFAULT_MIGRATED_POSTGRES_MODULES];
 

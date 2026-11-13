@@ -7,7 +7,11 @@ import {
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
-import { getPartyRepository, resetAllDemoData } from '@/server/services';
+import {
+  getIntakeQuoteRepository,
+  getPartyRepository,
+  resetAllDemoData,
+} from '@/server/services';
 import { getStore, saveStore } from '@/server/store';
 import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from '@/server/visibility';
 import { testDataResetContext } from '@/test/testTenantContexts';
@@ -386,9 +390,14 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
   it('excludes a person created from a hidden enquiry from CRM matching and the response while matching a person created from a visible enquiry with the same name (R263, R291, R300)', async () => {
     const store = getStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+    const seedEnq = (
+      await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
+        testDataResetContext(),
+      )
+    )[0]!;
     // Create a private Draft enquiry owned by P-000001 (hidden from P-000002) and a routed enquiry assigned to P-000002 (visible to P-000002)
     const hiddenEnq = {
-      ...structuredClone(store.enquiries[0]!),
+      ...structuredClone(seedEnq),
       id: 'ENQ-HIDDEN-S006',
       reference: 'ENQ-HIDDEN-S006',
       status: 'Draft' as const,
@@ -401,7 +410,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
       lastName: 'HiddenEnquirer',
     };
     const visibleEnq = {
-      ...structuredClone(store.enquiries[0]!),
+      ...structuredClone(seedEnq),
       id: 'ENQ-VISIBLE-S006',
       reference: 'ENQ-VISIBLE-S006',
       status: 'Assigned' as const,
@@ -460,7 +469,10 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
         },
       ],
     };
-    store.enquiries.push(hiddenEnq, visibleEnq);
+    await getIntakeQuoteRepository().putEnquiries(testDataResetContext(), [
+      hiddenEnq,
+      visibleEnq,
+    ]);
     // Push the hidden-enquiry person BEFORE the visible-enquiry person so an unfiltered .find() would pick the hidden one
     store.people.push(hiddenEnqPerson, sameNameHiddenPerson, sameNameVisiblePerson);
     saveStore(store);
@@ -469,6 +481,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     }
 
     const visibility = buildRecordVisibility(store, feeEarner, {
+      enquiries: [hiddenEnq, visibleEnq],
       hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     });
     expect(visibility.canViewEnquiry(hiddenEnq)).toBe(false);

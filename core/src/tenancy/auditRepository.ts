@@ -139,6 +139,18 @@ export class TenantAuditRepository extends TenantScopedRepository {
       let maxExplicitAuNum = 0;
 
       for (const entry of entries) {
+        if (
+          !entry.recordType?.trim() ||
+          !entry.recordId?.trim() ||
+          !entry.action?.trim() ||
+          !entry.byId?.trim()
+        ) {
+          const valErr = new Error(
+            'TENANCY_AUDIT_WRITE_ERROR: Audit entry requires non-empty recordType, recordId, action, and byId.',
+          ) as Error & { code: string };
+          valErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
+          throw valErr;
+        }
         const trimmedExplicitId = entry.id?.trim();
         const id = trimmedExplicitId || (await this.nextAuditIdInTx(tx));
         if (trimmedExplicitId) {

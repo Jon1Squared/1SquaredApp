@@ -38,6 +38,7 @@ import { getStore, resetStore } from '@/server/store';
 import {
   getAuditRepository,
   getKeyDateRepository,
+  getTaskWorkflowRepository,
   runAsTestActor,
   testTenantCtx,
 } from '@/server/testSupport/auditTestSupport';
@@ -709,7 +710,11 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       const unconfirmedKd = keyDatesNow.find(
         (k) => k.status !== 'confirmed',
       )!;
-      const tasksBefore = store.tasks.length;
+      const tasksBefore = (
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(
+          testTenantCtx('P-000001'),
+        )
+      ).length;
       const ackUnconfirmed = await runAsTestActor(
         unconfirmedKd.responsiblePersonIds[0]!,
         () =>
@@ -719,7 +724,13 @@ describe('Key Dates permissions, config schema validation, and extension contrac
           ),
       );
       expect(ackUnconfirmed.ok).toBe(false);
-      expect(store.tasks.length).toBe(tasksBefore);
+      expect(
+        (
+          await getTaskWorkflowRepository().listAllTasksUnfiltered(
+            testTenantCtx('P-000001'),
+          )
+        ).length,
+      ).toBe(tasksBefore);
     });
   });
 

@@ -82,9 +82,11 @@ import {
   getAppSnapshot,
   getClientPmsViewBundle,
   getEmployeeDetailsForUser,
+  getIntakeQuoteRepository,
   getMatterPmsViewBundle,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
   linkPmsRecord,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
@@ -2099,12 +2101,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
         const store = getStore();
+        const r123Ctx = testDataResetContext();
+        const templateTask = (await getTaskWorkflowRepository().listAllTasksUnfiltered(r123Ctx))[0]!;
+        const firstMatter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(r123Ctx))[0]!;
         // Create an unassigned open task on a team (TM-000004 Corporate) that P-000001 (Real Estate Partner with task:claim_any) is not a member of, while P-000002 (Real Estate Fee Earner without task:claim_any) is also not a member of
         const corpTeam =
           store.teams.find((t) => !t.memberIds.includes('P-000001') && !t.memberIds.includes('P-000002')) ??
           store.teams[0]!;
         const unassignedCorpTask: Task = {
-          ...store.tasks[0]!,
+          ...templateTask,
           id: 'TSK-R123-CLAIM-ANY',
           reference: 'TSK-R123',
           title: 'Unassigned Corporate Task',
@@ -2117,11 +2122,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           linkedRecords: [
             {
               recordType: 'matter',
-              recordId: store.matters[0]!.id,
+              recordId: firstMatter.id,
             },
           ],
         };
-        store.tasks.push(unassignedCorpTask);
+        await getTaskWorkflowRepository().putTask(r123Ctx, unassignedCorpTask);
 
         // R123: Partner P-000001 holds task:claim_any and sees canTakeByTaskId['TSK-R123-CLAIM-ANY'] === true even though not in corpTeam; Fee Earner P-000002 does not hold task:claim_any and sees false
         const partnerSnap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
@@ -2541,8 +2546,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
 
       // 3. No self-approval even when actor holds signoff:approve and assignedPartnerId matches or is null
-      const item1 = store.signOffs.find((s) => s.id === 'SO-000001')!;
+      let item1 = (await getTaskWorkflowRepository().getSignOffById(ctx, 'SO-000001', { includeRestricted: true }))!;
       item1.requestedById = 'P-000001';
+      await getTaskWorkflowRepository().putSignOff(ctx, item1);
       const selfApprove = await runAsTestActor('P-000001', () =>
         approveSignOff('SO-000001', 'P-000001'),
       );
@@ -2555,6 +2561,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
       expect(isActionDenied(selfDiscuss)).toBe(true);
       item1.requestedById = 'P-000002';
+      await getTaskWorkflowRepository().putSignOff(ctx, item1);
 
       // 4. Restricted linked matter that the assigned partner cannot access is denied
       const linkedMatter = (await getMatterRepository().getMatterById<Matter>(ctx, item1.matterId!))!;
@@ -2583,6 +2590,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         discussSignOff('SO-000001', 'Need client confirmation first', 'P-000001'),
       );
       expect(isActionDenied(discRes)).toBe(false);
+      item1 = (await getTaskWorkflowRepository().getSignOffById(ctx, 'SO-000001', { includeRestricted: true }))!;
       expect(item1.status).toBe('Discussing');
       const discAudit = (await auditSinceTestStart()).find(
         (a) =>
@@ -2593,10 +2601,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 6. When assignedPartnerId is null, any holder of signoff:approve (who is not requestedById and can access the matter) may approve
       item1.assignedPartnerId = null;
+      await getTaskWorkflowRepository().putSignOff(ctx, item1);
       const unassignedApprove = await runAsTestActor('P-000038', () =>
         approveSignOff('SO-000001', 'P-000038'),
       );
       expect(isActionDenied(unassignedApprove)).toBe(false);
+      item1 = (await getTaskWorkflowRepository().getSignOffById(ctx, 'SO-000001', { includeRestricted: true }))!;
       expect(item1.status).toBe('Approved');
 
       // 7. Re-approving or discussing an already Approved sign-off is denied
@@ -2611,17 +2621,19 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('1c (B3). anonymiseExpiredEnquiries requires enquiry:anonymise and enforces isReadyForRetentionAnonymisation for single enquiries as well as bulk', async () => {
-      const store = getStore();
+      const ctx = testDataResetContext();
       // Fee earner (P-000002) is denied enquiry:anonymise
       await expect(
         runAsTestActor('P-000002', () => anonymiseExpiredEnquiries('P-000002')),
       ).rejects.toThrow(AuthorisationError);
 
       // Find a closed unconverted enquiry that is RECENT (not past retentionMonths)
-      const closedEnq = store.enquiries.find(
+      const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
+      let closedEnq = allEnquiries.find(
         (e) => e.status === 'Declined' && !e.anonymisedAt,
       )!;
       closedEnq.receivedAt = new Date().toISOString();
+      await getIntakeQuoteRepository().putEnquiry(ctx, closedEnq);
       const origFirstName = closedEnq.firstName;
 
       // Single-enquiry call with Risk & Compliance (P-000003) must NOT anonymise a recent closed enquiry (B3 regression)
@@ -2629,6 +2641,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         anonymiseExpiredEnquiries('P-000003', closedEnq.id),
       );
       expect(prematureCount).toBe(0);
+      closedEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, closedEnq.id, { includeRestricted: true }))!;
       expect(closedEnq.firstName).toBe(origFirstName);
       expect(closedEnq.anonymisedAt).toBeNull();
 
@@ -2636,10 +2649,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       const twoYearsAgo = new Date();
       twoYearsAgo.setMonth(twoYearsAgo.getMonth() - 24);
       closedEnq.receivedAt = twoYearsAgo.toISOString();
+      await getIntakeQuoteRepository().putEnquiry(ctx, closedEnq);
       const expiredCount = await runAsTestActor('P-000003', () =>
         anonymiseExpiredEnquiries('P-000003', closedEnq.id),
       );
       expect(expiredCount).toBe(1);
+      closedEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, closedEnq.id, { includeRestricted: true }))!;
       expect(closedEnq.firstName).toBe('Anonymised');
       expect(closedEnq.anonymisedAt).toBeTruthy();
     });
@@ -3239,9 +3254,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('enforces reopenEnquiryRecord rules and preserves unassigned status as New when unassigned (B8)', async () => {
       try {
-        await resetAllDemoData('P-000001', testDataResetContext());
+        const ctx = testDataResetContext();
+        await resetAllDemoData('P-000001', ctx);
         const store = getStore();
-        const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
+        const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
+        const openEnq = allEnquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
 
         // 1. Reopening an already-open enquiry is denied
         const reopenOpenDenied = await runAsTestActor('P-000001', () =>
@@ -3250,8 +3267,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(reopenOpenDenied)).toBe(true);
 
         // 2. Reopening a Converted enquiry is denied
-        const convertedEnq = store.enquiries.find((e) => e.status === 'Converted') ?? openEnq;
+        const convertedEnq = allEnquiries.find((e) => e.status === 'Converted') ?? openEnq;
         convertedEnq.status = 'Converted';
+        await getIntakeQuoteRepository().putEnquiry(ctx, convertedEnq);
         const reopenConvertedDenied = await runAsTestActor('P-000001', () =>
           reopenEnquiryRecord(convertedEnq.id, 'P-000001'),
         );
@@ -3260,14 +3278,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         // 3. Prepare a closed (Declined) enquiry with assignedToId = null on team 0
         const team = store.teams.find((t) => t.leadIds.length > 0)!;
         const teamLeadId = team.leadIds[0]!;
-        const closedEnq = store.enquiries[0]!;
+        const closedEnq = allEnquiries[0]!;
         closedEnq.status = 'Declined';
         closedEnq.assignedToId = null;
         closedEnq.assignedTeamId = team.id;
         closedEnq.convertedMatterId = null;
+        await getIntakeQuoteRepository().putEnquiry(ctx, closedEnq);
 
         // Non-lead, non-assignee fee earner (who is not in Intake) cannot reopen
-        const ctx = testDataResetContext();
         const allPeople = await getPartyRepository().listAllPeople<Person>(ctx);
         const nonLeadFeeEarner = allPeople.find(
           (p) =>
@@ -3344,18 +3362,23 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         wallMatter.teamMemberIds = [];
         await getMatterRepository().putMatter(ctx, wallMatter, { expectedRowVersion: null });
 
-        const hiddenEnq = store.enquiries[0]!;
+        const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
+        const allQuotes = await getIntakeQuoteRepository().listAllQuotesUnfiltered(ctx);
+        const hiddenEnq = allEnquiries[0]!;
         hiddenEnq.status = 'Draft';
         hiddenEnq.createdById = 'P-000001';
         hiddenEnq.takenById = 'P-000001';
+        await getIntakeQuoteRepository().putEnquiry(ctx, hiddenEnq);
 
-        const quoteOnRestrictedMatter = store.quotes[0]!;
+        const quoteOnRestrictedMatter = allQuotes[0]!;
         quoteOnRestrictedMatter.convertedMatterId = wallMatter.id;
         quoteOnRestrictedMatter.linkedEnquiryId = null;
+        await getIntakeQuoteRepository().putQuote(ctx, quoteOnRestrictedMatter);
 
-        const quoteOnHiddenEnquiry = store.quotes[1]!;
+        const quoteOnHiddenEnquiry = allQuotes[1]!;
         quoteOnHiddenEnquiry.linkedEnquiryId = hiddenEnq.id;
         quoteOnHiddenEnquiry.convertedMatterId = null;
+        await getIntakeQuoteRepository().putQuote(ctx, quoteOnHiddenEnquiry);
 
         const feeEarnerSnap = await runAsTestActor('P-000002', () =>
           getAppSnapshot('P-000002'),
@@ -3368,7 +3391,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           feeEarnerSnap.quotes.some((q) => q.id === quoteOnHiddenEnquiry.id),
         ).toBe(false);
 
-        const existingQuote = store.quotes[0]!;
+        const existingQuote = allQuotes[0]!;
         await runAsTestActor(financeUser.id, async () => {
           expect(
             isActionDenied(
@@ -3515,18 +3538,21 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           session: verifiedActorSession,
         });
 
-        const sharedTask = store.tasks[0]!;
+        const allTasks = await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx);
+        const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
+        let sharedTask = allTasks[0]!;
         sharedTask.status = 'To do';
         sharedTask.assignedPersonId = 'P-000001';
         sharedTask.assignedPersonIds = ['P-000001', activeEmp.id];
+        await getTaskWorkflowRepository().putTask(ctx, sharedTask);
 
         // R270 & R293: findRecordsOwnedByLeavers finds multi-assignee tasks where leaver is in assignedPersonIds and labels roleField with assignedPersonIds
         const ownedBefore = findRecordsOwnedByLeavers(
           allPeople,
           allOrgs,
           allMatters,
-          store.tasks,
-          store.enquiries,
+          [sharedTask, ...allTasks.slice(1)],
+          allEnquiries,
           activeEmp.id,
         );
         const coOwnedTaskItem = ownedBefore.find(
@@ -3536,13 +3562,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(coOwnedTaskItem?.roleField).toBe('assignedPersonIds');
         expect(coOwnedTaskItem?.roleLabel).toBe('Co-assignee');
 
-        const closedEnq = store.enquiries[0]!;
+        let closedEnq = allEnquiries[0]!;
         closedEnq.status = 'Declined';
         closedEnq.assignedToId = activeEmp.id;
+        await getIntakeQuoteRepository().putEnquiry(ctx, closedEnq);
 
-        const openEnq = store.enquiries[1]!;
+        let openEnq = allEnquiries[1]!;
         openEnq.status = 'Assigned';
         openEnq.assignedToId = activeEmp.id;
+        await getIntakeQuoteRepository().putEnquiry(ctx, openEnq);
 
         const leaverAuditMark = Date.now();
         const okRes = await runWithActiveActorSession(
@@ -3596,10 +3624,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(leaverSyncJob?.status).toBe('succeeded');
 
         // Task assignedPersonIds updated
+        sharedTask = (await getTaskWorkflowRepository().getTaskById(ctx, sharedTask.id, { includeRestricted: true }))!;
         expect(sharedTask.assignedPersonIds).toContain(replacementEmp.id);
         expect(sharedTask.assignedPersonIds).not.toContain(activeEmp.id);
 
         // Closed enquiry untouched; open enquiry reassigned
+        closedEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, closedEnq.id, { includeRestricted: true }))!;
+        openEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, openEnq.id, { includeRestricted: true }))!;
         expect(closedEnq.assignedToId).toBe(activeEmp.id);
         expect(openEnq.assignedToId).toBe(replacementEmp.id);
 
@@ -3827,7 +3858,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBe(false);
 
         // 4. Refusals by permission key on assignEnquiryRecord, closeEnquiryRecord, logEnquiryContactRecord, sendEnquiryEmailRecord
-        const openEnq = store.enquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
+        const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
+        const openEnq = allEnquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
         financeUser.permissionOverrides = {
           grant: [],
           revoke: ['enquiry:assign'],
@@ -3883,9 +3915,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // 5 (R264, R292). saveEnquiryRecord refuses status or assignment changes on an existing non-draft enquiry
         // even when the actor holds enquiry:edit and only the specific action permission is revoked
-        const closedEnq = store.enquiries.find((e) => e.id !== openEnq.id)!;
+        openEnq.assignedToId = feeEarner.id;
+        await getIntakeQuoteRepository().putEnquiry(ctx, openEnq);
+        let closedEnq = allEnquiries.find((e) => e.id !== openEnq.id)!;
         closedEnq.status = 'Declined';
         closedEnq.assignedToId = feeEarner.id;
+        await getIntakeQuoteRepository().putEnquiry(ctx, closedEnq);
 
         await runAsTestActor(feeEarner.id, async () => {
           // 5a. Actor with enquiry:edit but enquiry:reopen revoked cannot reopen a closed enquiry via saveEnquiryRecord
@@ -3984,7 +4019,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             { firstName: 'Draft', lastName: 'Enquiry', summary: 'Draft summary' },
             { asDraft: true, byId: feeEarner.id },
           );
-          const draftEnq = draftEnqRes.enquiry!;
+          let draftEnq = draftEnqRes.enquiry!;
           const draftTaskRes = await saveTaskRecord(
             {
               title: 'Task on draft enquiry',
@@ -3999,12 +4034,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(draftTaskRes.task?.linkedRecords).toEqual([
             { recordType: 'enquiry', recordId: draftEnq.id },
           ]);
+          draftEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, draftEnq.id, { includeRestricted: true }))!;
           expect(draftEnq.status).toBe('Draft');
           expect(draftEnq.assignedToId).toBeNull();
 
           // Closed (Declined) unassigned enquiry is not auto-assigned or reopened when a task is linked to it (R293, R299)
           closedEnq.status = 'Declined';
           closedEnq.assignedToId = null;
+          await getIntakeQuoteRepository().putEnquiry(ctx, closedEnq);
           const closedTaskRes = await saveTaskRecord(
             {
               title: 'Task on declined enquiry',
@@ -4019,12 +4056,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(closedTaskRes.task?.linkedRecords).toEqual([
             { recordType: 'enquiry', recordId: closedEnq.id },
           ]);
+          closedEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, closedEnq.id, { includeRestricted: true }))!;
           expect(closedEnq.status).toBe('Declined');
           expect(closedEnq.assignedToId).toBeNull();
 
-          const routedNewEnq = store.enquiries.find((e) => e.id === openEnq.id)!;
+          let routedNewEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, openEnq.id, { includeRestricted: true }))!;
           routedNewEnq.status = 'New';
           routedNewEnq.assignedToId = null;
+          await getIntakeQuoteRepository().putEnquiry(ctx, routedNewEnq);
 
           // Actor without enquiry:assign does not auto-assign the enquiry
           feeEarner.permissionOverrides = {
@@ -4041,6 +4080,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             },
             feeEarner.id,
           );
+          routedNewEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, openEnq.id, { includeRestricted: true }))!;
           expect(routedNewEnq.assignedToId).toBeNull();
           expect(routedNewEnq.status).toBe('New');
 
@@ -4056,6 +4096,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             },
             feeEarner.id,
           );
+          routedNewEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, openEnq.id, { includeRestricted: true }))!;
           expect(routedNewEnq.assignedToId).toBe(feeEarner.id);
           expect(routedNewEnq.status).toBe('Assigned');
         });
@@ -4132,7 +4173,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expiresAt: new Date(Date.now() + 3600_000).toISOString(),
         });
 
-        const enqId = store.enquiries.find((e) => e.status !== 'Draft')!.id;
+        const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
+        const allQuotes = await getIntakeQuoteRepository().listAllQuotesUnfiltered(ctx);
+        const enqId = allEnquiries.find((e) => e.status !== 'Draft')!.id;
         const enqActionRes = await prepareEnquiryConversionAction(enqId, {
           createForBusiness: true,
         });
@@ -4147,7 +4190,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(enqSvcRes)).toBe(true);
 
-        const quoteId = store.quotes[0]!.id;
+        const quoteId = allQuotes[0]!.id;
         const quoteActionRes = await prepareQuoteConversionAction(quoteId);
         expect(isActionDenied(quoteActionRes)).toBe(true);
         const quoteSvcRes = await prepareQuoteConversionRecord(quoteId, 'P-000009');
@@ -4407,10 +4450,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(createdSameNameProspectOrg.conflictDecision?.outcome).toBe('Potential conflict');
           expect(createdSameNameProspectOrg.conflictDecision?.matchesCount).toBe(0);
           // R312: Quote conversion with a warning stores it on conflictDecision.warnings
-          expect(declinedByNameQuote.conflictDecision?.warnings).toContain(
+          const reloadedDeclinedByNameQuote = (await getIntakeQuoteRepository().getQuoteById(ctx, declinedByNameQuote.id, { includeRestricted: true }))!;
+          const reloadedAmberQuote = (await getIntakeQuoteRepository().getQuoteById(ctx, amberQuote.id, { includeRestricted: true }))!;
+          expect(reloadedDeclinedByNameQuote.conflictDecision?.warnings).toContain(
             "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
           );
-          expect(amberQuote.conflictDecision?.warnings).toEqual(
+          expect(reloadedAmberQuote.conflictDecision?.warnings).toEqual(
             amberConv.conflictWarnings,
           );
 
@@ -4420,7 +4465,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(linkedDeclinedRecheck.conflictBlocked).toBe(true);
 
           // 3. Enquiry conversion for a new business also records conflictDecision and audit entry, and keeps conflictDecision on the converted matter (R304)
-          const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
+          const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
+          const templateEnq = allEnquiries.find((e) => e.status !== 'Draft')!;
 
           // 3a. R307: An enquiry linked to a declined organisation is blocked on conversion, while an unlinked enquiry matching a declined organisation by name converts with the warning in conflictWarnings
           const linkedDeclinedEnq = (await saveEnquiryRecord(
@@ -4471,7 +4517,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             },
             { byId: 'P-000001' },
           )).organisation!;
-          const unlinkedDeclinedNameEnq = (await saveEnquiryRecord(
+          let unlinkedDeclinedNameEnq = (await saveEnquiryRecord(
             {
               channelId: templateEnq.channelId,
               firstName: 'Carys',
@@ -4500,6 +4546,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(unlinkedDeclinedNameEnqConv.conflictWarnings).toContain(
             "An organisation with this name has conflict status 'Conflict – declined'. Check whether it is the same client.",
           );
+          unlinkedDeclinedNameEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, unlinkedDeclinedNameEnq.id, { includeRestricted: true }))!;
           expect(unlinkedDeclinedNameEnq.conflictDecision?.outcome).toBe('Potential conflict');
           expect(unlinkedDeclinedNameEnq.conflictDecision?.matchesCount).toBe(0);
           // R312: Enquiry conversion with a warning stores it on conflictDecision.warnings
@@ -4518,6 +4565,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           restrictedMatter.teamMemberIds = [];
           await getMatterRepository().putMatter(ctx, restrictedMatter, { expectedRowVersion: null });
           unlinkedDeclinedNameEnq.convertedMatterId = restrictedMatter.id;
+          await getIntakeQuoteRepository().putEnquiry(ctx, unlinkedDeclinedNameEnq);
           try {
             const nonParticipantSnap = await runAsTestActor('P-000002', () =>
               getAppSnapshot('P-000002'),
@@ -4534,6 +4582,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           } finally {
             await getMatterRepository().putMatter(ctx, savedMatterSnap, { expectedRowVersion: null });
             unlinkedDeclinedNameEnq.convertedMatterId = prevConvertedMatterId;
+            await getIntakeQuoteRepository().putEnquiry(ctx, unlinkedDeclinedNameEnq);
           }
           // R311: Shared helper turns conflictWarnings into the user-visible notice for toast and new-matter banner
           expect(
@@ -4764,6 +4813,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(builtParties.some((p) => p.linkedRecordId === billPerson.id)).toBe(true);
 
         // 1. searchMatterConflicts finds instructingContactId, billingContactId, additionalClientIds, and person–organisation links
+        const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
         const matterMatches = searchMatterConflicts(
           {
             currentMatterId: null,
@@ -4802,7 +4852,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           },
           {
             matters: allMatters,
-            enquiries: store.enquiries,
+            enquiries: allEnquiries,
             people: allPeople,
             organisations: allOrgs,
             links: allLinks,
@@ -4848,7 +4898,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           allOrgs,
           allMatters,
           store.values,
-          store.enquiries,
+          allEnquiries,
           null,
           allLinks,
           () => true,
@@ -4894,7 +4944,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           {
             recordedAt: new Date().toISOString(),
             recordedById: 'P-000001',
-            enquiries: store.enquiries,
+            enquiries: allEnquiries,
             excludeEnquiryId: null,
             links: allLinks,
             canViewMatter: () => true,
@@ -5324,8 +5374,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).organisation!;
 
-        const store = getStore();
-        const enq = store.enquiries[0]!;
+        const ctx = testDataResetContext();
+        const enq = (await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx))[0]!;
         enq.linkedOrganisationId = mergedOrg.id;
         enq.referredToOrganisationId = mergedOrg.id;
         enq.referrerPersonId = mergedPerson.id;
@@ -5381,11 +5431,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ],
           knownOrganisations: [{ id: mergedOrg.id, formattedReasons: 'Duplicate Org' }],
         };
+        await getIntakeQuoteRepository().putEnquiry(ctx, enq);
 
         await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
         await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
 
-        const updatedEnq = getStore().enquiries.find((e) => e.id === enq.id)!;
+        const updatedEnq = (await getIntakeQuoteRepository().getEnquiryById(ctx, enq.id, { includeRestricted: true }))!;
         expect(updatedEnq.linkedOrganisationId).toBe(survivorOrg.id);
         expect(updatedEnq.referredToOrganisationId).toBe(survivorOrg.id);
         expect(updatedEnq.referrerPersonId).toBe(survivorPerson.id);
@@ -5398,10 +5449,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(updatedEnq.conflictSnapshot?.conflicts[1]?.href).toBe(
           `/organisations/${survivorOrg.id}`,
         );
-        expect(updatedEnq.conflictSnapshot?.knownPeople.map((kp) => kp.id)).toEqual([
+        expect(updatedEnq.conflictSnapshot?.knownPeople?.map((kp: { id: string }) => kp.id)).toEqual([
           survivorPerson.id,
         ]);
-        expect(updatedEnq.conflictSnapshot?.knownOrganisations.map((ko) => ko.id)).toEqual([
+        expect(updatedEnq.conflictSnapshot?.knownOrganisations?.map((ko: { id: string }) => ko.id)).toEqual([
           survivorOrg.id,
         ]);
       } finally {
@@ -5431,14 +5482,16 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).organisation!;
 
-        const quote = getStore().quotes[0]!;
+        const ctx = testDataResetContext();
+        const quote = (await getIntakeQuoteRepository().listAllQuotesUnfiltered(ctx))[0]!;
         quote.linkedOrganisationId = mergedOrg.id;
         quote.linkedPersonId = mergedPerson.id;
+        await getIntakeQuoteRepository().putQuote(ctx, quote);
 
         await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
         await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
 
-        const updatedQuote = getStore().quotes.find((q) => q.id === quote.id)!;
+        const updatedQuote = (await getIntakeQuoteRepository().getQuoteById(ctx, quote.id, { includeRestricted: true }))!;
         expect(updatedQuote.linkedOrganisationId).toBe(survivorOrg.id);
         expect(updatedQuote.linkedPersonId).toBe(survivorPerson.id);
       } finally {
@@ -5468,17 +5521,19 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).organisation!;
 
-        const task = getStore().tasks[0]!;
+        const ctx = testDataResetContext();
+        const task = (await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx))[0]!;
         task.linkedRecords = [
           { recordType: 'person', recordId: survivorPerson.id },
           { recordType: 'person', recordId: mergedPerson.id },
           { recordType: 'organisation', recordId: mergedOrg.id },
         ];
+        await getTaskWorkflowRepository().putTask(ctx, task);
 
         await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
         await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
 
-        const updatedTask = getStore().tasks.find((t) => t.id === task.id)!;
+        const updatedTask = (await getTaskWorkflowRepository().getTaskById(ctx, task.id, { includeRestricted: true }))!;
         expect(updatedTask.linkedRecords).toEqual([
           { recordType: 'person', recordId: survivorPerson.id },
           { recordType: 'organisation', recordId: survivorOrg.id },
@@ -5851,8 +5906,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         await getPartyRepository().putPerson(ctx, storeMergedPerson);
 
         await addNoteToRecord('person', mergedPerson.id, 'Merged person note', 'P-000004');
-        store.recentlyViewed['P-000001'] = [mergedPerson.id, survivorPerson.id, mergedOrg.id];
-        store.notifications.push({
+        await getTaskWorkflowRepository().putRecentlyViewedForUser(ctx, 'P-000001', [
+          mergedPerson.id,
+          survivorPerson.id,
+          mergedOrg.id,
+        ]);
+        await getTaskWorkflowRepository().putNotification(ctx, {
           id: 'NTF-MERGE-1',
           recipientId: 'P-000001',
           kind: 'enquiry_assigned',
@@ -5873,7 +5932,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
         await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
 
-        const updatedStore = getStore();
         const updatedNotes = await getPartyRepository().listAllNotes<import('@/domain/types').Note>(ctx);
         const updatedPeople = await getPartyRepository().listAllPeople<Person>(ctx);
         expect(
@@ -5892,11 +5950,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(updatedMergedPerson.createdFromEnquiryId).toBeNull();
         expect(updatedMergedPerson.mergedIntoId).toBe(survivorPerson.id);
 
-        expect(updatedStore.recentlyViewed['P-000001']).toEqual([
+        const updatedRv = await getTaskWorkflowRepository().getRecentlyViewedMap(ctx);
+        expect(updatedRv['P-000001']).toEqual([
           survivorPerson.id,
           survivorOrg.id,
         ]);
-        const updatedNotif = updatedStore.notifications.find((n) => n.id === 'NTF-MERGE-1')!;
+        const updatedNotif = (await getTaskWorkflowRepository().getNotificationById(ctx, 'NTF-MERGE-1'))!;
         expect(updatedNotif.recordId).toBe(survivorPerson.id);
         expect(updatedNotif.href).toBe(`/people/${survivorPerson.id}`);
 
@@ -5931,8 +5990,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(resetCtx))[0]!;
         matter.instructingContactId = mergedPerson.id;
         await getMatterRepository().putMatter(resetCtx, matter, { expectedRowVersion: null });
-        const enq = store.enquiries[0]!;
+        const enq = (await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(resetCtx))[0]!;
         enq.linkedPersonId = mergedPerson.id;
+        await getIntakeQuoteRepository().putEnquiry(resetCtx, enq);
 
         const tenantCfg = getActiveTenantConfiguration();
         const adminActor = (await getPartyRepository().getPersonById<Person>(resetCtx, 'P-000004'))!;
@@ -6048,13 +6108,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
         ).toBe(mergedPerson.id);
         clearStoreMemoryCache();
-        const reloadedAfterLoopFail = getStore();
+        getStore();
         expect(
           (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
         ).toBe(mergedPerson.id);
-        expect(reloadedAfterLoopFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId).toBe(
-          mergedPerson.id,
-        );
+        expect(
+          (await getIntakeQuoteRepository().getEnquiryById(ctx, enq.id, { includeRestricted: true }))?.linkedPersonId,
+        ).toBe(mergedPerson.id);
         expect(
           (await getPartyRepository().getPersonById<Person>(ctx, mergedPerson.id))?.mergedIntoId,
         ).toBeNull();
@@ -6090,8 +6150,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
         matter.instructingContactId = mergedPerson.id;
         await getMatterRepository().putMatter(ctx, matter, { expectedRowVersion: null });
-        const enq = store.enquiries[0]!;
+        const enq = (await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx))[0]!;
         enq.linkedPersonId = mergedPerson.id;
+        await getIntakeQuoteRepository().putEnquiry(ctx, enq);
         saveStore(store);
 
         repo.repointMergedEntityWithDelta = async () => {
@@ -6102,12 +6163,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).rejects.toThrow(/SIMULATED_PRE_SAVE_DOC_STEP_FAILURE/);
         repo.repointMergedEntityWithDelta = origRepoint;
 
-        const inMemoryAfterPreSaveFail = getStore();
+        getStore();
         expect(
           (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
         ).toBe(mergedPerson.id);
         expect(
-          inMemoryAfterPreSaveFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId,
+          (await getIntakeQuoteRepository().getEnquiryById(ctx, enq.id, { includeRestricted: true }))?.linkedPersonId,
         ).toBe(mergedPerson.id);
         expect(
           (await getPartyRepository().getPersonById<Person>(ctx, mergedPerson.id))?.mergedIntoId,
@@ -6115,12 +6176,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(await getPartyRepository().listAllMergeHistory(ctx)).toHaveLength(0);
 
         clearStoreMemoryCache();
-        const reloadedAfterPreSaveFail = getStore();
+        getStore();
         expect(
           (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
         ).toBe(mergedPerson.id);
         expect(
-          reloadedAfterPreSaveFail.enquiries.find((e) => e.id === enq.id)?.linkedPersonId,
+          (await getIntakeQuoteRepository().getEnquiryById(ctx, enq.id, { includeRestricted: true }))?.linkedPersonId,
         ).toBe(mergedPerson.id);
         expect(
           (await getPartyRepository().getPersonById<Person>(ctx, mergedPerson.id))?.mergedIntoId,
@@ -6149,8 +6210,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         )).person!;
 
         const store = getStore();
-        const enq = store.enquiries[0]!;
+        const ctx = testDataResetContext();
+        const enq = (await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx))[0]!;
         enq.linkedPersonId = mergedPerson.id;
+        await getIntakeQuoteRepository().putEnquiry(ctx, enq);
+        await linkPmsRecord('person', mergedPerson.id, 'PMS-R309', 'P-000004');
         saveStore(store);
 
         const priorSavedJson = global.__oneSquaredLastSavedStoreJson;
@@ -6977,7 +7041,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         // 2. R315: Mismatched clientCode or invoiceNumber from another matter returns FORBIDDEN and writes no note or task
         const notesBeforeR315 = (await getPartyRepository().listAllNotes(ctx)).length;
-        const tasksBeforeR315 = store.tasks.length;
+        const tasksBeforeR315 = (await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)).length;
         const mismatchedClientCc = await recordInvoiceCreditControlActionAction({
           invoiceNumber: 'PV/2026/0040',
           matterCode: 'HAR001-0003',
@@ -6991,7 +7055,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect(mismatchedClientCc.message).toMatch(/Client code does not match/i);
         }
         expect((await getPartyRepository().listAllNotes(ctx)).length).toBe(notesBeforeR315);
-        expect(store.tasks.length).toBe(tasksBeforeR315);
+        expect((await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)).length).toBe(tasksBeforeR315);
 
         const wrongMatterInvoiceCc = await recordInvoiceCreditControlActionAction({
           invoiceNumber: 'PV/2026/0021', // belongs to BAY001-0001, not HAR001-0003
@@ -7008,7 +7072,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           );
         }
         expect((await getPartyRepository().listAllNotes(ctx)).length).toBe(notesBeforeR315);
-        expect(store.tasks.length).toBe(tasksBeforeR315);
+        expect((await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)).length).toBe(tasksBeforeR315);
 
         // 2b. R337: An unlinked PMS code whose text equals the matterNumber of an accessible 1Squared matter returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note, and invalid amountGbp values are rejected
         const harLinkIdx = store.pmsLinks.findIndex(
@@ -7016,7 +7080,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(harLinkIdx).toBeGreaterThanOrEqual(0);
         const [removedHarLink] = store.pmsLinks.splice(harLinkIdx, 1);
-        const signOffsBeforeR337 = (store.signOffs ?? []).length;
+        const signOffsBeforeR337 = (await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length;
         try {
           const unlinkedBill = await requestMatterBillAction('HAR001-0003');
           expect(isActionDenied(unlinkedBill)).toBe(true);
@@ -7045,8 +7109,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expect(unlinkedCc.message).toBe('Matter not found or access denied.');
           }
 
-          expect(store.tasks.length).toBe(tasksBeforeR315);
-          expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+          expect((await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)).length).toBe(tasksBeforeR315);
+          expect((await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length).toBe(signOffsBeforeR337);
           expect((await getPartyRepository().listAllNotes(ctx)).length).toBe(notesBeforeR315);
         } finally {
           store.pmsLinks.splice(harLinkIdx, 0, removedHarLink!);
@@ -7060,7 +7124,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expect(badAmtRes.message).toMatch(/finite number greater than 0/i);
           }
         }
-        expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+        expect((await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length).toBe(signOffsBeforeR337);
 
         // 2c. R372: A linked matter code whose PMS matter is missing from the PMS database returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note
         store.pmsLinks.push({
@@ -7100,8 +7164,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expect(missingPmsCc.message).toBe('Matter not found or access denied.');
           }
 
-          expect(store.tasks.length).toBe(tasksBeforeR315);
-          expect((store.signOffs ?? []).length).toBe(signOffsBeforeR337);
+          expect((await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)).length).toBe(tasksBeforeR315);
+          expect((await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length).toBe(signOffsBeforeR337);
           expect((await getPartyRepository().listAllNotes(ctx)).length).toBe(notesBeforeR315);
         } finally {
           const idx = store.pmsLinks.findIndex((l) => l.id === 'PMSL-R372-MISSING-PMS');

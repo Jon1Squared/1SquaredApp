@@ -17,6 +17,7 @@ import {
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
 import {
+  getIntakeQuoteRepository,
   prepareEnquiryConversion,
   resetAllDemoData,
   saveMatterRecord,
@@ -484,7 +485,11 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
       expect(noAnswersSnapshot.overallRisk).toBeNull();
 
       // (b) Enquiry conversion (prepareEnquiryConversion + saveMatterRecord with sourceEnquiryId and no answers)
-      const routableEnquiry = store.enquiries.find(
+      const allEnquiries =
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
+          testDataResetContext(),
+        );
+      const routableEnquiry = allEnquiries.find(
         (e) => e.status !== 'Draft' && e.status !== 'Converted',
       )!;
       const prepRes = await prepareEnquiryConversion(
@@ -587,8 +592,8 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
       store.people,
       store.organisations,
       store.values,
-      store.enquiries,
-      store.quotes,
+      [],
+      [],
     );
     const pdfLines = buildMatterOpeningPdfLines(openingSnap).map((l) => l.text);
     const riskSectionLines = pdfLines.filter(

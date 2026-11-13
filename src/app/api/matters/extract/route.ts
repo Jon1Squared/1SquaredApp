@@ -15,9 +15,10 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import { AuthorisationError } from '@/domain/rbac';
-import type { Matter, Organisation, Person, PersonOrganisationLink } from '@/domain/types';
+import type { Enquiry, Matter, Organisation, Person, PersonOrganisationLink } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
+  getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
 } from '@/platform/tenantRuntime';
@@ -2537,15 +2538,18 @@ export const POST = guardedRoute(
       const tenantContext = guardedActor!.tenantContext;
       const partyRepo = getPartyRepository();
       const matterRepo = getMatterRepository();
-      const [allPeople, allOrganisations, allMatters] = await Promise.all([
+      const intakeRepo = getIntakeQuoteRepository();
+      const [allPeople, allOrganisations, allMatters, allEnquiries] = await Promise.all([
         partyRepo.listAllPeople<Person>(tenantContext),
         partyRepo.listAllOrganisations<Organisation>(tenantContext),
         matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
+        intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(tenantContext),
       ]);
       const actorPerson = allPeople.find((p) => p.id === byId) ?? null;
       const visibility = buildRecordVisibility(store, actorPerson, {
         people: allPeople,
         matters: allMatters,
+        enquiries: allEnquiries,
         hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
       });
       const visiblePeople = allPeople.filter(
@@ -2723,16 +2727,18 @@ export const POST = guardedRoute(
       }
 
       const latestStore = getStore();
-      const [latestPeople, latestOrganisations, latestLinks, latestMatters] =
+      const [latestPeople, latestOrganisations, latestLinks, latestMatters, latestEnquiries] =
         await Promise.all([
           partyRepo.listAllPeople<Person>(tenantContext),
           partyRepo.listAllOrganisations<Organisation>(tenantContext),
           partyRepo.listAllLinks<PersonOrganisationLink>(tenantContext),
           matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
+          intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(tenantContext),
         ]);
       const latestVisibility = buildRecordVisibility(latestStore, actorPerson, {
         people: latestPeople,
         matters: latestMatters,
+        enquiries: latestEnquiries,
         hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
       });
       const returnedOrganisations = latestOrganisations.filter(

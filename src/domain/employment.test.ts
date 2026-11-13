@@ -36,8 +36,10 @@ import { getStore, resetStore } from '../server/store';
 import {
   getAppSnapshot,
   getEmployeeDetailsForUser,
+  getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
   listAuditEntriesForRecord,
   logEmployeeRestrictedAccess,
   reassignLeaverOwnedRecords,
@@ -567,12 +569,14 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         );
 
         // Assign a person record to this leaver and test reassignment
-        const [beforePeople, beforeOrgs, beforeMatters] = await Promise.all([
+        const [beforePeople, beforeOrgs, beforeMatters, beforeTasks, beforeEnquiries] = await Promise.all([
           getPartyRepository().listAllPeople<Person>(testDataResetContext()),
           getPartyRepository().listAllOrganisations<Organisation>(
             testDataResetContext(),
           ),
           getMatterRepository().listAllMattersUnfiltered<Matter>(testDataResetContext()),
+          getTaskWorkflowRepository().listAllTasksUnfiltered(testDataResetContext()),
+          getIntakeQuoteRepository().listAllEnquiriesUnfiltered(testDataResetContext()),
         ]);
         beforePeople[0].relationshipOwnerId = leaverUpdated.id;
         await getPartyRepository().putPerson(
@@ -583,8 +587,8 @@ describe('Employee section, conversion paths, migration & permissions', () => {
           beforePeople,
           beforeOrgs,
           beforeMatters,
-          store.tasks,
-          store.enquiries,
+          beforeTasks,
+          beforeEnquiries,
           leaverUpdated.id,
         );
         expect(ownedBefore.length).toBeGreaterThan(0);
@@ -597,19 +601,21 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         expect(reassignRes.errors).toBeUndefined();
         expect(reassignRes.reassignedCount).toBeGreaterThan(0);
 
-        const [afterPeople, afterOrgs, afterMatters] = await Promise.all([
+        const [afterPeople, afterOrgs, afterMatters, afterTasks, afterEnquiries] = await Promise.all([
           getPartyRepository().listAllPeople<Person>(testDataResetContext()),
           getPartyRepository().listAllOrganisations<Organisation>(
             testDataResetContext(),
           ),
           getMatterRepository().listAllMattersUnfiltered<Matter>(testDataResetContext()),
+          getTaskWorkflowRepository().listAllTasksUnfiltered(testDataResetContext()),
+          getIntakeQuoteRepository().listAllEnquiriesUnfiltered(testDataResetContext()),
         ]);
         const ownedAfter = findRecordsOwnedByLeavers(
           afterPeople,
           afterOrgs,
           afterMatters,
-          store.tasks,
-          store.enquiries,
+          afterTasks,
+          afterEnquiries,
           leaverUpdated.id,
         );
         expect(ownedAfter.length).toBe(0);

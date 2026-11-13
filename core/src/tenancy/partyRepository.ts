@@ -13,12 +13,16 @@
  *    roll back atomically together.
  */
 
-import type { TenantContext } from '../api/index';
+import type {
+  FirmAuditEntryInput as AppendTenantAuditEntryInput,
+  TenantContext,
+} from '../api/index';
 import {
   TenantScopedRepository,
   toIsoString,
   type TenantSqlClient,
 } from './tenantScopedRepository';
+import { TenantAuditRepository } from './auditRepository';
 
 export interface TenantEmailEntry {
   id: string;
@@ -2024,59 +2028,476 @@ export class TenantPartyRepository extends TenantScopedRepository {
     });
   }
 
+  /**
+   * Atomically executes a person or organisation merge in a single PostgreSQL transaction (`S0-16`, `S0-17a`),
+   * repointing all references across `people`, `organisations`, `person_organisation_links`, `notes`,
+   * `matters`, `matter_parties`, `key_dates`, `document_links`, `enquiries`, `quotes`, `tasks`,
+   * `task_linked_records`, `notifications`, `sign_offs`, `recently_viewed`, `merge_history`, and `audit_entries`.
+   */
   public async executeMergeInTransaction(
     ctx: TenantContext,
     params: {
       recordType: 'person' | 'organisation';
-      survivor: TenantPersonRecord | TenantOrganisationRecord;
-      merged: TenantPersonRecord | TenantOrganisationRecord;
-      linksToUpsert: readonly TenantPersonOrganisationLinkRecord[];
-      linkIdsToDelete: readonly string[];
-      repointedSubsidiaries: readonly TenantOrganisationRecord[];
-      notesToRepoint: readonly TenantNoteRecord[];
-      mergeHistory: TenantMergeHistoryRecord;
+      survivorId?: string;
+      mergedId?: string;
+      survivor?: TenantPersonRecord | TenantOrganisationRecord;
+      merged?: TenantPersonRecord | TenantOrganisationRecord;
+      survivorPerson?: TenantPersonRecord;
+      mergedPerson?: TenantPersonRecord;
+      survivorOrganisation?: TenantOrganisationRecord;
+      mergedOrganisation?: TenantOrganisationRecord;
+      linksToUpsert?: readonly TenantPersonOrganisationLinkRecord[];
+      linkIdsToDelete?: readonly string[];
+      repointedSubsidiaries?: readonly TenantOrganisationRecord[];
+      notesToRepoint?: readonly TenantNoteRecord[];
+      mergeHistory?: TenantMergeHistoryRecord;
+      auditEntries?: readonly AppendTenantAuditEntryInput[];
     },
   ): Promise<void> {
+    const { recordType } = params;
+    const survivorPerson =
+      params.survivorPerson ??
+      (recordType === 'person'
+        ? (params.survivor as TenantPersonRecord | undefined)
+        : undefined);
+    const mergedPerson =
+      params.mergedPerson ??
+      (recordType === 'person'
+        ? (params.merged as TenantPersonRecord | undefined)
+        : undefined);
+    const survivorOrganisation =
+      params.survivorOrganisation ??
+      (recordType === 'organisation'
+        ? (params.survivor as TenantOrganisationRecord | undefined)
+        : undefined);
+    const mergedOrganisation =
+      params.mergedOrganisation ??
+      (recordType === 'organisation'
+        ? (params.merged as TenantOrganisationRecord | undefined)
+        : undefined);
+    const survivorId =
+      params.survivorId ??
+      survivorPerson?.id ??
+      survivorOrganisation?.id ??
+      params.mergeHistory?.survivorId ??
+      '';
+    const mergedId =
+      params.mergedId ??
+      mergedPerson?.id ??
+      mergedOrganisation?.id ??
+      params.mergeHistory?.mergedId ??
+      '';
+    if (!survivorId?.trim() || !mergedId?.trim() || survivorId === mergedId) {
+      throw new Error(
+        'PARTY_MERGE_VALIDATION_ERROR: Distinct survivorId and mergedId are required for executeMergeInTransaction.',
+      );
+    }
+
     await this.withTenantTransaction(ctx, async (tx) => {
-      if (params.recordType === 'person') {
-        await this.upsertPersonInTx(
-          tx,
-          ctx,
-          params.survivor as TenantPersonRecord,
+      // 1. Update survivor & tombstone merged party
+      if (recordType === 'person') {
+        if (survivorPerson) {
+          await this.upsertPersonInTx(tx, ctx, survivorPerson);
+        }
+        if (mergedPerson) {
+          await this.upsertPersonInTx(tx, ctx, {
+            ...mergedPerson,
+            mergedIntoId: survivorId,
+          });
+        } else {
+          await tx.query(
+            `UPDATE public.people
+             SET merged_into_id = $2, updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $3`,
+            [ctx.tenantId, survivorId, mergedId],
+          );
+          await tx.query(
+            `UPDATE public.person_emails
+             SET active = FALSE, updated_at = NOW()
+             WHERE tenant_id = $1 AND person_id = $2`,
+            [ctx.tenantId, mergedId],
+          );
+        }
+      } else {
+        if (survivorOrganisation) {
+          await this.upsertOrganisationInTx(tx, ctx, survivorOrganisation);
+        }
+        if (mergedOrganisation) {
+          await this.upsertOrganisationInTx(tx, ctx, {
+            ...mergedOrganisation,
+            mergedIntoId: survivorId,
+          });
+        } else {
+          await tx.query(
+            `UPDATE public.organisations
+             SET merged_into_id = $2, updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $3`,
+            [ctx.tenantId, survivorId, mergedId],
+          );
+        }
+        if (params.repointedSubsidiaries) {
+          for (const sub of params.repointedSubsidiaries) {
+            await this.upsertOrganisationInTx(tx, ctx, sub);
+          }
+        } else {
+          // Repoint child organisations' parent_organisation_id (avoiding self-parenting)
+          await tx.query(
+            `UPDATE public.organisations
+             SET parent_organisation_id = CASE WHEN id = $2 THEN NULL ELSE $2 END,
+                 updated_at = NOW()
+             WHERE tenant_id = $1 AND parent_organisation_id = $3`,
+            [ctx.tenantId, survivorId, mergedId],
+          );
+        }
+      }
+
+      // 2. Repoint person_organisation_links (deduplicating colliding links)
+      if (params.linkIdsToDelete || params.linksToUpsert) {
+        for (const linkId of params.linkIdsToDelete ?? []) {
+          await tx.query(
+            'DELETE FROM public.person_organisation_links WHERE tenant_id = $1 AND id = $2',
+            [ctx.tenantId, linkId],
+          );
+        }
+        for (const link of params.linksToUpsert ?? []) {
+          await this.upsertLinkInTx(tx, ctx, link);
+        }
+      } else if (recordType === 'person') {
+        await tx.query(
+          `DELETE FROM public.person_organisation_links l_merged
+           USING public.person_organisation_links l_surv
+           WHERE l_merged.tenant_id = $1
+             AND l_surv.tenant_id = $1
+             AND l_merged.person_id = $3
+             AND l_surv.person_id = $2
+             AND l_merged.organisation_id = l_surv.organisation_id
+             AND l_merged.is_current = l_surv.is_current`,
+          [ctx.tenantId, survivorId, mergedId],
         );
-        await this.upsertPersonInTx(
-          tx,
-          ctx,
-          params.merged as TenantPersonRecord,
+        await tx.query(
+          `UPDATE public.person_organisation_links
+           SET person_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND person_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
         );
       } else {
-        await this.upsertOrganisationInTx(
-          tx,
-          ctx,
-          params.survivor as TenantOrganisationRecord,
-        );
-        await this.upsertOrganisationInTx(
-          tx,
-          ctx,
-          params.merged as TenantOrganisationRecord,
-        );
-      }
-      for (const linkId of params.linkIdsToDelete) {
         await tx.query(
-          'DELETE FROM public.person_organisation_links WHERE tenant_id = $1 AND id = $2',
-          [ctx.tenantId, linkId],
+          `DELETE FROM public.person_organisation_links l_merged
+           USING public.person_organisation_links l_surv
+           WHERE l_merged.tenant_id = $1
+             AND l_surv.tenant_id = $1
+             AND l_merged.organisation_id = $3
+             AND l_surv.organisation_id = $2
+             AND l_merged.person_id = l_surv.person_id
+             AND l_merged.is_current = l_surv.is_current`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+        await tx.query(
+          `UPDATE public.person_organisation_links
+           SET organisation_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND organisation_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
         );
       }
-      for (const link of params.linksToUpsert) {
-        await this.upsertLinkInTx(tx, ctx, link);
+
+      // 3. Repoint notes
+      if (params.notesToRepoint) {
+        for (const note of params.notesToRepoint) {
+          await this.upsertNoteInTx(tx, ctx, note);
+        }
+      } else {
+        await tx.query(
+          `UPDATE public.notes
+           SET record_id = $2
+           WHERE tenant_id = $1 AND record_type = $3 AND record_id = $4`,
+          [ctx.tenantId, survivorId, recordType, mergedId],
+        );
       }
-      for (const sub of params.repointedSubsidiaries) {
-        await this.upsertOrganisationInTx(tx, ctx, sub);
+
+      // 4. Repoint matters & matter_parties
+      await tx.query(
+        `UPDATE public.matters
+         SET client_id = $2, updated_at = NOW()
+         WHERE tenant_id = $1 AND client_id = $3`,
+        [ctx.tenantId, survivorId, mergedId],
+      );
+      if (recordType === 'person') {
+        await tx.query(
+          `UPDATE public.matters
+           SET instructing_contact_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND instructing_contact_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+        await tx.query(
+          `UPDATE public.matters
+           SET billing_contact_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND billing_contact_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+        await tx.query(
+          `UPDATE public.matters
+           SET referrer_person_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND referrer_person_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+        await tx.query(
+          `UPDATE public.matter_parties
+           SET acting_solicitor_person_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND acting_solicitor_person_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+      } else {
+        await tx.query(
+          `UPDATE public.matters
+           SET referrer_organisation_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND referrer_organisation_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+        await tx.query(
+          `UPDATE public.matter_parties
+           SET acting_solicitor_organisation_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND acting_solicitor_organisation_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
       }
-      for (const note of params.notesToRepoint) {
-        await this.upsertNoteInTx(tx, ctx, note);
+      await tx.query(
+        `UPDATE public.matter_parties
+         SET entity_id = $2, updated_at = NOW()
+         WHERE tenant_id = $1 AND entity_type = $3 AND entity_id = $4`,
+        [ctx.tenantId, survivorId, recordType, mergedId],
+      );
+
+      // 6. Repoint documents & document_links
+      await tx.query(
+        `UPDATE public.documents
+         SET primary_client_id = CASE WHEN primary_client_id = $3 THEN $2 ELSE primary_client_id END,
+             recipient_party_id = CASE WHEN recipient_party_id = $3 THEN $2 ELSE recipient_party_id END
+         WHERE tenant_id = $1 AND (primary_client_id = $3 OR recipient_party_id = $3)`,
+        [ctx.tenantId, survivorId, mergedId],
+      );
+      await tx.query(
+        `DELETE FROM public.document_links dl_merged
+         USING public.document_links dl_surv
+         WHERE dl_merged.tenant_id = $1
+           AND dl_surv.tenant_id = $1
+           AND dl_merged.document_id = dl_surv.document_id
+           AND dl_merged.entity_type = $2
+           AND dl_surv.entity_type = $2
+           AND dl_merged.entity_id = $3
+           AND dl_surv.entity_id = $4`,
+        [ctx.tenantId, recordType, mergedId, survivorId],
+      );
+      await tx.query(
+        `UPDATE public.document_links
+         SET entity_id = $2
+         WHERE tenant_id = $1 AND entity_type = $3 AND entity_id = $4`,
+        [ctx.tenantId, survivorId, recordType, mergedId],
+      );
+
+      // 7. Repoint enquiries (`S0-17a`)
+      if (recordType === 'person') {
+        await tx.query(
+          `UPDATE public.enquiries
+           SET linked_person_id = CASE WHEN linked_person_id = $3 THEN $2 ELSE linked_person_id END,
+               referrer_person_id = CASE WHEN referrer_person_id = $3 THEN $2 ELSE referrer_person_id END,
+               updated_at = NOW()
+           WHERE tenant_id = $1 AND (linked_person_id = $3 OR referrer_person_id = $3)`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+      } else {
+        await tx.query(
+          `UPDATE public.enquiries
+           SET linked_organisation_id = CASE WHEN linked_organisation_id = $3 THEN $2 ELSE linked_organisation_id END,
+               referred_to_organisation_id = CASE WHEN referred_to_organisation_id = $3 THEN $2 ELSE referred_to_organisation_id END,
+               updated_at = NOW()
+           WHERE tenant_id = $1 AND (linked_organisation_id = $3 OR referred_to_organisation_id = $3)`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
       }
-      await this.upsertMergeHistoryInTx(tx, ctx, params.mergeHistory);
+      const enqSnapRes = await tx.query<{
+        tenant_id: string;
+        id: string;
+        conflict_snapshot_json: Record<string, unknown> | null;
+      }>(
+        `SELECT tenant_id, id, conflict_snapshot_json
+         FROM public.enquiries
+         WHERE tenant_id = $1 AND conflict_snapshot_json IS NOT NULL
+         FOR UPDATE`,
+        [ctx.tenantId],
+      );
+      for (const enqRow of enqSnapRes.rows) {
+        this.assertRowTenant(
+          ctx,
+          enqRow.tenant_id,
+          'enquiries.executeMergeInTransaction',
+        );
+        const snap = enqRow.conflict_snapshot_json;
+        if (!snap || typeof snap !== 'object') continue;
+        let snapChanged = false;
+        const clonedSnap = structuredClone(snap) as {
+          conflicts?: Array<{
+            recordType?: string;
+            recordId?: string;
+            href?: string;
+          }>;
+          knownPeople?: Array<{ id?: string }>;
+          knownOrganisations?: Array<{ id?: string }>;
+          searchedInput?: {
+            knownPeople?: Array<{ id?: string }>;
+            knownOrganisations?: Array<{ id?: string }>;
+          };
+        };
+        if (Array.isArray(clonedSnap.conflicts)) {
+          for (const hit of clonedSnap.conflicts) {
+            if (hit.recordId === mergedId) {
+              hit.recordId = survivorId;
+              if (typeof hit.href === 'string') {
+                hit.href = hit.href.split(mergedId).join(survivorId);
+              }
+              snapChanged = true;
+            }
+          }
+        }
+        if (recordType === 'person') {
+          for (const holder of [clonedSnap, clonedSnap.searchedInput]) {
+            if (holder && Array.isArray(holder.knownPeople)) {
+              const seen = new Set<string>();
+              const deduped: Array<{ id?: string }> = [];
+              for (const kp of holder.knownPeople) {
+                const nextId = kp.id === mergedId ? survivorId : kp.id;
+                if (kp.id === mergedId) {
+                  snapChanged = true;
+                }
+                if (typeof nextId === 'string' && seen.has(nextId)) {
+                  snapChanged = true;
+                  continue;
+                }
+                if (typeof nextId === 'string') {
+                  seen.add(nextId);
+                }
+                deduped.push({ ...kp, id: nextId });
+              }
+              holder.knownPeople = deduped;
+            }
+          }
+        }
+        if (recordType === 'organisation') {
+          for (const holder of [clonedSnap, clonedSnap.searchedInput]) {
+            if (holder && Array.isArray(holder.knownOrganisations)) {
+              const seen = new Set<string>();
+              const deduped: Array<{ id?: string }> = [];
+              for (const ko of holder.knownOrganisations) {
+                const nextId = ko.id === mergedId ? survivorId : ko.id;
+                if (ko.id === mergedId) {
+                  snapChanged = true;
+                }
+                if (typeof nextId === 'string' && seen.has(nextId)) {
+                  snapChanged = true;
+                  continue;
+                }
+                if (typeof nextId === 'string') {
+                  seen.add(nextId);
+                }
+                deduped.push({ ...ko, id: nextId });
+              }
+              holder.knownOrganisations = deduped;
+            }
+          }
+        }
+        if (snapChanged) {
+          await tx.query(
+            `UPDATE public.enquiries
+             SET conflict_snapshot_json = $3::jsonb, updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $2`,
+            [ctx.tenantId, enqRow.id, JSON.stringify(clonedSnap)],
+          );
+        }
+      }
+
+      // 8. Repoint quotes (`S0-17a`)
+      if (recordType === 'person') {
+        await tx.query(
+          `UPDATE public.quotes
+           SET client_person_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND client_person_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+      } else {
+        await tx.query(
+          `UPDATE public.quotes
+           SET client_organisation_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND client_organisation_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+      }
+
+      // 9. Repoint task_linked_records & tasks (`S0-17a`)
+      await tx.query(
+        `DELETE FROM public.task_linked_records tlr_merged
+         USING public.task_linked_records tlr_surv
+         WHERE tlr_merged.tenant_id = $1
+           AND tlr_surv.tenant_id = $1
+           AND tlr_merged.task_id = tlr_surv.task_id
+           AND tlr_merged.record_type = $2
+           AND tlr_surv.record_type = $2
+           AND tlr_merged.record_id = $3
+           AND tlr_surv.record_id = $4`,
+        [ctx.tenantId, recordType, mergedId, survivorId],
+      );
+      await tx.query(
+        `UPDATE public.task_linked_records
+         SET record_id = $4
+         WHERE tenant_id = $1 AND record_type = $2 AND record_id = $3`,
+        [ctx.tenantId, recordType, mergedId, survivorId],
+      );
+
+      // 10. Repoint notifications (`S0-17a`)
+      await tx.query(
+        `UPDATE public.notifications
+         SET record_id = $2,
+             href = REPLACE(href, $3, $2)
+         WHERE tenant_id = $1 AND record_id = $3`,
+        [ctx.tenantId, survivorId, mergedId],
+      );
+
+      // 11. Repoint recently_viewed (`S0-17a`)
+      const rvRes = await tx.query<{
+        tenant_id: string;
+        user_id: string;
+        items_json: string[] | null;
+      }>(
+        `SELECT tenant_id, user_id, items_json
+         FROM public.recently_viewed
+         WHERE tenant_id = $1 AND items_json ? $2
+         FOR UPDATE`,
+        [ctx.tenantId, mergedId],
+      );
+      for (const rvRow of rvRes.rows) {
+        this.assertRowTenant(ctx, rvRow.tenant_id, 'recently_viewed.executeMergeInTransaction');
+        const items = Array.isArray(rvRow.items_json) ? rvRow.items_json : [];
+        const deduped: string[] = [];
+        for (const item of items) {
+          const mapped = item === mergedId ? survivorId : item;
+          if (!deduped.includes(mapped)) {
+            deduped.push(mapped);
+          }
+        }
+        await tx.query(
+          `UPDATE public.recently_viewed
+           SET items_json = $3::jsonb, updated_at = NOW()
+           WHERE tenant_id = $1 AND user_id = $2`,
+          [ctx.tenantId, rvRow.user_id, JSON.stringify(deduped)],
+        );
+      }
+
+      // 12. Record merge_history & audit_entries in the same transaction
+      if (params.mergeHistory) {
+        await this.upsertMergeHistoryInTx(tx, ctx, params.mergeHistory);
+      }
+      if (params.auditEntries?.length) {
+        const auditRepo = new TenantAuditRepository();
+        await auditRepo.appendAuditEntries(ctx, params.auditEntries);
+      }
     });
   }
 

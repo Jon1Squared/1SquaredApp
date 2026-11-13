@@ -6,7 +6,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How non-live demo data reset and clean-deployment clear operations are protected by admin-only MFA permissions and audited, and how unconverted enquiry retention anonymisation is enforced.',
-  updated: '2026-11-10',
+  updated: '2026-11-11',
   body: `
 1Squared separates destructive environment data administration from routine firm configuration and enforces strict retention eligibility rules before personal data on closed enquiries can be anonymised.
 
@@ -25,7 +25,7 @@ Unconverted closed enquiries retain personal contact details only until the firm
 - **Permission required**: Running anonymisation—either in bulk from **Admin → Enquiry settings** or for an individual enquiry from the enquiry profile—requires \`enquiry:anonymise\`, granted to **Risk & Compliance (\`risk_compliance\`)** and **System Administrator (\`admin\`)**. The single-enquiry **Anonymise** button is hidden when the signed-in user lacks \`enquiry:anonymise\`.
 - **Retention period enforced on every path**: \`anonymiseExpiredEnquiries\` always evaluates \`isReadyForRetentionAnonymisation(enquiry, retentionMonths, now)\`, whether called in bulk or with a specific enquiry ID. An open enquiry, a converted enquiry, or a closed enquiry whose \`receivedAt\` date has not yet passed the retention cutoff is never anonymised early.
 - **Clear user feedback**: If a user triggers single-enquiry anonymisation before the retention period has elapsed, 1Squared leaves the record untouched and displays *"Not yet due for anonymisation (retention period ends …)"* rather than a success message.
-- **What is removed and retained**: When an eligible enquiry is anonymised, 1Squared scrubs the enquirer’s name, email, phone number, postal address, other named parties, and notes, while preserving the practice area, intake channel, dates, and closure outcome for management reporting, and records a \`Privacy retention anonymisation\` audit entry.
+- **What is removed and retained**: When an eligible enquiry is anonymised, \`TenantIntakeQuoteRepository.anonymiseExpiredEnquiries\` (\`S0-17a\`) scrubs the enquirer’s name, email, phone number, postal address, other named parties, and notes in \`public.enquiries\` while preserving the practice area, intake channel, dates, and closure outcome for management reporting, and writes the \`Privacy retention anonymisation\` entry into \`public.audit_entries\` in the same PostgreSQL transaction.
 
 ## 3. Administrative saves for lists, custom fields, teams & PMS links (\`admin:access\` and \`finance:manage_links\`)
 

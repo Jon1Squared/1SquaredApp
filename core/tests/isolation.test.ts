@@ -91,10 +91,12 @@ import {
   flagMatterWriteOff,
   getAppSnapshot,
   getClientPmsViewBundle,
+  getIntakeQuoteRepository,
   getKeyDateExceptionsReportRecord,
   getMatterPmsViewBundle,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
   liftMatterRestriction,
   listAuditEntriesForRecord,
   listFirmAuditEntriesPage,
@@ -1659,7 +1661,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(unconfiguredRes.errors).toBeUndefined();
       expect(unconfiguredRes.matter).not.toBeNull();
-      const unconfiguredTask = store.tasks.find(
+      const unconfiguredTask = (
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(
+          testTenantCtx(carys.id),
+        )
+      ).find(
         (t) =>
           t.linkedRecords.some((r) => r.recordId === baseMatter.id) &&
           t.title.includes('Unconfigured Conflict Review Matter'),
@@ -1706,7 +1712,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(staffReferredRes.errors).toBeUndefined();
       expect(staffReferredRes.matter).not.toBeNull();
       expect(staffReferredRes.matter!.isStaffMatter).toBe(true);
-      const staffTask = store.tasks.find((t) =>
+      const staffTask = (
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(
+          testTenantCtx(carys.id),
+        )
+      ).find((t) =>
         t.linkedRecords.some((r) => r.recordId === staffReferredRes.matter!.id),
       );
       expect(staffTask).toBeDefined();
@@ -3206,7 +3216,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ),
       );
       expect(result.matter).not.toBeNull();
-      const createdTask = store.tasks.find(
+      const createdTask = (
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(
+          testTenantCtx(feeEarner.id),
+        )
+      ).find(
         (t) =>
           t.linkedRecords.some(
             (lr) => lr.recordType === 'matter' && lr.recordId === result.matter!.id,
@@ -3276,7 +3290,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(billRes)).toBe(false);
       if (!isActionDenied(billRes)) {
         expect(billRes.ok).toBe(true);
-        const billingTask = store.tasks.find((t) => t.id === billRes.taskId);
+        const billingTask = await getTaskWorkflowRepository().getTaskById(
+          testTenantCtx('P-000001'),
+          billRes.taskId!,
+          { includeRestricted: true },
+        );
         expect(billingTask).toBeDefined();
         expect(billingTask?.assignedPersonId).toBeNull();
       }
@@ -3287,7 +3305,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(writeOffRes)).toBe(false);
       if (!isActionDenied(writeOffRes)) {
         expect(writeOffRes.ok).toBe(true);
-        const signOff = store.signOffs.find((s) => s.id === writeOffRes.signOffId);
+        const signOff = await getTaskWorkflowRepository().getSignOffById(
+          testTenantCtx('P-000001'),
+          writeOffRes.signOffId!,
+          { includeRestricted: true },
+        );
         expect(signOff).toBeDefined();
         expect(signOff?.assignedPartnerId).toBeNull();
       }
@@ -3307,7 +3329,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(ccRes)).toBe(false);
       if (!isActionDenied(ccRes)) {
         expect(ccRes.ok).toBe(true);
-        const ccTask = store.tasks.find((t) => t.id === ccRes.taskId);
+        const ccTask = await getTaskWorkflowRepository().getTaskById(
+          testTenantCtx('P-000001'),
+          ccRes.taskId!,
+          { includeRestricted: true },
+        );
         expect(ccTask).toBeDefined();
         expect(ccTask?.assignedPersonId).toBeNull();
       }
@@ -3650,7 +3676,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           !(p.roles ?? []).includes('risk_compliance'),
       )!;
       const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
-      const baseEnquiry = store.enquiries[0]!;
+      const partnerCtx = testTenantCtx(partner.id);
+      const baseEnquiry = (
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(partnerCtx)
+      )[0]!;
 
       // Create a restricted staff matter invisible to feeEarner
       const r170StaffMatter = {
@@ -3666,43 +3695,42 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         teamMemberIds: [partner.id],
       };
       await getMatterRepository().putMatter(
-        testTenantCtx(partner.id),
+        partnerCtx,
         r170StaffMatter,
         { expectedRowVersion: null, sqlRestrictedAccessUserIds: [partner.id] },
       );
 
-      // Create an enquiry converted into that restricted staff matter
-      store.enquiries.push({
-        ...structuredClone(baseEnquiry),
-        id: 'ENQ-R170-STAFF',
-        reference: 'ENQ-R170-STAFF',
-        status: 'Converted',
-        firstName: 'Private',
-        lastName: 'StaffCaller',
-        callingOnBehalfOf: 'SecretStaffOrg LLP',
-        otherPartiesNamed: 'HiddenEnquiryOpponent Ltd',
-        summary: 'Confidential disciplinary advice',
-        convertedMatterId: 'M-R170-STAFF',
-        createdById: partner.id,
-        createdAt: new Date().toISOString(),
-        takenById: partner.id,
-      });
-
-      // Also create a personal Draft enquiry belonging to partner (invisible to feeEarner)
-      store.enquiries.push({
-        ...structuredClone(baseEnquiry),
-        id: 'ENQ-R170-DRAFT',
-        reference: 'ENQ-R170-DRAFT',
-        status: 'Draft',
-        firstName: 'DraftOnly',
-        lastName: 'PrivateEnquirer',
-        summary: 'Unpublished personal draft enquiry',
-        convertedMatterId: null,
-        createdById: partner.id,
-        createdAt: new Date().toISOString(),
-        takenById: partner.id,
-      });
-      saveStore(store);
+      // Create an enquiry converted into that restricted staff matter and a personal Draft enquiry belonging to partner
+      await getIntakeQuoteRepository().putEnquiries(partnerCtx, [
+        {
+          ...structuredClone(baseEnquiry),
+          id: 'ENQ-R170-STAFF',
+          reference: 'ENQ-R170-STAFF',
+          status: 'Converted',
+          firstName: 'Private',
+          lastName: 'StaffCaller',
+          callingOnBehalfOf: 'SecretStaffOrg LLP',
+          otherPartiesNamed: 'HiddenEnquiryOpponent Ltd',
+          summary: 'Confidential disciplinary advice',
+          convertedMatterId: 'M-R170-STAFF',
+          createdById: partner.id,
+          createdAt: new Date().toISOString(),
+          takenById: partner.id,
+        },
+        {
+          ...structuredClone(baseEnquiry),
+          id: 'ENQ-R170-DRAFT',
+          reference: 'ENQ-R170-DRAFT',
+          status: 'Draft',
+          firstName: 'DraftOnly',
+          lastName: 'PrivateEnquirer',
+          summary: 'Unpublished personal draft enquiry',
+          convertedMatterId: null,
+          createdById: partner.id,
+          createdAt: new Date().toISOString(),
+          takenById: partner.id,
+        },
+      ]);
 
       const res = await runAsTestActor(feeEarner.id, () =>
         runMatterConflictSearchRecord(
@@ -3764,9 +3792,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           !(p.roles ?? []).includes('admin') &&
           !(p.roles ?? []).includes('risk_compliance'),
       )!;
-      const baseEnquiry = store.enquiries[0]!;
+      const partnerCtx = testTenantCtx(partner.id);
+      const baseEnquiry = (
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(partnerCtx)
+      )[0]!;
 
-      store.enquiries.push({
+      await getIntakeQuoteRepository().putEnquiry(partnerCtx, {
         ...structuredClone(baseEnquiry),
         id: 'ENQ-R172-DRAFT',
         reference: 'ENQ-R172-DRAFT',
@@ -5004,7 +5035,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           !(p.roles ?? []).includes('risk_compliance'),
       )!;
       const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
-      const baseEnquiry = store.enquiries[0]!;
+      const partnerCtx = testTenantCtx(partner.id);
+      const baseEnquiry = (
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(partnerCtx)
+      )[0]!;
       const prospectiveStatusId = store.values.find(
         (v) =>
           v.listKey === 'matter_status' &&
@@ -5063,7 +5097,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // Seed a restricted enquiry invisible to feeEarner so the party produces a restricted conflict match
-      store.enquiries.push({
+      await getIntakeQuoteRepository().putEnquiry(partnerCtx, {
         ...structuredClone(baseEnquiry),
         id: 'ENQ-R181-RESTRICTED',
         reference: 'ENQ-R181-RESTRICTED',
@@ -6782,18 +6816,21 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           namedPartner.id,
         ),
       );
-      store.signOffs.unshift({
-        id: 'SO-WALLED-01',
-        kind: 'write_off',
-        title: 'Walled write-off',
-        matterNumber: wallMatter.matterNumber,
-        matterId: wallMatter.id,
-        subtitle: 'Walled matter write-off',
-        requestedById: namedPartner.id,
-        requestedAt: nowIso,
-        assignedPartnerId: unnamedPartner.id,
-        status: 'Pending',
-      });
+      await getTaskWorkflowRepository().putSignOff(
+        testTenantCtx(namedPartner.id),
+        {
+          id: 'SO-WALLED-01',
+          kind: 'write_off',
+          title: 'Walled write-off',
+          matterNumber: wallMatter.matterNumber,
+          matterId: wallMatter.id,
+          subtitle: 'Walled matter write-off',
+          requestedById: namedPartner.id,
+          requestedAt: nowIso,
+          assignedPartnerId: unnamedPartner.id,
+          status: 'Pending',
+        },
+      );
 
       // Revoke matter:restricted:access on adminPerson to test admin without matter:restricted:access
       adminPerson.permissionOverrides = {
@@ -7083,7 +7120,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveQuoteAction({
             clientType: 'prospect',
             prospectName: 'Cross Tenant',
-            practiceAreaId: store.quotes[0]!.practiceAreaId,
+            practiceAreaId: 'work_type.real_estate_and_property',
             scope: 'Scope',
             feeBasis: 'Fixed fee',
             feeAmountExVat: 1000,
@@ -7147,12 +7184,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expiresAt,
       });
 
-      const tasksBefore = store.tasks.length;
-      const enquiriesBefore = store.enquiries.length;
-      const quotesBefore = store.quotes.length;
-      const orgsBefore = store.organisations.length;
-      const linksBefore = store.links.length;
-      const notesBefore = store.notes.length;
+      const s005Ctx = testTenantCtx('P-000001');
+      const [
+        initialTasks,
+        initialEnquiries,
+        initialQuotes,
+        initialOrgs,
+        initialLinks,
+        initialNotes,
+      ] = await Promise.all([
+        getTaskWorkflowRepository().listAllTasksUnfiltered(s005Ctx),
+        getIntakeQuoteRepository().listAllEnquiriesUnfiltered(s005Ctx),
+        getIntakeQuoteRepository().listAllQuotesUnfiltered(s005Ctx),
+        getPartyRepository().listAllOrganisations(s005Ctx),
+        getPartyRepository().listAllLinks(s005Ctx),
+        getPartyRepository().listAllNotes(s005Ctx),
+      ]);
+      const tasksBefore = initialTasks.length;
+      const enquiriesBefore = initialEnquiries.length;
+      const quotesBefore = initialQuotes.length;
+      const orgsBefore = initialOrgs.length;
+      const linksBefore = initialLinks.length;
+      const notesBefore = initialNotes.length;
+      const samplePracticeAreaId = initialQuotes[0]!.practiceAreaId;
 
       const expectTamperedForbidden = (res: unknown, expectedMessage: string) => {
         expect(isActionDenied(res)).toBe(true);
@@ -7231,7 +7285,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           {
             clientType: 'prospect',
             prospectName: 'Tampered',
-            practiceAreaId: store.quotes[0]!.practiceAreaId,
+            practiceAreaId: samplePracticeAreaId,
             scope: 'Scope',
             feeBasis: 'Fixed fee',
             feeAmountExVat: 1000,
@@ -7307,15 +7361,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'Source person must be an existing leaver.',
       );
 
-      expect(store.tasks.length).toBe(tasksBefore);
-      expect(store.enquiries.length).toBe(enquiriesBefore);
-      expect(store.quotes.length).toBe(quotesBefore);
-      expect(store.organisations.length).toBe(orgsBefore);
-      expect(store.links.length).toBe(linksBefore);
-      expect(store.notes.length).toBe(notesBefore);
+      expect(
+        (await getTaskWorkflowRepository().listAllTasksUnfiltered(s005Ctx))
+          .length,
+      ).toBe(tasksBefore);
+      expect(
+        (await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(s005Ctx))
+          .length,
+      ).toBe(enquiriesBefore);
+      expect(
+        (await getIntakeQuoteRepository().listAllQuotesUnfiltered(s005Ctx))
+          .length,
+      ).toBe(quotesBefore);
+      expect(
+        (await getPartyRepository().listAllOrganisations(s005Ctx)).length,
+      ).toBe(orgsBefore);
+      expect((await getPartyRepository().listAllLinks(s005Ctx)).length).toBe(
+        linksBefore,
+      );
+      expect((await getPartyRepository().listAllNotes(s005Ctx)).length).toBe(
+        notesBefore,
+      );
 
       // 3. Positive controls (R281, R298): all 20 S0-05 actions (plus takeTaskAction) succeed with Tenant A's valid session and valid Tenant A record IDs, producing observable state changes
-      const validTask = store.tasks[0]!;
+      const validTask = initialTasks[0]!;
       const validTaskSave = await saveTaskAction({
         id: validTask.id,
         title: 'Tenant A Verified Task Title',
@@ -7325,9 +7394,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
       expect(isActionDenied(validTaskSave)).toBe(false);
       expect(validTaskSave.error).toBeUndefined();
-      expect(store.tasks.find((t) => t.id === validTask.id)?.title).toBe(
-        'Tenant A Verified Task Title',
-      );
+      expect(
+        (
+          await getTaskWorkflowRepository().getTaskById(s005Ctx, validTask.id, {
+            includeRestricted: true,
+          })
+        )?.title,
+      ).toBe('Tenant A Verified Task Title');
 
       const actorTeam = store.teams.find(
         (tm) => tm.memberIds.includes('P-000001') || tm.leadIds.includes('P-000001'),
@@ -7342,9 +7415,15 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const unclaimedTaskId = unclaimedTaskCreate.task!.id;
       const validTaskTake = await takeTaskAction(unclaimedTaskId);
       expect(isActionDenied(validTaskTake)).toBe(false);
-      expect(store.tasks.find((t) => t.id === unclaimedTaskId)?.assignedPersonId).toBe(
-        'P-000001',
-      );
+      expect(
+        (
+          await getTaskWorkflowRepository().getTaskById(
+            s005Ctx,
+            unclaimedTaskId,
+            { includeRestricted: true },
+          )
+        )?.assignedPersonId,
+      ).toBe('P-000001');
 
       const validTaskComment = await addTaskCommentAction(
         validTask.id,
@@ -7352,12 +7431,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(isActionDenied(validTaskComment)).toBe(false);
       expect(
-        store.tasks
-          .find((t) => t.id === validTask.id)
-          ?.comments.some((c) => c.text === 'Tenant A valid comment'),
+        (
+          await getTaskWorkflowRepository().getTaskById(s005Ctx, validTask.id, {
+            includeRestricted: true,
+          })
+        )?.comments.some((c) => c.text === 'Tenant A valid comment'),
       ).toBe(true);
 
-      const templateEnq = store.enquiries.find(
+      const templateEnq = initialEnquiries.find(
         (e) => e.status === 'New' || e.status === 'Assigned',
       )!;
       const validEnqCreate = await saveEnquiryAction({
@@ -7375,10 +7456,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(validEnqCreate)).toBe(false);
       const validEnqId = validEnqCreate.enquiry!.id;
       expect(
-        store.enquiries.some(
-          (e) => e.id === validEnqId && e.firstName === 'TenantA',
-        ),
-      ).toBe(true);
+        (
+          await getIntakeQuoteRepository().getEnquiryById(s005Ctx, validEnqId, {
+            includeRestricted: true,
+          })
+        )?.firstName,
+      ).toBe('TenantA');
 
       const validEnqUpdate = await saveEnquiryAction(
         {
@@ -7396,15 +7479,23 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         { id: validEnqId },
       );
       expect(isActionDenied(validEnqUpdate)).toBe(false);
-      expect(store.enquiries.find((e) => e.id === validEnqId)?.summary).toBe(
-        'Tenant A positive control enquiry updated by ID',
-      );
+      expect(
+        (
+          await getIntakeQuoteRepository().getEnquiryById(s005Ctx, validEnqId, {
+            includeRestricted: true,
+          })
+        )?.summary,
+      ).toBe('Tenant A positive control enquiry updated by ID');
 
       const validEnqAssign = await assignEnquiryAction(validEnqId, 'P-000001');
       expect(isActionDenied(validEnqAssign)).toBe(false);
-      expect(store.enquiries.find((e) => e.id === validEnqId)?.assignedToId).toBe(
-        'P-000001',
-      );
+      expect(
+        (
+          await getIntakeQuoteRepository().getEnquiryById(s005Ctx, validEnqId, {
+            includeRestricted: true,
+          })
+        )?.assignedToId,
+      ).toBe('P-000001');
 
       const validEnqContactLog = await logEnquiryContactAction(validEnqId, {
         method: 'Phone',
@@ -7413,9 +7504,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
       expect(isActionDenied(validEnqContactLog)).toBe(false);
       expect(
-        store.enquiries
-          .find((e) => e.id === validEnqId)
-          ?.contactLog.some((c) => c.note === 'Tenant A valid contact log note'),
+        (
+          await getIntakeQuoteRepository().getEnquiryById(s005Ctx, validEnqId, {
+            includeRestricted: true,
+          })
+        )?.contactLog.some((c) => c.note === 'Tenant A valid contact log note'),
       ).toBe(true);
 
       const auditMarkBeforeEmail = await markAuditPosition();
@@ -7444,20 +7537,28 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         closeNotes: 'Closed in Tenant A positive control',
       });
       expect(isActionDenied(validEnqClose)).toBe(false);
-      expect(store.enquiries.find((e) => e.id === validEnqId)?.status).toBe(
-        'Declined',
-      );
+      expect(
+        (
+          await getIntakeQuoteRepository().getEnquiryById(s005Ctx, validEnqId, {
+            includeRestricted: true,
+          })
+        )?.status,
+      ).toBe('Declined');
 
       const validEnqReopen = await reopenEnquiryAction(validEnqId);
       expect(isActionDenied(validEnqReopen)).toBe(false);
-      expect(store.enquiries.find((e) => e.id === validEnqId)?.status).toBe(
-        'Assigned',
-      );
+      expect(
+        (
+          await getIntakeQuoteRepository().getEnquiryById(s005Ctx, validEnqId, {
+            includeRestricted: true,
+          })
+        )?.status,
+      ).toBe('Assigned');
 
       const validQuoteCreate = await saveQuoteAction({
         clientType: 'prospect',
         prospectName: 'Tenant A Prospect',
-        practiceAreaId: store.quotes[0]!.practiceAreaId,
+        practiceAreaId: samplePracticeAreaId,
         scope: 'Tenant A valid quote scope',
         feeBasis: 'Fixed fee',
         feeAmountExVat: 1250,
@@ -7465,16 +7566,18 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(validQuoteCreate)).toBe(false);
       const validQuoteId = validQuoteCreate.quote!.id;
       expect(
-        store.quotes.some(
-          (q) => q.id === validQuoteId && q.scope === 'Tenant A valid quote scope',
-        ),
-      ).toBe(true);
+        (
+          await getIntakeQuoteRepository().getQuoteById(s005Ctx, validQuoteId, {
+            includeRestricted: true,
+          })
+        )?.scope,
+      ).toBe('Tenant A valid quote scope');
 
       const validQuoteUpdate = await saveQuoteAction(
         {
           clientType: 'prospect',
           prospectName: 'Tenant A Prospect',
-          practiceAreaId: store.quotes[0]!.practiceAreaId,
+          practiceAreaId: samplePracticeAreaId,
           scope: 'Tenant A valid quote scope updated by ID',
           feeBasis: 'Fixed fee',
           feeAmountExVat: 1250,
@@ -7482,15 +7585,23 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         { id: validQuoteId },
       );
       expect(isActionDenied(validQuoteUpdate)).toBe(false);
-      expect(store.quotes.find((q) => q.id === validQuoteId)?.scope).toBe(
-        'Tenant A valid quote scope updated by ID',
-      );
+      expect(
+        (
+          await getIntakeQuoteRepository().getQuoteById(s005Ctx, validQuoteId, {
+            includeRestricted: true,
+          })
+        )?.scope,
+      ).toBe('Tenant A valid quote scope updated by ID');
 
       const validQuoteSent = await markQuoteSentAction(validQuoteId);
       expect(isActionDenied(validQuoteSent)).toBe(false);
-      expect(store.quotes.find((q) => q.id === validQuoteId)?.status).toBe(
-        'Sent',
-      );
+      expect(
+        (
+          await getIntakeQuoteRepository().getQuoteById(s005Ctx, validQuoteId, {
+            includeRestricted: true,
+          })
+        )?.status,
+      ).toBe('Sent');
 
       const validQuoteFollowUp = await logQuoteFollowUpAction(validQuoteId, {
         method: 'Phone',
@@ -7499,9 +7610,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       });
       expect(isActionDenied(validQuoteFollowUp)).toBe(false);
       expect(
-        store.quotes
-          .find((q) => q.id === validQuoteId)
-          ?.followUps.some((f) => f.note === 'Tenant A valid quote follow-up'),
+        (
+          await getIntakeQuoteRepository().getQuoteById(s005Ctx, validQuoteId, {
+            includeRestricted: true,
+          })
+        )?.followUps.some((f) => f.note === 'Tenant A valid quote follow-up'),
       ).toBe(true);
 
       const validQuoteRevise = await reviseQuoteAction(validQuoteId, {
@@ -7511,19 +7624,26 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         markAsSent: true,
       });
       expect(isActionDenied(validQuoteRevise)).toBe(false);
-      expect(store.quotes.find((q) => q.id === validQuoteId)?.version).toBe(2);
-      expect(
-        store.quotes.find((q) => q.id === validQuoteId)?.feeAmountExVat,
-      ).toBe(1500);
+      const revisedQuote = await getIntakeQuoteRepository().getQuoteById(
+        s005Ctx,
+        validQuoteId,
+        { includeRestricted: true },
+      );
+      expect(revisedQuote?.version).toBe(2);
+      expect(revisedQuote?.feeAmountExVat).toBe(1500);
 
       const validQuoteOutcome = await recordQuoteOutcomeAction(validQuoteId, {
         outcome: 'Accepted',
         note: 'Tenant A accepted quote',
       });
       expect(isActionDenied(validQuoteOutcome)).toBe(false);
-      expect(store.quotes.find((q) => q.id === validQuoteId)?.status).toBe(
-        'Accepted',
-      );
+      expect(
+        (
+          await getIntakeQuoteRepository().getQuoteById(s005Ctx, validQuoteId, {
+            includeRestricted: true,
+          })
+        )?.status,
+      ).toBe('Accepted');
 
       const validOrg = store.organisations[0]!;
       const validOrgSave = await saveOrganisationAction(
@@ -7699,9 +7819,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         status: 'Leaver',
       };
       await getPartyRepository().putPerson(testTenantCtx('P-000001'), leaverCandidate);
-      const taskInStore = store.tasks.find((t) => t.id === validTask.id)!;
-      taskInStore.assignedPersonId = leaverCandidate.id;
-      taskInStore.assignedPersonIds = [leaverCandidate.id];
+      const taskInRepo = (
+        await getTaskWorkflowRepository().getTaskById(s005Ctx, validTask.id, {
+          includeRestricted: true,
+        })
+      )!;
+      taskInRepo.assignedPersonId = leaverCandidate.id;
+      taskInRepo.assignedPersonIds = [leaverCandidate.id];
+      await getTaskWorkflowRepository().putTask(s005Ctx, taskInRepo);
       const validLeaverReassign = await reassignLeaverOwnedRecordsAction(
         leaverCandidate.id,
         'P-000001',
@@ -7709,7 +7834,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(validLeaverReassign)).toBe(false);
       expect(validLeaverReassign.reassignedCount).toBeGreaterThan(0);
       expect(
-        store.tasks.find((t) => t.id === validTask.id)?.assignedPersonId,
+        (
+          await getTaskWorkflowRepository().getTaskById(s005Ctx, validTask.id, {
+            includeRestricted: true,
+          })
+        )?.assignedPersonId,
       ).toBe('P-000001');
 
       // 4. Data-layer isolation check (real PostgreSQL TenantDocumentRepository)
@@ -7810,10 +7939,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         }),
       ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
       await expect(
-        prepareEnquiryConversionAction(store.enquiries[0]!.id, {}),
+        prepareEnquiryConversionAction('ENQ-000001', {}),
       ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
       await expect(
-        prepareQuoteConversionAction(store.quotes[0]!.id),
+        prepareQuoteConversionAction('Q-000001'),
       ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
 
       // 2. Tampered IDs under a valid Tenant A session fail closed with explicit "not found" errors and create nothing
@@ -7866,7 +7995,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(posSearchRes.errors).toBeUndefined();
       expect(posSearchRes.matches.some((m) => m.matterId === store.matters[0]!.id)).toBe(true);
 
-      const templateEnq = store.enquiries.find((e) => e.status !== 'Draft')!;
+      const s007Enquiries =
+        await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
+          testTenantCtx('P-000001'),
+        );
+      const templateEnq = s007Enquiries.find((e) => e.status !== 'Draft')!;
       const cleanTenantAEnqRes = await saveEnquiryAction(
         {
           channelId: templateEnq.channelId,
@@ -8081,7 +8214,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
         {
           matters: store.matters,
-          enquiries: store.enquiries,
+          enquiries: s007Enquiries,
           people: store.people,
           organisations: store.organisations,
           links: store.links,
@@ -8104,7 +8237,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         store.organisations,
         store.matters,
         store.values,
-        store.enquiries,
+        s007Enquiries,
         null,
         store.links,
         () => true,
@@ -8604,8 +8737,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       // (b) Tampered matter code, mismatched clientCode, or cross-matter invoiceNumber -> ActionDenied FORBIDDEN
       setTestEntraSessionOverride(validTenantASession);
-      const notesCountBefore = store.notes.length;
-      const tasksCountBefore = store.tasks.length;
+      const s010Ctx = testTenantCtx('P-000001');
+      const notesCountBefore = (await getPartyRepository().listAllNotes(s010Ctx))
+        .length;
+      const tasksCountBefore = (
+        await getTaskWorkflowRepository().listAllTasksUnfiltered(s010Ctx)
+      ).length;
       const tamperedCc = await recordInvoiceCreditControlActionAction({
         invoiceNumber: 'INV-TENANT-B-999',
         matterCode: 'TENANTB-9999',
@@ -8640,8 +8777,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           /Invoice does not belong to the specified matter/i,
         );
       }
-      expect(store.notes.length).toBe(notesCountBefore);
-      expect(store.tasks.length).toBe(tasksCountBefore);
+      expect((await getPartyRepository().listAllNotes(s010Ctx)).length).toBe(
+        notesCountBefore,
+      );
+      expect(
+        (await getTaskWorkflowRepository().listAllTasksUnfiltered(s010Ctx))
+          .length,
+      ).toBe(tasksCountBefore);
       // (c) Positive control: valid Tenant A session + valid matter code -> succeeds
       const okCc = await recordInvoiceCreditControlActionAction({
         invoiceNumber: 'PV/2026/0040',

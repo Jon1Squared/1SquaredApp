@@ -13,19 +13,26 @@ import {
   TenantAuditRepository,
   TenantDocumentRepository,
   TenantDocumentStoreRepository,
+  TenantIntakeQuoteRepository,
   TenantKeyDateRepository,
   TenantMatterRepository,
   TenantPartyRepository,
+  TenantTaskWorkflowRepository,
   type FirmAuditEntryInput,
   type MatterRestrictionMetadata,
   type TenantConfiguration,
   type TenantContext,
+  type TenantEnquiryRecord,
   type TenantMatterRecord,
   type TenantMergeHistoryRecord,
   type TenantNoteRecord,
+  type TenantNotificationRecord,
   type TenantOrganisationRecord,
   type TenantPersonOrganisationLinkRecord,
   type TenantPersonRecord,
+  type TenantQuoteRecord,
+  type TenantSignOffRecord,
+  type TenantTaskRecord,
 } from '@platform/core';
 import { isMatterRestrictedForKeyDates } from '@/domain/keyDates';
 import { canPersonAccessMatter } from '@/domain/rbac';
@@ -36,6 +43,9 @@ import { getStore, type FirmStore } from './store';
 export type ImportableStoreModule =
   | 'parties'
   | 'matters'
+  | 'intake'
+  | 'quotes'
+  | 'tasks'
   | 'documents'
   | 'document-store'
   | 'key-dates'
@@ -44,6 +54,9 @@ export type ImportableStoreModule =
 export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
   'parties',
   'matters',
+  'intake',
+  'quotes',
+  'tasks',
   'documents',
   'document-store',
   'key-dates',
@@ -86,6 +99,13 @@ export interface ImportStoreModulesResult {
     matters: number;
     matterParties: number;
     matterNumberSequences: number;
+    enquiries: number;
+    quotes: number;
+    tasks: number;
+    taskLinkedRecords: number;
+    notifications: number;
+    signOffs: number;
+    recentlyViewed: number;
     documentTemplates: number;
     documentTemplateVersions: number;
     documents: number;
@@ -168,6 +188,17 @@ export async function clearMigratedPostgresModulesForTenant(options: {
     const keyDateRepo = new TenantKeyDateRepository();
     await keyDateRepo.clearTenantData(ctx);
   }
+  if (modules.includes('tasks')) {
+    const taskRepo = new TenantTaskWorkflowRepository();
+    await taskRepo.clearTenantData(ctx);
+  }
+  if (modules.includes('intake') || modules.includes('quotes')) {
+    const intakeQuoteRepo = new TenantIntakeQuoteRepository();
+    await intakeQuoteRepo.clearTenantData(ctx, {
+      includeEnquiries: modules.includes('intake'),
+      includeQuotes: modules.includes('quotes'),
+    });
+  }
   if (modules.includes('matters')) {
     const matterRepo = new TenantMatterRepository();
     await matterRepo.clearTenantData(ctx, {
@@ -215,6 +246,13 @@ export async function importFirmStoreModulesToPostgres(
     matters: 0,
     matterParties: 0,
     matterNumberSequences: 0,
+    enquiries: 0,
+    quotes: 0,
+    tasks: 0,
+    taskLinkedRecords: 0,
+    notifications: 0,
+    signOffs: 0,
+    recentlyViewed: 0,
     documentTemplates: 0,
     documentTemplateVersions: 0,
     documents: 0,
@@ -324,6 +362,85 @@ export async function importFirmStoreModulesToPostgres(
     if (verifiedMatterCounts.matters < counts.matters) {
       throw new Error(
         'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection matters row count did not match imported total.',
+      );
+    }
+  }
+
+  if (modules.includes('intake') || modules.includes('quotes')) {
+    const intakeQuoteRepo = new TenantIntakeQuoteRepository();
+    const enquiries = modules.includes('intake')
+      ? ((store.enquiries ?? []) as unknown as TenantEnquiryRecord[])
+      : [];
+    const quotes = modules.includes('quotes')
+      ? ((store.quotes ?? []) as unknown as TenantQuoteRecord[])
+      : [];
+
+    await intakeQuoteRepo.withTenantTransaction(ctx, async () => {
+      if (modules.includes('intake')) {
+        await intakeQuoteRepo.putEnquiries(ctx, enquiries);
+        counts.enquiries = enquiries.length;
+      }
+      if (modules.includes('quotes')) {
+        await intakeQuoteRepo.putQuotes(ctx, quotes);
+        counts.quotes = quotes.length;
+      }
+    });
+
+    const verifyIqRepo = new TenantIntakeQuoteRepository();
+    const verifiedIqCounts =
+      await verifyIqRepo.countAllTenantIntakeQuoteRows(ctx);
+    if (
+      (modules.includes('intake') &&
+        verifiedIqCounts.enquiries < counts.enquiries) ||
+      (modules.includes('quotes') && verifiedIqCounts.quotes < counts.quotes)
+    ) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection enquiries/quotes row counts did not match imported totals.',
+      );
+    }
+  }
+
+  if (modules.includes('tasks')) {
+    const taskRepo = new TenantTaskWorkflowRepository();
+    const tasks = (store.tasks ?? []) as unknown as TenantTaskRecord[];
+    const notifications = (store.notifications ??
+      []) as unknown as TenantNotificationRecord[];
+    const signOffs = (store.signOffs ?? []) as unknown as TenantSignOffRecord[];
+    const recentlyViewedEntries = Object.entries(store.recentlyViewed ?? {});
+
+    await taskRepo.withTenantTransaction(ctx, async () => {
+      await taskRepo.putTasks(ctx, tasks);
+      counts.tasks = tasks.length;
+
+      await taskRepo.putNotifications(ctx, notifications);
+      counts.notifications = notifications.length;
+
+      await taskRepo.putSignOffs(ctx, signOffs);
+      counts.signOffs = signOffs.length;
+
+      for (const [userId, items] of recentlyViewedEntries) {
+        if (!userId) continue;
+        await taskRepo.putRecentlyViewedForUser(
+          ctx,
+          userId,
+          Array.isArray(items) ? items : [],
+        );
+        counts.recentlyViewed += 1;
+      }
+    });
+
+    const verifyTaskRepo = new TenantTaskWorkflowRepository();
+    const verifiedTaskCounts =
+      await verifyTaskRepo.countAllTenantTaskWorkflowRows(ctx);
+    counts.taskLinkedRecords = verifiedTaskCounts.taskLinkedRecords;
+    if (
+      verifiedTaskCounts.tasks < counts.tasks ||
+      verifiedTaskCounts.notifications < counts.notifications ||
+      verifiedTaskCounts.signOffs < counts.signOffs ||
+      verifiedTaskCounts.recentlyViewed < counts.recentlyViewed
+    ) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection tasks/workflows row counts did not match imported totals.',
       );
     }
   }

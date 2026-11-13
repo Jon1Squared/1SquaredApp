@@ -20,7 +20,10 @@ import {
   resolveCurrentTenantContext,
 } from '../../platform/tenantRuntime';
 import { runWithActiveActorSession } from '../rbacRuntime';
-import { getAuditRepository } from '../auditAdapter';
+import {
+  getAuditRepository,
+  setAuditRepositoryOverrideForTesting,
+} from '../auditAdapter';
 import {
   createSignedEntraSessionCookie,
   createVerifiedSessionActorFromEntraSession,
@@ -29,7 +32,13 @@ import {
   type EntraSessionPayload,
   type VerifiedEntraSessionPayload,
 } from '../entraAuth';
-import { getKeyDateRepository } from '../services';
+import {
+  getIntakeQuoteRepository,
+  getKeyDateRepository,
+  getMatterRepository,
+  getPartyRepository,
+  getTaskWorkflowRepository,
+} from '../services';
 import { getStore } from '../store';
 import { loadCommittedSeedStore } from '../../seed/seedSnapshot';
 import type { Person } from '../../domain/types';
@@ -68,7 +77,7 @@ export function setAuditAdapterFailureHookForTesting(
   assertTestEnvironment('setAuditAdapterFailureHookForTesting');
   if (!hook) {
     if (baseAuditRepoBeforeTestStub) {
-      global.__oneSquaredAuditRepo = baseAuditRepoBeforeTestStub;
+      setAuditRepositoryOverrideForTesting(null);
       baseAuditRepoBeforeTestStub = null;
     }
     return;
@@ -92,7 +101,7 @@ export function setAuditAdapterFailureHookForTesting(
     await hook({ ctx, entries: [entry] });
     return delegate.appendAuditEntry(ctx, entry);
   };
-  global.__oneSquaredAuditRepo = stub;
+  setAuditRepositoryOverrideForTesting(stub);
 }
 
 export interface TestActorSessionOptions {
@@ -304,4 +313,11 @@ export async function auditEntriesWrittenSince(sinceMs: number): Promise<FirmAud
   return out;
 }
 
-export { getAuditRepository, getKeyDateRepository };
+export {
+  getAuditRepository,
+  getIntakeQuoteRepository,
+  getKeyDateRepository,
+  getMatterRepository,
+  getPartyRepository,
+  getTaskWorkflowRepository,
+};
