@@ -21,9 +21,32 @@ jobs:
   verify:
     name: TypeScript, Isolation Tests & Build
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
     env:
       PLATFORM_TENANT_PACKAGE_DIR: client-not-a-law-firm
       PLATFORM_ENVIRONMENT: test
+      PLATFORM_POSTGRES_HOST: 127.0.0.1
+      PLATFORM_POSTGRES_PORT: '6432'
+      PLATFORM_POSTGRES_MIGRATE_PORT: '5432'
+      PLATFORM_HOSTING_MODE: multi_tenant
+      # Throwaway CI cluster credentials (R435): core has no built-in passwords.
+      PLATFORM_POSTGRES_ADMIN_USER: postgres
+      PLATFORM_POSTGRES_ADMIN_PASSWORD: postgres
+      PLATFORM_POSTGRES_RUNTIME_PASSWORD: onesquared_local_runtime
+      PLATFORM_POSTGRES_MIGRATE_PASSWORD: onesquared_local_migrate
 
     steps:
       - name: Checkout repository
@@ -55,6 +78,39 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Start PgBouncer in transaction mode (port 6432) and provision test PostgreSQL databases (R401, R402)
+        run: |
+          node scripts/setup-test-postgres.mjs
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pgbouncer postgresql-client
+          cat <<'EOF' | sudo tee /etc/pgbouncer/pgbouncer.ini > /dev/null
+          [databases]
+          * = host=127.0.0.1 port=5432
+
+          [pgbouncer]
+          listen_addr = 127.0.0.1
+          listen_port = 6432
+          auth_type = scram-sha-256
+          auth_file = /etc/pgbouncer/userlist.txt
+          pool_mode = transaction
+          max_client_conn = 200
+          default_pool_size = 5
+          admin_users = postgres
+          EOF
+          cat <<EOF | sudo tee /etc/pgbouncer/userlist.txt > /dev/null
+          "${PLATFORM_POSTGRES_ADMIN_USER:-postgres}" "${PLATFORM_POSTGRES_ADMIN_PASSWORD}"
+          "${PLATFORM_POSTGRES_RUNTIME_USER:-runtime_login}" "${PLATFORM_POSTGRES_RUNTIME_PASSWORD}"
+          "${PLATFORM_POSTGRES_MIGRATE_USER:-migrate_login}" "${PLATFORM_POSTGRES_MIGRATE_PASSWORD}"
+          EOF
+          sudo chown postgres:postgres /etc/pgbouncer/pgbouncer.ini /etc/pgbouncer/userlist.txt
+          sudo chmod 600 /etc/pgbouncer/userlist.txt
+          sudo systemctl restart pgbouncer
+          for i in $(seq 1 20); do
+            pg_isready -h 127.0.0.1 -p 6432 && break
+            sleep 0.5
+          done
+          pg_isready -h 127.0.0.1 -p 6432
 
       - name: Generate extension registry
         run: npm run generate:extensions
@@ -89,15 +145,40 @@ jobs:
       - name: Verify bundled job entry point and container image (R404)
         run: |
           node dist/jobs/run-job.mjs --list
+          node dist/jobs/import-store.mjs --help
           docker build --build-arg PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" -t onesquared-ci:test .
           docker run --rm onesquared-ci:test node dist/jobs/run-job.mjs --list
+          docker run --rm onesquared-ci:test node dist/jobs/import-store.mjs --help
 
   e2e:
     name: Role Journey Smoke Tests (Playwright)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
     env:
       PLATFORM_TENANT_PACKAGE_DIR: client-not-a-law-firm
       PLATFORM_ENVIRONMENT: test
+      PLATFORM_POSTGRES_HOST: 127.0.0.1
+      PLATFORM_POSTGRES_PORT: '6432'
+      PLATFORM_POSTGRES_MIGRATE_PORT: '5432'
+      PLATFORM_HOSTING_MODE: multi_tenant
+      # Throwaway CI cluster credentials (R435): core has no built-in passwords.
+      PLATFORM_POSTGRES_ADMIN_USER: postgres
+      PLATFORM_POSTGRES_ADMIN_PASSWORD: postgres
+      PLATFORM_POSTGRES_RUNTIME_PASSWORD: onesquared_local_runtime
+      PLATFORM_POSTGRES_MIGRATE_PASSWORD: onesquared_local_migrate
 
     steps:
       - name: Checkout repository
@@ -111,6 +192,39 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Start PgBouncer in transaction mode (port 6432) and provision test PostgreSQL databases (R401, R402)
+        run: |
+          node scripts/setup-test-postgres.mjs
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pgbouncer postgresql-client
+          cat <<'EOF' | sudo tee /etc/pgbouncer/pgbouncer.ini > /dev/null
+          [databases]
+          * = host=127.0.0.1 port=5432
+
+          [pgbouncer]
+          listen_addr = 127.0.0.1
+          listen_port = 6432
+          auth_type = scram-sha-256
+          auth_file = /etc/pgbouncer/userlist.txt
+          pool_mode = transaction
+          max_client_conn = 200
+          default_pool_size = 5
+          admin_users = postgres
+          EOF
+          cat <<EOF | sudo tee /etc/pgbouncer/userlist.txt > /dev/null
+          "${PLATFORM_POSTGRES_ADMIN_USER:-postgres}" "${PLATFORM_POSTGRES_ADMIN_PASSWORD}"
+          "${PLATFORM_POSTGRES_RUNTIME_USER:-runtime_login}" "${PLATFORM_POSTGRES_RUNTIME_PASSWORD}"
+          "${PLATFORM_POSTGRES_MIGRATE_USER:-migrate_login}" "${PLATFORM_POSTGRES_MIGRATE_PASSWORD}"
+          EOF
+          sudo chown postgres:postgres /etc/pgbouncer/pgbouncer.ini /etc/pgbouncer/userlist.txt
+          sudo chmod 600 /etc/pgbouncer/userlist.txt
+          sudo systemctl restart pgbouncer
+          for i in $(seq 1 20); do
+            pg_isready -h 127.0.0.1 -p 6432 && break
+            sleep 0.5
+          done
+          pg_isready -h 127.0.0.1 -p 6432
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium

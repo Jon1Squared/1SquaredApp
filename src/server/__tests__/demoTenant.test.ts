@@ -32,6 +32,7 @@ import {
   saveStore,
 } from '@/server/store';
 import { runSeedDemoTenant } from '../../../scripts/seed-demo-tenant';
+import { testDataResetContext } from '@/test/testTenantContexts';
 
 describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo command', () => {
   afterEach(() => {
@@ -154,33 +155,29 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('3. seed:demo refuses live and requires PLATFORM_TENANT_PACKAGE_DIR and PLATFORM_ENVIRONMENT', () => {
-    expect(() =>
-      runSeedDemoTenant({
+  it('3. seed:demo refuses live and requires PLATFORM_TENANT_PACKAGE_DIR and PLATFORM_ENVIRONMENT', async () => {
+    await expect(runSeedDemoTenant({
         args: [],
         env: { PLATFORM_TENANT_PACKAGE_DIR: '', PLATFORM_ENVIRONMENT: 'demo' },
-      }),
-    ).toThrow(/PLATFORM_TENANT_PACKAGE_DIR and PLATFORM_ENVIRONMENT are required/);
+      })).rejects.toThrow(/PLATFORM_TENANT_PACKAGE_DIR and PLATFORM_ENVIRONMENT are required/);
 
-    expect(() =>
-      runSeedDemoTenant({
+    await expect(runSeedDemoTenant({
         args: [],
         env: {
           PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
           PLATFORM_ENVIRONMENT: 'live',
         },
-      }),
-    ).toThrow(/Refusing to seed demo data in the live environment/);
+      })).rejects.toThrow(/Refusing to seed demo data in the live environment/);
   });
 
-  it('4. seed:demo refuses a non-empty store without --force, succeeds with --force, and logs only counts, tenantId and environment', () => {
+  it('4. seed:demo refuses a non-empty store without --force, succeeds with --force, and logs only counts, tenantId and environment', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-seed-cmd-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
     const logs: string[] = [];
 
     try {
       // First seed into an empty/non-existent path succeeds
-      const firstResult = runSeedDemoTenant({
+      const firstResult = await runSeedDemoTenant({
         args: [],
         env: {
           ...process.env,
@@ -205,8 +202,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       expect(logs[0]).not.toContain('Penarth');
 
       // Second seed without --force refuses to overwrite non-empty store
-      expect(() =>
-        runSeedDemoTenant({
+      await expect(runSeedDemoTenant({
           args: [],
           env: {
             ...process.env,
@@ -215,11 +211,10 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
           },
           runtimeStorePath: storePath,
           logger: () => {},
-        }),
-      ).toThrow(/Refusing to overwrite a non-empty store without --force/);
+        })).rejects.toThrow(/Refusing to overwrite a non-empty store without --force/);
 
       // Second seed with --force succeeds
-      const forcedResult = runSeedDemoTenant({
+      const forcedResult = await runSeedDemoTenant({
         args: ['--force'],
         env: {
           ...process.env,
@@ -233,8 +228,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
 
       // R335: Unparseable store file is refused without --force
       fs.writeFileSync(storePath, '{ not valid json', 'utf8');
-      expect(() =>
-        runSeedDemoTenant({
+      await expect(runSeedDemoTenant({
           args: [],
           env: {
             ...process.env,
@@ -243,14 +237,13 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
           },
           runtimeStorePath: storePath,
           logger: () => {},
-        }),
-      ).toThrow(/Refusing to overwrite an unparseable store file without --force/);
+        })).rejects.toThrow(/Refusing to overwrite an unparseable store file without --force/);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it('5. seed:demo --entra-map sets entraObjectId on the mapped persons only', () => {
+  it('5. seed:demo --entra-map sets entraObjectId on the mapped persons only', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-entra-map-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
     const mapPath = path.join(tmpDir, 'entra-map.local.json');
@@ -269,7 +262,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
         'utf8',
       );
 
-      const res = runSeedDemoTenant({
+      const res = await runSeedDemoTenant({
         args: ['--entra-map', mapPath],
         env: {
           ...process.env,
@@ -349,7 +342,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('8. resetAllDemoData preserves mapped entraObjectId bindings from the pre-reset store (R326)', () => {
+  it('8. resetAllDemoData preserves mapped entraObjectId bindings from the pre-reset store (R326)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r326-reset-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
     const mapPath = path.join(tmpDir, 'entra-map.local.json');
@@ -368,7 +361,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
         'utf8',
       );
 
-      runSeedDemoTenant({
+      await runSeedDemoTenant({
         args: ['--entra-map', mapPath],
         env: {
           ...process.env,
@@ -382,7 +375,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
       clearStoreMemoryCache();
 
-      resetAllDemoData('P-000004');
+      await resetAllDemoData('P-000004', testDataResetContext());
 
       const afterReset = getStore();
       const p1 = afterReset.people.find((p) => p.id === 'P-000001');
@@ -397,14 +390,14 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('9. seed:demo with a faked clock produces key dates in the future and no synthetic entraObjectId values when --entra-map is omitted (R328)', () => {
+  it('9. seed:demo with a faked clock produces key dates in the future and no synthetic entraObjectId values when --entra-map is omitted (R328)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r328-clock-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2027-06-15T10:00:00Z'));
     try {
-      runSeedDemoTenant({
+      await runSeedDemoTenant({
         args: [],
         env: {
           ...process.env,
@@ -441,7 +434,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('11. clearAllDataToCleanDeployment followed by provisioning a user as P-000004 and resetAllDemoData does not bind that user to the seeded admin persona or leave 00000000- object IDs (R336)', () => {
+  it('11. clearAllDataToCleanDeployment followed by provisioning a user as P-000004 and resetAllDemoData does not bind that user to the seeded admin persona or leave 00000000- object IDs (R336)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r336-reset-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
 
@@ -452,7 +445,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       clearStoreMemoryCache();
 
       // Step 1: Clear all data to a clean deployment
-      clearAllDataToCleanDeployment('P-000004');
+      await clearAllDataToCleanDeployment('P-000004', testDataResetContext());
       const cleared = getStore();
       expect(cleared.isCleanDeployment).toBe(true);
       expect(cleared.people).toHaveLength(0);
@@ -487,7 +480,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       clearStoreMemoryCache();
 
       // Step 3: Also test when isCleanDeployment was flipped to false but P-000004 is still a different person (different email)
-      resetAllDemoData('P-000004');
+      await resetAllDemoData('P-000004', testDataResetContext());
 
       const afterReset = getStore();
       const p4 = afterReset.people.find((p) => p.id === 'P-000004');
@@ -522,7 +515,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       saveStore(nonCleanMutated);
       clearStoreMemoryCache();
 
-      resetAllDemoData('P-000004');
+      await resetAllDemoData('P-000004', testDataResetContext());
       const afterSecondReset = getStore();
       expect(afterSecondReset.people.find((p) => p.id === 'P-000004')?.entraObjectId).toBeUndefined();
     } finally {
@@ -724,7 +717,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('15. getStore() and runSeedDemoTenant refuse corrupted JSON files without echoing file content in the error message (R357, R368, R379, R380)', () => {
+  it('15. getStore() and runSeedDemoTenant refuse corrupted JSON files without echoing file content in the error message (R357, R368, R379, R380)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r357-corrupt-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
     const entraMapPath = path.join(tmpDir, 'entra-map.local.json');
@@ -765,7 +758,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       const seedTargetPath = path.join(tmpDir, 'seeded-store.json');
       let thrownEntraMapMessage = '';
       try {
-        runSeedDemoTenant({
+        await runSeedDemoTenant({
           args: ['--entra-map', entraMapPath],
           env: {
             PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
@@ -785,7 +778,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('16. seed:demo without --entra-map prints a warning stating how many privileged personas remain unbound, with no email address in the output (S0-30, R381, R392)', () => {
+  it('16. seed:demo without --entra-map prints a warning stating how many privileged personas remain unbound, with no email address in the output (S0-30, R381, R392)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-s030-seed-warn-'));
     const storePath = path.join(tmpDir, 'runtime-store.json');
     const fullMapPath = path.join(tmpDir, 'entra-map.local.json');
@@ -793,7 +786,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
-      const unmappedRes = runSeedDemoTenant({
+      const unmappedRes = await runSeedDemoTenant({
         args: [],
         env: {
           ...process.env,
@@ -871,7 +864,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       fs.writeFileSync(fullMapPath, JSON.stringify(allPrivilegedMap, null, 2), 'utf8');
       warnSpy.mockClear();
 
-      const mappedRes = runSeedDemoTenant({
+      const mappedRes = await runSeedDemoTenant({
         args: ['--force', '--entra-map', fullMapPath],
         env: {
           ...process.env,

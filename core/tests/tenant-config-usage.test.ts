@@ -828,7 +828,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         docxBytes,
       },
     });
-    const submitted = submitTemplateVersionForApproval({
+    const submitted = await submitTemplateVersionForApproval({
       ctx,
       repo,
       catalogue: CORE_FIELD_CATALOGUE,
@@ -867,7 +867,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         docxBytes,
       },
     });
-    const autoActivated = submitTemplateVersionForApproval({
+    const autoActivated = await submitTemplateVersionForApproval({
       ctx,
       repo,
       catalogue: CORE_FIELD_CATALOGUE,
@@ -1512,5 +1512,21 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         'multi_tenant',
       ),
     ).toThrow(/TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED/);
+  });
+  it('validates optional database.dedicatedServerHost for tenants requiring a dedicated PostgreSQL server / CMK (S0-14, ADR 0028 Decision 1)', () => {
+    const dedicatedCfg = loadAndValidateTenantConfig(
+      {
+        ...notALawFirmBaseConfig,
+        database: {
+          dedicatedServerHost: 'psql-notalawfirm-cmk-test.postgres.database.azure.com',
+        },
+      },
+      {},
+      'test',
+      'multi_tenant',
+    );
+    expect(dedicatedCfg.database?.dedicatedServerHost).toBe(
+      'psql-notalawfirm-cmk-test.postgres.database.azure.com',
+    );
   });
 });

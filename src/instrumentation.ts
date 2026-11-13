@@ -3,11 +3,15 @@ export async function register(): Promise<void> {
     return;
   }
 
-  const [{ emitPlatformStartupTelemetry, initializeAzureMonitorTelemetry }, { resolveRequestCorrelationId }] =
-    await Promise.all([
-      import('@platform/core'),
-      import('./server/correlationId'),
-    ]);
+  await import('../core/src/tenancy/pgNodePreload');
+
+  const [
+    { emitPlatformStartupTelemetry, initializeAzureMonitorTelemetry },
+    { resolveRequestCorrelationId },
+  ] = await Promise.all([
+    import('@platform/core'),
+    import('./server/correlationId'),
+  ]);
 
   const { enabled } = await initializeAzureMonitorTelemetry({
     loadAzureMonitor: () => import('@azure/monitor-opentelemetry'),

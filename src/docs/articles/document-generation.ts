@@ -6,7 +6,7 @@ export const documentGenerationArticle: DocArticle = {
   section: 'documents-dms',
   summary:
     'How to author .docx precedent templates, map Field Catalogue placeholders, approve template versions with separation of duties, generate merged documents, and review template usage.',
-  updated: '2026-11-04',
+  updated: '2026-11-09',
   body: `
 1Squared includes a built-in **Document Generation & Precedent Management** engine that merges live client, matter, party, fee earner, and financial data into Word (\`.docx\`) templates while enforcing role-based field permissions, restricted-matter controls, and two-person template approval.
 
@@ -22,7 +22,7 @@ Users with the \`document:generate\` permission can generate letters, attendance
 
 ## 2. Scoped download tokens & access control
 
-Generated documents are stored in the tenant’s isolated document storage container and linked to the originating Matter or Client record:
+Generated documents are stored in the tenant’s isolated document storage container and linked to the originating Matter or Client record, while all template, version, generated document, link, usage, and tenant configuration records live exclusively in the firm’s isolated PostgreSQL database (\`TenantDocumentRepository\`, running every read and write inside a transaction with \`SET LOCAL ROLE\`):
 
 - Viewing generated document metadata requires \`document:view\` and access to the underlying Matter or Client record (including \`matter:restricted:access\` or allow-list membership on restricted staff matters).
 - Downloading a generated file requires \`document:download\`. 1Squared issues a short-lived, HMAC-signed scoped download token bound to your \`tenantId\`, user \`sub\`, \`documentId\`, and \`blobKey\`. When the download endpoint is called, 1Squared verifies both the token signature and your live session permissions before streaming the file.

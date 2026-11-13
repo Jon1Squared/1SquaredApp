@@ -103,13 +103,12 @@ import {
   buildTenantContextForUser,
   downloadMatterStoreDocument,
   ensureMatterDocumentStoreProvisioned,
-  ensureRepositorySyncedWithStore,
+  getRepositorySingleton,
   flushDocumentLifecycleSyncForTesting,
   getDocumentStoresAdminDashboard,
   getRegistrySingleton,
   linkExistingMatterDocumentFolder,
   mutateMatterStoreItem,
-  persistRepositoryToStore,
   previewAdminMatterFolderTemplate,
   remediateAdminReconciliationFinding,
   resetDocumentStoreSingletonsForTesting,
@@ -1181,7 +1180,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       expect(userCalls[0]!.accessTokenPrefix).toContain('obo_tok_');
 
       // Verify a permission_mismatch_store_denied reconciliation finding was automatically created
-      const findings = repo.listReconciliationFindings(ctx);
+      const findings = await repo.listReconciliationFindings(ctx);
       expect(findings).toHaveLength(1);
       expect(findings[0]!.findingType).toBe('permission_mismatch_store_denied');
       expect(findings[0]!.matterId).toBe('M-1001');
@@ -1359,15 +1358,13 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       });
 
       // 2. Tenant A cannot read Tenant B's location record by tampered location ID or matter ID
-      expect(sharedRepo.getMatterLocationById(ctxA, locB.id)).toBeNull();
+      expect(await sharedRepo.getMatterLocationById(ctxA, locB.id)).toBeNull();
       expect(
-        sharedRepo.listMatterLocationsByMatterId(ctxA, 'M-BETA-999'),
+        await sharedRepo.listMatterLocationsByMatterId(ctxA, 'M-BETA-999'),
       ).toHaveLength(0);
 
       // 3. Tenant A cannot write a record claiming Tenant B's tenantId
-      expect(() =>
-        sharedRepo.putMatterLocation(ctxA, locB),
-      ).toThrow(/TENANCY_ISOLATION_ERROR/);
+      await expect(sharedRepo.putMatterLocation(ctxA, locB)).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
 
       // 4. Tenant A provider cannot list, read, upload to, or setPermissions on Tenant B's driveId or folderItemId
       const providerA = sharedRegistry.createProvider(ctxA, storesA[0]!);
@@ -1693,29 +1690,34 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       expect(remediated.status).toBe('remediated');
     });
 
-    it('verifies reversible migration 0002 up, rollback, and re-apply', () => {
+    it('verifies reversible migration 0002 up, rollback, and re-apply', async () => {
       const ctx = makeTenantContext({ tenantId: 'firm-alpha' });
       const runner = new TenantMigrationRunner();
-      runner.applyUp(ctx);
-      expect(runner.getActiveTables(ctx)).toContain(
-        'matter_document_locations',
-      );
-      expect(runner.getActiveTables(ctx)).toContain(
-        'document_reconciliation_findings',
-      );
+      try {
+        await runner.applyUp(ctx);
+        expect(await runner.getActiveTables(ctx)).toContain(
+          'matter_document_locations',
+        );
+        expect(await runner.getActiveTables(ctx)).toContain(
+          'document_reconciliation_findings',
+        );
 
-      const rolledBack = runner.rollbackVersion(ctx, '0002');
-      expect(rolledBack).toBe(true);
-      expect(runner.getActiveTables(ctx)).not.toContain(
-        'matter_document_locations',
-      );
-      expect(runner.getActiveTables(ctx)).toContain('key_dates');
-      expect(runner.getActiveTables(ctx)).toContain('key_date_reminder_states');
+        await runner.rollbackVersion(ctx, '0006');
+        const rolledBack = await runner.rollbackVersion(ctx, '0002');
+        expect(rolledBack).toBe(true);
+        expect(await runner.getActiveTables(ctx)).not.toContain(
+          'matter_document_locations',
+        );
+        expect(await runner.getActiveTables(ctx)).toContain('key_dates');
+        expect(await runner.getActiveTables(ctx)).toContain('key_date_reminder_states');
 
-      runner.applyUp(ctx);
-      expect(runner.getActiveTables(ctx)).toContain(
-        'matter_document_locations',
-      );
+        await runner.applyUp(ctx);
+        expect(await runner.getActiveTables(ctx)).toContain(
+          'matter_document_locations',
+        );
+      } finally {
+        await runner.applyUp(ctx);
+      }
     });
   });
 
@@ -1919,9 +1921,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       try {
         await asEmployee('P-000002', async () => {
           // P-000002 is a fee earner without admin permissions
-          expect(() =>
-            getDocumentStoresAdminDashboard('P-000002', { mfaVerified: true }),
-          ).toThrow(/PERMISSION_DENIED/);
+          await expect(getDocumentStoresAdminDashboard('P-000002', { mfaVerified: true })).rejects.toThrow(/PERMISSION_DENIED/);
           await expect(
             testAdminDocumentStoreConnection({
               storeId: 'nalf-sharepoint-primary',
@@ -1936,19 +1936,15 @@ describe('External Document Store Integration (Sections 1–14)', () => {
               mfaVerified: true,
             }),
           ).rejects.toMatchObject({ code: 'access_denied' });
-          expect(() =>
-            saveAdminDocumentStoreConfiguration({
+          await expect(saveAdminDocumentStoreConfiguration({
               section: 'stores',
               userId: 'P-000002',
               mfaVerified: true,
-            }),
-          ).toThrow(/PERMISSION_DENIED/);
-          expect(() =>
-            previewAdminMatterFolderTemplate({
+            })).rejects.toThrow(/PERMISSION_DENIED/);
+          await expect(previewAdminMatterFolderTemplate({
               userId: 'P-000002',
               mfaVerified: true,
-            }),
-          ).toThrow(/PERMISSION_DENIED/);
+            })).rejects.toThrow(/PERMISSION_DENIED/);
           await expect(
             applyAdminTemplateAdditionsToOpenMatters('P-000002', {
               mfaVerified: true,
@@ -1971,9 +1967,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
 
         await asEmployee('P-000001', async () => {
           // P-000001 (admin) with mfaVerified: false is rejected with access_denied
-          expect(() =>
-            getDocumentStoresAdminDashboard('P-000001', { mfaVerified: false }),
-          ).toThrow(/MFA_REQUIRED/);
+          await expect(getDocumentStoresAdminDashboard('P-000001', { mfaVerified: false })).rejects.toThrow(/MFA_REQUIRED/);
           await expect(
             testAdminDocumentStoreConnection({
               storeId: 'nalf-sharepoint-primary',
@@ -1988,19 +1982,15 @@ describe('External Document Store Integration (Sections 1–14)', () => {
               mfaVerified: false,
             }),
           ).rejects.toMatchObject({ code: 'access_denied' });
-          expect(() =>
-            saveAdminDocumentStoreConfiguration({
+          await expect(saveAdminDocumentStoreConfiguration({
               section: 'stores',
               userId: 'P-000001',
               mfaVerified: false,
-            }),
-          ).toThrow(/MFA_REQUIRED/);
-          expect(() =>
-            previewAdminMatterFolderTemplate({
+            })).rejects.toThrow(/MFA_REQUIRED/);
+          await expect(previewAdminMatterFolderTemplate({
               userId: 'P-000001',
               mfaVerified: false,
-            }),
-          ).toThrow(/MFA_REQUIRED/);
+            })).rejects.toThrow(/MFA_REQUIRED/);
           await expect(
             applyAdminTemplateAdditionsToOpenMatters('P-000001', {
               mfaVerified: false,
@@ -2036,7 +2026,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       const snapshotScopes = structuredClone(
         store.documentStoreFolderScopes ?? [],
       );
-      const snapshotJobs = structuredClone(store.documentLifecycleJobs ?? []);
+      const snapshotJobs = structuredClone(await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' })));
       const snapshotFindings = structuredClone(
         store.documentReconciliationFindings ?? [],
       );
@@ -2063,7 +2053,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         restrictedMatter.teamMemberIds = ['P-000001'];
 
         // P-000007 is a fee earner in Corporate without matter:restricted:access
-        const jobsOnRestrictedBefore = (store.documentLifecycleJobs ?? []).filter(
+        const jobsOnRestrictedBefore = (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).filter(
           (j) => j.matterId === 'M-000002',
         ).length;
         const excludedBrowse = await asEmployee('P-000007', () =>
@@ -2077,7 +2067,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(excludedBrowse.activeLocation).toBeNull();
         expect(excludedBrowse.jobs).toEqual([]);
         expect(
-          (store.documentLifecycleJobs ?? []).filter(
+          (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).filter(
             (j) => j.matterId === 'M-000002',
           ),
         ).toHaveLength(jobsOnRestrictedBefore);
@@ -2345,7 +2335,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(crossBrowse.errorCode).toBe('access_denied');
         expect(crossBrowse.locations).toEqual([]);
         expect(
-          (store.documentStoreAuditEvents ?? []).some(
+          (await getRepositorySingleton().listAuditEvents(makeTenantContext({ tenantId: 'not-a-law-firm' }))).some(
             (e) =>
               e.matterId === 'M-000001' &&
               e.outcome === 'denied' &&
@@ -2437,7 +2427,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(hireRes.errors).toBeUndefined();
         await flushDocumentLifecycleSyncForTesting();
 
-        const updatedLocA = (store.matterDocumentLocations ?? []).find(
+        const updatedLocA = (await getRepositorySingleton().listAllMatterLocations(makeTenantContext({ tenantId: 'not-a-law-firm' }))).find(
           (l) => l.id === locA.id,
         )!;
         expect(updatedLocA.hasUniquePermissions).toBe(true);
@@ -2614,7 +2604,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
 
           expect(closeHookCalls).toContain('M-000001');
           expect(
-            (store.documentStoreAuditEvents ?? []).some(
+            (await getRepositorySingleton().listAuditEvents(makeTenantContext({ tenantId: 'not-a-law-firm' }))).some(
               (e) =>
                 e.matterId === 'M-000001' &&
                 e.action === 'lifecycle:matter:closed' &&
@@ -2640,7 +2630,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           await flushDocumentLifecycleSyncForTesting();
 
           expect(
-            (store.documentStoreAuditEvents ?? []).some(
+            (await getRepositorySingleton().listAuditEvents(makeTenantContext({ tenantId: 'not-a-law-firm' }))).some(
               (e) =>
                 e.matterId === 'M-000001' &&
                 e.action === 'lifecycle:matter:reopened' &&
@@ -2656,7 +2646,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             throw new Error('Hook rejected matter close');
           });
           const jobsBeforeHookThrow = new Set(
-            (store.documentLifecycleJobs ?? []).map((j) => j.id),
+            (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).map((j) => j.id),
           );
           try {
             await asEmployee('P-000001', () =>
@@ -2691,7 +2681,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
                 );
               }),
             ).toBe(true);
-            const hookFailJobs = (store.documentLifecycleJobs ?? []).filter(
+            const hookFailJobs = (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).filter(
               (j) =>
                 j.matterId === 'M-000001' &&
                 !jobsBeforeHookThrow.has(j.id) &&
@@ -2723,10 +2713,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           );
         try {
           const existingJobIds = new Set(
-            (store.documentLifecycleJobs ?? []).map((j) => j.id),
+            (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).map((j) => j.id),
           );
           const intendedBeforeFail = structuredClone(
-            (store.matterDocumentLocations ?? []).find((l) => l.id === locA.id)!
+            (await getRepositorySingleton().listAllMatterLocations(makeTenantContext({ tenantId: 'not-a-law-firm' }))).find((l) => l.id === locA.id)!
               .intendedGrants,
           );
 
@@ -2756,7 +2746,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             expect(loggedPayload).not.toContain('/RE/RE-COM');
           }
 
-          const newJobs = (store.documentLifecycleJobs ?? []).filter(
+          const newJobs = (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).filter(
             (j) => j.matterId === 'M-000001' && !existingJobIds.has(j.id),
           );
           expect(newJobs).toHaveLength(1);
@@ -2765,7 +2755,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           expect(newJobs[0]?.lastErrorMessage).not.toContain('/RE/RE-COM');
           expect(newJobs.some((j) => j.status === 'succeeded')).toBe(false);
 
-          const intendedAfterFail = (store.matterDocumentLocations ?? []).find(
+          const intendedAfterFail = (await getRepositorySingleton().listAllMatterLocations(makeTenantContext({ tenantId: 'not-a-law-firm' }))).find(
             (l) => l.id === locA.id,
           )!.intendedGrants;
           expect(intendedAfterFail).toEqual(intendedBeforeFail);
@@ -3160,15 +3150,16 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           store.documentStoreConfigOverride = cfgSnapshot;
         }
 
-        // R13 & R14: 600 audit events persisted without truncation, and two-tenant hydration/persistence isolation
+        // R13, R14 & R405: 600 audit events persisted in per-tenant PostgreSQL without truncation and isolated across fresh repository instances
         resetDocumentStoreSingletonsForTesting();
         const ctxAlpha = makeTenantContext({ tenantId: 'firm-alpha' });
         const ctxBeta = makeTenantContext({ tenantId: 'firm-beta' });
-        const repo = ensureRepositorySyncedWithStore(ctxAlpha, store);
-        ensureRepositorySyncedWithStore(ctxBeta, store);
+        const repo = getRepositorySingleton();
+        await repo.clearTenantData(ctxAlpha);
+        await repo.clearTenantData(ctxBeta);
 
         for (let i = 0; i < 600; i++) {
-          repo.appendAuditEvent(
+          await repo.appendAuditEvent(
             ctxAlpha,
             buildDocumentStoreAuditEvent({
               context: ctxAlpha,
@@ -3181,7 +3172,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             }),
           );
         }
-        repo.appendAuditEvent(
+        await repo.appendAuditEvent(
           ctxBeta,
           buildDocumentStoreAuditEvent({
             context: ctxBeta,
@@ -3194,15 +3185,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           }),
         );
 
-        persistRepositoryToStore(ctxAlpha, repo, store, { skipDiskSave: true });
-        persistRepositoryToStore(ctxBeta, repo, store, { skipDiskSave: true });
-
         resetDocumentStoreSingletonsForTesting();
-        const reloadedRepo = ensureRepositorySyncedWithStore(ctxAlpha, store);
-        ensureRepositorySyncedWithStore(ctxBeta, store);
+        const reloadedRepo = getRepositorySingleton();
 
-        expect(reloadedRepo.listAuditEvents(ctxAlpha)).toHaveLength(600);
-        expect(reloadedRepo.listAuditEvents(ctxBeta)).toHaveLength(1);
+        expect(await reloadedRepo.listAuditEvents(ctxAlpha)).toHaveLength(600);
+        expect(await reloadedRepo.listAuditEvents(ctxBeta)).toHaveLength(1);
 
         // R18 & R93: Route handlers log structured error with correlationId and tenantId while returning generic message, and audit events share the exact same correlationId
         const routeErrSpy = vi
@@ -3257,7 +3244,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           );
           expect(browseProvRes.activeLocation).not.toBeNull();
           expect(
-            (store.documentLifecycleJobs ?? []).some(
+            (await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' }))).some(
               (j) =>
                 j.matterId === m4.id &&
                 j.jobType === 'provision_matter' &&
@@ -3265,7 +3252,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             ),
           ).toBe(true);
           expect(
-            (store.documentStoreAuditEvents ?? []).some(
+            (await getRepositorySingleton().listAuditEvents(makeTenantContext({ tenantId: 'not-a-law-firm' }))).some(
               (e) =>
                 e.matterId === m4.id &&
                 e.action === 'lifecycle:matter:provisioned' &&
@@ -3285,7 +3272,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             ),
           ).rejects.toMatchObject({ code: 'access_denied' });
           expect(
-            (store.documentStoreAuditEvents ?? []).some(
+            (await getRepositorySingleton().listAuditEvents(makeTenantContext({ tenantId: 'not-a-law-firm' }))).some(
               (e) => e.correlationId === sharedCorrelationId,
             ),
           ).toBe(true);
@@ -3505,11 +3492,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           );
           const m1 = store.matters.find((m) => m.id === 'M-000001')!;
           const updatedTitle = `R112 Persisted Title ${Date.now()}`;
-          const prevDocStoreOverride = store.documentStoreConfigOverride;
-          store.documentStoreConfigOverride = {
-            ...(store.documentStoreConfigOverride ?? {}),
-            documentStores: 'invalid-override-to-force-sync-throw' as never,
-          } as never;
+          const r112Ctx = await asEmployee('P-000001', () => buildTenantContextForUser('P-000001', store).ctx);
+          const r112Repo = getRepositorySingleton();
+          const prevDocStoreOverride = await r112Repo.getDocumentStoreTenantConfig(r112Ctx);
+          await r112Repo.putDocumentStoreTenantConfig(
+            r112Ctx,
+            { documentStores: 'invalid-override-to-force-sync-throw' as never },
+            'P-000001',
+          );
           delete (process.env as Record<string, string | undefined>).VITEST;
           (process.env as Record<string, string | undefined>).NODE_ENV =
             'development';
@@ -3529,8 +3519,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
                 { id: 'M-000001', byId: 'P-000001' },
               ),
             );
+            await flushDocumentLifecycleSyncForTesting();
           } finally {
-            store.documentStoreConfigOverride = prevDocStoreOverride;
+            await r112Repo.putDocumentStoreTenantConfig(r112Ctx, prevDocStoreOverride, 'P-000001');
           }
           expect(saveRes.errors).toBeUndefined();
           expect(saveRes.matter).not.toBeNull();
@@ -4710,7 +4701,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       expect(providerSource).not.toContain('/search/query');
     });
 
-    it('R203: requires mfaVerified === true and writes a config:stores:updated audit entry when changing delegatedPermissionScope', () => {
+    it('R203: requires mfaVerified === true and writes a config:stores:updated audit entry when changing delegatedPermissionScope', async () => {
       const store = getStore();
       const prevOverride = store.documentStoreConfigOverride;
       try {
@@ -4758,7 +4749,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           }),
         )!;
 
-        const dash = runWithActiveActorSession(
+        const dash = await runWithActiveActorSession(
           {
             personId: adminEmp.id,
             tenantId: cfg.tenantId,
@@ -4781,8 +4772,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         }));
 
         // Without MFA, saving store config is rejected
-        expect(() =>
-          runWithActiveActorSession(
+        await expect(runWithActiveActorSession(
             {
               personId: adminEmp.id,
               tenantId: cfg.tenantId,
@@ -4798,11 +4788,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
                 session: adminSessionNoMfa,
                 mfaVerified: false,
               }),
-          ),
-        ).toThrow(/MFA_REQUIRED/);
+          )).rejects.toThrow(/MFA_REQUIRED/);
 
         // With MFA, saving store config succeeds and records config:stores:updated with delegatedPermissionScopes metadata
-        const afterDash = runWithActiveActorSession(
+        const afterDash = await runWithActiveActorSession(
           {
             personId: adminEmp.id,
             tenantId: cfg.tenantId,
@@ -4830,8 +4819,8 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           ),
         );
       } finally {
-        store.documentStoreConfigOverride = prevOverride;
-        saveStore(store);
+        const restoreCtx = makeTenantContext({ tenantId: 'not-a-law-firm' });
+        await getRepositorySingleton().putDocumentStoreTenantConfig(restoreCtx, prevOverride ?? null);
         resetDocumentStoreSingletonsForTesting();
       }
     });

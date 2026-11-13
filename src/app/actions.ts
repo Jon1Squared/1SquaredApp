@@ -405,8 +405,9 @@ export async function dismissDuplicateAction(recordType: RecordType, recordId: s
 }
 
 export async function mergeRecordsAction(recordType: RecordType, survivorId: string, mergedId: string) {
-  return guardedAction('mergeRecordsAction', ({ personId: byId }) => {
-    const hist = executeMerge(recordType, survivorId, mergedId, byId);
+  return guardedAction('mergeRecordsAction', async ({ personId: byId }) => {
+    const hist = await executeMerge(recordType, survivorId, mergedId, byId);
+
     revalidateAll();
     return hist;
   });
@@ -501,7 +502,7 @@ export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
 }
 
 export async function resetDemoDataAction() {
-  return guardedAction('resetDemoDataAction', ({ personId: byId }) => {
+  return guardedAction('resetDemoDataAction', async ({ personId: byId, tenantContext }) => {
     if (!isDataResetAllowedEnvironment()) {
       const env = getActiveTenantConfiguration().environment;
       return buildActionDenied(
@@ -511,14 +512,14 @@ export async function resetDemoDataAction() {
           : 'Demo data reset is disabled when enableDemoMode is false.',
       );
     }
-    resetAllDemoData(byId);
+    await resetAllDemoData(byId, tenantContext);
     revalidateAll();
     return { ok: true as const };
   });
 }
 
 export async function clearAllDataAction() {
-  return guardedAction('clearAllDataAction', ({ personId: byId }) => {
+  return guardedAction('clearAllDataAction', async ({ personId: byId, tenantContext }) => {
     if (!isDataResetAllowedEnvironment()) {
       const env = getActiveTenantConfiguration().environment;
       return buildActionDenied(
@@ -528,7 +529,7 @@ export async function clearAllDataAction() {
           : 'Clearing all data is disabled when enableDemoMode is false.',
       );
     }
-    clearAllDataToCleanDeployment(byId);
+    await clearAllDataToCleanDeployment(byId, tenantContext);
     revalidateAll();
     return { ok: true as const };
   });

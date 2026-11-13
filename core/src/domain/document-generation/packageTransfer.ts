@@ -44,7 +44,7 @@ export async function exportTemplatePackage(params: {
     );
   }
 
-  const template = repo.getTemplateById(ctx, templateId);
+  const template = await repo.getTemplateById(ctx, templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Template not found.');
   }
@@ -52,14 +52,14 @@ export async function exportTemplatePackage(params: {
   const resolvedVersionId =
     versionId ??
     template.activeVersionId ??
-    repo.listVersionsForTemplate(ctx, template.id)[0]?.id;
+    (await repo.listVersionsForTemplate(ctx, template.id))[0]?.id;
   if (!resolvedVersionId) {
     throw new Error(
       'TEMPLATE_VERSION_NOT_FOUND: No template version available to export.',
     );
   }
 
-  const version = repo.getTemplateVersionById(ctx, resolvedVersionId);
+  const version = await repo.getTemplateVersionById(ctx, resolvedVersionId);
   if (!version) {
     throw new Error('TEMPLATE_VERSION_NOT_FOUND: Template version not found.');
   }

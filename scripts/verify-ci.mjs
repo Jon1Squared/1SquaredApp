@@ -12,6 +12,19 @@ const testEnv = {
   ...process.env,
   PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
   PLATFORM_ENVIRONMENT: 'test',
+  PLATFORM_POSTGRES_HOST: process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1',
+  PLATFORM_POSTGRES_PORT: process.env.PLATFORM_POSTGRES_PORT || '5432',
+  PLATFORM_POSTGRES_MIGRATE_PORT:
+    process.env.PLATFORM_POSTGRES_MIGRATE_PORT || '5432',
+  PLATFORM_HOSTING_MODE: process.env.PLATFORM_HOSTING_MODE || 'multi_tenant',
+  // Throwaway local/CI cluster credentials (R435): core has no built-in passwords.
+  PLATFORM_POSTGRES_ADMIN_USER: process.env.PLATFORM_POSTGRES_ADMIN_USER || 'postgres',
+  PLATFORM_POSTGRES_ADMIN_PASSWORD:
+    process.env.PLATFORM_POSTGRES_ADMIN_PASSWORD || 'postgres',
+  PLATFORM_POSTGRES_RUNTIME_PASSWORD:
+    process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD || 'onesquared_local_runtime',
+  PLATFORM_POSTGRES_MIGRATE_PASSWORD:
+    process.env.PLATFORM_POSTGRES_MIGRATE_PASSWORD || 'onesquared_local_migrate',
 };
 
 const liveBuildEnv = {
@@ -281,6 +294,13 @@ if (!registryContent.includes('extModule_0')) {
 }
 
 runStep(
+  '8b/12 Provision & migrate local test PostgreSQL 16 databases',
+  process.execPath,
+  ['scripts/setup-test-postgres.mjs'],
+  testEnv,
+);
+
+runStep(
   '9/12 Run unit, contract & two-tenant isolation tests (PLATFORM_ENVIRONMENT=test)',
   npmCmd,
   ['test'],
@@ -298,6 +318,12 @@ runStep(
   '10b/12 Execute node dist/jobs/run-job.mjs --list',
   process.execPath,
   ['dist/jobs/run-job.mjs', '--list'],
+  liveBuildEnv,
+);
+runStep(
+  '10b2/12 Execute node dist/jobs/import-store.mjs --help',
+  process.execPath,
+  ['dist/jobs/import-store.mjs', '--help'],
   liveBuildEnv,
 );
 const dockerInfoRes = spawnSync(isWin ? 'docker.exe' : 'docker', ['info'], {

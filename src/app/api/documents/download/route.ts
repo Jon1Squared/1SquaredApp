@@ -47,7 +47,7 @@ export const GET = guardedRoute(
           );
         }
 
-        const doc = repo.getDocumentById(ctx, verified.documentId);
+        const doc = await repo.getDocumentById(ctx, verified.documentId);
         if (!doc || doc.isDeleted || doc.storageKey !== verified.blobKey) {
           return NextResponse.json(
             { error: 'Document not found.' },
@@ -60,7 +60,7 @@ export const GET = guardedRoute(
           const m = store.matters.find((x) => x.id === doc.primaryMatterId);
           if (m) linkedMatters.push(toMatterAccessSubject(m)!);
         }
-        for (const link of repo.listLinksForDocument(ctx, doc.id)) {
+        for (const link of await repo.listLinksForDocument(ctx, doc.id)) {
           if (link.entityType === 'matter') {
             const m = store.matters.find((x) => x.id === link.entityId);
             if (m && !linkedMatters.some((x) => x.id === m.id)) {

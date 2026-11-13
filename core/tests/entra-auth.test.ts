@@ -27,6 +27,7 @@ import { GET as callbackGet } from '../../src/app/api/auth/callback/microsoft-en
 import { GET as logoutGet } from '../../src/app/api/auth/logout/route';
 import { POST as extractMatterPost } from '../../src/app/api/matters/extract/route';
 import AdminCatchAllPage from '../../src/app/admin/[[...slug]]/page';
+import { testDataResetContext } from '../../src/test/testTenantContexts';
 
 const TEST_TENANT_ID = '00000000-0000-4000-8000-000000000099';
 const OTHER_TENANT_ID = '00000000-0000-4000-8000-000000000888';
@@ -416,7 +417,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
   });
 
   it('validates x-correlation-id and x-request-id headers in the OIDC callback route, replacing unsafe or over-long values while keeping valid ones (R399)', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const invokeCallbackWithHeaders = async (
         extraHeaders: Record<string, string>,
@@ -543,7 +544,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         `correlationId=${maxLenValidHeader}`,
       );
     } finally {
-      resetAllDemoData('P-000001');
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 
@@ -611,7 +612,7 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
   });
 
   it('prevents the onesquared_user cookie escalation attack, enforces requireAuthenticatedActor, and blocks GET logout & non-admin /admin (R50, R51, R62, R73)', async () => {
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
 
     // R51: getCurrentUserId() with no session throws UNAUTHENTICATED
     setTestEntraSessionOverride(null);
@@ -751,6 +752,6 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
       }
     }
 
-    resetAllDemoData('P-000001');
+    await resetAllDemoData('P-000001', testDataResetContext());
   });
 });

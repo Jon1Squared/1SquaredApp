@@ -60,7 +60,7 @@ export const GET = guardedRoute(
         if (mode === 'preview_template') {
           const departmentId = searchParams.get('departmentId') || undefined;
           const workTypeId = searchParams.get('workTypeId') || undefined;
-          const preview = previewAdminMatterFolderTemplate({
+          const preview = await previewAdminMatterFolderTemplate({
             departmentId,
             workTypeId,
             userId,
@@ -71,7 +71,7 @@ export const GET = guardedRoute(
           return NextResponse.json({ ok: true, preview });
         }
 
-        const dashboard = getDocumentStoresAdminDashboard(userId, {
+        const dashboard = await getDocumentStoresAdminDashboard(userId, {
           session: actor.session,
           mfaVerified,
           correlationId,
@@ -139,7 +139,7 @@ export const POST = guardedRoute(
             mfaVerified,
             correlationId,
           });
-          const dashboard = getDocumentStoresAdminDashboard(userId, {
+          const dashboard = await getDocumentStoresAdminDashboard(userId, {
             session,
             mfaVerified,
             correlationId,
@@ -166,7 +166,7 @@ export const POST = guardedRoute(
             | 'stores'
             | 'routing_and_access'
             | 'templates';
-          const dashboard = saveAdminDocumentStoreConfiguration({
+          const dashboard = await saveAdminDocumentStoreConfiguration({
             section,
             documentStores: body.documentStores as never,
             documentRouting: body.documentRouting as never,
@@ -182,7 +182,7 @@ export const POST = guardedRoute(
         }
 
         case 'preview_template': {
-          const preview = previewAdminMatterFolderTemplate({
+          const preview = await previewAdminMatterFolderTemplate({
             departmentId: body.departmentId
               ? String(body.departmentId)
               : undefined,
@@ -202,7 +202,7 @@ export const POST = guardedRoute(
             mfaVerified,
             correlationId,
           });
-          const dashboard = getDocumentStoresAdminDashboard(userId, {
+          const dashboard = await getDocumentStoresAdminDashboard(userId, {
             session,
             mfaVerified,
             correlationId,
@@ -221,7 +221,7 @@ export const POST = guardedRoute(
             mfaVerified,
             correlationId,
           });
-          const dashboard = getDocumentStoresAdminDashboard(userId, {
+          const dashboard = await getDocumentStoresAdminDashboard(userId, {
             session,
             mfaVerified,
             correlationId,
@@ -238,7 +238,7 @@ export const POST = guardedRoute(
             mfaVerified,
             correlationId,
           });
-          const dashboard = getDocumentStoresAdminDashboard(userId, {
+          const dashboard = await getDocumentStoresAdminDashboard(userId, {
             session,
             mfaVerified,
             correlationId,

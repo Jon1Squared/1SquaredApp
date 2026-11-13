@@ -515,19 +515,17 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     expect(draft1.unmappedPlaceholders).toEqual(['CustomRefToken']);
 
     // Submitting while `CustomRefToken` is unmapped is blocked
-    expect(() =>
-      submitTemplateVersionForApproval({
+    await expect(submitTemplateVersionForApproval({
         ctx: ctxA,
         repo,
         catalogue,
         actor: builderActor,
         config: baseTenantConfig,
         versionId: draft1.version.id,
-      }),
-    ).toThrow(/TEMPLATE_UNMAPPED_PLACEHOLDERS/);
+      })).rejects.toThrow(/TEMPLATE_UNMAPPED_PLACEHOLDERS/);
 
     // Map `CustomRefToken` as a Prompted Field
-    updateDraftTemplateVersion({
+    await updateDraftTemplateVersion({
       ctx: ctxA,
       repo,
       catalogue,
@@ -554,7 +552,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     });
 
     // Now submit succeeds
-    const submitted1 = submitTemplateVersionForApproval({
+    const submitted1 = await submitTemplateVersionForApproval({
       ctx: ctxA,
       repo,
       catalogue,
@@ -565,18 +563,16 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     expect(submitted1.version.status).toBe('Submitted');
 
     // Self-approval by `builderActor` is blocked when `allowSelfApproval` is false (default)
-    expect(() =>
-      approveTemplateVersion({
+    await expect(approveTemplateVersion({
         ctx: ctxA,
         repo,
         actor: builderActor,
         config: baseTenantConfig,
         versionId: draft1.version.id,
-      }),
-    ).toThrow(/TEMPLATE_SELF_APPROVAL_FORBIDDEN/);
+      })).rejects.toThrow(/TEMPLATE_SELF_APPROVAL_FORBIDDEN/);
 
     // Second approver (`secondApproverActor`) approves v1 -> Active
-    const approved1 = approveTemplateVersion({
+    const approved1 = await approveTemplateVersion({
       ctx: ctxA,
       repo,
       actor: secondApproverActor,
@@ -614,7 +610,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         docxBytes: docxV2,
       },
     });
-    submitTemplateVersionForApproval({
+    await submitTemplateVersionForApproval({
       ctx: ctxA,
       repo,
       catalogue,
@@ -622,7 +618,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       config: baseTenantConfig,
       versionId: draft2.version.id,
     });
-    const approved2 = approveTemplateVersion({
+    const approved2 = await approveTemplateVersion({
       ctx: ctxA,
       repo,
       actor: secondApproverActor,
@@ -630,12 +626,12 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       versionId: draft2.version.id,
     });
     expect(approved2.template.activeVersionId).toBe(draft2.version.id);
-    expect(repo.getTemplateVersionById(ctxA, draft1.version.id)?.status).toBe(
+    expect((await repo.getTemplateVersionById(ctxA, draft1.version.id))?.status).toBe(
       'Retired',
     );
 
     // Roll back from v2 to v1
-    const rolledBack = rollbackTemplateToVersion({
+    const rolledBack = await rollbackTemplateToVersion({
       ctx: ctxA,
       repo,
       actor: secondApproverActor,
@@ -676,6 +672,8 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     const catalogue = buildFullFieldCatalogueForTenant();
 
     const builderA = { id: 'P-BUILD-A', tenantId: ctxA.tenantId, roles: ['admin'] };
+    await repo.offboardTenantData(ctxA);
+    await repo.offboardTenantData(ctxB);
     const approverA = { id: 'P-APP-A', tenantId: ctxA.tenantId, roles: ['risk_compliance'] };
     const feeEarnerAssigned = { id: 'P-FE-ASSIGNED', tenantId: ctxA.tenantId, roles: ['fee_earner'] };
     const feeEarnerUnassigned = { id: 'P-FE-OTHER', tenantId: ctxA.tenantId, roles: ['fee_earner'] };
@@ -737,7 +735,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       },
     });
 
-    submitTemplateVersionForApproval({
+    await submitTemplateVersionForApproval({
       ctx: ctxA,
       repo,
       catalogue,
@@ -745,7 +743,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       config: baseTenantConfig,
       versionId: created.version.id,
     });
-    approveTemplateVersion({
+    await approveTemplateVersion({
       ctx: ctxA,
       repo,
       actor: approverA,
@@ -848,7 +846,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
 
     // Assigned fee earner sees the document on BOTH the Matter screen and the Client screen
     expect(
-      listAccessibleDocumentsForEntity({
+      await listAccessibleDocumentsForEntity({
         ctx: ctxA,
         repo,
         actor: feeEarnerAssigned,
@@ -860,7 +858,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     ).toHaveLength(1);
 
     expect(
-      listAccessibleDocumentsForEntity({
+      await listAccessibleDocumentsForEntity({
         ctx: ctxA,
         repo,
         actor: feeEarnerAssigned,
@@ -873,7 +871,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
 
     // Unassigned fee earner CANNOT see the document on the Matter screen OR on the Client (`person`) screen!
     expect(
-      listAccessibleDocumentsForEntity({
+      await listAccessibleDocumentsForEntity({
         ctx: ctxA,
         repo,
         actor: feeEarnerUnassigned,
@@ -885,7 +883,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     ).toHaveLength(0);
 
     expect(
-      listAccessibleDocumentsForEntity({
+      await listAccessibleDocumentsForEntity({
         ctx: ctxA,
         repo,
         actor: feeEarnerUnassigned,
@@ -897,9 +895,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     ).toHaveLength(0);
 
     // TWO-TENANT ISOLATION: Tenant B cannot read Tenant A's template, document, blob, or download token
-    expect(repo.getTemplateById(ctxB, created.template.id)).toBeNull();
+    expect(await repo.getTemplateById(ctxB, created.template.id)).toBeNull();
     expect(
-      repo.getDocumentById(ctxB, generatedRes.document!.id),
+      await repo.getDocumentById(ctxB, generatedRes.document!.id),
     ).toBeNull();
     await expect(
       storage.getObjectBytes(ctxB, {
@@ -915,7 +913,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
 
     // Usage reporting & dual user-level gate (`document_template:view_usage_by_user` + `showUserLevelDetail`)
     const partnerActor = { id: 'P-PARTNER-1', tenantId: ctxA.tenantId, roles: ['partner'] };
-    const partnerReport = queryTemplateUsageReport({
+    const partnerReport = await queryTemplateUsageReport({
       ctx: ctxA,
       repo,
       actor: partnerActor,
@@ -926,7 +924,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     expect(partnerReport.userLevelDetailPermitted).toBe(false);
     expect(partnerReport.byUser).toBeUndefined();
 
-    const adminReport = queryTemplateUsageReport({
+    const adminReport = await queryTemplateUsageReport({
       ctx: ctxA,
       repo,
       actor: builderA, // Admin has `document_template:view_usage_by_user`
@@ -941,7 +939,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     expect(csv).toContain('P-FE-ASSIGNED');
 
     // When `showUserLevelDetail` is false in tenant config, even Admin cannot see `byUser`
-    const adminReportPrivacyOff = queryTemplateUsageReport({
+    const adminReportPrivacyOff = await queryTemplateUsageReport({
       ctx: ctxA,
       repo,
       actor: builderA,
@@ -960,7 +958,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     expect(adminReportPrivacyOff.byUser).toBeUndefined();
 
     // Retention purge background job & delete document
-    const purgeResult = executeUsageRetentionPurgeJob(ctxA, repo, {
+    const purgeResult = await executeUsageRetentionPurgeJob(ctxA, repo, {
       jobId: 'JOB-RETENTION-1',
       tenantId: ctxA.tenantId,
       correlationId: ctxA.correlationId,
@@ -981,34 +979,38 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       resolveMatterSubject: resolveMatter,
     });
     expect(
-      repo.getDocumentById(ctxA, generatedRes.document!.id)?.isDeleted,
+      (await repo.getDocumentById(ctxA, generatedRes.document!.id))?.isDeleted,
     ).toBe(true);
   });
 
-  it('7. Verifies per-tenant reversible database migrations (up, rollback, re-apply)', () => {
+  it('7. Verifies per-tenant reversible database migrations (up, rollback, re-apply)', async () => {
     const runner = new TenantMigrationRunner();
+    try {
+      await runner.applyUp(ctxA);
+      expect(await runner.listAppliedMigrations(ctxA)).toHaveLength(6);
+      expect(await runner.getActiveTables(ctxA)).toContain('document_templates');
+      expect(await runner.getActiveTables(ctxA)).toContain('template_usage_daily_summaries');
+      expect(await runner.getActiveTables(ctxA)).toContain('matter_document_locations');
+      expect(await runner.getActiveTables(ctxA)).toContain('key_dates');
 
-    const applied = runner.applyUp(ctxA);
-    expect(applied).toHaveLength(4);
-    expect(runner.getActiveTables(ctxA)).toContain('document_templates');
-    expect(runner.getActiveTables(ctxA)).toContain('template_usage_daily_summaries');
-    expect(runner.getActiveTables(ctxA)).toContain('matter_document_locations');
-    expect(runner.getActiveTables(ctxA)).toContain('key_dates');
-    // Tenant B is unaffected until its own migration runs
-    expect(runner.listAppliedMigrations(ctxB)).toHaveLength(0);
+      // Roll back migrations in reverse order down to 0001 on Tenant A (leaving Tenant B untouched!)
+      expect(await runner.rollbackVersion(ctxA, '0006')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0005')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0004')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0003')).toBe(true);
+      expect(await runner.rollbackVersion(ctxA, '0002')).toBe(true);
+      const rolledBack = await runner.rollbackVersion(ctxA, '0001');
+      expect(rolledBack).toBe(true);
+      expect(await runner.getActiveTables(ctxA)).not.toContain('document_templates');
+      expect(await runner.getActiveTables(ctxB)).toContain('document_templates');
 
-    // Roll back migrations in reverse order down to 0001 on Tenant A
-    expect(runner.rollbackVersion(ctxA, '0004')).toBe(true);
-    expect(runner.rollbackVersion(ctxA, '0003')).toBe(true);
-    expect(runner.rollbackVersion(ctxA, '0002')).toBe(true);
-    const rolledBack = runner.rollbackVersion(ctxA, '0001');
-    expect(rolledBack).toBe(true);
-    expect(runner.getActiveTables(ctxA)).not.toContain('document_templates');
-
-    // Re-apply cleanly
-    const reapplied = runner.applyUp(ctxA);
-    expect(reapplied).toHaveLength(4);
-    expect(runner.getActiveTables(ctxA)).toContain('documents');
+      // Re-apply cleanly
+      const reapplied = await runner.applyUp(ctxA);
+      expect(reapplied).toHaveLength(6);
+      expect(await runner.getActiveTables(ctxA)).toContain('documents');
+    } finally {
+      await runner.applyUp(ctxA);
+    }
   });
 
   it('8. Enforces R1, R15, R17, R24: requires explicit signing key, binds download tokens to sub and documentId, uses timingSafeEqual, and rejects unimplemented azure_blob provider', async () => {
@@ -1294,7 +1296,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         },
       },
     });
-    submitTemplateVersionForApproval({
+    await submitTemplateVersionForApproval({
       ctx: ctxA,
       repo,
       catalogue,
@@ -1302,7 +1304,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       config: customPartnerConfig,
       versionId: created.version.id,
     });
-    approveTemplateVersion({
+    await approveTemplateVersion({
       ctx: ctxA,
       repo,
       actor: { id: 'P-RISK-APPROVER', tenantId: ctxA.tenantId, roles: ['risk_compliance'] },
@@ -1383,7 +1385,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
 
     // Unnamed partner cannot list or delete the generated document
     expect(
-      listAccessibleDocumentsForEntity({
+      await listAccessibleDocumentsForEntity({
         ctx: ctxA,
         repo,
         actor: unnamedPartner,
@@ -1437,32 +1439,25 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         id: 'DOC-WALL-R11',
         tenantId: ctx.tenantId,
         templateId: 'TPL-1',
-        templateCode: 'TPL-1',
+        templateName: 'TPL-1',
         templateVersionId: 'TPLV-1',
         templateVersionNumber: 1,
         title: 'Ethical Wall Document',
         fileName: 'wall.docx',
-        outputFormat: 'docx',
+        documentType: 'letter',
+        outputFormat: 'docx' as const,
         mimeType:
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        sizeBytes: 10,
-        sha256: 'abc',
-        storageProvider: 'local',
+        fileSizeBytes: 10,
+        fileSha256: 'abc',
+        storageProvider: 'local-fs' as const,
         storageKey: 'key-wall-r11',
-        sourceEntityType: 'matter',
-        sourceEntityId: 'M-000002',
         primaryMatterId: 'M-000002',
-        matterId: 'M-000002',
-        enquiryId: null,
-        clientPersonId: null,
-        generatedById: 'P-000001',
+        generatedByUserId: 'P-000001',
         generatedAt: '2026-11-03T10:00:00.000Z',
         isDeleted: false,
-        deletedAt: null,
-        deletedById: null,
-      } as never;
-      hostRepo.putDocument(ctx, docRecord);
-      store.documents = [...(store.documents ?? []), docRecord];
+      };
+      await hostRepo.putDocument(ctx, docRecord);
 
       // P-000007 is an excluded fee earner (not on M-000002's ethical wall allow-list)
       const excludedSnap = await runAsTestEmployee('P-000007', () =>
@@ -1495,9 +1490,8 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         getDocumentGenerationSnapshotForUser('NON-EXISTENT-USER'),
       ).rejects.toThrow(/UNAUTHENTICATED/);
 
-      const beforeInvalidSave = structuredClone(
-        store.documentGenerationConfigOverride,
-      );
+      const initCtx = await runAsTestEmployee('P-000001', () => getInitializedDocGenContext('P-000001'));
+      const beforeInvalidSave = await initCtx.repo.getDocumentGenerationTenantConfig(initCtx.ctx);
       await expect(
         runAsTestEmployee('P-000001', () =>
           updateDocumentGenerationConfigService(
@@ -1510,8 +1504,8 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
           ),
         ),
       ).rejects.toThrow();
-      // R16: Stored settings remain unchanged when validation rejects the update
-      expect(store.documentGenerationConfigOverride).toEqual(beforeInvalidSave);
+      // R16: Stored PostgreSQL settings remain unchanged when validation rejects the update
+      expect(await initCtx.repo.getDocumentGenerationTenantConfig(initCtx.ctx)).toEqual(beforeInvalidSave);
 
       await expect(
         runAsTestEmployee('P-000001', () =>
@@ -1523,7 +1517,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
           ),
         ),
       ).rejects.toThrow();
-      expect(store.documentGenerationConfigOverride).toEqual(beforeInvalidSave);
+      expect(await initCtx.repo.getDocumentGenerationTenantConfig(initCtx.ctx)).toEqual(beforeInvalidSave);
 
       // R22: Excluded user calling GET /api/matters/[id]/documents route handler on a staff matter gets access_denied and empty locations
       const staffMatter = store.matters.find((m) => m.id === 'M-000002')!;
@@ -1590,27 +1584,23 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         templateVersionNumber: 1,
         title: 'Deleted Document',
         fileName: 'deleted-doc.docx',
-        outputFormat: 'docx',
+        documentType: 'letter',
+        templateName: 'TPL-1',
+        outputFormat: 'docx' as const,
         mimeType:
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        sizeBytes: 3,
-        sha256: storedBlob.sha256,
-        storageProvider: 'local',
+        fileSizeBytes: 3,
+        fileSha256: storedBlob.sha256,
+        storageProvider: 'local-fs' as const,
         storageKey: storedBlob.blobKey,
-        sourceEntityType: 'matter',
-        sourceEntityId: 'M-000001',
         primaryMatterId: 'M-000001',
-        matterId: 'M-000001',
-        enquiryId: null,
-        clientPersonId: null,
-        generatedById: 'P-000001',
+        generatedByUserId: 'P-000001',
         generatedAt: '2026-11-03T10:00:00.000Z',
         isDeleted: true,
         deletedAt: '2026-11-03T11:00:00.000Z',
-        deletedById: 'P-000001',
-      } as never;
-      hostRepo.putDocument(ctx, deletedDoc);
-      store.documents = [...(store.documents ?? []), deletedDoc];
+        deletedByUserId: 'P-000001',
+      };
+      await hostRepo.putDocument(ctx, deletedDoc);
 
       const tokenForDeleted = await hostStorage.issueScopedDownloadToken(
         ctx,

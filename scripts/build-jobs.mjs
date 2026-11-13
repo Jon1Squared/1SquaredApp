@@ -13,7 +13,7 @@ const jobEntries = [
   {
     entryPoint: path.join(rootDir, 'scripts', 'import-store-to-postgres.ts'),
     outfile: path.join(outDir, 'import-store.mjs'),
-    optional: true,
+
   },
 ];
 

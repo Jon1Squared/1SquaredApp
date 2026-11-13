@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16-bookworm
+    container_name: onesquared-postgres16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p2
+    container_name: onesquared-pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      LISTEN_PORT: 6432
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 5
+      AUTH_TYPE: scram-sha-256
+      ADMIN_USERS: postgres
+      PLATFORM_POSTGRES_ADMIN_USER: ${PLATFORM_POSTGRES_ADMIN_USER:-postgres}
+      PLATFORM_POSTGRES_ADMIN_PASSWORD: ${PLATFORM_POSTGRES_ADMIN_PASSWORD:-postgres}
+      PLATFORM_POSTGRES_RUNTIME_USER: ${PLATFORM_POSTGRES_RUNTIME_USER:-runtime_login}
+      PLATFORM_POSTGRES_RUNTIME_PASSWORD: ${PLATFORM_POSTGRES_RUNTIME_PASSWORD:-onesquared_local_runtime}
+      PLATFORM_POSTGRES_MIGRATE_USER: ${PLATFORM_POSTGRES_MIGRATE_USER:-migrate_login}
+      PLATFORM_POSTGRES_MIGRATE_PASSWORD: ${PLATFORM_POSTGRES_MIGRATE_PASSWORD:-onesquared_local_migrate}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /etc/pgbouncer
+        cat <<EOF > /etc/pgbouncer/userlist.txt
+        "$${PLATFORM_POSTGRES_ADMIN_USER}" "$${PLATFORM_POSTGRES_ADMIN_PASSWORD}"
+        "$${PLATFORM_POSTGRES_RUNTIME_USER}" "$${PLATFORM_POSTGRES_RUNTIME_PASSWORD}"
+        "$${PLATFORM_POSTGRES_MIGRATE_USER}" "$${PLATFORM_POSTGRES_MIGRATE_PASSWORD}"
+        EOF
+        chmod 600 /etc/pgbouncer/userlist.txt
+        exec /entrypoint.sh /usr/bin/pgbouncer /etc/pgbouncer/pgbouncer.ini
+    ports:
+      - "6432:6432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

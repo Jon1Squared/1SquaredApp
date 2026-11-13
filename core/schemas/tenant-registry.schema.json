@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.1squared.uk/schemas/tenant-registry.schema.json",
+  "title": "TenantRegistry",
+  "description": "Schema-validated environment tenant registry owned by @platform/core for migration sweeps and scheduled background jobs (ADR 0030 §2, R403, R413). Never used to resolve web request TenantContext.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "environment",
+    "hostingMode",
+    "tenants"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "default": "1.0.0"
+    },
+    "environment": {
+      "type": "string",
+      "enum": [
+        "dev",
+        "test",
+        "training",
+        "demo",
+        "live"
+      ]
+    },
+    "hostingMode": {
+      "type": "string",
+      "enum": [
+        "single_tenant",
+        "multi_tenant"
+      ]
+    },
+    "tenants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenantId",
+          "slug",
+          "environment",
+          "postgresHost",
+          "postgresDatabaseName",
+          "postgresRoleName",
+          "keyVaultUri",
+          "packageDir",
+          "timeZone",
+          "enabled"
+        ],
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$"
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_]{1,48}[a-z0-9]$"
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "test",
+              "training",
+              "demo",
+              "live"
+            ]
+          },
+          "postgresHost": {
+            "type": "string",
+            "minLength": 1
+          },
+          "postgresDatabaseName": {
+            "type": "string",
+            "pattern": "^pg_tenant_[a-z0-9_]{2,55}$"
+          },
+          "postgresRoleName": {
+            "type": "string",
+            "pattern": "^role_tenant_[a-z0-9_]{2,55}$"
+          },
+          "keyVaultUri": {
+            "type": "string",
+            "pattern": "^https://[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]\\.vault\\.azure\\.net/?$"
+          },
+          "packageDir": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timeZone": {
+            "type": "string",
+            "default": "Europe/London",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

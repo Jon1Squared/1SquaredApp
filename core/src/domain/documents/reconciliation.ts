@@ -90,7 +90,7 @@ function compareGrants(
  * Records a reconciliation finding when 1Squared allows an action on a matter
  * (RBAC + matter access pass) but the external document store denies the user (`access_denied`).
  */
-export function recordStoreAccessDeniedFinding(params: {
+export async function recordStoreAccessDeniedFinding(params: {
   ctx: TenantContext;
   repository: TenantDocumentStoreRepository;
   storeId: string;
@@ -98,10 +98,10 @@ export function recordStoreAccessDeniedFinding(params: {
   matterId: string;
   providerItemId: string;
   operation: string;
-}): DocumentReconciliationFindingRecord {
+}): Promise<DocumentReconciliationFindingRecord> {
   const now = new Date().toISOString();
   const finding: DocumentReconciliationFindingRecord =
-    params.repository.putReconciliationFinding(params.ctx, {
+    await params.repository.putReconciliationFinding(params.ctx, {
       id: `finding-${randomUUID()}`,
       tenantId: params.ctx.tenantId,
       storeId: params.storeId,
@@ -126,7 +126,7 @@ export function recordStoreAccessDeniedFinding(params: {
       remediatedByUserId: null,
     });
 
-  params.repository.appendAuditEvent(
+  await params.repository.appendAuditEvent(
     params.ctx,
     buildDocumentStoreAuditEvent({
       context: params.ctx,
@@ -201,8 +201,8 @@ export async function reconcileDocumentStorePermissionsJob(params: {
           store.sharepoint?.siteId ?? `site-${store.storeId}`;
 
         // 1. Reconcile department and team folder scopes
-        const scopes = deps.repository
-          .listFolderScopes(ctx, store.storeId)
+        const scopes = (await deps.repository
+          .listFolderScopes(ctx, store.storeId))
           .filter(
             (s) => s.scopeType === 'department' || s.scopeType === 'team',
           );
@@ -251,8 +251,8 @@ export async function reconcileDocumentStorePermissionsJob(params: {
                 { pageSize: 200 },
               );
               const knownMatterFolderIds = new Set(
-                deps.repository
-                  .listAllMatterLocations(ctx, store.storeId)
+                (await deps.repository
+                  .listAllMatterLocations(ctx, store.storeId))
                   .map((l) => l.providerFolderItemId),
               );
 
@@ -262,7 +262,7 @@ export async function reconcileDocumentStorePermissionsJob(params: {
                   !knownMatterFolderIds.has(child.itemId)
                 ) {
                   const orphanFinding =
-                    deps.repository.putReconciliationFinding(ctx, {
+                    await deps.repository.putReconciliationFinding(ctx, {
                       id: `finding-${randomUUID()}`,
                       tenantId: ctx.tenantId,
                       storeId: store.storeId,
@@ -289,8 +289,8 @@ export async function reconcileDocumentStorePermissionsJob(params: {
         }
 
         // 2. Reconcile provisioned matter folders
-        const matterLocations = deps.repository
-          .listAllMatterLocations(ctx, store.storeId)
+        const matterLocations = (await deps.repository
+          .listAllMatterLocations(ctx, store.storeId))
           .filter((l) => l.provisioningStatus === 'provisioned');
 
         for (const loc of matterLocations) {
@@ -304,7 +304,7 @@ export async function reconcileDocumentStorePermissionsJob(params: {
             });
           } catch (err) {
             if ((err as { code?: string })?.code === 'not_found') {
-              const missingFinding = deps.repository.putReconciliationFinding(
+              const missingFinding = await deps.repository.putReconciliationFinding(
                 ctx,
                 {
                   id: `finding-${randomUUID()}`,
@@ -356,7 +356,7 @@ export async function reconcileDocumentStorePermissionsJob(params: {
         }
       }
 
-      deps.repository.appendAuditEvent(
+      await deps.repository.appendAuditEvent(
         ctx,
         buildDocumentStoreAuditEvent({
           context: ctx,
@@ -448,7 +448,7 @@ async function inspectFolderScopeDrift(params: {
     }
 
     createdFindings.push(
-      deps.repository.putReconciliationFinding(ctx, {
+      await deps.repository.putReconciliationFinding(ctx, {
         id: `finding-${randomUUID()}`,
         tenantId: ctx.tenantId,
         storeId,
@@ -491,7 +491,7 @@ async function inspectFolderScopeDrift(params: {
     }
 
     createdFindings.push(
-      deps.repository.putReconciliationFinding(ctx, {
+      await deps.repository.putReconciliationFinding(ctx, {
         id: `finding-${randomUUID()}`,
         tenantId: ctx.tenantId,
         storeId,
@@ -537,7 +537,7 @@ async function inspectFolderScopeDrift(params: {
       }
 
       createdFindings.push(
-        deps.repository.putReconciliationFinding(ctx, {
+        await deps.repository.putReconciliationFinding(ctx, {
           id: `finding-${randomUUID()}`,
           tenantId: ctx.tenantId,
           storeId,
@@ -581,7 +581,7 @@ async function inspectFolderScopeDrift(params: {
       }
 
       createdFindings.push(
-        deps.repository.putReconciliationFinding(ctx, {
+        await deps.repository.putReconciliationFinding(ctx, {
           id: `finding-${randomUUID()}`,
           tenantId: ctx.tenantId,
           storeId,
@@ -621,7 +621,7 @@ export async function remediateReconciliationFinding(params: {
   findingId: string;
 }): Promise<DocumentReconciliationFindingRecord> {
   const { ctx, deps, findingId } = params;
-  const finding = deps.repository.getReconciliationFindingById(ctx, findingId);
+  const finding = await deps.repository.getReconciliationFindingById(ctx, findingId);
   if (!finding) {
     throw new Error(`Reconciliation finding "${findingId}" not found.`);
   }
@@ -647,12 +647,12 @@ export async function remediateReconciliationFinding(params: {
     | MatterDocumentLocationRecord
     | undefined;
   if (finding.matterId) {
-    targetScope = deps.repository
-      .listMatterLocationsByMatterId(ctx, finding.matterId)
+    targetScope = (await deps.repository
+      .listMatterLocationsByMatterId(ctx, finding.matterId))
       .find((l) => l.storeId === finding.storeId);
   } else if (finding.providerItemId) {
-    targetScope = deps.repository
-      .listFolderScopes(ctx, finding.storeId, finding.libraryId)
+    targetScope = (await deps.repository
+      .listFolderScopes(ctx, finding.storeId, finding.libraryId))
       .find((s) => s.providerItemId === finding.providerItemId);
   }
 
@@ -671,14 +671,14 @@ export async function remediateReconciliationFinding(params: {
   }
 
   const now = new Date().toISOString();
-  const updated = deps.repository.putReconciliationFinding(ctx, {
+  const updated = await deps.repository.putReconciliationFinding(ctx, {
     ...finding,
     status: 'remediated',
     remediatedAt: now,
     remediatedByUserId: ctx.actorId || 'admin',
   });
 
-  deps.repository.appendAuditEvent(
+  await deps.repository.appendAuditEvent(
     ctx,
     buildDocumentStoreAuditEvent({
       context: ctx,

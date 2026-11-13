@@ -14,7 +14,6 @@ import {
   CORE_VERSION,
   ExtensionHost,
   loadAndValidateTenantConfig,
-  PostgresTenantCluster,
   resolveTenantFromVerifiedToken,
   resolveTenantPostgresConfig,
   validateExtensionManifest,
@@ -254,7 +253,6 @@ export interface ExtensionLoadError {
 let cachedHost: ExtensionHost | null = null;
 let cachedHostKey: string | null = null;
 let cachedHostLoadErrors: ExtensionLoadError[] = [];
-let cachedCluster: PostgresTenantCluster | null = null;
 
 export function getExtensionHostLoadErrors(): readonly ExtensionLoadError[] {
   if (!cachedHost) {
@@ -523,12 +521,6 @@ export function getPlatformExtensionHost(): ExtensionHost {
   return cachedHost;
 }
 
-export function getPlatformPostgresCluster(): PostgresTenantCluster {
-  if (!cachedCluster) {
-    cachedCluster = new PostgresTenantCluster();
-  }
-  return cachedCluster;
-}
 
 const ALLOWED_PLATFORM_ENVIRONMENTS = new Set<TenantConfiguration['environment']>([
   'dev',
@@ -666,7 +658,7 @@ export function resolveCurrentTenantContext(
   actor?: VerifiedSessionActorInput | null,
   configOverride?: Pick<
     TenantConfiguration,
-    'tenantId' | 'hostingMode' | 'environment' | 'branding' | 'keyVault'
+    'tenantId' | 'hostingMode' | 'environment' | 'branding' | 'keyVault' | 'database'
   >,
 ): TenantContext {
   const actorId = (actor?.id ?? actor?.sub ?? '').trim();
@@ -717,6 +709,7 @@ export function resolveCurrentTenantContext(
     environment: cfg.environment,
     correlationId: resolveRequestCorrelationId(actor.correlationId, 'req'),
     untrustedRequestTenantOverride: actor.untrustedRequestTenantOverride,
+    configuredPostgresHost: cfg.database?.dedicatedServerHost,
     configuredKeyVault: cfg.keyVault
       ? {
           vaultName: cfg.keyVault.vaultName,

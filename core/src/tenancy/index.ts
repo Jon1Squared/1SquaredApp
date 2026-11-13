@@ -28,7 +28,11 @@ export * from './blobStorage';
 export * from './documentRepository';
 export * from './documentStoreRepository';
 export * from './keyVaultSecrets';
+export * from './tenantRegistry';
+export * from './postgresPoolManager';
+export * from './tenantScopedRepository';
 export * from './keyDateRepository';
+
 export {
   isEntraMfaVerified,
   mapEntraTokenClaimsToVerifiedOidcToken,
@@ -47,6 +51,7 @@ export interface ResolveTenantInput {
    */
   untrustedRequestTenantOverride?: string;
   configuredKeyVault?: TenantKeyVaultConfig;
+  configuredPostgresHost?: string;
 }
 
 export interface TenantPostgresConnectionConfig {
@@ -119,6 +124,9 @@ export function resolveTenantFromVerifiedToken(
     environment,
     correlationId,
     postgresDatabaseName: `pg_tenant_${slug}_${environment}`,
+    ...(input.configuredPostgresHost?.trim()
+      ? { configuredPostgresHost: input.configuredPostgresHost.trim() }
+      : {}),
     blobContainerName: `tenant-${tenantId}-${environment}`,
     keyVaultSecretPrefix:
       input.configuredKeyVault?.vaultName?.trim() ||
@@ -148,89 +156,18 @@ export function resolveTenantPostgresConfig(
 ): TenantPostgresConnectionConfig {
   const slug = normaliseTenantSlug(ctx.tenantId);
   const host =
-    ctx.hostingMode === 'single_tenant'
+    ctx.configuredPostgresHost?.trim() ||
+    (ctx.hostingMode === 'single_tenant'
       ? `${ctx.tenantId}-pg-${ctx.environment}.postgres.database.azure.com`
-      : `platform-shared-pool-${ctx.environment}.postgres.database.azure.com`;
+      : `platform-shared-pool-${ctx.environment}.postgres.database.azure.com`);
 
   return {
     host,
-    port: 5432,
+    port: Number(process.env.PLATFORM_POSTGRES_PORT || 6432),
     databaseName: ctx.postgresDatabaseName,
     sslMode: 'verify-full',
     keyVaultEncryptionKeyRef: `https://kv-platform-${ctx.environment}.vault.azure.net/keys/cmk-${slug}`,
   };
-}
-
-export interface TenantScopedRecord {
-  id: string;
-  tenantId: string;
-  [key: string]: unknown;
-}
-
-/**
- * Isolated per-tenant database cluster simulation enforcing physical database-per-tenant
- * separation and blocking cross-tenant record access or tampered identifiers.
- */
-export class PostgresTenantCluster {
-  private readonly databases = new Map<
-    string,
-    Map<string, TenantScopedRecord>
-  >();
-
-  private getDatabaseForTenant(
-    ctx: TenantContext,
-  ): Map<string, TenantScopedRecord> {
-    if (!ctx?.tenantId || !ctx?.postgresDatabaseName) {
-      throw new Error(
-        'TENANCY_ISOLATION_ERROR: Data access requires a valid TenantContext.',
-      );
-    }
-    let db = this.databases.get(ctx.postgresDatabaseName);
-    if (!db) {
-      db = new Map<string, TenantScopedRecord>();
-      this.databases.set(ctx.postgresDatabaseName, db);
-    }
-    return db;
-  }
-
-  public putRecord<T extends TenantScopedRecord>(
-    ctx: TenantContext,
-    record: T,
-  ): T {
-    if (record.tenantId !== ctx.tenantId) {
-      throw new Error(
-        `TENANCY_ISOLATION_ERROR: Cannot write record belonging to tenant "${record.tenantId}" into database for tenant "${ctx.tenantId}".`,
-      );
-    }
-    const db = this.getDatabaseForTenant(ctx);
-    const stored = Object.freeze({ ...record, tenantId: ctx.tenantId });
-    db.set(record.id, stored);
-    return stored;
-  }
-
-  public getRecordById<T extends TenantScopedRecord>(
-    ctx: TenantContext,
-    recordId: string,
-  ): T | null {
-    const db = this.getDatabaseForTenant(ctx);
-    const found = db.get(recordId);
-    if (!found) {
-      return null;
-    }
-    if (found.tenantId !== ctx.tenantId) {
-      throw new Error(
-        'TENANCY_ISOLATION_ERROR: Cross-tenant record access blocked.',
-      );
-    }
-    return found as T;
-  }
-
-  public listRecords<T extends TenantScopedRecord>(ctx: TenantContext): T[] {
-    const db = this.getDatabaseForTenant(ctx);
-    return Array.from(db.values()).filter(
-      (r): r is T => r.tenantId === ctx.tenantId,
-    );
-  }
 }
 
 export function buildTenantCacheKey(
@@ -267,6 +204,3 @@ export function runTenantBackgroundJob<TPayload, TResult>(
   }
   return handler(job);
 }
-
-export * from './keyDateRepository';
-

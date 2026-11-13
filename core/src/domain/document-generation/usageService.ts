@@ -56,11 +56,11 @@ export interface RecordUsageEventInput {
   occurredAt?: string;
 }
 
-export function recordTemplateUsageEvent(
+export async function recordTemplateUsageEvent(
   ctx: TenantContext,
   repo: TenantDocumentRepository,
   input: RecordUsageEventInput,
-): TemplateUsageEventRecord {
+): Promise<TemplateUsageEventRecord> {
   const roles = normaliseActorHomeRoles(input.actor);
   const primaryRoleKey = roles[0] ?? 'fee_earner';
 
@@ -148,14 +148,14 @@ export interface TemplateUsageReportResult {
   byUser?: UserUsageBreakdownRow[];
 }
 
-export function queryTemplateUsageReport(params: {
+export async function queryTemplateUsageReport(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   actor: DocumentPermissionActor;
   config: TenantConfiguration;
   filter?: TemplateUsageReportFilter;
   nowIso?: string;
-}): TemplateUsageReportResult {
+}): Promise<TemplateUsageReportResult> {
   const { ctx, repo, actor, config, filter } = params;
 
   if (!hasDocumentPermission(actor, 'document_template:view_usage', config)) {
@@ -172,10 +172,10 @@ export function queryTemplateUsageReport(params: {
     now.getTime() - 90 * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  const allTemplates = repo.listTemplates(ctx);
-  const allVersions = repo.listAllTemplateVersions(ctx);
+  const allTemplates = await repo.listTemplates(ctx);
+  const allVersions = await repo.listAllTemplateVersions(ctx);
   const versionMap = new Map(allVersions.map((v) => [v.id, v]));
-  const rawEvents = repo.listUsageEvents(ctx);
+  const rawEvents = await repo.listUsageEvents(ctx);
 
   // Filter events by optional date/taxonomy criteria
   const filteredEvents = rawEvents.filter((ev) => {
@@ -447,12 +447,12 @@ export interface UsageRetentionJobPayload {
   nowIso?: string;
 }
 
-export function executeUsageRetentionPurgeJob(
+export async function executeUsageRetentionPurgeJob(
   ctx: TenantContext,
   repo: TenantDocumentRepository,
   job: TenantBackgroundJob<UsageRetentionJobPayload>,
-): { purgedEventsCount: number; purgedSummaryBucketsCount: number } {
-  return runTenantBackgroundJob(job, (verifiedJob) => {
+): Promise<{ purgedEventsCount: number; purgedSummaryBucketsCount: number }> {
+  return runTenantBackgroundJob(job, async (verifiedJob) => {
     if (verifiedJob.tenantId !== ctx.tenantId) {
       throw new Error(
         'TENANCY_JOB_ERROR: Background job tenantId does not match TenantContext.',

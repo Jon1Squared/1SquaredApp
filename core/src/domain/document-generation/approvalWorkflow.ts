@@ -245,15 +245,15 @@ export async function createOrUploadDraftTemplateVersion(params: {
 
   const nowIso = new Date().toISOString();
   const existingTemplate = input.templateId
-    ? repo.getTemplateById(ctx, input.templateId)
-    : repo.getTemplateByCode(ctx, input.code);
+    ? await repo.getTemplateById(ctx, input.templateId)
+    : await repo.getTemplateByCode(ctx, input.code);
 
   const templateId =
     existingTemplate?.id ??
     input.templateId ??
     `TPL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
-  const existingVersions = repo.listVersionsForTemplate(ctx, templateId);
+  const existingVersions = await repo.listVersionsForTemplate(ctx, templateId);
   const nextVersionNumber =
     existingVersions.reduce((max, v) => Math.max(max, v.versionNumber), 0) + 1;
   const versionId = `${templateId}-V${nextVersionNumber}`;
@@ -349,8 +349,8 @@ export async function createOrUploadDraftTemplateVersion(params: {
     changeNote: input.changeNote ?? `Version ${nextVersionNumber} draft`,
   };
 
-  repo.putTemplate(ctx, template);
-  repo.putTemplateVersion(ctx, version);
+  await repo.putTemplate(ctx, template);
+  await await repo.putTemplateVersion(ctx, version);
 
   const unmappedPlaceholders = findUnmappedPlaceholders(version, catalogue);
   return { template, version, unmappedPlaceholders };
@@ -359,7 +359,7 @@ export async function createOrUploadDraftTemplateVersion(params: {
 /**
  * Updates placeholder mappings, prompted fields, or metadata on a `Draft` template version.
  */
-export function updateDraftTemplateVersion(params: {
+export async function updateDraftTemplateVersion(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   catalogue: readonly FieldCatalogueEntry[];
@@ -381,11 +381,11 @@ export function updateDraftTemplateVersion(params: {
     >
   >;
   changeNote?: string;
-}): {
+}): Promise<{
   template: DocumentTemplateRecord;
   version: DocumentTemplateVersionRecord;
   unmappedPlaceholders: string[];
-} {
+}> {
   const { ctx, repo, catalogue, actor, config, versionId } = params;
   assertBuildPermission(actor, config);
   validateAllowedRoleKeys(
@@ -393,7 +393,7 @@ export function updateDraftTemplateVersion(params: {
     config,
   );
 
-  const version = repo.getTemplateVersionById(ctx, versionId);
+  const version = await repo.getTemplateVersionById(ctx, versionId);
   if (!version) {
     throw new Error('TEMPLATE_VERSION_NOT_FOUND: Template version not found.');
   }
@@ -403,7 +403,7 @@ export function updateDraftTemplateVersion(params: {
     );
   }
 
-  const template = repo.getTemplateById(ctx, version.templateId);
+  const template = await repo.getTemplateById(ctx, version.templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Parent template not found.');
   }
@@ -422,8 +422,8 @@ export function updateDraftTemplateVersion(params: {
     updatedAt: nowIso,
   };
 
-  repo.putTemplate(ctx, updatedTemplate);
-  repo.putTemplateVersion(ctx, updatedVersion);
+  await repo.putTemplate(ctx, updatedTemplate);
+  await await repo.putTemplateVersion(ctx, updatedVersion);
 
   return {
     template: updatedTemplate,
@@ -436,7 +436,7 @@ export function updateDraftTemplateVersion(params: {
  * Submits a `Draft` template version for approval (`Draft` -> `Submitted`).
  * Blocked if any placeholder is unmapped or if `scanStatus !== 'clean'`.
  */
-export function submitTemplateVersionForApproval(params: {
+export async function submitTemplateVersionForApproval(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   catalogue: readonly FieldCatalogueEntry[];
@@ -444,14 +444,14 @@ export function submitTemplateVersionForApproval(params: {
   config: TenantConfiguration;
   versionId: string;
   changeNote?: string;
-}): {
+}): Promise<{
   template: DocumentTemplateRecord;
   version: DocumentTemplateVersionRecord;
-} {
+}> {
   const { ctx, repo, catalogue, actor, config, versionId } = params;
   assertBuildPermission(actor, config);
 
-  const version = repo.getTemplateVersionById(ctx, versionId);
+  const version = await repo.getTemplateVersionById(ctx, versionId);
   if (!version) {
     throw new Error('TEMPLATE_VERSION_NOT_FOUND: Template version not found.');
   }
@@ -474,7 +474,7 @@ export function submitTemplateVersionForApproval(params: {
     );
   }
 
-  const template = repo.getTemplateById(ctx, version.templateId);
+  const template = await repo.getTemplateById(ctx, version.templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Parent template not found.');
   }
@@ -484,9 +484,9 @@ export function submitTemplateVersionForApproval(params: {
     config.documentGeneration.approval.requireApproval ?? true;
 
   if (!requireApproval) {
-    for (const existingVer of repo.listVersionsForTemplate(ctx, template.id)) {
+    for (const existingVer of await repo.listVersionsForTemplate(ctx, template.id)) {
       if (existingVer.id !== version.id && existingVer.status === 'Active') {
-        repo.putTemplateVersion(ctx, {
+        await repo.putTemplateVersion(ctx, {
           ...existingVer,
           status: 'Retired',
         });
@@ -511,8 +511,8 @@ export function submitTemplateVersionForApproval(params: {
       updatedAt: nowIso,
     };
 
-    repo.putTemplateVersion(ctx, activatedVersion);
-    repo.putTemplate(ctx, updatedTemplate);
+    await repo.putTemplateVersion(ctx, activatedVersion);
+    await repo.putTemplate(ctx, updatedTemplate);
 
     return { template: updatedTemplate, version: activatedVersion };
   }
@@ -531,8 +531,8 @@ export function submitTemplateVersionForApproval(params: {
     updatedAt: nowIso,
   };
 
-  repo.putTemplateVersion(ctx, submittedVersion);
-  repo.putTemplate(ctx, updatedTemplate);
+  await repo.putTemplateVersion(ctx, submittedVersion);
+  await repo.putTemplate(ctx, updatedTemplate);
 
   return { template: updatedTemplate, version: submittedVersion };
 }
@@ -541,20 +541,20 @@ export function submitTemplateVersionForApproval(params: {
  * Approves a `Submitted` template version (`Submitted` -> `Active`), retiring any previously
  * active version of the same template. Enforces `allowSelfApproval`.
  */
-export function approveTemplateVersion(params: {
+export async function approveTemplateVersion(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   actor: DocumentPermissionActor;
   config: TenantConfiguration;
   versionId: string;
-}): {
+}): Promise<{
   template: DocumentTemplateRecord;
   version: DocumentTemplateVersionRecord;
-} {
+}> {
   const { ctx, repo, actor, config, versionId } = params;
   assertApprovePermission(actor, config, ctx);
 
-  const version = repo.getTemplateVersionById(ctx, versionId);
+  const version = await repo.getTemplateVersionById(ctx, versionId);
   if (!version) {
     throw new Error('TEMPLATE_VERSION_NOT_FOUND: Template version not found.');
   }
@@ -582,7 +582,7 @@ export function approveTemplateVersion(params: {
     );
   }
 
-  const template = repo.getTemplateById(ctx, version.templateId);
+  const template = await repo.getTemplateById(ctx, version.templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Parent template not found.');
   }
@@ -590,9 +590,9 @@ export function approveTemplateVersion(params: {
   const nowIso = new Date().toISOString();
 
   // Retire any previously Active version of this template
-  for (const existingVer of repo.listVersionsForTemplate(ctx, template.id)) {
+  for (const existingVer of await repo.listVersionsForTemplate(ctx, template.id)) {
     if (existingVer.id !== version.id && existingVer.status === 'Active') {
-      repo.putTemplateVersion(ctx, {
+      await repo.putTemplateVersion(ctx, {
         ...existingVer,
         status: 'Retired',
       });
@@ -614,8 +614,8 @@ export function approveTemplateVersion(params: {
     updatedAt: nowIso,
   };
 
-  repo.putTemplateVersion(ctx, approvedVersion);
-  repo.putTemplate(ctx, updatedTemplate);
+  await repo.putTemplateVersion(ctx, approvedVersion);
+  await repo.putTemplate(ctx, updatedTemplate);
 
   return { template: updatedTemplate, version: approvedVersion };
 }
@@ -623,17 +623,17 @@ export function approveTemplateVersion(params: {
 /**
  * Rejects a `Submitted` template version (`Submitted` -> `Rejected`) with a mandatory reason.
  */
-export function rejectTemplateVersion(params: {
+export async function rejectTemplateVersion(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   actor: DocumentPermissionActor;
   config: TenantConfiguration;
   versionId: string;
   rejectionReason: string;
-}): {
+}): Promise<{
   template: DocumentTemplateRecord;
   version: DocumentTemplateVersionRecord;
-} {
+}> {
   const { ctx, repo, actor, config, versionId, rejectionReason } = params;
   assertApprovePermission(actor, config, ctx);
 
@@ -643,7 +643,7 @@ export function rejectTemplateVersion(params: {
     );
   }
 
-  const version = repo.getTemplateVersionById(ctx, versionId);
+  const version = await repo.getTemplateVersionById(ctx, versionId);
   if (!version) {
     throw new Error('TEMPLATE_VERSION_NOT_FOUND: Template version not found.');
   }
@@ -653,7 +653,7 @@ export function rejectTemplateVersion(params: {
     );
   }
 
-  const template = repo.getTemplateById(ctx, version.templateId);
+  const template = await repo.getTemplateById(ctx, version.templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Parent template not found.');
   }
@@ -673,8 +673,8 @@ export function rejectTemplateVersion(params: {
     updatedAt: nowIso,
   };
 
-  repo.putTemplateVersion(ctx, rejectedVersion);
-  repo.putTemplate(ctx, updatedTemplate);
+  await repo.putTemplateVersion(ctx, rejectedVersion);
+  await repo.putTemplate(ctx, updatedTemplate);
 
   return { template: updatedTemplate, version: rejectedVersion };
 }
@@ -682,25 +682,25 @@ export function rejectTemplateVersion(params: {
 /**
  * Retires an active template so it can no longer be used for new document generation.
  */
-export function retireTemplate(params: {
+export async function retireTemplate(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   actor: DocumentPermissionActor;
   config: TenantConfiguration;
   templateId: string;
-}): DocumentTemplateRecord {
+}): Promise<DocumentTemplateRecord> {
   const { ctx, repo, actor, config, templateId } = params;
   assertApprovePermission(actor, config, ctx);
 
-  const template = repo.getTemplateById(ctx, templateId);
+  const template = await repo.getTemplateById(ctx, templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Template not found.');
   }
 
   const nowIso = new Date().toISOString();
-  for (const ver of repo.listVersionsForTemplate(ctx, template.id)) {
+  for (const ver of await repo.listVersionsForTemplate(ctx, template.id)) {
     if (ver.status === 'Active') {
-      repo.putTemplateVersion(ctx, {
+      await repo.putTemplateVersion(ctx, {
         ...ver,
         status: 'Retired',
       });
@@ -721,26 +721,26 @@ export function retireTemplate(params: {
  * Rolls a template back to a previously approved version (`versionId` or `versionNumber`),
  * retiring the current active version and reactivating the selected prior approved version.
  */
-export function rollbackTemplateToVersion(params: {
+export async function rollbackTemplateToVersion(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   actor: DocumentPermissionActor;
   config: TenantConfiguration;
   templateId: string;
   targetVersionId: string;
-}): {
+}): Promise<{
   template: DocumentTemplateRecord;
   activeVersion: DocumentTemplateVersionRecord;
-} {
+}> {
   const { ctx, repo, actor, config, templateId, targetVersionId } = params;
   assertApprovePermission(actor, config, ctx);
 
-  const template = repo.getTemplateById(ctx, templateId);
+  const template = await repo.getTemplateById(ctx, templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Template not found.');
   }
 
-  const targetVersion = repo.getTemplateVersionById(ctx, targetVersionId);
+  const targetVersion = await repo.getTemplateVersionById(ctx, targetVersionId);
   if (!targetVersion || targetVersion.templateId !== template.id) {
     throw new Error(
       'TEMPLATE_VERSION_NOT_FOUND: Target rollback version not found for this template.',
@@ -754,9 +754,9 @@ export function rollbackTemplateToVersion(params: {
   }
 
   const nowIso = new Date().toISOString();
-  for (const ver of repo.listVersionsForTemplate(ctx, template.id)) {
+  for (const ver of await repo.listVersionsForTemplate(ctx, template.id)) {
     if (ver.id !== targetVersion.id && ver.status === 'Active') {
-      repo.putTemplateVersion(ctx, {
+      await repo.putTemplateVersion(ctx, {
         ...ver,
         status: 'Retired',
       });
@@ -775,8 +775,8 @@ export function rollbackTemplateToVersion(params: {
     updatedAt: nowIso,
   };
 
-  repo.putTemplateVersion(ctx, reactivatedVersion);
-  repo.putTemplate(ctx, updatedTemplate);
+  await repo.putTemplateVersion(ctx, reactivatedVersion);
+  await repo.putTemplate(ctx, updatedTemplate);
 
   return { template: updatedTemplate, activeVersion: reactivatedVersion };
 }

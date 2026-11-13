@@ -227,7 +227,7 @@ export async function previewTemplateVersion(params: {
     );
   }
 
-  const version = repo.getTemplateVersionById(ctx, versionId);
+  const version = await repo.getTemplateVersionById(ctx, versionId);
   if (!version) {
     throw new Error('TEMPLATE_VERSION_NOT_FOUND: Template version not found.');
   }
@@ -238,7 +238,7 @@ export async function previewTemplateVersion(params: {
     );
   }
 
-  const template = repo.getTemplateById(ctx, version.templateId);
+  const template = await repo.getTemplateById(ctx, version.templateId);
   if (!template) {
     throw new Error('TEMPLATE_NOT_FOUND: Template not found.');
   }
@@ -264,7 +264,7 @@ export async function previewTemplateVersion(params: {
   const format: DocumentOutputFormat =
     params.outputFormat ?? config.documentGeneration.defaultOutputFormat;
 
-  recordTemplateUsageEvent(ctx, repo, {
+  await recordTemplateUsageEvent(ctx, repo, {
     templateId: template.id,
     templateVersionId: version.id,
     versionNumber: version.versionNumber,
@@ -380,14 +380,14 @@ export async function generateDocumentFromTemplate(params: {
     );
   }
 
-  const template = repo.getTemplateById(ctx, templateId);
+  const template = await repo.getTemplateById(ctx, templateId);
   if (!template || !template.activeVersionId) {
     throw new Error(
       'TEMPLATE_NOT_ACTIVE: Selected template is not found or does not have an Active approved version.',
     );
   }
 
-  const version = repo.getTemplateVersionById(ctx, template.activeVersionId);
+  const version = await repo.getTemplateVersionById(ctx, template.activeVersionId);
   if (!version || version.status !== 'Active') {
     throw new Error(
       'TEMPLATE_VERSION_NOT_ACTIVE: Active version for template was not found.',
@@ -422,7 +422,7 @@ export async function generateDocumentFromTemplate(params: {
   });
 
   if (!availability.available) {
-    recordTemplateUsageEvent(ctx, repo, {
+    await recordTemplateUsageEvent(ctx, repo, {
       templateId: template.id,
       templateVersionId: version.id,
       versionNumber: version.versionNumber,
@@ -478,7 +478,7 @@ export async function generateDocumentFromTemplate(params: {
   );
 
   if (allMissingRequired.length > 0) {
-    recordTemplateUsageEvent(ctx, repo, {
+    await recordTemplateUsageEvent(ctx, repo, {
       templateId: template.id,
       templateVersionId: version.id,
       versionNumber: version.versionNumber,
@@ -560,12 +560,12 @@ export async function generateDocumentFromTemplate(params: {
     isDeleted: false,
   };
 
-  repo.putDocument(ctx, docRecord);
+  await repo.putDocument(ctx, docRecord);
 
   const links: DocumentLinkRecord[] = [];
   if (docRecord.primaryMatterId) {
     links.push(
-      repo.putDocumentLink(ctx, {
+      await repo.putDocumentLink(ctx, {
         id: `${documentId}-LNK-MAT`,
         tenantId: ctx.tenantId,
         documentId,
@@ -579,7 +579,7 @@ export async function generateDocumentFromTemplate(params: {
 
   if (docRecord.primaryClientId && params.primaryClientEntityType) {
     links.push(
-      repo.putDocumentLink(ctx, {
+      await repo.putDocumentLink(ctx, {
         id: `${documentId}-LNK-CLI`,
         tenantId: ctx.tenantId,
         documentId,
@@ -597,7 +597,7 @@ export async function generateDocumentFromTemplate(params: {
     params.recipientPartyId !== docRecord.primaryClientId
   ) {
     links.push(
-      repo.putDocumentLink(ctx, {
+      await repo.putDocumentLink(ctx, {
         id: `${documentId}-LNK-PTY`,
         tenantId: ctx.tenantId,
         documentId,
@@ -609,7 +609,7 @@ export async function generateDocumentFromTemplate(params: {
     );
   }
 
-  recordTemplateUsageEvent(ctx, repo, {
+  await recordTemplateUsageEvent(ctx, repo, {
     templateId: template.id,
     templateVersionId: version.id,
     versionNumber: version.versionNumber,
@@ -644,7 +644,7 @@ export async function generateDocumentFromTemplate(params: {
  * Lists generated documents for a Matter or Client (`organisation` | `person`) screen,
  * enforcing both `document:view` and restricted staff matter inheritance (`canActorAccessGeneratedDocument`).
  */
-export function listAccessibleDocumentsForEntity(params: {
+export async function listAccessibleDocumentsForEntity(params: {
   ctx: TenantContext;
   repo: TenantDocumentRepository;
   actor: DocumentPermissionActor;
@@ -652,7 +652,7 @@ export function listAccessibleDocumentsForEntity(params: {
   entityType: 'matter' | 'organisation' | 'person';
   entityId: string;
   resolveMatterSubject: (matterId: string) => MatterAccessSubject | null | undefined;
-}): GeneratedDocumentRecord[] {
+}): Promise<GeneratedDocumentRecord[]> {
   const {
     ctx,
     repo,
@@ -674,14 +674,15 @@ export function listAccessibleDocumentsForEntity(params: {
     }
   }
 
-  const rawDocs = repo.listDocumentsForEntity(ctx, entityType, entityId);
-  return rawDocs.filter((doc) => {
+  const rawDocs = await repo.listDocumentsForEntity(ctx, entityType, entityId);
+  const out: GeneratedDocumentRecord[] = [];
+  for (const doc of rawDocs) {
     const linkedMatters: MatterAccessSubject[] = [];
     if (doc.primaryMatterId) {
       const m = resolveMatterSubject(doc.primaryMatterId);
       if (m) linkedMatters.push(m);
     }
-    for (const link of repo.listLinksForDocument(ctx, doc.id)) {
+    for (const link of await repo.listLinksForDocument(ctx, doc.id)) {
       if (link.entityType === 'matter') {
         const m = resolveMatterSubject(link.entityId);
         if (m && !linkedMatters.some((x) => x.id === m.id)) {
@@ -689,8 +690,11 @@ export function listAccessibleDocumentsForEntity(params: {
         }
       }
     }
-    return canActorAccessGeneratedDocument(actor, doc, linkedMatters, config);
-  });
+    if (canActorAccessGeneratedDocument(actor, doc, linkedMatters, config)) {
+      out.push(doc);
+    }
+  }
+  return out;
 }
 
 /**
@@ -722,7 +726,7 @@ export async function deleteGeneratedDocument(params: {
     );
   }
 
-  const doc = repo.getDocumentById(ctx, documentId);
+  const doc = await repo.getDocumentById(ctx, documentId);
   if (!doc || doc.isDeleted) {
     throw new Error('DOCUMENT_NOT_FOUND: Document not found.');
   }

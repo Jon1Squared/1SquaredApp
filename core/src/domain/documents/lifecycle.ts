@@ -153,13 +153,13 @@ async function ensureHierarchyAndGroupScopes(params: {
       rootGrants,
       { inherit: false },
     );
-    const existingRootScope = deps.repository.findFolderScope(ctx, {
+    const existingRootScope = await deps.repository.findFolderScope(ctx, {
       storeId: store.storeId,
       libraryId,
       scopeType: 'library_root',
       scopeKey: 'root',
     });
-    deps.repository.putFolderScope(ctx, {
+    await deps.repository.putFolderScope(ctx, {
       id: existingRootScope?.id ?? `scope-${randomUUID()}`,
       tenantId: ctx.tenantId,
       storeId: store.storeId,
@@ -222,13 +222,13 @@ async function ensureHierarchyAndGroupScopes(params: {
       deptPlan.grants,
       { inherit: deptPlan.inherit },
     );
-    const existingDeptScope = deps.repository.findFolderScope(ctx, {
+    const existingDeptScope = await deps.repository.findFolderScope(ctx, {
       storeId: store.storeId,
       libraryId,
       scopeType: 'department',
       scopeKey: subject.departmentId,
     });
-    deps.repository.putFolderScope(ctx, {
+    await deps.repository.putFolderScope(ctx, {
       id: existingDeptScope?.id ?? `scope-${randomUUID()}`,
       tenantId: ctx.tenantId,
       storeId: store.storeId,
@@ -260,13 +260,13 @@ async function ensureHierarchyAndGroupScopes(params: {
         { inherit: teamPlan.inherit },
       );
       const teamScopeKey = `${subject.departmentId}/${subject.teamId}`;
-      const existingTeamScope = deps.repository.findFolderScope(ctx, {
+      const existingTeamScope = await deps.repository.findFolderScope(ctx, {
         storeId: store.storeId,
         libraryId,
         scopeType: 'team',
         scopeKey: teamScopeKey,
       });
-      deps.repository.putFolderScope(ctx, {
+      await deps.repository.putFolderScope(ctx, {
         id: existingTeamScope?.id ?? `scope-${randomUUID()}`,
         tenantId: ctx.tenantId,
         storeId: store.storeId,
@@ -346,7 +346,7 @@ export async function provisionMatterDocumentsJob(params: {
       const driveId =
         libraryCfg?.driveId ?? `drive-${route.store.storeId}-${route.libraryId}`;
 
-      const existingLocations = deps.repository.listMatterLocationsByMatterId(
+      const existingLocations = await deps.repository.listMatterLocationsByMatterId(
         ctx,
         subject.matterId,
       );
@@ -356,10 +356,10 @@ export async function provisionMatterDocumentsJob(params: {
 
       const now = new Date().toISOString();
       const existingJob = existingJobId
-        ? deps.repository.getLifecycleJobById(ctx, existingJobId)
+        ? await deps.repository.getLifecycleJobById(ctx, existingJobId)
         : null;
 
-      let jobRecord: DocumentLifecycleJobRecord = deps.repository.putLifecycleJob(
+      let jobRecord: DocumentLifecycleJobRecord = await deps.repository.putLifecycleJob(
         ctx,
         {
           id: bgJob.jobId,
@@ -387,7 +387,7 @@ export async function provisionMatterDocumentsJob(params: {
 
       // Put pending location record so the matter can open even if provisioning fails mid-flight
       let locationRecord: MatterDocumentLocationRecord =
-        deps.repository.putMatterLocation(ctx, {
+        await deps.repository.putMatterLocation(ctx, {
           id: existingLoc?.id ?? `loc-${randomUUID()}`,
           tenantId: ctx.tenantId,
           matterId: subject.matterId,
@@ -502,13 +502,13 @@ export async function provisionMatterDocumentsJob(params: {
         );
 
         const matterScopeKey = `MATTER:${subject.matterId}`;
-        const existingMatterScope = deps.repository.findFolderScope(ctx, {
+        const existingMatterScope = await deps.repository.findFolderScope(ctx, {
           storeId: route.store.storeId,
           libraryId: route.libraryId,
           scopeType: 'matter',
           scopeKey: matterScopeKey,
         });
-        deps.repository.putFolderScope(ctx, {
+        await deps.repository.putFolderScope(ctx, {
           id: existingMatterScope?.id ?? `scope-${randomUUID()}`,
           tenantId: ctx.tenantId,
           storeId: route.store.storeId,
@@ -559,7 +559,7 @@ export async function provisionMatterDocumentsJob(params: {
           (permPlan.consumesUniqueScope ? 1 : 0) + subfolderUniqueScopes;
 
         const completedAt = new Date().toISOString();
-        locationRecord = deps.repository.putMatterLocation(ctx, {
+        locationRecord = await deps.repository.putMatterLocation(ctx, {
           ...locationRecord,
           providerFolderItemId: matterFolderItemId,
           webUrl: ensuredMatter.rootWebUrl,
@@ -574,7 +574,7 @@ export async function provisionMatterDocumentsJob(params: {
           updatedAt: completedAt,
         });
 
-        jobRecord = deps.repository.putLifecycleJob(ctx, {
+        jobRecord = await deps.repository.putLifecycleJob(ctx, {
           ...jobRecord,
           status: 'succeeded',
           result: {
@@ -586,7 +586,7 @@ export async function provisionMatterDocumentsJob(params: {
           updatedAt: completedAt,
         });
 
-        deps.repository.appendAuditEvent(
+        await deps.repository.appendAuditEvent(
           ctx,
           buildDocumentStoreAuditEvent({
             context: ctx,
@@ -622,7 +622,7 @@ export async function provisionMatterDocumentsJob(params: {
         const errorCode =
           (err as { code?: string })?.code ?? 'unavailable';
 
-        locationRecord = deps.repository.putMatterLocation(ctx, {
+        locationRecord = await deps.repository.putMatterLocation(ctx, {
           ...locationRecord,
           provisioningStatus: 'failed',
           lastErrorCode: errorCode,
@@ -630,7 +630,7 @@ export async function provisionMatterDocumentsJob(params: {
           updatedAt: failedAt,
         });
 
-        jobRecord = deps.repository.putLifecycleJob(ctx, {
+        jobRecord = await deps.repository.putLifecycleJob(ctx, {
           ...jobRecord,
           status: 'failed',
           lastErrorCode: errorCode,
@@ -638,7 +638,7 @@ export async function provisionMatterDocumentsJob(params: {
           updatedAt: failedAt,
         });
 
-        deps.repository.appendAuditEvent(
+        await deps.repository.appendAuditEvent(
           ctx,
           buildDocumentStoreAuditEvent({
             context: ctx,
@@ -748,8 +748,8 @@ export async function linkExistingMatterFolderJob(params: {
       }
 
       const actualRelPath = resolvedLoc.relativePath ?? '';
-      const conflictingLocation = deps.repository
-        .listAllMatterLocations(ctx)
+      const conflictingLocation = (await deps.repository
+        .listAllMatterLocations(ctx))
         .find((otherLoc) => {
           if (otherLoc.matterId === subject.matterId || otherLoc.storeId !== storeId) {
             return false;
@@ -779,7 +779,7 @@ export async function linkExistingMatterFolderJob(params: {
         });
 
       if (conflictingLocation) {
-        deps.repository.appendAuditEvent(
+        await deps.repository.appendAuditEvent(
           ctx,
           buildDocumentStoreAuditEvent({
             context: ctx,
@@ -808,8 +808,8 @@ export async function linkExistingMatterFolderJob(params: {
         .toLowerCase()
         .replace(/^\/+|\/+$/g, '');
 
-      const matchesContainerScope = deps.repository
-        .listFolderScopes(ctx)
+      const matchesContainerScope = (await deps.repository
+        .listFolderScopes(ctx))
         .some(
           (s) =>
             s.storeId === storeId &&
@@ -853,7 +853,7 @@ export async function linkExistingMatterFolderJob(params: {
           (actualNormalized === expectedBaseNormalized ||
             expectedBaseNormalized.startsWith(`${actualNormalized}/`)))
       ) {
-        deps.repository.appendAuditEvent(
+        await deps.repository.appendAuditEvent(
           ctx,
           buildDocumentStoreAuditEvent({
             context: ctx,
@@ -881,7 +881,7 @@ export async function linkExistingMatterFolderJob(params: {
         !actualNormalized.startsWith(`${expectedBaseNormalized}/`)
       ) {
         if (!allowRoutingMismatchOverride || !ctx.mfaVerified) {
-          deps.repository.appendAuditEvent(
+          await deps.repository.appendAuditEvent(
             ctx,
             buildDocumentStoreAuditEvent({
               context: ctx,
@@ -942,7 +942,7 @@ export async function linkExistingMatterFolderJob(params: {
       );
 
       const now = new Date().toISOString();
-      const location = deps.repository.putMatterLocation(ctx, {
+      const location = await deps.repository.putMatterLocation(ctx, {
         id: `loc-${randomUUID()}`,
         tenantId: ctx.tenantId,
         matterId: subject.matterId,
@@ -969,7 +969,7 @@ export async function linkExistingMatterFolderJob(params: {
         updatedAt: now,
       });
 
-      const job = deps.repository.putLifecycleJob(ctx, {
+      const job = await deps.repository.putLifecycleJob(ctx, {
         id: bgJob.jobId,
         tenantId: ctx.tenantId,
         correlationId: ctx.correlationId,
@@ -992,7 +992,7 @@ export async function linkExistingMatterFolderJob(params: {
         updatedAt: now,
       });
 
-      deps.repository.appendAuditEvent(
+      await deps.repository.appendAuditEvent(
         ctx,
         buildDocumentStoreAuditEvent({
           context: ctx,
@@ -1047,7 +1047,7 @@ export async function recalculateMatterPermissionsJob(params: {
       payload: { matterId: subject.matterId },
     },
     async () => {
-      const existingLocations = deps.repository.listMatterLocationsByMatterId(
+      const existingLocations = await deps.repository.listMatterLocationsByMatterId(
         ctx,
         subject.matterId,
       );
@@ -1144,7 +1144,7 @@ export async function recalculateMatterPermissionsJob(params: {
               code: errorCode,
             }),
           );
-          deps.repository.putLifecycleJob(ctx, {
+          await deps.repository.putLifecycleJob(ctx, {
             id: `job-perm-${randomUUID()}`,
             tenantId: ctx.tenantId,
             correlationId: ctx.correlationId,
@@ -1167,7 +1167,7 @@ export async function recalculateMatterPermissionsJob(params: {
             createdAt: now,
             updatedAt: now,
           });
-          deps.repository.putReconciliationFinding(ctx, {
+          await deps.repository.putReconciliationFinding(ctx, {
             id: `finding-${randomUUID()}`,
             tenantId: ctx.tenantId,
             storeId: loc.storeId,
@@ -1189,7 +1189,7 @@ export async function recalculateMatterPermissionsJob(params: {
             remediatedAt: null,
             remediatedByUserId: null,
           });
-          deps.repository.appendAuditEvent(
+          await deps.repository.appendAuditEvent(
             ctx,
             buildDocumentStoreAuditEvent({
               context: ctx,
@@ -1209,13 +1209,13 @@ export async function recalculateMatterPermissionsJob(params: {
 
         const now = new Date().toISOString();
         const matterScopeKey = `MATTER:${subject.matterId}`;
-        const existingMatterScope = deps.repository.findFolderScope(ctx, {
+        const existingMatterScope = await deps.repository.findFolderScope(ctx, {
           storeId: loc.storeId,
           libraryId: loc.libraryId,
           scopeType: 'matter',
           scopeKey: matterScopeKey,
         });
-        deps.repository.putFolderScope(ctx, {
+        await deps.repository.putFolderScope(ctx, {
           id: existingMatterScope?.id ?? `scope-${randomUUID()}`,
           tenantId: ctx.tenantId,
           storeId: loc.storeId,
@@ -1228,7 +1228,7 @@ export async function recalculateMatterPermissionsJob(params: {
           lastVerifiedAt: now,
         });
 
-        const updatedLoc = deps.repository.putMatterLocation(ctx, {
+        const updatedLoc = await deps.repository.putMatterLocation(ctx, {
           ...loc,
           hasUniquePermissions: !effectiveInherit,
           uniqueScopeCount: !effectiveInherit ? 1 : 0,
@@ -1236,7 +1236,7 @@ export async function recalculateMatterPermissionsJob(params: {
           updatedAt: now,
         });
 
-        const jobRecord = deps.repository.putLifecycleJob(ctx, {
+        const jobRecord = await deps.repository.putLifecycleJob(ctx, {
           id: `job-perm-${randomUUID()}`,
           tenantId: ctx.tenantId,
           correlationId: ctx.correlationId,
@@ -1262,7 +1262,7 @@ export async function recalculateMatterPermissionsJob(params: {
           updatedAt: now,
         });
 
-        deps.repository.appendAuditEvent(
+        await deps.repository.appendAuditEvent(
           ctx,
           buildDocumentStoreAuditEvent({
             context: ctx,
@@ -1321,7 +1321,7 @@ export async function moveMatterFolderJob(params: {
       payload: { matterId: subject.matterId, locationId },
     },
     async (bgJob) => {
-      const loc = deps.repository.getMatterLocationById(ctx, locationId);
+      const loc = await deps.repository.getMatterLocationById(ctx, locationId);
       if (!loc) {
         throw new Error(`Matter document location "${locationId}" not found.`);
       }
@@ -1388,7 +1388,7 @@ export async function moveMatterFolderJob(params: {
       );
 
       const now = new Date().toISOString();
-      const updatedLoc = deps.repository.putMatterLocation(ctx, {
+      const updatedLoc = await deps.repository.putMatterLocation(ctx, {
         ...loc,
         webUrl: movedItem.webUrl,
         relativePath: route.matterRelativePath,
@@ -1400,7 +1400,7 @@ export async function moveMatterFolderJob(params: {
         updatedAt: now,
       });
 
-      const job = deps.repository.putLifecycleJob(ctx, {
+      const job = await deps.repository.putLifecycleJob(ctx, {
         id: bgJob.jobId,
         tenantId: ctx.tenantId,
         correlationId: ctx.correlationId,
@@ -1423,7 +1423,7 @@ export async function moveMatterFolderJob(params: {
         updatedAt: now,
       });
 
-      deps.repository.appendAuditEvent(
+      await deps.repository.appendAuditEvent(
         ctx,
         buildDocumentStoreAuditEvent({
           context: ctx,
@@ -1466,7 +1466,7 @@ export async function closeMatterFolderJob(params: {
   };
 
   const existingLocations =
-    params.deps.repository.listMatterLocationsByMatterId(
+    await params.deps.repository.listMatterLocationsByMatterId(
       params.ctx,
       params.subject.matterId,
     );
@@ -1492,17 +1492,17 @@ export async function closeMatterFolderJob(params: {
     triggerEvent: params.triggerEvent ?? 'matter.closed',
   });
 
-  const updatedLocations = res.locations.map((loc) => {
+  const updatedLocationsPromises = res.locations.map(async (loc) => {
     const retentionLabelId = retentionByLocId.get(loc.id);
     const updated =
       retentionLabelId !== undefined
-        ? params.deps.repository.putMatterLocation(params.ctx, {
+        ? await params.deps.repository.putMatterLocation(params.ctx, {
             ...loc,
             retentionLabelId,
           })
         : loc;
 
-    params.deps.repository.appendAuditEvent(
+    await params.deps.repository.appendAuditEvent(
       params.ctx,
       buildDocumentStoreAuditEvent({
         context: params.ctx,
@@ -1523,7 +1523,7 @@ export async function closeMatterFolderJob(params: {
     return updated;
   });
 
-  return { jobs: res.jobs, locations: updatedLocations };
+  return { jobs: res.jobs, locations: await Promise.all(updatedLocationsPromises) };
 }
 
 /**
@@ -1551,7 +1551,7 @@ export async function reopenMatterFolderJob(params: {
   });
 
   for (const loc of res.locations) {
-    params.deps.repository.appendAuditEvent(
+    await params.deps.repository.appendAuditEvent(
       params.ctx,
       buildDocumentStoreAuditEvent({
         context: params.ctx,
@@ -1608,7 +1608,7 @@ export async function applyTemplateAdditionsToOpenMattersJob(params: {
 
       for (const subject of openMatterSubjects) {
         if (subject.isClosed) continue;
-        const locations = deps.repository.listMatterLocationsByMatterId(
+        const locations = await deps.repository.listMatterLocationsByMatterId(
           ctx,
           subject.matterId,
         );
@@ -1629,7 +1629,7 @@ export async function applyTemplateAdditionsToOpenMattersJob(params: {
           if (diff.missingRelativePaths.length === 0) {
             if (loc.templateVersion !== compiled.version) {
               updatedLocations.push(
-                deps.repository.putMatterLocation(ctx, {
+                await deps.repository.putMatterLocation(ctx, {
                   ...loc,
                   templateId: compiled.templateId,
                   templateVersion: compiled.version,
@@ -1658,7 +1658,7 @@ export async function applyTemplateAdditionsToOpenMattersJob(params: {
             ...ensured.folderItemMap,
           };
 
-          const updatedLoc = deps.repository.putMatterLocation(ctx, {
+          const updatedLoc = await deps.repository.putMatterLocation(ctx, {
             ...loc,
             folderItemMap: mergedMap,
             templateId: compiled.templateId,
@@ -1671,7 +1671,7 @@ export async function applyTemplateAdditionsToOpenMattersJob(params: {
       }
 
       const now = new Date().toISOString();
-      const job = deps.repository.putLifecycleJob(ctx, {
+      const job = await deps.repository.putLifecycleJob(ctx, {
         id: bgJob.jobId,
         tenantId: ctx.tenantId,
         correlationId: ctx.correlationId,
@@ -1693,7 +1693,7 @@ export async function applyTemplateAdditionsToOpenMattersJob(params: {
         updatedAt: now,
       });
 
-      deps.repository.appendAuditEvent(
+      await deps.repository.appendAuditEvent(
         ctx,
         buildDocumentStoreAuditEvent({
           context: ctx,
@@ -1715,24 +1715,24 @@ export async function applyTemplateAdditionsToOpenMattersJob(params: {
 /**
  * Calculates the current unique permission scope count for each configured library in a tenant.
  */
-export function computeTenantLibraryScaleStatuses(params: {
+export async function computeTenantLibraryScaleStatuses(params: {
   ctx: TenantContext;
   repository: TenantDocumentStoreRepository;
   stores: readonly DocumentStoreConfig[];
   warningThreshold?: number;
-}): LibraryScopeScaleStatus[] {
+}): Promise<LibraryScopeScaleStatus[]> {
   const { ctx, repository, stores, warningThreshold } = params;
   const results: LibraryScopeScaleStatus[] = [];
 
   for (const store of stores) {
     for (const lib of store.sharepoint?.libraries ?? []) {
-      const scopes = repository.listFolderScopes(
+      const scopes = await repository.listFolderScopes(
         ctx,
         store.storeId,
         lib.libraryId,
       );
-      const locations = repository
-        .listAllMatterLocations(ctx, store.storeId)
+      const locations = (await repository
+        .listAllMatterLocations(ctx, store.storeId))
         .filter((l) => l.libraryId === lib.libraryId);
 
       const departmentScopes = scopes.filter(
