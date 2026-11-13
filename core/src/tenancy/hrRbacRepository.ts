@@ -22,6 +22,7 @@ import type {
 } from '../api/index';
 import { TenantAuditRepository } from './auditRepository';
 import {
+  getActiveTenantTransactionState,
   TenantScopedRepository,
   type TenantSqlClient,
   toIsoString,
@@ -1353,88 +1354,63 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
   }
 
   // ============================================================================
-  // Tenant RBAC Configuration Overrides (`tenant_rbac_configs`)
+  // Tenant RBAC Configuration Overrides (`tenant_rbac_configs`, `R477`, `S3`)
   // ============================================================================
 
-  public async getTenantRbacConfigOverride<
+  private extractRbacOverrideAndRowVersion<
     TOverride extends Partial<RbacConfiguration> = Partial<RbacConfiguration>,
-  >(ctx: TenantContext): Promise<TOverride | null> {
+  >(
+    raw: Record<string, unknown> | Partial<RbacConfiguration> | null | undefined,
+  ): { override: TOverride | null; rowVersion: number } {
+    if (!raw || typeof raw !== 'object') {
+      return { override: null, rowVersion: 0 };
+    }
+    const cloned = structuredClone(raw) as Record<string, unknown>;
+    const rawVer = cloned['_rowVersion'] ?? cloned['row_version'];
+    const rowVersion =
+      typeof rawVer === 'number' && Number.isFinite(rawVer) && rawVer >= 1
+        ? Math.floor(rawVer)
+        : 1;
+    delete cloned['_rowVersion'];
+    delete cloned['row_version'];
+    return {
+      override: cloned as TOverride,
+      rowVersion,
+    };
+  }
+
+  public async getRbacConfigOverrideWithVersion<
+    TOverride extends Partial<RbacConfiguration> = Partial<RbacConfiguration>,
+  >(
+    ctx: TenantContext,
+  ): Promise<{ override: TOverride | null; rowVersion: number }> {
+    const activeTx = getActiveTenantTransactionState();
+    const inWriteTx = activeTx?.tenantId === ctx.tenantId;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<TenantRbacConfigRow>(
-        'SELECT * FROM public.tenant_rbac_configs WHERE tenant_id = $1',
+        inWriteTx
+          ? 'SELECT * FROM public.tenant_rbac_configs WHERE tenant_id = $1 FOR UPDATE'
+          : 'SELECT * FROM public.tenant_rbac_configs WHERE tenant_id = $1',
         [ctx.tenantId],
       );
       const row = res.rows[0];
-      if (!row || !row.rbac_override_json) return null;
+      if (!row || !row.rbac_override_json) {
+        return { override: null, rowVersion: 0 };
+      }
       this.assertRowTenant(ctx, row.tenant_id, 'tenant_rbac_configs');
-      return structuredClone(row.rbac_override_json) as TOverride;
+      return this.extractRbacOverrideAndRowVersion<TOverride>(
+        row.rbac_override_json,
+      );
     });
   }
 
   public async getRbacConfigOverride<
     TOverride extends Partial<RbacConfiguration> = Partial<RbacConfiguration>,
   >(ctx: TenantContext): Promise<TOverride | null> {
-    return this.getTenantRbacConfigOverride<TOverride>(ctx);
-  }
-
-  public async getRbacTenantConfig<
-    TOverride extends Partial<RbacConfiguration> = Partial<RbacConfiguration>,
-  >(ctx: TenantContext): Promise<TOverride | null> {
-    return this.getTenantRbacConfigOverride<TOverride>(ctx);
-  }
-
-  public async putTenantRbacConfigOverride<
-    TOverride extends Partial<RbacConfiguration> = Partial<RbacConfiguration>,
-  >(
-    ctx: TenantContext,
-    override: TOverride | null | undefined,
-    updatedByIdOrOptions?:
-      | string
-      | {
-          updatedById?: string | null;
-          updatedAt?: string | null;
-          auditEntries?: readonly FirmAuditEntryInput[];
-        },
-  ): Promise<TOverride | null> {
-    const options =
-      typeof updatedByIdOrOptions === 'string'
-        ? { updatedById: updatedByIdOrOptions }
-        : updatedByIdOrOptions;
-    return this.withTenantTransaction(ctx, async (tx) => {
-      if (!override) {
-        await tx.query(
-          'DELETE FROM public.tenant_rbac_configs WHERE tenant_id = $1',
-          [ctx.tenantId],
-        );
-        if (options?.auditEntries?.length) {
-          await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
-        }
-        return null;
-      }
-      const updatedAtIso = safeTimestampIso(options?.updatedAt);
-      const updatedById = options?.updatedById ?? 'system';
-      const res = await tx.query<TenantRbacConfigRow>(
-        `INSERT INTO public.tenant_rbac_configs (
-           tenant_id, updated_at, updated_by_id, rbac_override_json
-         ) VALUES ($1, $2::timestamptz, $3, $4::jsonb)
-         ON CONFLICT (tenant_id) DO UPDATE SET
-           updated_at = EXCLUDED.updated_at,
-           updated_by_id = EXCLUDED.updated_by_id,
-           rbac_override_json = EXCLUDED.rbac_override_json
-         RETURNING *`,
-        [ctx.tenantId, updatedAtIso, updatedById, JSON.stringify(override)],
-      );
-      const row = res.rows[0];
-      if (row) {
-        this.assertRowTenant(ctx, row.tenant_id, 'tenant_rbac_configs');
-      }
-      if (options?.auditEntries?.length) {
-        await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
-      }
-      return row?.rbac_override_json
-        ? (structuredClone(row.rbac_override_json) as TOverride)
-        : null;
-    });
+    const { override } = await this.getRbacConfigOverrideWithVersion<TOverride>(
+      ctx,
+    );
+    return override;
   }
 
   public async putRbacConfigOverride<
@@ -1447,37 +1423,86 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       | {
           updatedById?: string | null;
           updatedAt?: string | null;
+          expectedRowVersion?: number | null;
           auditEntries?: readonly FirmAuditEntryInput[];
         },
   ): Promise<TOverride | null> {
-    return this.putTenantRbacConfigOverride<TOverride>(
-      ctx,
-      override,
-      updatedByIdOrOptions,
-    );
+    const options =
+      typeof updatedByIdOrOptions === 'string'
+        ? { updatedById: updatedByIdOrOptions }
+        : updatedByIdOrOptions;
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const existingRes = await tx.query<TenantRbacConfigRow>(
+        'SELECT * FROM public.tenant_rbac_configs WHERE tenant_id = $1 FOR UPDATE',
+        [ctx.tenantId],
+      );
+      const existingRow = existingRes.rows[0];
+      if (existingRow) {
+        this.assertRowTenant(ctx, existingRow.tenant_id, 'tenant_rbac_configs');
+      }
+      const currentRowVersion = existingRow?.rbac_override_json
+        ? this.extractRbacOverrideAndRowVersion(existingRow.rbac_override_json)
+            .rowVersion
+        : 0;
+      if (
+        options?.expectedRowVersion !== undefined &&
+        options.expectedRowVersion !== null &&
+        options.expectedRowVersion !== currentRowVersion
+      ) {
+        const conflictErr = new Error(
+          `RBAC_CONFIG_CONCURRENCY_CONFLICT: Tenant RBAC configuration was modified by another transaction (expected row_version ${options.expectedRowVersion}, actual ${currentRowVersion}).`,
+        ) as Error & { code: string };
+        conflictErr.code = 'RBAC_CONFIG_CONCURRENCY_CONFLICT';
+        throw conflictErr;
+      }
+
+      if (!override) {
+        await tx.query(
+          'DELETE FROM public.tenant_rbac_configs WHERE tenant_id = $1',
+          [ctx.tenantId],
+        );
+        if (options?.auditEntries?.length) {
+          await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
+        }
+        return null;
+      }
+      const updatedAtIso = safeTimestampIso(options?.updatedAt);
+      const updatedById = options?.updatedById ?? 'system';
+      const nextRowVersion = currentRowVersion + 1;
+      const payloadWithVersion = {
+        ...(structuredClone(override) as Record<string, unknown>),
+        _rowVersion: nextRowVersion,
+      };
+      const res = await tx.query<TenantRbacConfigRow>(
+        `INSERT INTO public.tenant_rbac_configs (
+           tenant_id, updated_at, updated_by_id, rbac_override_json
+         ) VALUES ($1, $2::timestamptz, $3, $4::jsonb)
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           updated_at = EXCLUDED.updated_at,
+           updated_by_id = EXCLUDED.updated_by_id,
+           rbac_override_json = EXCLUDED.rbac_override_json
+         RETURNING *`,
+        [
+          ctx.tenantId,
+          updatedAtIso,
+          updatedById,
+          JSON.stringify(payloadWithVersion),
+        ],
+      );
+      const row = res.rows[0];
+      if (row) {
+        this.assertRowTenant(ctx, row.tenant_id, 'tenant_rbac_configs');
+      }
+      if (options?.auditEntries?.length) {
+        await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
+      }
+      return this.extractRbacOverrideAndRowVersion<TOverride>(
+        row?.rbac_override_json,
+      ).override;
+    });
   }
 
-  public async putRbacTenantConfig<
-    TOverride extends Partial<RbacConfiguration> = Partial<RbacConfiguration>,
-  >(
-    ctx: TenantContext,
-    override: TOverride | null | undefined,
-    updatedByIdOrOptions?:
-      | string
-      | {
-          updatedById?: string | null;
-          updatedAt?: string | null;
-          auditEntries?: readonly FirmAuditEntryInput[];
-        },
-  ): Promise<TOverride | null> {
-    return this.putTenantRbacConfigOverride<TOverride>(
-      ctx,
-      override,
-      updatedByIdOrOptions,
-    );
-  }
-
-  public async deleteTenantRbacConfigOverride(
+  public async deleteRbacConfigOverride(
     ctx: TenantContext,
     options?: { auditEntries?: readonly FirmAuditEntryInput[] },
   ): Promise<boolean> {
@@ -1491,13 +1516,6 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
       }
       return del.rowCount > 0;
     });
-  }
-
-  public async deleteRbacTenantConfig(
-    ctx: TenantContext,
-    options?: { auditEntries?: readonly FirmAuditEntryInput[] },
-  ): Promise<boolean> {
-    return this.deleteTenantRbacConfigOverride(ctx, options);
   }
 
   // ============================================================================

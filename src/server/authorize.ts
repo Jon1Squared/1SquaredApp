@@ -18,7 +18,10 @@ import {
   type TenantContext,
 } from '@platform/core';
 import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
-import { runWithActiveActorSession } from '@/domain/rbac';
+import {
+  getActiveActorSession,
+  runWithActiveActorSession,
+} from '@/domain/rbac';
 import {
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
@@ -52,6 +55,7 @@ import type { Person, Team } from '@/domain/types';
 export interface GuardedActorContext extends AuthenticatedActorContext {
   readonly tenantContext: TenantContext;
   readonly permissions: ResolvedPermissionSet;
+  readonly rbacConfig: RbacConfiguration;
 }
 
 export type AuthorizableResource =
@@ -172,20 +176,22 @@ async function buildGuardedActorContext(
     actor.teams
       ? Promise.resolve([...actor.teams])
       : getHrAndRbacRepository().listAllTeams<Team>(tenantContext),
-    getHrAndRbacRepository().getRbacTenantConfig<RbacConfiguration>(
+    getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(
       tenantContext,
     ),
   ]);
+  const baseRbacConfig = getDefaultTenantRbacConfig(tenantContext.tenantId);
   const effectiveRbacConfig = rbacOverride
-    ? mergeRbacConfigOverlay(
-        getDefaultTenantRbacConfig(tenantContext.tenantId),
-        rbacOverride,
-      )
-    : undefined;
+    ? mergeRbacConfigOverlay(baseRbacConfig, rbacOverride)
+    : baseRbacConfig;
+  const activeSession = getActiveActorSession();
+  if (activeSession && activeSession.tenantId === tenantContext.tenantId) {
+    activeSession.effectiveRbacConfig = effectiveRbacConfig;
+  }
   const permissions = resolvePersonPermissionSet(actor.person, {
     allPeople,
     teams,
-    ...(effectiveRbacConfig ? { config: { rbac: effectiveRbacConfig } } : {}),
+    config: { rbac: effectiveRbacConfig },
     tenantId: tenantContext.tenantId,
     context: tenantContext,
     mfaVerified: tenantContext.mfaVerified,
@@ -198,6 +204,7 @@ async function buildGuardedActorContext(
     mfaVerified: tenantContext.mfaVerified,
     tenantContext,
     permissions,
+    rbacConfig: effectiveRbacConfig,
   };
 }
 

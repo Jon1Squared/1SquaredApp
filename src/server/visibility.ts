@@ -1,3 +1,4 @@
+import type { RbacConfiguration } from '@platform/core';
 import { canPersonAccessMatter } from './rbacRuntime';
 import type { Enquiry, Matter, Person, Quote, Task, Team } from '@/domain/types';
 import type { FirmStore } from './store';
@@ -27,6 +28,7 @@ export function buildRecordVisibility(
     matters?: readonly Matter[];
     enquiries?: readonly Enquiry[];
     quotes?: readonly Quote[];
+    rbacConfig?: RbacConfiguration;
   },
 ): RecordVisibility {
   const userId = user?.id ?? '';
@@ -41,6 +43,7 @@ export function buildRecordVisibility(
       allPeople,
       teams: [...allTeams],
       tokenRoles: opts.tokenRoles,
+      ...(opts.rbacConfig ? { config: { rbac: opts.rbacConfig } } : {}),
     });
 
   const hiddenMatterIds = new Set<string>();

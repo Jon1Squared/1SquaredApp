@@ -1347,4 +1347,248 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
       setTestEntraSessionOverride(null);
     }
   });
+
+  it('R477: two-replica RBAC override test using separate vi.resetModules() graphs — setting, clearing, and re-setting an override on Replica A immediately governs guarded actions on Replica B with no snapshot load in between, and updateTenantRbacConfig enforces row_version', async () => {
+    const loadReplica = async () => {
+      vi.resetModules();
+      const servicesMod = await import('@/server/services');
+      const entraAuthMod = await import('@/server/entraAuth');
+      const rbacRuntimeMod = await import('@/server/rbacRuntime');
+      const actionsMod = await import('@/app/actions');
+      const tenantRuntimeMod = await import('@/platform/tenantRuntime');
+      return {
+        services: servicesMod,
+        entraAuth: entraAuthMod,
+        rbacRuntime: rbacRuntimeMod,
+        actions: actionsMod,
+        tenantRuntime: tenantRuntimeMod,
+      };
+    };
+
+    const replicaA = await loadReplica();
+    const replicaB = await loadReplica();
+
+    expect(replicaA.services).not.toBe(replicaB.services);
+    expect(replicaA.rbacRuntime).not.toBe(replicaB.rbacRuntime);
+    expect(replicaA.actions).not.toBe(replicaB.actions);
+
+    const runOnReplica = async <T>(
+      replica: Awaited<ReturnType<typeof loadReplica>>,
+      actorPersonId: string,
+      roles: string[],
+      fn: (ctx: TenantContext) => Promise<T>,
+    ): Promise<T> => {
+      const cfg = replica.tenantRuntime.getActiveTenantConfiguration();
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+      const cookieVal = replica.entraAuth.createSignedEntraSessionCookie({
+        personId: actorPersonId,
+        tenantId: cfg.tenantId,
+        oid: `00000000-0000-4000-8000-${actorPersonId.replace(/\D/g, '').padStart(12, '0')}`,
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: actorPersonId,
+        email: `${actorPersonId.toLowerCase()}@${cfg.branding.primaryDomain}`,
+        displayName: `Replica Actor ${actorPersonId}`,
+        entraRoles: roles,
+        mappedRoles: roles,
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verified =
+        replica.entraAuth.verifySignedEntraSessionCookie(cookieVal)!;
+      replica.entraAuth.setTestEntraSessionOverride(verified);
+      const ctx = replica.tenantRuntime.resolveCurrentTenantContext(
+        replica.entraAuth.createVerifiedSessionActorFromEntraSession(verified, {
+          correlationId: `corr-r477-${actorPersonId}`,
+        }),
+        cfg,
+      );
+      try {
+        return await replica.rbacRuntime.runWithActiveActorSession(
+          {
+            personId: actorPersonId,
+            tenantId: cfg.tenantId,
+            tokenRoles: roles,
+            mfaVerified: true,
+            expiresAtMs: Date.parse(expiresAt),
+            verifiedSession: verified,
+          },
+          () => fn(ctx),
+        );
+      } finally {
+        replica.entraAuth.setTestEntraSessionOverride(null);
+      }
+    };
+
+    const sampleEnquiryPayload = (suffix: string) => ({
+      status: 'New' as const,
+      firstName: 'R477',
+      lastName: `Caller-${suffix}`,
+      email: `r477.${suffix}@notalawfirm.example`,
+      phone: '029 2000 4770',
+      practiceAreaId: 'pa_corp',
+      workTypeSubcategoryId: 'wt_corp_ma',
+      summary: `R477 two-replica enquiry ${suffix}`,
+      notes: 'Testing R477 across independent module graphs',
+      urgencyId: 'enquiry_urgency.standard',
+      sourceId: 'source.website',
+      assignedTeamId: 'TM-000001',
+      assignedToId: 'P-000002',
+      privacyNoticeGiven: true,
+    });
+
+    try {
+      // Seed demo data on Replica A
+      await runOnReplica(
+        replicaA,
+        'P-000001',
+        ['admin', 'managing_partner', 'partner', 'fee_earner'],
+        async (ctxA) => {
+          await replicaA.services.resetAllDemoData('P-000001', ctxA);
+        },
+      );
+
+      const baseFeeEarnerRole =
+        replicaA.rbacRuntime.getDefaultTenantRbacConfig().roles['fee_earner']!;
+      expect(baseFeeEarnerRole.permissions).toContain('enquiry:create');
+
+      const overrideWithoutEnquiryCreate = {
+        roles: {
+          fee_earner: {
+            ...baseFeeEarnerRole,
+            permissions: baseFeeEarnerRole.permissions.filter(
+              (p) => p !== 'enquiry:create',
+            ),
+          },
+        },
+      };
+
+      // Step 1: Replica A sets an override that removes permission 'enquiry:create' from role 'fee_earner'.
+      // On Replica B, a guarded action ('saveEnquiryAction') that needs 'enquiry:create' is denied.
+      await runOnReplica(
+        replicaA,
+        'P-000004',
+        ['admin'],
+        async () => {
+          const res = await replicaA.services.updateTenantRbacConfig(
+            overrideWithoutEnquiryCreate,
+            'P-000004',
+            { mfaVerified: true },
+          );
+          expect(res.ok).toBe(true);
+        },
+      );
+
+      const step1OnB = await runOnReplica(
+        replicaB,
+        'P-000002',
+        ['fee_earner'],
+        async () =>
+          replicaB.actions.saveEnquiryAction(sampleEnquiryPayload('step1')),
+      );
+      expect(step1OnB).toMatchObject({
+        ok: false,
+        denied: true,
+        code: 'FORBIDDEN',
+      });
+
+      // Step 2: Replica A clears the override.
+      // Replica B allows the guarded action, with NO snapshot load in between.
+      await runOnReplica(
+        replicaA,
+        'P-000004',
+        ['admin'],
+        async () => {
+          const res = await replicaA.services.updateTenantRbacConfig(
+            null,
+            'P-000004',
+            { mfaVerified: true },
+          );
+          expect(res.ok).toBe(true);
+        },
+      );
+
+      const step2OnB = await runOnReplica(
+        replicaB,
+        'P-000002',
+        ['fee_earner'],
+        async () =>
+          replicaB.actions.saveEnquiryAction(sampleEnquiryPayload('step2')),
+      );
+      expect('denied' in step2OnB && step2OnB.denied).toBe(false);
+      expect(
+        (step2OnB as { enquiry?: { id: string } | null }).enquiry?.id,
+      ).toMatch(/^ENQ-\d{6}$/);
+
+      // Step 3: Replica A sets the override again.
+      // Replica B denies the guarded action.
+      await runOnReplica(
+        replicaA,
+        'P-000004',
+        ['admin'],
+        async () => {
+          const res = await replicaA.services.updateTenantRbacConfig(
+            overrideWithoutEnquiryCreate,
+            'P-000004',
+            { mfaVerified: true },
+          );
+          expect(res.ok).toBe(true);
+        },
+      );
+
+      const step3OnB = await runOnReplica(
+        replicaB,
+        'P-000002',
+        ['fee_earner'],
+        async () =>
+          replicaB.actions.saveEnquiryAction(sampleEnquiryPayload('step3')),
+      );
+      expect(step3OnB).toMatchObject({
+        ok: false,
+        denied: true,
+        code: 'FORBIDDEN',
+      });
+
+      // Also verify row_version optimistic concurrency on updateTenantRbacConfig:
+      await expect(
+        runOnReplica(replicaA, 'P-000004', ['admin'], async () =>
+          replicaA.services.updateTenantRbacConfig(
+            overrideWithoutEnquiryCreate,
+            'P-000004',
+            { mfaVerified: true, expectedRowVersion: 999 },
+          ),
+        ),
+      ).rejects.toMatchObject({
+        code: 'RBAC_CONFIG_CONCURRENCY_CONFLICT',
+        message: expect.stringMatching(/RBAC_CONFIG_CONCURRENCY_CONFLICT/),
+      });
+    } finally {
+      const { ctx, actorSession } = makeHostActorAndContext('P-000001');
+      await runWithActiveActorSession(actorSession, () =>
+        resetAllDemoData('P-000001', ctx),
+      );
+    }
+  });
+
+  it('R477 contract: src/server/rbacRuntime.ts holds zero module-level Map or Set instances and exports no process-wide override mutator', async () => {
+    const rbacRuntimePath = path.resolve(
+      __dirname,
+      '../../src/server/rbacRuntime.ts',
+    );
+    const rawSource = fs.readFileSync(rbacRuntimePath, 'utf8');
+    const strippedComments = rawSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    expect(strippedComments).not.toMatch(/\bnew\s+Map\b/);
+    expect(strippedComments).not.toMatch(/\bnew\s+Set\b/);
+    expect(strippedComments).not.toMatch(/\bsetRuntimeRbacConfigOverride\b/);
+    expect(strippedComments).not.toMatch(/\btenantRbacConfigCacheByTenant\b/);
+    expect(strippedComments).not.toMatch(/\bruntimeRbacConfigOverrideByTenant\b/);
+
+    const rbacRuntimeMod = await import('@/server/rbacRuntime');
+    expect('setRuntimeRbacConfigOverride' in rbacRuntimeMod).toBe(false);
+  });
 });

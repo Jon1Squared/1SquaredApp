@@ -66,7 +66,6 @@ import {
   getDefaultTenantRbacConfig,
   resolveConfiguredFirmPrimaryDomain,
   runWithActiveActorSession,
-  setRuntimeRbacConfigOverride,
 } from '../../src/server/rbacRuntime';
 import {
   getActiveTenantConfiguration,
@@ -3258,16 +3257,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(warnings[1]).toContain('branding.website');
   });
 
-  it('R166: getDefaultTenantRbacConfig and setRuntimeRbacConfigOverride reject mismatched tenantId with TENANT_MISMATCH', () => {
+  it('R166: getDefaultTenantRbacConfig rejects mismatched tenantId with TENANT_MISMATCH', () => {
     expect(() => getDefaultTenantRbacConfig('other-tenant')).toThrow(
       /TENANT_MISMATCH/,
     );
-    expect(() =>
-      setRuntimeRbacConfigOverride(
-        getDefaultTenantRbacConfig('not-a-law-firm'),
-        'other-tenant',
-      ),
-    ).toThrow(/TENANT_MISMATCH/);
   });
 
   it('R167: billing and credit-control actions leave unassigned when matter has no leadFeeEarnerId or responsiblePartnerId, and getStore does not overwrite firm when demo mode is off', async () => {
@@ -4254,10 +4247,13 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           ] as never,
         },
       };
-      setRuntimeRbacConfigOverride({
-        ...currentRbac,
-        roles: customRoles,
-      });
+      await getHrAndRbacRepository().putRbacConfigOverride(
+        testTenantCtx(partner.id),
+        {
+          ...currentRbac,
+          roles: customRoles,
+        },
+      );
       customReviewer.roles = ['junior_risk_reviewer' as never];
       await getPartyRepository().putPerson(
         testTenantCtx(partner.id),
@@ -4390,7 +4386,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       ).toEqual(restrictedIds);
     } finally {
       void originalRawBase;
-      setRuntimeRbacConfigOverride(null);
       setActiveTenantConfigForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());
     }

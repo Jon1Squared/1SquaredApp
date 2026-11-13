@@ -60,7 +60,6 @@ import {
   resolvePersonPermissions,
   resolveUserAppRole,
   runWithActiveActorSession,
-  setRuntimeRbacConfigOverride,
 } from '../../src/server/rbacRuntime';
 import { saveStore } from '../../src/server/store';
 import { buildDemoData } from '../../src/seed/demo';
@@ -1420,28 +1419,57 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // R55: resolveCurrentTenantContext() with no argument throws TENANCY_AUTH_ERROR
       expect(() => resolveCurrentTenantContext()).toThrow(/TENANCY_AUTH_ERROR/);
 
-      // R60: An override for tenant A doesn't change getDefaultTenantRbacConfig('tenant-b')
+      // R60: An override for tenant A in PostgreSQL doesn't change tenant B's override or getDefaultTenantRbacConfig('tenant-b')
       const baseTenantCfg = getActiveTenantRawBaseConfig();
       try {
-        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
-        setRuntimeRbacConfigOverride(
-          {
-            ...getDefaultTenantRbacConfig('tenant-a'),
-            departmentGrants: { 'DEPT-CUSTOM-A': ['finance:view'] },
+        const ctxTenantA = resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: 'P-000004',
+            tenantId: 'tenant-a',
+            name: 'Admin A',
+            email: 'admin@tenant-a.example',
+            roles: ['admin'],
+            mfaVerified: true,
           },
-          'tenant-a',
-        );
+          hostingMode: 'multi_tenant',
+          environment: 'test',
+          correlationId: 'r60-tenant-a',
+        });
+        const ctxTenantB = resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: 'P-000004',
+            tenantId: 'tenant-b',
+            name: 'Admin B',
+            email: 'admin@tenant-b.example',
+            roles: ['admin'],
+            mfaVerified: true,
+          },
+          hostingMode: 'multi_tenant',
+          environment: 'test',
+          correlationId: 'r60-tenant-b',
+        });
+        await getHrAndRbacRepository().putRbacConfigOverride(ctxTenantB, null);
+        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
+        await getHrAndRbacRepository().putRbacConfigOverride(ctxTenantA, {
+          ...getDefaultTenantRbacConfig('tenant-a'),
+          departmentGrants: { 'DEPT-CUSTOM-A': ['finance:view'] },
+        });
         expect(
-          getDefaultTenantRbacConfig('tenant-a').departmentGrants['DEPT-CUSTOM-A'],
+          (await getHrAndRbacRepository().getRbacConfigOverride(ctxTenantA))
+            ?.departmentGrants?.['DEPT-CUSTOM-A'],
         ).toEqual(['finance:view']);
 
         setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-b' });
         expect(
+          await getHrAndRbacRepository().getRbacConfigOverride(ctxTenantB),
+        ).toBeNull();
+        expect(
           getDefaultTenantRbacConfig('tenant-b').departmentGrants['DEPT-CUSTOM-A'],
         ).toBeUndefined();
 
-        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
-        setRuntimeRbacConfigOverride(null, 'tenant-a');
+        await getHrAndRbacRepository().putRbacConfigOverride(ctxTenantA, null);
       } finally {
         setActiveTenantConfigForTesting(null);
       }
@@ -1689,31 +1717,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 1. Two-tenant isolation: P-000002 with ['admin'] token roles in tenant-a does NOT get admin permissions in tenant-b
       const baseTenantCfg = getActiveTenantRawBaseConfig();
-      try {
-        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-b' });
-        const tenantBHybridRbac = {
-          ...getDefaultTenantRbacConfig('tenant-b'),
-          identityMapping: {
-            ...getDefaultTenantRbacConfig('tenant-b').identityMapping,
-            authorityMode: 'hybrid' as const,
-          },
-        };
-        setRuntimeRbacConfigOverride(tenantBHybridRbac, 'tenant-b');
-        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
-        setRuntimeRbacConfigOverride(
-          {
-            ...getDefaultTenantRbacConfig('tenant-a'),
-            identityMapping: {
-              ...getDefaultTenantRbacConfig('tenant-a').identityMapping,
-              authorityMode: 'hybrid' as const,
-            },
-          },
-          'tenant-a',
-        );
-      } finally {
-        setActiveTenantConfigForTesting(null);
-      }
-
       const dafydd = (
         await runAsTestActor('P-000002', () => getAppSnapshot('P-000002'))
       ).people.find((p) => p.id === 'P-000002')!;
@@ -1728,7 +1731,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 1b. Inside runWithActiveActorSession for tenant-a, token roles apply to tenant-a and never leak to tenant-b
       try {
-        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-a' });
+        setActiveTenantConfigForTesting({
+          ...baseTenantCfg,
+          tenantId: 'tenant-a',
+          rbac: {
+            ...(baseTenantCfg.rbac as Record<string, unknown>),
+            identityMapping: {
+              ...((baseTenantCfg.rbac as Record<string, unknown>)
+                ?.identityMapping as Record<string, unknown>),
+              authorityMode: 'hybrid',
+            },
+          },
+        });
         const permsInTenantA = runWithActiveActorSession(
           {
             tenantId: 'tenant-a',
@@ -1749,7 +1763,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(permsInTenantA).toContain('admin:access');
 
-        setActiveTenantConfigForTesting({ ...baseTenantCfg, tenantId: 'tenant-b' });
+        setActiveTenantConfigForTesting({
+          ...baseTenantCfg,
+          tenantId: 'tenant-b',
+          rbac: {
+            ...(baseTenantCfg.rbac as Record<string, unknown>),
+            identityMapping: {
+              ...((baseTenantCfg.rbac as Record<string, unknown>)
+                ?.identityMapping as Record<string, unknown>),
+              authorityMode: 'hybrid',
+            },
+          },
+        });
         const permsInTenantB = runWithActiveActorSession(
           {
             tenantId: 'tenant-a',
@@ -1944,8 +1969,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setTestEntraSessionOverride(undefined);
       }
 
-      setRuntimeRbacConfigOverride(null, 'tenant-a');
-      setRuntimeRbacConfigOverride(null, 'tenant-b');
       await resetAllDemoData('P-000001', testDataResetContext());
     });
 
@@ -2320,7 +2343,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setActiveTenantConfigForTesting(
           customConfig as unknown as Record<string, unknown>,
         );
-        setRuntimeRbacConfigOverride(undefined);
         // Also simulate saveStore when store has no runtime rbac override
         saveStore(store);
 
@@ -2369,7 +2391,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
       } finally {
         setActiveTenantConfigForTesting(null);
-        setRuntimeRbacConfigOverride(undefined);
       }
     });
   });

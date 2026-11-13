@@ -18,7 +18,6 @@ import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { computeAutomaticPmsLinks } from '@/domain/pms';
 import {
   resolveConfiguredFirmPrimaryDomain,
-  setRuntimeRbacConfigOverride,
 } from './rbacRuntime';
 import {
   getActiveTenantConfiguration,
@@ -992,9 +991,6 @@ export function getStore(): FirmStore {
       if (migrated) {
         saveStore(parsed);
       }
-      if (parsed.rbacConfigOverride !== undefined) {
-        setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
-      }
       global.__oneSquaredStore = parsed;
       try {
         const currentPath = resolveReadableStorePath();
@@ -1052,9 +1048,6 @@ export function getStore(): FirmStore {
       if (!Array.isArray(parsed.keyDateNotApplicable)) parsed.keyDateNotApplicable = [];
       if (!Array.isArray(parsed.keyDateReminderStates)) parsed.keyDateReminderStates = [];
       if (!Array.isArray(parsed.keyDateCalendarSyncs)) parsed.keyDateCalendarSyncs = [];
-      if (parsed.rbacConfigOverride !== undefined) {
-        setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
-      }
       global.__oneSquaredStore = parsed;
       return global.__oneSquaredStore;
     } catch {
@@ -1118,9 +1111,6 @@ function serializeUnmigratedStoreForPersistence(
 
 export function saveStore(store: FirmStore): void {
   global.__oneSquaredStore = store;
-  if (store.rbacConfigOverride !== undefined) {
-    setRuntimeRbacConfigOverride(store.rbacConfigOverride);
-  }
   if (
     (process.env.VITEST || process.env.NODE_ENV === 'test') &&
     !process.env.ONESQUARED_RUNTIME_STORE_PATH
@@ -1159,14 +1149,12 @@ export function resetStore(): FirmStore {
   const includeSyntheticEntraOids =
     getActiveTenantConfiguration().environment === 'test';
   const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
-  setRuntimeRbacConfigOverride(undefined);
   saveStore(fresh);
   return fresh;
 }
 
 export function clearStoreToCleanDeployment(): FirmStore {
   const clean = createCleanDeploymentStore(new Date());
-  setRuntimeRbacConfigOverride(undefined);
   saveStore(clean);
   return clean;
 }

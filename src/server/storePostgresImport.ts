@@ -594,7 +594,7 @@ export async function importFirmStoreModulesToPostgres(
       }
 
       if (rbacOverride && Object.keys(rbacOverride).length > 0) {
-        await hrRbacRepo.putRbacTenantConfig(
+        await hrRbacRepo.putRbacConfigOverride(
           ctx,
           rbacOverride,
           'system-store-import',

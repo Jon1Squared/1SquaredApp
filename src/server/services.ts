@@ -180,7 +180,6 @@ import {
   resolvePersonPermissions,
   resolveUserAppRole,
   runWithActiveActorSession,
-  setRuntimeRbacConfigOverride,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
   type PermissionKey,
@@ -492,10 +491,11 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   const ctx = resolveDefaultServiceTenantContext(store, actor.personId, {
     session: actor.session,
   });
-  const [people, matters, teams] = await Promise.all([
+  const [people, matters, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
   const targetPerson = people.find(
     (p) => p.id === targetUserId && p.isEmployee && !p.mergedIntoId,
@@ -516,11 +516,13 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     teams,
     mfaVerified: actor.mfaVerified,
     tokenRoles: actor.session.mappedRoles,
+    config: { rbac: rbacConfig },
   });
   const targetPerms = resolvePersonPermissionSet(targetPerson, {
     allPeople: people,
     teams,
     mfaVerified: true,
+    config: { rbac: rbacConfig },
   });
   const missingPerm = targetPerms.permissionList.find(
     (perm) => !actorPerms.permissions.has(perm),
@@ -546,11 +548,13 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
       canPersonAccessMatter(m, targetPerson.id, targetPerson, {
         allPeople: people,
         teams,
+        config: { rbac: rbacConfig },
       }) &&
       !canPersonAccessMatter(m, actor.personId, actorPerson, {
         allPeople: people,
         teams,
         tokenRoles: actor.session.mappedRoles,
+        config: { rbac: rbacConfig },
       }),
   );
   if (restrictedMatterWithTargetAccess) {
@@ -728,6 +732,25 @@ function resolveDefaultServiceTenantContext(
  * Takes `SELECT ... FOR UPDATE` on the affected matter rows and reads `people` and `teams` inside the same
  * transaction so stale pre-transaction reads or read-only paths can never overwrite access lists.
  */
+async function loadEffectiveTenantRbacConfig(
+  ctx: TenantContext,
+  preloadedOverride?: Partial<RbacConfiguration> | null,
+): Promise<RbacConfiguration> {
+  const base = getDefaultTenantRbacConfig(ctx.tenantId);
+  const override =
+    preloadedOverride !== undefined
+      ? preloadedOverride
+      : await getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(
+          ctx,
+        );
+  const effective = override ? mergeRbacConfigOverlay(base, override) : base;
+  const activeSession = getActiveActorSession();
+  if (activeSession && activeSession.tenantId === ctx.tenantId) {
+    activeSession.effectiveRbacConfig = effective;
+  }
+  return effective;
+}
+
 async function syncAffectedMattersRestrictionsInTx(
   ctx: TenantContext,
   options: {
@@ -758,7 +781,7 @@ async function syncAffectedMattersRestrictionsInTx(
   const txRbacOverride =
     options.rbacConfig !== undefined
       ? options.rbacConfig
-      : await getHrAndRbacRepository().getRbacTenantConfig<RbacConfiguration>(ctx);
+      : await getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx);
   const baseTenantConfig = getActiveTenantConfiguration();
   const effectiveRbac = txRbacOverride
     ? mergeRbacConfigOverlay(
@@ -807,7 +830,7 @@ async function putMatterWithInTxRestrictions(
   const txRbacOverride =
     options.rbacConfig !== undefined
       ? options.rbacConfig
-      : await getHrAndRbacRepository().getRbacTenantConfig<RbacConfiguration>(ctx);
+      : await getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx);
   const baseTenantConfig = getActiveTenantConfiguration();
   const effectiveRbac = txRbacOverride
     ? mergeRbacConfigOverlay(
@@ -888,13 +911,14 @@ export async function listAuditEntriesForRecord(
   } catch {
     return [];
   }
-  const [people, matters, enquiries, quotes, tasks, teams] = await Promise.all([
+  const [people, matters, enquiries, quotes, tasks, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
     getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
     getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
   const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
@@ -915,6 +939,7 @@ export async function listAuditEntriesForRecord(
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const hiddenMatterKeyDateIds =
     await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -929,6 +954,7 @@ export async function listAuditEntriesForRecord(
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
+    rbacConfig,
   });
 
   if (recordType === 'matter') {
@@ -963,11 +989,11 @@ export async function listAuditEntriesForRecord(
       return [];
     }
   } else if (recordType === 'employee_payroll') {
-    if (!hasEmployeePermission(viewer, 'employee:payroll', people, teams)) {
+    if (!hasEmployeePermission(viewer, 'employee:payroll', people, teams, { config: { rbac: rbacConfig } })) {
       return [];
     }
   } else if (recordType === 'employee_sensitive') {
-    if (!hasEmployeePermission(viewer, 'employee:sensitive', people, teams)) {
+    if (!hasEmployeePermission(viewer, 'employee:sensitive', people, teams, { config: { rbac: rbacConfig } })) {
       return [];
     }
   }
@@ -1009,13 +1035,14 @@ export async function listFirmAuditEntriesPage(
       nextBeforeSeq: null,
     };
   }
-  const [people, matters, enquiries, quotes, tasks, teams] = await Promise.all([
+  const [people, matters, enquiries, quotes, tasks, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
     getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
     getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
   const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
@@ -1032,6 +1059,7 @@ export async function listFirmAuditEntriesPage(
       allPeople: people,
       teams,
       tokenRoles: effectiveTokenRoles,
+      config: { rbac: rbacConfig },
     })
   ) {
     return {
@@ -1052,6 +1080,7 @@ export async function listFirmAuditEntriesPage(
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const hiddenMatterKeyDateIds =
     await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -1066,6 +1095,7 @@ export async function listFirmAuditEntriesPage(
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
+    rbacConfig,
   });
   const hiddenTaskIds = new Set(
     tasks.filter((t) => !visibility.canViewTask(t)).map((t) => t.id),
@@ -1075,12 +1105,14 @@ export async function listFirmAuditEntriesPage(
     'employee:payroll',
     people,
     teams,
+    { config: { rbac: rbacConfig } },
   );
   const canSensitive = hasEmployeePermission(
     viewer,
     'employee:sensitive',
     people,
     teams,
+    { config: { rbac: rbacConfig } },
   );
 
   const isVisibleAuditRow = (a: FirmAuditEntryRecord): boolean => {
@@ -1237,9 +1269,12 @@ async function getAppSnapshotInScope(
     hrRepo.getEmployeeMigrationReport<
       import('@/domain/types').EmployeeMigrationReport
     >(snapshotTenantCtx),
-    hrRepo.getRbacTenantConfig<RbacConfiguration>(snapshotTenantCtx),
+    hrRepo.getRbacConfigOverride<RbacConfiguration>(snapshotTenantCtx),
   ]);
-  setRuntimeRbacConfigOverride(dbRbacOverride ?? undefined);
+  const rbacConfig = await loadEffectiveTenantRbacConfig(
+    snapshotTenantCtx,
+    dbRbacOverride,
+  );
   const user = people.find(
     (p) => p.id === userId && !p.mergedIntoId,
   );
@@ -1253,11 +1288,14 @@ async function getAppSnapshotInScope(
     });
   }
   const employees = activeEmployees(people, store.values);
-  const currentUserRole = resolveUserAppRole(user, teams, store.values);
+  const currentUserRole = resolveUserAppRole(user, teams, store.values, {
+    config: { rbac: rbacConfig },
+  });
   const currentUserEmployeePermissions = resolveEmployeePermissions(
     user,
     people,
     teams,
+    { config: { rbac: rbacConfig } },
   );
   const activeSession = getActiveActorSession();
   const effectiveTokenRoles =
@@ -1267,8 +1305,8 @@ async function getAppSnapshotInScope(
     allPeople: people,
     teams,
     tokenRoles: effectiveTokenRoles,
+    config: { rbac: rbacConfig },
   });
-  const rbacConfig = getDefaultTenantRbacConfig();
   const orgStructure =
     store.orgStructure ??
     buildDefaultOrgStructure({
@@ -1286,6 +1324,7 @@ async function getAppSnapshotInScope(
         people,
         teams,
         orgStructure,
+        { config: { rbac: rbacConfig } },
       ),
     };
   });
@@ -1304,6 +1343,7 @@ async function getAppSnapshotInScope(
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
     snapshotTenantCtx,
@@ -1317,6 +1357,7 @@ async function getAppSnapshotInScope(
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
+    rbacConfig,
   });
   const visibleMatters: Matter[] = matters.filter(visibility.canViewMatter);
   const hiddenMatterIds = visibility.hiddenMatterIds;
@@ -1404,8 +1445,11 @@ async function getAppSnapshotInScope(
     config: keyDatesConfig,
     allPeople: people,
     teams,
+    rbac: { config: { rbac: rbacConfig } },
   });
-  const baseRail = getLeftRailVisibility(activeViewingRole, currentUserRoles);
+  const baseRail = getLeftRailVisibility(activeViewingRole, currentUserRoles, {
+    config: { rbac: rbacConfig },
+  });
   const leftRailVisibility = {
     ...baseRail,
     keyDates:
@@ -1652,11 +1696,13 @@ async function getAppSnapshotInScope(
       emp,
       teams,
       store.values,
+      { config: { rbac: rbacConfig } },
     );
     rolesByPersonId[emp.id] = resolveEmployeeRoles(emp, teams);
     permissionsByPersonId[emp.id] = resolvePersonPermissions(emp, {
       allPeople: people,
       teams,
+      config: { rbac: rbacConfig },
     });
   }
 
@@ -1793,13 +1839,16 @@ export async function getEmployeeDetailsForUser(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const hrRepo = getHrAndRbacRepository();
-  const [people, teams] = await Promise.all([
+  const [people, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     hrRepo.listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
   const user = people.find((p) => p.id === byId) ?? null;
   const person = people.find((p) => p.id === personId) ?? null;
-  const perms = resolveEmployeePermissions(user, people, teams);
+  const perms = resolveEmployeePermissions(user, people, teams, {
+    config: { rbac: rbacConfig },
+  });
   const errors: Record<string, string> = {};
 
   if (!person) {
@@ -1830,7 +1879,7 @@ export async function getEmployeeDetailsForUser(
     const nowIso = new Date().toISOString();
 
     if (opts.logViewPayroll) {
-      if (!hasEmployeePermission(user, 'employee:payroll', people, teams)) {
+      if (!hasEmployeePermission(user, 'employee:payroll', people, teams, { config: { rbac: rbacConfig } })) {
         errors.payrollPermission = 'You do not have permission to view payroll details.';
       } else {
         auditInputs.push({
@@ -1847,7 +1896,7 @@ export async function getEmployeeDetailsForUser(
     }
 
     if (opts.logViewSensitive) {
-      if (!hasEmployeePermission(user, 'employee:sensitive', people, teams)) {
+      if (!hasEmployeePermission(user, 'employee:sensitive', people, teams, { config: { rbac: rbacConfig } })) {
         errors.sensitivePermission = 'You do not have permission to view sensitive employee information.';
       } else {
         auditInputs.push({
@@ -1878,6 +1927,7 @@ export async function getEmployeeDetailsForUser(
     people,
     teams,
     store.orgStructure,
+    { config: { rbac: rbacConfig } },
   );
   // R103 & R130: Only return sensitive HR records when logViewSensitive: true and audit write succeeded in the same transaction
   const sensitive = sensitiveAuditWritten
@@ -1904,15 +1954,16 @@ export async function logEmployeeRestrictedAccess(
 ): Promise<{ auditEntry?: AuditEntry; error?: string }> {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const hrRepo = getHrAndRbacRepository();
-  const [people, teams] = await Promise.all([
+  const [people, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     hrRepo.listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
   const user = people.find((p) => p.id === byId) ?? null;
   const requiredPerm: EmployeePermission =
     section === 'payroll' ? 'employee:payroll' : 'employee:sensitive';
 
-  if (!hasEmployeePermission(user, requiredPerm, people, teams)) {
+  if (!hasEmployeePermission(user, requiredPerm, people, teams, { config: { rbac: rbacConfig } })) {
     return { error: `Permission denied: ${requiredPerm} is required.` };
   }
 
@@ -1958,19 +2009,21 @@ export async function reassignLeaverOwnedRecords(
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
   const hrRepo = getHrAndRbacRepository();
-  const [people, organisations, matters, tasks, enquiries, teams] = await Promise.all([
+  const [people, organisations, matters, tasks, enquiries, teams, rbacConfig] = await Promise.all([
     partyRepo.listAllPeople<Person>(reassignCtx),
     partyRepo.listAllOrganisations<Organisation>(reassignCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(reassignCtx),
     taskRepo.listAllTasksUnfiltered<Task>(reassignCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(reassignCtx),
     hrRepo.listAllTeams<Team>(reassignCtx),
+    loadEffectiveTenantRbacConfig(reassignCtx),
   ]);
   const now = new Date().toISOString();
   const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: people,
     teams,
+    config: { rbac: rbacConfig },
   });
   if (
     !actorPerms.permissions.has('employee:edit_core') ||
@@ -2344,15 +2397,18 @@ export async function savePersonRecord(
     return deny('FORBIDDEN', 'Person record not found.', 'id');
   }
   const actingUser = people.find((p) => p.id === opts.byId) ?? null;
+  const rbacConfig = await loadEffectiveTenantRbacConfig(personCtx);
   const permSet = resolvePersonPermissionSet(actingUser, {
     allPeople: people,
     teams,
     targetPersonId: existing?.id,
     mfaVerified: opts.mfaVerified,
+    config: { rbac: rbacConfig },
   });
   const userPerms = new Set([
     ...resolveEmployeePermissions(actingUser, people, teams, {
       targetPersonId: existing?.id,
+      config: { rbac: rbacConfig },
     }),
     ...Array.from(permSet.permissions),
   ]);
@@ -4390,7 +4446,7 @@ export async function saveMatterRecord(
       }
     }
   }
-  const [people, organisations, links, matters, enquiries, quotes, tasks, teams] = lookupCtx
+  const [people, organisations, links, matters, enquiries, quotes, tasks, teams, lookupRbacConfig] = lookupCtx
     ? await Promise.all([
         partyRepo.listAllPeople<Person>(lookupCtx),
         partyRepo.listAllOrganisations<Organisation>(lookupCtx),
@@ -4400,8 +4456,9 @@ export async function saveMatterRecord(
         intakeRepo.listAllQuotesUnfiltered<Quote>(lookupCtx),
         taskRepo.listAllTasksUnfiltered<Task>(lookupCtx),
         getHrAndRbacRepository().listAllTeams<Team>(lookupCtx),
+        loadEffectiveTenantRbacConfig(lookupCtx),
       ])
-    : [[], [], [], [], [], [], [], []];
+    : [[], [], [], [], [], [], [], [], undefined];
   const existingRef = opts.id ? matters.find((m) => m.id === opts.id) ?? null : null;
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingRowVersion = existing?.rowVersion ?? 1;
@@ -4449,6 +4506,8 @@ export async function saveMatterRecord(
       },
     };
   }
+  const matterRbacConfig =
+    lookupRbacConfig ?? (await loadEffectiveTenantRbacConfig(extensionCtx));
   if ((input as { id?: string }).id && !opts.id) {
     return {
       matter: null,
@@ -4463,6 +4522,7 @@ export async function saveMatterRecord(
       !canPersonAccessMatter(existing, opts.byId, actingUser, {
         allPeople: people,
         teams,
+        config: { rbac: matterRbacConfig },
       })
     ) {
       return {
@@ -4477,6 +4537,7 @@ export async function saveMatterRecord(
       !hasPersonPermission(actingUser, 'matter:edit', {
         allPeople: people,
         teams,
+        config: { rbac: matterRbacConfig },
       })
     ) {
       return {
@@ -4511,6 +4572,7 @@ export async function saveMatterRecord(
       !hasPersonPermission(actingUser, 'matter:create', {
         allPeople: people,
         teams,
+        config: { rbac: matterRbacConfig },
       })
     ) {
       return {
@@ -8224,10 +8286,7 @@ export async function updateEmployeeRoleSetting(
     if (!actor) return { ok: false, error: 'Acting user not found.' };
     if (!person) return { ok: false, error: 'Employee not found.' };
 
-    if (rbacOverride !== undefined) {
-      setRuntimeRbacConfigOverride(rbacOverride);
-    }
-    const rbacConfig = getDefaultTenantRbacConfig();
+    const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, rbacOverride);
     const actorPerms = resolvePersonPermissionSet(actor, {
       allPeople: people,
       teams,
@@ -9148,7 +9207,7 @@ export async function saveEnquiryRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+  const [people, organisations, links, matters, enquiries, quotes, teams, rbacConfig] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
@@ -9156,6 +9215,7 @@ export async function saveEnquiryRecord(
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
+    loadEffectiveTenantRbacConfig(enqCtx),
   ]);
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
@@ -9165,6 +9225,7 @@ export async function saveEnquiryRecord(
     quotes,
     teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const existing = opts.id ? enquiries.find((e) => e.id === opts.id) ?? null : null;
   if (opts.id && !existing) {
@@ -9179,6 +9240,7 @@ export async function saveEnquiryRecord(
       !hasPersonPermission(actor, 'enquiry:create', {
         allPeople: people,
         teams,
+        config: { rbac: rbacConfig },
       })
     ) {
       const msg = 'You do not have permission (enquiry:create) to create an enquiry.';
@@ -9192,6 +9254,7 @@ export async function saveEnquiryRecord(
       !hasPersonPermission(actor, 'enquiry:edit', {
         allPeople: people,
         teams,
+        config: { rbac: rbacConfig },
       }) ||
       !visibility.canViewEnquiry(existing)
     ) {
@@ -11988,7 +12051,7 @@ export async function updateEmployeeRolesAndSupports(
     if (!actor) return { ok: false, error: 'Acting user not found.' };
     if (!person) return { ok: false, error: 'Employee not found.' };
 
-    const rbacConfig = getDefaultTenantRbacConfig();
+    const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, dbRbacOverride);
     const actorPerms = resolvePersonPermissionSet(actor, {
       allPeople: people,
       teams,
@@ -12083,9 +12146,10 @@ export async function previewRbacOverrides(
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx),
   ]);
-  if (dbRbacOverride) {
-    setRuntimeRbacConfigOverride(dbRbacOverride);
-  }
+  const currentRbacConfig = await loadEffectiveTenantRbacConfig(
+    ctx,
+    dbRbacOverride,
+  );
   const actor = people.find((p) => p.id === byId);
   const target = people.find((p) => p.id === personId);
   if (!actor)
@@ -12096,14 +12160,17 @@ export async function previewRbacOverrides(
     !hasPersonPermission(actor, 'admin:access', {
       allPeople: people,
       teams,
+      config: { rbac: currentRbacConfig },
     }) &&
     !hasPersonPermission(actor, 'rbac:manage_user_overrides', {
       allPeople: people,
       teams,
+      config: { rbac: currentRbacConfig },
     }) &&
     !hasPersonPermission(actor, 'rbac:manage_config', {
       allPeople: people,
       teams,
+      config: { rbac: currentRbacConfig },
     })
   ) {
     return {
@@ -12160,9 +12227,7 @@ export async function previewRbacOverrides(
   const permissions = resolvePersonPermissions(syntheticTarget, {
     allPeople: people,
     teams,
-    ...(validatedRbacConfig
-      ? { config: { rbac: validatedRbacConfig } }
-      : {}),
+    config: { rbac: validatedRbacConfig ?? currentRbacConfig },
   });
 
   return { ok: true, permissions };
@@ -12193,15 +12258,12 @@ export async function updatePersonPermissionOverrides(
       hrRepo.listAllTeams<Team>(ctx),
       hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
     ]);
-    if (dbRbacOverride) {
-      setRuntimeRbacConfigOverride(dbRbacOverride);
-    }
     const actor = people.find((p) => p.id === byId);
     const target = people.find((p) => p.id === personId);
     if (!actor) return { ok: false, error: 'Acting user not found.' };
     if (!target) return { ok: false, error: 'Target employee not found.' };
 
-    const rbacConfig = getDefaultTenantRbacConfig();
+    const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, dbRbacOverride);
     const actorPerms = resolvePersonPermissionSet(actor, {
       allPeople: people,
       teams,
@@ -12292,151 +12354,173 @@ export async function updatePersonPermissionOverrides(
  * Enforces `rbac:manage_config` + MFA, validates all permission and role keys, and writes a before/after audit log.
  */
 export async function updateTenantRbacConfig(
-  patch: Partial<RbacConfiguration>,
+  patch: Partial<RbacConfiguration> | null,
   byId: string,
-  options: { mfaVerified?: boolean } = {},
+  options: { mfaVerified?: boolean; expectedRowVersion?: number | null } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string; rbacConfig?: RbacConfiguration }> {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const hrRepo = getHrAndRbacRepository();
-  const [people, teams, dbRbacOverride] = await Promise.all([
-    partyRepo.listAllPeople<Person>(ctx),
-    hrRepo.listAllTeams<Team>(ctx),
-    hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
-  ]);
-  if (dbRbacOverride) {
-    setRuntimeRbacConfigOverride(dbRbacOverride);
-  }
-  const actor = people.find((p) => p.id === byId);
-  if (!actor) return { ok: false, error: 'Acting user not found.' };
+  return runWithAuditStagingScope(() =>
+    hrRepo.withTenantTransaction(ctx, async () => {
+      const [people, teams, { override: dbRbacOverride, rowVersion }] =
+        await Promise.all([
+          partyRepo.listAllPeople<Person>(ctx),
+          hrRepo.listAllTeams<Team>(ctx),
+          hrRepo.getRbacConfigOverrideWithVersion<RbacConfiguration>(ctx),
+        ]);
+      const actor = people.find((p) => p.id === byId);
+      if (!actor) return { ok: false, error: 'Acting user not found.' };
 
-  const currentRbac = getDefaultTenantRbacConfig();
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams,
-    mfaVerified: options.mfaVerified ?? false,
-    config: { rbac: currentRbac },
-  });
+      const baseRbac = getDefaultTenantRbacConfig(ctx.tenantId);
+      const currentRbac = dbRbacOverride
+        ? mergeRbacConfigOverlay(baseRbac, dbRbacOverride)
+        : baseRbac;
+      const actorPerms = resolvePersonPermissionSet(actor, {
+        allPeople: people,
+        teams,
+        mfaVerified: options.mfaVerified ?? false,
+        config: { rbac: currentRbac },
+      });
 
-  try {
-    requirePermission(
-      actorPerms,
-      'rbac:manage_config',
-      'update tenant RBAC and Entra ID configuration',
-    );
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
-    };
-  }
-
-  const knownRoleKeys = new Set<string>([
-    ...Object.keys(currentRbac.roles),
-    ...Object.keys(patch.roles ?? {}),
-  ]);
-
-  // Validate permission keys in roles and departmentGrants
-  for (const [roleKey, roleDef] of Object.entries(patch.roles ?? {})) {
-    for (const perm of roleDef?.permissions ?? []) {
-      if (!isRegisteredPermissionKey(perm)) {
+      try {
+        requirePermission(
+          actorPerms,
+          'rbac:manage_config',
+          'update tenant RBAC and Entra ID configuration',
+        );
+      } catch (err) {
+        const code = err instanceof AuthorisationError ? err.code : undefined;
+        const message = err instanceof Error ? err.message : String(err);
         return {
           ok: false,
-          error: `Role "${roleKey}" references unknown permission "${perm}".`,
+          code,
+          error: code ? `${code}: ${message}` : message,
         };
       }
-    }
-  }
-  for (const [deptId, perms] of Object.entries(patch.departmentGrants ?? {})) {
-    for (const perm of perms ?? []) {
-      if (!isRegisteredPermissionKey(perm)) {
-        return {
-          ok: false,
-          error: `Department "${deptId}" references unknown permission "${perm}".`,
-        };
-      }
-    }
-  }
-  if (patch.identityMapping) {
-    for (const [groupKey, rks] of Object.entries(
-      patch.identityMapping.entraGroupToRoleKey ?? {},
-    )) {
-      for (const rk of rks) {
-        if (!knownRoleKeys.has(rk)) {
-          return {
-            ok: false,
-            error: `Entra group "${groupKey}" maps to unknown role key "${rk}".`,
-          };
+
+      if (patch !== null) {
+        const knownRoleKeys = new Set<string>([
+          ...Object.keys(currentRbac.roles),
+          ...Object.keys(patch.roles ?? {}),
+        ]);
+
+        // Validate permission keys in roles and departmentGrants
+        for (const [roleKey, roleDef] of Object.entries(patch.roles ?? {})) {
+          for (const perm of roleDef?.permissions ?? []) {
+            if (!isRegisteredPermissionKey(perm)) {
+              return {
+                ok: false,
+                error: `Role "${roleKey}" references unknown permission "${perm}".`,
+              };
+            }
+          }
         }
-      }
-    }
-    for (const [appRole, rks] of Object.entries(
-      patch.identityMapping.entraAppRoleToRoleKey ?? {},
-    )) {
-      for (const rk of rks) {
-        if (!knownRoleKeys.has(rk)) {
-          return {
-            ok: false,
-            error: `Entra app role "${appRole}" maps to unknown role key "${rk}".`,
-          };
+        for (const [deptId, perms] of Object.entries(
+          patch.departmentGrants ?? {},
+        )) {
+          for (const perm of perms ?? []) {
+            if (!isRegisteredPermissionKey(perm)) {
+              return {
+                ok: false,
+                error: `Department "${deptId}" references unknown permission "${perm}".`,
+              };
+            }
+          }
         }
-      }
-    }
-    if ('emailLinking' in patch.identityMapping && patch.identityMapping.emailLinking !== undefined) {
-      if (
-        typeof patch.identityMapping.emailLinking !== 'object' ||
-        patch.identityMapping.emailLinking === null
-      ) {
-        return {
-          ok: false,
-          error: 'emailLinking must be an object.',
-        };
-      }
-      if (
-        'enabled' in patch.identityMapping.emailLinking &&
-        typeof patch.identityMapping.emailLinking.enabled !== 'boolean'
-      ) {
-        return {
-          ok: false,
-          error: 'emailLinking.enabled must be a boolean.',
-        };
-      }
-      if ('domains' in patch.identityMapping.emailLinking) {
-        if (!Array.isArray(patch.identityMapping.emailLinking.domains)) {
-          return {
-            ok: false,
-            error: 'emailLinking.domains must be an array of lower-case domain names.',
-          };
-        }
-        for (const domain of patch.identityMapping.emailLinking.domains) {
+        if (patch.identityMapping) {
+          for (const [groupKey, rks] of Object.entries(
+            patch.identityMapping.entraGroupToRoleKey ?? {},
+          )) {
+            for (const rk of rks) {
+              if (!knownRoleKeys.has(rk)) {
+                return {
+                  ok: false,
+                  error: `Entra group "${groupKey}" maps to unknown role key "${rk}".`,
+                };
+              }
+            }
+          }
+          for (const [appRole, rks] of Object.entries(
+            patch.identityMapping.entraAppRoleToRoleKey ?? {},
+          )) {
+            for (const rk of rks) {
+              if (!knownRoleKeys.has(rk)) {
+                return {
+                  ok: false,
+                  error: `Entra app role "${appRole}" maps to unknown role key "${rk}".`,
+                };
+              }
+            }
+          }
           if (
-            typeof domain !== 'string' ||
-            !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)
+            'emailLinking' in patch.identityMapping &&
+            patch.identityMapping.emailLinking !== undefined
           ) {
-            return {
-              ok: false,
-              error: `Invalid domain "${String(domain)}" in emailLinking.domains; each domain must be a lower-case domain name.`,
-            };
+            if (
+              typeof patch.identityMapping.emailLinking !== 'object' ||
+              patch.identityMapping.emailLinking === null
+            ) {
+              return {
+                ok: false,
+                error: 'emailLinking must be an object.',
+              };
+            }
+            if (
+              'enabled' in patch.identityMapping.emailLinking &&
+              typeof patch.identityMapping.emailLinking.enabled !== 'boolean'
+            ) {
+              return {
+                ok: false,
+                error: 'emailLinking.enabled must be a boolean.',
+              };
+            }
+            if ('domains' in patch.identityMapping.emailLinking) {
+              if (!Array.isArray(patch.identityMapping.emailLinking.domains)) {
+                return {
+                  ok: false,
+                  error:
+                    'emailLinking.domains must be an array of lower-case domain names.',
+                };
+              }
+              for (const domain of patch.identityMapping.emailLinking.domains) {
+                if (
+                  typeof domain !== 'string' ||
+                  !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)
+                ) {
+                  return {
+                    ok: false,
+                    error: `Invalid domain "${String(domain)}" in emailLinking.domains; each domain must be a lower-case domain name.`,
+                  };
+                }
+              }
+            }
           }
         }
       }
-    }
-  }
 
-  const beforeJson = JSON.stringify(currentRbac);
-  const nextRbac = mergeRbacConfigOverlay(currentRbac, patch);
-  const nowIso = new Date().toISOString();
+      const beforeJson = JSON.stringify(currentRbac);
+      const nextRbac =
+        patch === null ? baseRbac : mergeRbacConfigOverlay(currentRbac, patch);
+      const nowIso = new Date().toISOString();
+      const expectedRowVersion =
+        options.expectedRowVersion !== undefined
+          ? options.expectedRowVersion
+          : rowVersion;
 
-  await runWithAuditStagingScope(() =>
-    hrRepo.withTenantTransaction(ctx, async () => {
-      await hrRepo.putRbacConfigOverride(ctx, nextRbac, {
-        updatedById: byId,
-        updatedAt: nowIso,
-      });
-      setRuntimeRbacConfigOverride(nextRbac);
+      await hrRepo.putRbacConfigOverride(
+        ctx,
+        patch === null ? null : nextRbac,
+        {
+          updatedById: byId,
+          updatedAt: nowIso,
+          expectedRowVersion,
+        },
+      );
+      const activeSession = getActiveActorSession();
+      if (activeSession && activeSession.tenantId === ctx.tenantId) {
+        activeSession.effectiveRbacConfig = nextRbac;
+      }
       await syncAffectedMattersRestrictionsInTx(ctx, {
         includeAllRestrictedMatters: true,
         rbacConfig: nextRbac,
@@ -12452,10 +12536,9 @@ export async function updateTenantRbacConfig(
         at: nowIso,
       });
       await flushStagedAuditEntries(ctx);
+      return { ok: true, rbacConfig: nextRbac };
     }),
   );
-
-  return { ok: true, rbacConfig: nextRbac };
 }
 
 export async function approveSignOff(
@@ -14809,10 +14892,12 @@ export async function resolveOrProvisionEntraEmployee(
   const [prelimPeople, prelimTeams, dbRbacOverride] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(signInCtx),
     hrRepo.listAllTeams<Team>(signInCtx),
-    hrRepo.getRbacConfigOverride(signInCtx),
+    hrRepo.getRbacConfigOverride<RbacConfiguration>(signInCtx),
   ]);
-  setRuntimeRbacConfigOverride(dbRbacOverride);
-  const rbacConfig = getDefaultTenantRbacConfig(activeTenantId);
+  const rbacConfig = await loadEffectiveTenantRbacConfig(
+    signInCtx,
+    dbRbacOverride,
+  );
   if (claimEmail) {
     await getPartyRepository().findActivePeopleByEmail(signInCtx, claimEmail);
   }
