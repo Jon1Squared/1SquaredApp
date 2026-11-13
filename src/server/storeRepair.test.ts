@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildDemoData } from '@/seed/demo';
 import { buildSeedLists } from '@/seed/lists';
-import { repairOrphanTaxonomyIds } from './store';
+import { repairOrphanTaxonomyIds } from '@/seed/seedStoreBuilder';
 
 describe('repairOrphanTaxonomyIds (R217)', () => {
   it('preserves a matter practiceAreaId when it is an admin-added value in parsed.values', () => {

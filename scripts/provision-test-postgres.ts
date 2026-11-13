@@ -17,7 +17,8 @@ import {
 import '../core/src/tenancy/pgNodePreload';
 // Local/CI provisioning helper; deliberately not exported from @platform/core (R435).
 import { provisionPostgresClusterRolesAndDatabases } from '../core/src/tenancy/postgresAdminBootstrap';
-import { createSeedStore } from '../src/server/store';
+import { loadCommittedSeedStore } from '../src/seed/seedSnapshot';
+import { createSeedStore } from '../src/seed/seedStoreBuilder';
 import { importFirmStoreModulesToPostgres } from '../src/server/storePostgresImport';
 
 process.env.PLATFORM_HOSTING_MODE ||= 'multi_tenant';
@@ -70,6 +71,7 @@ const TEST_CLUSTER_TENANTS: ReadonlyArray<{
 ];
 
 async function main(): Promise<void> {
+  const resetTestSeed = process.argv.includes('--reset-test-seed');
   const { databasesProvisioned } =
     await provisionPostgresClusterRolesAndDatabases({
       tenants: TEST_CLUSTER_TENANTS,
@@ -98,10 +100,20 @@ async function main(): Promise<void> {
     ) {
       const partyRepo = new TenantPartyRepository();
       const existingCounts = await partyRepo.countAllTenantPartyRows(ctx);
-      if (existingCounts.people === 0) {
-        const seedStore = createSeedStore(new Date(), {
-          includeSyntheticEntraOids: t.environment === 'test',
+      if (resetTestSeed && t.environment === 'test') {
+        const committedSeed = loadCommittedSeedStore();
+        await importFirmStoreModulesToPostgres({
+          ctx,
+          store: committedSeed,
+          clearFirst: true,
         });
+      } else if (existingCounts.people === 0) {
+        const seedStore =
+          t.environment === 'test'
+            ? loadCommittedSeedStore()
+            : createSeedStore(new Date(), {
+                includeSyntheticEntraOids: false,
+              });
         await importFirmStoreModulesToPostgres({
           ctx,
           store: seedStore,

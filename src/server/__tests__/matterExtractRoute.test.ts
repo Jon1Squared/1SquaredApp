@@ -12,7 +12,7 @@ import {
   getPartyRepository,
   resetAllDemoData,
 } from '@/server/services';
-import { getStore, saveStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from '@/server/visibility';
 import { testDataResetContext } from '@/test/testTenantContexts';
 
@@ -216,8 +216,10 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
   });
 
   it('never creates employees (B10), checks contact:create before creating contacts/orgs/links, and returns no unrelated records', async () => {
-    const storeBefore = getStore();
-    const employeeIdsBefore = storeBefore.people
+    const peopleBefore = await getPartyRepository().listAllPeople(
+      testDataResetContext(),
+    );
+    const employeeIdsBefore = peopleBefore
       .filter((p) => p.isEmployee)
       .map((p) => p.id);
 
@@ -251,8 +253,10 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     };
 
     // B10: No employee was created; unmatched partner stays unmatched suggestion
-    const storeAfter = getStore();
-    const employeeIdsAfter = storeAfter.people
+    const peopleAfter = await getPartyRepository().listAllPeople(
+      testDataResetContext(),
+    );
+    const employeeIdsAfter = peopleAfter
       .filter((p) => p.isEmployee)
       .map((p) => p.id);
     expect(employeeIdsAfter).toEqual(employeeIdsBefore);
@@ -275,7 +279,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
 
     // When actor lacks contact:create, no new client org, person, or link is created
     clearMatterExtractionCacheForTesting();
-    const actor = storeAfter.people.find((p) => p.id === 'P-000002')!;
+    const actor = peopleAfter.find((p) => p.id === 'P-000002')!;
     actor.permissionOverrides = {
       grant: [],
       revoke: ['contact:create'],
@@ -327,7 +331,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
       await getPartyRepository().listAllOrganisations(testDataResetContext())
     )[0]!;
     const unlinkedPerson = {
-      ...structuredClone(getStore().people.find((p) => !p.isEmployee)!),
+      ...structuredClone(loadCommittedSeedStore().people.find((p) => !p.isEmployee)!),
       id: 'P-UNLINKED-EXT-01',
       firstName: 'Nerys',
       surname: 'UnlinkedContact',
@@ -388,7 +392,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
   });
 
   it('excludes a person created from a hidden enquiry from CRM matching and the response while matching a person created from a visible enquiry with the same name (R263, R291, R300)', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     const seedEnq = (
       await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
@@ -473,9 +477,6 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
       hiddenEnq,
       visibleEnq,
     ]);
-    // Push the hidden-enquiry person BEFORE the visible-enquiry person so an unfiltered .find() would pick the hidden one
-    store.people.push(hiddenEnqPerson, sameNameHiddenPerson, sameNameVisiblePerson);
-    saveStore(store);
     for (const p of [hiddenEnqPerson, sameNameHiddenPerson, sameNameVisiblePerson]) {
       await getPartyRepository().putPerson(testDataResetContext(), p);
     }
@@ -681,7 +682,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     });
     await getPartyRepository().putPerson(
       testDataResetContext(),
-      getStore().people.find((p) => p.id === 'P-000002')!,
+      loadCommittedSeedStore().people.find((p) => p.id === 'P-000002')!,
     );
     setTestEntraSessionOverride({
       ...FEE_EARNER_SESSION,

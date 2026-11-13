@@ -51,7 +51,8 @@ import {
   saveTaskSettingsRecord,
   updateWorkTypeProfiles,
 } from '@/server/services';
-import { createSeedStore, getStore, resetStore, saveStore } from '@/server/store';
+import { createSeedStore } from '@/seed/seedStoreBuilder';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
@@ -457,7 +458,7 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
   it('persists firm profile, choice lists/values, custom fields, and all tenant module configs to PostgreSQL in the same transaction as audit_entries, and rolls back both on forced failure', async () => {
     const { ctx, actorSession } = makeHostActorAndContext('P-000001');
     await runWithActiveActorSession(actorSession, async () => {
-      const store = resetStore();
+      const store = loadCommittedSeedStore();
       await importFirmStoreModulesToPostgres({
         ctx,
         store,
@@ -1112,42 +1113,18 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
     }
   });
 
-  it('never writes migrated S0-17c catalogue or module config keys to data/runtime-store.json (R468) and enforces R466/R470 code contracts', () => {
+  it('never writes runtime-store.json on disk (R468, S0-20) and enforces R466/R470 code contracts', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), '1sq-r468-cat-'));
     const runtimeStorePath = path.join(tmpDir, 'runtime-store.json');
     const prevStorePath = process.env.ONESQUARED_RUNTIME_STORE_PATH;
     const prevNodeEnv = process.env.NODE_ENV;
     try {
+      const { ctx } = makeHostActorAndContext('P-000001');
       process.env.ONESQUARED_RUNTIME_STORE_PATH = runtimeStorePath;
       (process.env as Record<string, string | undefined>).NODE_ENV =
         'development';
-      saveStore(getStore());
-      expect(fs.existsSync(runtimeStorePath)).toBe(true);
-      const writtenJson = JSON.parse(
-        fs.readFileSync(runtimeStorePath, 'utf8'),
-      ) as Record<string, unknown>;
-      const forbiddenStoreKeys = [
-        'firmId',
-        'isCleanDeployment',
-        'firm',
-        'lists',
-        'values',
-        'customFields',
-        'orgStructure',
-        'matterPartyTaxonomy',
-        'matterPartyMigrationReport',
-        'homePagesConfig',
-        'matterCostsConfig',
-        'enquirySettings',
-        'taskSettings',
-        'counters',
-      ];
-      for (const key of forbiddenStoreKeys) {
-        expect(
-          Object.prototype.hasOwnProperty.call(writtenJson, key),
-          `Expected data/runtime-store.json not to contain migrated key "${key}"`,
-        ).toBe(false);
-      }
+      await getCatalogueRepository().getFullCatalogueAndConfigsSnapshot(ctx);
+      expect(fs.existsSync(runtimeStorePath)).toBe(false);
     } finally {
       (process.env as Record<string, string | undefined>).NODE_ENV =
         prevNodeEnv;
@@ -1166,39 +1143,15 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
     );
     expect(catRepoSrc).not.toMatch(/__oneSquared/);
 
-    // R470: Zero getSynchronizedTenantStoreSnapshot in src/ or core/
+    // R470: Zero getSynchronizedTenantStoreSnapshot in src/ or core/, and src/server/store.ts is retired
     const servicesSrc = fs.readFileSync(
       path.join(REPO_ROOT, 'src/server/services.ts'),
       'utf8',
     );
     expect(servicesSrc).not.toContain('getSynchronizedTenantStoreSnapshot');
-
-    const storeSrc = fs.readFileSync(
-      path.join(REPO_ROOT, 'src/server/store.ts'),
-      'utf8',
-    );
-    expect(storeSrc).toContain('MOVED_TO_POSTGRES_STORE_KEYS');
-    for (const movedKey of [
-      'firmId',
-      'firm',
-      'isCleanDeployment',
-      'lists',
-      'values',
-      'customFields',
-      'formSections',
-      'orgStructure',
-      'matterPartyTaxonomy',
-      'matterPartyMigrationReport',
-      'homePagesConfig',
-      'matterCostsConfig',
-      'enquirySettings',
-      'taskSettings',
-      'dismissedDuplicates',
-      'workTypeProfiles',
-      'counters',
-    ]) {
-      expect(storeSrc).toContain(`'${movedKey}'`);
-    }
+    expect(
+      fs.existsSync(path.join(REPO_ROOT, 'src/server/store.ts')),
+    ).toBe(false);
 
     const forbiddenGetSaveFiles = [
       'src/server/authorize.ts',
@@ -1219,6 +1172,6 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
       'utf8',
     );
     const getStoreMatches = [...actionsSrc.matchAll(/\bgetStore\s*\(/g)];
-    expect(getStoreMatches.length).toBeLessThanOrEqual(1);
+    expect(getStoreMatches).toHaveLength(0);
   });
 });

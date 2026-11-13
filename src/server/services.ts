@@ -381,12 +381,10 @@ import type {
 import { DEFAULT_ENQUIRY_SETTINGS, DEFAULT_TASK_SETTINGS } from '@/seed/demo';
 import { buildSeedLists, slug, vid } from '@/seed/lists';
 import {
-  clearStoreToCleanDeployment,
   createCleanDeploymentStore,
   createSeedStore,
-  resetStore,
   type FirmStore,
-} from './store';
+} from '@/seed/seedStoreBuilder';
 
 export const USER_COOKIE = 'onesquared_user';
 
@@ -8262,7 +8260,9 @@ export async function resetAllDemoData(
         }
       }
     }
-    const fresh = resetStore();
+    const includeSyntheticEntraOids =
+      getActiveTenantConfiguration().environment === 'test';
+    const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
     if (prevSeededEntraByIdAndEmail.size > 0) {
       for (const p of fresh.people) {
         const email = primaryEmail(p).trim().toLowerCase();
@@ -8298,7 +8298,7 @@ export async function clearAllDataToCleanDeployment(
 ): Promise<void> {
     const actor = await getPartyRepository().getPersonById<Person>(ctx, byId);
     const actorName = actor ? personDisplayName(actor) : byId;
-    const clean = clearStoreToCleanDeployment();
+    const clean = createCleanDeploymentStore(new Date());
     await clearMigratedPostgresModulesForTenant({ ctx });
     await importFirmStoreModulesToPostgres({
       ctx,

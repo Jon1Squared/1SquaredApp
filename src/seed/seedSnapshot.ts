@@ -1,33 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createSeedStore, type FirmStore } from '@/server/store';
+import { createSeedStore, type FirmStore } from './seedStoreBuilder';
 import {
   COMMITTED_SEED_STORE_REL_PATH,
-  DEFAULT_RUNTIME_STORE_REL_PATH,
   loadCommittedSeedStore as loadCommittedSeedStoreMjs,
   loadCommittedSeedStoreRaw,
-  resetRuntimeStoreFromCommittedSeed,
   resolveCommittedSeedStorePath,
-  resolveRuntimeStorePath as resolveRuntimeStorePathMjs,
 } from './seedFileLoader.mjs';
 
 export {
   COMMITTED_SEED_STORE_REL_PATH,
-  DEFAULT_RUNTIME_STORE_REL_PATH,
   loadCommittedSeedStoreRaw,
-  resetRuntimeStoreFromCommittedSeed,
   resolveCommittedSeedStorePath,
 };
 
 export function loadCommittedSeedStore(rootDir: string = process.cwd()): FirmStore {
   return loadCommittedSeedStoreMjs(rootDir) as FirmStore;
-}
-
-export function resolveRuntimeStorePath(
-  rootDir: string = process.cwd(),
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolveRuntimeStorePathMjs(rootDir, env as NodeJS.ProcessEnv);
 }
 
 /**

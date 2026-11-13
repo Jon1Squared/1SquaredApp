@@ -53,7 +53,7 @@ import { canPersonAccessMatter } from '@/domain/rbac';
 import type { Matter, Person, Team } from '@/domain/types';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { getCachedDefaultWorkbookDataset } from '@/pms/importPms';
-import { getStore, type FirmStore } from './store';
+import { createSeedStore, type FirmStore } from '@/seed/seedStoreBuilder';
 
 export type ImportableStoreModule =
   | 'parties'
@@ -160,9 +160,8 @@ export interface ImportStoreModulesResult {
 }
 
 /**
- * Computes the authoritative `MatterRestrictionMetadata` for `TenantKeyDateRepository`
- * (`matter_restriction_metadata` table), respecting staff matters (`isStaffMatter`),
- * fail-closed ethical walls (`hasEthicalWall`, `B12`), and `canPersonAccessMatter`.
+ * Computes the authoritative `MatterRestrictionMetadata` for a matter, respecting staff matters
+ * (`isStaffMatter`), fail-closed ethical walls (`hasEthicalWall`, `B12`), and `canPersonAccessMatter`.
  */
 export function computeMatterRestrictionMetadataForStore(
   matter: Matter,
@@ -273,7 +272,7 @@ export async function importFirmStoreModulesToPostgres(
       'STORE_IMPORT_TENANT_MISMATCH: Tenant configuration does not belong to the caller tenant context.',
     );
   }
-  const store = options.store ?? getStore();
+  const store = options.store ?? createSeedStore();
   const modules: ImportableStoreModule[] = [
     ...(options.modules ?? DEFAULT_MIGRATED_POSTGRES_MODULES),
   ];
@@ -330,8 +329,8 @@ export async function importFirmStoreModulesToPostgres(
     auditEntries: 0,
   };
 
-  // R421: Capture any pre-existing PostgreSQL `people.employment_json` / `employee_employment_records`
-  // before `parties` import runs so post-S0-16 live employment edits in PostgreSQL are never overwritten
+  // R421: Capture any pre-existing PostgreSQL `employee_employment_records`
+  // before `parties` import runs so live employment edits in PostgreSQL are never overwritten
   // by stale `store.people[].employment`.
   const preImportPgEmployment = modules.includes('hr')
     ? await new TenantHrAndRbacRepository().readAuthoritativePeopleEmploymentForImport(
@@ -527,8 +526,8 @@ export async function importFirmStoreModulesToPostgres(
     const hrRbacRepo = new TenantHrAndRbacRepository();
     const partyRepo = new TenantPartyRepository();
 
-    // R421: Read authoritative employment from PostgreSQL (`people.employment_json` / `employee_employment_records`)
-    // and combine with pre-import snapshot and fallback JSON `store.people` so post-S0-16 live employment edits win.
+    // R421: Read authoritative employment from PostgreSQL (`employee_employment_records`)
+    // and combine with pre-import snapshot and fallback `store.people` so live employment edits win.
     const currentPgEmployment =
       await hrRbacRepo.readAuthoritativePeopleEmploymentForImport(ctx);
     const currentPgByPersonId = new Map(

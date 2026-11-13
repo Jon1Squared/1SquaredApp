@@ -2,7 +2,6 @@ import '../core/src/tenancy/pgNodePreload';
 import { getGlobalTenantPostgresPoolManager } from '@platform/core';
 import { getActiveTenantConfiguration } from '../src/platform/tenantRuntime';
 import {
-  buildPmsDatabaseFromWorkbook,
   importPmsWorkbookToPostgres,
   parseImportPmsCliArgs,
 } from '../src/pms/importPms';
@@ -24,9 +23,6 @@ async function main(): Promise<void> {
 
   try {
     const pgResult = await importPmsWorkbookToPostgres(ctx, {
-      asAtDate: cliOptions.asAtDate,
-    });
-    buildPmsDatabaseFromWorkbook({
       asAtDate: cliOptions.asAtDate,
     });
     console.log('PMS extract imported into tenant PostgreSQL database successfully:');

@@ -11,7 +11,7 @@ import {
   getIntakeQuoteRepository,
   saveEnquiryRecord,
 } from '../../server/services';
-import { getStore } from '../../server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   runAsTestActor,
   testTenantCtx,
@@ -310,7 +310,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
   });
 
   it('saveEnquiryRecord rejects non-draft saves without privacyNoticeGiven while leaving store.enquiries unchanged, allows draft saves to store privacyNoticeGiven = false, and allows legacy non-draft enquiries with privacyNoticeGiven = false to be edited and fixed (R362, R376, R380)', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       valueBySystemKey(store.values, 'enquiry_channel', 'phone')?.id ??
       'enquiry_channel.phone';

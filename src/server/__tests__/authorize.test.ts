@@ -18,7 +18,7 @@ import {
   type EntraSessionPayload,
 } from '@/server/entraAuth';
 import { resolvePersonPermissionSet } from '@/server/rbacRuntime';
-import { getStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 
 function makeSession(
   overrides: Partial<EntraSessionPayload> = {},
@@ -113,7 +113,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
   });
 
   it('4. a viewing-as role or previewRole never grants a permission (ADR 0013)', async () => {
-    const store = getStore() as ReturnType<typeof getStore> & {
+    const store = loadCommittedSeedStore() as ReturnType<typeof loadCommittedSeedStore> & {
       activeViewingRoleByUser?: Record<string, string>;
     };
     const feeEarner = store.people.find((p) => p.id === 'P-000002') as
@@ -246,7 +246,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
   });
 
   it('7. a service that resolves permissions without passing mfaVerified sees the session’s real MFA state', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const adminPerson = store.people.find((p) => p.id === 'P-000004')!;
 
     // Session with mfaVerified: true

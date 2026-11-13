@@ -1,7 +1,6 @@
 import type { RbacConfiguration } from '@platform/core';
 import { canPersonAccessMatter } from './rbacRuntime';
 import type { Enquiry, Matter, Person, Quote, Task, Team } from '@/domain/types';
-import type { FirmStore } from './store';
 
 export interface RecordVisibility {
   canViewMatter: (matter: Matter) => boolean;
@@ -18,7 +17,7 @@ export interface RecordVisibility {
 export const EMPTY_HIDDEN_KEY_DATE_IDS: ReadonlySet<string> = new Set<string>();
 
 export function buildRecordVisibility(
-  store: Partial<Pick<FirmStore, 'teams'>> | null | undefined,
+  store: { teams?: readonly Team[] } | null | undefined,
   user: Person | null | undefined,
   opts: {
     tokenRoles?: readonly string[];

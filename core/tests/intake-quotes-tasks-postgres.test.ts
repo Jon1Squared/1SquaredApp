@@ -48,7 +48,6 @@ import {
   saveQuoteRecord,
   saveTaskRecord,
 } from '@/server/services';
-import { getStore } from '@/server/store';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { setAuditAdapterFailureHookForTesting } from '@/server/testSupport/auditTestSupport';
 import { testDataResetContext } from '@/test/testTenantContexts';
@@ -507,7 +506,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
     await partyRepo.clearTenantData(ctxAllowed);
 
     // Create a restricted staff/ethical-wall matter accessible only to P-ALLOWED
-    const seedMatter = structuredClone(getStore().matters[0]!);
+    const seedMatter = structuredClone(loadCommittedSeedStore().matters[0]!);
     const restrictedMatter: TenantMatterRecord = {
       ...seedMatter,
       id: 'M-RESTRICTED-1',
@@ -910,7 +909,9 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
           enqCountBefore,
         );
         expect(
-          getStore().enquiries.some((e) => e.firstName === 'RolledBack'),
+          (await freshIqRepo.listAllEnquiriesUnfiltered(ctx)).some(
+            (e) => e.firstName === 'RolledBack',
+          ),
         ).toBe(false);
 
         // 2. saveQuoteRecord rollback on audit failure
@@ -941,7 +942,9 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
           quoteCountBefore,
         );
         expect(
-          getStore().quotes.some((q) => q.prospectName === 'RolledBack Prospect'),
+          (await freshIqRepo.listAllQuotesUnfiltered(ctx)).some(
+            (q) => q.prospectName === 'RolledBack Prospect',
+          ),
         ).toBe(false);
 
         // 3. saveTaskRecord rollback on audit failure
@@ -972,7 +975,9 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
           taskCountBefore,
         );
         expect(
-          getStore().tasks.some((t) => t.title === 'RolledBack Task Title'),
+          (await freshTwRepo.listAllTasksUnfiltered(ctx)).some(
+            (t) => t.title === 'RolledBack Task Title',
+          ),
         ).toBe(false);
 
         // 4. approveSignOff & discussSignOff rollback on audit failure

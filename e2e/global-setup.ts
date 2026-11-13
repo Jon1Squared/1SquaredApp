@@ -1,16 +1,16 @@
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { E2E_TEST_AUTH_SECRET } from '../playwright.config';
-import { resetRuntimeStoreFromCommittedSeed } from '../src/seed/seedFileLoader.mjs';
 import type { EntraSessionPayload } from '../src/server/entraAuth';
 
 /**
- * Playwright global setup (Slice S0-27).
+ * Playwright global setup (Slice S0-27 & S0-20).
  *
- * 1. Restores `data/seed-not-a-law-firm.json` into `data/runtime-store.json` so
- *    every test run starts from deterministic invented fixture data.
+ * 1. Restores `data/seed-not-a-law-firm.json` directly into the tenant's PostgreSQL
+ *    database (`importFirmStoreModulesToPostgres(..., clearFirst: true)`) so every
+ *    test run starts from deterministic invented fixture data.
  * 2. Mints HMAC-SHA256 signed `onesquared_entra_session` cookies in test code
  *    only (matching `signPayload` in `src/server/entraAuth.ts`) and writes one
  *    Playwright storageState file per role under `e2e/.auth/`.
@@ -175,11 +175,8 @@ export function storageStatePathFor(stateKey: string): string {
 export default async function globalSetup(): Promise<void> {
   const rootDir = process.cwd();
 
-  // Reset runtime store from seed data before the test run via the shared seed loader
-  resetRuntimeStoreFromCommittedSeed({ rootDir });
-  execFileSync(
-    process.execPath,
-    [path.join(rootDir, 'dist', 'jobs', 'import-store.mjs'), '--clear'],
+  execSync(
+    'npx tsx --conditions react-server scripts/provision-test-postgres.ts --reset-test-seed',
     {
       cwd: rootDir,
       stdio: 'inherit',
@@ -192,7 +189,6 @@ export default async function globalSetup(): Promise<void> {
         PLATFORM_POSTGRES_PORT: process.env.PLATFORM_POSTGRES_PORT || '5432',
         PLATFORM_POSTGRES_MIGRATE_PORT:
           process.env.PLATFORM_POSTGRES_MIGRATE_PORT || '5432',
-        // Throwaway local/CI cluster credentials (R435): core has no built-in passwords.
         PLATFORM_POSTGRES_RUNTIME_PASSWORD:
           process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ||
           'onesquared_local_runtime',

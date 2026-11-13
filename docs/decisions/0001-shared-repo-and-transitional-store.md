@@ -1,7 +1,9 @@
 # ADR-0001: Early-Stage Shared Repository Structure and Transitional Local Store
 
 - **Date:** 2026-10-31
-- **Status:** Accepted
+- **Status:** Superseded by ADR 0028 (runtime persistence) and ADR 0026 (demo seeding)
+
+> **Supersession note (Slice S0-20, November 2026):** The transitional local JSON store (`src/server/store.ts`, `data/runtime-store.json`), SQLite PMS demo database (`data/pms/pms-demo.sqlite`, `DemoDbPmsSource`), and Firestore sync (`firebase-admin`) have been retired. All runtime state and background jobs run exclusively against per-tenant PostgreSQL databases (`core/src/tenancy/`, [ADR 0028](./0028-tenant-database-and-repositories.md)), and pure seed-generation helpers live in `src/seed/seedStoreBuilder.ts` for non-live demo seeding and resets ([ADR 0026](./0026-demo-tenant.md)). The shared repository structure (`core/`, `client-not-a-law-firm/`, `src/`, `docs/`) and invented fixture names (`Not A Law Firm LLP` / `Pembroke Vaughan`) remain in effect under `docs/architecture-standard.md` §4.
 
 ## Context
 

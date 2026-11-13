@@ -101,12 +101,19 @@ import {
   getTestEntraSessionOverride,
   type VerifiedEntraSessionPayload,
 } from './entraAuth';
-import type { FirmStore } from './store';
 
-type DocGenCatalogueStoreView = Pick<
-  FirmStore,
-  'isCleanDeployment' | 'firm' | 'values' | 'customFields'
->;
+interface DocGenFirmIdentity {
+  name: string;
+  shortName: string;
+  offices: { id: string; name: string; city: string; postcode: string }[];
+}
+
+interface DocGenCatalogueStoreView {
+  isCleanDeployment?: boolean;
+  firm: DocGenFirmIdentity;
+  values: ChoiceValue[];
+  customFields: CustomFieldDefinition[];
+}
 
 void findUnmappedPlaceholders;
 void hasPermission;
@@ -724,12 +731,12 @@ export async function getInitializedDocGenContext(
     getEffectiveTenantConfig(ctx, repo),
   ]);
   const catalogueSnap = await getCatalogueRepository().getFullCatalogueAndConfigsSnapshot<
-    FirmStore['firm'],
+    DocGenFirmIdentity,
     ChoiceList,
     ChoiceValue,
     CustomFieldDefinition
   >(ctx, config);
-  const defaultFirm: FirmStore['firm'] = {
+  const defaultFirm: DocGenFirmIdentity = {
     name: config.displayName,
     shortName: config.displayName.replace(/\s+LLP$/i, '').trim() || config.displayName,
     offices: [],

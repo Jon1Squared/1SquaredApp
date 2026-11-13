@@ -14,7 +14,7 @@ import {
   type MicrosoftGraphCalendarEventPayload,
 } from '../keyDateCalendarSync';
 import { reassignKeyDateTeamRecord } from '@/server/services';
-import { getStore, resetStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { getKeyDateRepository, runAsTestActor, testTenantCtx } from '@/server/testSupport/auditTestSupport';
 
 const config = exampleConfig as unknown as KeyDatesConfig;
@@ -237,8 +237,7 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
     }
 
     // Reassignment via reassignKeyDateTeamRecord calls syncKeyDateToOutlookCalendar and deletes the old owner's event
-    resetStore();
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const allKeyDates = await getKeyDateRepository().listAllVisibleKeyDates(testTenantCtx('P-000001'));
     const confirmedKd = allKeyDates.find((k) => k.status === 'confirmed' && Boolean(k.matterId))!;
     expect(confirmedKd).toBeDefined();

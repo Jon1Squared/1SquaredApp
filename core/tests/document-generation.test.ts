@@ -56,13 +56,13 @@ import {
   setTestEntraSessionOverride,
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
-import { getStore, saveStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { getMatterRepository } from '@/server/services';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 
 function buildTestSessionScopeForEmployee(personId: string) {
-  const store = getStore();
+  const store = loadCommittedSeedStore();
   const tenantId = getActiveTenantConfiguration().tenantId;
   const emp = store.people.find((p) => p.id === personId);
   if (!emp) return null;
@@ -1423,8 +1423,7 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     expect(ethicalWallSubject?.hasEthicalWall).toBe(true);
 
     // R11: getDocumentGenerationSnapshotForUser omits a document linked to a matter with hasEthicalWall: true (even when isStaffMatter: false) for an excluded employee
-    const store = getStore();
-    const snapshotMatters = structuredClone(store.matters);
+    const store = loadCommittedSeedStore();
     const origWallMatter = structuredClone(
       store.matters.find((m) => m.id === 'M-000002')!,
     );
@@ -1487,21 +1486,20 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       await getMatterRepository().putMatter(ctx, origWallMatter, {
         expectedRowVersion: null,
       });
-      store.matters = snapshotMatters;
-      saveStore(store);
     }
   });
 
   it('10. Enforces R16, R19, R22, R51 & R78: schema validation on updateDocumentGenerationConfigService, UNAUTHENTICATED on unknown userId, and download route soft-delete & auth checks', async () => {
-    const store = getStore();
-    const snapshotOverride = structuredClone(store.documentGenerationConfigOverride);
-    const snapshotMatters = structuredClone(store.matters);
+    const store = loadCommittedSeedStore();
+    const origStaffMatter = structuredClone(
+      store.matters.find((m) => m.id === 'M-000002')!,
+    );
+    const initCtx = await runAsTestEmployee('P-000001', () => getInitializedDocGenContext('P-000001'));
     try {
       await expect(
         getDocumentGenerationSnapshotForUser('NON-EXISTENT-USER'),
       ).rejects.toThrow(/UNAUTHENTICATED/);
 
-      const initCtx = await runAsTestEmployee('P-000001', () => getInitializedDocGenContext('P-000001'));
       const beforeInvalidSave = await initCtx.repo.getDocumentGenerationTenantConfig(initCtx.ctx);
       await expect(
         runAsTestEmployee('P-000001', () =>
@@ -1534,6 +1532,10 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       const staffMatter = store.matters.find((m) => m.id === 'M-000002')!;
       staffMatter.isStaffMatter = true;
       staffMatter.restrictedAccessUserIds = ['P-000001'];
+      await getMatterRepository().putMatter(initCtx.ctx, staffMatter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000001'],
+      });
       setTestEntraSessionOverride({
         sub: 'P-000007',
         tenantId: 'not-a-law-firm',
@@ -1677,9 +1679,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         setTestEntraSessionOverride(undefined);
       }
     } finally {
-      store.documentGenerationConfigOverride = snapshotOverride;
-      store.matters = snapshotMatters;
-      saveStore(store);
+      await getMatterRepository().putMatter(initCtx.ctx, origStaffMatter, {
+        expectedRowVersion: null,
+      });
     }
   });
 });

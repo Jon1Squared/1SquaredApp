@@ -127,7 +127,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     // Migrate job uses migrateIdentity ONLY and connects directly to port 5432 bypassing PgBouncer
     const migrateJobBlock = platformNoComments.slice(
       platformNoComments.indexOf('resource migrateJob'),
-      platformNoComments.indexOf('resource storeImportJob'),
+      platformNoComments.indexOf('resource keyDateRemindersJob'),
     );
     expect(migrateJobBlock).toContain("'${migrateIdentity.id}': {}");
     expect(migrateJobBlock).not.toContain('runtimeIdentity');
@@ -139,19 +139,13 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(migrateJobBlock).toContain('sharedPostgresEntraAdmin');
 
     const nonMigrateJobsBlock = platformNoComments.slice(
-      platformNoComments.indexOf('resource storeImportJob'),
+      platformNoComments.indexOf('resource keyDateRemindersJob'),
       platformNoComments.indexOf('output vnetId'),
     );
     expect(nonMigrateJobsBlock).toContain("'${runtimeIdentity.id}': {}");
     expect(nonMigrateJobsBlock).not.toContain('migrateIdentity');
-
-    // R431: store-import only needs runtimeCommonEnv, so it mounts no web secrets
-    const storeImportBlock = platformNoComments.slice(
-      platformNoComments.indexOf('resource storeImportJob'),
-      platformNoComments.indexOf('resource keyDateRemindersJob'),
-    );
-    expect(storeImportBlock).not.toContain('runtimeKeyVaultSecrets');
-    expect(storeImportBlock).not.toContain('secrets:');
+    expect(platformBicep).not.toContain('storeImportJob');
+    expect(platformBicep).not.toContain('enableStoreImportJob');
   });
 
   it('enforces Entra ID auth only, TLS 1.2+, and explicit PgBouncer TRANSACTION pool mode on both shared and dedicated PostgreSQL servers (R401)', () => {
@@ -186,13 +180,13 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     );
   });
 
-  it('runs bundled dist/jobs/ entry points for migrate, store-import and scheduled jobs, and defines the Application Insights job failure alert rule (R403, R404, R407, R412)', () => {
+  it('runs bundled dist/jobs/ entry points for migrate and scheduled jobs, and defines the Application Insights job failure alert rule (R403, R404, R412)', () => {
     expect(platformBicep).not.toContain('scripts/run-job');
     expect(platformBicep).not.toContain('tsx');
 
     expect(platformBicep).toContain("'dist/jobs/run-job.mjs'");
     expect(platformBicep).toContain("'migrate'");
-    expect(platformBicep).toContain("'dist/jobs/import-store.mjs'");
+    expect(platformBicep).not.toContain("'dist/jobs/import-store.mjs'");
     expect(platformBicep).toContain("'key-date-reminders'");
     expect(platformBicep).toContain("'usage-retention-purge'");
     expect(platformBicep).toContain("'enquiry-retention-anonymise'");
@@ -303,14 +297,13 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
         platformNoComments.indexOf(`resource ${name} `),
         platformNoComments.indexOf(`resource ${next} `),
       );
-    const migrateJobBlock = resourceBlock('migrateJob', 'storeImportJob');
+    const migrateJobBlock = resourceBlock('migrateJob', 'keyDateRemindersJob');
     expect(migrateJobBlock).toMatch(
       /name: 'AZURE_CLIENT_ID'\s+value: migrateIdentity\.properties\.clientId/,
     );
     expect(migrateJobBlock).toContain('migrateAppInsightsMetricsPublisherRole');
     for (const [name, next] of [
       ['webContainerApp', 'migrateJob'],
-      ['storeImportJob', 'keyDateRemindersJob'],
       ['keyDateRemindersJob', 'usageRetentionPurgeJob'],
       ['usageRetentionPurgeJob', 'enquiryAnonymisationJob'],
     ] as const) {
