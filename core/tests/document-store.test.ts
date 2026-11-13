@@ -88,7 +88,10 @@ import {
   hasPersonPermission,
   runWithActiveActorSession,
 } from '@/server/rbacRuntime';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import {
+  getActiveTenantConfiguration,
+  getCatalogueRepository,
+} from '@/platform/tenantRuntime';
 import {
   buildEntraSessionPayload,
   createSignedEntraSessionCookie,
@@ -2420,6 +2423,10 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           active: true,
           sortOrder: 999,
         });
+        await getCatalogueRepository().putCustomFieldDefinitions(
+          testTenantCtx('P-000001'),
+          store.customFields,
+        );
         try {
           const rejectedHire = await asEmployee('P-000001', async () =>
             savePersonRecord(
@@ -2453,6 +2460,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           expect(mockItemBeforeValidHire.inheritsFromParent).toBe(true);
         } finally {
           store.customFields = snapshotCustomFields;
+          await getCatalogueRepository().updateExistingCustomFieldDefinition(
+            testTenantCtx('P-000001'),
+            'CF-REQ-PERSON-TEST',
+            { active: false, required: false },
+          );
         }
 
         // R8 & R80: Making Matter A a staff matter through conflict-on-hire (savePersonRecord) updates the mock backend's folder permissions as well as intendedGrants
@@ -3952,6 +3964,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           targetDept.active = false;
           targetTeam.active = false;
           otherInactiveDept.active = false;
+          await getCatalogueRepository().putOrgStructureConfig(
+            testTenantCtx('P-000001'),
+            store.orgStructure!,
+            'P-000001',
+          );
 
           const legacyDeptTitleSave = await runAsStoreEmployee('P-000001', async () =>
             saveMatterRecord(
@@ -3986,6 +4003,11 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           targetDept.active = prevDeptActive;
           targetTeam.active = prevTeamActive;
           otherInactiveDept.active = prevOtherDeptActive;
+          await getCatalogueRepository().putOrgStructureConfig(
+            testTenantCtx('P-000001'),
+            store.orgStructure!,
+            'P-000001',
+          );
         }
 
         // R136 (a1): updateMatterConflictRecord requires matter:edit even when the user IS on the matter (canPersonAccessMatter === true) and holds risk:view

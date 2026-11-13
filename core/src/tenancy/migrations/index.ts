@@ -1441,6 +1441,101 @@ DROP SEQUENCE IF EXISTS tenant_team_id_seq;
 `.trim(),
 };
 
+export const CATALOGUES_AND_CONFIG_MIGRATION_0012: TenantMigrationDefinition = {
+  version: '0012',
+  name: '0012_catalogues_and_config_expand',
+  description:
+    'Creates tenant-scoped tables for firm_profiles, choice_lists, choice_values, custom_field_definitions, and tenant_module_configs (S0-17c).',
+  dependsOn: ['0011'],
+  tablesChanged: [
+    'firm_profiles',
+    'choice_lists',
+    'choice_values',
+    'custom_field_definitions',
+    'tenant_module_configs',
+  ],
+  upSql: `
+CREATE TABLE IF NOT EXISTS firm_profiles (
+  tenant_id TEXT NOT NULL,
+  firm_id TEXT NOT NULL,
+  is_clean_deployment BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  firm_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS choice_lists (
+  tenant_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  description TEXT NULL,
+  allow_hierarchy BOOLEAN NOT NULL DEFAULT FALSE,
+  system_locked BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS choice_values (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  list_key TEXT NOT NULL,
+  code TEXT NULL,
+  label TEXT NOT NULL,
+  parent_id TEXT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 1,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_choice_values_tenant_list
+  ON choice_values (tenant_id, list_key, sort_order);
+
+CREATE TABLE IF NOT EXISTS custom_field_definitions (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  record_type TEXT NOT NULL,
+  field_key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  field_type TEXT NOT NULL,
+  section TEXT NOT NULL,
+  required BOOLEAN NOT NULL DEFAULT FALSE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order INTEGER NOT NULL DEFAULT 1,
+  source TEXT NOT NULL DEFAULT 'admin',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  options_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_custom_fields_tenant_type
+  ON custom_field_definitions (tenant_id, record_type, sort_order);
+
+CREATE TABLE IF NOT EXISTS tenant_module_configs (
+  tenant_id TEXT NOT NULL,
+  config_key TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by_id TEXT NULL,
+  config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, config_key)
+);
+`.trim(),
+  downSql: `
+DROP TABLE IF EXISTS tenant_module_configs;
+
+DROP INDEX IF EXISTS idx_custom_fields_tenant_type;
+DROP TABLE IF EXISTS custom_field_definitions;
+
+DROP INDEX IF EXISTS idx_choice_values_tenant_list;
+DROP TABLE IF EXISTS choice_values;
+
+DROP TABLE IF EXISTS choice_lists;
+DROP TABLE IF EXISTS firm_profiles;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -1453,6 +1548,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   PARTIES_AND_MATTERS_MIGRATION_0009,
   INTAKE_QUOTES_TASKS_MIGRATION_0010,
   HR_TEAMS_AND_RBAC_MIGRATION_0011,
+  CATALOGUES_AND_CONFIG_MIGRATION_0012,
 ];
 
 export function validateMigrationCatalogueOrder(

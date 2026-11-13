@@ -37,10 +37,9 @@ import {
   resetAllDemoData,
   savePersonRecord,
   saveTeamRecord,
-  updateChoiceValue,
   updateTenantRbacConfig,
 } from '@/server/services';
-import { createSeedStore, getStore, resetStore } from '@/server/store';
+import { createSeedStore, getStore, resetStore, saveStore } from '@/server/store';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import type { EmployeeSensitiveRecord, EmploymentRecord, Person } from '@/domain/types';
 
@@ -928,10 +927,8 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
         );
         expect(saveRes.errors).toBeUndefined();
 
-        // Trigger a saveStore() to disk via an unmoved collection mutation (choice values)
-        const store = getStore();
-        const firstVal = store.values[0]!;
-        await updateChoiceValue(firstVal.id, { label: firstVal.label }, 'P-000001');
+        // Trigger a saveStore() to disk
+        saveStore(getStore());
 
         expect(fs.existsSync(runtimeStorePath)).toBe(true);
         const rawDiskJson = fs.readFileSync(runtimeStorePath, 'utf8');

@@ -681,6 +681,67 @@ function syncStoreFirmIdAndHomeRoles(store: FirmStore): boolean {
   return changed;
 }
 
+function hydrateMissingMovedStoreFields(parsed: FirmStore): void {
+  const defaults = createCleanDeploymentStore();
+  if (!parsed.firmId) parsed.firmId = defaults.firmId;
+  if (!parsed.firm) parsed.firm = defaults.firm;
+  if (typeof parsed.isCleanDeployment !== 'boolean') {
+    parsed.isCleanDeployment = defaults.isCleanDeployment;
+  }
+  if (!Array.isArray(parsed.lists)) parsed.lists = defaults.lists;
+  if (!Array.isArray(parsed.values)) parsed.values = defaults.values;
+  if (!Array.isArray(parsed.customFields)) parsed.customFields = defaults.customFields;
+  if (!parsed.orgStructure) parsed.orgStructure = defaults.orgStructure;
+  if (!parsed.matterPartyTaxonomy) {
+    parsed.matterPartyTaxonomy = defaults.matterPartyTaxonomy;
+  }
+  if (!parsed.matterPartyMigrationReport) {
+    parsed.matterPartyMigrationReport = defaults.matterPartyMigrationReport;
+  }
+  if (!parsed.homePagesConfig || !Array.isArray(parsed.homePagesConfig.roles)) {
+    parsed.homePagesConfig = defaults.homePagesConfig;
+  }
+  if (!parsed.matterCostsConfig) {
+    parsed.matterCostsConfig = defaults.matterCostsConfig;
+  }
+  if (!parsed.enquirySettings) parsed.enquirySettings = defaults.enquirySettings;
+  if (!parsed.taskSettings) parsed.taskSettings = defaults.taskSettings;
+  if (!Array.isArray(parsed.organisations)) parsed.organisations = [];
+  if (!Array.isArray(parsed.people)) parsed.people = [];
+  if (!Array.isArray(parsed.links)) parsed.links = [];
+  if (!Array.isArray(parsed.matters)) parsed.matters = [];
+  if (!Array.isArray(parsed.teams)) parsed.teams = [];
+  if (!Array.isArray(parsed.tasks)) parsed.tasks = [];
+  if (!Array.isArray(parsed.enquiries)) parsed.enquiries = [];
+  if (!Array.isArray(parsed.quotes)) parsed.quotes = [];
+  if (!Array.isArray(parsed.notifications)) parsed.notifications = [];
+  if (!Array.isArray(parsed.signOffs)) parsed.signOffs = [];
+  if (!parsed.recentlyViewed || typeof parsed.recentlyViewed !== 'object') {
+    parsed.recentlyViewed = {};
+  }
+  if (
+    !parsed.employeeSensitiveRecords ||
+    typeof parsed.employeeSensitiveRecords !== 'object'
+  ) {
+    parsed.employeeSensitiveRecords = {};
+  }
+  if (!Array.isArray(parsed.pmsLinks)) parsed.pmsLinks = [];
+  if (!Array.isArray(parsed.notes)) parsed.notes = [];
+  if (!Array.isArray(parsed.audit)) parsed.audit = [];
+  if (!Array.isArray(parsed.mergeHistory)) parsed.mergeHistory = [];
+  if (!parsed.counters) parsed.counters = {};
+  if (!Array.isArray(parsed.keyDates)) parsed.keyDates = [];
+  if (!Array.isArray(parsed.keyDateNotApplicable)) {
+    parsed.keyDateNotApplicable = [];
+  }
+  if (!Array.isArray(parsed.keyDateReminderStates)) {
+    parsed.keyDateReminderStates = [];
+  }
+  if (!Array.isArray(parsed.keyDateCalendarSyncs)) {
+    parsed.keyDateCalendarSyncs = [];
+  }
+}
+
 export function getStore(): FirmStore {
   const isTestEnv = Boolean(
     (process.env.VITEST || process.env.NODE_ENV === 'test') &&
@@ -819,6 +880,7 @@ export function getStore(): FirmStore {
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new SyntaxError('Root JSON value must be an object.');
       }
+      hydrateMissingMovedStoreFields(parsed);
       let migrated = false;
       const seedLists = buildSeedLists();
 
@@ -1022,32 +1084,7 @@ export function getStore(): FirmStore {
   if (isTestEnv && global.__oneSquaredLastSavedStoreJson) {
     try {
       const parsed = JSON.parse(global.__oneSquaredLastSavedStoreJson) as FirmStore;
-      if (!Array.isArray(parsed.organisations)) parsed.organisations = [];
-      if (!Array.isArray(parsed.people)) parsed.people = [];
-      if (!Array.isArray(parsed.links)) parsed.links = [];
-      if (!Array.isArray(parsed.matters)) parsed.matters = [];
-      if (!Array.isArray(parsed.teams)) parsed.teams = [];
-      if (!Array.isArray(parsed.tasks)) parsed.tasks = [];
-      if (!Array.isArray(parsed.enquiries)) parsed.enquiries = [];
-      if (!Array.isArray(parsed.quotes)) parsed.quotes = [];
-      if (!Array.isArray(parsed.notifications)) parsed.notifications = [];
-      if (!Array.isArray(parsed.signOffs)) parsed.signOffs = [];
-      if (!parsed.recentlyViewed || typeof parsed.recentlyViewed !== 'object') {
-        parsed.recentlyViewed = {};
-      }
-      if (
-        !parsed.employeeSensitiveRecords ||
-        typeof parsed.employeeSensitiveRecords !== 'object'
-      ) {
-        parsed.employeeSensitiveRecords = {};
-      }
-      if (!Array.isArray(parsed.notes)) parsed.notes = [];
-      if (!Array.isArray(parsed.audit)) parsed.audit = [];
-      if (!Array.isArray(parsed.mergeHistory)) parsed.mergeHistory = [];
-      if (!Array.isArray(parsed.keyDates)) parsed.keyDates = [];
-      if (!Array.isArray(parsed.keyDateNotApplicable)) parsed.keyDateNotApplicable = [];
-      if (!Array.isArray(parsed.keyDateReminderStates)) parsed.keyDateReminderStates = [];
-      if (!Array.isArray(parsed.keyDateCalendarSyncs)) parsed.keyDateCalendarSyncs = [];
+      hydrateMissingMovedStoreFields(parsed);
       global.__oneSquaredStore = parsed;
       return global.__oneSquaredStore;
     } catch {
@@ -1094,6 +1131,20 @@ const MOVED_TO_POSTGRES_STORE_KEYS: ReadonlySet<string> = new Set([
   'employeeSensitiveRecords',
   'employeeMigrationReport',
   'rbacConfigOverride',
+  'firmId',
+  'isCleanDeployment',
+  'firm',
+  'lists',
+  'values',
+  'customFields',
+  'enquirySettings',
+  'taskSettings',
+  'homePagesConfig',
+  'orgStructure',
+  'matterPartyTaxonomy',
+  'matterPartyMigrationReport',
+  'matterCostsConfig',
+  'counters',
 ]);
 
 function serializeUnmigratedStoreForPersistence(

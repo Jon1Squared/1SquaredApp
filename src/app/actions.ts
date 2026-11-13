@@ -475,13 +475,9 @@ export async function updateChoiceValueAction(
 
 export async function reorderChoiceValueAction(id: string, direction: -1 | 1) {
   return guardedAction('reorderChoiceValueAction', async ({ personId: byId }) => {
-    const store = getStore();
-    if (!store.values.some((v) => v.id === id)) {
-      return buildActionDenied('FORBIDDEN', `Choice value "${id}" not found.`);
-    }
-    await reorderChoiceValue(id, direction, byId);
+    const res = await reorderChoiceValue(id, direction, byId);
     revalidateAll();
-    return { ok: true as const };
+    return res;
   });
 }
 
@@ -509,9 +505,6 @@ export async function saveCustomFieldAction(input: {
   options?: string[];
 }) {
   return guardedAction('saveCustomFieldAction', async ({ personId: byId }) => {
-    if (input.id && !getStore().customFields.some((d) => d.id === input.id)) {
-      return buildActionDenied('FORBIDDEN', `Custom field "${input.id}" not found.`);
-    }
     const def = await saveCustomFieldDefinition(input, byId);
     revalidateAll();
     return def;
@@ -520,12 +513,9 @@ export async function saveCustomFieldAction(input: {
 
 export async function reorderCustomFieldAction(id: string, direction: -1 | 1) {
   return guardedAction('reorderCustomFieldAction', async ({ personId: byId }) => {
-    if (!getStore().customFields.some((d) => d.id === id)) {
-      return buildActionDenied('FORBIDDEN', `Custom field "${id}" not found.`);
-    }
-    await reorderCustomField(id, direction, byId);
+    const res = await reorderCustomField(id, direction, byId);
     revalidateAll();
-    return { ok: true as const };
+    return res;
   });
 }
 

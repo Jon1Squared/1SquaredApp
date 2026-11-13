@@ -142,6 +142,7 @@ import {
 import {
   buildDefaultMatterPartyTaxonomy,
   computeMatterPartyUsageCounts,
+  migrateMatterPartiesToTwoFieldModel,
 } from '@/domain/matterParties';
 import {
   createDefaultMatterCostsConfig,
@@ -200,11 +201,14 @@ import {
 } from './entraAuth';
 import {
   getActiveTenantConfiguration,
+  getCatalogueRepository,
   getExtensionHostLoadErrors,
   getPlatformExtensionHost,
   isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
+  TenantCatalogueRepository,
 } from '@/platform/tenantRuntime';
+export { getCatalogueRepository, TenantCatalogueRepository };
 import {
   getActiveTenantTransactionState,
   MATTER_CONCURRENCY_CONFLICT_CODE,
@@ -318,6 +322,7 @@ import type {
   Matter,
   MatterCostsConfig,
   MatterPartyCapacityDef,
+  MatterPartyMigrationReport,
   MatterPartyRelationshipDef,
   MatterPartyTaxonomy,
   MergeHistory,
@@ -356,7 +361,8 @@ import type {
   PmsMatterFinancials,
   PmsMatterFullBundle,
 } from '@/pms/types';
-import { slug, vid } from '@/seed/lists';
+import { DEFAULT_ENQUIRY_SETTINGS, DEFAULT_TASK_SETTINGS } from '@/seed/demo';
+import { buildSeedLists, slug, vid } from '@/seed/lists';
 import {
   clearStoreToCleanDeployment,
   type FirmStore,
@@ -477,7 +483,6 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   personId: string;
 }> {
   const actor = await requireAuthenticatedActor();
-  const store = getStore();
   const tenantId = getActiveTenantConfiguration().tenantId;
   if (!isDemoModeEnabled()) {
     throw new AuthorisationError({
@@ -488,7 +493,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
       actorUserId: actor.personId,
     });
   }
-  const ctx = resolveDefaultServiceTenantContext(store, actor.personId, {
+  const ctx = resolveDefaultServiceTenantContext(null, actor.personId, {
     session: actor.session,
   });
   const [people, matters, teams, rbacConfig] = await Promise.all([
@@ -582,7 +587,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
 
   await runWithAuditStagingScope(() =>
     getPartyRepository().withTenantTransaction(ctx, async () => {
-      writeAudit(store, {
+      writeAudit(null, {
         recordType: 'person',
         recordId: targetPerson.id,
         action: 'update',
@@ -726,12 +731,168 @@ function resolveDefaultServiceTenantContext(
   throw err;
 }
 
-/**
- * Recomputes and writes `is_staff_matter`, `has_ethical_wall`, and `restricted_access_user_ids_json`
- * for only the affected matter rows inside the caller's active `withTenantTransaction` (`R478`, `R479`).
- * Takes `SELECT ... FOR UPDATE` on the affected matter rows and reads `people` and `teams` inside the same
- * transaction so stale pre-transaction reads or read-only paths can never overwrite access lists.
- */
+async function loadTenantCatalogueStoreView(
+  ctx: TenantContext,
+  options?: { includePmsLinks?: boolean },
+): Promise<FirmStore> {
+  const activeTenantConfig = getActiveTenantConfiguration();
+  const catSnap =
+    await getCatalogueRepository().getFullCatalogueAndConfigsSnapshot<
+      FirmStore['firm'],
+      ChoiceList,
+      ChoiceValue,
+      CustomFieldDefinition
+    >(ctx, activeTenantConfig);
+  const seedLists = buildSeedLists();
+  const nowIso = new Date().toISOString();
+
+  const lists: ChoiceList[] = [...catSnap.lists];
+  for (const l of seedLists.lists) {
+    if (!lists.some((x) => x.key === l.key)) {
+      lists.push(l);
+    }
+  }
+  const mpList = lists.find((x) => x.key === 'matter_party_role');
+  if (mpList && mpList.label !== 'Matter Parties') {
+    mpList.label = 'Matter Parties';
+  }
+
+  let values: ChoiceValue[] = [...catSnap.values];
+  for (const v of seedLists.values) {
+    const existingVal = values.find((x) => x.id === v.id);
+    if (!existingVal) {
+      values.push(v);
+    } else if (v.listKey === 'work_type' && v.meta) {
+      if (
+        existingVal.meta?.amlInScope === undefined ||
+        existingVal.meta?.clientMoneyThresholdGbp === undefined
+      ) {
+        existingVal.meta = {
+          ...v.meta,
+          ...(existingVal.meta ?? {}),
+        };
+      }
+    }
+  }
+
+  const orgStructure =
+    (catSnap.moduleConfigs.org_structure as OrgStructureCatalogue | undefined) ??
+    buildDefaultOrgStructure({
+      legalName: activeTenantConfig.displayName,
+    });
+
+  const matterPartyTaxonomy =
+    (catSnap.moduleConfigs.matter_party_taxonomy as MatterPartyTaxonomy | undefined) ??
+    buildDefaultMatterPartyTaxonomy(values);
+  let matterPartyMigrationReport = catSnap.moduleConfigs
+    .matter_party_migration_report as MatterPartyMigrationReport | undefined;
+
+  if (
+    !catSnap.moduleConfigs.matter_party_taxonomy ||
+    !matterPartyMigrationReport
+  ) {
+    const partyMig = migrateMatterPartiesToTwoFieldModel(
+      values,
+      [],
+      matterPartyTaxonomy,
+      nowIso,
+    );
+    values = partyMig.values;
+    if (!matterPartyMigrationReport) {
+      matterPartyMigrationReport = partyMig.report;
+    }
+  }
+
+  const rawHomePages =
+    (catSnap.moduleConfigs.home_pages as HomePagesConfig | undefined) ??
+    createDefaultHomePagesConfig(
+      nowIso,
+      activeTenantConfig.branding.primaryDomain,
+    );
+  const syncedRoles = syncHomeRolesWithEmployeeRoles(
+    rawHomePages.roles ?? [],
+    values,
+    createDefaultRoleConfigs(activeTenantConfig.branding.primaryDomain),
+  );
+  const homePagesConfig: HomePagesConfig = {
+    ...rawHomePages,
+    roles: syncedRoles,
+  };
+
+  const matterCostsConfig =
+    (catSnap.moduleConfigs.matter_costs as MatterCostsConfig | undefined) ??
+    syncRateCardsWithPmsFeeEarners(
+      createDefaultMatterCostsConfig(values, nowIso, {
+        clientProfileCode: activeTenantConfig.tenantId,
+        displayName: activeTenantConfig.displayName,
+        primaryDomain: activeTenantConfig.branding.primaryDomain,
+      }),
+      getPmsSource().listFeeEarners(),
+      values,
+    );
+
+  const enquirySettings: EnquirySettings =
+    (catSnap.moduleConfigs.enquiry_settings as EnquirySettings | undefined) ?? {
+      ...DEFAULT_ENQUIRY_SETTINGS,
+    };
+
+  const taskSettings: TaskSettings =
+    (catSnap.moduleConfigs.task_settings as TaskSettings | undefined) ?? {
+      templates: DEFAULT_TASK_SETTINGS.templates.map((t) => ({ ...t })),
+    };
+
+  const firm = catSnap.firmProfile
+    ? {
+        name: catSnap.firmProfile.firm.name,
+        shortName: catSnap.firmProfile.firm.shortName,
+        offices: [...catSnap.firmProfile.firm.offices],
+      }
+    : {
+        name: activeTenantConfig.displayName,
+        shortName:
+          activeTenantConfig.displayName.replace(/\s+LLP$/i, '').trim() ||
+          activeTenantConfig.displayName,
+        offices: orgStructure.offices.map((o) => o.name),
+      };
+
+  return {
+    firmId: catSnap.firmProfile?.firmId ?? ctx.tenantId,
+    firm,
+    isCleanDeployment: catSnap.firmProfile?.isCleanDeployment ?? false,
+    lists,
+    values,
+    customFields: catSnap.customFields,
+    orgStructure,
+    matterPartyTaxonomy,
+    matterPartyMigrationReport,
+    people: [],
+    employeeSensitiveRecords: {},
+    organisations: [],
+    links: [],
+    matters: [],
+    teams: [],
+    tasks: [],
+    enquiries: [],
+    quotes: [],
+    notifications: [],
+    enquirySettings,
+    taskSettings,
+    signOffs: [],
+    homePagesConfig,
+    matterCostsConfig,
+    pmsLinks: options?.includePmsLinks ? getStore().pmsLinks : [],
+    notes: [],
+    audit: [],
+    mergeHistory: [],
+    recentlyViewed: {},
+    counters: {},
+    keyDates: [],
+    keyDateNotApplicable: [],
+    keyDateReminderStates: [],
+    keyDateCalendarSyncs: [],
+  };
+}
+
 async function loadEffectiveTenantRbacConfig(
   ctx: TenantContext,
   preloadedOverride?: Partial<RbacConfiguration> | null,
@@ -751,6 +912,12 @@ async function loadEffectiveTenantRbacConfig(
   return effective;
 }
 
+/**
+ * Recomputes and writes `is_staff_matter`, `has_ethical_wall`, and `restricted_access_user_ids_json`
+ * for only the affected matter rows inside the caller's active `withTenantTransaction` (`R478`, `R479`).
+ * Takes `SELECT ... FOR UPDATE` on the affected matter rows and reads `people` and `teams` inside the same
+ * transaction so stale pre-transaction reads or read-only paths can never overwrite access lists.
+ */
 async function syncAffectedMattersRestrictionsInTx(
   ctx: TenantContext,
   options: {
@@ -1224,7 +1391,6 @@ async function getAppSnapshotInScope(
   userId: string,
   options?: { tokenRoles?: readonly string[]; includeFirmAudit?: boolean },
 ): Promise<AppSnapshot> {
-  const store = getStore();
   const now = new Date();
   if (!userId || !userId.trim()) {
     throw new AuthorisationError({
@@ -1235,7 +1401,10 @@ async function getAppSnapshotInScope(
       actorUserId: userId || 'anonymous',
     });
   }
-  const snapshotTenantCtx = resolveDefaultServiceTenantContext(store, userId);
+  const snapshotTenantCtx = resolveDefaultServiceTenantContext(null, userId);
+  const store = await loadTenantCatalogueStoreView(snapshotTenantCtx, {
+    includePmsLinks: true,
+  });
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
@@ -1721,7 +1890,7 @@ async function getAppSnapshotInScope(
 
   const conflictReviewCfg = activeTenantCfg.conflictReview;
   const riskReviewer = resolveSuggestedConflictReviewer(
-    store,
+    { teams, orgStructure },
     conflictReviewCfg,
     rolesByPersonId,
     employees,
@@ -1836,10 +2005,10 @@ export async function getEmployeeDetailsForUser(
   permissions: EmployeePermission[];
   errors?: Record<string, string>;
 }> {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const hrRepo = getHrAndRbacRepository();
-  const [people, teams, rbacConfig] = await Promise.all([
+  const [store, people, teams, rbacConfig] = await Promise.all([
+    loadTenantCatalogueStoreView(ctx),
     getPartyRepository().listAllPeople<Person>(ctx),
     hrRepo.listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
@@ -2002,8 +2171,8 @@ export async function reassignLeaverOwnedRecords(
     previousMatter: Matter;
     store: FirmStore;
   }> = [];
-  const store = getStore();
-  const reassignCtx = resolveDefaultServiceTenantContext(store, byId);
+  const reassignCtx = resolveDefaultServiceTenantContext(null, byId);
+  const store = await loadTenantCatalogueStoreView(reassignCtx);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
@@ -2361,8 +2530,8 @@ export async function savePersonRecord(
   const res = await withJsonStoreWriteLock<
     ({ person: Person; errors?: Record<string, string> } & Partial<ActionDenied>)
   >(async () => {
-  const store = getStore();
-  const personCtx = resolveDefaultServiceTenantContext(store, opts?.byId);
+  const personCtx = resolveDefaultServiceTenantContext(null, opts?.byId);
+  const store = await loadTenantCatalogueStoreView(personCtx);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const hrRepo = getHrAndRbacRepository();
@@ -3427,8 +3596,8 @@ export async function saveOrganisationRecord(
     internalSystemStep?: 'enquiry_conversion' | 'quote_conversion';
   },
 ): Promise<{ organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>> {
-  const store = getStore();
-  const orgCtx = resolveDefaultServiceTenantContext(store, opts?.byId);
+  const orgCtx = resolveDefaultServiceTenantContext(null, opts?.byId);
+  const store = await loadTenantCatalogueStoreView(orgCtx);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const [people, organisations, matters, teams] = await Promise.all([
@@ -3772,8 +3941,7 @@ export async function createOrUpdateLink(
 }
 
 export async function deleteLink(linkId: string, byId: string): Promise<{ ok: true } | ActionDenied> {
-  const store = getStore();
-  const linkCtx = resolveDefaultServiceTenantContext(store, byId);
+  const linkCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const [people, existing, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(linkCtx),
@@ -3808,7 +3976,7 @@ export async function deleteLink(linkId: string, byId: string): Promise<{ ok: tr
         ['person', existing.personId],
         ['organisation', existing.organisationId],
       ] as const) {
-        writeAudit(store, {
+        writeAudit(null, {
           recordType: rtype,
           recordId: rid,
           action: 'unlink',
@@ -3830,8 +3998,7 @@ export async function addNoteToRecord(
   text: string,
   byId: string,
 ): Promise<Note & Partial<ActionDenied>> {
-  const store = getStore();
-  const noteCtx = resolveDefaultServiceTenantContext(store, byId);
+  const noteCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const [people, matters, targetOrg, teams] = await Promise.all([
@@ -3843,7 +4010,7 @@ export async function addNoteToRecord(
     getHrAndRbacRepository().listAllTeams<Team>(noteCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actor, {
+  const visibility = buildRecordVisibility({ teams }, actor, {
     people,
     matters,
     teams,
@@ -3940,7 +4107,7 @@ export async function addNoteToRecord(
         expectedRowVersion: null,
       });
     }
-    writeAudit(store, {
+    writeAudit(null, {
       recordType,
       recordId,
       action: 'note',
@@ -4420,7 +4587,7 @@ export async function saveMatterRecord(
     label: 'saveMatterRecord',
     resolveCtx: (s) =>
       resolvedMatterCtx ?? resolveDefaultServiceTenantContext(s, opts.byId),
-    mutate: async (store) => {
+    mutate: async (_rawStore) => {
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
@@ -4431,7 +4598,7 @@ export async function saveMatterRecord(
   const tenantCfg = getActiveTenantConfiguration();
   let lookupCtx: TenantContext | null = null;
   try {
-    lookupCtx = resolveDefaultServiceTenantContext(store, opts.byId);
+    lookupCtx = resolveDefaultServiceTenantContext(null, opts.byId);
   } catch {
     if (activeVerifiedSession) {
       try {
@@ -4446,8 +4613,9 @@ export async function saveMatterRecord(
       }
     }
   }
-  const [people, organisations, links, matters, enquiries, quotes, tasks, teams, lookupRbacConfig] = lookupCtx
+  const [store, people, organisations, links, matters, enquiries, quotes, tasks, teams, lookupRbacConfig] = lookupCtx
     ? await Promise.all([
+        loadTenantCatalogueStoreView(lookupCtx),
         partyRepo.listAllPeople<Person>(lookupCtx),
         partyRepo.listAllOrganisations<Organisation>(lookupCtx),
         partyRepo.listAllLinks<PersonOrganisationLink>(lookupCtx),
@@ -4458,7 +4626,7 @@ export async function saveMatterRecord(
         getHrAndRbacRepository().listAllTeams<Team>(lookupCtx),
         loadEffectiveTenantRbacConfig(lookupCtx),
       ])
-    : [[], [], [], [], [], [], [], [], undefined];
+    : [null as unknown as FirmStore, [], [], [], [], [], [], [], [], undefined];
   const existingRef = opts.id ? matters.find((m) => m.id === opts.id) ?? null : null;
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingRowVersion = existing?.rowVersion ?? 1;
@@ -5907,7 +6075,7 @@ export async function saveMatterRecord(
           const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
           const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
             resolveConflictReviewTaskRouting(
-              { people: allPeopleWithPending, teams },
+              { people: allPeopleWithPending, teams, orgStructure: store.orgStructure },
               tenantCfg.conflictReview,
               matter,
             );
@@ -6018,10 +6186,9 @@ export async function markEngagementLetterDrafted(
   matterId: string,
   byId: string,
 ): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
-  const store = getStore();
   let ctx: TenantContext;
   try {
-    ctx = resolveDefaultServiceTenantContext(store, byId);
+    ctx = resolveDefaultServiceTenantContext(null, byId);
   } catch {
     return {
       matter: null,
@@ -6081,7 +6248,7 @@ export async function markEngagementLetterDrafted(
       saved = await putMatterWithInTxRestrictions(ctx, existing, {
         expectedRowVersion: null,
       });
-      writeAudit(store, {
+      writeAudit(null, {
         recordType: 'matter',
         recordId: existing.id,
         action: 'update',
@@ -6103,10 +6270,9 @@ export async function liftMatterRestriction(
   reason: string,
   byId: string,
 ): Promise<{ matter: Matter | null; errors?: Record<string, string> }> {
-  const store = getStore();
   let prelimCtx: TenantContext;
   try {
-    prelimCtx = resolveDefaultServiceTenantContext(store, byId);
+    prelimCtx = resolveDefaultServiceTenantContext(null, byId);
   } catch {
     return {
       matter: null,
@@ -6220,16 +6386,17 @@ export async function liftMatterRestriction(
     existing.restrictedAccessUserIds = [];
   }
 
-  const liftCtx = resolveDefaultServiceTenantContext(store, byId, {
+  const liftCtx = resolveDefaultServiceTenantContext(null, byId, {
     session: activeVerifiedSession,
   });
+  const store = await loadTenantCatalogueStoreView(liftCtx);
   let saved!: Matter;
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(liftCtx, async () => {
       saved = await putMatterWithInTxRestrictions(liftCtx, existing, {
         expectedRowVersion: null,
       });
-      writeAudit(store, {
+      writeAudit(null, {
         recordType: 'matter',
         recordId: existing.id,
         action: 'matter-restriction-lift',
@@ -6271,10 +6438,9 @@ export async function runMatterConflictSearchRecord(
   matter?: Matter | null;
   errors?: Record<string, string>;
 }> {
-  const store = getStore();
   let ctx: TenantContext;
   try {
-    ctx = resolveDefaultServiceTenantContext(store, byId);
+    ctx = resolveDefaultServiceTenantContext(null, byId);
   } catch {
     return {
       matches: [],
@@ -6321,7 +6487,7 @@ export async function runMatterConflictSearchRecord(
     allPeople: people,
     teams,
   });
-  const visibility = buildRecordVisibility(store, actingUser, {
+  const visibility = buildRecordVisibility({ teams }, actingUser, {
     people,
     matters,
     enquiries,
@@ -6398,7 +6564,7 @@ export async function runMatterConflictSearchRecord(
         (activeSession as { correlationId?: string } | null)?.correlationId ??
         `conflict-search-${randomUUID()}`;
       if (hasSavedMatter && input.currentMatterId) {
-        writeAudit(store, {
+        writeAudit(null, {
           recordType: 'matter',
           recordId: input.currentMatterId,
           action: 'update',
@@ -6452,17 +6618,17 @@ export async function updateMatterConflictRecord(
     errors?: Record<string, string>;
     warnings?: string[];
   }> => {
-    const store = getStore();
     let conflictCtx: TenantContext;
     try {
-      conflictCtx = resolveDefaultServiceTenantContext(store, byId);
+      conflictCtx = resolveDefaultServiceTenantContext(null, byId);
     } catch {
       return { matter: null };
     }
     const partyRepo = getPartyRepository();
     const matterRepo = getMatterRepository();
     const intakeRepo = getIntakeQuoteRepository();
-    const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+    const [store, people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+      loadTenantCatalogueStoreView(conflictCtx),
       partyRepo.listAllPeople<Person>(conflictCtx),
       partyRepo.listAllOrganisations<Organisation>(conflictCtx),
       partyRepo.listAllLinks<PersonOrganisationLink>(conflictCtx),
@@ -6778,10 +6944,9 @@ export async function signOffMatterCostsRecord(
       matter: null,
     };
   }
-  const store = getStore();
   let prelimCtx: TenantContext;
   try {
-    prelimCtx = resolveDefaultServiceTenantContext(store, byId);
+    prelimCtx = resolveDefaultServiceTenantContext(null, byId);
   } catch {
     return {
       matter: null,
@@ -6791,7 +6956,8 @@ export async function signOffMatterCostsRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(prelimCtx),
     partyRepo.listAllPeople<Person>(prelimCtx),
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
@@ -6970,10 +7136,10 @@ export async function dismissDuplicateMatch(
   otherId: string | null,
   byId: string,
 ): Promise<{ ok: true } | ActionDenied> {
-  const store = getStore();
-  const dupCtx = resolveDefaultServiceTenantContext(store, byId);
+  const dupCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
-  const [people, organisations, teams] = await Promise.all([
+  const [store, people, organisations, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(dupCtx),
     partyRepo.listAllPeople<Person>(dupCtx),
     recordType === 'organisation'
       ? partyRepo.listAllOrganisations<Organisation>(dupCtx)
@@ -7098,11 +7264,12 @@ export async function executeMerge(
   return runUnmigratedJsonMutationWithAudit({
     label: 'executeMerge',
     resolveCtx: (s) => mergeCtx ?? resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store, compensator) => {
-  const prelimCtx = resolveDefaultServiceTenantContext(store, byId);
+    mutate: async (rawStore, compensator) => {
+  const prelimCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, links, notes, matters, teams] = await Promise.all([
+  const [store, people, organisations, links, notes, matters, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(prelimCtx, { includePmsLinks: true }),
     partyRepo.listAllPeople<Person>(prelimCtx),
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(prelimCtx),
@@ -7363,12 +7530,14 @@ export async function executeMerge(
     // notifications, and recently_viewed are repointed atomically inside partyRepo.executeMergeInTransaction.
 
     // 7. Repoint PMS links (handle collision when survivor already has a PMS link)
+    let pmsLinksChanged = false;
     const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
     const nextPmsLinks: PmsLink[] = [];
-    for (const pmsLink of store.pmsLinks) {
+    for (const pmsLink of rawStore.pmsLinks) {
       if (pmsLink.onesquaredId === merged.id) {
+        pmsLinksChanged = true;
         const existingSurvivorPmsLink =
-          store.pmsLinks.find(
+          rawStore.pmsLinks.find(
             (other) =>
               other !== pmsLink &&
               other.entityType === pmsLink.entityType &&
@@ -7409,7 +7578,9 @@ export async function executeMerge(
         nextPmsLinks.push(pmsLink);
       }
     }
-    store.pmsLinks = nextPmsLinks;
+    if (pmsLinksChanged) {
+      rawStore.pmsLinks = nextPmsLinks;
+    }
 
     // 9. Copy notes to survivor
     const notesToRepoint: Note[] = [];
@@ -7574,7 +7745,7 @@ export async function executeMerge(
       });
     });
 
-    saveStore(store);
+    saveStore(rawStore);
     return history;
     },
   });
@@ -7649,53 +7820,64 @@ export async function addChoiceValue(
   },
   byId: string,
 ): Promise<ChoiceValue> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'addChoiceValue',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
   const label = input.label.trim();
   if (!label) throw new Error('Label is required');
-  let id = vid(input.listKey, (input.parentId ? slug(input.parentId) + '_' : '') + label);
-  let suffix = 2;
-  while (store.values.some((v) => v.id === id)) {
-    id = `${vid(input.listKey, label)}_${suffix++}`;
-  }
-  const val: ChoiceValue = {
-    id,
-    listKey: input.listKey,
-    label,
-    description: input.description?.trim() || undefined,
-    guidance: input.guidance?.trim() || undefined,
-    parentId: input.parentId ?? null,
-    sortOrder: nextSortOrder(store.values, input.listKey),
-    active: true,
-    meta: input.meta && Object.keys(input.meta).length > 0 ? input.meta : undefined,
-  };
-  store.values.push(val);
-  if (input.listKey === 'employee_role' && store.homePagesConfig) {
-    store.homePagesConfig.roles = syncHomeRolesWithEmployeeRoles(
-      store.homePagesConfig.roles,
-      store.values,
-      createDefaultRoleConfigs(
-        getActiveTenantConfiguration().branding.primaryDomain,
-      ),
-    );
-  }
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: input.listKey,
-    action: 'list-change',
-    field: `Added value to ${input.listKey}`,
-    oldValue: null,
-    newValue: val.label,
-    byId,
-  });
-  saveStore(store);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let val!: ChoiceValue;
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      let id = vid(
+        input.listKey,
+        (input.parentId ? slug(input.parentId) + '_' : '') + label,
+      );
+      let suffix = 2;
+      while (store.values.some((v) => v.id === id)) {
+        id = `${vid(input.listKey, label)}_${suffix++}`;
+      }
+      val = {
+        id,
+        listKey: input.listKey,
+        label,
+        description: input.description?.trim() || undefined,
+        guidance: input.guidance?.trim() || undefined,
+        parentId: input.parentId ?? null,
+        sortOrder: nextSortOrder(store.values, input.listKey),
+        active: true,
+        meta:
+          input.meta && Object.keys(input.meta).length > 0
+            ? input.meta
+            : undefined,
+      };
+      await catalogueRepo.putChoiceValue(ctx, val);
+      if (input.listKey === 'employee_role' && store.homePagesConfig) {
+        const nextValues = [...store.values, val];
+        const nextHomePages: HomePagesConfig = {
+          ...store.homePagesConfig,
+          roles: syncHomeRolesWithEmployeeRoles(
+            store.homePagesConfig.roles,
+            nextValues,
+            createDefaultRoleConfigs(
+              getActiveTenantConfiguration().branding.primaryDomain,
+            ),
+          ),
+        };
+        await catalogueRepo.putHomePagesConfig(ctx, nextHomePages, byId);
+      }
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: input.listKey,
+        action: 'list-change',
+        field: `Added value to ${input.listKey}`,
+        oldValue: null,
+        newValue: val.label,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
   return val;
-
-    },
-  });
 }
 
 export async function updateChoiceValue(
@@ -7709,87 +7891,101 @@ export async function updateChoiceValue(
   },
   byId: string,
 ): Promise<{ value?: ChoiceValue; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'updateChoiceValue',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const val = store.values.find((v) => v.id === id);
-  if (!val) {
-    return {
-      ...buildActionDenied('FORBIDDEN', 'Value not found'),
-      error: 'Value not found',
-    };
-  }
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { value?: ChoiceValue; error?: string } & Partial<ActionDenied>;
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const val = store.values.find((v) => v.id === id);
+      if (!val) {
+        result = {
+          ...buildActionDenied('FORBIDDEN', 'Value not found'),
+          error: 'Value not found',
+        };
+        return;
+      }
 
-  if (patch.active === false && val.active) {
-    const check = canDeactivate(val);
-    if (!check.ok) return { error: check.reason };
-  }
+      if (patch.active === false && val.active) {
+        const check = canDeactivate(val);
+        if (!check.ok) {
+          result = { error: check.reason };
+          return;
+        }
+      }
 
-  const beforeLabel = val.label;
-  const beforeActive = val.active;
-  if (patch.label !== undefined && patch.label.trim()) val.label = patch.label.trim();
-  if (patch.description !== undefined) val.description = patch.description.trim() || undefined;
-  if (patch.guidance !== undefined) val.guidance = patch.guidance.trim() || undefined;
-  if (patch.active !== undefined) val.active = patch.active;
-  if (patch.meta !== undefined) {
-    val.meta = { ...(val.meta ?? {}), ...patch.meta };
-  }
-  if (val.listKey === 'employee_role' && store.homePagesConfig) {
-    store.homePagesConfig.roles = syncHomeRolesWithEmployeeRoles(
-      store.homePagesConfig.roles,
-      store.values,
-      createDefaultRoleConfigs(
-        getActiveTenantConfiguration().branding.primaryDomain,
-      ),
-    );
-  }
-  if (false) {
-  }
+      const beforeLabel = val.label;
+      const beforeActive = val.active;
+      if (patch.label !== undefined && patch.label.trim()) val.label = patch.label.trim();
+      if (patch.description !== undefined) val.description = patch.description.trim() || undefined;
+      if (patch.guidance !== undefined) val.guidance = patch.guidance.trim() || undefined;
+      if (patch.active !== undefined) val.active = patch.active;
+      if (patch.meta !== undefined) {
+        val.meta = { ...(val.meta ?? {}), ...patch.meta };
+      }
+      await catalogueRepo.putChoiceValue(ctx, val);
+      if (val.listKey === 'employee_role' && store.homePagesConfig) {
+        const nextHomePages: HomePagesConfig = {
+          ...store.homePagesConfig,
+          roles: syncHomeRolesWithEmployeeRoles(
+            store.homePagesConfig.roles,
+            store.values,
+            createDefaultRoleConfigs(
+              getActiveTenantConfiguration().branding.primaryDomain,
+            ),
+          ),
+        };
+        await catalogueRepo.putHomePagesConfig(ctx, nextHomePages, byId);
+      }
 
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: val.listKey,
-    action: 'list-change',
-    field: val.id,
-    oldValue: `${beforeLabel}${beforeActive ? '' : ' (inactive)'}`,
-    newValue: `${val.label}${val.active ? '' : ' (inactive)'}`,
-    byId,
-  });
-  saveStore(store);
-  return { value: val };
-
-    },
-  });
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: val.listKey,
+        action: 'list-change',
+        field: val.id,
+        oldValue: `${beforeLabel}${beforeActive ? '' : ' (inactive)'}`,
+        newValue: `${val.label}${val.active ? '' : ' (inactive)'}`,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { value: val };
+    }),
+  );
+  return result;
 }
 
-export async function reorderChoiceValue(id: string, direction: -1 | 1, byId: string): Promise<void> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'reorderChoiceValue',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const changed = reorder(store.values, id, direction);
-  if (!changed.length) return;
-  for (const u of changed) {
-    const idx = store.values.findIndex((v) => v.id === u.id);
-    if (idx !== -1) store.values[idx] = u;
-  }
-  const target = store.values.find((v) => v.id === id)!;
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: target.listKey,
-    action: 'list-change',
-    field: `Re-ordered ${target.label}`,
-    oldValue: null,
-    newValue: direction === -1 ? 'Moved up' : 'Moved down',
-    byId,
-  });
-  saveStore(store);
-
-    },
-  });
+export async function reorderChoiceValue(
+  id: string,
+  direction: -1 | 1,
+  byId: string,
+): Promise<{ ok: true } | ActionDenied> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result: { ok: true } | ActionDenied = { ok: true };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const target = store.values.find((v) => v.id === id);
+      if (!target) {
+        result = buildActionDenied('FORBIDDEN', `Choice value "${id}" not found.`);
+        return;
+      }
+      const changed = reorder(store.values, id, direction);
+      if (!changed.length) return;
+      await catalogueRepo.putChoiceValues(ctx, changed);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: target.listKey,
+        action: 'list-change',
+        field: `Re-ordered ${target.label}`,
+        oldValue: null,
+        newValue: direction === -1 ? 'Moved up' : 'Moved down',
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
+  return result;
 }
 
 export async function createMatterStageGroup(
@@ -7801,122 +7997,131 @@ export async function createMatterStageGroup(
   },
   byId: string,
 ): Promise<ChoiceValue> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'createMatterStageGroup',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
   const label = input.label.trim();
   if (!label) throw new Error('Group name is required');
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let groupVal!: ChoiceValue;
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const toUpsert: ChoiceValue[] = [];
 
-  // Ensure Default Group exists in store.values
-  const defaultGroupId = 'matter_stage_group.default_group';
-  if (!store.values.some((v) => v.id === defaultGroupId)) {
-    store.values.push({
-      id: defaultGroupId,
-      listKey: 'matter_stage_group',
-      label: 'Default Group',
-      description: 'Standard firm-wide matter stage and milestone framework',
-      sortOrder: 1,
-      active: true,
-      parentId: null,
-      systemKey: 'default_group',
-    });
-  }
-  for (const v of store.values) {
-    if (v.listKey === 'matter_stage' && !v.parentId && !v.meta?.stageGroupId) {
-      v.meta = { ...(v.meta ?? {}), stageGroupId: defaultGroupId };
-    }
-  }
-
-  let groupId = vid('matter_stage_group', label);
-  let suffix = 2;
-  while (store.values.some((v) => v.id === groupId)) {
-    groupId = `${vid('matter_stage_group', label)}_${suffix++}`;
-  }
-
-  const groupVal: ChoiceValue = {
-    id: groupId,
-    listKey: 'matter_stage_group',
-    label,
-    description: input.description?.trim() || undefined,
-    parentId: null,
-    sortOrder: nextSortOrder(store.values, 'matter_stage_group'),
-    active: true,
-  };
-  store.values.push(groupVal);
-
-  if (input.mode === 'from_default' && input.selectedDefaultStageIds?.length) {
-    const selectedSet = new Set(input.selectedDefaultStageIds);
-    const defaultStages = store.values
-      .filter(
-        (v) =>
-          v.listKey === 'matter_stage' &&
-          !v.parentId &&
-          (v.meta?.stageGroupId ?? defaultGroupId) === defaultGroupId &&
-          selectedSet.has(v.id),
-      )
-      .sort((a, b) => a.sortOrder - b.sortOrder);
-
-    defaultStages.forEach((srcStage, sIdx) => {
-      let newStageId = vid('matter_stage', `${slug(label)}_${srcStage.label}`);
-      let stgSuffix = 2;
-      while (store.values.some((v) => v.id === newStageId)) {
-        newStageId = `${vid('matter_stage', `${slug(label)}_${srcStage.label}`)}_${stgSuffix++}`;
+      // Ensure Default Group exists in store.values
+      const defaultGroupId = 'matter_stage_group.default_group';
+      if (!store.values.some((v) => v.id === defaultGroupId)) {
+        const defGroup: ChoiceValue = {
+          id: defaultGroupId,
+          listKey: 'matter_stage_group',
+          label: 'Default Group',
+          description: 'Standard firm-wide matter stage and milestone framework',
+          sortOrder: 1,
+          active: true,
+          parentId: null,
+          systemKey: 'default_group',
+        };
+        store.values.push(defGroup);
+        toUpsert.push(defGroup);
+      }
+      for (const v of store.values) {
+        if (v.listKey === 'matter_stage' && !v.parentId && !v.meta?.stageGroupId) {
+          v.meta = { ...(v.meta ?? {}), stageGroupId: defaultGroupId };
+          toUpsert.push(v);
+        }
       }
 
-      const clonedStage: ChoiceValue = {
-        id: newStageId,
-        listKey: 'matter_stage',
-        label: srcStage.label,
-        description: srcStage.description,
-        guidance: srcStage.guidance,
+      let groupId = vid('matter_stage_group', label);
+      let suffix = 2;
+      while (store.values.some((v) => v.id === groupId)) {
+        groupId = `${vid('matter_stage_group', label)}_${suffix++}`;
+      }
+
+      groupVal = {
+        id: groupId,
+        listKey: 'matter_stage_group',
+        label,
+        description: input.description?.trim() || undefined,
         parentId: null,
-        sortOrder: sIdx + 1,
+        sortOrder: nextSortOrder(store.values, 'matter_stage_group'),
         active: true,
-        meta: { ...(srcStage.meta ?? {}), stageGroupId: groupId },
       };
-      store.values.push(clonedStage);
+      store.values.push(groupVal);
+      toUpsert.push(groupVal);
 
-      const srcMilestones = store.values
-        .filter((v) => v.listKey === 'matter_stage' && v.parentId === srcStage.id)
-        .sort((a, b) => a.sortOrder - b.sortOrder);
+      if (input.mode === 'from_default' && input.selectedDefaultStageIds?.length) {
+        const selectedSet = new Set(input.selectedDefaultStageIds);
+        const defaultStages = store.values
+          .filter(
+            (v) =>
+              v.listKey === 'matter_stage' &&
+              !v.parentId &&
+              (v.meta?.stageGroupId ?? defaultGroupId) === defaultGroupId &&
+              selectedSet.has(v.id),
+          )
+          .sort((a, b) => a.sortOrder - b.sortOrder);
 
-      srcMilestones.forEach((srcMs, mIdx) => {
-        let newMsId = vid('matter_stage', `${slug(newStageId)}_${srcMs.label}`);
-        let msSuffix = 2;
-        while (store.values.some((v) => v.id === newMsId)) {
-          newMsId = `${vid('matter_stage', `${slug(newStageId)}_${srcMs.label}`)}_${msSuffix++}`;
-        }
-        store.values.push({
-          id: newMsId,
-          listKey: 'matter_stage',
-          label: srcMs.label,
-          description: srcMs.description,
-          guidance: srcMs.guidance,
-          parentId: newStageId,
-          sortOrder: mIdx + 1,
-          active: true,
-          meta: srcMs.meta ? { ...srcMs.meta } : undefined,
+        defaultStages.forEach((srcStage, sIdx) => {
+          let newStageId = vid('matter_stage', `${slug(label)}_${srcStage.label}`);
+          let stgSuffix = 2;
+          while (store.values.some((v) => v.id === newStageId)) {
+            newStageId = `${vid('matter_stage', `${slug(label)}_${srcStage.label}`)}_${stgSuffix++}`;
+          }
+
+          const clonedStage: ChoiceValue = {
+            id: newStageId,
+            listKey: 'matter_stage',
+            label: srcStage.label,
+            description: srcStage.description,
+            guidance: srcStage.guidance,
+            parentId: null,
+            sortOrder: sIdx + 1,
+            active: true,
+            meta: { ...(srcStage.meta ?? {}), stageGroupId: groupId },
+          };
+          store.values.push(clonedStage);
+          toUpsert.push(clonedStage);
+
+          const srcMilestones = store.values
+            .filter((v) => v.listKey === 'matter_stage' && v.parentId === srcStage.id)
+            .sort((a, b) => a.sortOrder - b.sortOrder);
+
+          srcMilestones.forEach((srcMs, mIdx) => {
+            let newMsId = vid('matter_stage', `${slug(newStageId)}_${srcMs.label}`);
+            let msSuffix = 2;
+            while (store.values.some((v) => v.id === newMsId)) {
+              newMsId = `${vid('matter_stage', `${slug(newStageId)}_${srcMs.label}`)}_${msSuffix++}`;
+            }
+            const clonedMs: ChoiceValue = {
+              id: newMsId,
+              listKey: 'matter_stage',
+              label: srcMs.label,
+              description: srcMs.description,
+              guidance: srcMs.guidance,
+              parentId: newStageId,
+              sortOrder: mIdx + 1,
+              active: true,
+              meta: srcMs.meta ? { ...srcMs.meta } : undefined,
+            };
+            store.values.push(clonedMs);
+            toUpsert.push(clonedMs);
+          });
         });
+      }
+
+      await catalogueRepo.putChoiceValues(ctx, toUpsert);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: 'matter_stage',
+        action: 'list-change',
+        field: 'Created matter stage group',
+        oldValue: null,
+        newValue: `${groupVal.label} (${input.mode === 'from_default' ? 'copied from Default Group' : 'from scratch'})`,
+        byId,
       });
-    });
-  }
-
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: 'matter_stage',
-    action: 'list-change',
-    field: 'Created matter stage group',
-    oldValue: null,
-    newValue: `${groupVal.label} (${input.mode === 'from_default' ? 'copied from Default Group' : 'from scratch'})`,
-    byId,
-  });
-  saveStore(store);
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
   return groupVal;
-
-    },
-  });
 }
 
 // ------------------------------------------------------------------ Admin: Custom fields
@@ -7932,118 +8137,152 @@ export async function saveCustomFieldDefinition(
     options?: string[];
   },
   byId: string,
-): Promise<CustomFieldDefinition> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveCustomFieldDefinition',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const existing = input.id ? store.customFields.find((d) => d.id === input.id) ?? null : null;
-  const id = existing?.id ?? `cf_${slug(input.label)}_${Date.now().toString(36).slice(-4)}`;
+): Promise<CustomFieldDefinition & Partial<ActionDenied>> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: CustomFieldDefinition & Partial<ActionDenied>;
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const existing = input.id
+        ? store.customFields.find((d) => d.id === input.id) ?? null
+        : null;
+      if (input.id && !existing) {
+        result = buildActionDenied(
+          'FORBIDDEN',
+          `Custom field "${input.id}" not found.`,
+        ) as unknown as CustomFieldDefinition & Partial<ActionDenied>;
+        return;
+      }
+      const id =
+        existing?.id ??
+        `cf_${slug(input.label)}_${Date.now().toString(36).slice(-4)}`;
 
-  let optionsListKey = existing?.optionsListKey;
-  if (input.fieldType === 'choice') {
-    optionsListKey = optionsListKey ?? id;
-    if (!store.lists.some((l) => l.key === optionsListKey)) {
-      const list: ChoiceList = {
-        key: optionsListKey,
-        label: input.label.trim(),
-        group: 'custom',
-        appliesTo: [input.recordType],
-        allowMultiple: false,
-        hierarchical: false,
-      };
-      store.lists.push(list);
-    }
-    if (input.options?.length) {
-      const existingVals = store.values.filter((v) => v.listKey === optionsListKey);
-      input.options
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .forEach((optLabel, idx) => {
-          if (!existingVals.some((ev) => ev.label.toLowerCase() === optLabel.toLowerCase())) {
-            store.values.push({
-              id: vid(optionsListKey!, optLabel),
-              listKey: optionsListKey!,
-              label: optLabel,
-              sortOrder: existingVals.length + idx + 1,
-              active: true,
-              parentId: null,
+      let optionsListKey = existing?.optionsListKey;
+      if (input.fieldType === 'choice') {
+        optionsListKey = optionsListKey ?? id;
+        if (!store.lists.some((l) => l.key === optionsListKey)) {
+          const list: ChoiceList = {
+            key: optionsListKey,
+            label: input.label.trim(),
+            group: 'custom',
+            appliesTo: [input.recordType],
+            allowMultiple: false,
+            hierarchical: false,
+          };
+          await catalogueRepo.putChoiceList(ctx, list);
+        }
+        if (input.options?.length) {
+          const existingVals = store.values.filter(
+            (v) => v.listKey === optionsListKey,
+          );
+          const newVals: ChoiceValue[] = [];
+          input.options
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .forEach((optLabel, idx) => {
+              if (
+                !existingVals.some(
+                  (ev) => ev.label.toLowerCase() === optLabel.toLowerCase(),
+                )
+              ) {
+                newVals.push({
+                  id: vid(optionsListKey!, optLabel),
+                  listKey: optionsListKey!,
+                  label: optLabel,
+                  sortOrder: existingVals.length + idx + 1,
+                  active: true,
+                  parentId: null,
+                });
+              }
             });
+          if (newVals.length > 0) {
+            await catalogueRepo.putChoiceValues(ctx, newVals);
           }
-        });
-    }
-  }
+        }
+      }
 
-  const sameType = store.customFields.filter((d) => d.recordType === input.recordType);
-  const maxOrder = sameType.length ? Math.max(...sameType.map((d) => d.sortOrder)) : 0;
+      const sameType = store.customFields.filter(
+        (d) => d.recordType === input.recordType,
+      );
+      const maxOrder = sameType.length
+        ? Math.max(...sameType.map((d) => d.sortOrder))
+        : 0;
 
-  const def: CustomFieldDefinition = {
-    id,
-    recordType: input.recordType,
-    label: input.label.trim(),
-    fieldType: input.fieldType,
-    optionsListKey,
-    section: input.section,
-    required: input.required,
-    sortOrder: existing?.sortOrder ?? maxOrder + 1,
-    active: input.active ?? existing?.active ?? true,
-  };
+      const def: CustomFieldDefinition = {
+        id,
+        recordType: input.recordType,
+        label: input.label.trim(),
+        fieldType: input.fieldType,
+        optionsListKey,
+        section: input.section,
+        required: input.required,
+        sortOrder: existing?.sortOrder ?? maxOrder + 1,
+        active: input.active ?? existing?.active ?? true,
+      };
 
-  if (!existing) {
-    store.customFields.push(def);
-  } else {
-    const idx = store.customFields.findIndex((d) => d.id === existing.id);
-    store.customFields[idx] = def;
-  }
+      await catalogueRepo.putCustomFieldDefinition(ctx, def, {
+        source: 'admin',
+      });
 
-  writeAudit(store, {
-    recordType: 'customField',
-    recordId: def.id,
-    action: 'custom-field-change' as AuditAction,
-    field: `${def.recordType} · ${def.label}`,
-    oldValue: existing ? `${existing.label} (${existing.active ? 'active' : 'inactive'})` : null,
-    newValue: `${def.label} (${def.fieldType}, ${def.active ? 'active' : 'inactive'})`,
-    byId,
-  });
-  saveStore(store);
-  return def;
-
-    },
-  });
+      writeAudit(null, {
+        recordType: 'customField',
+        recordId: def.id,
+        action: 'custom-field-change' as AuditAction,
+        field: `${def.recordType} · ${def.label}`,
+        oldValue: existing
+          ? `${existing.label} (${existing.active ? 'active' : 'inactive'})`
+          : null,
+        newValue: `${def.label} (${def.fieldType}, ${def.active ? 'active' : 'inactive'})`,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = def;
+    }),
+  );
+  return result;
 }
 
-export async function reorderCustomField(id: string, direction: -1 | 1, byId: string): Promise<void> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'reorderCustomField',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const target = store.customFields.find((d) => d.id === id);
-  if (!target) return;
-  const siblings = store.customFields
-    .filter((d) => d.recordType === target.recordType)
-    .sort((a, b) => a.sortOrder - b.sortOrder);
-  const idx = siblings.findIndex((d) => d.id === id);
-  const swapIdx = idx + direction;
-  if (swapIdx < 0 || swapIdx >= siblings.length) return;
-  [siblings[idx], siblings[swapIdx]] = [siblings[swapIdx], siblings[idx]];
-  siblings.forEach((d, i) => {
-    d.sortOrder = i + 1;
-  });
-  writeAudit(store, {
-    recordType: 'customField',
-    recordId: target.id,
-    action: 'custom-field-change',
-    field: `Re-ordered ${target.label}`,
-    oldValue: null,
-    newValue: direction === -1 ? 'Moved up' : 'Moved down',
-    byId,
-  });
-  saveStore(store);
-
-    },
-  });
+export async function reorderCustomField(
+  id: string,
+  direction: -1 | 1,
+  byId: string,
+): Promise<{ ok: true } | ActionDenied> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result: { ok: true } | ActionDenied = { ok: true };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const target = store.customFields.find((d) => d.id === id);
+      if (!target) {
+        result = buildActionDenied('FORBIDDEN', `Custom field "${id}" not found.`);
+        return;
+      }
+      const siblings = store.customFields
+        .filter((d) => d.recordType === target.recordType)
+        .sort((a, b) => a.sortOrder - b.sortOrder);
+      const idx = siblings.findIndex((d) => d.id === id);
+      const swapIdx = idx + direction;
+      if (swapIdx < 0 || swapIdx >= siblings.length) return;
+      [siblings[idx], siblings[swapIdx]] = [siblings[swapIdx], siblings[idx]];
+      siblings.forEach((d, i) => {
+        d.sortOrder = i + 1;
+      });
+      await catalogueRepo.putCustomFieldDefinitions(ctx, siblings);
+      writeAudit(null, {
+        recordType: 'customField',
+        recordId: target.id,
+        action: 'custom-field-change',
+        field: `Re-ordered ${target.label}`,
+        oldValue: null,
+        newValue: direction === -1 ? 'Moved up' : 'Moved down',
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
+  return result;
 }
 
 export async function resetAllDemoData(
@@ -8051,13 +8290,15 @@ export async function resetAllDemoData(
   ctx: TenantContext,
 ): Promise<void> {
   await withJsonStoreWriteLock(async () => {
-    const prevStore = getStore();
-    const prevPeople = await getPartyRepository().listAllPeople<Person>(ctx);
+    const [prevProfile, prevPeople] = await Promise.all([
+      getCatalogueRepository().getFirmProfile(ctx),
+      getPartyRepository().listAllPeople<Person>(ctx),
+    ]);
     const actor = prevPeople.find((p) => p.id === byId) ?? null;
     const actorName = actor ? personDisplayName(actor) : byId;
     const prevSeededEntraByIdAndEmail = new Map<string, string | null | undefined>();
     if (
-      !prevStore.isCleanDeployment &&
+      !prevProfile?.isCleanDeployment &&
       getActiveTenantConfiguration().environment !== 'test'
     ) {
       for (const p of prevPeople) {
@@ -8110,6 +8351,12 @@ export async function clearAllDataToCleanDeployment(
     const clean = clearStoreToCleanDeployment();
     saveStore(clean);
     await clearMigratedPostgresModulesForTenant({ ctx });
+    await importFirmStoreModulesToPostgres({
+      ctx,
+      store: clean,
+      modules: ['catalogues'],
+      clearFirst: false,
+    });
     await appendUnmigratedModuleAuditEntries(ctx, [
       {
         recordType: 'system',
@@ -8360,55 +8607,54 @@ export async function saveEnquirySettingsRecord(
   patch: Partial<EnquirySettings>,
   byId: string,
 ): Promise<EnquirySettings> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveEnquirySettingsRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  store.enquirySettings = {
-    ...store.enquirySettings,
-    ...patch,
-  };
-  writeAudit(store, {
-    recordType: 'system',
-    recordId: 'enquiry-settings',
-    action: 'update',
-    field: 'Enquiry settings',
-    oldValue: null,
-    newValue: `Emergency ${store.enquirySettings.emergencyHours}h · Hours ${store.enquirySettings.workDayStart}–${store.enquirySettings.workDayEnd} · Attempts ${store.enquirySettings.failedAttemptsBeforeSuggestNoResponse} · Retention ${store.enquirySettings.retentionMonths}m`,
-    byId,
-  });
-  saveStore(store);
-  return store.enquirySettings;
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let nextSettings!: EnquirySettings;
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      nextSettings = {
+        ...store.enquirySettings,
+        ...patch,
+      };
+      await catalogueRepo.putEnquirySettingsConfig(ctx, nextSettings, byId);
+      writeAudit(null, {
+        recordType: 'system',
+        recordId: 'enquiry-settings',
+        action: 'update',
+        field: 'Enquiry settings',
+        oldValue: null,
+        newValue: `Emergency ${nextSettings.emergencyHours}h · Hours ${nextSettings.workDayStart}–${nextSettings.workDayEnd} · Attempts ${nextSettings.failedAttemptsBeforeSuggestNoResponse} · Retention ${nextSettings.retentionMonths}m`,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
+  return nextSettings;
 }
 
 export async function saveTaskSettingsRecord(
   settings: TaskSettings,
   byId: string,
 ): Promise<TaskSettings> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveTaskSettingsRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  store.taskSettings = settings;
-  writeAudit(store, {
-    recordType: 'system',
-    recordId: 'task-settings',
-    action: 'update',
-    field: 'Task settings',
-    oldValue: null,
-    newValue: 'Updated automatic task templates and due offsets',
-    byId,
-  });
-  saveStore(store);
-  return store.taskSettings;
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      await catalogueRepo.putTaskSettingsConfig(ctx, settings, byId);
+      writeAudit(null, {
+        recordType: 'system',
+        recordId: 'task-settings',
+        action: 'update',
+        field: 'Task settings',
+        oldValue: null,
+        newValue: 'Updated automatic task templates and due offsets',
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
+  return settings;
 }
 
 // ------------------------------------------------------------------ Tasks
@@ -8443,14 +8689,15 @@ export async function saveTaskRecord(
   return runUnmigratedJsonMutationWithAudit({
     label: 'saveTaskRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store) => {
+    mutate: async () => {
   const now = new Date().toISOString();
-  const taskCtx = resolveDefaultServiceTenantContext(store, byId);
+  const taskCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [people, organisations, matters, enquiries, quotes, existing, teams] = await Promise.all([
+  const [store, people, organisations, matters, enquiries, quotes, existing, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(taskCtx),
     partyRepo.listAllPeople<Person>(taskCtx),
     partyRepo.listAllOrganisations<Organisation>(taskCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
@@ -8861,13 +9108,13 @@ export async function takeTaskRecord(
   byId: string,
 ): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
   return withJsonStoreWriteLock(async () => {
-    const store = getStore();
-    const taskCtx = resolveDefaultServiceTenantContext(store, byId);
+    const taskCtx = resolveDefaultServiceTenantContext(null, byId);
     const partyRepo = getPartyRepository();
     const matterRepo = getMatterRepository();
     const intakeRepo = getIntakeQuoteRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const [people, matters, enquiries, quotes, existing, teams] = await Promise.all([
+    const [store, people, matters, enquiries, quotes, existing, teams] = await Promise.all([
+      loadTenantCatalogueStoreView(taskCtx),
       partyRepo.listAllPeople<Person>(taskCtx),
       matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
       intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
@@ -8931,13 +9178,14 @@ export async function addTaskCommentRecord(
   return runUnmigratedJsonMutationWithAudit({
     label: 'addTaskCommentRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store) => {
-  const taskCtx = resolveDefaultServiceTenantContext(store, byId);
+    mutate: async () => {
+  const taskCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, enquiries, quotes, task, teams] = await Promise.all([
+  const [store, people, matters, enquiries, quotes, task, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(taskCtx),
     partyRepo.listAllPeople<Person>(taskCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
@@ -9201,13 +9449,13 @@ export async function saveEnquiryRecord(
     label: 'saveEnquiryRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
     mutate: async (): Promise<{ enquiry?: Enquiry; routedTeamName?: string; routedToIntakeFallback?: boolean; errors?: Record<string, string>; missingFields?: string[]; } & Partial<ActionDenied>> => {
-  const store = getStore();
   const now = opts.now ?? new Date().toISOString();
-  const enqCtx = resolveDefaultServiceTenantContext(store, opts.byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, opts.byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes, teams, rbacConfig] = await Promise.all([
+  const [store, people, organisations, links, matters, enquiries, quotes, teams, rbacConfig] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
@@ -9732,11 +9980,11 @@ export async function assignEnquiryRecord(
     label: 'assignEnquiryRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, enquiries, quotes, tasks, teams] = await Promise.all([
+  const [store, people, matters, enquiries, quotes, tasks, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
@@ -9868,10 +10116,10 @@ export async function logEnquiryContactRecord(
     label: 'logEnquiryContactRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
@@ -9976,10 +10224,10 @@ export async function sendEnquiryEmailRecord(
     label: 'sendEnquiryEmailRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
@@ -10066,12 +10314,12 @@ export async function closeEnquiryRecord(
     label: 'closeEnquiryRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     partyRepo.listAllPeople<Person>(enqCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
@@ -10212,10 +10460,10 @@ export async function reopenEnquiryRecord(
     label: 'reopenEnquiryRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
@@ -10351,12 +10599,12 @@ export async function prepareEnquiryConversion(
     label: 'prepareEnquiryConversion',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
@@ -10840,10 +11088,10 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
     label: 'anonymiseExpiredEnquiries',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const enqCtx = resolveDefaultServiceTenantContext(store, byId);
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, enquiries, teams] = await Promise.all([
+  const [store, people, enquiries, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(enqCtx),
     getPartyRepository().listAllPeople<Person>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
@@ -11185,7 +11433,9 @@ export interface PmsAdminSnapshot {
 }
 
 export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapshot> {
-  const store = getStore();
+  const actorId = byId || getActiveActorSession()?.personId;
+  const ctx = resolveDefaultServiceTenantContext(null, actorId);
+  const store = await loadTenantCatalogueStoreView(ctx, { includePmsLinks: true });
   const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
   if (isCleanEmpty) {
     const nowIso = new Date().toISOString();
@@ -11202,8 +11452,6 @@ export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapsh
       suggestedMatterMatches: [],
     };
   }
-  const actorId = byId || getActiveActorSession()?.personId;
-  const ctx = resolveDefaultServiceTenantContext(store, actorId);
   const [people, matters, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
@@ -11420,9 +11668,9 @@ export async function createRecordFromPms(
   byId: string,
   opts: { mfaVerified: boolean },
 ): Promise<{ ok: boolean; createdId?: string; error?: string } & Partial<Omit<ActionDenied, 'ok'>>> {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, teams] = await Promise.all([
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const [store, people, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(ctx, { includePmsLinks: true }),
     getPartyRepository().listAllPeople<Person>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
@@ -11719,45 +11967,50 @@ export async function switchViewingRole(
   userId: string,
   roleKey: string,
 ): Promise<{ ok: boolean; error?: string; roleKey?: string }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'switchViewingRole',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, userId),
-    mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, userId);
-  const [user, teams] = await Promise.all([
-    getPartyRepository().getPersonById<Person>(ctx, userId),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  if (!user) return { ok: false, error: 'User not found.' };
+  const ctx = resolveDefaultServiceTenantContext(null, userId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { ok: boolean; error?: string; roleKey?: string };
+  await catalogueRepo.withTenantTransaction(ctx, async () => {
+    const [store, user, teams] = await Promise.all([
+      loadTenantCatalogueStoreView(ctx),
+      getPartyRepository().getPersonById<Person>(ctx, userId),
+      getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    ]);
+    if (!user) {
+      result = { ok: false, error: 'User not found.' };
+      return;
+    }
 
-  if (!store.homePagesConfig) {
-    store.homePagesConfig = createDefaultHomePagesConfig(
-      new Date().toISOString(),
-      getActiveTenantConfiguration().branding.primaryDomain,
+    const homePagesConfig =
+      store.homePagesConfig ??
+      createDefaultHomePagesConfig(
+        new Date().toISOString(),
+        getActiveTenantConfiguration().branding.primaryDomain,
+      );
+
+    const userRoles = resolveEmployeeRoles(user, teams);
+    const isValidConfiguredRole = homePagesConfig.roles.some(
+      (r) => r.key === roleKey,
     );
-  }
+    if (
+      !userRoles.includes(roleKey) &&
+      !(canPreviewAnyHomeRole(userRoles) && isValidConfiguredRole)
+    ) {
+      result = { ok: false, error: 'Role is not assigned to the current user.' };
+      return;
+    }
 
-  const userRoles = resolveEmployeeRoles(user, teams);
-  const isValidConfiguredRole = store.homePagesConfig.roles.some(
-    (r) => r.key === roleKey,
-  );
-  if (
-    !userRoles.includes(roleKey) &&
-    !(canPreviewAnyHomeRole(userRoles) && isValidConfiguredRole)
-  ) {
-    return { ok: false, error: 'Role is not assigned to the current user.' };
-  }
-
-  store.homePagesConfig.lastViewingRoleByUserId = {
-    ...(store.homePagesConfig.lastViewingRoleByUserId ?? {}),
-    [userId]: roleKey,
-  };
-  saveStore(store);
-  return { ok: true, roleKey };
-
-    },
+    const nextConfig: HomePagesConfig = {
+      ...homePagesConfig,
+      lastViewingRoleByUserId: {
+        ...(homePagesConfig.lastViewingRoleByUserId ?? {}),
+        [userId]: roleKey,
+      },
+    };
+    await catalogueRepo.putHomePagesConfig(ctx, nextConfig, userId);
+    result = { ok: true, roleKey };
   });
+  return result;
 }
 
 export async function saveHomePagesConfig(
@@ -11768,160 +12021,166 @@ export async function saveHomePagesConfig(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string; config: HomePagesConfig }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveHomePagesConfig',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
   const nowIso = new Date().toISOString();
   const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
-  const current =
-    store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams,
-    mfaVerified: options.mfaVerified ?? false,
-  });
-  try {
-    requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
-      config: {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { ok: boolean; code?: string; error?: string; config: HomePagesConfig };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const [store, people, teams] = await Promise.all([
+        loadTenantCatalogueStoreView(ctx),
+        getPartyRepository().listAllPeople<Person>(ctx),
+        getHrAndRbacRepository().listAllTeams<Team>(ctx),
+      ]);
+      const current =
+        store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
+      const actor = people.find((p) => p.id === byId) ?? null;
+      const actorPerms = resolvePersonPermissionSet(actor, {
+        allPeople: people,
+        teams,
+        mfaVerified: options.mfaVerified ?? false,
+      });
+      try {
+        requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
+      } catch (err) {
+        const code = err instanceof AuthorisationError ? err.code : undefined;
+        const message = err instanceof Error ? err.message : String(err);
+        result = {
+          ok: false,
+          code,
+          error: code ? `${code}: ${message}` : message,
+          config: {
+            ...current,
+            firmSettings: {
+              ...current.firmSettings,
+              demoMode: isDemoModeEnabled(),
+            },
+          },
+        };
+        return;
+      }
+
+      const nextRoles = input.roles
+        ? input.roles.map((r) => ({
+            ...r,
+            headlineCardIds: (r.headlineCardIds ?? []).slice(0, 5),
+            primaryPanels: Array.from(new Set(r.primaryPanels ?? [])),
+            summaryPanels: Array.from(
+              new Set(
+                (r.summaryPanels ?? []).filter(
+                  (p) => !(r.primaryPanels ?? []).includes(p),
+                ),
+              ),
+            ),
+          }))
+        : current.roles;
+
+      const sanitizedFirmSettings = { ...(input.firmSettings ?? {}) };
+      delete sanitizedFirmSettings.demoMode;
+      const nextSettings: HomeFirmSettings = {
+        ...current.firmSettings,
+        ...sanitizedFirmSettings,
+        demoMode: isDemoModeEnabled(),
+      };
+
+      const nextConfig: HomePagesConfig = {
         ...current,
-        firmSettings: {
-          ...current.firmSettings,
-          demoMode: isDemoModeEnabled(),
-        },
-      },
-    };
-  }
+        roles: nextRoles,
+        firmSettings: nextSettings,
+        updatedAt: nowIso,
+        updatedById: byId,
+      };
+      await catalogueRepo.putHomePagesConfig(ctx, nextConfig, byId);
 
-  const nextRoles = input.roles
-    ? input.roles.map((r) => ({
-        ...r,
-        headlineCardIds: (r.headlineCardIds ?? []).slice(0, 5),
-        primaryPanels: Array.from(new Set(r.primaryPanels ?? [])),
-        summaryPanels: Array.from(
-          new Set((r.summaryPanels ?? []).filter((p) => !(r.primaryPanels ?? []).includes(p))),
-        ),
-      }))
-    : current.roles;
-
-  const sanitizedFirmSettings = { ...(input.firmSettings ?? {}) };
-  delete sanitizedFirmSettings.demoMode;
-  const nextSettings: HomeFirmSettings = {
-    ...current.firmSettings,
-    ...sanitizedFirmSettings,
-    demoMode: isDemoModeEnabled(),
-  };
-
-  store.homePagesConfig = {
-    ...current,
-    roles: nextRoles,
-    firmSettings: nextSettings,
-    updatedAt: nowIso,
-    updatedById: byId,
-  };
-
-  writeAudit(store, {
-    recordType: 'system',
-    recordId: 'HOME-CONFIG',
-    action: 'update',
-    field: 'Home pages configuration',
-    oldValue: null,
-    newValue: `Updated role Home layouts and firm settings (demoMode=${nextSettings.demoMode})`,
-    byId,
-    at: nowIso,
-  });
-
-  saveStore(store);
-  return { ok: true, config: store.homePagesConfig };
-
-    },
-  });
+      writeAudit(null, {
+        recordType: 'system',
+        recordId: 'HOME-CONFIG',
+        action: 'update',
+        field: 'Home pages configuration',
+        oldValue: null,
+        newValue: `Updated role Home layouts and firm settings (demoMode=${nextSettings.demoMode})`,
+        byId,
+        at: nowIso,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { ok: true, config: nextConfig };
+    }),
+  );
+  return result;
 }
 
 export async function resetHomePagesConfig(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string; config: HomePagesConfig }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'resetHomePagesConfig',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
   const nowIso = new Date().toISOString();
   const primaryDomain = getActiveTenantConfiguration().branding.primaryDomain;
-  const current =
-    store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams,
-    mfaVerified: options.mfaVerified ?? false,
-  });
-  try {
-    requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
-      config: {
-        ...current,
-        firmSettings: {
-          ...current.firmSettings,
-          demoMode: isDemoModeEnabled(),
-        },
-      },
-    };
-  }
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { ok: boolean; code?: string; error?: string; config: HomePagesConfig };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const [store, people, teams] = await Promise.all([
+        loadTenantCatalogueStoreView(ctx),
+        getPartyRepository().listAllPeople<Person>(ctx),
+        getHrAndRbacRepository().listAllTeams<Team>(ctx),
+      ]);
+      const current =
+        store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
+      const actor = people.find((p) => p.id === byId) ?? null;
+      const actorPerms = resolvePersonPermissionSet(actor, {
+        allPeople: people,
+        teams,
+        mfaVerified: options.mfaVerified ?? false,
+      });
+      try {
+        requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
+      } catch (err) {
+        const code = err instanceof AuthorisationError ? err.code : undefined;
+        const message = err instanceof Error ? err.message : String(err);
+        result = {
+          ok: false,
+          code,
+          error: code ? `${code}: ${message}` : message,
+          config: {
+            ...current,
+            firmSettings: {
+              ...current.firmSettings,
+              demoMode: isDemoModeEnabled(),
+            },
+          },
+        };
+        return;
+      }
 
-  const preservedViewing = store.homePagesConfig?.lastViewingRoleByUserId ?? {};
-  const defaults = createDefaultHomePagesConfig(nowIso, primaryDomain);
-  defaults.lastViewingRoleByUserId = preservedViewing;
-  defaults.firmSettings.demoMode = isDemoModeEnabled();
-  defaults.updatedById = byId;
+      const preservedViewing = store.homePagesConfig?.lastViewingRoleByUserId ?? {};
+      const defaults = createDefaultHomePagesConfig(nowIso, primaryDomain);
+      defaults.lastViewingRoleByUserId = preservedViewing;
+      defaults.firmSettings.demoMode = isDemoModeEnabled();
+      defaults.updatedById = byId;
 
-  defaults.roles = syncHomeRolesWithEmployeeRoles(
-    defaults.roles,
-    store.values,
-    createDefaultRoleConfigs(primaryDomain),
+      defaults.roles = syncHomeRolesWithEmployeeRoles(
+        defaults.roles,
+        store.values,
+        createDefaultRoleConfigs(primaryDomain),
+      );
+      await catalogueRepo.putHomePagesConfig(ctx, defaults, byId);
+      writeAudit(null, {
+        recordType: 'system',
+        recordId: 'HOME-CONFIG',
+        action: 'update',
+        field: 'Home pages configuration',
+        oldValue: null,
+        newValue: 'Reset role Home layouts to firm defaults',
+        byId,
+        at: nowIso,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { ok: true, config: defaults };
+    }),
   );
-  store.homePagesConfig = defaults;
-  writeAudit(store, {
-    recordType: 'system',
-    recordId: 'HOME-CONFIG',
-    action: 'update',
-    field: 'Home pages configuration',
-    oldValue: null,
-    newValue: 'Reset role Home layouts to firm defaults',
-    byId,
-    at: nowIso,
-  });
-  saveStore(store);
-  return { ok: true, config: store.homePagesConfig };
-
-    },
-  });
+  return result;
 }
 
 export async function addHomeRole(
@@ -11935,97 +12194,107 @@ export async function addHomeRole(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string; role?: RoleHomeConfig }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'addHomeRole',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
   const nowIso = new Date().toISOString();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const [people, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams,
-    mfaVerified: options.mfaVerified ?? false,
-  });
-  try {
-    requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
-    };
-  }
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { ok: boolean; code?: string; error?: string; role?: RoleHomeConfig };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const [store, people, teams] = await Promise.all([
+        loadTenantCatalogueStoreView(ctx),
+        getPartyRepository().listAllPeople<Person>(ctx),
+        getHrAndRbacRepository().listAllTeams<Team>(ctx),
+      ]);
+      const actor = people.find((p) => p.id === byId) ?? null;
+      const actorPerms = resolvePersonPermissionSet(actor, {
+        allPeople: people,
+        teams,
+        mfaVerified: options.mfaVerified ?? false,
+      });
+      try {
+        requirePermission(actorPerms, 'admin:access', 'save Home pages configuration');
+      } catch (err) {
+        const code = err instanceof AuthorisationError ? err.code : undefined;
+        const message = err instanceof Error ? err.message : String(err);
+        result = {
+          ok: false,
+          code,
+          error: code ? `${code}: ${message}` : message,
+        };
+        return;
+      }
 
-  if (!store.homePagesConfig) {
-    store.homePagesConfig = createDefaultHomePagesConfig(
-      nowIso,
-      getActiveTenantConfiguration().branding.primaryDomain,
-    );
-  }
-  const cleanLabel = input.label.trim();
-  if (!cleanLabel) return { ok: false, error: 'Role name is required.' };
+      const homePagesConfig =
+        store.homePagesConfig ??
+        createDefaultHomePagesConfig(
+          nowIso,
+          getActiveTenantConfiguration().branding.primaryDomain,
+        );
+      const cleanLabel = input.label.trim();
+      if (!cleanLabel) {
+        result = { ok: false, error: 'Role name is required.' };
+        return;
+      }
 
-  const key = (input.key || slug(cleanLabel)).replace(/[^a-z0-9_]+/g, '_');
-  if (store.homePagesConfig.roles.some((r) => r.key === key)) {
-    return { ok: false, error: `Role "${key}" already exists.` };
-  }
+      const key = (input.key || slug(cleanLabel)).replace(/[^a-z0-9_]+/g, '_');
+      if (homePagesConfig.roles.some((r) => r.key === key)) {
+        result = { ok: false, error: `Role "${key}" already exists.` };
+        return;
+      }
 
-  const template =
-    store.homePagesConfig.roles.find((r) => r.key === (input.copyFromRoleKey || 'fee_earner')) ??
-    store.homePagesConfig.roles[0];
+      const template =
+        homePagesConfig.roles.find(
+          (r) => r.key === (input.copyFromRoleKey || 'fee_earner'),
+        ) ?? homePagesConfig.roles[0];
 
-  const newRole: RoleHomeConfig = {
-    key,
-    label: cleanLabel,
-    shortLabel: (input.shortLabel || cleanLabel).trim(),
-    purpose: input.purpose.trim() || template.purpose,
-    headlineCardIds: [...template.headlineCardIds],
-    primaryPanels: [...template.primaryPanels],
-    summaryPanels: [...template.summaryPanels],
-    isBuiltIn: false,
-  };
+      const newRole: RoleHomeConfig = {
+        key,
+        label: cleanLabel,
+        shortLabel: (input.shortLabel || cleanLabel).trim(),
+        purpose: input.purpose.trim() || template.purpose,
+        headlineCardIds: [...template.headlineCardIds],
+        primaryPanels: [...template.primaryPanels],
+        summaryPanels: [...template.summaryPanels],
+        isBuiltIn: false,
+      };
 
-  const empRoleId = `employee_role.${key}`;
-  newRole.employeeRoleId = empRoleId;
-  if (!store.values.some((v) => v.id === empRoleId)) {
-    store.values.push({
-      id: empRoleId,
-      listKey: 'employee_role',
-      label: cleanLabel,
-      description: newRole.purpose,
-      parentId: null,
-      sortOrder: nextSortOrder(store.values, 'employee_role'),
-      active: true,
-    });
-  }
-  store.homePagesConfig.roles.push(newRole);
-  store.homePagesConfig.updatedAt = nowIso;
-  store.homePagesConfig.updatedById = byId;
+      const empRoleId = `employee_role.${key}`;
+      newRole.employeeRoleId = empRoleId;
+      if (!store.values.some((v) => v.id === empRoleId)) {
+        const newEmpRoleVal: ChoiceValue = {
+          id: empRoleId,
+          listKey: 'employee_role',
+          label: cleanLabel,
+          description: newRole.purpose,
+          parentId: null,
+          sortOrder: nextSortOrder(store.values, 'employee_role'),
+          active: true,
+        };
+        await catalogueRepo.putChoiceValue(ctx, newEmpRoleVal);
+      }
+      const nextHomePages: HomePagesConfig = {
+        ...homePagesConfig,
+        roles: [...homePagesConfig.roles, newRole],
+        updatedAt: nowIso,
+        updatedById: byId,
+      };
+      await catalogueRepo.putHomePagesConfig(ctx, nextHomePages, byId);
 
-  writeAudit(store, {
-    recordType: 'system',
-    recordId: `ROLE-${key}`,
-    action: 'create',
-    field: 'Home role',
-    oldValue: null,
-    newValue: `${newRole.label} (${newRole.key})`,
-    byId,
-    at: nowIso,
-  });
-
-  saveStore(store);
-  return { ok: true, role: newRole };
-
-    },
-  });
+      writeAudit(null, {
+        recordType: 'system',
+        recordId: `ROLE-${key}`,
+        action: 'create',
+        field: 'Home role',
+        oldValue: null,
+        newValue: `${newRole.label} (${newRole.key})`,
+        byId,
+        at: nowIso,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { ok: true, role: newRole };
+    }),
+  );
+  return result;
 }
 
 export async function updateEmployeeRolesAndSupports(
@@ -12549,8 +12818,7 @@ export async function approveSignOff(
     label: 'approveSignOff',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const taskRepo = getTaskWorkflowRepository();
   const [people, matters, item, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -12619,7 +12887,7 @@ export async function approveSignOff(
 
   await taskRepo.putSignOff(ctx, item);
 
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: item.matterId ? 'matter' : 'system',
     recordId: item.matterId ?? item.id,
     action: 'status-change',
@@ -12646,8 +12914,7 @@ export async function discussSignOff(
     label: 'discussSignOff',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const taskRepo = getTaskWorkflowRepository();
   const [people, matters, item, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -12715,7 +12982,7 @@ export async function discussSignOff(
 
   await taskRepo.putSignOff(ctx, item);
 
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: item.matterId ? 'matter' : 'system',
     recordId: item.matterId ?? item.id,
     action: 'status-change',
@@ -13116,7 +13383,6 @@ export async function recordInvoiceCreditControlAction(
     at: nowIso,
   });
 
-  saveStore(store);
   return { ok: true };
 
     },
@@ -13128,27 +13394,25 @@ export async function saveOrgStructure(
   nextCatalogue: OrgStructureCatalogue,
   byId: string,
 ): Promise<{ orgStructure: OrgStructureCatalogue }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveOrgStructure',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  store.orgStructure = nextCatalogue;
-  writeAudit(store, {
-    recordType: 'system',
-    recordId: 'ORG-STRUCTURE',
-    action: 'update',
-    field: 'Organisation structure reference tables',
-    oldValue: null,
-    newValue: `Updated organisation hierarchy (${nextCatalogue.divisions.length} divisions, ${nextCatalogue.departments.length} departments, ${nextCatalogue.teamsOrPracticeGroups.length} teams/practice groups)`,
-    byId,
-    at: new Date().toISOString(),
-  });
-  saveStore(store);
-  return { orgStructure: store.orgStructure };
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      await catalogueRepo.putOrgStructureConfig(ctx, nextCatalogue, byId);
+      writeAudit(null, {
+        recordType: 'system',
+        recordId: 'ORG-STRUCTURE',
+        action: 'update',
+        field: 'Organisation structure reference tables',
+        oldValue: null,
+        newValue: `Updated organisation hierarchy (${nextCatalogue.divisions.length} divisions, ${nextCatalogue.departments.length} departments, ${nextCatalogue.teamsOrPracticeGroups.length} teams/practice groups)`,
+        byId,
+        at: new Date().toISOString(),
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
+  return { orgStructure: nextCatalogue };
 }
 
 export async function saveMatterPartyRelationship(
@@ -13161,71 +13425,96 @@ export async function saveMatterPartyRelationship(
   },
   byId: string,
 ): Promise<{ relationship?: MatterPartyRelationshipDef; taxonomy: MatterPartyTaxonomy; error?: string }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveMatterPartyRelationship',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-  store.matterPartyTaxonomy = taxonomy;
-  const code = input.code.trim().toUpperCase();
-  const label = input.label.trim();
-  if (!code) return { taxonomy, error: 'Relationship code is required.' };
-  if (!label) return { taxonomy, error: 'Relationship label is required.' };
-
-  const existingIdx = taxonomy.relationships.findIndex((r) => r.code === code);
-  if (input.isNew) {
-    if (existingIdx !== -1) {
-      return { taxonomy, error: `Relationship code "${code}" already exists. Codes are immutable.` };
-    }
-    const maxOrder = taxonomy.relationships.reduce((m, r) => Math.max(m, r.sortOrder), 0);
-    const created: MatterPartyRelationshipDef = {
-      code,
-      label,
-      description: (input.description ?? '').trim(),
-      sortOrder: maxOrder + 1,
-      active: input.active ?? true,
-    };
-    taxonomy.relationships.push(created);
-    writeAudit(store, {
-      recordType: 'list',
-      recordId: 'matter_party_role',
-      action: 'list-change',
-      field: `Relationship ${code}`,
-      oldValue: null,
-      newValue: `${code} — ${label}`,
-      byId,
-    });
-    saveStore(store);
-    return { relationship: created, taxonomy };
-  }
-
-  if (existingIdx === -1) {
-    return { taxonomy, error: `Relationship "${code}" not found.` };
-  }
-  const existing = taxonomy.relationships[existingIdx];
-  const updated: MatterPartyRelationshipDef = {
-    ...existing,
-    code: existing.code, // Immutable
-    label,
-    description: input.description !== undefined ? input.description.trim() : existing.description,
-    active: input.active !== undefined ? input.active : existing.active,
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: {
+    relationship?: MatterPartyRelationshipDef;
+    taxonomy: MatterPartyTaxonomy;
+    error?: string;
   };
-  taxonomy.relationships[existingIdx] = updated;
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: 'matter_party_role',
-    action: 'list-change',
-    field: `Relationship ${existing.code}`,
-    oldValue: `${existing.label}${existing.active ? '' : ' (inactive)'}`,
-    newValue: `${updated.label}${updated.active ? '' : ' (inactive)'}`,
-    byId,
-  });
-  saveStore(store);
-  return { relationship: updated, taxonomy };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const taxonomy =
+        store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+      const code = input.code.trim().toUpperCase();
+      const label = input.label.trim();
+      if (!code) {
+        result = { taxonomy, error: 'Relationship code is required.' };
+        return;
+      }
+      if (!label) {
+        result = { taxonomy, error: 'Relationship label is required.' };
+        return;
+      }
 
-    },
-  });
+      const existingIdx = taxonomy.relationships.findIndex((r) => r.code === code);
+      if (input.isNew) {
+        if (existingIdx !== -1) {
+          result = {
+            taxonomy,
+            error: `Relationship code "${code}" already exists. Codes are immutable.`,
+          };
+          return;
+        }
+        const maxOrder = taxonomy.relationships.reduce(
+          (m, r) => Math.max(m, r.sortOrder),
+          0,
+        );
+        const created: MatterPartyRelationshipDef = {
+          code,
+          label,
+          description: (input.description ?? '').trim(),
+          sortOrder: maxOrder + 1,
+          active: input.active ?? true,
+        };
+        taxonomy.relationships.push(created);
+        await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+        writeAudit(null, {
+          recordType: 'list',
+          recordId: 'matter_party_role',
+          action: 'list-change',
+          field: `Relationship ${code}`,
+          oldValue: null,
+          newValue: `${code} — ${label}`,
+          byId,
+        });
+        await flushStagedAuditEntries(ctx);
+        result = { relationship: created, taxonomy };
+        return;
+      }
+
+      if (existingIdx === -1) {
+        result = { taxonomy, error: `Relationship "${code}" not found.` };
+        return;
+      }
+      const existing = taxonomy.relationships[existingIdx];
+      const updated: MatterPartyRelationshipDef = {
+        ...existing,
+        code: existing.code, // Immutable
+        label,
+        description:
+          input.description !== undefined
+            ? input.description.trim()
+            : existing.description,
+        active: input.active !== undefined ? input.active : existing.active,
+      };
+      taxonomy.relationships[existingIdx] = updated;
+      await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: 'matter_party_role',
+        action: 'list-change',
+        field: `Relationship ${existing.code}`,
+        oldValue: `${existing.label}${existing.active ? '' : ' (inactive)'}`,
+        newValue: `${updated.label}${updated.active ? '' : ' (inactive)'}`,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { relationship: updated, taxonomy };
+    }),
+  );
+  return result;
 }
 
 export async function reorderMatterPartyRelationship(
@@ -13233,78 +13522,92 @@ export async function reorderMatterPartyRelationship(
   direction: -1 | 1,
   byId: string,
 ): Promise<{ taxonomy: MatterPartyTaxonomy }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'reorderMatterPartyRelationship',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-  store.matterPartyTaxonomy = taxonomy;
-  const sorted = [...taxonomy.relationships].sort((a, b) => a.sortOrder - b.sortOrder);
-  const idx = sorted.findIndex((r) => r.code === code);
-  const swapIdx = idx + direction;
-  if (idx === -1 || swapIdx < 0 || swapIdx >= sorted.length) {
-    return { taxonomy };
-  }
-  [sorted[idx], sorted[swapIdx]] = [sorted[swapIdx], sorted[idx]];
-  sorted.forEach((r, i) => {
-    r.sortOrder = i + 1;
-  });
-  taxonomy.relationships = sorted;
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: 'matter_party_role',
-    action: 'list-change',
-    field: `Reordered relationship ${code}`,
-    oldValue: null,
-    newValue: direction === -1 ? 'Moved up' : 'Moved down',
-    byId,
-  });
-  saveStore(store);
-  return { taxonomy };
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { taxonomy: MatterPartyTaxonomy };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const taxonomy =
+        store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+      const sorted = [...taxonomy.relationships].sort(
+        (a, b) => a.sortOrder - b.sortOrder,
+      );
+      const idx = sorted.findIndex((r) => r.code === code);
+      const swapIdx = idx + direction;
+      if (idx === -1 || swapIdx < 0 || swapIdx >= sorted.length) {
+        result = { taxonomy };
+        return;
+      }
+      [sorted[idx], sorted[swapIdx]] = [sorted[swapIdx], sorted[idx]];
+      sorted.forEach((r, i) => {
+        r.sortOrder = i + 1;
+      });
+      taxonomy.relationships = sorted;
+      await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: 'matter_party_role',
+        action: 'list-change',
+        field: `Reordered relationship ${code}`,
+        oldValue: null,
+        newValue: direction === -1 ? 'Moved up' : 'Moved down',
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { taxonomy };
+    }),
+  );
+  return result;
 }
 
 export async function deleteMatterPartyRelationship(
   code: string,
   byId: string,
 ): Promise<{ taxonomy: MatterPartyTaxonomy; error?: string }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'deleteMatterPartyRelationship',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-  store.matterPartyTaxonomy = taxonomy;
-  const usage = computeMatterPartyUsageCounts(matters);
-  const count = usage.byRelationshipCode[code] ?? 0;
-  if (count > 0) {
-    return {
-      taxonomy,
-      error: `Relationship "${code}" is in use on ${count} matter party record(s). It can be deactivated but not deleted.`,
-    };
-  }
-  const existing = taxonomy.relationships.find((r) => r.code === code);
-  if (!existing) return { taxonomy, error: 'Relationship not found.' };
-  taxonomy.relationships = taxonomy.relationships.filter((r) => r.code !== code);
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: 'matter_party_role',
-    action: 'list-change',
-    field: `Deleted relationship ${code}`,
-    oldValue: existing.label,
-    newValue: null,
-    byId,
-  });
-  saveStore(store);
-  return { taxonomy };
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { taxonomy: MatterPartyTaxonomy; error?: string };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const [store, matters] = await Promise.all([
+        loadTenantCatalogueStoreView(ctx),
+        getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+      ]);
+      const taxonomy =
+        store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+      const usage = computeMatterPartyUsageCounts(matters);
+      const count = usage.byRelationshipCode[code] ?? 0;
+      if (count > 0) {
+        result = {
+          taxonomy,
+          error: `Relationship "${code}" is in use on ${count} matter party record(s). It can be deactivated but not deleted.`,
+        };
+        return;
+      }
+      const existing = taxonomy.relationships.find((r) => r.code === code);
+      if (!existing) {
+        result = { taxonomy, error: 'Relationship not found.' };
+        return;
+      }
+      taxonomy.relationships = taxonomy.relationships.filter(
+        (r) => r.code !== code,
+      );
+      await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: 'matter_party_role',
+        action: 'list-change',
+        field: `Deleted relationship ${code}`,
+        oldValue: existing.label,
+        newValue: null,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { taxonomy };
+    }),
+  );
+  return result;
 }
 
 export async function saveMatterPartyCapacity(
@@ -13320,117 +13623,152 @@ export async function saveMatterPartyCapacity(
   },
   byId: string,
 ): Promise<{ capacity?: MatterPartyCapacityDef; taxonomy: MatterPartyTaxonomy; error?: string }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveMatterPartyCapacity',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-  store.matterPartyTaxonomy = taxonomy;
-  const code = input.code.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
-  const label = input.label.trim();
-  if (!code) return { taxonomy, error: 'Capacity code is required.' };
-  if (!label) return { taxonomy, error: 'Capacity label is required.' };
-
-  const existingIdx = taxonomy.capacities.findIndex((c) => c.code === code);
-  if (input.isNew) {
-    if (existingIdx !== -1) {
-      return { taxonomy, error: `Capacity code "${code}" already exists. Codes are immutable.` };
-    }
-    const maxOrder = taxonomy.capacities.reduce((m, c) => Math.max(m, c.sortOrder), 0);
-    const created: MatterPartyCapacityDef = {
-      code,
-      label,
-      group: input.group || 'Ownership, control and authority',
-      description: input.description?.trim() || undefined,
-      allowedRelationships: Array.from(new Set(input.allowedRelationships)),
-      profiles: Array.from(new Set(input.profiles)),
-      sortOrder: maxOrder + 1,
-      active: input.active ?? true,
-    };
-    taxonomy.capacities.push(created);
-    writeAudit(store, {
-      recordType: 'list',
-      recordId: 'matter_party_role',
-      action: 'list-change',
-      field: `Capacity ${code}`,
-      oldValue: null,
-      newValue: `${label} (${created.group})`,
-      byId,
-    });
-    saveStore(store);
-    return { capacity: created, taxonomy };
-  }
-
-  if (existingIdx === -1) {
-    return { taxonomy, error: `Capacity "${code}" not found.` };
-  }
-  const existing = taxonomy.capacities[existingIdx];
-  const updated: MatterPartyCapacityDef = {
-    ...existing,
-    code: existing.code, // Immutable
-    label,
-    group: input.group || existing.group,
-    description: input.description !== undefined ? input.description.trim() || undefined : existing.description,
-    allowedRelationships: Array.from(new Set(input.allowedRelationships)),
-    profiles: Array.from(new Set(input.profiles)),
-    active: input.active !== undefined ? input.active : existing.active,
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: {
+    capacity?: MatterPartyCapacityDef;
+    taxonomy: MatterPartyTaxonomy;
+    error?: string;
   };
-  taxonomy.capacities[existingIdx] = updated;
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: 'matter_party_role',
-    action: 'list-change',
-    field: `Capacity ${existing.code}`,
-    oldValue: `${existing.label}${existing.active ? '' : ' (inactive)'}`,
-    newValue: `${updated.label}${updated.active ? '' : ' (inactive)'}`,
-    byId,
-  });
-  saveStore(store);
-  return { capacity: updated, taxonomy };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const taxonomy =
+        store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+      const code = input.code
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9_]/g, '_');
+      const label = input.label.trim();
+      if (!code) {
+        result = { taxonomy, error: 'Capacity code is required.' };
+        return;
+      }
+      if (!label) {
+        result = { taxonomy, error: 'Capacity label is required.' };
+        return;
+      }
 
-    },
-  });
+      const existingIdx = taxonomy.capacities.findIndex((c) => c.code === code);
+      if (input.isNew) {
+        if (existingIdx !== -1) {
+          result = {
+            taxonomy,
+            error: `Capacity code "${code}" already exists. Codes are immutable.`,
+          };
+          return;
+        }
+        const maxOrder = taxonomy.capacities.reduce(
+          (m, c) => Math.max(m, c.sortOrder),
+          0,
+        );
+        const created: MatterPartyCapacityDef = {
+          code,
+          label,
+          group: input.group || 'Ownership, control and authority',
+          description: input.description?.trim() || undefined,
+          allowedRelationships: Array.from(new Set(input.allowedRelationships)),
+          profiles: Array.from(new Set(input.profiles)),
+          sortOrder: maxOrder + 1,
+          active: input.active ?? true,
+        };
+        taxonomy.capacities.push(created);
+        await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+        writeAudit(null, {
+          recordType: 'list',
+          recordId: 'matter_party_role',
+          action: 'list-change',
+          field: `Capacity ${code}`,
+          oldValue: null,
+          newValue: `${label} (${created.group})`,
+          byId,
+        });
+        await flushStagedAuditEntries(ctx);
+        result = { capacity: created, taxonomy };
+        return;
+      }
+
+      if (existingIdx === -1) {
+        result = { taxonomy, error: `Capacity "${code}" not found.` };
+        return;
+      }
+      const existing = taxonomy.capacities[existingIdx];
+      const updated: MatterPartyCapacityDef = {
+        ...existing,
+        code: existing.code, // Immutable
+        label,
+        group: input.group || existing.group,
+        description:
+          input.description !== undefined
+            ? input.description.trim() || undefined
+            : existing.description,
+        allowedRelationships: Array.from(new Set(input.allowedRelationships)),
+        profiles: Array.from(new Set(input.profiles)),
+        active: input.active !== undefined ? input.active : existing.active,
+      };
+      taxonomy.capacities[existingIdx] = updated;
+      await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: 'matter_party_role',
+        action: 'list-change',
+        field: `Capacity ${existing.code}`,
+        oldValue: `${existing.label}${existing.active ? '' : ' (inactive)'}`,
+        newValue: `${updated.label}${updated.active ? '' : ' (inactive)'}`,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { capacity: updated, taxonomy };
+    }),
+  );
+  return result;
 }
 
 export async function deleteMatterPartyCapacity(
   code: string,
   byId: string,
 ): Promise<{ taxonomy: MatterPartyTaxonomy; error?: string }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'deleteMatterPartyCapacity',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-  store.matterPartyTaxonomy = taxonomy;
-  const usage = computeMatterPartyUsageCounts(matters);
-  const count = usage.byCapacityCode[code] ?? 0;
-  if (count > 0) {
-    return {
-      taxonomy,
-      error: `Capacity "${code}" is in use on ${count} matter party record(s). It can be deactivated but not deleted.`,
-    };
-  }
-  const existing = taxonomy.capacities.find((c) => c.code === code);
-  if (!existing) return { taxonomy, error: 'Capacity not found.' };
-  taxonomy.capacities = taxonomy.capacities.filter((c) => c.code !== code);
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: 'matter_party_role',
-    action: 'list-change',
-    field: `Deleted capacity ${code}`,
-    oldValue: existing.label,
-    newValue: null,
-    byId,
-  });
-  saveStore(store);
-  return { taxonomy };
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { taxonomy: MatterPartyTaxonomy; error?: string };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const [store, matters] = await Promise.all([
+        loadTenantCatalogueStoreView(ctx),
+        getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+      ]);
+      const taxonomy =
+        store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+      const usage = computeMatterPartyUsageCounts(matters);
+      const count = usage.byCapacityCode[code] ?? 0;
+      if (count > 0) {
+        result = {
+          taxonomy,
+          error: `Capacity "${code}" is in use on ${count} matter party record(s). It can be deactivated but not deleted.`,
+        };
+        return;
+      }
+      const existing = taxonomy.capacities.find((c) => c.code === code);
+      if (!existing) {
+        result = { taxonomy, error: 'Capacity not found.' };
+        return;
+      }
+      taxonomy.capacities = taxonomy.capacities.filter((c) => c.code !== code);
+      await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: 'matter_party_role',
+        action: 'list-change',
+        field: `Deleted capacity ${code}`,
+        oldValue: existing.label,
+        newValue: null,
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { taxonomy };
+    }),
+  );
+  return result;
 }
 
 export async function updateWorkTypeProfiles(
@@ -13438,30 +13776,32 @@ export async function updateWorkTypeProfiles(
   profiles: WorkTypeProfileCode[],
   byId: string,
 ): Promise<{ taxonomy: MatterPartyTaxonomy }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'updateWorkTypeProfiles',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const taxonomy = store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-  store.matterPartyTaxonomy = taxonomy;
-  const prev = taxonomy.workTypeProfiles[workTypeSubcategoryId] ?? [];
-  const next = Array.from(new Set(profiles.filter((p) => p !== 'ALL')));
-  taxonomy.workTypeProfiles[workTypeSubcategoryId] = next;
-  writeAudit(store, {
-    recordType: 'list',
-    recordId: 'matter_party_role',
-    action: 'list-change',
-    field: `Work type profiles: ${workTypeSubcategoryId}`,
-    oldValue: prev.join(', '),
-    newValue: next.join(', '),
-    byId,
-  });
-  saveStore(store);
-  return { taxonomy };
-
-    },
-  });
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let result!: { taxonomy: MatterPartyTaxonomy };
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const taxonomy =
+        store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
+      const prev = taxonomy.workTypeProfiles[workTypeSubcategoryId] ?? [];
+      const next = Array.from(new Set(profiles.filter((p) => p !== 'ALL')));
+      taxonomy.workTypeProfiles[workTypeSubcategoryId] = next;
+      await catalogueRepo.putMatterPartyTaxonomyConfig(ctx, taxonomy, byId);
+      writeAudit(null, {
+        recordType: 'list',
+        recordId: 'matter_party_role',
+        action: 'list-change',
+        field: `Work type profiles: ${workTypeSubcategoryId}`,
+        oldValue: prev.join(', '),
+        newValue: next.join(', '),
+        byId,
+      });
+      await flushStagedAuditEntries(ctx);
+      result = { taxonomy };
+    }),
+  );
+  return result;
 }
 
 // ============================================================================
@@ -13500,8 +13840,7 @@ export async function saveQuoteRecord(
     label: 'saveQuoteRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, opts.byId);
+  const ctx = resolveDefaultServiceTenantContext(null, opts.byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -13521,7 +13860,7 @@ export async function saveQuoteRecord(
     const msg = 'You do not have permission (quote:edit) to create or edit quotes.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
+  const visibility = buildRecordVisibility({ teams }, actor, {
     people,
     matters,
     enquiries,
@@ -13680,7 +14019,7 @@ export async function saveQuoteRecord(
     };
 
     await intakeRepo.putQuote(ctx, created);
-    writeAudit(store, {
+    writeAudit(null, {
       recordType: 'quote',
       recordId: created.id,
       action: 'create',
@@ -13742,7 +14081,7 @@ export async function saveQuoteRecord(
   }
 
   await intakeRepo.putQuote(ctx, existing);
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: 'quote',
     recordId: existing.id,
     action: 'update',
@@ -13766,8 +14105,7 @@ export async function markQuoteSentRecord(
     label: 'markQuoteSentRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -13785,7 +14123,7 @@ export async function markQuoteSentRecord(
     const msg = 'You do not have permission (quote:edit) to mark a quote as sent.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
+  const visibility = buildRecordVisibility({ teams }, actor, {
     people,
     matters,
     quotes,
@@ -13819,7 +14157,7 @@ export async function markQuoteSentRecord(
   });
 
   await intakeRepo.putQuote(ctx, quote);
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: 'quote',
     recordId: quote.id,
     action: 'status-change',
@@ -13849,8 +14187,7 @@ export async function logQuoteFollowUpRecord(
     label: 'logQuoteFollowUpRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -13868,7 +14205,7 @@ export async function logQuoteFollowUpRecord(
     const msg = 'You do not have permission (quote:edit) to log quote follow-ups.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
+  const visibility = buildRecordVisibility({ teams }, actor, {
     people,
     matters,
     quotes,
@@ -13916,7 +14253,7 @@ export async function logQuoteFollowUpRecord(
   });
 
   await intakeRepo.putQuote(ctx, quote);
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: 'quote',
     recordId: quote.id,
     action: 'contact-log',
@@ -13955,8 +14292,7 @@ export async function reviseQuoteRecord(
     label: 'reviseQuoteRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -13974,7 +14310,7 @@ export async function reviseQuoteRecord(
     const msg = 'You do not have permission (quote:edit) to revise quotes.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
+  const visibility = buildRecordVisibility({ teams }, actor, {
     people,
     matters,
     quotes,
@@ -14089,7 +14425,7 @@ export async function reviseQuoteRecord(
   }
 
   await intakeRepo.putQuote(ctx, quote);
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: 'quote',
     recordId: quote.id,
     action: 'update',
@@ -14119,8 +14455,7 @@ export async function recordQuoteOutcomeRecord(
     label: 'recordQuoteOutcomeRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
@@ -14138,7 +14473,7 @@ export async function recordQuoteOutcomeRecord(
     const msg = 'You do not have permission (quote:edit) to record a quote outcome.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
+  const visibility = buildRecordVisibility({ teams }, actor, {
     people,
     matters,
     quotes,
@@ -14194,7 +14529,7 @@ export async function recordQuoteOutcomeRecord(
   }
 
   await intakeRepo.putQuote(ctx, quote);
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: 'quote',
     recordId: quote.id,
     action: 'status-change',
@@ -14237,12 +14572,12 @@ export async function prepareQuoteConversionRecord(
     label: 'prepareQuoteConversionRecord',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(ctx),
     partyRepo.listAllPeople<Person>(ctx),
     partyRepo.listAllOrganisations<Organisation>(ctx),
     partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
@@ -14748,10 +15083,6 @@ export async function saveMatterCostsConfig(
   config: MatterCostsConfig,
   byId: string,
 ): Promise<MatterCostsConfig> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveMatterCostsConfig',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
     throw new AuthorisationError({
@@ -14763,38 +15094,36 @@ export async function saveMatterCostsConfig(
       actorUserId: byId,
     });
   }
-  const store = getStore();
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
   const now = new Date().toISOString();
   const next: MatterCostsConfig = {
     ...config,
     updatedAt: now,
     updatedById: byId,
   };
-  store.matterCostsConfig = next;
-  writeAudit(store, {
-    recordType: 'matter',
-    recordId: 'FIRM-MATTER-COSTS-CONFIG',
-    action: 'update',
-    field: 'Matter Costs & Rates Table Config',
-    oldValue: null,
-    newValue: `${next.clientProfileName} (${next.rateSourceMode}, ${next.rateCards.length} rate cards)`,
-    byId,
-    at: now,
-  });
-  saveStore(store);
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      await catalogueRepo.putMatterCostsConfig(ctx, next, byId);
+      writeAudit(null, {
+        recordType: 'matter',
+        recordId: 'FIRM-MATTER-COSTS-CONFIG',
+        action: 'update',
+        field: 'Matter Costs & Rates Table Config',
+        oldValue: null,
+        newValue: `${next.clientProfileName} (${next.rateSourceMode}, ${next.rateCards.length} rate cards)`,
+        byId,
+        at: now,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
   return next;
-
-    },
-  });
 }
 
 export async function syncMatterCostsRatesFromPms(
   byId: string,
 ): Promise<MatterCostsConfig> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'syncMatterCostsRatesFromPms',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enablePmsLiveRateSync) {
     throw new AuthorisationError({
@@ -14806,40 +15135,48 @@ export async function syncMatterCostsRatesFromPms(
       actorUserId: byId,
     });
   }
-  const store = getStore();
-  const pms = getPmsSource();
-  const feeEarners = pms.listFeeEarners();
-  const base =
-    store.matterCostsConfig ??
-    createDefaultMatterCostsConfig(store.values, {
-      clientProfileCode: tenantCfg.tenantId,
-      displayName: tenantCfg.displayName,
-      primaryDomain: tenantCfg.branding.primaryDomain,
-    });
-  const synced = syncRateCardsWithPmsFeeEarners(base, feeEarners, store.values);
-  const now = new Date().toISOString();
-  const next: MatterCostsConfig = {
-    ...synced,
-    pmsLinkActive: true,
-    updatedAt: now,
-    updatedById: byId,
-  };
-  store.matterCostsConfig = next;
-  writeAudit(store, {
-    recordType: 'matter',
-    recordId: 'FIRM-MATTER-COSTS-CONFIG',
-    action: 'update',
-    field: 'PMS Rate Cards Sync',
-    oldValue: base.pmsLastSyncedAt ?? 'Never',
-    newValue: `Synced ${feeEarners.length} fee earner rates from PMS (${now})`,
-    byId,
-    at: now,
-  });
-  saveStore(store);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const catalogueRepo = getCatalogueRepository();
+  let next!: MatterCostsConfig;
+  await runWithAuditStagingScope(() =>
+    catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
+      const pms = getPmsSource();
+      const feeEarners = pms.listFeeEarners();
+      const base =
+        store.matterCostsConfig ??
+        createDefaultMatterCostsConfig(store.values, {
+          clientProfileCode: tenantCfg.tenantId,
+          displayName: tenantCfg.displayName,
+          primaryDomain: tenantCfg.branding.primaryDomain,
+        });
+      const synced = syncRateCardsWithPmsFeeEarners(
+        base,
+        feeEarners,
+        store.values,
+      );
+      const now = new Date().toISOString();
+      next = {
+        ...synced,
+        pmsLinkActive: true,
+        updatedAt: now,
+        updatedById: byId,
+      };
+      await catalogueRepo.putMatterCostsConfig(ctx, next, byId);
+      writeAudit(null, {
+        recordType: 'matter',
+        recordId: 'FIRM-MATTER-COSTS-CONFIG',
+        action: 'update',
+        field: 'PMS Rate Cards Sync',
+        oldValue: base.pmsLastSyncedAt ?? 'Never',
+        newValue: `Synced ${feeEarners.length} fee earner rates from PMS (${now})`,
+        byId,
+        at: now,
+      });
+      await flushStagedAuditEntries(ctx);
+    }),
+  );
   return next;
-
-    },
-  });
 }
 
 export async function resolveOrProvisionEntraEmployee(
@@ -14965,7 +15302,7 @@ export async function resolveOrProvisionEntraEmployee(
   return runUnmigratedJsonMutationWithAudit({
     label: 'resolveOrProvisionEntraEmployee',
     resolveCtx: () => signInCtx,
-    mutate: async (store) => {
+    mutate: async () => {
       const partyRepo = getPartyRepository();
       const [people, teams] = await Promise.all([
         partyRepo.listAllPeople<Person>(signInCtx),
@@ -14988,7 +15325,7 @@ export async function resolveOrProvisionEntraEmployee(
         const isFirstEmailLink = Boolean(matchedByEmailOnly && !prevOid && oid);
         if (isFirstEmailLink && oid) {
           matchedPerson.entraObjectId = oid;
-          writeAudit(store, {
+          writeAudit(null, {
             recordType: 'person',
             recordId: matchedPerson.id,
             action: 'entra-link',
@@ -15022,7 +15359,7 @@ export async function resolveOrProvisionEntraEmployee(
         }
         matchedPerson.updatedAt = now;
         await partyRepo.putPerson(signInCtx, matchedPerson);
-        writeAudit(store, {
+        writeAudit(null, {
           recordType: 'person',
           recordId: matchedPerson.id,
           action: 'update',
@@ -15132,7 +15469,7 @@ export async function resolveOrProvisionEntraEmployee(
       };
 
       await partyRepo.putPerson(signInCtx, newEmployee);
-      writeAudit(store, {
+      writeAudit(null, {
         recordType: 'person',
         recordId: newEmployee.id,
         action: 'create',
@@ -15164,7 +15501,7 @@ function resolveActorFromPeopleForKeyDates(
 }
 
 async function resolveKeyDatesActorAndData(
-  store: FirmStore,
+  store: FirmStore | null,
   byId: string,
   options?: { tenantCtx?: TenantContext | null },
 ): Promise<{
@@ -15293,10 +15630,9 @@ export async function getMatterKeyDatesSnapshot(
   keyDateCalendarSyncs: KeyDateCalendarSync[];
   canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
 }> {
-  const store = getStore();
   let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    resolved = await resolveKeyDatesActorAndData(store, userId);
+    resolved = await resolveKeyDatesActorAndData(null, userId);
   } catch {
     resolved = null;
   }
@@ -15382,8 +15718,7 @@ export async function previewLimitationCalculationRecord(
   byId: string,
 ): Promise<{ ok: boolean; result?: CalculationResult; error?: string }> {
   try {
-    const store = getStore();
-    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
@@ -15460,8 +15795,7 @@ export async function createOrProposeKeyDateRecord(
 }> {
   try {
     return await withJsonStoreWriteLock(async () => {
-      const store = getStore();
-      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -15607,8 +15941,7 @@ export async function proposeProvisionalKeyDateRecord(
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     return await withJsonStoreWriteLock(async () => {
-      const store = getStore();
-      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -15622,7 +15955,7 @@ export async function proposeProvisionalKeyDateRecord(
 
       const loaded = await loadKeyDateForActorOrClassifyError(
         ctx,
-        store,
+        null,
         keyDateId,
         actor,
         people,
@@ -15724,7 +16057,7 @@ export async function proposeProvisionalKeyDateRecord(
 
 async function loadKeyDateForActorOrClassifyError(
   ctx: TenantContext,
-  _store: FirmStore,
+  _store: FirmStore | null,
   keyDateId: string,
   actor: Person,
   people: readonly Person[],
@@ -15770,8 +16103,7 @@ export async function verifyProposedKeyDateRecord(
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     return await withJsonStoreWriteLock(async () => {
-      const store = getStore();
-      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -15782,7 +16114,7 @@ export async function verifyProposedKeyDateRecord(
 
       const loaded = await loadKeyDateForActorOrClassifyError(
         ctx,
-        store,
+        null,
         keyDateId,
         verifier,
         people,
@@ -15891,8 +16223,7 @@ export async function rejectProposedKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const store = getStore();
-    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
@@ -15903,7 +16234,7 @@ export async function rejectProposedKeyDateRecord(
 
     const loaded = await loadKeyDateForActorOrClassifyError(
       ctx,
-      store,
+      null,
       keyDateId,
       verifier,
       people,
@@ -15972,8 +16303,7 @@ export async function supersedeConfirmedKeyDateRecord(
 }> {
   try {
     return await withJsonStoreWriteLock(async () => {
-      const store = getStore();
-      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -15984,7 +16314,7 @@ export async function supersedeConfirmedKeyDateRecord(
 
       const loaded = await loadKeyDateForActorOrClassifyError(
         ctx,
-        store,
+        null,
         keyDateId,
         actor,
         people,
@@ -16182,8 +16512,7 @@ export async function resolveKeyDateOutcomeRecord(
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     return await withJsonStoreWriteLock(async () => {
-      const store = getStore();
-      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -16194,7 +16523,7 @@ export async function resolveKeyDateOutcomeRecord(
 
       const loaded = await loadKeyDateForActorOrClassifyError(
         ctx,
-        store,
+        null,
         keyDateId,
         actor,
         people,
@@ -16287,8 +16616,7 @@ export async function reassignKeyDateTeamRecord(
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
     return await withJsonStoreWriteLock(async () => {
-      const store = getStore();
-      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -16299,7 +16627,7 @@ export async function reassignKeyDateTeamRecord(
 
       const loaded = await loadKeyDateForActorOrClassifyError(
         ctx,
-        store,
+        null,
         keyDateId,
         actor,
         people,
@@ -16381,8 +16709,7 @@ export async function recordKeyDateNotApplicableRecord(
   byId: string,
 ): Promise<{ ok: boolean; record?: KeyDateNotApplicable; error?: string }> {
   try {
-    const store = getStore();
-    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
@@ -16445,8 +16772,7 @@ export async function acknowledgeKeyDateReminderRecord(
 ): Promise<{ ok: boolean; reminderState?: KeyDateReminderState; error?: string }> {
   try {
     return await withJsonStoreWriteLock(async () => {
-      const store = getStore();
-      const resolved = await resolveKeyDatesActorAndData(store, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -16471,7 +16797,7 @@ export async function acknowledgeKeyDateReminderRecord(
 
       const loaded = await loadKeyDateForActorOrClassifyError(
         ctx,
-        store,
+        null,
         keyDateId,
         actor,
         people,
@@ -16647,19 +16973,18 @@ export async function runKeyDateReminderSchedulerRecord(
     ? effectiveTenantCtx.mfaVerified === true && options?.mfaVerified !== false
     : options?.mfaVerified === true;
 
-  const prelimStore = getStore();
   let prelimPeople: Person[] = [];
   let prelimTeams: Team[] = [];
   try {
     const readPeopleCtx =
       effectiveTenantCtx ??
-      resolveDefaultServiceTenantContext(prelimStore, null);
+      resolveDefaultServiceTenantContext(null, null);
     [prelimPeople, prelimTeams] = await Promise.all([
       getPartyRepository().listAllPeople<Person>(readPeopleCtx),
       getHrAndRbacRepository().listAllTeams<Team>(readPeopleCtx),
     ]);
   } catch {
-    prelimPeople = prelimStore.people;
+    prelimPeople = [];
     prelimTeams = [];
   }
   const actor = resolveActorFromPeopleForKeyDates(prelimPeople, actorId);
@@ -16669,8 +16994,7 @@ export async function runKeyDateReminderSchedulerRecord(
 
   // Evaluate permission and MFA before reading any key-date repository or configuration rows from PostgreSQL (R449).
   const inMemoryKeyDatesConfig =
-    prelimStore.keyDatesConfigOverride ??
-    (getActiveTenantConfiguration().keyDates as KeyDatesConfig | undefined);
+    getActiveTenantConfiguration().keyDates as KeyDatesConfig | undefined;
   if (
     !hasKeyDatePermission(actor, 'keydate:configure', {
       config: inMemoryKeyDatesConfig,
@@ -16826,10 +17150,9 @@ export async function queryKeyDatesTeamDiaryRecord(
   byId: string,
   todayIso: string = toIsoDate(new Date()),
 ): Promise<TeamDiaryEntry[]> {
-  const store = getStore();
   let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    resolved = await resolveKeyDatesActorAndData(store, byId);
+    resolved = await resolveKeyDatesActorAndData(null, byId);
   } catch {
     resolved = null;
   }
@@ -16868,10 +17191,9 @@ export async function getKeyDateExceptionsReportRecord(
   byId: string,
   todayIso: string = toIsoDate(new Date()),
 ): Promise<KeyDateException[]> {
-  const store = getStore();
   let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    resolved = await resolveKeyDatesActorAndData(store, byId);
+    resolved = await resolveKeyDatesActorAndData(null, byId);
   } catch {
     resolved = null;
   }
@@ -16884,7 +17206,7 @@ export async function getKeyDateExceptionsReportRecord(
     teams,
   });
   const keyDateRepo = getKeyDateRepository();
-  const [keyDates, notApplicable, reminderStates, calendarSyncs] =
+  const [keyDates, notApplicable, reminderStates, calendarSyncs, values] =
     await Promise.all([
       keyDateRepo.listKeyDatesForExceptionsReport(ctx, viewer.id, {
         includeMissingMatterOrphans: canConfigure,
@@ -16892,6 +17214,7 @@ export async function getKeyDateExceptionsReportRecord(
       keyDateRepo.listAllVisibleNotApplicable(ctx, viewer.id),
       keyDateRepo.listAllReminderStates(ctx, viewer.id),
       keyDateRepo.listAllVisibleCalendarSyncs(ctx, viewer.id),
+      getCatalogueRepository().listAllChoiceValues<ChoiceValue>(ctx),
     ]);
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
@@ -16911,7 +17234,7 @@ export async function getKeyDateExceptionsReportRecord(
     matters: visibleMatters,
     teams,
     people,
-    values: store.values,
+    values,
     filterTeamIds: filter.teamIds,
     filterKinds: filter.kinds,
   });
@@ -16926,10 +17249,9 @@ export async function exportKeyDateExceptionsReportRecord(
   byId: string,
   todayIso: string = toIsoDate(new Date()),
 ): Promise<{ ok: boolean; content?: string; filename?: string; count?: number; error?: string }> {
-  const store = getStore();
   let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    resolved = await resolveKeyDatesActorAndData(store, byId);
+    resolved = await resolveKeyDatesActorAndData(null, byId);
   } catch {
     resolved = null;
   }
@@ -17008,8 +17330,7 @@ export async function saveKeyDatesConfigRecord(
   options?: { mfaVerified?: boolean } | boolean,
 ): Promise<{ ok: boolean; config?: KeyDatesConfig; error?: string }> {
   try {
-    const store = getStore();
-    const resolved = await resolveKeyDatesActorAndData(store, byId);
+    const resolved = await resolveKeyDatesActorAndData(null, byId);
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }

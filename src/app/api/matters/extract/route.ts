@@ -15,9 +15,10 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import { AuthorisationError } from '@/domain/rbac';
-import type { Enquiry, Matter, Organisation, Person, PersonOrganisationLink, Team } from '@/domain/types';
+import type { ChoiceValue, Enquiry, Matter, Organisation, Person, PersonOrganisationLink, Team } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
+  getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
@@ -32,7 +33,6 @@ import {
   savePersonRecord,
 } from '@/server/services';
 import { readServerSecret } from '@/server/serverSecrets';
-import { getStore } from '@/server/store';
 import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from '@/server/visibility';
 
 export const dynamic = 'force-dynamic';
@@ -2535,18 +2535,19 @@ export const POST = guardedRoute(
         );
       }
 
-      const store = getStore();
       const tenantContext = guardedActor!.tenantContext;
       const partyRepo = getPartyRepository();
       const matterRepo = getMatterRepository();
       const intakeRepo = getIntakeQuoteRepository();
       const hrRepo = getHrAndRbacRepository();
-      const [allPeople, allOrganisations, allMatters, allEnquiries, allTeams] = await Promise.all([
+      const catalogueRepo = getCatalogueRepository();
+      const [allPeople, allOrganisations, allMatters, allEnquiries, allTeams, allValues] = await Promise.all([
         partyRepo.listAllPeople<Person>(tenantContext),
         partyRepo.listAllOrganisations<Organisation>(tenantContext),
         matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
         intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(tenantContext),
         hrRepo.listAllTeams<Team>(tenantContext),
+        catalogueRepo.listAllChoiceValues<ChoiceValue>(tenantContext),
       ]);
       const actorPerson = allPeople.find((p) => p.id === byId) ?? null;
       const visibility = buildRecordVisibility({ teams: allTeams }, actorPerson, {
@@ -2564,12 +2565,12 @@ export const POST = guardedRoute(
       const visibleOrganisations = allOrganisations.filter((o) => !o.mergedIntoId);
       const employees = allPeople.filter((p) => p.isEmployee && !p.mergedIntoId);
 
-      const practiceAreas = store.values.filter(
+      const practiceAreas = allValues.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
       const workTypesListText = practiceAreas
         .map((pa) => {
-          const subs = store.values
+          const subs = allValues
             .filter((v) => v.listKey === 'work_type' && v.parentId === pa.id && v.active)
             .map((s) => s.label)
             .join(', ');
@@ -2589,7 +2590,7 @@ export const POST = guardedRoute(
         organisations: visibleOrganisations,
         people: visiblePeople,
         employees,
-        values: store.values,
+        values: allValues,
       });
 
       const canCreateContacts =

@@ -744,7 +744,7 @@ export const TenantConfigurationSchema = z
       .array(CustomFieldConfigEntrySchema)
       .default([])
       .describe(
-        '[x-reserved:S0-17] Per-client custom fields, screen locations, and mandatory rules (reserved for S0-17)',
+        'Per-client custom fields, screen locations, and mandatory rules',
       ),
     enabledExtensions: z
       .array(z.string())

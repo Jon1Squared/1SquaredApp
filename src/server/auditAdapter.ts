@@ -22,6 +22,7 @@
 
 import {
   TenantAuditRepository,
+  TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
@@ -35,6 +36,7 @@ import { getActiveActorSession } from '@/domain/rbac';
 import type { AuditEntry } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
+  getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
@@ -106,11 +108,13 @@ export function setAuditRepositoryOverrideForTesting(
 }
 
 export {
+  getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
   getTaskWorkflowRepository,
+  TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
@@ -155,7 +159,22 @@ export type MovedToPostgresKeys =
   | 'teams'
   | 'employeeSensitiveRecords'
   | 'employeeMigrationReport'
-  | 'rbacConfigOverride';
+  | 'rbacConfigOverride'
+  | 'firmId'
+  | 'isCleanDeployment'
+  | 'firm'
+  | 'lists'
+  | 'values'
+  | 'customFields'
+  | 'enquirySettings'
+  | 'taskSettings'
+  | 'homePagesConfig'
+  | 'orgStructure'
+  | 'matterPartyTaxonomy'
+  | 'matterPartyMigrationReport'
+  | 'matterCostsConfig'
+  | 'documentGenerationConfigOverride'
+  | 'documentStoreConfigOverride';
 
 export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>;
 
@@ -163,9 +182,6 @@ export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>
  * Unmoved ID-keyed array collections in `FirmStore` tracked for per-record delta compensation (`R406`, `R442`).
  */
 const ID_KEYED_ARRAY_COLLECTIONS = [
-  { name: 'lists', keyField: 'key' },
-  { name: 'values', keyField: 'id' },
-  { name: 'customFields', keyField: 'id' },
   { name: 'pmsLinks', keyField: 'id' },
 ] as const;
 
@@ -177,20 +193,7 @@ const PER_KEY_MAP_KEYS = [] as const;
 /**
  * Unmoved scalar / configuration properties on `FirmStore` tracked individually (`R442`).
  */
-const SCALAR_CONFIG_KEYS = [
-  'firmId',
-  'isCleanDeployment',
-  'firm',
-  'enquirySettings',
-  'taskSettings',
-  'homePagesConfig',
-  'orgStructure',
-  'matterPartyTaxonomy',
-  'matterPartyMigrationReport',
-  'matterCostsConfig',
-  'documentGenerationConfigOverride',
-  'documentStoreConfigOverride',
-] as const;
+const SCALAR_CONFIG_KEYS = [] as const;
 
 type RepresentedTrackedFirmStoreKey =
   | (typeof ID_KEYED_ARRAY_COLLECTIONS)[number]['name']
