@@ -3,9 +3,15 @@ import { cookies } from 'next/headers';
 import { resolveRequestCorrelationId } from './correlationId';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import {
+  getDocumentRepository,
+  getEffectiveTenantConfig,
   repointMergedEntityForTenant,
   resolveTenantContextForStoreUser,
 } from './documentGenerationServices';
+import {
+  guardedJob,
+  type GuardedJobOptions,
+} from './authorize';
 import {
   appendTenantAuditEntries,
   flushStagedAuditEntries,
@@ -13,6 +19,7 @@ import {
   getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
+  getJobRunRepository,
   getMatterRepository,
   getPartyRepository,
   getPmsRepository,
@@ -20,6 +27,7 @@ import {
   runWithAuditStagingScope,
   stageAuditEntry,
   TenantCatalogueRepository,
+  TenantJobRunRepository,
   TenantPmsRepository,
   getActiveTenantConfiguration,
   getExtensionHostLoadErrors,
@@ -31,11 +39,13 @@ export {
   getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
+  getJobRunRepository,
   getMatterRepository,
   getPartyRepository,
   getPmsRepository,
   getTaskWorkflowRepository,
   TenantCatalogueRepository,
+  TenantJobRunRepository,
   TenantPmsRepository,
 };
 import {
@@ -174,7 +184,9 @@ import {
   hasEmployeePermission,
   hasKeyDatePermission,
   hasPersonPermission,
+  isJobOnlyPermissionKey,
   isRegisteredPermissionKey,
+  isUserAssignablePermissionKey,
   mergeRbacConfigOverlay,
   PERMISSION_REGISTRY,
   requirePermission,
@@ -205,17 +217,23 @@ import {
   createSignInActorFromVerifiedOidcToken,
 } from './entraAuth';
 import {
+  executeUsageRetentionPurgeJob,
   getActiveTenantTransactionState,
+  loadActiveTenantRegistry,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   runTenantBackgroundJob,
+  sanitizeJobErrorCode,
   TenantKeyDateRepository,
   validateKeyDatesConfig,
   validateRbacConfig,
+  type ControlledJobRunOutcome,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
+  type JobRunRecord,
   type KeyDatesConfiguration,
   type TenantContext,
+  type TenantRegistry,
 } from '@platform/core';
 import type {
   CalculationResult,
@@ -12412,8 +12430,20 @@ export async function previewRbacOverrides(
     }
   }
 
+  const jobOnlyPreviewGrant = (draftOverrides.grant ?? []).find(
+    isJobOnlyPermissionKey,
+  );
+  if (jobOnlyPreviewGrant) {
+    return {
+      ok: false,
+      code: 'FORBIDDEN',
+      error: `FORBIDDEN: Permission "${jobOnlyPreviewGrant}" is reserved for background jobs (jobOnly) and cannot be granted to a user.`,
+      permissions: [],
+    };
+  }
+
   const cleanGrant = Array.from(
-    new Set((draftOverrides.grant ?? []).filter(isRegisteredPermissionKey)),
+    new Set((draftOverrides.grant ?? []).filter(isUserAssignablePermissionKey)),
   );
   const cleanRevoke = Array.from(
     new Set(
@@ -12487,7 +12517,12 @@ export async function updatePersonPermissionOverrides(
     const prevGrant = new Set<PermissionKey>(
       target.permissionOverrides?.grant ?? [],
     );
-    const newlyAddedPermissions = cleanGrant.filter((p) => !prevGrant.has(p));
+    const newlyAddedPermissions = Array.from(
+      new Set([
+        ...cleanGrant.filter((p) => !prevGrant.has(p)),
+        ...cleanGrant.filter(isJobOnlyPermissionKey),
+      ]),
+    );
 
     try {
       validateUserOverrideOrRoleMutation({
@@ -12513,7 +12548,7 @@ export async function updatePersonPermissionOverrides(
     });
 
     target.permissionOverrides = {
-      grant: cleanGrant,
+      grant: cleanGrant.filter(isUserAssignablePermissionKey),
       revoke: cleanRevoke.filter((p) => !cleanGrant.includes(p)),
       ...(input.reason?.trim() ? { reason: input.reason.trim() } : {}),
       updatedAt: nowIso,
@@ -12612,13 +12647,21 @@ export async function updateTenantRbacConfig(
           ...Object.keys(patch.roles ?? {}),
         ]);
 
-        // Validate permission keys in roles and departmentGrants
+        // Validate permission keys in roles, departmentGrants, and relationshipGrants
         for (const [roleKey, roleDef] of Object.entries(patch.roles ?? {})) {
           for (const perm of roleDef?.permissions ?? []) {
             if (!isRegisteredPermissionKey(perm)) {
               return {
                 ok: false,
                 error: `Role "${roleKey}" references unknown permission "${perm}".`,
+              };
+            }
+            if (isJobOnlyPermissionKey(perm)) {
+              const msg = `Permission "${perm}" is reserved for background jobs (jobOnly) and cannot be granted to role "${roleKey}".`;
+              return {
+                ok: false,
+                code: 'FORBIDDEN',
+                error: `FORBIDDEN: ${msg}`,
               };
             }
           }
@@ -12631,6 +12674,32 @@ export async function updateTenantRbacConfig(
               return {
                 ok: false,
                 error: `Department "${deptId}" references unknown permission "${perm}".`,
+              };
+            }
+            if (isJobOnlyPermissionKey(perm)) {
+              const msg = `Permission "${perm}" is reserved for background jobs (jobOnly) and cannot be granted to department "${deptId}".`;
+              return {
+                ok: false,
+                code: 'FORBIDDEN',
+                error: `FORBIDDEN: ${msg}`,
+              };
+            }
+          }
+        }
+        for (const rule of patch.relationshipGrants ?? []) {
+          for (const perm of rule?.permissions ?? []) {
+            if (!isRegisteredPermissionKey(perm)) {
+              return {
+                ok: false,
+                error: `Relationship "${rule?.relationship}" references unknown permission "${perm}".`,
+              };
+            }
+            if (isJobOnlyPermissionKey(perm)) {
+              const msg = `Permission "${perm}" is reserved for background jobs (jobOnly) and cannot be granted via relationship "${rule?.relationship}".`;
+              return {
+                ok: false,
+                code: 'FORBIDDEN',
+                error: `FORBIDDEN: ${msg}`,
               };
             }
           }
@@ -15495,6 +15564,7 @@ async function commitKeyDateDomainWritesInPostgres(params: {
   tasksToDeleteIds?: readonly string[];
   notificationsToUpsert?: NotificationItem[];
   auditEntries: AuditEntry[];
+  allowSystemSchedulerWrite?: boolean;
 }): Promise<void> {
   const keyDateRepo = getKeyDateRepository();
   const taskRepo = getTaskWorkflowRepository();
@@ -15533,7 +15603,9 @@ async function commitKeyDateDomainWritesInPostgres(params: {
       await keyDateRepo.putNotApplicable(params.ctx, na);
     }
     for (const rs of params.reminderStatesToUpsert ?? []) {
-      await keyDateRepo.putReminderState(params.ctx, rs);
+      await keyDateRepo.putReminderState(params.ctx, rs, {
+        allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
+      });
     }
     for (const cs of params.calendarSyncsToUpsert ?? []) {
       await keyDateRepo.putCalendarSync(params.ctx, cs);
@@ -16823,16 +16895,523 @@ export async function acknowledgeKeyDateReminderRecord(
   }
 }
 
+export interface KeyDateRemindersJobSummary extends Record<string, number> {
+  readonly evaluatedCount: number;
+  readonly stagesAdvancedCount: number;
+  readonly remindersSent: number;
+  readonly tasksCreated: number;
+  readonly notificationsCreated: number;
+  readonly escalationsSent: number;
+  readonly exceptionsFound: number;
+}
+
+export interface ExecuteKeyDateRemindersForTenantOptions {
+  readonly triggerSource: 'scheduled' | 'manual';
+  readonly triggeredById: string;
+  readonly timeZone?: string;
+  readonly defaultRunHourLocal?: number;
+  readonly nowIso?: string;
+  readonly statementTimeoutMs?: number;
+  readonly onAfterWorkBeforeCommit?: (
+    ctx: TenantContext,
+  ) => Promise<void> | void;
+}
+
+/**
+ * Single-transaction per-tenant Key Date reminder execution shared by scheduled
+ * hourly ticks (`system:key-date-reminders`) and manual Admin triggers (`actor.id`)
+ * (ADR 0030 §§4–6 / Slice S0-19).
+ *
+ * Inside one `withTenantTransaction`:
+ * 1. Acquires `pg_try_advisory_xact_lock(hashtext('onesquared_job:key-date-reminders:' || tenantId))`.
+ * 2. Checks `job_runs` for scheduled runs (`localHour >= 02:00` and no `status = 'succeeded'` row for `local_date`).
+ * 3. Reads all inputs (`keyDates`, `reminderStates`, `tasks`, `people`, `teams`, `matters`, `config`) inside the transaction.
+ * 4. Evaluates due reminders, escalations, tasks, notifications, and audit entries and writes them on the same transaction client.
+ * 5. Inserts the `status = 'succeeded'` row in `job_runs` before `COMMIT` releases the advisory lock atomically.
+ */
+export async function executeKeyDateRemindersForTenant(
+  ctx: TenantContext,
+  options: ExecuteKeyDateRemindersForTenantOptions,
+): Promise<
+  ControlledJobRunOutcome<{
+    result: ReturnType<typeof runTenantKeyDateReminderJob>;
+    summary: KeyDateRemindersJobSummary;
+  }>
+> {
+  const tenantConfig = getActiveTenantConfiguration();
+  const effectiveTimeZone =
+    options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
+  const nowIso = options.nowIso ?? new Date().toISOString();
+
+  return getJobRunRepository().executeControlledTenantJobRun(ctx, {
+    jobKey: 'key-date-reminders',
+    triggerSource: options.triggerSource,
+    triggeredById: options.triggeredById,
+    timeZone: effectiveTimeZone,
+    targetLocalHour: options.defaultRunHourLocal ?? 2,
+    now: new Date(nowIso),
+    statementTimeoutMs: options.statementTimeoutMs,
+    work: async ({ localDate }) => {
+      const keyDateRepo = getKeyDateRepository();
+      const taskRepo = getTaskWorkflowRepository();
+      const partyRepo = getPartyRepository();
+      const matterRepo = getMatterRepository();
+      const hrRepo = getHrAndRbacRepository();
+      const catalogueRepo = getCatalogueRepository();
+
+      const [
+        people,
+        matters,
+        storeTasks,
+        teams,
+        values,
+        config,
+        keyDatesWorking,
+        reminderStatesWorking,
+        notApplicableWorking,
+        calendarSyncsWorking,
+      ] = await Promise.all([
+        partyRepo.listAllPeople<Person>(ctx),
+        matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+        taskRepo.listAllTasksUnfiltered<Task>(ctx),
+        hrRepo.listAllTeams<Team>(ctx),
+        catalogueRepo.listAllChoiceValues<ChoiceValue>(ctx),
+        getKeyDatesConfig({ ctx, userId: options.triggeredById }),
+        keyDateRepo.listAllKeyDatesUnfilteredForScheduler(ctx),
+        keyDateRepo.listAllReminderStatesUnfilteredForScheduler(ctx),
+        keyDateRepo.listAllVisibleNotApplicable(ctx, options.triggeredById),
+        keyDateRepo.listAllVisibleCalendarSyncs(ctx, options.triggeredById),
+      ]);
+
+      if (options.triggerSource === 'manual') {
+        const actorInTx = resolveActorFromPeopleForKeyDates(
+          people,
+          options.triggeredById,
+        );
+        if (
+          !actorInTx ||
+          !hasKeyDatePermission(actorInTx, 'keydate:configure', {
+            config,
+            allPeople: people,
+            teams,
+            rbac: { tokenRoles: ctx.actorRoles },
+          })
+        ) {
+          const permErr = new Error(
+            'KEY_DATE_PERMISSION_DENIED: You need "keydate:configure" permission to trigger the key date reminder scheduler.',
+          );
+          (permErr as Error & { code?: string }).code =
+            'KEY_DATE_PERMISSION_DENIED';
+          throw permErr;
+        }
+      }
+
+      const beforeReminderStageByKd = new Map(
+        reminderStatesWorking.map((rs) => [
+          rs.keyDateId,
+          rs.currentStageDaysBefore,
+        ]),
+      );
+      const beforeReminderJsonByKd = new Map(
+        reminderStatesWorking.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
+      );
+      const beforeTaskJsonById = new Map(
+        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      );
+      const createdNotifications: NotificationItem[] = [];
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
+      let pendingTaskIdx = 0;
+      let pendingNotifIdx = 0;
+
+      const result = runTenantBackgroundJob(
+        {
+          jobId: `keydate-reminder-scheduler:${ctx.tenantId}:${localDate}`,
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          payload: { todayIso: localDate, nowIso },
+        },
+        (job) =>
+          runTenantKeyDateReminderJob({
+            tenantId: job.tenantId,
+            actorId: options.triggeredById,
+            todayIso: job.payload.todayIso,
+            nowIso: job.payload.nowIso,
+            config,
+            keyDates: keyDatesWorking,
+            reminderStates: reminderStatesWorking,
+            tasks: storeTasks,
+            matters,
+            teams,
+            people,
+            notifications: createdNotifications,
+            audit: stagedAudit,
+            nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+            nextNotificationId: () => `NTF-PENDING-${++pendingNotifIdx}`,
+            nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          }),
+      );
+
+      const changedTasks = storeTasks.filter(
+        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+      );
+      const newTasksCount = changedTasks.filter((t) =>
+        t.id.startsWith('TSK-PENDING-'),
+      ).length;
+      const currentIds = new Set(storeTasks.map((t) => t.id));
+      const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+        (id) => !currentIds.has(id),
+      );
+      const changedReminders = reminderStatesWorking.filter(
+        (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
+      );
+
+      for (const rs of changedReminders) {
+        const alreadyAudited = stagedAudit.some(
+          (a) => a.recordId === rs.keyDateId,
+        );
+        if (!alreadyAudited) {
+          const prevStage = beforeReminderStageByKd.get(rs.keyDateId);
+          stagedAudit.push({
+            id: `AU-PENDING-${++pendingIdx}`,
+            recordType: 'key_date',
+            recordId: rs.keyDateId,
+            action: 'update',
+            field: 'currentStageDaysBefore',
+            oldValue: prevStage !== undefined ? String(prevStage) : null,
+            newValue: String(rs.currentStageDaysBefore),
+            byId: options.triggeredById,
+            at: nowIso,
+            reason: `Key date reminder stage evaluated (${localDate})`,
+          });
+        }
+      }
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        reminderStatesToUpsert: changedReminders,
+        tasksToUpsert: changedTasks,
+        tasksToDeleteIds: deletedTaskIds,
+        notificationsToUpsert: createdNotifications,
+        auditEntries: stagedAudit,
+        allowSystemSchedulerWrite: true,
+      });
+
+      const syntheticViewer: Person =
+        people.find((p) => p.id === options.triggeredById) ??
+        ({
+          id: options.triggeredById,
+          firstName: 'System',
+          surname: 'Scheduler',
+          isEmployee: true,
+          roles: ['admin'],
+          appRole: 'admin',
+        } as unknown as Person);
+      const exceptions = computeKeyDateExceptions({
+        viewer: syntheticViewer,
+        todayIso: localDate,
+        nowIso,
+        config,
+        keyDates: keyDatesWorking,
+        notApplicable: notApplicableWorking,
+        reminderStates: reminderStatesWorking,
+        calendarSyncs: calendarSyncsWorking,
+        matters,
+        teams,
+        people,
+        values,
+      });
+
+      if (options.onAfterWorkBeforeCommit) {
+        await options.onAfterWorkBeforeCommit(ctx);
+      }
+
+      const summary: KeyDateRemindersJobSummary = {
+        evaluatedCount: result.evaluatedCount,
+        stagesAdvancedCount: result.stagesAdvancedCount,
+        remindersSent: changedReminders.length,
+        tasksCreated: newTasksCount,
+        notificationsCreated: createdNotifications.length,
+        escalationsSent: result.escalationsTriggeredCount,
+        exceptionsFound: exceptions.length,
+      };
+
+      return {
+        result: { result, summary },
+        summary,
+      };
+    },
+  });
+}
+
+export interface UsageRetentionPurgeJobSummary extends Record<string, number> {
+  readonly purgedEventsCount: number;
+  readonly purgedSummaryBucketsCount: number;
+  readonly retentionMonths: number;
+}
+
+export interface ExecuteUsageRetentionPurgeForTenantOptions {
+  readonly triggerSource?: 'scheduled' | 'manual';
+  readonly triggeredById?: string;
+  readonly timeZone?: string;
+  readonly defaultRunHourLocal?: number;
+  readonly nowIso?: string;
+  readonly statementTimeoutMs?: number;
+  readonly onAfterWorkBeforeCommit?: (
+    ctx: TenantContext,
+  ) => Promise<void> | void;
+}
+
+/**
+ * Single-transaction per-tenant document-generation usage retention purge job
+ * (`system:usage-retention-purge`, ADR 0030 §§4–6 / Slice S0-19).
+ */
+export async function executeUsageRetentionPurgeForTenant(
+  ctx: TenantContext,
+  options: ExecuteUsageRetentionPurgeForTenantOptions = {},
+): Promise<
+  ControlledJobRunOutcome<{
+    purgedEventsCount: number;
+    purgedSummaryBucketsCount: number;
+    retentionMonths: number;
+  }>
+> {
+  const tenantConfig = getActiveTenantConfiguration();
+  const effectiveTimeZone =
+    options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
+  const triggeredById =
+    options.triggeredById?.trim() || 'system:usage-retention-purge';
+  const nowIso = options.nowIso ?? new Date().toISOString();
+
+  return getJobRunRepository().executeControlledTenantJobRun(ctx, {
+    jobKey: 'usage-retention-purge',
+    triggerSource: options.triggerSource ?? 'scheduled',
+    triggeredById,
+    timeZone: effectiveTimeZone,
+    targetLocalHour: options.defaultRunHourLocal ?? 2,
+    now: new Date(nowIso),
+    statementTimeoutMs: options.statementTimeoutMs,
+    work: async ({ localDate }) => {
+      const docRepo = getDocumentRepository();
+      const effectiveConfig = await getEffectiveTenantConfig(ctx, docRepo);
+      const retentionMonths =
+        effectiveConfig.documentGeneration.usage.retentionMonths ??
+        tenantConfig.documentGeneration.usage.retentionMonths;
+
+      const purged = await executeUsageRetentionPurgeJob(ctx, docRepo, {
+        jobId: `usage-retention-purge:${ctx.tenantId}:${localDate}`,
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        payload: {
+          retentionMonths,
+          nowIso,
+        },
+      });
+
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'matter',
+          recordId: 'FIRM-DOCGEN-USAGE-RETENTION',
+          action: 'update',
+          field: 'documentGeneration.usage.retentionMonths',
+          oldValue: null,
+          newValue: `purgedEvents=${purged.purgedEventsCount}; purgedSummaries=${purged.purgedSummaryBucketsCount}; retentionMonths=${retentionMonths}`,
+          byId: triggeredById,
+          at: nowIso,
+          reason: `Scheduled usage retention purge (${localDate})`,
+        },
+      ]);
+
+      if (options.onAfterWorkBeforeCommit) {
+        await options.onAfterWorkBeforeCommit(ctx);
+      }
+
+      const summary: UsageRetentionPurgeJobSummary = {
+        purgedEventsCount: purged.purgedEventsCount,
+        purgedSummaryBucketsCount: purged.purgedSummaryBucketsCount,
+        retentionMonths,
+      };
+
+      return {
+        result: summary,
+        summary,
+      };
+    },
+  });
+}
+
+export interface ScheduledTenantJobSweepSummary {
+  readonly exitCode: number;
+  readonly succeededTenants: string[];
+  readonly skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }>;
+  readonly failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }>;
+}
+
+export async function runScheduledKeyDateRemindersJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly nowIso?: string;
+  readonly timeoutMs?: number;
+  readonly defaultRunHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+  readonly onAfterWorkBeforeCommitByTenant?: Readonly<
+    Record<string, (ctx: TenantContext) => Promise<void> | void>
+  >;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) {
+      continue;
+    }
+    try {
+      const outcome = await guardedJob(
+        'key-date-reminders',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs }) =>
+          executeKeyDateRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            timeZone: tenantEntry.timeZone,
+            defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
+            nowIso: options?.nowIso,
+            statementTimeoutMs: timeoutMs,
+            onAfterWorkBeforeCommit:
+              options?.onAfterWorkBeforeCommitByTenant?.[entry.tenantId],
+          }),
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status: outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+  };
+}
+
+export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly nowIso?: string;
+  readonly timeoutMs?: number;
+  readonly defaultRunHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+  readonly onAfterWorkBeforeCommitByTenant?: Readonly<
+    Record<string, (ctx: TenantContext) => Promise<void> | void>
+  >;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) {
+      continue;
+    }
+    try {
+      const outcome = await guardedJob(
+        'usage-retention-purge',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs }) =>
+          executeUsageRetentionPurgeForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:usage-retention-purge',
+            timeZone: tenantEntry.timeZone,
+            defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
+            nowIso: options?.nowIso,
+            statementTimeoutMs: timeoutMs,
+            onAfterWorkBeforeCommit:
+              options?.onAfterWorkBeforeCommitByTenant?.[entry.tenantId],
+          }),
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status: outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+  };
+}
+
 export async function runKeyDateReminderSchedulerRecord(
   options?: {
     tenantCtx?: TenantContext | null;
     session?: VerifiedEntraSessionPayload | null;
     byId: string;
     mfaVerified?: boolean;
+    nowIso?: string;
+    timeZone?: string;
   } | null,
 ): Promise<{
   ok: boolean;
   result?: ReturnType<typeof runTenantKeyDateReminderJob>;
+  jobRun?: JobRunRecord;
+  jobStatus?: 'succeeded' | 'skipped' | 'already_running';
   triggeredBy?: string;
   error?: string;
 }> {
@@ -16956,114 +17535,46 @@ export async function runKeyDateReminderSchedulerRecord(
     );
   }
 
-  const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, storeTasks, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(effectiveTenantCtx!),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(effectiveTenantCtx!),
-    taskRepo.listAllTasksUnfiltered<Task>(effectiveTenantCtx!),
-    getHrAndRbacRepository().listAllTeams<Team>(effectiveTenantCtx!),
-  ]);
-  const config = await getKeyDatesConfig({
-    ctx: effectiveTenantCtx!,
-    userId: actor.id,
-  });
-  if (
-    !hasKeyDatePermission(actor, 'keydate:configure', {
-      config,
-      allPeople: people,
-      teams,
-      rbac: { tokenRoles: effectiveTenantCtx!.actorRoles },
-    })
-  ) {
+  try {
+    const outcome = await executeKeyDateRemindersForTenant(effectiveTenantCtx!, {
+      triggerSource: 'manual',
+      triggeredById: actor.id,
+      nowIso: options?.nowIso,
+      timeZone: options?.timeZone,
+    });
+
+    if (outcome.outcome === 'executed') {
+      return {
+        ok: true,
+        result: outcome.result.result,
+        jobRun: outcome.jobRun,
+        jobStatus: 'succeeded',
+        triggeredBy: actor.id,
+      };
+    }
+
+    return {
+      ok: true,
+      result: {
+        tenantId: effectiveTenantCtx!.tenantId,
+        evaluatedCount: 0,
+        stagesAdvancedCount: 0,
+        escalationsTriggeredCount: 0,
+        notificationsSentCount: 0,
+      },
+      jobStatus:
+        outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+      triggeredBy: actor.id,
+    };
+  } catch (err) {
     return {
       ok: false,
       error:
-        'KEY_DATE_PERMISSION_DENIED: You need "keydate:configure" permission to trigger the key date reminder scheduler.',
+        err instanceof Error
+          ? err.message
+          : 'Failed to execute key date reminder scheduler.',
     };
   }
-  const nowIso = new Date().toISOString();
-  const todayIso = toIsoDate(new Date());
-
-  const keyDateRepo = getKeyDateRepository();
-  // Scheduler evaluates all key dates in the tenant database (including restricted matters via system/admin visibility)
-  const allTenantKeyDates = await keyDateRepo.withTenantReadTransaction(
-    effectiveTenantCtx!,
-    async (tx) => {
-      const res = await tx.query<{ id: string }>(
-        'SELECT id FROM key_dates WHERE tenant_id = $1 ORDER BY due_date ASC, id ASC',
-        [effectiveTenantCtx!.tenantId],
-      );
-      return res.rows.map((r) => r.id);
-    },
-  );
-  const keyDatesWorking: KeyDate[] = [];
-  for (const id of allTenantKeyDates) {
-    const kd = await keyDateRepo.getKeyDateById(effectiveTenantCtx!, id, actor.id);
-    if (kd) keyDatesWorking.push(kd);
-  }
-  const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-    effectiveTenantCtx!,
-    actor.id,
-  );
-  const beforeReminderJsonByKd = new Map(
-    reminderStatesWorking.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
-  );
-  const beforeTaskJsonById = new Map(
-    storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-  );
-  const createdNotifications: NotificationItem[] = [];
-  const stagedAudit: AuditEntry[] = [];
-  let pendingIdx = 0;
-  let pendingTaskIdx = 0;
-  let pendingNotifIdx = 0;
-
-  const result = runTenantBackgroundJob(
-    {
-      jobId: `keydate-reminder-scheduler:${effectiveTenantCtx!.tenantId}:${todayIso}`,
-      tenantId: effectiveTenantCtx!.tenantId,
-      correlationId: effectiveTenantCtx!.correlationId,
-      payload: { todayIso, nowIso },
-    },
-    (job) =>
-      runTenantKeyDateReminderJob({
-        tenantId: job.tenantId,
-        todayIso: job.payload.todayIso,
-        nowIso: job.payload.nowIso,
-        config,
-        keyDates: keyDatesWorking,
-        reminderStates: reminderStatesWorking,
-        tasks: storeTasks,
-        matters,
-        teams,
-        people,
-        notifications: createdNotifications,
-        audit: stagedAudit,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-        nextNotificationId: () => `NTF-PENDING-${++pendingNotifIdx}`,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      }),
-  );
-
-  const changedTasks = storeTasks.filter(
-    (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-  );
-  const currentIds = new Set(storeTasks.map((t) => t.id));
-  const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-    (id) => !currentIds.has(id),
-  );
-  const changedReminders = reminderStatesWorking.filter(
-    (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
-  );
-  await commitKeyDateDomainWritesInPostgres({
-    ctx: effectiveTenantCtx!,
-    reminderStatesToUpsert: changedReminders,
-    tasksToUpsert: changedTasks,
-    tasksToDeleteIds: deletedTaskIds,
-    notificationsToUpsert: createdNotifications,
-    auditEntries: stagedAudit,
-  });
-
-  return { ok: true, result, triggeredBy: actor.id };
 }
 
 export async function queryKeyDatesTeamDiaryRecord(

@@ -10,15 +10,28 @@
 import { randomUUID } from 'node:crypto';
 import {
   resolveTenantFromVerifiedToken,
+  type HostingMode,
+  type PermissionKey,
+  type PlatformEnvironment,
   type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
 
 export function buildSystemJobTenantContext(params: {
-  readonly tenantConfig: TenantConfiguration;
+  readonly tenantConfig: Pick<
+    TenantConfiguration,
+    'tenantId' | 'hostingMode' | 'environment'
+  > & {
+    readonly database?: { readonly dedicatedServerHost?: string };
+    readonly keyVault?: {
+      readonly vaultName?: string;
+      readonly vaultUri?: string;
+    };
+  };
   readonly jobKey: string;
   readonly correlationId?: string;
   readonly configuredPostgresHost?: string;
+  readonly jobPermissions?: readonly PermissionKey[];
 }): TenantContext {
   const jobKey = params.jobKey.trim();
   if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(jobKey)) {
@@ -38,13 +51,14 @@ export function buildSystemJobTenantContext(params: {
       tenantId: params.tenantConfig.tenantId,
       name: `Platform job ${jobKey}`,
       email: `${jobKey}@platform.example`,
-      roles: ['admin'],
+      roles: [],
       mfaVerified: true,
     },
-    hostingMode: params.tenantConfig.hostingMode,
-    environment: params.tenantConfig.environment,
+    hostingMode: params.tenantConfig.hostingMode as HostingMode,
+    environment: params.tenantConfig.environment as PlatformEnvironment,
     correlationId:
       params.correlationId?.trim() || `job-${jobKey}-${randomUUID()}`,
+    ...(params.jobPermissions ? { jobPermissions: params.jobPermissions } : {}),
     ...(configuredPostgresHost ? { configuredPostgresHost } : {}),
     ...(params.tenantConfig.keyVault
       ? {

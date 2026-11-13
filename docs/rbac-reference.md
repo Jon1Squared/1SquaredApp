@@ -16,13 +16,14 @@ Related Architecture Decision Records:
 - [ADR-0020: Document References and Zero-Content Storage](./decisions/0020-document-references-and-zero-content-storage.md)
 - [ADR-0021: Matter Folder Template Inheritance Model](./decisions/0021-matter-folder-template-inheritance-model.md)
 - [ADR-0025: One Permission Enforcement Pattern for Server Actions and Routes](./decisions/0025-permission-enforcement-pattern.md)
+- [ADR-0030: Tenant-Aware Background Job Scheduler](./decisions/0030-tenant-aware-scheduler.md)
 
 ---
 
 ## 1. Central Permission Registry (`PERMISSION_REGISTRY`)
 
 Defined in `core/src/domain/rbac/registry.ts` and exported from `@platform/core`.
-Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), and states whether multi-factor authentication (`requiresMfa`) is required.
+Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 60 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 3 job-only permissions).
 
 | Permission Key | Domain | Sensitivity | Requires MFA | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -86,6 +87,11 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `keydate:waive` | `keydate` | `restricted` | No | Waive a key date with an audited reason |
 | `keydate:override_calculation` | `keydate` | `restricted` | No | Override a rule-calculated limitation or key date with a mandatory audited reason |
 | `keydate:configure` | `keydate` | `critical` | **Yes** | Configure key date types, matter type rules, reminder schedules, limitation rule sets, and business calendars |
+| `tenant:migrate` | `tenancy` | `critical` | No (`jobOnly: true`) | Execute per-tenant database schema migrations in the unattended `migrate` Container Apps job (`system:migrate` via `guardedJob`) |
+| `keydate:run_reminders` | `key_dates` | `critical` | No (`jobOnly: true`) | Execute the unattended daily key-date reminder and escalation sweep for a tenant (`system:key-date-reminders` via `guardedJob`) |
+| `document_generation:purge_usage` | `document_generation` | `critical` | No (`jobOnly: true`) | Execute the unattended daily document generation usage retention purge for a tenant (`system:usage-retention-purge` via `guardedJob`) |
+
+> **Job-only permission invariant (`ADR-0030 §3`):** No built-in or custom role (`admin` included) holds any `jobOnly: true` permission (`DEFAULT_RBAC_ROLES.admin.permissions` uses `ALL_USER_PERMISSION_KEYS`). `resolvePermissions`, `resolvePersonPermissionSet`, `updatePersonPermissionOverrides`, and `updateTenantRbacConfig` strip or reject any attempt to grant a `jobOnly` permission to a person, role, or department (`FORBIDDEN`).
 
 ### Field Catalogue Contract
 Every entry in `CORE_FIELD_CATALOGUE` (`core/src/domain/document-generation/fieldCatalogue.ts`) declares a `requiredPermission: PermissionKey`. A contract test in `core/tests/rbac.test.ts` verifies at CI time that every catalogue field's `requiredPermission` is registered in `PERMISSION_REGISTRY`.
@@ -196,11 +202,13 @@ Per [ADR-0025](./decisions/0025-permission-enforcement-pattern.md), every server
 - **Policy Registry (`src/server/actionPermissions.ts`):**
   - `ACTION_PERMISSIONS`: maps each exported server action name to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'authenticated', reason }`, or `{ kind: 'gap', slice }`.
   - `ROUTE_PERMISSIONS`: maps each `<METHOD> /api/...` route handler to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'public', reason }`, or `{ kind: 'gap', slice }`.
+  - `JOB_PERMISSIONS`: maps each registered CLI background job (`migrate`, `key-date-reminders`, `usage-retention-purge`) to `{ kind: 'job', permission, jobOnly: true, enforcedBy: 'job', timeoutMs }`.
   - `MAX_KNOWN_GAPS`: locks the maximum count of `gap` entries so new actions cannot ship without a permission policy and the baseline gap count can only decrease as Stage 0 slices S0-03 to S0-07 and S0-10 close them.
-- **Action & Route Wrappers (`src/server/authorize.ts`):**
+- **Action, Route & Job Wrappers (`src/server/authorize.ts`):**
   - `guardedAction(name, fn)` authenticates the actor from the verified Entra ID session, resolves `TenantContext` via `resolveCurrentTenantContext`, resolves the actor's `ResolvedPermissionSet` with the session's real `mfaVerified` state and token roles, and runs `fn` inside `runWithActiveActorSession`.
   - When a policy has `enforcedBy: 'action'`, `guardedAction` enforces the required permission via `@platform/core` `requirePermission` (including MFA gates where `requiresMfa: true`), logs any denial with `correlationId`, `tenantId`, `action`, and `code` (never personal data), and returns `ActionDenied` (`{ ok: false, denied: true, code, message, error }` in `src/domain/actionResult.ts`) without calling `fn`.
   - `guardedRoute(name, handler)` wraps route handlers and passes Next.js route context (`params`) through to the handler.
+  - `guardedJob(jobKey, tenantTarget, fn, options)` (confined strictly to `scripts/run-job.ts` and `src/server/authorize.ts`, ADR-0030 §3) verifies the tenant is registered and `enabled === true` in `TenantRegistry` (`TENANCY_UNREGISTERED_JOB_TENANT`), mints a job `TenantContext` (`actorId`/`actorSub: 'system:' + jobKey`, `actorRoles: []`, `jobPermissions: [policy.permission]`), enforces the `jobOnly: true` permission, applies a per-tenant deadline (`120s` default), and emits PII-free telemetry (`job.tenant.started`, `job.tenant.succeeded`, `job.tenant.failed`).
   - `authorizeResource(permissions, resource)` wraps `@platform/core` `canAccessMatter` for second-gate record-level access checks in services.
 - **Static Guard Test (`src/server/__tests__/actionPermissionGuard.test.ts`):**
   - Scans `src/app/actions.ts` and `src/app/api/**/route.ts` on every test run and fails if any export is missing from `ACTION_PERMISSIONS` / `ROUTE_PERMISSIONS`, does not call `guardedAction` / `guardedRoute` with its own name, references an unregistered permission key, omits a reason on an `authenticated` or `public` entry, or exceeds `MAX_KNOWN_GAPS`.

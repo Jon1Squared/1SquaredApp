@@ -7,7 +7,7 @@
  * policy. Verified at test/CI time by `src/server/__tests__/actionPermissionGuard.test.ts`.
  */
 
-import type { PermissionKey } from '@platform/core';
+import type { JobOnlyPermissionKey, PermissionKey } from '@platform/core';
 
 export type GapSliceId =
   | 'S0-03'
@@ -687,6 +687,53 @@ export const ROUTE_PERMISSIONS = {
 } as const satisfies Record<string, ActionPolicy>;
 
 export type RegisteredRouteName = keyof typeof ROUTE_PERMISSIONS;
+
+export interface JobPolicy {
+  readonly kind: 'job';
+  readonly permission: JobOnlyPermissionKey;
+  readonly jobOnly: true;
+  readonly timeoutMs: number;
+  readonly defaultRunHourLocal?: number;
+  readonly description: string;
+}
+
+/**
+ * Central background job permission policy registry (ADR 0030 §3 / Slice S0-19).
+ *
+ * Every registered CLI job in `scripts/run-job.ts` must have an entry here mapping
+ * its `jobKey` to a `jobOnly: true` permission in `PERMISSION_REGISTRY`.
+ */
+export const JOB_PERMISSIONS = {
+  migrate: {
+    kind: 'job',
+    permission: 'tenant:migrate',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    description:
+      'Apply pending per-tenant PostgreSQL expand/contract migrations across active registry tenants.',
+  },
+  'key-date-reminders': {
+    kind: 'job',
+    permission: 'keydate:run_reminders',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    defaultRunHourLocal: 2,
+    description:
+      'Evaluate due key date reminders, follow-up tasks, and overdue escalations per tenant.',
+  },
+  'usage-retention-purge': {
+    kind: 'job',
+    permission: 'document_generation:purge_usage',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    defaultRunHourLocal: 2,
+    description:
+      'Purge expired document generation usage events and daily summaries per tenant.',
+  },
+} as const satisfies Record<string, JobPolicy>;
+
+export type RegisteredJobName = keyof typeof JOB_PERMISSIONS;
+export type JobName = RegisteredJobName;
 
 /**
  * Maximum number of `kind: 'gap'` policies across `ACTION_PERMISSIONS` and

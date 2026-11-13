@@ -23,7 +23,7 @@ import {
   type TenantPostgresPoolManager,
 } from './postgresPoolManager';
 
-export const CORE_REQUIRED_SCHEMA_VERSION = '0013';
+export const CORE_REQUIRED_SCHEMA_VERSION = '0014';
 
 export interface TenantQueryResult<TRow = Record<string, unknown>> {
   readonly rows: TRow[];
@@ -201,15 +201,17 @@ export abstract class TenantScopedRepository {
   public async withTenantTransaction<T>(
     ctx: TenantContext,
     fn: (tx: TenantSqlClient) => Promise<T>,
+    options?: { statementTimeoutMs?: number },
   ): Promise<T> {
-    return this.executeTransaction(ctx, false, fn, true);
+    return this.executeTransaction(ctx, false, fn, true, options?.statementTimeoutMs);
   }
 
   public async withAutonomousTenantTransaction<T>(
     ctx: TenantContext,
     fn: (tx: TenantSqlClient) => Promise<T>,
+    options?: { statementTimeoutMs?: number },
   ): Promise<T> {
-    return this.executeTransaction(ctx, false, fn, false);
+    return this.executeTransaction(ctx, false, fn, false, options?.statementTimeoutMs);
   }
 
   private async executeTransaction<T>(
@@ -217,6 +219,7 @@ export abstract class TenantScopedRepository {
     readOnly: boolean,
     fn: (tx: TenantSqlClient) => Promise<T>,
     joinExistingScope = true,
+    overrideStatementTimeoutMs?: number,
   ): Promise<T> {
     assertValidPostgresTenantContext(ctx);
 
@@ -249,8 +252,12 @@ export abstract class TenantScopedRepository {
 
       const quotedRole = quotePgIdentifier(target.tenantRoleName);
       await rawClient.query(`SET LOCAL ROLE ${quotedRole}`);
+      const effectiveTimeoutMs = Math.max(
+        50,
+        Math.floor(overrideStatementTimeoutMs ?? this.statementTimeoutMs),
+      );
       await rawClient.query(
-        `SET LOCAL statement_timeout = '${Math.max(1000, Math.floor(this.statementTimeoutMs))}ms'`,
+        `SET LOCAL statement_timeout = '${effectiveTimeoutMs}ms'`,
       );
 
       if (

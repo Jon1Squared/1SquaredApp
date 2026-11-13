@@ -85,13 +85,13 @@ param pdfConverterContainerImage string = ''
 param enableStoreImportJob bool = true
 
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
-param enableSchedulerJobs bool = false
+param enableSchedulerJobs bool = true
 
 @description('Enable the hourly key-date-reminders scheduled Container Apps job (S0-19)')
-param enableKeyDateRemindersJob bool = false
+param enableKeyDateRemindersJob bool = true
 
 @description('Enable the hourly usage-retention-purge scheduled Container Apps job (S0-19)')
-param enableUsageRetentionPurgeJob bool = false
+param enableUsageRetentionPurgeJob bool = true
 
 @description('Enable the hourly enquiry-retention-anonymise scheduled Container Apps job (S0-19b)')
 param enableEnquiryAnonymisationJob bool = false

@@ -1576,7 +1576,9 @@ export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
   });
 }
 
-export async function runKeyDateReminderSchedulerAction() {
+export async function runKeyDateReminderSchedulerAction(options?: {
+  nowIso?: string;
+}) {
   return guardedAction('runKeyDateReminderSchedulerAction', async (actor) => {
     const tenantCtx = resolveCurrentTenantContext(
       createVerifiedSessionActorFromEntraSession(actor.session),
@@ -1586,6 +1588,7 @@ export async function runKeyDateReminderSchedulerAction() {
       session: actor.session,
       byId: actor.personId,
       mfaVerified: actor.mfaVerified,
+      nowIso: options?.nowIso,
     });
     revalidateAll();
     return res;

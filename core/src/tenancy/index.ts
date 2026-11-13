@@ -12,6 +12,7 @@
 
 import type {
   HostingMode,
+  PermissionKey,
   PlatformEnvironment,
   TenantContext,
   TenantKeyVaultConfig,
@@ -40,6 +41,7 @@ export * from './taskWorkflowRepository';
 export * from './hrRbacRepository';
 export * from './catalogueRepository';
 export * from './pmsRepository';
+export * from './jobRunRepository';
 
 export {
   isEntraMfaVerified,
@@ -60,6 +62,11 @@ export interface ResolveTenantInput {
   untrustedRequestTenantOverride?: string;
   configuredKeyVault?: TenantKeyVaultConfig;
   configuredPostgresHost?: string;
+  /**
+   * Optional job-only permissions granted exclusively to a system job `TenantContext`
+   * (`sub: 'system:<job-key>'`) minted by `guardedJob` (ADR 0030 §3).
+   */
+  jobPermissions?: readonly PermissionKey[];
 }
 
 export interface TenantPostgresConnectionConfig {
@@ -114,10 +121,14 @@ export function resolveTenantFromVerifiedToken(
   return Object.freeze({
     tenantId,
     actorId: verifiedToken.sub,
+    actorSub: verifiedToken.sub,
     actorName: verifiedToken.name,
     actorEmail: verifiedToken.email,
     ...(verifiedToken.upn ? { actorUpn: verifiedToken.upn } : {}),
     actorRoles: Object.freeze([...verifiedToken.roles]),
+    ...(input.jobPermissions && verifiedToken.sub.startsWith('system:')
+      ? { jobPermissions: Object.freeze([...input.jobPermissions]) }
+      : {}),
     ...(verifiedToken.groups
       ? { actorGroups: Object.freeze([...verifiedToken.groups]) }
       : {}),

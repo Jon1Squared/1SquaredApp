@@ -144,6 +144,7 @@ export function sanitizePostgresError(
       err.message.startsWith('CHOICE_') ||
       err.message.startsWith('FIRM_PROFILE_') ||
       err.message.startsWith('PMS_') ||
+      err.message.startsWith('JOB_') ||
       err.message.startsWith('MIGRATION_') ||
       err.message.startsWith('DOCUMENT_') ||
       err.message.startsWith('TEMPLATE_')
@@ -156,6 +157,15 @@ export function sanitizePostgresError(
     typeof (err as { code?: unknown })?.code === 'string'
       ? String((err as { code?: unknown }).code)
       : undefined;
+
+  if (sqlState === '57014') {
+    const timeoutErr = new Error(
+      `JOB_STATEMENT_TIMEOUT: PostgreSQL statement timeout exceeded during ${contextLabel} (SQLSTATE 57014).`,
+    ) as Error & { code: string; sqlState: string };
+    timeoutErr.code = 'JOB_STATEMENT_TIMEOUT';
+    timeoutErr.sqlState = '57014';
+    return timeoutErr;
+  }
 
   if (sqlState === '42501') {
     const denied = new Error(

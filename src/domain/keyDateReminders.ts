@@ -530,6 +530,8 @@ export interface RunTenantKeyDateReminderJobInput {
   /** Required: scheduler job refuses to run without `tenantId`. */
   tenantId: string;
   correlationId?: string;
+  /** Actor ID recorded on reminder tasks, notifications, and audit entries (`'system:key-date-reminders'` or manual `actor.personId`). */
+  actorId?: PersonId;
   todayIso: IsoDate;
   nowIso?: IsoDateTime;
   config: KeyDatesConfig;
@@ -597,6 +599,7 @@ export function runTenantKeyDateReminderJob(
     nextNotificationId = () => `NTF-KD-${Date.now()}-${Math.random()}`,
     nextAuditId = () => `AU-KD-${Date.now()}-${Math.random()}`,
   } = input;
+  const effectiveActorId = input.actorId?.trim() || 'system:key-date-reminders';
 
   if (!config?.enabled) {
     return {
@@ -646,7 +649,7 @@ export function runTenantKeyDateReminderJob(
         people,
         todayIso,
         nowIso,
-        actorId: 'SYSTEM',
+        actorId: effectiveActorId,
         nextTaskId,
       });
       state = synced.reminderState;
@@ -671,7 +674,7 @@ export function runTenantKeyDateReminderJob(
           recordId: keyDate.matterId ?? keyDate.enquiryId ?? keyDate.id,
           createdAt: nowIso,
           read: false,
-          byId: 'SYSTEM',
+          byId: effectiveActorId,
         });
         notificationsSentCount += 1;
       } else if (
@@ -686,7 +689,7 @@ export function runTenantKeyDateReminderJob(
           field: 'responsiblePersonIds',
           oldValue: null,
           newValue: 'no_permitted_assignees',
-          byId: 'SYSTEM',
+          byId: effectiveActorId,
           at: nowIso,
           reason: isMissingMatter
             ? 'Reminder skipped task creation because the linked matter was not found.'
@@ -742,7 +745,7 @@ export function runTenantKeyDateReminderJob(
           field: 'responsiblePersonIds',
           oldValue: null,
           newValue: 'no_permitted_assignees',
-          byId: 'SYSTEM',
+          byId: effectiveActorId,
           at: nowIso,
           reason: isMissingMatter
             ? 'Reminder stage advance skipped task assignment because the linked matter was not found.'
@@ -764,7 +767,7 @@ export function runTenantKeyDateReminderJob(
           task.completedById = null;
         }
         task.updatedAt = nowIso;
-        task.updatedById = 'SYSTEM';
+        task.updatedById = effectiveActorId;
       }
 
       stagesAdvancedCount += 1;
@@ -782,7 +785,7 @@ export function runTenantKeyDateReminderJob(
           recordId: keyDate.matterId ?? keyDate.enquiryId ?? keyDate.id,
           createdAt: nowIso,
           read: false,
-          byId: 'SYSTEM',
+          byId: effectiveActorId,
         });
         notificationsSentCount += 1;
       }
@@ -834,7 +837,7 @@ export function runTenantKeyDateReminderJob(
               targetLevel,
             );
             task.updatedAt = nowIso;
-            task.updatedById = 'SYSTEM';
+            task.updatedById = effectiveActorId;
           }
 
           audit.push({
@@ -845,7 +848,7 @@ export function runTenantKeyDateReminderJob(
             field: 'escalationLevel',
             oldValue: String(beforeState.escalationLevel),
             newValue: String(targetLevel),
-            byId: 'SYSTEM',
+            byId: effectiveActorId,
             at: nowIso,
             reason: `Stage (${state.currentStageDaysBefore}d) unacknowledged after ${daysUnacknowledged} days; escalated to ${levelSpec}.`,
             snapshot: { before: beforeState, after: { ...state } },
@@ -874,7 +877,7 @@ export function runTenantKeyDateReminderJob(
               recordId: keyDate.matterId ?? keyDate.enquiryId ?? keyDate.id,
               createdAt: nowIso,
               read: false,
-              byId: 'SYSTEM',
+              byId: effectiveActorId,
             });
             notificationsSentCount += 1;
           }

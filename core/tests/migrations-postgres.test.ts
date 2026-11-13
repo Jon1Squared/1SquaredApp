@@ -183,7 +183,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    // Round-trip rollback 0014 -> 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
     expect(await runner.getActiveTables(ctx)).toEqual(
       expect.arrayContaining([
         'people',
@@ -227,8 +227,12 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'pms_disbursements',
         'pms_client_account_entries',
         'pms_credit_control_log',
+        'job_runs',
       ]),
     );
+    expect(await runner.rollbackVersion(ctx, '0014')).toBe(true);
+    const activeAfter0014Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0014Rollback).not.toContain('job_runs');
     expect(await runner.rollbackVersion(ctx, '0013')).toBe(true);
     const activeAfter0013Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0013Rollback).not.toContain('pms_links');
@@ -342,6 +346,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'pms_disbursements',
         'pms_client_account_entries',
         'pms_credit_control_log',
+        'job_runs',
       ]),
     );
   });

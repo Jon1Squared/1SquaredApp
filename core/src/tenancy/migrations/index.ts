@@ -1863,6 +1863,44 @@ DROP SEQUENCE IF EXISTS public.tenant_pms_link_id_seq;
 `.trim(),
 };
 
+export const SCHEDULER_JOB_RUNS_MIGRATION_0014: TenantMigrationDefinition = {
+  version: '0014',
+  name: '0014_scheduler_job_runs_expand',
+  description:
+    'Create per-tenant job_runs table for daily scheduler and manual job execution tracking, advisory lock coordination, and once-per-local-day scheduled idempotency',
+  tablesChanged: ['job_runs'],
+  dependsOn: ['0013'],
+  upSql: `
+CREATE TABLE IF NOT EXISTS public.job_runs (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  job_key TEXT NOT NULL,
+  local_date TEXT NOT NULL,
+  trigger_source TEXT NOT NULL CHECK (trigger_source IN ('scheduled', 'manual')),
+  triggered_by_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finished_at TIMESTAMPTZ NULL,
+  correlation_id TEXT NOT NULL,
+  error_code TEXT NULL,
+  summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_job_runs_scheduled_once_per_day
+  ON public.job_runs (tenant_id, job_key, local_date)
+  WHERE status = 'succeeded' AND trigger_source = 'scheduled';
+
+CREATE INDEX IF NOT EXISTS idx_job_runs_tenant_job_date_status
+  ON public.job_runs (tenant_id, job_key, local_date, status);
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS public.idx_job_runs_tenant_job_date_status;
+DROP INDEX IF EXISTS public.idx_job_runs_scheduled_once_per_day;
+DROP TABLE IF EXISTS public.job_runs;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -1877,6 +1915,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   HR_TEAMS_AND_RBAC_MIGRATION_0011,
   CATALOGUES_AND_CONFIG_MIGRATION_0012,
   PMS_PER_TENANT_MIGRATION_0013,
+  SCHEDULER_JOB_RUNS_MIGRATION_0014,
 ];
 
 export function validateMigrationCatalogueOrder(

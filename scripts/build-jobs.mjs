@@ -40,7 +40,7 @@ async function bundleJobs() {
       sourcemap: false,
       logLevel: 'warning',
       banner: {
-        js: "import { createRequire as __oneSquaredCreateRequire } from 'node:module'; const require = __oneSquaredCreateRequire(import.meta.url);",
+        js: "import { createRequire as __oneSquaredCreateRequire } from 'node:module'; import { fileURLToPath as __oneSquaredFileURLToPath } from 'node:url'; import { dirname as __oneSquaredDirname } from 'node:path'; const require = __oneSquaredCreateRequire(import.meta.url); const __filename = __oneSquaredFileURLToPath(import.meta.url); const __dirname = __oneSquaredDirname(__filename);",
       },
       alias: {
         '@': path.join(rootDir, 'src'),

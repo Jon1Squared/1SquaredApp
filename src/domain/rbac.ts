@@ -17,7 +17,9 @@ import {
   ALL_BUILTIN_ROLE_KEYS,
   ALL_DOCUMENT_PERMISSIONS,
   ALL_EMPLOYEE_PERMISSIONS,
+  ALL_JOB_ONLY_PERMISSION_KEYS,
   ALL_PERMISSION_KEYS,
+  ALL_USER_PERMISSION_KEYS,
   AuthorisationError,
   canAccessMatter,
   clearPermissionRequestCache,
@@ -28,7 +30,9 @@ import {
   getPermissionRegistryEntry,
   hasPermission,
   isEntraMfaVerified,
+  isJobOnlyPermissionKey,
   isRegisteredPermissionKey,
+  isUserAssignablePermissionKey,
   mapEntraTokenClaimsToVerifiedOidcToken,
   migrateLegacyPersonOverrides,
   PERMISSION_REGISTRY,
@@ -37,6 +41,7 @@ import {
   resolvePermissions,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
+  type JobOnlyPermissionKey,
   type PermissionKey,
   type PermissionRegistryEntry,
   type PersonPermissionOverrides,
@@ -85,7 +90,9 @@ export function mergeRbacConfigOverlay(
       if (v) {
         mergedRoles[k] = {
           ...v,
-          permissions: (v.permissions ?? []).filter(isRegisteredPermissionKey),
+          permissions: (v.permissions ?? []).filter(
+            isUserAssignablePermissionKey,
+          ),
         };
       }
     }
@@ -96,14 +103,20 @@ export function mergeRbacConfigOverlay(
   if (overlay.departmentGrants) {
     for (const [deptId, perms] of Object.entries(overlay.departmentGrants)) {
       if (Array.isArray(perms)) {
-        mergedDeptGrants[deptId] = perms.filter(isRegisteredPermissionKey);
+        mergedDeptGrants[deptId] = perms.filter(isUserAssignablePermissionKey);
       }
     }
   }
+  const mergedRelGrants = (
+    overlay.relationshipGrants ?? base.relationshipGrants
+  ).map((rule) => ({
+    ...rule,
+    permissions: (rule.permissions ?? []).filter(isUserAssignablePermissionKey),
+  }));
   return {
     roles: mergedRoles,
     departmentGrants: mergedDeptGrants,
-    relationshipGrants: overlay.relationshipGrants ?? base.relationshipGrants,
+    relationshipGrants: mergedRelGrants,
     identityMapping: overlay.identityMapping
       ? {
           ...base.identityMapping,
@@ -870,7 +883,9 @@ export {
   ALL_BUILTIN_ROLE_KEYS,
   ALL_DOCUMENT_PERMISSIONS,
   ALL_EMPLOYEE_PERMISSIONS,
+  ALL_JOB_ONLY_PERMISSION_KEYS,
   ALL_PERMISSION_KEYS,
+  ALL_USER_PERMISSION_KEYS,
   AuthorisationError,
   canAccessMatter,
   clearPermissionRequestCache,
@@ -881,7 +896,9 @@ export {
   getPermissionRegistryEntry,
   hasPermission,
   isEntraMfaVerified,
+  isJobOnlyPermissionKey,
   isRegisteredPermissionKey,
+  isUserAssignablePermissionKey,
   mapEntraTokenClaimsToVerifiedOidcToken,
   migrateLegacyPersonOverrides,
   PERMISSION_REGISTRY,
@@ -890,6 +907,7 @@ export {
   resolvePermissions,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
+  type JobOnlyPermissionKey,
   type PermissionKey,
   type PermissionRegistryEntry,
   type PersonPermissionOverrides,

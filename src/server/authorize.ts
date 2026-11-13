@@ -10,12 +10,18 @@ import { NextResponse } from 'next/server';
 import {
   AuthorisationError,
   canAccessMatter,
+  isJobOnlyPermissionKey,
+  loadActiveTenantRegistry,
   requirePermission,
+  sanitizeJobErrorCode,
+  sanitizeJobSummaryCounts,
   type MatterAccessRecord,
   type PermissionKey,
   type RbacConfiguration,
   type ResolvedPermissionSet,
   type TenantContext,
+  type TenantRegistry,
+  type TenantRegistryEntry,
 } from '@platform/core';
 import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
 import {
@@ -27,19 +33,24 @@ import {
   getHrAndRbacRepository,
   getPartyRepository,
   resolveCurrentTenantContext,
+  resolveJobTenantContext,
 } from '@/platform/tenantRuntime';
 import {
   ACTION_PERMISSIONS,
+  JOB_PERMISSIONS,
   ROUTE_PERMISSIONS,
   type ActionPolicy,
+  type JobPolicy,
   type PolicyPermissionRequirement,
   type RegisteredActionName,
+  type RegisteredJobName,
   type RegisteredRouteName,
 } from './actionPermissions';
 import { createVerifiedSessionActorFromEntraSession } from './entraAuth';
 import { resolveRequestCorrelationId } from './correlationId';
 import {
   emitTenantTelemetryEvent,
+  emitTenantTelemetryException,
   resolveCurrentRequestCorrelationId,
 } from './telemetry';
 import {
@@ -160,7 +171,7 @@ function mapAuthorisationErrorToActionDenied(
   return buildActionDenied(mappedCode, err.message);
 }
 
-async function buildGuardedActorContext(
+export async function buildGuardedActorContext(
   actor: AuthenticatedActorContext,
   correlationId: string,
 ): Promise<GuardedActorContext> {
@@ -421,5 +432,357 @@ export function authorizeResource(
       actorUserId: permissions.actorUserId,
       requiredPermission: 'matter:restricted:access' as PermissionKey,
     });
+  }
+}
+
+export interface GuardedJobExecutionContext {
+  readonly jobKey: RegisteredJobName;
+  readonly tenantEntry: TenantRegistryEntry;
+  readonly tenantContext: TenantContext;
+  readonly correlationId: string;
+  readonly signal: AbortSignal;
+  readonly timeoutMs: number;
+}
+
+export interface GuardedJobOptions {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly correlationId?: string;
+  /**
+   * Optional override strictly for negative tests verifying that `guardedJob`
+   * rejects missing or non-jobOnly `jobPermissions` on the minted `TenantContext`.
+   */
+  readonly overrideJobPermissions?: readonly PermissionKey[];
+  /**
+   * Optional override strictly for negative tests verifying that `guardedJob`
+   * rejects a non-system actor identity (`actorSub`).
+   */
+  readonly overrideActorSub?: string;
+}
+
+export type GuardedJobTenantTarget =
+  | string
+  | Pick<TenantRegistryEntry, 'tenantId'> & Partial<TenantRegistryEntry>;
+
+function resolveJobRegistryOrFallback(
+  providedRegistry?: TenantRegistry,
+): TenantRegistry {
+  if (providedRegistry) {
+    return providedRegistry;
+  }
+  try {
+    return loadActiveTenantRegistry();
+  } catch {
+    const activeCfg = getActiveTenantConfiguration();
+    const slug = activeCfg.tenantId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    return {
+      schemaVersion: '1.0',
+      environment: activeCfg.environment,
+      hostingMode: activeCfg.hostingMode,
+      tenants: [
+        {
+          tenantId: activeCfg.tenantId,
+          slug,
+          environment: activeCfg.environment,
+          enabled: true,
+          postgresHost:
+            activeCfg.database?.dedicatedServerHost ??
+            `${activeCfg.tenantId}-pg-${activeCfg.environment}.postgres.database.azure.com`,
+          postgresDatabaseName: `pg_tenant_${slug}_${activeCfg.environment}`,
+          postgresRoleName: `role_tenant_${slug}_${activeCfg.environment}`,
+          keyVaultUri:
+            activeCfg.keyVault?.vaultUri ??
+            `https://kv-${activeCfg.tenantId}-${activeCfg.environment}.vault.azure.net/`,
+          packageDir: 'client-not-a-law-firm',
+          timeZone: activeCfg.timeZone || 'Europe/London',
+        },
+      ],
+    };
+  }
+}
+
+/**
+ * Central background job authorisation and per-tenant execution guard
+ * (`src/server/authorize.ts`, ADR 0030 §3 / Slice S0-19).
+ *
+ * Confined strictly to CLI job entry points (`scripts/run-job.ts`) and job sweep
+ * runners; never exposed as a web route or server action.
+ *
+ * 1. Verifies `jobKey` is registered in `JOB_PERMISSIONS` with a `jobOnly: true` permission.
+ * 2. Verifies the target tenant is registered and `enabled === true` in the active
+ *    `TenantRegistry` (`TENANCY_UNREGISTERED_JOB_TENANT` otherwise).
+ * 3. Mints a system job `TenantContext` (`actorId`/`actorSub: 'system:<jobKey>'`,
+ *    `actorRoles: []`, `jobPermissions: [policy.permission]`) with a fresh correlation ID.
+ * 4. Enforces `policy.permission` against `tenantContext.jobPermissions` (`FORBIDDEN` if missing).
+ * 5. Enforces a per-tenant execution deadline (default 120s) via `AbortController`.
+ * 6. Emits PII-free telemetry (`job.tenant.started`, `job.tenant.succeeded`, `job.tenant.failed`).
+ */
+export async function guardedJob<R>(
+  jobKey: RegisteredJobName,
+  tenantTarget: GuardedJobTenantTarget | null | undefined,
+  fn: (ctx: GuardedJobExecutionContext) => Promise<R> | R,
+  options?: GuardedJobOptions,
+): Promise<R> {
+  const policy = (
+    JOB_PERMISSIONS as Record<string, JobPolicy | undefined>
+  )[jobKey];
+  if (!policy) {
+    throw new Error(
+      `UNREGISTERED_JOB_POLICY: Background job "${String(jobKey)}" has no entry in JOB_PERMISSIONS.`,
+    );
+  }
+
+  const correlationId = resolveRequestCorrelationId(
+    options?.correlationId ?? null,
+    `job-${jobKey}`,
+  );
+
+  const requestedTenantId =
+    typeof tenantTarget === 'string'
+      ? tenantTarget.trim()
+      : tenantTarget?.tenantId?.trim() ?? '';
+
+  if (!requestedTenantId) {
+    const err = new Error(
+      'TENANCY_UNREGISTERED_JOB_TENANT: A registered and enabled tenantId is required to execute a background job.',
+    );
+    (err as Error & { code?: string }).code = 'TENANCY_UNREGISTERED_JOB_TENANT';
+    throw err;
+  }
+
+  const registry = resolveJobRegistryOrFallback(options?.registry);
+  const registeredEntry = registry.tenants.find(
+    (t) => t.tenantId === requestedTenantId,
+  );
+  const explicitlyDisabled =
+    typeof tenantTarget === 'object' &&
+    tenantTarget !== null &&
+    tenantTarget.enabled === false;
+
+  if (!registeredEntry || !registeredEntry.enabled || explicitlyDisabled) {
+    logAuthorisationDenial({
+      correlationId,
+      tenantId: requestedTenantId,
+      action: `job:${jobKey}`,
+      code: 'TENANCY_UNREGISTERED_JOB_TENANT',
+      requiredPermission: policy.permission,
+    });
+    const err = new Error(
+      `TENANCY_UNREGISTERED_JOB_TENANT: Tenant "${requestedTenantId}" is not registered or is disabled in the active tenant registry.`,
+    );
+    (err as Error & { code?: string }).code = 'TENANCY_UNREGISTERED_JOB_TENANT';
+    throw err;
+  }
+
+  if (!policy.jobOnly || !isJobOnlyPermissionKey(policy.permission)) {
+    logAuthorisationDenial({
+      correlationId,
+      tenantId: registeredEntry.tenantId,
+      action: `job:${jobKey}`,
+      code: 'FORBIDDEN',
+      requiredPermission: policy.permission,
+    });
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message: `Background job "${jobKey}" requires a jobOnly permission ("${policy.permission}").`,
+      tenantId: registeredEntry.tenantId,
+      correlationId,
+      actorUserId: `system:${jobKey}`,
+      requiredPermission: policy.permission,
+    });
+  }
+
+  const expectedActorSub = `system:${jobKey}`;
+  const effectiveActorSub = options?.overrideActorSub ?? expectedActorSub;
+  const effectiveJobPermissions =
+    options?.overrideJobPermissions ?? [policy.permission];
+
+  const tenantContext = resolveJobTenantContext({
+    actorSub: effectiveActorSub,
+    jobKey,
+    tenantId: registeredEntry.tenantId,
+    hostingMode: registry.hostingMode,
+    environment: registeredEntry.environment,
+    correlationId,
+    postgresHost: registeredEntry.postgresHost,
+    keyVaultUri: registeredEntry.keyVaultUri,
+    jobPermissions: effectiveJobPermissions,
+  });
+
+  const targetDatabaseName =
+    (typeof tenantTarget === 'object' &&
+    tenantTarget !== null &&
+    tenantTarget.postgresDatabaseName
+      ? tenantTarget.postgresDatabaseName
+      : registeredEntry.postgresDatabaseName) ??
+    registeredEntry.postgresDatabaseName;
+
+  if (
+    registeredEntry.postgresDatabaseName !== tenantContext.postgresDatabaseName ||
+    targetDatabaseName !== tenantContext.postgresDatabaseName
+  ) {
+    const mismatchErr = new Error(
+      'TENANT_REGISTRY_DATABASE_MISMATCH: Registry postgresDatabaseName does not match the database derived from the tenant ID.',
+    );
+    (mismatchErr as Error & { code?: string }).code =
+      'TENANT_REGISTRY_DATABASE_MISMATCH';
+    emitTenantTelemetryEvent({
+      eventName: 'job.tenant.failed',
+      severity: 'error',
+      tenantId: registeredEntry.tenantId,
+      correlationId,
+      properties: {
+        jobKey,
+        durationMs: 0,
+        errorCode: 'TENANT_REGISTRY_DATABASE_MISMATCH',
+      },
+    });
+    emitTenantTelemetryException({
+      eventName: 'job.tenant.failed',
+      tenantId: registeredEntry.tenantId,
+      correlationId,
+      error: mismatchErr,
+      properties: {
+        jobKey,
+        errorCode: 'TENANT_REGISTRY_DATABASE_MISMATCH',
+      },
+    });
+    throw mismatchErr;
+  }
+
+  if (
+    tenantContext.actorId !== expectedActorSub ||
+    tenantContext.actorSub !== expectedActorSub ||
+    tenantContext.actorRoles.length > 0 ||
+    !tenantContext.jobPermissions ||
+    !tenantContext.jobPermissions.includes(policy.permission)
+  ) {
+    logAuthorisationDenial({
+      correlationId,
+      tenantId: tenantContext.tenantId,
+      action: `job:${jobKey}`,
+      code: 'FORBIDDEN',
+      requiredPermission: policy.permission,
+    });
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message: `System job "${jobKey}" is not authorised for permission "${policy.permission}".`,
+      tenantId: tenantContext.tenantId,
+      correlationId,
+      actorUserId: tenantContext.actorId,
+      requiredPermission: policy.permission,
+    });
+  }
+
+  const timeoutMs = Math.max(
+    10,
+    Math.trunc(options?.timeoutMs ?? policy.timeoutMs ?? 120_000),
+  );
+  const abortController = new AbortController();
+  const startedAtMs = Date.now();
+
+  emitTenantTelemetryEvent({
+    eventName: 'job.tenant.started',
+    tenantId: tenantContext.tenantId,
+    correlationId,
+    properties: {
+      jobKey,
+      timeoutMs,
+    },
+  });
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race<R>([
+      Promise.resolve().then(() =>
+        fn({
+          jobKey,
+          tenantEntry: registeredEntry,
+          tenantContext,
+          correlationId,
+          signal: abortController.signal,
+          timeoutMs,
+        }),
+      ),
+      new Promise<R>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          abortController.abort();
+          const timeoutErr = new Error(
+            `JOB_TENANT_TIMEOUT: Background job "${jobKey}" exceeded per-tenant deadline of ${timeoutMs}ms.`,
+          );
+          (timeoutErr as Error & { code?: string }).code = 'JOB_TENANT_TIMEOUT';
+          reject(timeoutErr);
+        }, timeoutMs);
+      }),
+    ]);
+
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    const resultRecord =
+      typeof result === 'object' && result !== null
+        ? (result as Record<string, unknown>)
+        : undefined;
+    const statusProp =
+      typeof resultRecord?.outcome === 'string'
+        ? resultRecord.outcome
+        : typeof resultRecord?.status === 'string'
+          ? resultRecord.status
+          : 'succeeded';
+    const nestedSummary =
+      typeof resultRecord?.jobRun === 'object' &&
+      resultRecord.jobRun !== null &&
+      typeof (resultRecord.jobRun as Record<string, unknown>).summary === 'object'
+        ? ((resultRecord.jobRun as Record<string, unknown>).summary as Record<
+            string,
+            number
+          >)
+        : typeof resultRecord?.summary === 'object' &&
+            resultRecord.summary !== null
+          ? (resultRecord.summary as Record<string, number>)
+          : {};
+    const rawSummary = sanitizeJobSummaryCounts(nestedSummary);
+
+    emitTenantTelemetryEvent({
+      eventName: 'job.tenant.succeeded',
+      tenantId: tenantContext.tenantId,
+      correlationId,
+      properties: {
+        jobKey,
+        durationMs,
+        status: statusProp,
+        ...rawSummary,
+      },
+    });
+
+    return result;
+  } catch (err) {
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    const errorCode = sanitizeJobErrorCode(err);
+    emitTenantTelemetryEvent({
+      eventName: 'job.tenant.failed',
+      severity: 'error',
+      tenantId: tenantContext.tenantId,
+      correlationId,
+      properties: {
+        jobKey,
+        durationMs,
+        errorCode,
+      },
+    });
+    emitTenantTelemetryException({
+      eventName: 'job.tenant.failed',
+      tenantId: tenantContext.tenantId,
+      correlationId,
+      error: err,
+      properties: {
+        jobKey,
+        durationMs,
+        errorCode,
+      },
+    });
+    throw err;
+  } finally {
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+    }
   }
 }

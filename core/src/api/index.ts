@@ -54,10 +54,16 @@ import type {
 } from './keyDates.types';
 export * from './keyDates.types';
 
+export type JobOnlyPermissionKey =
+  | 'tenant:migrate'
+  | 'keydate:run_reminders'
+  | 'document_generation:purge_usage';
+
 export type PermissionKey =
   | EmployeePermission
   | DocumentPermission
   | KeyDatePermission
+  | JobOnlyPermissionKey
   | 'finance:view_matter'
   | 'finance:credit_control'
   | 'finance:manage_links'
@@ -94,7 +100,10 @@ export type PermissionDomain =
   | 'employee'
   | 'document_template'
   | 'document'
+  | 'document_generation'
   | 'keydate'
+  | 'key_dates'
+  | 'tenancy'
   | 'finance'
   | 'risk'
   | 'matter'
@@ -115,9 +124,11 @@ export type PermissionSensitivity =
 export interface PermissionRegistryEntry {
   readonly key: PermissionKey;
   readonly domain: PermissionDomain;
+  readonly module?: string;
   readonly description: string;
   readonly sensitivity: PermissionSensitivity;
   readonly requiresMfa: boolean;
+  readonly jobOnly?: boolean;
   readonly sinceVersion: string;
   readonly deprecated?: {
     readonly sinceVersion: string;
@@ -220,11 +231,13 @@ export interface ExtensionManifest {
 export interface TenantContext {
   readonly tenantId: string;
   readonly actorId: string;
+  readonly actorSub?: string;
   readonly actorName: string;
   readonly actorEmail: string;
   readonly actorUpn?: string;
   readonly actorRoles: readonly string[];
   readonly actorGroups?: readonly string[];
+  readonly jobPermissions?: readonly PermissionKey[];
   readonly entraObjectId?: string;
   readonly entraTenantId?: string;
   readonly mfaVerified: boolean;
@@ -798,6 +811,7 @@ export interface TenantConfiguration {
   displayName: string;
   hostingMode: HostingMode;
   environment: PlatformEnvironment;
+  timeZone: string;
   branding: {
     primaryDomain: string;
     accentColorHex: string;

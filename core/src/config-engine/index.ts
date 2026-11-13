@@ -34,6 +34,7 @@ import {
   createDefaultRbacConfig,
   DEFAULT_RBAC_IDENTITY_MAPPING,
   DEFAULT_RBAC_RELATIONSHIP_GRANTS,
+  isJobOnlyPermissionKey,
 } from '../domain/rbac/registry';
 import { RESERVED_UNSUPPORTED_DOCUMENT_STORE_PROVIDERS } from '../integrations/document-stores/index';
 import { assertTenantOwnsKeyVaultSecretRef } from '../tenancy/keyVaultSecrets';
@@ -284,7 +285,7 @@ export const DocumentGenerationConfigSchema = z
           .max(120)
           .default(24)
           .describe(
-            'Number of months to retain template usage events and daily summaries [x-reserved:S0-19]',
+            'Number of months to retain template usage events and daily summaries before the scheduled usage-retention-purge job removes older buckets (ADR 0030)',
           ),
         lowUseThreshold: z
           .number()
@@ -563,6 +564,21 @@ export const TenantConfigurationSchema = z
       .enum(['dev', 'test', 'training', 'demo', 'live'])
       .default('dev')
       .describe('Target deployment environment'),
+    timeZone: z
+      .string()
+      .min(1)
+      .default('Europe/London')
+      .refine((tz) => {
+        try {
+          new Intl.DateTimeFormat(undefined, { timeZone: tz });
+          return true;
+        } catch {
+          return false;
+        }
+      }, 'Invalid IANA timeZone identifier.')
+      .describe(
+        'IANA time zone identifier used by the tenant-aware scheduler to evaluate local calendar dates and run hours (ADR 0030)',
+      ),
     branding: z
       .object({
         primaryDomain: z
@@ -925,6 +941,40 @@ export const TenantConfigurationSchema = z
       })
       .strict()
       .superRefine((rbacVal, ctx) => {
+        for (const [roleKey, roleDef] of Object.entries(rbacVal.roles)) {
+          for (const perm of roleDef.permissions) {
+            if (isJobOnlyPermissionKey(perm)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['roles', roleKey, 'permissions'],
+                message: `FORBIDDEN: Permission '${perm}' is jobOnly and cannot be granted to role '${roleKey}'.`,
+              });
+            }
+          }
+        }
+        for (const [deptId, perms] of Object.entries(rbacVal.departmentGrants)) {
+          for (const perm of perms) {
+            if (isJobOnlyPermissionKey(perm)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['departmentGrants', deptId],
+                message: `FORBIDDEN: Permission '${perm}' is jobOnly and cannot be granted to department '${deptId}'.`,
+              });
+            }
+          }
+        }
+        for (let i = 0; i < rbacVal.relationshipGrants.length; i++) {
+          const relRule = rbacVal.relationshipGrants[i]!;
+          for (const perm of relRule.permissions) {
+            if (isJobOnlyPermissionKey(perm)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['relationshipGrants', i, 'permissions'],
+                message: `FORBIDDEN: Permission '${perm}' is jobOnly and cannot be granted via relationship '${relRule.relationship}'.`,
+              });
+            }
+          }
+        }
         const definedRoleKeys = new Set(Object.keys(rbacVal.roles));
         for (const [groupId, mappedRoles] of Object.entries(
           rbacVal.identityMapping.entraGroupToRoleKey,
