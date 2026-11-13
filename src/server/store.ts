@@ -18,7 +18,6 @@ import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { computeAutomaticPmsLinks } from '@/domain/pms';
 import {
   resolveConfiguredFirmPrimaryDomain,
-  setRuntimeRbacConfigOverride,
 } from './rbacRuntime';
 import {
   getActiveTenantConfiguration,
@@ -992,7 +991,6 @@ export function getStore(): FirmStore {
       if (migrated) {
         saveStore(parsed);
       }
-      setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
       global.__oneSquaredStore = parsed;
       try {
         const currentPath = resolveReadableStorePath();
@@ -1028,6 +1026,7 @@ export function getStore(): FirmStore {
       if (!Array.isArray(parsed.people)) parsed.people = [];
       if (!Array.isArray(parsed.links)) parsed.links = [];
       if (!Array.isArray(parsed.matters)) parsed.matters = [];
+      if (!Array.isArray(parsed.teams)) parsed.teams = [];
       if (!Array.isArray(parsed.tasks)) parsed.tasks = [];
       if (!Array.isArray(parsed.enquiries)) parsed.enquiries = [];
       if (!Array.isArray(parsed.quotes)) parsed.quotes = [];
@@ -1036,6 +1035,12 @@ export function getStore(): FirmStore {
       if (!parsed.recentlyViewed || typeof parsed.recentlyViewed !== 'object') {
         parsed.recentlyViewed = {};
       }
+      if (
+        !parsed.employeeSensitiveRecords ||
+        typeof parsed.employeeSensitiveRecords !== 'object'
+      ) {
+        parsed.employeeSensitiveRecords = {};
+      }
       if (!Array.isArray(parsed.notes)) parsed.notes = [];
       if (!Array.isArray(parsed.audit)) parsed.audit = [];
       if (!Array.isArray(parsed.mergeHistory)) parsed.mergeHistory = [];
@@ -1043,7 +1048,6 @@ export function getStore(): FirmStore {
       if (!Array.isArray(parsed.keyDateNotApplicable)) parsed.keyDateNotApplicable = [];
       if (!Array.isArray(parsed.keyDateReminderStates)) parsed.keyDateReminderStates = [];
       if (!Array.isArray(parsed.keyDateCalendarSyncs)) parsed.keyDateCalendarSyncs = [];
-      setRuntimeRbacConfigOverride(parsed.rbacConfigOverride);
       global.__oneSquaredStore = parsed;
       return global.__oneSquaredStore;
     } catch {
@@ -1086,6 +1090,10 @@ const MOVED_TO_POSTGRES_STORE_KEYS: ReadonlySet<string> = new Set([
   'notifications',
   'signOffs',
   'recentlyViewed',
+  'teams',
+  'employeeSensitiveRecords',
+  'employeeMigrationReport',
+  'rbacConfigOverride',
 ]);
 
 function serializeUnmigratedStoreForPersistence(
@@ -1103,7 +1111,6 @@ function serializeUnmigratedStoreForPersistence(
 
 export function saveStore(store: FirmStore): void {
   global.__oneSquaredStore = store;
-  setRuntimeRbacConfigOverride(store.rbacConfigOverride);
   if (
     (process.env.VITEST || process.env.NODE_ENV === 'test') &&
     !process.env.ONESQUARED_RUNTIME_STORE_PATH

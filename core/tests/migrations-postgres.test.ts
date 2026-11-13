@@ -183,7 +183,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    // Round-trip rollback 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
     expect(await runner.getActiveTables(ctx)).toEqual(
       expect.arrayContaining([
         'people',
@@ -204,8 +204,20 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'notifications',
         'sign_offs',
         'recently_viewed',
+        'teams',
+        'employee_employment_records',
+        'employee_sensitive_records',
+        'employee_migration_reports',
+        'tenant_rbac_configs',
       ]),
     );
+    expect(await runner.rollbackVersion(ctx, '0011')).toBe(true);
+    const activeAfter0011Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0011Rollback).not.toContain('teams');
+    expect(activeAfter0011Rollback).not.toContain('employee_employment_records');
+    expect(activeAfter0011Rollback).not.toContain('employee_sensitive_records');
+    expect(activeAfter0011Rollback).not.toContain('employee_migration_reports');
+    expect(activeAfter0011Rollback).not.toContain('tenant_rbac_configs');
     expect(await runner.rollbackVersion(ctx, '0010')).toBe(true);
     const activeAfter0010Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0010Rollback).not.toContain('enquiries');
@@ -267,6 +279,11 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'notifications',
         'sign_offs',
         'recently_viewed',
+        'teams',
+        'employee_employment_records',
+        'employee_sensitive_records',
+        'employee_migration_reports',
+        'tenant_rbac_configs',
       ]),
     );
   });

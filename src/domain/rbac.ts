@@ -211,6 +211,7 @@ export interface ActiveActorTokenSession {
   mfaVerified?: boolean;
   expiresAtMs: number;
   verifiedSession?: unknown;
+  effectiveRbacConfig?: RbacConfiguration;
 }
 
 type AsyncLocalStorageLike<T> = {

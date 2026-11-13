@@ -1346,6 +1346,101 @@ DROP SEQUENCE IF EXISTS tenant_enquiry_id_seq;
 `.trim(),
 };
 
+export const HR_TEAMS_AND_RBAC_MIGRATION_0011: TenantMigrationDefinition = {
+  version: '0011',
+  name: '0011_hr_teams_and_rbac_expand',
+  description:
+    'Creates tenant-scoped tables and sequences for teams, employee_employment_records (ON DELETE RESTRICT), employee_sensitive_records (ON DELETE RESTRICT), employee_migration_reports, and tenant_rbac_configs (S0-17b).',
+  dependsOn: ['0010'],
+  tablesChanged: [
+    'teams',
+    'employee_employment_records',
+    'employee_sensitive_records',
+    'employee_migration_reports',
+    'tenant_rbac_configs',
+  ],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS tenant_team_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS teams (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_id TEXT NULL,
+  updated_by_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  member_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  lead_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  practice_area_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_teams_tenant_active
+  ON teams (tenant_id, active);
+
+CREATE TABLE IF NOT EXISTS employee_employment_records (
+  tenant_id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  employment_status TEXT NULL,
+  worker_type TEXT NULL,
+  start_date TEXT NULL,
+  leaving_date TEXT NULL,
+  notice_end_date TEXT NULL,
+  hr_retention_until TEXT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  employment_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, person_id),
+  FOREIGN KEY (tenant_id, person_id) REFERENCES people (tenant_id, id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_emp_records_tenant_status
+  ON employee_employment_records (tenant_id, employment_status);
+
+CREATE TABLE IF NOT EXISTS employee_sensitive_records (
+  tenant_id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by_id TEXT NULL,
+  payroll_json JSONB NULL,
+  sensitive_hr_json JSONB NULL,
+  PRIMARY KEY (tenant_id, person_id),
+  FOREIGN KEY (tenant_id, person_id) REFERENCES people (tenant_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS employee_migration_reports (
+  tenant_id TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  report_json JSONB NULL,
+  PRIMARY KEY (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS tenant_rbac_configs (
+  tenant_id TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by_id TEXT NULL,
+  rbac_override_json JSONB NULL,
+  PRIMARY KEY (tenant_id)
+);
+`.trim(),
+  downSql: `
+DROP TABLE IF EXISTS tenant_rbac_configs;
+DROP TABLE IF EXISTS employee_migration_reports;
+DROP TABLE IF EXISTS employee_sensitive_records;
+
+DROP INDEX IF EXISTS idx_emp_records_tenant_status;
+DROP TABLE IF EXISTS employee_employment_records;
+
+DROP INDEX IF EXISTS idx_teams_tenant_active;
+DROP TABLE IF EXISTS teams;
+
+DROP SEQUENCE IF EXISTS tenant_team_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -1357,6 +1452,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   NON_LIVE_AUDIT_RESET_MIGRATION_0008,
   PARTIES_AND_MATTERS_MIGRATION_0009,
   INTAKE_QUOTES_TASKS_MIGRATION_0010,
+  HR_TEAMS_AND_RBAC_MIGRATION_0011,
 ];
 
 export function validateMigrationCatalogueOrder(

@@ -15,7 +15,6 @@
  *   any other operation's records untouched.
  *
  * Retirement schedule:
- * - @remove-in S0-17b: Employment, Sensitive/Payroll HR records, Teams, RBAC overrides
  * - @remove-in S0-17c: Firm settings, Choice Lists/Values, Custom Fields, Org Structure, Party Taxonomy, Home/Costs configs
  * - @remove-in S0-18: PMS Links (`pmsLinks`)
  * - Deleted completely in `S0-20` alongside `src/server/store.ts` and `src/server/storeLock.ts`.
@@ -23,6 +22,7 @@
 
 import {
   TenantAuditRepository,
+  TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantPartyRepository,
@@ -32,9 +32,10 @@ import {
   type TenantContext,
 } from '@platform/core';
 import { getActiveActorSession } from '@/domain/rbac';
-import type { AuditEntry, EmployeeSensitiveRecord } from '@/domain/types';
+import type { AuditEntry } from '@/domain/types';
 import {
   getActiveTenantConfiguration,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
@@ -105,10 +106,12 @@ export function setAuditRepositoryOverrideForTesting(
 }
 
 export {
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
   getTaskWorkflowRepository,
+  TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantPartyRepository,
@@ -117,7 +120,7 @@ export {
 
 /**
  * Keys on `FirmStore` that have already moved to PostgreSQL (or are monotonic sequence counters)
- * and are therefore excluded from JSON store delta compensation (`R442`, `R469`).
+ * and are therefore excluded from JSON store delta compensation (`R442`, `R468`, `R469`).
  */
 export type MovedToPostgresKeys =
   | 'audit'
@@ -148,7 +151,11 @@ export type MovedToPostgresKeys =
   | 'quotes'
   | 'notifications'
   | 'signOffs'
-  | 'recentlyViewed';
+  | 'recentlyViewed'
+  | 'teams'
+  | 'employeeSensitiveRecords'
+  | 'employeeMigrationReport'
+  | 'rbacConfigOverride';
 
 export type TrackedFirmStoreKeys = Exclude<keyof FirmStore, MovedToPostgresKeys>;
 
@@ -159,16 +166,13 @@ const ID_KEYED_ARRAY_COLLECTIONS = [
   { name: 'lists', keyField: 'key' },
   { name: 'values', keyField: 'id' },
   { name: 'customFields', keyField: 'id' },
-  { name: 'teams', keyField: 'id' },
   { name: 'pmsLinks', keyField: 'id' },
 ] as const;
 
 /**
  * Unmoved per-key map properties on `FirmStore` tracked per entry (`R442`).
  */
-const PER_KEY_MAP_KEYS = [
-  'employeeSensitiveRecords',
-] as const;
+const PER_KEY_MAP_KEYS = [] as const;
 
 /**
  * Unmoved scalar / configuration properties on `FirmStore` tracked individually (`R442`).
@@ -183,9 +187,7 @@ const SCALAR_CONFIG_KEYS = [
   'orgStructure',
   'matterPartyTaxonomy',
   'matterPartyMigrationReport',
-  'employeeMigrationReport',
   'matterCostsConfig',
-  'rbacConfigOverride',
   'documentGenerationConfigOverride',
   'documentStoreConfigOverride',
 ] as const;
@@ -214,7 +216,6 @@ interface CapturedItemEntry {
 
 export interface JsonStoreBaseline {
   readonly arraysByCollection: Map<string, Map<string, CapturedItemEntry>>;
-  readonly employeeSensitiveByPerson: Map<string, string>;
   readonly countersByPrefix: Map<string, number>;
   readonly scalarConfigsByKey: Map<string, { hadKey: boolean; json: string }>;
 }
@@ -236,16 +237,6 @@ export function captureJsonStoreBaseline(store: FirmStore): JsonStoreBaseline {
       }
     }
     arraysByCollection.set(spec.name, itemMap);
-  }
-
-  const employeeSensitiveByPerson = new Map<string, string>();
-  if (
-    store.employeeSensitiveRecords &&
-    typeof store.employeeSensitiveRecords === 'object'
-  ) {
-    for (const [pid, rec] of Object.entries(store.employeeSensitiveRecords)) {
-      employeeSensitiveByPerson.set(pid, JSON.stringify(rec));
-    }
   }
 
   const countersByPrefix = new Map<string, number>();
@@ -272,7 +263,6 @@ export function captureJsonStoreBaseline(store: FirmStore): JsonStoreBaseline {
 
   return {
     arraysByCollection,
-    employeeSensitiveByPerson,
     countersByPrefix,
     scalarConfigsByKey,
   };
@@ -360,24 +350,6 @@ export function registerJsonStoreRecordDeltas(
     }
   }
 
-  const sensitiveChanges: Array<{
-    personId: string;
-    beforeJson: string | null;
-  }> = [];
-  const afterSensitive = afterStore.employeeSensitiveRecords ?? {};
-  const allSensitivePersons = new Set<string>([
-    ...baseline.employeeSensitiveByPerson.keys(),
-    ...Object.keys(afterSensitive),
-  ]);
-  for (const pid of allSensitivePersons) {
-    const beforeJson = baseline.employeeSensitiveByPerson.get(pid) ?? null;
-    const hasAfter = Object.prototype.hasOwnProperty.call(afterSensitive, pid);
-    const afterJson = hasAfter ? JSON.stringify(afterSensitive[pid]) : null;
-    if (beforeJson !== afterJson) {
-      sensitiveChanges.push({ personId: pid, beforeJson });
-    }
-  }
-
   const scalarChanges: Array<{
     key: string;
     hadBefore: boolean;
@@ -396,10 +368,7 @@ export function registerJsonStoreRecordDeltas(
     }
   }
 
-  const hasAnyDelta =
-    arrayDeltas.length > 0 ||
-    sensitiveChanges.length > 0 ||
-    scalarChanges.length > 0;
+  const hasAnyDelta = arrayDeltas.length > 0 || scalarChanges.length > 0;
 
   if (!hasAnyDelta) {
     return false;
@@ -444,24 +413,6 @@ export function registerJsonStoreRecordDeltas(
           const restored = JSON.parse(del.beforeJson) as Record<string, unknown>;
           const insertAt = Math.min(Math.max(0, del.beforeIndex), arr.length);
           arr.splice(insertAt, 0, restored);
-        }
-      }
-    }
-
-    if (sensitiveChanges.length > 0) {
-      if (
-        !liveStore.employeeSensitiveRecords ||
-        typeof liveStore.employeeSensitiveRecords !== 'object'
-      ) {
-        liveStore.employeeSensitiveRecords = {};
-      }
-      for (const sc of sensitiveChanges) {
-        if (sc.beforeJson === null) {
-          delete liveStore.employeeSensitiveRecords[sc.personId];
-        } else {
-          liveStore.employeeSensitiveRecords[sc.personId] = JSON.parse(
-            sc.beforeJson,
-          ) as EmployeeSensitiveRecord;
         }
       }
     }

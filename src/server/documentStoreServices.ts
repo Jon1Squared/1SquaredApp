@@ -70,11 +70,12 @@ import {
   getActiveActorSession,
   resolvePersonPermissions,
 } from './rbacRuntime';
-import type { Matter, Organisation, Person } from '@/domain/types';
+import type { Matter, Organisation, Person, Team } from '@/domain/types';
 import {
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
+  getHrAndRbacRepository,
   getMatterRepository,
   getPartyRepository,
   isNonLiveDemoEnvironment,
@@ -215,7 +216,7 @@ export interface BuildTenantContextOptions {
 
 export async function buildTenantContextForUser(
   userId: string,
-  store: FirmStore = getStore(),
+  _store: FirmStore = getStore(),
   config: TenantConfiguration = getActiveTenantConfiguration(),
   options?: BuildTenantContextOptions,
 ): Promise<{
@@ -224,6 +225,7 @@ export async function buildTenantContextForUser(
   grantedPermissions: PermissionKey[];
   people: Person[];
   organisations: Organisation[];
+  teams: Team[];
 }> {
   const trimmedId = (userId ?? '').trim();
   if (!trimmedId) {
@@ -258,9 +260,11 @@ export async function buildTenantContextForUser(
       );
 
   const partyRepo = getPartyRepository();
-  const [people, organisations] = await Promise.all([
+  const hrRepo = getHrAndRbacRepository();
+  const [people, organisations, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(prelimCtx),
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
+    hrRepo.listAllTeams<Team>(prelimCtx),
   ]);
 
   const user = people.find(
@@ -274,10 +278,10 @@ export async function buildTenantContextForUser(
     throw err;
   }
 
-  const roles = resolveEmployeeRoles(user, store.teams);
+  const roles = resolveEmployeeRoles(user, teams);
   const resolvedPerms = resolvePersonPermissions(user, {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
 
   const grantedPermissions: PermissionKey[] =
@@ -311,6 +315,7 @@ export async function buildTenantContextForUser(
     grantedPermissions,
     people,
     organisations,
+    teams,
   };
 }
 
@@ -840,7 +845,7 @@ export async function retryMatterDocumentProvisioning(
 }> {
   const store = getStore();
   const baseCfg = getActiveTenantConfiguration();
-  const { ctx, user, grantedPermissions, people, organisations } =
+  const { ctx, user, grantedPermissions, people, organisations, teams } =
     await buildTenantContextForUser(
       userId,
       store,
@@ -856,7 +861,7 @@ export async function retryMatterDocumentProvisioning(
     throw new Error(`Matter "${matterId}" not found.`);
   }
 
-  const accessCheck = checkMatterAccessForActor(user, matter, store, config);
+  const accessCheck = checkMatterAccessForActor(user, matter, teams, config);
   const permSet = new Set(grantedPermissions);
   const canRetry =
     accessCheck.canAccess &&
@@ -921,7 +926,7 @@ export async function linkExistingMatterDocumentFolder(params: {
 }> {
   const store = getStore();
   const baseCfg = getActiveTenantConfiguration();
-  const { ctx, user, grantedPermissions, people, organisations } =
+  const { ctx, user, grantedPermissions, people, organisations, teams } =
     await buildTenantContextForUser(
       params.userId ?? '',
       store,
@@ -941,7 +946,7 @@ export async function linkExistingMatterDocumentFolder(params: {
     throw new Error(`Matter "${params.matterId}" not found.`);
   }
 
-  const accessCheck = checkMatterAccessForActor(user, matter, store, config);
+  const accessCheck = checkMatterAccessForActor(user, matter, teams, config);
   const permSet = new Set(grantedPermissions);
   const canLink =
     accessCheck.canAccess &&
@@ -1205,14 +1210,14 @@ export function syncMatterLifecycleOnSaveSync(params: {
 function checkMatterAccessForActor(
   user: Person,
   matter: Matter,
-  store: FirmStore,
+  teams: Team[],
   config: TenantConfiguration,
 ): {
   canAccess: boolean;
   isRestricted: boolean;
   isOnRestrictedAllowlist: boolean;
 } {
-  const roles = resolveEmployeeRoles(user, store.teams);
+  const roles = resolveEmployeeRoles(user, teams);
   const isRestricted = Boolean(matter.isStaffMatter || matter.hasEthicalWall);
   const allowlist = new Set(
     [
@@ -1284,7 +1289,7 @@ export async function browseMatterDocumentStoreFolder(params: {
 }> {
   const store = getStore();
   const baseCfg = getActiveTenantConfiguration();
-  const { ctx, user, grantedPermissions, people, organisations } =
+  const { ctx, user, grantedPermissions, people, organisations, teams } =
     await buildTenantContextForUser(
       params.userId ?? '',
       store,
@@ -1301,7 +1306,7 @@ export async function browseMatterDocumentStoreFolder(params: {
   }
 
   // 1. Check 1Squared RBAC + matter access FIRST before any Entra check, location read, or provisioning/seeding!
-  const accessCheck = checkMatterAccessForActor(user, matter, store, config);
+  const accessCheck = checkMatterAccessForActor(user, matter, teams, config);
   const permSet = new Set(grantedPermissions);
   const hasViewPerm = permSet.has('document:view');
   const blockedByRestricted =
@@ -1529,7 +1534,7 @@ export async function uploadMatterStoreDocument(params: {
 }): Promise<DocumentStoreItem> {
   const store = getStore();
   const baseCfg = getActiveTenantConfiguration();
-  const { ctx, user, grantedPermissions, people } =
+  const { ctx, user, grantedPermissions, people, teams } =
     await buildTenantContextForUser(
       params.userId ?? '',
       store,
@@ -1558,7 +1563,7 @@ export async function uploadMatterStoreDocument(params: {
     config.documentStores?.[0]?.sharepoint?.libraries?.[0]?.libraryId ??
     'default';
 
-  const accessCheck = checkMatterAccessForActor(user, matter, store, config);
+  const accessCheck = checkMatterAccessForActor(user, matter, teams, config);
   const provider = deps.getProvider(fallbackStoreId);
 
   return executeUserMatterDocumentOperation(
@@ -1618,7 +1623,7 @@ export async function downloadMatterStoreDocument(params: {
 }> {
   const store = getStore();
   const baseCfg = getActiveTenantConfiguration();
-  const { ctx, user, grantedPermissions, people } =
+  const { ctx, user, grantedPermissions, people, teams } =
     await buildTenantContextForUser(
       params.userId ?? '',
       store,
@@ -1647,7 +1652,7 @@ export async function downloadMatterStoreDocument(params: {
     config.documentStores?.[0]?.sharepoint?.libraries?.[0]?.libraryId ??
     'default';
 
-  const accessCheck = checkMatterAccessForActor(user, matter, store, config);
+  const accessCheck = checkMatterAccessForActor(user, matter, teams, config);
   const provider = deps.getProvider(fallbackStoreId);
 
   const dl = await executeUserMatterDocumentOperation(
@@ -1724,7 +1729,7 @@ export async function mutateMatterStoreItem(params: {
 }> {
   const store = getStore();
   const baseCfg = getActiveTenantConfiguration();
-  const { ctx, user, grantedPermissions, people } =
+  const { ctx, user, grantedPermissions, people, teams } =
     await buildTenantContextForUser(
       params.userId ?? '',
       store,
@@ -1753,7 +1758,7 @@ export async function mutateMatterStoreItem(params: {
     config.documentStores?.[0]?.sharepoint?.libraries?.[0]?.libraryId ??
     'default';
 
-  const accessCheck = checkMatterAccessForActor(user, matter, store, config);
+  const accessCheck = checkMatterAccessForActor(user, matter, teams, config);
   const provider = deps.getProvider(fallbackStoreId);
 
   const permMap = {

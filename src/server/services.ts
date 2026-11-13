@@ -16,6 +16,7 @@ import {
   flushStagedAuditEntries,
   getActiveCompensatorOrNull,
   getAuditRepository,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
@@ -26,6 +27,7 @@ import {
   stageUnmigratedAuditEntry,
 } from './auditAdapter';
 export {
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
@@ -178,7 +180,6 @@ import {
   resolvePersonPermissions,
   resolveUserAppRole,
   runWithActiveActorSession,
-  setRuntimeRbacConfigOverride,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
   type PermissionKey,
@@ -373,6 +374,8 @@ export interface AuthenticatedActorContext {
   session: VerifiedEntraSessionPayload;
   mfaVerified: boolean;
   tenantId: string;
+  allPeople?: readonly Person[];
+  teams?: readonly Team[];
 }
 
 export async function requireAuthenticatedActor(): Promise<AuthenticatedActorContext> {
@@ -394,10 +397,11 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
     }),
     activeConfig,
   );
-  const loaded = await getPartyRepository().getPersonById<Person>(
-    authCtx,
-    entraSession.personId,
-  );
+  const [allPeople, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(authCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(authCtx),
+  ]);
+  const loaded = allPeople.find((p) => p.id === entraSession.personId) ?? null;
   const person =
     loaded && loaded.isEmployee && !loaded.mergedIntoId ? loaded : null;
   if (!person) {
@@ -416,6 +420,8 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
     session: entraSession,
     mfaVerified: Boolean(entraSession.mfaVerified),
     tenantId: resolvedTenantId,
+    allPeople,
+    teams,
   };
 }
 
@@ -485,9 +491,11 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   const ctx = resolveDefaultServiceTenantContext(store, actor.personId, {
     session: actor.session,
   });
-  const [people, matters] = await Promise.all([
+  const [people, matters, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
   const targetPerson = people.find(
     (p) => p.id === targetUserId && p.isEmployee && !p.mergedIntoId,
@@ -505,14 +513,16 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   const actorPerson = people.find((p) => p.id === actor.personId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actorPerson, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     mfaVerified: actor.mfaVerified,
     tokenRoles: actor.session.mappedRoles,
+    config: { rbac: rbacConfig },
   });
   const targetPerms = resolvePersonPermissionSet(targetPerson, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     mfaVerified: true,
+    config: { rbac: rbacConfig },
   });
   const missingPerm = targetPerms.permissionList.find(
     (perm) => !actorPerms.permissions.has(perm),
@@ -537,12 +547,14 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
       ) &&
       canPersonAccessMatter(m, targetPerson.id, targetPerson, {
         allPeople: people,
-        teams: store.teams,
+        teams,
+        config: { rbac: rbacConfig },
       }) &&
       !canPersonAccessMatter(m, actor.personId, actorPerson, {
         allPeople: people,
-        teams: store.teams,
+        teams,
         tokenRoles: actor.session.mappedRoles,
+        config: { rbac: rbacConfig },
       }),
   );
   if (restrictedMatterWithTargetAccess) {
@@ -563,7 +575,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     personId: targetPerson.id,
     email: targetPerson.emails?.[0]?.address ?? actor.session.email,
     displayName: personDisplayName(targetPerson),
-    mappedRoles: resolveEmployeeRoles(targetPerson, store.teams),
+    mappedRoles: resolveEmployeeRoles(targetPerson, teams),
     authenticatedAt: new Date(now).toISOString(),
     expiresAt: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
   };
@@ -720,6 +732,25 @@ function resolveDefaultServiceTenantContext(
  * Takes `SELECT ... FOR UPDATE` on the affected matter rows and reads `people` and `teams` inside the same
  * transaction so stale pre-transaction reads or read-only paths can never overwrite access lists.
  */
+async function loadEffectiveTenantRbacConfig(
+  ctx: TenantContext,
+  preloadedOverride?: Partial<RbacConfiguration> | null,
+): Promise<RbacConfiguration> {
+  const base = getDefaultTenantRbacConfig(ctx.tenantId);
+  const override =
+    preloadedOverride !== undefined
+      ? preloadedOverride
+      : await getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(
+          ctx,
+        );
+  const effective = override ? mergeRbacConfigOverlay(base, override) : base;
+  const activeSession = getActiveActorSession();
+  if (activeSession && activeSession.tenantId === ctx.tenantId) {
+    activeSession.effectiveRbacConfig = effective;
+  }
+  return effective;
+}
+
 async function syncAffectedMattersRestrictionsInTx(
   ctx: TenantContext,
   options: {
@@ -746,10 +777,18 @@ async function syncAffectedMattersRestrictionsInTx(
     return;
   }
   const txPeople = await getPartyRepository().listAllPeople<Person>(ctx);
-  const txTeams = getStore().teams;
+  const txTeams = await getHrAndRbacRepository().listAllTeams<Team>(ctx);
+  const txRbacOverride =
+    options.rbacConfig !== undefined
+      ? options.rbacConfig
+      : await getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx);
   const baseTenantConfig = getActiveTenantConfiguration();
-  const effectiveRbac =
-    options.rbacConfig ?? getDefaultTenantRbacConfig(ctx.tenantId);
+  const effectiveRbac = txRbacOverride
+    ? mergeRbacConfigOverlay(
+        getDefaultTenantRbacConfig(ctx.tenantId),
+        txRbacOverride,
+      )
+    : getDefaultTenantRbacConfig(ctx.tenantId);
   const effectiveTenantConfig = { ...baseTenantConfig, rbac: effectiveRbac };
   for (const m of lockedMatters) {
     const meta = computeMatterRestrictionMetadataForStore(
@@ -787,10 +826,18 @@ async function putMatterWithInTxRestrictions(
     matterIds: [matter.id],
   });
   const txPeople = await getPartyRepository().listAllPeople<Person>(ctx);
-  const txTeams = getStore().teams;
+  const txTeams = await getHrAndRbacRepository().listAllTeams<Team>(ctx);
+  const txRbacOverride =
+    options.rbacConfig !== undefined
+      ? options.rbacConfig
+      : await getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx);
   const baseTenantConfig = getActiveTenantConfiguration();
-  const effectiveRbac =
-    options.rbacConfig ?? getDefaultTenantRbacConfig(ctx.tenantId);
+  const effectiveRbac = txRbacOverride
+    ? mergeRbacConfigOverlay(
+        getDefaultTenantRbacConfig(ctx.tenantId),
+        txRbacOverride,
+      )
+    : getDefaultTenantRbacConfig(ctx.tenantId);
   const effectiveTenantConfig = { ...baseTenantConfig, rbac: effectiveRbac };
   const meta = computeMatterRestrictionMetadataForStore(
     matter,
@@ -864,12 +911,14 @@ export async function listAuditEntriesForRecord(
   } catch {
     return [];
   }
-  const [people, matters, enquiries, quotes, tasks] = await Promise.all([
+  const [people, matters, enquiries, quotes, tasks, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
     getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
     getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
   const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
@@ -877,32 +926,35 @@ export async function listAuditEntriesForRecord(
   if (!viewer) {
     return [];
   }
-  const store = getStore();
   const activeSession = getActiveActorSession();
   const effectiveTokenRoles =
     options?.tokenRoles ??
     (activeSession?.personId === viewer.id ? activeSession.tokenRoles : undefined);
 
-  const prelimVisibility = buildRecordVisibility(store, viewer, {
+  const prelimVisibility = buildRecordVisibility({ teams }, viewer, {
+    teams,
     people,
     matters,
     enquiries,
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const hiddenMatterKeyDateIds =
     await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
       ctx,
       prelimVisibility.hiddenMatterIds,
     );
-  const visibility = buildRecordVisibility(store, viewer, {
+  const visibility = buildRecordVisibility({ teams }, viewer, {
+    teams,
     people,
     matters,
     enquiries,
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
+    rbacConfig,
   });
 
   if (recordType === 'matter') {
@@ -937,11 +989,11 @@ export async function listAuditEntriesForRecord(
       return [];
     }
   } else if (recordType === 'employee_payroll') {
-    if (!hasEmployeePermission(viewer, 'employee:payroll', people, store.teams)) {
+    if (!hasEmployeePermission(viewer, 'employee:payroll', people, teams, { config: { rbac: rbacConfig } })) {
       return [];
     }
   } else if (recordType === 'employee_sensitive') {
-    if (!hasEmployeePermission(viewer, 'employee:sensitive', people, store.teams)) {
+    if (!hasEmployeePermission(viewer, 'employee:sensitive', people, teams, { config: { rbac: rbacConfig } })) {
       return [];
     }
   }
@@ -983,14 +1035,15 @@ export async function listFirmAuditEntriesPage(
       nextBeforeSeq: null,
     };
   }
-  const [people, matters, enquiries, quotes, tasks] = await Promise.all([
+  const [people, matters, enquiries, quotes, tasks, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
     getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
     getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
-  const store = getStore();
   const viewer = people.find(
     (p) => p.id === viewerId && !p.mergedIntoId,
   );
@@ -1004,8 +1057,9 @@ export async function listFirmAuditEntriesPage(
     !viewer ||
     !hasPersonPermission(viewer, 'admin:access', {
       allPeople: people,
-      teams: store.teams,
+      teams,
       tokenRoles: effectiveTokenRoles,
+      config: { rbac: rbacConfig },
     })
   ) {
     return {
@@ -1018,26 +1072,30 @@ export async function listFirmAuditEntriesPage(
     };
   }
 
-  const prelimVisibility = buildRecordVisibility(store, viewer, {
+  const prelimVisibility = buildRecordVisibility({ teams }, viewer, {
+    teams,
     people,
     matters,
     enquiries,
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const hiddenMatterKeyDateIds =
     await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
       ctx,
       prelimVisibility.hiddenMatterIds,
     );
-  const visibility = buildRecordVisibility(store, viewer, {
+  const visibility = buildRecordVisibility({ teams }, viewer, {
+    teams,
     people,
     matters,
     enquiries,
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
+    rbacConfig,
   });
   const hiddenTaskIds = new Set(
     tasks.filter((t) => !visibility.canViewTask(t)).map((t) => t.id),
@@ -1046,13 +1104,15 @@ export async function listFirmAuditEntriesPage(
     viewer,
     'employee:payroll',
     people,
-    store.teams,
+    teams,
+    { config: { rbac: rbacConfig } },
   );
   const canSensitive = hasEmployeePermission(
     viewer,
     'employee:sensitive',
     people,
-    store.teams,
+    teams,
+    { config: { rbac: rbacConfig } },
   );
 
   const isVisibleAuditRow = (a: FirmAuditEntryRecord): boolean => {
@@ -1180,6 +1240,7 @@ async function getAppSnapshotInScope(
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
+  const hrRepo = getHrAndRbacRepository();
   const [
     people,
     organisations,
@@ -1203,6 +1264,17 @@ async function getAppSnapshotInScope(
     taskRepo.listAllTasksUnfiltered<Task>(snapshotTenantCtx),
     taskRepo.listAllSignOffsUnfiltered<SignOffItem>(snapshotTenantCtx),
   ]);
+  const [teams, dbEmployeeMigrationReport, dbRbacOverride] = await Promise.all([
+    hrRepo.listAllTeams<Team>(snapshotTenantCtx),
+    hrRepo.getEmployeeMigrationReport<
+      import('@/domain/types').EmployeeMigrationReport
+    >(snapshotTenantCtx),
+    hrRepo.getRbacConfigOverride<RbacConfiguration>(snapshotTenantCtx),
+  ]);
+  const rbacConfig = await loadEffectiveTenantRbacConfig(
+    snapshotTenantCtx,
+    dbRbacOverride,
+  );
   const user = people.find(
     (p) => p.id === userId && !p.mergedIntoId,
   );
@@ -1216,22 +1288,25 @@ async function getAppSnapshotInScope(
     });
   }
   const employees = activeEmployees(people, store.values);
-  const currentUserRole = resolveUserAppRole(user, store.teams, store.values);
+  const currentUserRole = resolveUserAppRole(user, teams, store.values, {
+    config: { rbac: rbacConfig },
+  });
   const currentUserEmployeePermissions = resolveEmployeePermissions(
     user,
     people,
-    store.teams,
+    teams,
+    { config: { rbac: rbacConfig } },
   );
   const activeSession = getActiveActorSession();
   const effectiveTokenRoles =
     options?.tokenRoles ??
-    (activeSession?.personId === user.id ? activeSession.tokenRoles : undefined);
+    (activeSession?.personId === user.id ? activeSession?.tokenRoles : undefined);
   const currentUserPermissions = resolvePersonPermissions(user, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     tokenRoles: effectiveTokenRoles,
+    config: { rbac: rbacConfig },
   });
-  const rbacConfig = getDefaultTenantRbacConfig();
   const orgStructure =
     store.orgStructure ??
     buildDefaultOrgStructure({
@@ -1247,8 +1322,9 @@ async function getAppSnapshotInScope(
         p.employment,
         user,
         people,
-        store.teams,
+        teams,
         orgStructure,
+        { config: { rbac: rbacConfig } },
       ),
     };
   });
@@ -1259,25 +1335,29 @@ async function getAppSnapshotInScope(
   const keyDateRepo = getKeyDateRepository();
 
   // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
-  const prelimVisibility = buildRecordVisibility(store, user, {
+  const prelimVisibility = buildRecordVisibility({ teams }, user, {
+    teams,
     people,
     matters,
     enquiries,
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
     snapshotTenantCtx,
     prelimVisibility.hiddenMatterIds,
   );
-  const visibility = buildRecordVisibility(store, user, {
+  const visibility = buildRecordVisibility({ teams }, user, {
+    teams,
     people,
     matters,
     enquiries,
     quotes,
     tokenRoles: effectiveTokenRoles,
     hiddenMatterKeyDateIds,
+    rbacConfig,
   });
   const visibleMatters: Matter[] = matters.filter(visibility.canViewMatter);
   const hiddenMatterIds = visibility.hiddenMatterIds;
@@ -1358,15 +1438,18 @@ async function getAppSnapshotInScope(
       demoMode: isDemoModeEnabled(),
     },
   };
-  const currentUserRoles = resolveEmployeeRoles(user, store.teams);
-  const activeViewingRole = resolveActiveViewingRole(user, homePagesConfig, store.teams);
+  const currentUserRoles = resolveEmployeeRoles(user, teams);
+  const activeViewingRole = resolveActiveViewingRole(user, homePagesConfig, teams);
   const keyDatesConfig = await getKeyDatesConfig({ ctx: snapshotTenantCtx, userId: user.id });
   const currentUserKeyDatePermissions = resolveKeyDatePermissions(user, {
     config: keyDatesConfig,
     allPeople: people,
-    teams: store.teams,
+    teams,
+    rbac: { config: { rbac: rbacConfig } },
   });
-  const baseRail = getLeftRailVisibility(activeViewingRole, currentUserRoles);
+  const baseRail = getLeftRailVisibility(activeViewingRole, currentUserRoles, {
+    config: { rbac: rbacConfig },
+  });
   const leftRailVisibility = {
     ...baseRail,
     keyDates:
@@ -1377,10 +1460,10 @@ async function getAppSnapshotInScope(
 
   // Data-layer filtering of key dates from TenantKeyDateRepository for restricted matters & team scoping (R32, R37, S0-15):
   const permittedDiaryTeamIds = new Set(
-    resolvePermittedDiaryTeamIds(user, undefined, store.teams, {
+    resolvePermittedDiaryTeamIds(user, undefined, teams, {
       config: keyDatesConfig,
       allPeople: people,
-      teams: store.teams,
+      teams,
     }),
   );
   const matterByIdForKd = new Map(matters.map((m) => [m.id, m]));
@@ -1465,14 +1548,14 @@ async function getAppSnapshotInScope(
     visibleMatters,
     visibleEnquiries,
     visibleTasks,
-    store.teams,
+    teams,
     resolvedFirmName,
   );
   const attention = attentionList([...people, ...organisations], store.values, now, {
     userId: effectiveWorkPerson.id,
     tasks: visibleTasks,
     enquiries: visibleEnquiries,
-    teams: store.teams,
+    teams,
     matters: visibleMatters,
     pmsSummaryByMatterId: pmsSummaryByMatterIdForAttention,
     canViewFinance: finance.canViewMatter,
@@ -1572,7 +1655,7 @@ async function getAppSnapshotInScope(
     canTakeByTaskId[t.id] = canUserTakeTask(
       user.id,
       t,
-      store.teams,
+      teams,
       people,
       store.values,
       currentUserPermissions,
@@ -1587,7 +1670,7 @@ async function getAppSnapshotInScope(
     canVerifyByKeyDateId[kd.id] = canUserVerifyKeyDate(user, kd, {
       config: keyDatesConfig,
       allPeople: people,
-      teams: store.teams,
+      teams,
     });
   }
 
@@ -1598,7 +1681,7 @@ async function getAppSnapshotInScope(
       canUserReopenEnquiry(
         user.id,
         eq,
-        store.teams,
+        teams,
         people,
         store.values,
       );
@@ -1611,13 +1694,15 @@ async function getAppSnapshotInScope(
     if (!emp.isEmployee || emp.mergedIntoId) continue;
     appRoleByPersonId[emp.id] = resolveUserAppRole(
       emp,
-      store.teams,
+      teams,
       store.values,
+      { config: { rbac: rbacConfig } },
     );
-    rolesByPersonId[emp.id] = resolveEmployeeRoles(emp, store.teams);
+    rolesByPersonId[emp.id] = resolveEmployeeRoles(emp, teams);
     permissionsByPersonId[emp.id] = resolvePersonPermissions(emp, {
       allPeople: people,
-      teams: store.teams,
+      teams,
+      config: { rbac: rbacConfig },
     });
   }
 
@@ -1688,7 +1773,7 @@ async function getAppSnapshotInScope(
     matterPartyTaxonomy: store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values),
     matterPartyMigrationReport: store.matterPartyMigrationReport,
     employeeSensitiveRecords,
-    employeeMigrationReport: store.employeeMigrationReport,
+    employeeMigrationReport: dbEmployeeMigrationReport ?? undefined,
     leaverOwnedRecords,
     activeViewingRole,
     leftRailVisibility,
@@ -1704,7 +1789,7 @@ async function getAppSnapshotInScope(
     organisations,
     links: visibleLinks,
     matters: visibleMatters,
-    teams: store.teams,
+    teams,
     tasks: visibleTasks,
     enquiries: visibleEnquiries,
     quotes: visibleQuotes,
@@ -1740,7 +1825,11 @@ export async function recordRecentlyViewed(userId: string, recordId: string): Pr
 export async function getEmployeeDetailsForUser(
   personId: string,
   byId: string,
-  opts: { logViewPayroll?: boolean; logViewSensitive?: boolean } = {},
+  opts: {
+    logViewPayroll?: boolean;
+    logViewSensitive?: boolean;
+    beforeCommitHook?: () => Promise<void> | void;
+  } = {},
 ): Promise<{
   employment: EmploymentRecord | null;
   sensitive: EmployeeSensitiveRecord | null;
@@ -1749,43 +1838,100 @@ export async function getEmployeeDetailsForUser(
 }> {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const hrRepo = getHrAndRbacRepository();
+  const [people, teams, rbacConfig] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    hrRepo.listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
   const user = people.find((p) => p.id === byId) ?? null;
   const person = people.find((p) => p.id === personId) ?? null;
-  const perms = resolveEmployeePermissions(user, people, store.teams);
+  const perms = resolveEmployeePermissions(user, people, teams, {
+    config: { rbac: rbacConfig },
+  });
   const errors: Record<string, string> = {};
 
   if (!person) {
     return { employment: null, sensitive: null, permissions: perms, errors: { notFound: 'Person not found.' } };
   }
 
-  if (opts.logViewPayroll) {
-    const payrollLogRes = await logEmployeeRestrictedAccess(personId, 'payroll', byId);
-    if (!payrollLogRes.auditEntry) {
-      errors.payrollPermission = 'You do not have permission to view payroll details.';
-    }
-  }
-
   let sensitiveAuditWritten = false;
-  if (opts.logViewSensitive) {
-    const sensitiveLogRes = await logEmployeeRestrictedAccess(personId, 'sensitive', byId);
-    if (!sensitiveLogRes.auditEntry) {
-      errors.sensitivePermission = 'You do not have permission to view sensitive employee information.';
-    } else {
-      sensitiveAuditWritten = true;
+  let rawEmployment: EmploymentRecord | null = person.employment ?? null;
+  let rawSensitive: EmployeeSensitiveRecord | null = null;
+
+  await hrRepo.withTenantTransaction(ctx, async () => {
+    const dbEmp = await hrRepo.getEmploymentRecord<EmploymentRecord>(
+      ctx,
+      personId,
+    );
+    const dbSens = await hrRepo.getSensitiveRecord<EmployeeSensitiveRecord>(
+      ctx,
+      personId,
+    );
+    if (dbEmp !== null) {
+      rawEmployment = dbEmp;
     }
-  }
+    if (dbSens !== null) {
+      rawSensitive = dbSens;
+    }
+
+    const auditInputs: FirmAuditEntryInput[] = [];
+    const nowIso = new Date().toISOString();
+
+    if (opts.logViewPayroll) {
+      if (!hasEmployeePermission(user, 'employee:payroll', people, teams, { config: { rbac: rbacConfig } })) {
+        errors.payrollPermission = 'You do not have permission to view payroll details.';
+      } else {
+        auditInputs.push({
+          recordType: 'employee_payroll',
+          recordId: personId,
+          action: 'view-payroll',
+          field: 'Payroll & benefits',
+          oldValue: null,
+          newValue: `Viewed by ${user ? personDisplayName(user) : byId}`,
+          byId,
+          at: nowIso,
+        });
+      }
+    }
+
+    if (opts.logViewSensitive) {
+      if (!hasEmployeePermission(user, 'employee:sensitive', people, teams, { config: { rbac: rbacConfig } })) {
+        errors.sensitivePermission = 'You do not have permission to view sensitive employee information.';
+      } else {
+        auditInputs.push({
+          recordType: 'employee_sensitive',
+          recordId: personId,
+          action: 'view-sensitive',
+          field: 'Sensitive information',
+          oldValue: null,
+          newValue: `Viewed by ${user ? personDisplayName(user) : byId}`,
+          byId,
+          at: nowIso,
+        });
+        sensitiveAuditWritten = true;
+      }
+    }
+
+    if (auditInputs.length > 0) {
+      await hrRepo.appendHrAuditEntriesInTx(ctx, auditInputs);
+    }
+    if (opts.beforeCommitHook) {
+      await opts.beforeCommitHook();
+    }
+  });
 
   const employment = filterEmploymentForUser(
-    person.employment,
+    rawEmployment ?? undefined,
     user,
     people,
-    store.teams,
+    teams,
     store.orgStructure,
+    { config: { rbac: rbacConfig } },
   );
-  // R103 & R130: Only return sensitive HR records when logViewSensitive: true and logEmployeeRestrictedAccess succeeded
+  // R103 & R130: Only return sensitive HR records when logViewSensitive: true and audit write succeeded in the same transaction
   const sensitive = sensitiveAuditWritten
-    ? structuredClone(store.employeeSensitiveRecords?.[personId] ?? null)
+    ? structuredClone(rawSensitive ?? null)
     : null;
 
   return {
@@ -1797,7 +1943,8 @@ export async function getEmployeeDetailsForUser(
 }
 
 /**
- * Logs every view of payroll and sensitive fields with user and timestamp to PostgreSQL audit_entries.
+ * Logs every view of payroll and sensitive fields with user and timestamp to PostgreSQL audit_entries
+ * in the same transaction as the HR record read.
  */
 export async function logEmployeeRestrictedAccess(
   personId: string,
@@ -1805,29 +1952,40 @@ export async function logEmployeeRestrictedAccess(
   byId: string,
   fieldDetail?: string,
 ): Promise<{ auditEntry?: AuditEntry; error?: string }> {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const hrRepo = getHrAndRbacRepository();
+  const [people, teams, rbacConfig] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    hrRepo.listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
   const user = people.find((p) => p.id === byId) ?? null;
   const requiredPerm: EmployeePermission =
     section === 'payroll' ? 'employee:payroll' : 'employee:sensitive';
 
-  if (!hasEmployeePermission(user, requiredPerm, people, store.teams)) {
+  if (!hasEmployeePermission(user, requiredPerm, people, teams, { config: { rbac: rbacConfig } })) {
     return { error: `Permission denied: ${requiredPerm} is required.` };
   }
 
-  const persisted = await appendUnmigratedModuleAuditEntries(ctx, [
-    {
-      recordType: section === 'payroll' ? 'employee_payroll' : 'employee_sensitive',
-      recordId: personId,
-      action: section === 'payroll' ? 'view-payroll' : 'view-sensitive',
-      field: fieldDetail ?? (section === 'payroll' ? 'Payroll & benefits' : 'Sensitive information'),
-      oldValue: null,
-      newValue: `Viewed by ${user ? personDisplayName(user) : byId}`,
-      byId,
-      at: new Date().toISOString(),
-    },
-  ]);
+  const persisted = await hrRepo.withTenantTransaction(ctx, async () => {
+    if (section === 'payroll') {
+      await hrRepo.getEmploymentRecord(ctx, personId);
+    } else {
+      await hrRepo.getSensitiveRecord(ctx, personId);
+    }
+    return hrRepo.appendHrAuditEntriesInTx(ctx, [
+      {
+        recordType: section === 'payroll' ? 'employee_payroll' : 'employee_sensitive',
+        recordId: personId,
+        action: section === 'payroll' ? 'view-payroll' : 'view-sensitive',
+        field: fieldDetail ?? (section === 'payroll' ? 'Payroll & benefits' : 'Sensitive information'),
+        oldValue: null,
+        newValue: `Viewed by ${user ? personDisplayName(user) : byId}`,
+        byId,
+        at: new Date().toISOString(),
+      },
+    ]);
+  });
   return { auditEntry: mapFirmAuditRecordToAuditEntry(persisted[0]!) };
 }
 
@@ -1844,29 +2002,28 @@ export async function reassignLeaverOwnedRecords(
     previousMatter: Matter;
     store: FirmStore;
   }> = [];
-  const res = await runUnmigratedJsonMutationWithAudit<
-    { reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>
-  >({
-    label: 'reassignLeaverOwnedRecords',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async (store): Promise<{ reassignedCount: number; errors?: Record<string, string> } & Partial<ActionDenied>> => {
+  const store = getStore();
   const reassignCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [people, organisations, matters, tasks, enquiries] = await Promise.all([
+  const hrRepo = getHrAndRbacRepository();
+  const [people, organisations, matters, tasks, enquiries, teams, rbacConfig] = await Promise.all([
     partyRepo.listAllPeople<Person>(reassignCtx),
     partyRepo.listAllOrganisations<Organisation>(reassignCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(reassignCtx),
     taskRepo.listAllTasksUnfiltered<Task>(reassignCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(reassignCtx),
+    hrRepo.listAllTeams<Team>(reassignCtx),
+    loadEffectiveTenantRbacConfig(reassignCtx),
   ]);
   const now = new Date().toISOString();
   const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
+    config: { rbac: rbacConfig },
   });
   if (
     !actorPerms.permissions.has('employee:edit_core') ||
@@ -1904,253 +2061,252 @@ export async function reassignLeaverOwnedRecords(
   const fromName = personDisplayName(fromLeaver);
   const toName = personDisplayName(targetEmp);
   let count = 0;
-  const changedPeople: Array<{ person: Person; prevPerson: Person }> = [];
-  const changedOrganisations: Array<{
-    org: Organisation;
-    prevOrg: Organisation;
-  }> = [];
-  const changedMatters: Array<{ matter: Matter; prevMatter: Matter | null }> = [];
-  const changedTasks: Array<{ task: Task; prevTask: Task }> = [];
-  const changedEnquiries: Array<{ enquiry: Enquiry; prevEnquiry: Enquiry }> = [];
 
-  for (const p of people) {
-    if (p.mergedIntoId) continue;
-    const prevPerson =
-      p.relationshipOwnerId === fromLeaverId ||
-      p.recordOwnerId === fromLeaverId ||
-      p.verificationReviewerId === fromLeaverId
-        ? structuredClone(p)
-        : null;
-    const movedRoles: string[] = [];
-    if (p.relationshipOwnerId === fromLeaverId) {
-      p.relationshipOwnerId = toEmployeeId;
-      count++;
-      movedRoles.push('Relationship owner');
-    }
-    if (p.recordOwnerId === fromLeaverId) {
-      p.recordOwnerId = toEmployeeId;
-      count++;
-      movedRoles.push('Record owner');
-    }
-    if (p.verificationReviewerId === fromLeaverId) {
-      p.verificationReviewerId = toEmployeeId;
-      count++;
-      movedRoles.push('Verification reviewer');
-    }
-    if (movedRoles.length > 0 && prevPerson) {
-      p.updatedAt = now;
-      p.updatedById = byId;
-      changedPeople.push({ person: p, prevPerson });
+  await runWithAuditStagingScope(() =>
+    partyRepo.withTenantTransaction(reassignCtx, async () => {
+      const changedPeople: Array<{ person: Person; prevPerson: Person }> = [];
+      const changedOrganisations: Array<{
+        org: Organisation;
+        prevOrg: Organisation;
+      }> = [];
+      const changedMatters: Array<{ matter: Matter; prevMatter: Matter | null }> = [];
+      const changedTasks: Array<{ task: Task; prevTask: Task }> = [];
+      const changedEnquiries: Array<{ enquiry: Enquiry; prevEnquiry: Enquiry }> = [];
+
+      for (const p of people) {
+        if (p.mergedIntoId) continue;
+        const prevPerson =
+          p.relationshipOwnerId === fromLeaverId ||
+          p.recordOwnerId === fromLeaverId ||
+          p.verificationReviewerId === fromLeaverId
+            ? structuredClone(p)
+            : null;
+        const movedRoles: string[] = [];
+        if (p.relationshipOwnerId === fromLeaverId) {
+          p.relationshipOwnerId = toEmployeeId;
+          count++;
+          movedRoles.push('Relationship owner');
+        }
+        if (p.recordOwnerId === fromLeaverId) {
+          p.recordOwnerId = toEmployeeId;
+          count++;
+          movedRoles.push('Record owner');
+        }
+        if (p.verificationReviewerId === fromLeaverId) {
+          p.verificationReviewerId = toEmployeeId;
+          count++;
+          movedRoles.push('Verification reviewer');
+        }
+        if (movedRoles.length > 0 && prevPerson) {
+          p.updatedAt = now;
+          p.updatedById = byId;
+          changedPeople.push({ person: p, prevPerson });
+          writeAudit(store, {
+            recordType: 'person',
+            recordId: p.id,
+            action: 'assign',
+            field: `Leaver reassignment (${movedRoles.join(', ')})`,
+            oldValue: `${fromName} (${fromLeaverId})`,
+            newValue: `${toName} (${toEmployeeId})`,
+            byId,
+            at: now,
+          });
+        }
+      }
+
+      for (const o of organisations) {
+        if (o.mergedIntoId) continue;
+        const prevOrg =
+          o.relationshipPartnerId === fromLeaverId ||
+          o.recordOwnerId === fromLeaverId ||
+          o.reviewerId === fromLeaverId
+            ? structuredClone(o)
+            : null;
+        const movedRoles: string[] = [];
+        if (o.relationshipPartnerId === fromLeaverId) {
+          o.relationshipPartnerId = toEmployeeId;
+          count++;
+          movedRoles.push('Relationship partner');
+        }
+        if (o.recordOwnerId === fromLeaverId) {
+          o.recordOwnerId = toEmployeeId;
+          count++;
+          movedRoles.push('Record owner');
+        }
+        if (o.reviewerId === fromLeaverId) {
+          o.reviewerId = toEmployeeId;
+          count++;
+          movedRoles.push('Reviewer');
+        }
+        if (movedRoles.length > 0 && prevOrg) {
+          o.updatedAt = now;
+          o.updatedById = byId;
+          changedOrganisations.push({ org: o, prevOrg });
+          writeAudit(store, {
+            recordType: 'organisation',
+            recordId: o.id,
+            action: 'assign',
+            field: `Leaver reassignment (${movedRoles.join(', ')})`,
+            oldValue: `${fromName} (${fromLeaverId})`,
+            newValue: `${toName} (${toEmployeeId})`,
+            byId,
+            at: now,
+          });
+        }
+      }
+
+      for (const m of matters) {
+        const movedRoles: string[] = [];
+        const prevMatter =
+          m.responsiblePartnerId === fromLeaverId ||
+          m.supervisingPartnerId === fromLeaverId ||
+          m.leadFeeEarnerId === fromLeaverId
+            ? structuredClone(m)
+            : null;
+
+        if (m.responsiblePartnerId === fromLeaverId) {
+          m.responsiblePartnerId = toEmployeeId;
+          count++;
+          movedRoles.push('Responsible partner');
+        }
+        if (m.supervisingPartnerId === fromLeaverId) {
+          m.supervisingPartnerId = toEmployeeId;
+          count++;
+          movedRoles.push('Supervising partner');
+        }
+        if (m.leadFeeEarnerId === fromLeaverId) {
+          m.leadFeeEarnerId = toEmployeeId;
+          count++;
+          movedRoles.push('Lead fee earner');
+        }
+        if (movedRoles.length > 0) {
+          const isRestricted =
+            m.isStaffMatter ||
+            m.hasEthicalWall ||
+            (m.restrictedAccessUserIds?.length ?? 0) > 0;
+          if (isRestricted) {
+            const nextRestricted = new Set(m.restrictedAccessUserIds ?? []);
+            nextRestricted.delete(fromLeaverId);
+            nextRestricted.add(toEmployeeId);
+            m.restrictedAccessUserIds = Array.from(nextRestricted);
+          }
+          touchMatter(m, byId);
+          changedMatters.push({ matter: m, prevMatter });
+          writeAudit(store, {
+            recordType: 'matter',
+            recordId: m.id,
+            action: 'assign',
+            field: `Leaver reassignment (${movedRoles.join(', ')})`,
+            oldValue: `${fromName} (${fromLeaverId})`,
+            newValue: `${toName} (${toEmployeeId})`,
+            byId,
+            at: now,
+          });
+        }
+      }
+
+      for (const t of tasks) {
+        if (t.status === 'Done' || t.status === 'Cancelled') continue;
+        const prevTask = structuredClone(t);
+        let taskChanged = false;
+        if (t.assignedPersonId === fromLeaverId) {
+          t.assignedPersonId = toEmployeeId;
+          count++;
+          taskChanged = true;
+        }
+        if (Array.isArray(t.assignedPersonIds) && t.assignedPersonIds.includes(fromLeaverId)) {
+          t.assignedPersonIds = Array.from(
+            new Set(t.assignedPersonIds.map((id) => (id === fromLeaverId ? toEmployeeId : id))),
+          );
+          if (!taskChanged) {
+            count++;
+            taskChanged = true;
+          }
+        }
+        if (taskChanged) {
+          t.updatedAt = now;
+          t.updatedById = byId;
+          changedTasks.push({ task: t, prevTask });
+          writeAudit(store, {
+            recordType: 'task',
+            recordId: t.id,
+            action: 'assign',
+            field: 'Leaver reassignment (Assigned to)',
+            oldValue: `${fromName} (${fromLeaverId})`,
+            newValue: `${toName} (${toEmployeeId})`,
+            byId,
+            at: now,
+          });
+        }
+      }
+
+      for (const e of enquiries) {
+        if (!isEnquiryOpen(e)) continue;
+        if (e.assignedToId === fromLeaverId) {
+          const prevEnquiry = structuredClone(e);
+          e.assignedToId = toEmployeeId;
+          e.updatedAt = now;
+          e.updatedById = byId;
+          count++;
+          changedEnquiries.push({ enquiry: e, prevEnquiry });
+          writeAudit(store, {
+            recordType: 'enquiry',
+            recordId: e.id,
+            action: 'assign',
+            field: 'Leaver reassignment (Assigned to)',
+            oldValue: `${fromName} (${fromLeaverId})`,
+            newValue: `${toName} (${toEmployeeId})`,
+            byId,
+            at: now,
+          });
+        }
+      }
+
       writeAudit(store, {
         recordType: 'person',
-        recordId: p.id,
+        recordId: fromLeaverId,
         action: 'assign',
-        field: `Leaver reassignment (${movedRoles.join(', ')})`,
-        oldValue: `${fromName} (${fromLeaverId})`,
-        newValue: `${toName} (${toEmployeeId})`,
+        field: 'Leaver record reassignment',
+        oldValue: fromLeaverId,
+        newValue: `Reassigned ${count} record role(s) to ${toName} (${toEmployeeId})`,
         byId,
         at: now,
       });
-    }
-  }
 
-  for (const o of organisations) {
-    if (o.mergedIntoId) continue;
-    const prevOrg =
-      o.relationshipPartnerId === fromLeaverId ||
-      o.recordOwnerId === fromLeaverId ||
-      o.reviewerId === fromLeaverId
-        ? structuredClone(o)
-        : null;
-    const movedRoles: string[] = [];
-    if (o.relationshipPartnerId === fromLeaverId) {
-      o.relationshipPartnerId = toEmployeeId;
-      count++;
-      movedRoles.push('Relationship partner');
-    }
-    if (o.recordOwnerId === fromLeaverId) {
-      o.recordOwnerId = toEmployeeId;
-      count++;
-      movedRoles.push('Record owner');
-    }
-    if (o.reviewerId === fromLeaverId) {
-      o.reviewerId = toEmployeeId;
-      count++;
-      movedRoles.push('Reviewer');
-    }
-    if (movedRoles.length > 0 && prevOrg) {
-      o.updatedAt = now;
-      o.updatedById = byId;
-      changedOrganisations.push({ org: o, prevOrg });
-      writeAudit(store, {
-        recordType: 'organisation',
-        recordId: o.id,
-        action: 'assign',
-        field: `Leaver reassignment (${movedRoles.join(', ')})`,
-        oldValue: `${fromName} (${fromLeaverId})`,
-        newValue: `${toName} (${toEmployeeId})`,
-        byId,
-        at: now,
-      });
-    }
-  }
-
-  for (const m of matters) {
-    const movedRoles: string[] = [];
-    const prevMatter =
-      m.responsiblePartnerId === fromLeaverId ||
-      m.supervisingPartnerId === fromLeaverId ||
-      m.leadFeeEarnerId === fromLeaverId
-        ? structuredClone(m)
-        : null;
-
-    if (m.responsiblePartnerId === fromLeaverId) {
-      m.responsiblePartnerId = toEmployeeId;
-      count++;
-      movedRoles.push('Responsible partner');
-    }
-    if (m.supervisingPartnerId === fromLeaverId) {
-      m.supervisingPartnerId = toEmployeeId;
-      count++;
-      movedRoles.push('Supervising partner');
-    }
-    if (m.leadFeeEarnerId === fromLeaverId) {
-      m.leadFeeEarnerId = toEmployeeId;
-      count++;
-      movedRoles.push('Lead fee earner');
-    }
-    if (movedRoles.length > 0) {
-      const isRestricted =
-        m.isStaffMatter ||
-        m.hasEthicalWall ||
-        (m.restrictedAccessUserIds?.length ?? 0) > 0;
-      if (isRestricted) {
-        const nextRestricted = new Set(m.restrictedAccessUserIds ?? []);
-        nextRestricted.delete(fromLeaverId);
-        nextRestricted.add(toEmployeeId);
-        m.restrictedAccessUserIds = Array.from(nextRestricted);
+      for (const { person: p } of changedPeople) {
+        await partyRepo.putPerson(reassignCtx, p);
       }
-      touchMatter(m, byId);
-      changedMatters.push({ matter: m, prevMatter });
-      writeAudit(store, {
-        recordType: 'matter',
-        recordId: m.id,
-        action: 'assign',
-        field: `Leaver reassignment (${movedRoles.join(', ')})`,
-        oldValue: `${fromName} (${fromLeaverId})`,
-        newValue: `${toName} (${toEmployeeId})`,
-        byId,
-        at: now,
-      });
-    }
-  }
-
-  for (const t of tasks) {
-    if (t.status === 'Done' || t.status === 'Cancelled') continue;
-    const prevTask = structuredClone(t);
-    let taskChanged = false;
-    if (t.assignedPersonId === fromLeaverId) {
-      t.assignedPersonId = toEmployeeId;
-      count++;
-      taskChanged = true;
-    }
-    if (Array.isArray(t.assignedPersonIds) && t.assignedPersonIds.includes(fromLeaverId)) {
-      t.assignedPersonIds = Array.from(
-        new Set(t.assignedPersonIds.map((id) => (id === fromLeaverId ? toEmployeeId : id))),
-      );
-      if (!taskChanged) {
-        count++;
-        taskChanged = true;
+      for (const { org: o } of changedOrganisations) {
+        await partyRepo.putOrganisation(reassignCtx, o);
       }
-    }
-    if (taskChanged) {
-      t.updatedAt = now;
-      t.updatedById = byId;
-      changedTasks.push({ task: t, prevTask });
-      writeAudit(store, {
-        recordType: 'task',
-        recordId: t.id,
-        action: 'assign',
-        field: 'Leaver reassignment (Assigned to)',
-        oldValue: `${fromName} (${fromLeaverId})`,
-        newValue: `${toName} (${toEmployeeId})`,
-        byId,
-        at: now,
-      });
-    }
-  }
+      for (const { matter: m } of changedMatters) {
+        await putMatterWithInTxRestrictions(reassignCtx, m, {
+          expectedRowVersion: null,
+        });
+      }
+      for (const { task: t } of changedTasks) {
+        await taskRepo.putTask(reassignCtx, t);
+      }
+      for (const { enquiry: e } of changedEnquiries) {
+        await intakeRepo.putEnquiry(reassignCtx, e);
+      }
+      await flushStagedAuditEntries(reassignCtx);
 
-  for (const e of enquiries) {
-    if (!isEnquiryOpen(e)) continue;
-    if (e.assignedToId === fromLeaverId) {
-      const prevEnquiry = structuredClone(e);
-      e.assignedToId = toEmployeeId;
-      e.updatedAt = now;
-      e.updatedById = byId;
-      count++;
-      changedEnquiries.push({ enquiry: e, prevEnquiry });
-      writeAudit(store, {
-        recordType: 'enquiry',
-        recordId: e.id,
-        action: 'assign',
-        field: 'Leaver reassignment (Assigned to)',
-        oldValue: `${fromName} (${fromLeaverId})`,
-        newValue: `${toName} (${toEmployeeId})`,
-        byId,
-        at: now,
-      });
-    }
-  }
-
-  writeAudit(store, {
-    recordType: 'person',
-    recordId: fromLeaverId,
-    action: 'assign',
-    field: 'Leaver record reassignment',
-    oldValue: fromLeaverId,
-    newValue: `Reassigned ${count} record role(s) to ${toName} (${toEmployeeId})`,
-    byId,
-    at: now,
-  });
-
-  const tenantCfg = getActiveTenantConfiguration();
-  await partyRepo.withTenantTransaction(reassignCtx, async () => {
-    for (const { person: p } of changedPeople) {
-      await partyRepo.putPerson(reassignCtx, p);
-    }
-    for (const { org: o } of changedOrganisations) {
-      await partyRepo.putOrganisation(reassignCtx, o);
-    }
-    for (const { matter: m } of changedMatters) {
-      await putMatterWithInTxRestrictions(reassignCtx, m, {
-        expectedRowVersion: null,
-      });
-    }
-    for (const { task: t } of changedTasks) {
-      await taskRepo.putTask(reassignCtx, t);
-    }
-    for (const { enquiry: e } of changedEnquiries) {
-      await intakeRepo.putEnquiry(reassignCtx, e);
-    }
-    await flushStagedAuditEntries(reassignCtx);
-  });
-  for (const { matter: m, prevMatter } of changedMatters) {
-    const isRestricted =
-      m.isStaffMatter ||
-      m.hasEthicalWall ||
-      (m.restrictedAccessUserIds?.length ?? 0) > 0;
-    if (isRestricted && prevMatter) {
-      pendingLifecycleSyncs.push({
-        matter: m,
-        previousMatter: prevMatter,
-        store,
-      });
-    }
-  }
-
-  return { reassignedCount: count };
-    },
-  });
+      for (const { matter: m, prevMatter } of changedMatters) {
+        const isRestricted =
+          m.isStaffMatter ||
+          m.hasEthicalWall ||
+          (m.restrictedAccessUserIds?.length ?? 0) > 0;
+        if (isRestricted && prevMatter) {
+          pendingLifecycleSyncs.push({
+            matter: m,
+            previousMatter: prevMatter,
+            store,
+          });
+        }
+      }
+    }),
+  );
   for (const syncItem of pendingLifecycleSyncs) {
     const syncCorrelationId = `corr-leaver-reassign-${syncItem.matter.id}-${Date.now()}`;
     try {
@@ -2167,7 +2323,7 @@ export async function reassignLeaverOwnedRecords(
       logDocumentLifecycleSyncError(err, syncCorrelationId);
     }
   }
-  return res;
+  return { reassignedCount: count };
 }
 
 export async function savePersonRecord(
@@ -2202,23 +2358,23 @@ export async function savePersonRecord(
     previousMatter: Matter;
     store: FirmStore;
   }> = [];
-  const res = await runUnmigratedJsonMutationWithAudit({
-    label: 'savePersonRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, opts?.byId),
-    mutate: async (_store, compensator) => {
+  const res = await withJsonStoreWriteLock<
+    ({ person: Person; errors?: Record<string, string> } & Partial<ActionDenied>)
+  >(async () => {
   const store = getStore();
   const personCtx = resolveDefaultServiceTenantContext(store, opts?.byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, matters] = await Promise.all([
+  const hrRepo = getHrAndRbacRepository();
+  const [people, organisations, matters, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(personCtx),
     partyRepo.listAllOrganisations<Organisation>(personCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(personCtx),
+    hrRepo.listAllTeams<Team>(personCtx),
   ]);
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
   const existing = opts.id ? people.find((p) => p.id === opts.id) ?? null : null;
-  const previousPersonSnapshot = existing ? structuredClone(existing) : null;
   const deny = (
     code: 'FORBIDDEN' | 'MFA_REQUIRED',
     message: string,
@@ -2241,15 +2397,18 @@ export async function savePersonRecord(
     return deny('FORBIDDEN', 'Person record not found.', 'id');
   }
   const actingUser = people.find((p) => p.id === opts.byId) ?? null;
+  const rbacConfig = await loadEffectiveTenantRbacConfig(personCtx);
   const permSet = resolvePersonPermissionSet(actingUser, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     targetPersonId: existing?.id,
     mfaVerified: opts.mfaVerified,
+    config: { rbac: rbacConfig },
   });
   const userPerms = new Set([
-    ...resolveEmployeePermissions(actingUser, people, store.teams, {
+    ...resolveEmployeePermissions(actingUser, people, teams, {
       targetPersonId: existing?.id,
+      config: { rbac: rbacConfig },
     }),
     ...Array.from(permSet.permissions),
   ]);
@@ -2892,245 +3051,343 @@ export async function savePersonRecord(
     return { person: existing as Person, errors: cfValidation.errors };
   }
 
-  let unmigratedStoreMutated = false;
   const changedMattersOnHire: Array<{ matter: Matter; prevMatter: Matter }> = [];
   const changedDuplicatePeople: Array<{ person: Person; prevPerson: Person }> = [];
 
-  await partyRepo.withTenantTransaction(personCtx, async () => {
-    if (!existing) {
-      const allocatedId = await partyRepo.allocateNextPersonId(personCtx);
-      person.id = allocatedId;
+  await runWithAuditStagingScope(() =>
+    partyRepo.withTenantTransaction(personCtx, async () => {
+      if (!existing) {
+        const allocatedId = await partyRepo.allocateNextPersonId(personCtx);
+        person.id = allocatedId;
+        if (person.employment) {
+          person.employment.personId = allocatedId;
+        }
+      }
+
+      if (openMattersOnHire.length > 0 && person.employment?.conflictCheckOnHire) {
+        for (const m of openMattersOnHire) {
+          if (m.clientId === person.id || m.additionalClientIds?.includes(person.id)) {
+            const prevMatter = structuredClone(m);
+            m.isStaffMatter = true;
+            const allowed = new Set<string>([
+              ...(m.restrictedAccessUserIds ?? []),
+              ...(m.responsiblePartnerId ? [m.responsiblePartnerId] : []),
+              ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
+              ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
+              ...(m.teamMemberIds ?? []),
+            ]);
+            m.restrictedAccessUserIds = Array.from(allowed);
+            touchMatter(m, opts.byId);
+            changedMattersOnHire.push({ matter: m, prevMatter });
+          }
+        }
+        if (changedMattersOnHire.length > 0) {
+          await matterRepo.lockMattersForRestrictionRecompute<Matter>(personCtx, {
+            matterIds: changedMattersOnHire.map((x) => x.matter.id),
+          });
+        }
+
+        const riskOfficerId =
+          people.find(
+            (p) =>
+              isWorkingAtFirm(p) &&
+              (p.roles?.includes('risk_compliance') ||
+                p.employeeRoleId === 'employee_role.risk_and_compliance'),
+          )?.id ?? opts.byId;
+        const notifId = await getTaskWorkflowRepository().allocateNextNotificationId(personCtx);
+        await getTaskWorkflowRepository().putNotification(personCtx, {
+          id: notifId,
+          recipientId: riskOfficerId,
+          kind: 'task_assigned',
+          title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
+          detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMattersOnHire.map((m) => m.matterNumber).join(', ')}.`,
+          href: `/people/${person.id}`,
+          recordId: person.id,
+          createdAt: now,
+          read: false,
+          byId: opts.byId,
+        });
+
+        writeAudit(store, {
+          recordType: 'person',
+          recordId: person.id,
+          action: 'status-change',
+          field: 'Conflict check on hire (Risk flag)',
+          oldValue: 'External contact / client',
+          newValue: person.employment.conflictCheckOnHire.riskNotes,
+          byId: opts.byId,
+          at: now,
+        });
+      }
+
+      if (rawEmpInput?.payroll) {
+        const oldPay = existing?.employment?.payroll;
+        const newPay = nextEmployment?.payroll;
+        if (JSON.stringify(oldPay ?? null) !== JSON.stringify(newPay ?? null)) {
+          writeAudit(store, {
+            recordType: 'employee_payroll',
+            recordId: person.id,
+            action: 'update-payroll',
+            field: 'Payroll & benefits',
+            oldValue: oldPay
+              ? `NI: ${maskNationalInsuranceNumber(oldPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(oldPay.bankSortCode || '', oldPay.bankAccountNumber || '').accountNumber}`
+              : null,
+            newValue: newPay
+              ? `NI: ${maskNationalInsuranceNumber(newPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(newPay.bankSortCode || '', newPay.bankAccountNumber || '').accountNumber}, Ref: ${newPay.externalPayrollReference || '—'}`
+              : null,
+            byId: opts.byId,
+            at: now,
+          });
+        }
+      }
+
+      const oldSens = existing
+        ? await hrRepo.getSensitiveRecord<EmployeeSensitiveRecord>(personCtx, person.id)
+        : null;
+      const canApplySensitiveSubmission =
+        Boolean(opts.sensitiveSubmitted) &&
+        opts.sensitiveSectionOpened !== false &&
+        opts.sensitiveSectionEdited !== false &&
+        (!oldSens ||
+          (opts.sensitiveSectionOpened === true &&
+            opts.sensitiveSectionEdited === true));
+
+      let nextSensToPersist: EmployeeSensitiveRecord | null = null;
+      if (canApplySensitiveSubmission && opts.sensitiveSubmitted) {
+        const nextSens: EmployeeSensitiveRecord = {
+          personId: person.id,
+          reasonableAdjustmentsNeeded:
+            opts.sensitiveSubmitted.reasonableAdjustmentsNeeded ??
+            oldSens?.reasonableAdjustmentsNeeded ??
+            '',
+          diversity: {
+            ...emptyDiversityAnswers(),
+            ...(oldSens?.diversity ?? {}),
+            ...(opts.sensitiveSubmitted.diversity ?? {}),
+          },
+          updatedById: opts.byId,
+          updatedAt: now,
+        };
+        if (JSON.stringify(oldSens) !== JSON.stringify(nextSens)) {
+          nextSensToPersist = nextSens;
+          writeAudit(store, {
+            recordType: 'employee_sensitive',
+            recordId: person.id,
+            action: 'update-sensitive',
+            field: 'Sensitive information (special category data)',
+            oldValue: oldSens ? 'Recorded' : null,
+            newValue: `Updated by ${actingUser ? personDisplayName(actingUser) : opts.byId}`,
+            byId: opts.byId,
+            at: now,
+          });
+        }
+      }
+
+      const auditOldActiveEmails =
+        isFirmWorkEmailIdentityChange && prevFirmWorkEmail
+          ? Array.from(new Set([...prevActiveEmails, prevFirmWorkEmail])).sort()
+          : prevActiveEmails;
+      const auditNewActiveEmails =
+        isFirmWorkEmailIdentityChange && nextFirmWorkEmail
+          ? Array.from(new Set([...nextActiveEmails, nextFirmWorkEmail])).sort()
+          : nextActiveEmails;
+
+      const fmtCtx = formatContext({
+        people,
+        organisations,
+        matters,
+        enquiries: [],
+        tasks: [],
+        teams,
+        values: store.values,
+      });
+      if (!existing) {
+        writeAudit(store, {
+          recordType: 'person',
+          recordId: person.id,
+          action: 'create',
+          field: null,
+          oldValue: null,
+          newValue: personDisplayName(person),
+          byId: opts.byId,
+          at: now,
+        });
+        if (isEmployeeEmailIdentityChange) {
+          writeAudit(store, {
+            recordType: 'person',
+            recordId: person.id,
+            action: 'update',
+            field: 'Employee sign-in email',
+            oldValue: auditOldActiveEmails.join(', ') || null,
+            newValue: auditNewActiveEmails.join(', ') || null,
+            byId: opts.byId,
+            at: now,
+          });
+        }
+      } else {
+        const changes = diffRecords(
+          'person',
+          existing as unknown as Record<string, unknown>,
+          person as unknown as Record<string, unknown>,
+          fmtCtx,
+          store.customFields,
+        );
+        if (isEmployeeEmailIdentityChange) {
+          writeAudit(store, {
+            recordType: 'person',
+            recordId: person.id,
+            action: 'update',
+            field: 'Employee sign-in email',
+            oldValue: auditOldActiveEmails.join(', ') || null,
+            newValue: auditNewActiveEmails.join(', ') || null,
+            byId: opts.byId,
+            at: now,
+          });
+        }
+        for (const ch of changes) {
+          writeAudit(store, {
+            recordType: 'person',
+            recordId: person.id,
+            action: 'update',
+            field: ch.field,
+            oldValue: ch.oldValue,
+            newValue: ch.newValue,
+            byId: opts.byId,
+            at: now,
+          });
+        }
+      }
+
+      if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
+        for (const otherId of opts.matchedDuplicateIds) {
+          const other = people.find((p) => p.id === otherId);
+          if (other && !other.possibleMatchIds.includes(person.id)) {
+            const prevPerson = structuredClone(other);
+            other.possibleMatchIds.push(person.id);
+            other.duplicateStatusId = dupPossible;
+            changedDuplicatePeople.push({ person: other, prevPerson });
+          }
+        }
+      }
+
+      await partyRepo.putPerson(personCtx, person);
+      if (nextSensToPersist) {
+        await hrRepo.putEmployeeSensitiveRecord(personCtx, {
+          personId: person.id,
+          sensitiveHr: nextSensToPersist,
+          updatedById: opts.byId,
+          updatedAt: now,
+        });
+      }
+      for (const { person: dupPerson } of changedDuplicatePeople) {
+        await partyRepo.putPerson(personCtx, dupPerson);
+      }
+
+      // Keep operational teams (PostgreSQL teams) synchronised with the employee's Organisation Structure Department / Team
       if (person.employment) {
-        person.employment.personId = allocatedId;
-      }
-    }
+        if (person.employment.status === 'Leaver') {
+          for (const tm of teams) {
+            const prevLen = tm.memberIds.length + tm.leadIds.length;
+            tm.memberIds = tm.memberIds.filter((id) => id !== person.id);
+            tm.leadIds = tm.leadIds.filter((id) => id !== person.id);
+            if (tm.memberIds.length + tm.leadIds.length !== prevLen) {
+              await hrRepo.putTeam(personCtx, tm);
+            }
+          }
+        } else {
+          const deptId = person.employment.departmentId;
+          const tpgId = person.employment.teamOrPracticeGroupId;
+          const deptObj = resolveOrgDepartment(deptId, orgStructure);
+          const tpgObj = orgStructure.teamsOrPracticeGroups.find((t) => t.id === tpgId);
 
-    if (openMattersOnHire.length > 0 && person.employment?.conflictCheckOnHire) {
-      for (const m of openMattersOnHire) {
-        if (m.clientId === person.id || m.additionalClientIds?.includes(person.id)) {
-          const prevMatter = structuredClone(m);
-          m.isStaffMatter = true;
-          const allowed = new Set<string>([
-            ...(m.restrictedAccessUserIds ?? []),
-            ...(m.responsiblePartnerId ? [m.responsiblePartnerId] : []),
-            ...(m.supervisingPartnerId ? [m.supervisingPartnerId] : []),
-            ...(m.leadFeeEarnerId ? [m.leadFeeEarnerId] : []),
-            ...(m.teamMemberIds ?? []),
-          ]);
-          m.restrictedAccessUserIds = Array.from(allowed);
-          touchMatter(m, opts.byId);
-          changedMattersOnHire.push({ matter: m, prevMatter });
+          const deptToTeamNameMap: Record<string, string> = {
+            'DEPT-RE': 'Real Estate & Property',
+            'DEPT-CORP': 'Corporate & Commercial',
+            'DEPT-DR': 'Dispute Resolution & Litigation',
+            'DEPT-PC': 'Private Client, Trusts & Family',
+            'DEPT-EMP': 'Employment & HR',
+            'DEPT-RISK': 'Risk & Compliance',
+            'DEPT-FIN': 'Accounts',
+            'DEPT-BD': 'Intake',
+          };
+          const targetTeamName = deptToTeamNameMap[deptId] ?? tpgObj?.name ?? deptObj?.name ?? '';
+          if (targetTeamName) {
+            const matchingTeam = teams.find(
+              (tm) =>
+                tm.name.toLowerCase() === targetTeamName.toLowerCase() ||
+                (deptObj && tm.name.toLowerCase().includes(deptObj.name.toLowerCase())),
+            );
+            if (matchingTeam) {
+              let teamChanged = false;
+              if (!matchingTeam.memberIds.includes(person.id)) {
+                matchingTeam.memberIds.push(person.id);
+                teamChanged = true;
+              }
+              if (
+                person.employment.roleType === 'Partner/Member' &&
+                !matchingTeam.leadIds.includes(person.id)
+              ) {
+                matchingTeam.leadIds.push(person.id);
+                teamChanged = true;
+              }
+              if (teamChanged) {
+                await hrRepo.putTeam(personCtx, matchingTeam);
+              }
+            }
+          }
         }
       }
-      if (changedMattersOnHire.length > 0) {
-        await matterRepo.lockMattersForRestrictionRecompute<Matter>(personCtx, {
-          matterIds: changedMattersOnHire.map((x) => x.matter.id),
+
+      for (const { matter: m } of changedMattersOnHire) {
+        await putMatterWithInTxRestrictions(personCtx, m, {
+          expectedRowVersion: null,
         });
       }
 
-      const riskOfficerId =
-        people.find(
-          (p) =>
-            isWorkingAtFirm(p) &&
-            (p.roles?.includes('risk_compliance') ||
-              p.employeeRoleId === 'employee_role.risk_and_compliance'),
-        )?.id ?? opts.byId;
-      const notifId = await getTaskWorkflowRepository().allocateNextNotificationId(personCtx);
-      await getTaskWorkflowRepository().putNotification(personCtx, {
-        id: notifId,
-        recipientId: riskOfficerId,
-        kind: 'task_assigned',
-        title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
-        detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMattersOnHire.map((m) => m.matterNumber).join(', ')}.`,
-        href: `/people/${person.id}`,
-        recordId: person.id,
-        createdAt: now,
-        read: false,
-        byId: opts.byId,
-      });
-
-      writeAudit(store, {
-        recordType: 'person',
-        recordId: person.id,
-        action: 'status-change',
-        field: 'Conflict check on hire (Risk flag)',
-        oldValue: 'External contact / client',
-        newValue: person.employment.conflictCheckOnHire.riskNotes,
-        byId: opts.byId,
-        at: now,
-      });
-    }
-
-    if (rawEmpInput?.payroll) {
-      const oldPay = existing?.employment?.payroll;
-      const newPay = nextEmployment?.payroll;
-      if (JSON.stringify(oldPay ?? null) !== JSON.stringify(newPay ?? null)) {
-        writeAudit(store, {
-          recordType: 'employee_payroll',
-          recordId: person.id,
-          action: 'update-payroll',
-          field: 'Payroll & benefits',
-          oldValue: oldPay
-            ? `NI: ${maskNationalInsuranceNumber(oldPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(oldPay.bankSortCode || '', oldPay.bankAccountNumber || '').accountNumber}`
-            : null,
-          newValue: newPay
-            ? `NI: ${maskNationalInsuranceNumber(newPay.nationalInsuranceNumber || '')}, Bank: ${maskBankDetails(newPay.bankSortCode || '', newPay.bankAccountNumber || '').accountNumber}, Ref: ${newPay.externalPayrollReference || '—'}`
-            : null,
-          byId: opts.byId,
-          at: now,
-        });
-      }
-    }
-
-    const canApplySensitiveSubmission =
-      Boolean(opts.sensitiveSubmitted) &&
-      opts.sensitiveSectionOpened !== false &&
-      opts.sensitiveSectionEdited !== false &&
-      (!store.employeeSensitiveRecords?.[person.id] ||
-        (opts.sensitiveSectionOpened === true &&
-          opts.sensitiveSectionEdited === true));
-
-    if (canApplySensitiveSubmission && opts.sensitiveSubmitted) {
-      if (!store.employeeSensitiveRecords) {
-        store.employeeSensitiveRecords = {};
-      }
-      const oldSens = store.employeeSensitiveRecords[person.id] ?? null;
-      const nextSens: EmployeeSensitiveRecord = {
-        personId: person.id,
-        reasonableAdjustmentsNeeded:
-          opts.sensitiveSubmitted.reasonableAdjustmentsNeeded ??
-          oldSens?.reasonableAdjustmentsNeeded ??
-          '',
-        diversity: {
-          ...emptyDiversityAnswers(),
-          ...(oldSens?.diversity ?? {}),
-          ...(opts.sensitiveSubmitted.diversity ?? {}),
-        },
-        updatedById: opts.byId,
-        updatedAt: now,
-      };
-      if (JSON.stringify(oldSens) !== JSON.stringify(nextSens)) {
-        store.employeeSensitiveRecords[person.id] = nextSens;
-        unmigratedStoreMutated = true;
-        writeAudit(store, {
-          recordType: 'employee_sensitive',
-          recordId: person.id,
-          action: 'update-sensitive',
-          field: 'Sensitive information (special category data)',
-          oldValue: oldSens ? 'Recorded' : null,
-          newValue: `Updated by ${actingUser ? personDisplayName(actingUser) : opts.byId}`,
-          byId: opts.byId,
-          at: now,
-        });
-      }
-    }
-
-    const auditOldActiveEmails =
-      isFirmWorkEmailIdentityChange && prevFirmWorkEmail
-        ? Array.from(new Set([...prevActiveEmails, prevFirmWorkEmail])).sort()
-        : prevActiveEmails;
-    const auditNewActiveEmails =
-      isFirmWorkEmailIdentityChange && nextFirmWorkEmail
-        ? Array.from(new Set([...nextActiveEmails, nextFirmWorkEmail])).sort()
-        : nextActiveEmails;
-
-    const fmtCtx = formatContext({
-      people,
-      organisations,
-      matters,
-      enquiries: [],
-      tasks: [],
-      teams: store.teams,
-      values: store.values,
-    });
-    if (!existing) {
-      writeAudit(store, {
-        recordType: 'person',
-        recordId: person.id,
-        action: 'create',
-        field: null,
-        oldValue: null,
-        newValue: personDisplayName(person),
-        byId: opts.byId,
-        at: now,
-      });
-      if (isEmployeeEmailIdentityChange) {
-        writeAudit(store, {
-          recordType: 'person',
-          recordId: person.id,
-          action: 'update',
-          field: 'Employee sign-in email',
-          oldValue: auditOldActiveEmails.join(', ') || null,
-          newValue: auditNewActiveEmails.join(', ') || null,
-          byId: opts.byId,
-          at: now,
-        });
-      }
-    } else {
-      const changes = diffRecords(
-        'person',
-        existing as unknown as Record<string, unknown>,
-        person as unknown as Record<string, unknown>,
-        fmtCtx,
-        store.customFields,
-      );
-      if (isEmployeeEmailIdentityChange) {
-        writeAudit(store, {
-          recordType: 'person',
-          recordId: person.id,
-          action: 'update',
-          field: 'Employee sign-in email',
-          oldValue: auditOldActiveEmails.join(', ') || null,
-          newValue: auditNewActiveEmails.join(', ') || null,
-          byId: opts.byId,
-          at: now,
-        });
-      }
-      for (const ch of changes) {
-        writeAudit(store, {
-          recordType: 'person',
-          recordId: person.id,
-          action: 'update',
-          field: ch.field,
-          oldValue: ch.oldValue,
-          newValue: ch.newValue,
-          byId: opts.byId,
-          at: now,
-        });
-      }
-    }
-
-    if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
-      for (const otherId of opts.matchedDuplicateIds) {
-        const other = people.find((p) => p.id === otherId);
-        if (other && !other.possibleMatchIds.includes(person.id)) {
-          const prevPerson = structuredClone(other);
-          other.possibleMatchIds.push(person.id);
-          other.duplicateStatusId = dupPossible;
-          changedDuplicatePeople.push({ person: other, prevPerson });
+      if (person.createdFromEnquiryId) {
+        const srcEnq = await getIntakeQuoteRepository().getEnquiryById<Enquiry>(
+          personCtx,
+          person.createdFromEnquiryId,
+          { includeRestricted: true },
+        );
+        if (srcEnq && !srcEnq.linkedPersonId) {
+          srcEnq.linkedPersonId = person.id;
+          await getIntakeQuoteRepository().putEnquiry(personCtx, srcEnq);
         }
       }
-    }
 
-    await partyRepo.putPerson(personCtx, person);
-    for (const { person: dupPerson } of changedDuplicatePeople) {
-      await partyRepo.putPerson(personCtx, dupPerson);
-    }
-    for (const { matter: m } of changedMattersOnHire) {
-      await putMatterWithInTxRestrictions(personCtx, m, {
-        expectedRowVersion: null,
-      });
-    }
-    if (
-      person.isEmployee ||
-      existing?.isEmployee ||
-      changedMattersOnHire.length > 0
-    ) {
-      await syncAffectedMattersRestrictionsInTx(personCtx, {
-        includeAllRestrictedMatters: true,
-      });
-    }
-  });
+      if (!existing && opts.initialLink?.organisationId) {
+        await createOrUpdateLink(
+          {
+            personId: person.id,
+            organisationId: opts.initialLink.organisationId,
+            jobTitle: opts.initialLink.jobTitle || person.jobTitle,
+            department: opts.initialLink.department || '',
+            roleWithinOrganisation: opts.initialLink.roleWithinOrganisation || '',
+            contactRoleIds: opts.initialLink.contactRoleIds ?? [],
+            isPrimaryContact: Boolean(opts.initialLink.isPrimaryContact),
+            isCurrent: true,
+            startDate: opts.initialLink.startDate ?? today,
+            endDate: null,
+            contactStatusId: vid('contact_status', 'Active'),
+          },
+          opts.byId,
+          { internalSystemStep: true },
+        );
+      }
+
+      if (
+        person.isEmployee ||
+        existing?.isEmployee ||
+        changedMattersOnHire.length > 0
+      ) {
+        await syncAffectedMattersRestrictionsInTx(personCtx, {
+          includeAllRestrictedMatters: true,
+        });
+      }
+      await flushStagedAuditEntries(personCtx);
+    }),
+  );
   for (const { matter: m, prevMatter } of changedMattersOnHire) {
     pendingLifecycleSyncs.push({
       matter: m,
@@ -3138,131 +3395,7 @@ export async function savePersonRecord(
       store,
     });
   }
-  let createdInitialLinkId: string | null = null;
-  compensator.register(`person.persist:${person.id}`, async () => {
-    const tenantCfg = getActiveTenantConfiguration();
-    await partyRepo.withTenantTransaction(personCtx, async (tx) => {
-      if (createdInitialLinkId) {
-        await partyRepo.deleteLink(personCtx, createdInitialLinkId);
-      }
-      if (previousPersonSnapshot) {
-        await partyRepo.putPerson(personCtx, previousPersonSnapshot);
-      } else {
-        await tx.query('DELETE FROM people WHERE tenant_id = $1 AND id = $2', [
-          personCtx.tenantId,
-          person.id,
-        ]);
-      }
-      for (const { prevPerson } of changedDuplicatePeople) {
-        await partyRepo.putPerson(personCtx, prevPerson);
-      }
-      for (const { prevMatter } of changedMattersOnHire) {
-        const prevMeta = computeMatterRestrictionMetadataForStore(
-          prevMatter,
-          people,
-          store.teams,
-          tenantCfg,
-        );
-        await matterRepo.putMatter(personCtx, prevMatter, {
-          expectedRowVersion: null,
-          sqlRestrictedAccessUserIds: prevMeta.restrictedAccessUserIds,
-        });
-      }
-    });
-  });
-
-  if (person.createdFromEnquiryId) {
-    const srcEnq = await getIntakeQuoteRepository().getEnquiryById<Enquiry>(
-      personCtx,
-      person.createdFromEnquiryId,
-      { includeRestricted: true },
-    );
-    if (srcEnq && !srcEnq.linkedPersonId) {
-      srcEnq.linkedPersonId = person.id;
-      await getIntakeQuoteRepository().putEnquiry(personCtx, srcEnq);
-    }
-  }
-
-  if (!existing && opts.initialLink?.organisationId) {
-    const createdLink = await createOrUpdateLink(
-      {
-        personId: person.id,
-        organisationId: opts.initialLink.organisationId,
-        jobTitle: opts.initialLink.jobTitle || person.jobTitle,
-        department: opts.initialLink.department || '',
-        roleWithinOrganisation: opts.initialLink.roleWithinOrganisation || '',
-        contactRoleIds: opts.initialLink.contactRoleIds ?? [],
-        isPrimaryContact: Boolean(opts.initialLink.isPrimaryContact),
-        isCurrent: true,
-        startDate: opts.initialLink.startDate ?? today,
-        endDate: null,
-        contactStatusId: vid('contact_status', 'Active'),
-      },
-      opts.byId,
-      { internalSystemStep: true },
-    );
-    if (createdLink?.id) {
-      createdInitialLinkId = createdLink.id;
-    }
-  }
-
-  // Keep operational teams (store.teams) synchronised with the employee's Organisation Structure Department / Team
-  if (person.employment) {
-    if (person.employment.status === 'Leaver') {
-      for (const tm of store.teams) {
-        const prevLen = tm.memberIds.length + tm.leadIds.length;
-        tm.memberIds = tm.memberIds.filter((id) => id !== person.id);
-        tm.leadIds = tm.leadIds.filter((id) => id !== person.id);
-        if (tm.memberIds.length + tm.leadIds.length !== prevLen) {
-          unmigratedStoreMutated = true;
-        }
-      }
-    } else {
-      const deptId = person.employment.departmentId;
-      const tpgId = person.employment.teamOrPracticeGroupId;
-      const deptObj = resolveOrgDepartment(deptId, orgStructure);
-      const tpgObj = orgStructure.teamsOrPracticeGroups.find((t) => t.id === tpgId);
-
-      const deptToTeamNameMap: Record<string, string> = {
-        'DEPT-RE': 'Real Estate & Property',
-        'DEPT-CORP': 'Corporate & Commercial',
-        'DEPT-DR': 'Dispute Resolution & Litigation',
-        'DEPT-PC': 'Private Client, Trusts & Family',
-        'DEPT-EMP': 'Employment & HR',
-        'DEPT-RISK': 'Risk & Compliance',
-        'DEPT-FIN': 'Accounts',
-        'DEPT-BD': 'Intake',
-      };
-      const targetTeamName = deptToTeamNameMap[deptId] ?? tpgObj?.name ?? deptObj?.name ?? '';
-      if (targetTeamName) {
-        const matchingTeam = store.teams.find(
-          (tm) =>
-            tm.name.toLowerCase() === targetTeamName.toLowerCase() ||
-            (deptObj && tm.name.toLowerCase().includes(deptObj.name.toLowerCase())),
-        );
-        if (matchingTeam) {
-          if (!matchingTeam.memberIds.includes(person.id)) {
-            matchingTeam.memberIds.push(person.id);
-            unmigratedStoreMutated = true;
-          }
-          if (
-            person.employment.roleType === 'Partner/Member' &&
-            !matchingTeam.leadIds.includes(person.id)
-          ) {
-            matchingTeam.leadIds.push(person.id);
-            unmigratedStoreMutated = true;
-          }
-        }
-      }
-    }
-  }
-
-  if (unmigratedStoreMutated) {
-    saveStore(store);
-  }
   return { person };
-
-    },
   });
   for (const syncItem of pendingLifecycleSyncs) {
     const syncCorrelationId = `corr-lifecycle-sync-${syncItem.matter.id}-${Date.now()}`;
@@ -3298,10 +3431,11 @@ export async function saveOrganisationRecord(
   const orgCtx = resolveDefaultServiceTenantContext(store, opts?.byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, matters] = await Promise.all([
+  const [people, organisations, matters, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(orgCtx),
     partyRepo.listAllOrganisations<Organisation>(orgCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(orgCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(orgCtx),
   ]);
   const now = new Date().toISOString();
   const today = toIsoDate(new Date());
@@ -3321,7 +3455,7 @@ export async function saveOrganisationRecord(
     if (
       !hasPersonPermission(actor, requiredPerm, {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       const msg = `You do not have permission (${requiredPerm}) to ${existing ? 'edit' : 'create'} an organisation record.`;
@@ -3468,7 +3602,7 @@ export async function saveOrganisationRecord(
       matters,
       enquiries: [],
       tasks: [],
-      teams: store.teams,
+      teams,
       values: store.values,
     });
     if (!existing) {
@@ -3555,13 +3689,13 @@ export async function createOrUpdateLink(
     ) as unknown as PersonOrganisationLink & Partial<ActionDenied>;
   }
   if (!opts?.internalSystemStep) {
-    const store = getStore();
+    const teams = await getHrAndRbacRepository().listAllTeams<Team>(linkCtx);
     const actor = people.find((p) => p.id === byId) ?? null;
     const requiredPerm = existing ? 'contact:edit' : 'contact:create';
     if (
       !hasPersonPermission(actor, requiredPerm, {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       return buildActionDenied(
@@ -3641,15 +3775,16 @@ export async function deleteLink(linkId: string, byId: string): Promise<{ ok: tr
   const store = getStore();
   const linkCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
-  const [people, existing] = await Promise.all([
+  const [people, existing, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(linkCtx),
     partyRepo.getLinkById<PersonOrganisationLink>(linkCtx, linkId),
+    getHrAndRbacRepository().listAllTeams<Team>(linkCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'contact:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return buildActionDenied(
@@ -3699,17 +3834,19 @@ export async function addNoteToRecord(
   const noteCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, matters, targetOrg] = await Promise.all([
+  const [people, matters, targetOrg, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(noteCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(noteCtx),
     recordType === 'organisation'
       ? partyRepo.getOrganisationById<Organisation>(noteCtx, recordId)
       : Promise.resolve(null),
+    getHrAndRbacRepository().listAllTeams<Team>(noteCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
     people,
     matters,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
 
@@ -3731,7 +3868,7 @@ export async function addNoteToRecord(
     if (
       !hasPersonPermission(actor, 'matter:edit', {
         allPeople: people,
-        teams: store.teams,
+        teams,
       }) ||
       !visibility.canViewMatter(target as Matter)
     ) {
@@ -3744,7 +3881,7 @@ export async function addNoteToRecord(
     if (
       !hasPersonPermission(actor, 'contact:edit', {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       return buildActionDenied(
@@ -3759,7 +3896,7 @@ export async function addNoteToRecord(
     if (
       !hasPersonPermission(actor, requiredPerm, {
         allPeople: people,
-        teams: store.teams,
+        teams,
         targetPersonId: targetPerson.id,
       })
     ) {
@@ -4309,7 +4446,7 @@ export async function saveMatterRecord(
       }
     }
   }
-  const [people, organisations, links, matters, enquiries, quotes, tasks] = lookupCtx
+  const [people, organisations, links, matters, enquiries, quotes, tasks, teams, lookupRbacConfig] = lookupCtx
     ? await Promise.all([
         partyRepo.listAllPeople<Person>(lookupCtx),
         partyRepo.listAllOrganisations<Organisation>(lookupCtx),
@@ -4318,8 +4455,10 @@ export async function saveMatterRecord(
         intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(lookupCtx),
         intakeRepo.listAllQuotesUnfiltered<Quote>(lookupCtx),
         taskRepo.listAllTasksUnfiltered<Task>(lookupCtx),
+        getHrAndRbacRepository().listAllTeams<Team>(lookupCtx),
+        loadEffectiveTenantRbacConfig(lookupCtx),
       ])
-    : [[], [], [], [], [], [], []];
+    : [[], [], [], [], [], [], [], [], undefined];
   const existingRef = opts.id ? matters.find((m) => m.id === opts.id) ?? null : null;
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingRowVersion = existing?.rowVersion ?? 1;
@@ -4367,6 +4506,8 @@ export async function saveMatterRecord(
       },
     };
   }
+  const matterRbacConfig =
+    lookupRbacConfig ?? (await loadEffectiveTenantRbacConfig(extensionCtx));
   if ((input as { id?: string }).id && !opts.id) {
     return {
       matter: null,
@@ -4380,7 +4521,8 @@ export async function saveMatterRecord(
       !existing ||
       !canPersonAccessMatter(existing, opts.byId, actingUser, {
         allPeople: people,
-        teams: store.teams,
+        teams,
+        config: { rbac: matterRbacConfig },
       })
     ) {
       return {
@@ -4394,7 +4536,8 @@ export async function saveMatterRecord(
     if (
       !hasPersonPermission(actingUser, 'matter:edit', {
         allPeople: people,
-        teams: store.teams,
+        teams,
+        config: { rbac: matterRbacConfig },
       })
     ) {
       return {
@@ -4428,7 +4571,8 @@ export async function saveMatterRecord(
     if (
       !hasPersonPermission(actingUser, 'matter:create', {
         allPeople: people,
-        teams: store.teams,
+        teams,
+        config: { rbac: matterRbacConfig },
       })
     ) {
       return {
@@ -4517,7 +4661,7 @@ export async function saveMatterRecord(
       (deptChanged || teamChanged) &&
       !hasPersonPermission(actingUser, 'matter:reassign_ownership', {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       if (deptChanged) {
@@ -4960,7 +5104,7 @@ export async function saveMatterRecord(
 
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
     allPeople: allPeopleWithPending,
-    teams: store.teams,
+    teams,
   });
   const submittedConflictRecord =
     input.conflictCheckRecord === null ? undefined : input.conflictCheckRecord;
@@ -4990,6 +5134,7 @@ export async function saveMatterRecord(
       matters,
       enquiries,
       quotes,
+      teams,
       hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     },
   );
@@ -5762,7 +5907,7 @@ export async function saveMatterRecord(
           const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
           const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
             resolveConflictReviewTaskRouting(
-              { people: allPeopleWithPending, teams: store.teams },
+              { people: allPeopleWithPending, teams },
               tenantCfg.conflictReview,
               matter,
             );
@@ -5888,9 +6033,10 @@ export async function markEngagementLetterDrafted(
   }
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, existing] = await Promise.all([
+  const [people, existing, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(ctx),
     matterRepo.getMatterById<Matter>(ctx, matterId),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
@@ -5899,7 +6045,7 @@ export async function markEngagementLetterDrafted(
     !actingUser.isEmployee ||
     !canPersonAccessMatter(existing, byId, actingUser, {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return {
@@ -5913,7 +6059,7 @@ export async function markEngagementLetterDrafted(
   if (
     !hasPersonPermission(actingUser, 'matter:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return {
@@ -5972,9 +6118,10 @@ export async function liftMatterRestriction(
   }
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, existing] = await Promise.all([
+  const [people, existing, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(prelimCtx),
     matterRepo.getMatterById<Matter>(prelimCtx, matterId),
+    getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
   const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
@@ -5983,7 +6130,7 @@ export async function liftMatterRestriction(
     !actingUser.isEmployee ||
     !canPersonAccessMatter(existing, byId, actingUser, {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return {
@@ -5996,7 +6143,7 @@ export async function liftMatterRestriction(
   }
   const canLift = hasPersonPermission(actingUser, 'matter:restriction:lift', {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   if (!canLift) {
     return {
@@ -6140,13 +6287,14 @@ export async function runMatterConflictSearchRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
+  const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(ctx),
     partyRepo.listAllOrganisations<Organisation>(ctx),
     partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
     matterRepo.listAllMattersUnfiltered<Matter>(ctx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actingUser = people.find((p) => p.id === byId) ?? null;
   if (
@@ -6154,11 +6302,11 @@ export async function runMatterConflictSearchRecord(
     !actingUser.isEmployee ||
     (!hasPersonPermission(actingUser, 'matter:create', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     }) &&
       !hasPersonPermission(actingUser, 'matter:edit', {
         allPeople: people,
-        teams: store.teams,
+        teams,
       }))
   ) {
     return {
@@ -6171,13 +6319,14 @@ export async function runMatterConflictSearchRecord(
   }
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   const visibility = buildRecordVisibility(store, actingUser, {
     people,
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const nowIso = new Date().toISOString();
@@ -6226,7 +6375,7 @@ export async function runMatterConflictSearchRecord(
     visibility.canViewMatter(savedMatter) &&
     hasPersonPermission(actingUser, 'matter:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     }) &&
     savedMatter.conflictCheckRecord
   ) {
@@ -6313,13 +6462,14 @@ export async function updateMatterConflictRecord(
     const partyRepo = getPartyRepository();
     const matterRepo = getMatterRepository();
     const intakeRepo = getIntakeQuoteRepository();
-    const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
+    const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
       partyRepo.listAllPeople<Person>(conflictCtx),
       partyRepo.listAllOrganisations<Organisation>(conflictCtx),
       partyRepo.listAllLinks<PersonOrganisationLink>(conflictCtx),
       matterRepo.listAllMattersUnfiltered<Matter>(conflictCtx),
       intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(conflictCtx),
       intakeRepo.listAllQuotesUnfiltered<Quote>(conflictCtx),
+      getHrAndRbacRepository().listAllTeams<Team>(conflictCtx),
     ]);
   const today = toIsoDate(new Date());
   const matter = matters.find((m) => m.id === matterId);
@@ -6329,6 +6479,7 @@ export async function updateMatterConflictRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   if (
@@ -6338,14 +6489,14 @@ export async function updateMatterConflictRecord(
     !visibility.canViewMatter(matter) ||
     !hasPersonPermission(actingUser, 'matter:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return { matter: null };
   }
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   if (
     (record.status === 'Approved' || record.status === 'Declined') &&
@@ -6640,12 +6791,13 @@ export async function signOffMatterCostsRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, matters, enquiries, quotes] = await Promise.all([
+  const [people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(prelimCtx),
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(prelimCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(prelimCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
   const matter = matters.find((m) => m.id === matterId) ?? null;
   const actingUser = people.find((p) => p.id === byId) ?? null;
@@ -6654,6 +6806,7 @@ export async function signOffMatterCostsRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   if (
@@ -6670,7 +6823,7 @@ export async function signOffMatterCostsRecord(
   if (
     !hasPersonPermission(actingUser, 'matter:costs:sign_off', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return {
@@ -6820,17 +6973,18 @@ export async function dismissDuplicateMatch(
   const store = getStore();
   const dupCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
-  const [people, organisations] = await Promise.all([
+  const [people, organisations, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(dupCtx),
     recordType === 'organisation'
       ? partyRepo.listAllOrganisations<Organisation>(dupCtx)
       : Promise.resolve([] as Organisation[]),
+    getHrAndRbacRepository().listAllTeams<Team>(dupCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'record:merge', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return buildActionDenied(
@@ -6948,18 +7102,19 @@ export async function executeMerge(
   const prelimCtx = resolveDefaultServiceTenantContext(store, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, organisations, links, notes, matters] = await Promise.all([
+  const [people, organisations, links, notes, matters, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(prelimCtx),
     partyRepo.listAllOrganisations<Organisation>(prelimCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(prelimCtx),
     partyRepo.listAllNotes<Note>(prelimCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'record:merge', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return buildActionDenied(
@@ -7408,7 +7563,7 @@ export async function executeMerge(
           const prevMeta = computeMatterRestrictionMetadataForStore(
             prevM,
             people,
-            store.teams,
+            teams,
             tenantCfg,
           );
           await matterRepo.putMatter(activeMergeCtx, prevM, {
@@ -8027,16 +8182,15 @@ export async function saveTeamRecord(
   },
   byId: string,
 ): Promise<{ team?: Team; error?: string } & Partial<ActionDenied>> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'saveTeamRecord',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
   const now = new Date().toISOString();
   const name = input.name.trim();
   if (!name) return { error: 'Team name is required.' };
 
-  const existing = input.id ? store.teams.find((t) => t.id === input.id) ?? null : null;
+  const teamCtx = resolveDefaultServiceTenantContext(null, byId);
+  const hrRepo = getHrAndRbacRepository();
+  const existing = input.id
+    ? await hrRepo.getTeamById<Team>(teamCtx, input.id)
+    : null;
   if (input.id && !existing) {
     const msg = `Team "${input.id}" not found.`;
     return {
@@ -8060,58 +8214,56 @@ export async function saveTeamRecord(
   const memberIds = Array.from(new Set([...input.memberIds, ...input.leadIds]));
   const leadIds = input.leadIds.filter((id) => memberIds.includes(id));
 
-  const team: Team = {
-    id: existing?.id ?? nextId(store, 'TM'),
-    name,
-    description: (input.description ?? existing?.description ?? '').trim(),
-    memberIds,
-    leadIds,
-    practiceAreaIds: input.practiceAreaIds,
-    active: input.active ?? existing?.active ?? true,
-    createdById: existing?.createdById ?? byId,
-    createdAt: existing?.createdAt ?? now,
-    updatedById: byId,
-    updatedAt: now,
-  };
-
-  if (!existing) {
-    store.teams.push(team);
-    writeAudit(store, {
-      recordType: 'team',
-      recordId: team.id,
-      action: 'create',
-      field: 'Team created',
-      oldValue: null,
-      newValue: team.name,
-      byId,
-      at: now,
-    });
-  } else {
-    const idx = store.teams.findIndex((t) => t.id === existing.id);
-    store.teams = store.teams.map((t, i) => (i === idx ? team : t));
-    writeAudit(store, {
-      recordType: 'team',
-      recordId: team.id,
-      action: 'update',
-      field: 'Team updated',
-      oldValue: existing.name,
-      newValue: `${team.name} (${team.memberIds.length} members, ${team.active ? 'active' : 'inactive'})`,
-      byId,
-      at: now,
-    });
-  }
-  saveStore(store);
-  const teamCtx = resolveDefaultServiceTenantContext(store, byId);
-  const partyRepo = getPartyRepository();
-  await partyRepo.withTenantTransaction(teamCtx, async () => {
-    await syncAffectedMattersRestrictionsInTx(teamCtx, {
-      includeAllRestrictedMatters: true,
-    });
-  });
+  let team!: Team;
+  await runWithAuditStagingScope(() =>
+    hrRepo.withTenantTransaction(teamCtx, async () => {
+      const allocatedTeamId = existing
+        ? existing.id
+        : await hrRepo.allocateNextTeamId(teamCtx);
+      team = {
+        id: allocatedTeamId,
+        name,
+        description: (input.description ?? existing?.description ?? '').trim(),
+        memberIds,
+        leadIds,
+        practiceAreaIds: input.practiceAreaIds,
+        active: input.active ?? existing?.active ?? true,
+        createdById: existing?.createdById ?? byId,
+        createdAt: existing?.createdAt ?? now,
+        updatedById: byId,
+        updatedAt: now,
+      };
+      await hrRepo.putTeam(teamCtx, team);
+      await syncAffectedMattersRestrictionsInTx(teamCtx, {
+        includeAllRestrictedMatters: true,
+      });
+      if (!existing) {
+        writeAudit(null, {
+          recordType: 'team',
+          recordId: team.id,
+          action: 'create',
+          field: 'Team created',
+          oldValue: null,
+          newValue: team.name,
+          byId,
+          at: now,
+        });
+      } else {
+        writeAudit(null, {
+          recordType: 'team',
+          recordId: team.id,
+          action: 'update',
+          field: 'Team updated',
+          oldValue: existing.name,
+          newValue: `${team.name} (${team.memberIds.length} members, ${team.active ? 'active' : 'inactive'})`,
+          byId,
+          at: now,
+        });
+      }
+      await flushStagedAuditEntries(teamCtx);
+    }),
+  );
   return { team };
-
-    },
-  });
 }
 
 export async function updateEmployeeRoleSetting(
@@ -8120,21 +8272,26 @@ export async function updateEmployeeRoleSetting(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string }> {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
+  const hrRepo = getHrAndRbacRepository();
   return partyRepo.withTenantTransaction(ctx, async () => {
-    const people = await partyRepo.listAllPeople<Person>(ctx);
+    const [people, teams, rbacOverride] = await Promise.all([
+      partyRepo.listAllPeople<Person>(ctx),
+      hrRepo.listAllTeams<Team>(ctx),
+      hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
+    ]);
     const actor = people.find((p) => p.id === byId);
     const person = people.find((p) => p.id === personId && p.isEmployee);
     if (!actor) return { ok: false, error: 'Acting user not found.' };
     if (!person) return { ok: false, error: 'Employee not found.' };
 
-    const rbacConfig = getDefaultTenantRbacConfig();
+    const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, rbacOverride);
     const actorPerms = resolvePersonPermissionSet(actor, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       mfaVerified: options.mfaVerified ?? false,
+      config: { rbac: rbacConfig },
     });
 
     const addedRoleKeys: string[] =
@@ -8184,7 +8341,7 @@ export async function updateEmployeeRoleSetting(
       includeAllRestrictedMatters: true,
     });
     await runWithAuditStagingScope(async () => {
-      writeAudit(store, {
+      writeAudit(null, {
         recordType: 'person',
         recordId: person.id,
         action: 'update',
@@ -8293,7 +8450,7 @@ export async function saveTaskRecord(
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [people, organisations, matters, enquiries, quotes, existing] = await Promise.all([
+  const [people, organisations, matters, enquiries, quotes, existing, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(taskCtx),
     partyRepo.listAllOrganisations<Organisation>(taskCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
@@ -8302,6 +8459,7 @@ export async function saveTaskRecord(
     input.id
       ? taskRepo.getTaskById<Task>(taskCtx, input.id, { includeRestricted: true })
       : Promise.resolve(null),
+    getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const prelimVis = buildRecordVisibility(store, actor, {
@@ -8309,6 +8467,7 @@ export async function saveTaskRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -8320,6 +8479,7 @@ export async function saveTaskRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
 
@@ -8327,7 +8487,7 @@ export async function saveTaskRecord(
     if (
       !hasPersonPermission(actor, 'task:edit', {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       const msg = 'You do not have permission (task:edit) to create or edit tasks.';
@@ -8428,10 +8588,10 @@ export async function saveTaskRecord(
         nextTeamId === existing.assignedTeamId &&
         nextPersonIds.length === 1 &&
         nextPersonIds[0] === byId &&
-        canUserTakeTask(byId, existing, store.teams, people, store.values);
+        canUserTakeTask(byId, existing, teams, people, store.values);
       if (
         !isSelfClaim &&
-        !canUserReassignTask(byId, existing, store.teams, people, store.values)
+        !canUserReassignTask(byId, existing, teams, people, store.values)
       ) {
         const msg = 'You do not have permission to reassign this task.';
         return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -8564,7 +8724,7 @@ export async function saveTaskRecord(
           });
         }
       } else if (task.assignedTeamId) {
-        const team = store.teams.find((tm) => tm.id === task.assignedTeamId);
+        const team = teams.find((tm) => tm.id === task.assignedTeamId);
         if (team) {
           for (const memberId of team.memberIds) {
             await pushNotification(taskCtx, {
@@ -8652,7 +8812,7 @@ export async function saveTaskRecord(
       task.assignedPersonId &&
       hasPersonPermission(actor, 'enquiry:assign', {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       for (const lr of task.linkedRecords) {
@@ -8707,12 +8867,13 @@ export async function takeTaskRecord(
     const matterRepo = getMatterRepository();
     const intakeRepo = getIntakeQuoteRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const [people, matters, enquiries, quotes, existing] = await Promise.all([
+    const [people, matters, enquiries, quotes, existing, teams] = await Promise.all([
       partyRepo.listAllPeople<Person>(taskCtx),
       matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
       intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
       intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
       taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
+      getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
     ]);
     const actor = people.find((p) => p.id === byId) ?? null;
     const prelimVis = buildRecordVisibility(store, actor, {
@@ -8720,6 +8881,7 @@ export async function takeTaskRecord(
       matters,
       enquiries,
       quotes,
+      teams,
       hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     });
     const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -8731,13 +8893,14 @@ export async function takeTaskRecord(
       matters,
       enquiries,
       quotes,
+      teams,
       hiddenMatterKeyDateIds: hiddenKdIds,
     });
     if (!existing || !visibility.canViewTask(existing)) {
       const msg = 'Task not found.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
     }
-    if (!canUserTakeTask(byId, existing, store.teams, people, store.values)) {
+    if (!canUserTakeTask(byId, existing, teams, people, store.values)) {
       const msg = 'You do not have permission to claim this task.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
     }
@@ -8774,18 +8937,19 @@ export async function addTaskCommentRecord(
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, enquiries, quotes, task] = await Promise.all([
+  const [people, matters, enquiries, quotes, task, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(taskCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
     taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
+    getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'task:comment', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (task:comment) to comment on tasks.';
@@ -8796,6 +8960,7 @@ export async function addTaskCommentRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -8807,6 +8972,7 @@ export async function addTaskCommentRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
   if (!task || !visibility.canViewTask(task)) {
@@ -8946,7 +9112,7 @@ async function raiseAutomaticTask(
       at: opts.now,
     });
   } else if (task.assignedTeamId) {
-    const team = store.teams.find((tm) => tm.id === task.assignedTeamId);
+    const team = await getHrAndRbacRepository().getTeamById<Team>(ctx, task.assignedTeamId);
     if (team) {
       for (const memberId of team.memberIds) {
         await pushNotification(ctx, {
@@ -9041,13 +9207,15 @@ export async function saveEnquiryRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
+  const [people, organisations, links, matters, enquiries, quotes, teams, rbacConfig] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
+    loadEffectiveTenantRbacConfig(enqCtx),
   ]);
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
@@ -9055,7 +9223,9 @@ export async function saveEnquiryRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const existing = opts.id ? enquiries.find((e) => e.id === opts.id) ?? null : null;
   if (opts.id && !existing) {
@@ -9069,7 +9239,8 @@ export async function saveEnquiryRecord(
     if (
       !hasPersonPermission(actor, 'enquiry:create', {
         allPeople: people,
-        teams: store.teams,
+        teams,
+        config: { rbac: rbacConfig },
       })
     ) {
       const msg = 'You do not have permission (enquiry:create) to create an enquiry.';
@@ -9082,7 +9253,8 @@ export async function saveEnquiryRecord(
     if (
       !hasPersonPermission(actor, 'enquiry:edit', {
         allPeople: people,
-        teams: store.teams,
+        teams,
+        config: { rbac: rbacConfig },
       }) ||
       !visibility.canViewEnquiry(existing)
     ) {
@@ -9370,7 +9542,7 @@ export async function saveEnquiryRecord(
     : existing?.assignedTeamId ?? null;
   let routedToIntakeFallback = existing?.routedToIntakeFallback ?? false;
   if (isInitialRoute && !assignedTeamId) {
-    const routed = resolveRoutedTeam(mergedInput.practiceAreaId, store.teams);
+    const routed = resolveRoutedTeam(mergedInput.practiceAreaId, teams);
     assignedTeamId = routed.team?.id ?? null;
     routedToIntakeFallback = routed.isFallbackIntake;
   }
@@ -9447,7 +9619,7 @@ export async function saveEnquiryRecord(
     updatedAt: now,
   };
 
-  const routedTeam = store.teams.find((t) => t.id === enquiry.assignedTeamId);
+  const routedTeam = teams.find((t) => t.id === enquiry.assignedTeamId);
   const practiceAreaLabel =
     resolveLabel(store.values, enquiry.practiceAreaId) || routedTeam?.name || 'Intake';
 
@@ -9564,18 +9736,19 @@ export async function assignEnquiryRecord(
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, enquiries, quotes, tasks] = await Promise.all([
+  const [people, matters, enquiries, quotes, tasks, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
     taskRepo.listAllTasksUnfiltered<Task>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:assign', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (enquiry:assign) to assign enquiries.';
@@ -9586,6 +9759,7 @@ export async function assignEnquiryRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = enquiries.find((e) => e.id === enquiryId);
@@ -9697,17 +9871,18 @@ export async function logEnquiryContactRecord(
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes] = await Promise.all([
+  const [people, matters, enquiries, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (enquiry:edit) to log contact on enquiries.';
@@ -9718,6 +9893,7 @@ export async function logEnquiryContactRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = enquiries.find((e) => e.id === enquiryId);
@@ -9803,17 +9979,18 @@ export async function sendEnquiryEmailRecord(
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes] = await Promise.all([
+  const [people, matters, enquiries, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (enquiry:edit) to send enquiry emails.';
@@ -9824,6 +10001,7 @@ export async function sendEnquiryEmailRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = enquiries.find((e) => e.id === enquiryId);
@@ -9893,17 +10071,18 @@ export async function closeEnquiryRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes] = await Promise.all([
+  const [people, matters, enquiries, quotes, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:close', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (enquiry:close) to close enquiries.';
@@ -9914,6 +10093,7 @@ export async function closeEnquiryRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = enquiries.find((e) => e.id === enquiryId);
@@ -10035,17 +10215,18 @@ export async function reopenEnquiryRecord(
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, enquiries, quotes] = await Promise.all([
+  const [people, matters, enquiries, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:reopen', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (enquiry:reopen) to reopen enquiries.';
@@ -10056,6 +10237,7 @@ export async function reopenEnquiryRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = enquiries.find((e) => e.id === enquiryId);
@@ -10070,7 +10252,7 @@ export async function reopenEnquiryRecord(
         : 'Only closed enquiries (Declined, Referred out, or No response) can be reopened.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  if (!canUserReopenEnquiry(byId, enq, store.teams, people, store.values)) {
+  if (!canUserReopenEnquiry(byId, enq, teams, people, store.values)) {
     const msg =
       'Only the assignee, the team lead for the enquiry team, Intake, or an administrator may reopen this enquiry.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -10174,19 +10356,20 @@ export async function prepareEnquiryConversion(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
+  const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(enqCtx),
     partyRepo.listAllOrganisations<Organisation>(enqCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'matter:create', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (matter:create) to convert an enquiry to a matter.';
@@ -10202,6 +10385,7 @@ export async function prepareEnquiryConversion(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const enq = enquiries.find((e) => e.id === enquiryId);
@@ -10564,7 +10748,10 @@ async function finalizeEnquiryConversionToMatter(
   const existingTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
   if (kdConfig.enabled) {
     const keyDateRepo = getKeyDateRepository();
-    const existingEnquiryKds = await keyDateRepo.listKeyDatesForEnquiry(ctx, enq.id);
+    const [existingEnquiryKds, teams] = await Promise.all([
+      keyDateRepo.listKeyDatesForEnquiry(ctx, enq.id),
+      getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    ]);
     const workingKeyDates = existingEnquiryKds.map((kd) => structuredClone(kd));
     const preAllocatedNewKdId =
       existingEnquiryKds.length === 0 && enq.keyDate
@@ -10580,7 +10767,7 @@ async function finalizeEnquiryConversionToMatter(
       tenantId: ctx.tenantId,
       keyDates: workingKeyDates,
       tasks: workingTasks,
-      teams: store.teams,
+      teams,
       config: kdConfig,
       actorId: byId,
       nowIso: now,
@@ -10656,14 +10843,15 @@ export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?
   const store = getStore();
   const enqCtx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, enquiries] = await Promise.all([
+  const [people, enquiries, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(enqCtx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   requirePermission(permSet, 'enquiry:anonymise');
   const now = new Date();
@@ -10766,13 +10954,13 @@ export async function getMatterPmsViewBundle(
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { store, actor, permSet, tokenRoles, visiblePmsLinks, people, matters } = auth;
+  const { store, actor, permSet, tokenRoles, visiblePmsLinks, people, matters, teams } = auth;
   const matter = matters.find((m) => m.id === matterId && !m.mergedIntoId);
   if (
     !matter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       tokenRoles,
     })
   ) {
@@ -11016,16 +11204,17 @@ export async function getPmsAdminSnapshot(byId?: string): Promise<PmsAdminSnapsh
   }
   const actorId = byId || getActiveActorSession()?.personId;
   const ctx = resolveDefaultServiceTenantContext(store, actorId);
-  const [people, matters] = await Promise.all([
+  const [people, matters, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = actorId ? people.find((p) => p.id === actorId) ?? null : null;
   const visibleMatters = actorId
     ? matters.filter((m) =>
         canPersonAccessMatter(m, actorId, actor, {
           allPeople: people,
-          teams: store.teams,
+          teams,
         }),
       )
     : matters;
@@ -11233,13 +11422,16 @@ export async function createRecordFromPms(
 ): Promise<{ ok: boolean; createdId?: string; error?: string } & Partial<Omit<ActionDenied, 'ok'>>> {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const [people, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
   const pms = getPmsSource();
   const actor = people.find((p) => p.id === byId) ?? null;
   const effectiveMfaVerified = opts.mfaVerified === true;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     mfaVerified: effectiveMfaVerified,
   });
 
@@ -11533,7 +11725,10 @@ export async function switchViewingRole(
     mutate: async () => {
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, userId);
-  const user = await getPartyRepository().getPersonById<Person>(ctx, userId);
+  const [user, teams] = await Promise.all([
+    getPartyRepository().getPersonById<Person>(ctx, userId),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
   if (!user) return { ok: false, error: 'User not found.' };
 
   if (!store.homePagesConfig) {
@@ -11543,7 +11738,7 @@ export async function switchViewingRole(
     );
   }
 
-  const userRoles = resolveEmployeeRoles(user, store.teams);
+  const userRoles = resolveEmployeeRoles(user, teams);
   const isValidConfiguredRole = store.homePagesConfig.roles.some(
     (r) => r.key === roleKey,
   );
@@ -11583,11 +11778,14 @@ export async function saveHomePagesConfig(
   const current =
     store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const [people, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     mfaVerified: options.mfaVerified ?? false,
   });
   try {
@@ -11668,11 +11866,14 @@ export async function resetHomePagesConfig(
   const current =
     store.homePagesConfig ?? createDefaultHomePagesConfig(nowIso, primaryDomain);
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const [people, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     mfaVerified: options.mfaVerified ?? false,
   });
   try {
@@ -11741,11 +11942,14 @@ export async function addHomeRole(
   const store = getStore();
   const nowIso = new Date().toISOString();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const [people, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
     mfaVerified: options.mfaVerified ?? false,
   });
   try {
@@ -11833,21 +12037,26 @@ export async function updateEmployeeRolesAndSupports(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string }> {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
+  const hrRepo = getHrAndRbacRepository();
   return partyRepo.withTenantTransaction(ctx, async () => {
-    const people = await partyRepo.listAllPeople<Person>(ctx);
+    const [people, teams, dbRbacOverride] = await Promise.all([
+      partyRepo.listAllPeople<Person>(ctx),
+      hrRepo.listAllTeams<Team>(ctx),
+      hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
+    ]);
     const actor = people.find((p) => p.id === byId);
     const person = people.find((p) => p.id === personId);
     if (!actor) return { ok: false, error: 'Acting user not found.' };
     if (!person) return { ok: false, error: 'Employee not found.' };
 
-    const rbacConfig = getDefaultTenantRbacConfig();
+    const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, dbRbacOverride);
     const actorPerms = resolvePersonPermissionSet(actor, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       mfaVerified: options.mfaVerified ?? false,
+      config: { rbac: rbacConfig },
     });
 
     const prevRoles = new Set<string>(person.roles ?? []);
@@ -11900,7 +12109,7 @@ export async function updateEmployeeRolesAndSupports(
       includeAllRestrictedMatters: true,
     });
     await runWithAuditStagingScope(async () => {
-      writeAudit(store, {
+      writeAudit(null, {
         recordType: 'person',
         recordId: person.id,
         action: 'update',
@@ -11931,9 +12140,16 @@ export async function previewRbacOverrides(
   byId: string,
   options?: { mfaVerified?: boolean },
 ): Promise<{ ok: boolean; code?: string; error?: string; permissions: PermissionKey[] }> {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const [people, teams, dbRbacOverride] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx),
+  ]);
+  const currentRbacConfig = await loadEffectiveTenantRbacConfig(
+    ctx,
+    dbRbacOverride,
+  );
   const actor = people.find((p) => p.id === byId);
   const target = people.find((p) => p.id === personId);
   if (!actor)
@@ -11943,15 +12159,18 @@ export async function previewRbacOverrides(
   if (
     !hasPersonPermission(actor, 'admin:access', {
       allPeople: people,
-      teams: store.teams,
+      teams,
+      config: { rbac: currentRbacConfig },
     }) &&
     !hasPersonPermission(actor, 'rbac:manage_user_overrides', {
       allPeople: people,
-      teams: store.teams,
+      teams,
+      config: { rbac: currentRbacConfig },
     }) &&
     !hasPersonPermission(actor, 'rbac:manage_config', {
       allPeople: people,
-      teams: store.teams,
+      teams,
+      config: { rbac: currentRbacConfig },
     })
   ) {
     return {
@@ -12007,10 +12226,8 @@ export async function previewRbacOverrides(
 
   const permissions = resolvePersonPermissions(syntheticTarget, {
     allPeople: people,
-    teams: store.teams,
-    ...(validatedRbacConfig
-      ? { config: { rbac: validatedRbacConfig } }
-      : {}),
+    teams,
+    config: { rbac: validatedRbacConfig ?? currentRbacConfig },
   });
 
   return { ok: true, permissions };
@@ -12032,21 +12249,26 @@ export async function updatePersonPermissionOverrides(
   byId: string,
   options: { mfaVerified?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string; person?: Person }> {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
+  const hrRepo = getHrAndRbacRepository();
   return partyRepo.withTenantTransaction(ctx, async () => {
-    const people = await partyRepo.listAllPeople<Person>(ctx);
+    const [people, teams, dbRbacOverride] = await Promise.all([
+      partyRepo.listAllPeople<Person>(ctx),
+      hrRepo.listAllTeams<Team>(ctx),
+      hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
+    ]);
     const actor = people.find((p) => p.id === byId);
     const target = people.find((p) => p.id === personId);
     if (!actor) return { ok: false, error: 'Acting user not found.' };
     if (!target) return { ok: false, error: 'Target employee not found.' };
 
-    const rbacConfig = getDefaultTenantRbacConfig();
+    const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, dbRbacOverride);
     const actorPerms = resolvePersonPermissionSet(actor, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       mfaVerified: options.mfaVerified ?? false,
+      config: { rbac: rbacConfig },
     });
 
     const cleanGrant = Array.from(
@@ -12110,7 +12332,7 @@ export async function updatePersonPermissionOverrides(
       includeAllRestrictedMatters: true,
     });
     await runWithAuditStagingScope(async () => {
-      writeAudit(store, {
+      writeAudit(null, {
         recordType: 'person',
         recordId: target.id,
         action: 'update',
@@ -12132,162 +12354,191 @@ export async function updatePersonPermissionOverrides(
  * Enforces `rbac:manage_config` + MFA, validates all permission and role keys, and writes a before/after audit log.
  */
 export async function updateTenantRbacConfig(
-  patch: Partial<RbacConfiguration>,
+  patch: Partial<RbacConfiguration> | null,
   byId: string,
-  options: { mfaVerified?: boolean } = {},
+  options: { mfaVerified?: boolean; expectedRowVersion?: number | null } = {},
 ): Promise<{ ok: boolean; code?: string; error?: string; rbacConfig?: RbacConfiguration }> {
-  return runUnmigratedJsonMutationWithAudit({
-    label: 'updateTenantRbacConfig',
-    resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
-    mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
-  const actor = people.find((p) => p.id === byId);
-  if (!actor) return { ok: false, error: 'Acting user not found.' };
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const partyRepo = getPartyRepository();
+  const hrRepo = getHrAndRbacRepository();
+  return runWithAuditStagingScope(() =>
+    hrRepo.withTenantTransaction(ctx, async () => {
+      const [people, teams, { override: dbRbacOverride, rowVersion }] =
+        await Promise.all([
+          partyRepo.listAllPeople<Person>(ctx),
+          hrRepo.listAllTeams<Team>(ctx),
+          hrRepo.getRbacConfigOverrideWithVersion<RbacConfiguration>(ctx),
+        ]);
+      const actor = people.find((p) => p.id === byId);
+      if (!actor) return { ok: false, error: 'Acting user not found.' };
 
-  const actorPerms = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams: store.teams,
-    mfaVerified: options.mfaVerified ?? false,
-  });
+      const baseRbac = getDefaultTenantRbacConfig(ctx.tenantId);
+      const currentRbac = dbRbacOverride
+        ? mergeRbacConfigOverlay(baseRbac, dbRbacOverride)
+        : baseRbac;
+      const actorPerms = resolvePersonPermissionSet(actor, {
+        allPeople: people,
+        teams,
+        mfaVerified: options.mfaVerified ?? false,
+        config: { rbac: currentRbac },
+      });
 
-  try {
-    requirePermission(
-      actorPerms,
-      'rbac:manage_config',
-      'update tenant RBAC and Entra ID configuration',
-    );
-  } catch (err) {
-    const code = err instanceof AuthorisationError ? err.code : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      code,
-      error: code ? `${code}: ${message}` : message,
-    };
-  }
-
-  const currentRbac = getDefaultTenantRbacConfig();
-  const knownRoleKeys = new Set<string>([
-    ...Object.keys(currentRbac.roles),
-    ...Object.keys(patch.roles ?? {}),
-  ]);
-
-  // Validate permission keys in roles and departmentGrants
-  for (const [roleKey, roleDef] of Object.entries(patch.roles ?? {})) {
-    for (const perm of roleDef?.permissions ?? []) {
-      if (!isRegisteredPermissionKey(perm)) {
+      try {
+        requirePermission(
+          actorPerms,
+          'rbac:manage_config',
+          'update tenant RBAC and Entra ID configuration',
+        );
+      } catch (err) {
+        const code = err instanceof AuthorisationError ? err.code : undefined;
+        const message = err instanceof Error ? err.message : String(err);
         return {
           ok: false,
-          error: `Role "${roleKey}" references unknown permission "${perm}".`,
+          code,
+          error: code ? `${code}: ${message}` : message,
         };
       }
-    }
-  }
-  for (const [deptId, perms] of Object.entries(patch.departmentGrants ?? {})) {
-    for (const perm of perms ?? []) {
-      if (!isRegisteredPermissionKey(perm)) {
-        return {
-          ok: false,
-          error: `Department "${deptId}" references unknown permission "${perm}".`,
-        };
-      }
-    }
-  }
-  if (patch.identityMapping) {
-    for (const [groupKey, rks] of Object.entries(
-      patch.identityMapping.entraGroupToRoleKey ?? {},
-    )) {
-      for (const rk of rks) {
-        if (!knownRoleKeys.has(rk)) {
-          return {
-            ok: false,
-            error: `Entra group "${groupKey}" maps to unknown role key "${rk}".`,
-          };
+
+      if (patch !== null) {
+        const knownRoleKeys = new Set<string>([
+          ...Object.keys(currentRbac.roles),
+          ...Object.keys(patch.roles ?? {}),
+        ]);
+
+        // Validate permission keys in roles and departmentGrants
+        for (const [roleKey, roleDef] of Object.entries(patch.roles ?? {})) {
+          for (const perm of roleDef?.permissions ?? []) {
+            if (!isRegisteredPermissionKey(perm)) {
+              return {
+                ok: false,
+                error: `Role "${roleKey}" references unknown permission "${perm}".`,
+              };
+            }
+          }
         }
-      }
-    }
-    for (const [appRole, rks] of Object.entries(
-      patch.identityMapping.entraAppRoleToRoleKey ?? {},
-    )) {
-      for (const rk of rks) {
-        if (!knownRoleKeys.has(rk)) {
-          return {
-            ok: false,
-            error: `Entra app role "${appRole}" maps to unknown role key "${rk}".`,
-          };
+        for (const [deptId, perms] of Object.entries(
+          patch.departmentGrants ?? {},
+        )) {
+          for (const perm of perms ?? []) {
+            if (!isRegisteredPermissionKey(perm)) {
+              return {
+                ok: false,
+                error: `Department "${deptId}" references unknown permission "${perm}".`,
+              };
+            }
+          }
         }
-      }
-    }
-    if ('emailLinking' in patch.identityMapping && patch.identityMapping.emailLinking !== undefined) {
-      if (
-        typeof patch.identityMapping.emailLinking !== 'object' ||
-        patch.identityMapping.emailLinking === null
-      ) {
-        return {
-          ok: false,
-          error: 'emailLinking must be an object.',
-        };
-      }
-      if (
-        'enabled' in patch.identityMapping.emailLinking &&
-        typeof patch.identityMapping.emailLinking.enabled !== 'boolean'
-      ) {
-        return {
-          ok: false,
-          error: 'emailLinking.enabled must be a boolean.',
-        };
-      }
-      if ('domains' in patch.identityMapping.emailLinking) {
-        if (!Array.isArray(patch.identityMapping.emailLinking.domains)) {
-          return {
-            ok: false,
-            error: 'emailLinking.domains must be an array of lower-case domain names.',
-          };
-        }
-        for (const domain of patch.identityMapping.emailLinking.domains) {
+        if (patch.identityMapping) {
+          for (const [groupKey, rks] of Object.entries(
+            patch.identityMapping.entraGroupToRoleKey ?? {},
+          )) {
+            for (const rk of rks) {
+              if (!knownRoleKeys.has(rk)) {
+                return {
+                  ok: false,
+                  error: `Entra group "${groupKey}" maps to unknown role key "${rk}".`,
+                };
+              }
+            }
+          }
+          for (const [appRole, rks] of Object.entries(
+            patch.identityMapping.entraAppRoleToRoleKey ?? {},
+          )) {
+            for (const rk of rks) {
+              if (!knownRoleKeys.has(rk)) {
+                return {
+                  ok: false,
+                  error: `Entra app role "${appRole}" maps to unknown role key "${rk}".`,
+                };
+              }
+            }
+          }
           if (
-            typeof domain !== 'string' ||
-            !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)
+            'emailLinking' in patch.identityMapping &&
+            patch.identityMapping.emailLinking !== undefined
           ) {
-            return {
-              ok: false,
-              error: `Invalid domain "${String(domain)}" in emailLinking.domains; each domain must be a lower-case domain name.`,
-            };
+            if (
+              typeof patch.identityMapping.emailLinking !== 'object' ||
+              patch.identityMapping.emailLinking === null
+            ) {
+              return {
+                ok: false,
+                error: 'emailLinking must be an object.',
+              };
+            }
+            if (
+              'enabled' in patch.identityMapping.emailLinking &&
+              typeof patch.identityMapping.emailLinking.enabled !== 'boolean'
+            ) {
+              return {
+                ok: false,
+                error: 'emailLinking.enabled must be a boolean.',
+              };
+            }
+            if ('domains' in patch.identityMapping.emailLinking) {
+              if (!Array.isArray(patch.identityMapping.emailLinking.domains)) {
+                return {
+                  ok: false,
+                  error:
+                    'emailLinking.domains must be an array of lower-case domain names.',
+                };
+              }
+              for (const domain of patch.identityMapping.emailLinking.domains) {
+                if (
+                  typeof domain !== 'string' ||
+                  !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)
+                ) {
+                  return {
+                    ok: false,
+                    error: `Invalid domain "${String(domain)}" in emailLinking.domains; each domain must be a lower-case domain name.`,
+                  };
+                }
+              }
+            }
           }
         }
       }
-    }
-  }
 
-  const beforeJson = JSON.stringify(currentRbac);
-  const nextRbac = mergeRbacConfigOverlay(currentRbac, patch);
-  store.rbacConfigOverride = nextRbac;
-  setRuntimeRbacConfigOverride(nextRbac);
+      const beforeJson = JSON.stringify(currentRbac);
+      const nextRbac =
+        patch === null ? baseRbac : mergeRbacConfigOverlay(currentRbac, patch);
+      const nowIso = new Date().toISOString();
+      const expectedRowVersion =
+        options.expectedRowVersion !== undefined
+          ? options.expectedRowVersion
+          : rowVersion;
 
-  writeAudit(store, {
-    recordType: 'system',
-    recordId: 'TENANT-RBAC-CONFIG',
-    action: 'update',
-    field: 'Tenant RBAC & Entra ID Identity Mapping',
-    oldValue: beforeJson,
-    newValue: JSON.stringify(nextRbac),
-    byId,
-    at: new Date().toISOString(),
-  });
-
-  saveStore(store);
-  await getPartyRepository().withTenantTransaction(ctx, async () => {
-    await syncAffectedMattersRestrictionsInTx(ctx, {
-      includeAllRestrictedMatters: true,
-      rbacConfig: nextRbac,
-    });
-  });
-  return { ok: true, rbacConfig: nextRbac };
-
-    },
-  });
+      await hrRepo.putRbacConfigOverride(
+        ctx,
+        patch === null ? null : nextRbac,
+        {
+          updatedById: byId,
+          updatedAt: nowIso,
+          expectedRowVersion,
+        },
+      );
+      const activeSession = getActiveActorSession();
+      if (activeSession && activeSession.tenantId === ctx.tenantId) {
+        activeSession.effectiveRbacConfig = nextRbac;
+      }
+      await syncAffectedMattersRestrictionsInTx(ctx, {
+        includeAllRestrictedMatters: true,
+        rbacConfig: nextRbac,
+      });
+      writeAudit(null, {
+        recordType: 'system',
+        recordId: 'TENANT-RBAC-CONFIG',
+        action: 'update',
+        field: 'Tenant RBAC & Entra ID Identity Mapping',
+        oldValue: beforeJson,
+        newValue: JSON.stringify(nextRbac),
+        byId,
+        at: nowIso,
+      });
+      await flushStagedAuditEntries(ctx);
+      return { ok: true, rbacConfig: nextRbac };
+    }),
+  );
 }
 
 export async function approveSignOff(
@@ -12301,15 +12552,16 @@ export async function approveSignOff(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, item] = await Promise.all([
+  const [people, matters, item, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     taskRepo.getSignOffById<SignOffItem>(ctx, signOffId, { includeRestricted: true }),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   if (!permSet.permissions.has('signoff:approve')) {
     return buildActionDenied(
@@ -12328,7 +12580,7 @@ export async function approveSignOff(
       !linkedMatter ||
       !canPersonAccessMatter(linkedMatter, byId, actor, {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       return buildActionDenied(
@@ -12397,15 +12649,16 @@ export async function discussSignOff(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, item] = await Promise.all([
+  const [people, matters, item, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     taskRepo.getSignOffById<SignOffItem>(ctx, signOffId, { includeRestricted: true }),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   if (!permSet.permissions.has('signoff:approve')) {
     return buildActionDenied(
@@ -12424,7 +12677,7 @@ export async function discussSignOff(
       !linkedMatter ||
       !canPersonAccessMatter(linkedMatter, byId, actor, {
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       return buildActionDenied(
@@ -12504,7 +12757,7 @@ export async function requestMatterBill(
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor, tokenRoles, people, matters } = auth;
+  const { store, actor, tokenRoles, people, matters, teams } = auth;
   const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
   const targetMatter = linkedId
     ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
@@ -12515,7 +12768,7 @@ export async function requestMatterBill(
     !pmsMatter ||
     !canPersonAccessMatter(targetMatter, actor.id, actor, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       tokenRoles,
     })
   ) {
@@ -12579,7 +12832,7 @@ export async function flagMatterWriteOff(
     );
   }
 
-  const { store, actor, tokenRoles, people, matters } = auth;
+  const { store, actor, tokenRoles, people, matters, teams } = auth;
   const linkedId = findOneSquaredIdForPmsCode(store.pmsLinks, 'matter', matterCode);
   const matter = linkedId
     ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
@@ -12590,7 +12843,7 @@ export async function flagMatterWriteOff(
     !pmsMatter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       tokenRoles,
     })
   ) {
@@ -12650,13 +12903,15 @@ export async function remindTeamLeadOverdueCompliance(
     label: 'remindTeamLeadOverdueCompliance',
     resolveCtx: (s) => resolveDefaultServiceTenantContext(s, byId),
     mutate: async () => {
-  const store = getStore();
-  const ctx = resolveDefaultServiceTenantContext(store, byId);
-  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const [people, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   if (!permSet.permissions.has('risk:view')) {
     return buildActionDenied(
@@ -12664,7 +12919,7 @@ export async function remindTeamLeadOverdueCompliance(
       'You do not have permission (risk:view) to send overdue compliance reminders.',
     );
   }
-  const team = store.teams.find((t) => t.id === teamId);
+  const team = teams.find((t) => t.id === teamId);
   if (!team) {
     return buildActionDenied('FORBIDDEN', 'Team not found.');
   }
@@ -12698,7 +12953,7 @@ export async function remindTeamLeadOverdueCompliance(
     byId,
   });
 
-  writeAudit(store, {
+  writeAudit(null, {
     recordType: 'team',
     recordId: team.id,
     action: 'update',
@@ -12733,7 +12988,7 @@ export async function recordInvoiceCreditControlAction(
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:credit_control');
   if (!auth.ok) return auth;
 
-  const { store, actor, tokenRoles, people, matters, ctx } = auth;
+  const { store, actor, tokenRoles, people, matters, teams, ctx } = auth;
   const linkedMatterId = findOneSquaredIdForPmsCode(
     store.pmsLinks,
     'matter',
@@ -12751,7 +13006,7 @@ export async function recordInvoiceCreditControlAction(
     !pmsMatter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
       allPeople: people,
-      teams: store.teams,
+      teams,
       tokenRoles,
     })
   ) {
@@ -13248,18 +13503,19 @@ export async function saveQuoteRecord(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, opts.byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, matters, enquiries, quotes] = await Promise.all([
+  const [people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (quote:edit) to create or edit quotes.';
@@ -13270,6 +13526,7 @@ export async function saveQuoteRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const now = new Date();
@@ -13333,8 +13590,8 @@ export async function saveQuoteRecord(
   );
 
   const feeEarnerId = input.feeEarnerId || existing?.feeEarnerId || opts.byId;
-  const routedTeam = resolveRoutedTeam(input.practiceAreaId, store.teams);
-  const feeEarnerTeam = store.teams.find(
+  const routedTeam = resolveRoutedTeam(input.practiceAreaId, teams);
+  const feeEarnerTeam = teams.find(
     (t) => t.active && t.memberIds.includes(feeEarnerId),
   );
   const assignedTeamId = routedTeam?.team?.id ?? feeEarnerTeam?.id ?? existing?.assignedTeamId ?? null;
@@ -13512,16 +13769,17 @@ export async function markQuoteSentRecord(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes] = await Promise.all([
+  const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (quote:edit) to mark a quote as sent.';
@@ -13531,6 +13789,7 @@ export async function markQuoteSentRecord(
     people,
     matters,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = quotes.find((q) => q.id === quoteId);
@@ -13593,16 +13852,17 @@ export async function logQuoteFollowUpRecord(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes] = await Promise.all([
+  const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (quote:edit) to log quote follow-ups.';
@@ -13612,6 +13872,7 @@ export async function logQuoteFollowUpRecord(
     people,
     matters,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = quotes.find((q) => q.id === quoteId);
@@ -13697,16 +13958,17 @@ export async function reviseQuoteRecord(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes] = await Promise.all([
+  const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (quote:edit) to revise quotes.';
@@ -13716,6 +13978,7 @@ export async function reviseQuoteRecord(
     people,
     matters,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = quotes.find((q) => q.id === quoteId);
@@ -13859,16 +14122,17 @@ export async function recordQuoteOutcomeRecord(
   const store = getStore();
   const ctx = resolveDefaultServiceTenantContext(store, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes] = await Promise.all([
+  const [people, matters, quotes, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (quote:edit) to record a quote outcome.';
@@ -13878,6 +14142,7 @@ export async function recordQuoteOutcomeRecord(
     people,
     matters,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = quotes.find((q) => q.id === quoteId);
@@ -13977,19 +14242,20 @@ export async function prepareQuoteConversionRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes] = await Promise.all([
+  const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
     partyRepo.listAllPeople<Person>(ctx),
     partyRepo.listAllOrganisations<Organisation>(ctx),
     partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
     matterRepo.listAllMattersUnfiltered<Matter>(ctx),
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
     intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'matter:create', {
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     const msg = 'You do not have permission (matter:create) to convert a quote to a matter.';
@@ -14005,6 +14271,7 @@ export async function prepareQuoteConversionRecord(
     matters,
     enquiries,
     quotes,
+    teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const quote = quotes.find((q) => q.id === quoteId);
@@ -14018,7 +14285,7 @@ export async function prepareQuoteConversionRecord(
   const actorName = actor ? personDisplayName(actor) : byId;
   const actorHasRiskView = hasPersonPermission(actor, 'risk:view', {
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
 
   let personId = quote.linkedPersonId;
@@ -14591,16 +14858,15 @@ export async function resolveOrProvisionEntraEmployee(
         ?.correlationId,
     'corr-entra-signin',
   );
-  const prelimStore = getStore();
-  const rbacConfig = getDefaultTenantRbacConfig(activeTenantId);
+  const defaultRbacConfig = getDefaultTenantRbacConfig(activeTenantId);
   const {
     verifiedToken,
   } = resolvePersonForEntraClaims({
     claims,
     people: [],
-    teams: prelimStore.teams,
+    teams: [],
     tenantId: activeTenantId,
-    rbacConfig,
+    rbacConfig: defaultRbacConfig,
     primaryDomain: activeTenantConfig.branding.primaryDomain,
   });
 
@@ -14622,7 +14888,16 @@ export async function resolveOrProvisionEntraEmployee(
     }),
     activeTenantConfig,
   );
-  const prelimPeople = await getPartyRepository().listAllPeople<Person>(signInCtx);
+  const hrRepo = getHrAndRbacRepository();
+  const [prelimPeople, prelimTeams, dbRbacOverride] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(signInCtx),
+    hrRepo.listAllTeams<Team>(signInCtx),
+    hrRepo.getRbacConfigOverride<RbacConfiguration>(signInCtx),
+  ]);
+  const rbacConfig = await loadEffectiveTenantRbacConfig(
+    signInCtx,
+    dbRbacOverride,
+  );
   if (claimEmail) {
     await getPartyRepository().findActivePeopleByEmail(signInCtx, claimEmail);
   }
@@ -14632,7 +14907,7 @@ export async function resolveOrProvisionEntraEmployee(
   } = resolvePersonForEntraClaims({
     claims,
     people: prelimPeople,
-    teams: prelimStore.teams,
+    teams: prelimTeams,
     tenantId: activeTenantId,
     rbacConfig,
     primaryDomain: activeTenantConfig.branding.primaryDomain,
@@ -14692,14 +14967,17 @@ export async function resolveOrProvisionEntraEmployee(
     resolveCtx: () => signInCtx,
     mutate: async (store) => {
       const partyRepo = getPartyRepository();
-      const people = await partyRepo.listAllPeople<Person>(signInCtx);
+      const [people, teams] = await Promise.all([
+        partyRepo.listAllPeople<Person>(signInCtx),
+        hrRepo.listAllTeams<Team>(signInCtx),
+      ]);
       const {
         person: matchedPerson,
         matchedByEmailOnly,
       } = resolvePersonForEntraClaims({
         claims,
         people,
-        teams: store.teams,
+        teams,
         tenantId: activeTenantId,
         rbacConfig,
         primaryDomain: activeTenantConfig.branding.primaryDomain,
@@ -14894,6 +15172,7 @@ async function resolveKeyDatesActorAndData(
   actor: Person | null;
   people: Person[];
   matters: Matter[];
+  teams: Team[];
 } | null> {
   if (!byId || !byId.trim()) return null;
   let prelimCtx: TenantContext;
@@ -14904,18 +15183,19 @@ async function resolveKeyDatesActorAndData(
   } catch {
     return null;
   }
-  const [people, matters] = await Promise.all([
+  const [people, matters, teams] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(prelimCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(prelimCtx),
+    getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
   const actor = resolveActorFromPeopleForKeyDates(people, byId);
   if (!actor) {
-    return { ctx: prelimCtx, actor: null, people, matters };
+    return { ctx: prelimCtx, actor: null, people, matters, teams };
   }
   const ctx = resolveDefaultServiceTenantContext(store, actor.id, {
     tenantCtx: options?.tenantCtx,
   });
-  return { ctx, actor, people, matters };
+  return { ctx, actor, people, matters, teams };
 }
 
 function assertKeyDatesModuleEnabled(
@@ -15029,13 +15309,13 @@ export async function getMatterKeyDatesSnapshot(
       canVerifyByKeyDateId: {},
     };
   }
-  const { ctx, actor: user, people, matters } = resolved;
+  const { ctx, actor: user, people, matters, teams } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: user.id });
   if (
     !hasKeyDatePermission(user, 'keydate:view', {
       config,
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return {
@@ -15079,7 +15359,7 @@ export async function getMatterKeyDatesSnapshot(
     canVerifyByKeyDateId[kd.id] = canUserVerifyKeyDate(user, kd, {
       config,
       allPeople: people,
-      teams: store.teams,
+      teams,
     });
   }
   return {
@@ -15107,13 +15387,13 @@ export async function previewLimitationCalculationRecord(
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people } = resolved;
+    const { ctx, actor, people, teams } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     if (
       !hasKeyDatePermission(actor, 'keydate:view', {
         config,
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       return {
@@ -15185,7 +15465,7 @@ export async function createOrProposeKeyDateRecord(
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const { ctx, actor, people, matters } = resolved;
+      const { ctx, actor, people, matters, teams } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -15251,7 +15531,7 @@ export async function createOrProposeKeyDateRecord(
         actor,
         nowIso,
         config,
-        teams: store.teams,
+        teams,
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -15332,7 +15612,7 @@ export async function proposeProvisionalKeyDateRecord(
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const { ctx, actor, people, matters } = resolved;
+      const { ctx, actor, people, matters, teams } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -15347,6 +15627,7 @@ export async function proposeProvisionalKeyDateRecord(
         actor,
         people,
         matters,
+        teams,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -15365,7 +15646,7 @@ export async function proposeProvisionalKeyDateRecord(
         config,
         matter,
         enquiry,
-        teams: store.teams,
+        teams,
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -15443,11 +15724,12 @@ export async function proposeProvisionalKeyDateRecord(
 
 async function loadKeyDateForActorOrClassifyError(
   ctx: TenantContext,
-  store: FirmStore,
+  _store: FirmStore,
   keyDateId: string,
   actor: Person,
   people: readonly Person[],
   matters: readonly Matter[],
+  _teams: readonly Team[],
 ): Promise<{ kd: KeyDate | null; error?: string; matter: Matter | null; enquiry: Enquiry | null }> {
   const keyDateRepo = getKeyDateRepository();
   const kd = await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
@@ -15493,7 +15775,7 @@ export async function verifyProposedKeyDateRecord(
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const { ctx, actor: verifier, people, matters } = resolved;
+      const { ctx, actor: verifier, people, matters, teams } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -15505,6 +15787,7 @@ export async function verifyProposedKeyDateRecord(
         verifier,
         people,
         matters,
+        teams,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -15521,7 +15804,7 @@ export async function verifyProposedKeyDateRecord(
         verifier,
         nowIso,
         config,
-        teams: store.teams,
+        teams,
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -15613,7 +15896,7 @@ export async function rejectProposedKeyDateRecord(
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor: verifier, people, matters } = resolved;
+    const { ctx, actor: verifier, people, matters, teams } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
     const disabledErr = assertKeyDatesModuleEnabled(config);
     if (disabledErr) return disabledErr;
@@ -15625,6 +15908,7 @@ export async function rejectProposedKeyDateRecord(
       verifier,
       people,
       matters,
+      teams,
     );
     if (!loaded.kd) {
       return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -15640,7 +15924,7 @@ export async function rejectProposedKeyDateRecord(
       reason,
       nowIso,
       config,
-      teams: store.teams,
+      teams,
       people,
       audit: stagedAudit,
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -15693,7 +15977,7 @@ export async function supersedeConfirmedKeyDateRecord(
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const { ctx, actor, people, matters } = resolved;
+      const { ctx, actor, people, matters, teams } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -15705,6 +15989,7 @@ export async function supersedeConfirmedKeyDateRecord(
         actor,
         people,
         matters,
+        teams,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -15748,7 +16033,7 @@ export async function supersedeConfirmedKeyDateRecord(
         config,
         matter,
         enquiry,
-        teams: store.teams,
+        teams,
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -15902,7 +16187,7 @@ export async function resolveKeyDateOutcomeRecord(
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const { ctx, actor, people, matters } = resolved;
+      const { ctx, actor, people, matters, teams } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -15914,6 +16199,7 @@ export async function resolveKeyDateOutcomeRecord(
         actor,
         people,
         matters,
+        teams,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -15931,7 +16217,7 @@ export async function resolveKeyDateOutcomeRecord(
         actor,
         nowIso,
         config,
-        teams: store.teams,
+        teams,
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -16006,7 +16292,7 @@ export async function reassignKeyDateTeamRecord(
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const { ctx, actor, people, matters } = resolved;
+      const { ctx, actor, people, matters, teams } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -16018,6 +16304,7 @@ export async function reassignKeyDateTeamRecord(
         actor,
         people,
         matters,
+        teams,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -16043,7 +16330,7 @@ export async function reassignKeyDateTeamRecord(
         config,
         matter,
         tasks: storeTasks,
-        teams: store.teams,
+        teams,
         people,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -16099,7 +16386,7 @@ export async function recordKeyDateNotApplicableRecord(
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters } = resolved;
+    const { ctx, actor, people, matters, teams } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     const disabledErr = assertKeyDatesModuleEnabled(config);
     if (disabledErr) return disabledErr;
@@ -16128,7 +16415,7 @@ export async function recordKeyDateNotApplicableRecord(
       nowIso,
       config,
       notApplicableList: existingNaList,
-      teams: store.teams,
+      teams,
       people,
       audit: stagedAudit,
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
@@ -16163,7 +16450,7 @@ export async function acknowledgeKeyDateReminderRecord(
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
-      const { ctx, actor, people, matters } = resolved;
+      const { ctx, actor, people, matters, teams } = resolved;
       const config = await getKeyDatesConfig({ ctx, userId: actor.id });
       const disabledErr = assertKeyDatesModuleEnabled(config);
       if (disabledErr) return disabledErr;
@@ -16172,7 +16459,7 @@ export async function acknowledgeKeyDateReminderRecord(
         !hasKeyDatePermission(actor, 'keydate:view', {
           config,
           allPeople: people,
-          teams: store.teams,
+          teams,
         })
       ) {
         return {
@@ -16189,6 +16476,7 @@ export async function acknowledgeKeyDateReminderRecord(
         actor,
         people,
         matters,
+        teams,
       );
       if (!loaded.kd) {
         return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -16202,7 +16490,7 @@ export async function acknowledgeKeyDateReminderRecord(
         };
       }
 
-      const owningTeam = store.teams.find((t) => t.id === kd.teamId);
+      const owningTeam = teams.find((t) => t.id === kd.teamId);
       const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
       const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
       if (!isResponsiblePerson && !isOwningTeamLead) {
@@ -16361,13 +16649,18 @@ export async function runKeyDateReminderSchedulerRecord(
 
   const prelimStore = getStore();
   let prelimPeople: Person[] = [];
+  let prelimTeams: Team[] = [];
   try {
     const readPeopleCtx =
       effectiveTenantCtx ??
       resolveDefaultServiceTenantContext(prelimStore, null);
-    prelimPeople = await getPartyRepository().listAllPeople<Person>(readPeopleCtx);
+    [prelimPeople, prelimTeams] = await Promise.all([
+      getPartyRepository().listAllPeople<Person>(readPeopleCtx),
+      getHrAndRbacRepository().listAllTeams<Team>(readPeopleCtx),
+    ]);
   } catch {
     prelimPeople = prelimStore.people;
+    prelimTeams = [];
   }
   const actor = resolveActorFromPeopleForKeyDates(prelimPeople, actorId);
   if (!actor) {
@@ -16382,7 +16675,7 @@ export async function runKeyDateReminderSchedulerRecord(
     !hasKeyDatePermission(actor, 'keydate:configure', {
       config: inMemoryKeyDatesConfig,
       allPeople: prelimPeople,
-      teams: prelimStore.teams,
+      teams: prelimTeams,
       rbac: effectiveTenantCtx
         ? { tokenRoles: effectiveTenantCtx.actorRoles }
         : undefined,
@@ -16417,12 +16710,12 @@ export async function runKeyDateReminderSchedulerRecord(
   }
 
   return withJsonStoreWriteLock(async () => {
-    const store = getStore();
     const taskRepo = getTaskWorkflowRepository();
-    const [people, matters, storeTasks] = await Promise.all([
+    const [people, matters, storeTasks, teams] = await Promise.all([
       getPartyRepository().listAllPeople<Person>(effectiveTenantCtx!),
       getMatterRepository().listAllMattersUnfiltered<Matter>(effectiveTenantCtx!),
       taskRepo.listAllTasksUnfiltered<Task>(effectiveTenantCtx!),
+      getHrAndRbacRepository().listAllTeams<Team>(effectiveTenantCtx!),
     ]);
     const config = await getKeyDatesConfig({
       ctx: effectiveTenantCtx!,
@@ -16432,7 +16725,7 @@ export async function runKeyDateReminderSchedulerRecord(
       !hasKeyDatePermission(actor, 'keydate:configure', {
         config,
         allPeople: people,
-        teams: store.teams,
+        teams,
         rbac: { tokenRoles: effectiveTenantCtx!.actorRoles },
       })
     ) {
@@ -16495,7 +16788,7 @@ export async function runKeyDateReminderSchedulerRecord(
           reminderStates: reminderStatesWorking,
           tasks: storeTasks,
           matters,
-          teams: store.teams,
+          teams,
           people,
           notifications: createdNotifications,
           audit: stagedAudit,
@@ -16541,7 +16834,7 @@ export async function queryKeyDatesTeamDiaryRecord(
     resolved = null;
   }
   if (!resolved || !resolved.actor) return [];
-  const { ctx, actor: viewer, people, matters } = resolved;
+  const { ctx, actor: viewer, people, matters, teams } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
   const keyDateRepo = getKeyDateRepository();
   const intakeRepo = getIntakeQuoteRepository();
@@ -16553,7 +16846,7 @@ export async function queryKeyDatesTeamDiaryRecord(
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
       allPeople: people,
-      teams: store.teams,
+      teams,
     }),
   );
   return queryTeamDiaryEntries({
@@ -16565,7 +16858,7 @@ export async function queryKeyDatesTeamDiaryRecord(
     reminderStates,
     matters: visibleMatters,
     enquiries,
-    teams: store.teams,
+    teams,
     people,
   });
 }
@@ -16583,12 +16876,12 @@ export async function getKeyDateExceptionsReportRecord(
     resolved = null;
   }
   if (!resolved || !resolved.actor) return [];
-  const { ctx, actor: viewer, people, matters } = resolved;
+  const { ctx, actor: viewer, people, matters, teams } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
   const canConfigure = hasKeyDatePermission(viewer, 'keydate:configure', {
     config,
     allPeople: people,
-    teams: store.teams,
+    teams,
   });
   const keyDateRepo = getKeyDateRepository();
   const [keyDates, notApplicable, reminderStates, calendarSyncs] =
@@ -16603,7 +16896,7 @@ export async function getKeyDateExceptionsReportRecord(
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, {
       allPeople: people,
-      teams: store.teams,
+      teams,
     }),
   );
   return computeKeyDateExceptions({
@@ -16616,7 +16909,7 @@ export async function getKeyDateExceptionsReportRecord(
     reminderStates,
     calendarSyncs,
     matters: visibleMatters,
-    teams: store.teams,
+    teams,
     people,
     values: store.values,
     filterTeamIds: filter.teamIds,
@@ -16643,14 +16936,14 @@ export async function exportKeyDateExceptionsReportRecord(
   if (!resolved || !resolved.actor) {
     return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
   }
-  const { ctx, actor: viewer, people } = resolved;
+  const { ctx, actor: viewer, people, teams } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
 
   if (
     !hasKeyDatePermission(viewer, 'keydate:view_any_team', {
       config,
       allPeople: people,
-      teams: store.teams,
+      teams,
     })
   ) {
     return {
@@ -16720,14 +17013,14 @@ export async function saveKeyDatesConfigRecord(
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people } = resolved;
+    const { ctx, actor, people, teams } = resolved;
     const currentConfig = await getKeyDatesConfig({ ctx, userId: actor.id });
 
     if (
       !hasKeyDatePermission(actor, 'keydate:configure', {
         config: currentConfig,
         allPeople: people,
-        teams: store.teams,
+        teams,
       })
     ) {
       return {

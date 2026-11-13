@@ -36,6 +36,7 @@ import { getStore, resetStore } from '../server/store';
 import {
   getAppSnapshot,
   getEmployeeDetailsForUser,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
@@ -722,7 +723,12 @@ describe('Employee section, conversion paths, migration & permissions', () => {
           },
         );
         expect(
-          store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+          (
+            await getHrAndRbacRepository().getSensitiveRecord(
+              testDataResetContext(),
+              target.id,
+            )
+          )?.reasonableAdjustmentsNeeded,
         ).toBe('Ergonomic standing desk and dual monitors');
 
         const countSensitiveAudit = async (action: string) =>
@@ -790,7 +796,12 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         );
         expect(uneditedServerAttempt.errors).toBeUndefined();
         expect(
-          store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+          (
+            await getHrAndRbacRepository().getSensitiveRecord(
+              testDataResetContext(),
+              target.id,
+            )
+          )?.reasonableAdjustmentsNeeded,
         ).toBe('Ergonomic standing desk and dual monitors');
 
         // Now save P-000002 again (e.g. updating preferredName) without revealing/submitting sensitive section
@@ -811,7 +822,12 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         );
         expect(updateRes.errors).toBeUndefined();
         expect(
-          store.employeeSensitiveRecords?.[target.id]?.reasonableAdjustmentsNeeded,
+          (
+            await getHrAndRbacRepository().getSensitiveRecord(
+              testDataResetContext(),
+              target.id,
+            )
+          )?.reasonableAdjustmentsNeeded,
         ).toBe('Ergonomic standing desk and dual monitors');
         const sensitiveAuditCountAfter = await countSensitiveAudit('update-sensitive');
         expect(sensitiveAuditCountAfter).toBe(sensitiveAuditCountBefore);

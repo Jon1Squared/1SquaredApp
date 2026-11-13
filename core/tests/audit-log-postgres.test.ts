@@ -26,6 +26,7 @@ import {
 import {
   executeMerge,
   getAppSnapshot,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getKeyDatesConfig,
   getMatterRepository,
@@ -802,7 +803,9 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
         initialStore.people.find((p) => p.id === targetEmployeeId)!,
       );
       const beforeSensitive = structuredClone(
-        initialStore.employeeSensitiveRecords[targetEmployeeId],
+        await getHrAndRbacRepository().getSensitiveRecord<
+          import('../../src/domain/types').EmployeeSensitiveRecord
+        >(testDataResetContext(), targetEmployeeId),
       );
 
       setAuditAdapterFailureHookForTesting(({ entries }) => {
@@ -837,10 +840,17 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       setAuditAdapterFailureHookForTesting(null);
 
       clearStoreMemoryCache();
-      expect(getStore().employeeSensitiveRecords[targetEmployeeId]).toEqual(beforeSensitive);
+      expect(
+        await getHrAndRbacRepository().getSensitiveRecord(
+          testDataResetContext(),
+          targetEmployeeId,
+        ),
+      ).toEqual(beforeSensitive);
 
       // Part 2: RBAC configuration override rollback
-      const beforeRbacOverride = structuredClone(getStore().rbacConfigOverride);
+      const beforeRbacOverride = structuredClone(
+        await getHrAndRbacRepository().getRbacConfigOverride(testDataResetContext()),
+      );
       const snap = await runAsTestEmployee('P-000004', () => getAppSnapshot('P-000004'));
       setAuditAdapterFailureHookForTesting(({ entries }) => {
         if (entries.some((e) => e.recordId === 'TENANT-RBAC-CONFIG')) {
@@ -868,7 +878,9 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       setAuditAdapterFailureHookForTesting(null);
 
       clearStoreMemoryCache();
-      expect(getStore().rbacConfigOverride).toEqual(beforeRbacOverride);
+      expect(
+        await getHrAndRbacRepository().getRbacConfigOverride(testDataResetContext()),
+      ).toEqual(beforeRbacOverride);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());

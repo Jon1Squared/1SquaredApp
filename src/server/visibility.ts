@@ -1,5 +1,6 @@
+import type { RbacConfiguration } from '@platform/core';
 import { canPersonAccessMatter } from './rbacRuntime';
-import type { Enquiry, Matter, Person, Quote, Task } from '@/domain/types';
+import type { Enquiry, Matter, Person, Quote, Task, Team } from '@/domain/types';
 import type { FirmStore } from './store';
 
 export interface RecordVisibility {
@@ -17,18 +18,21 @@ export interface RecordVisibility {
 export const EMPTY_HIDDEN_KEY_DATE_IDS: ReadonlySet<string> = new Set<string>();
 
 export function buildRecordVisibility(
-  store: Pick<FirmStore, 'teams'>,
+  store: Partial<Pick<FirmStore, 'teams'>> | null | undefined,
   user: Person | null | undefined,
   opts: {
     tokenRoles?: readonly string[];
     hiddenMatterKeyDateIds: ReadonlySet<string>;
+    teams?: readonly Team[];
     people?: readonly Person[];
     matters?: readonly Matter[];
     enquiries?: readonly Enquiry[];
     quotes?: readonly Quote[];
+    rbacConfig?: RbacConfiguration;
   },
 ): RecordVisibility {
   const userId = user?.id ?? '';
+  const allTeams = opts.teams ?? store?.teams ?? [];
   const allPeople = opts.people ?? [];
   const allMatters = opts.matters ?? [];
   const allEnquiries = opts.enquiries ?? [];
@@ -37,8 +41,9 @@ export function buildRecordVisibility(
     Boolean(userId) &&
     canPersonAccessMatter(m, userId, user ?? null, {
       allPeople,
-      teams: store.teams,
+      teams: [...allTeams],
       tokenRoles: opts.tokenRoles,
+      ...(opts.rbacConfig ? { config: { rbac: opts.rbacConfig } } : {}),
     });
 
   const hiddenMatterIds = new Set<string>();

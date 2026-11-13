@@ -9,10 +9,8 @@ import 'server-only';
 
 import {
   canAccessMatter,
-  clearPermissionRequestCache,
   hasPermission,
   requirePermission,
-  validateRbacConfig,
   type EntraIdRawTokenClaims,
   type PermissionKey,
   type RbacConfiguration,
@@ -78,9 +76,6 @@ import type {
 type PersonId = string;
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 
-const tenantRbacConfigCacheByTenant = new Map<string, RbacConfiguration>();
-const runtimeRbacConfigOverrideByTenant = new Map<string, RbacConfiguration>();
-
 export function getServerTenantConfiguration(): Pick<
   TenantConfiguration,
   'tenantId' | 'displayName' | 'branding' | 'rbac'
@@ -106,39 +101,12 @@ function requireActiveTenantRbacBase(tenantId: string): RbacConfiguration {
   return activeCfg.rbac;
 }
 
-export function setRuntimeRbacConfigOverride(
-  override: Partial<RbacConfiguration> | null | undefined,
-  tenantId?: string,
-): void {
-  const activeCfg = getServerTenantConfiguration();
-  const activeTenantId = tenantId?.trim() || activeCfg.tenantId;
-  if (!override) {
-    runtimeRbacConfigOverrideByTenant.delete(activeTenantId);
-  } else {
-    const baseCfg = requireActiveTenantRbacBase(activeTenantId);
-    const merged = mergeRbacConfigOverlay(baseCfg, override);
-    const validated = validateRbacConfig(merged);
-    runtimeRbacConfigOverrideByTenant.set(activeTenantId, validated);
-  }
-  tenantRbacConfigCacheByTenant.delete(activeTenantId);
-  clearPermissionRequestCache();
-}
-
 export function getDefaultTenantRbacConfig(
   tenantId?: string,
 ): RbacConfiguration {
   const activeCfg = getServerTenantConfiguration();
   const targetTenantId = tenantId?.trim() || activeCfg.tenantId;
-  const base = requireActiveTenantRbacBase(targetTenantId);
-  const cached = tenantRbacConfigCacheByTenant.get(targetTenantId);
-  if (cached) {
-    return cached;
-  }
-
-  const runtimeOverride = runtimeRbacConfigOverrideByTenant.get(targetTenantId);
-  const withRuntime = mergeRbacConfigOverlay(base, runtimeOverride);
-  tenantRbacConfigCacheByTenant.set(targetTenantId, withRuntime);
-  return withRuntime;
+  return requireActiveTenantRbacBase(targetTenantId);
 }
 
 export function resolveActiveTenantIdForRbac(
@@ -160,12 +128,21 @@ export function withActiveTenantRbacOptions(
   const activeTenantId = resolveActiveTenantIdForRbac(
     options.tenantId ?? options.context?.tenantId,
   );
+  const activeSession = getActiveActorSession();
+  const sessionRbacConfig =
+    activeSession?.tenantId === activeTenantId
+      ? activeSession.effectiveRbacConfig
+      : undefined;
   const rbacConfig =
-    options.config?.rbac ?? getDefaultTenantRbacConfig(activeTenantId);
+    options.config?.rbac ??
+    sessionRbacConfig ??
+    getDefaultTenantRbacConfig(activeTenantId);
   return {
     ...options,
     tenantId: activeTenantId,
-    config: options.config ?? { rbac: rbacConfig },
+    config: options.config
+      ? { ...options.config, rbac: rbacConfig }
+      : { rbac: rbacConfig },
     context: options.context
       ? { ...options.context, tenantId: activeTenantId }
       : { tenantId: activeTenantId },
@@ -392,8 +369,15 @@ export function getLeftRailVisibility(
   } = {},
 ): LeftRailVisibility {
   const activeTenantId = resolveActiveTenantIdForRbac(options.tenantId);
+  const activeSession = getActiveActorSession();
+  const sessionRbacConfig =
+    activeSession?.tenantId === activeTenantId
+      ? activeSession.effectiveRbacConfig
+      : undefined;
   const rbacConfig =
-    options.config?.rbac ?? getDefaultTenantRbacConfig(activeTenantId);
+    options.config?.rbac ??
+    sessionRbacConfig ??
+    getDefaultTenantRbacConfig(activeTenantId);
   return domainGetLeftRailVisibility(activeRole, userRoles, {
     tenantId: activeTenantId,
     config: { rbac: rbacConfig },

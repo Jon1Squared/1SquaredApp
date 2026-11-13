@@ -109,6 +109,10 @@ export function sanitizePostgresError(
         existingCode.startsWith('TASK_') ||
         existingCode.startsWith('NOTIFICATION_') ||
         existingCode.startsWith('SIGN_OFF_') ||
+        existingCode.startsWith('HR_') ||
+        existingCode.startsWith('TEAM_') ||
+        existingCode.startsWith('RBAC_') ||
+        existingCode.startsWith('EMPLOYEE_') ||
         existingCode.startsWith('MIGRATION_') ||
         existingCode.startsWith('DOCUMENT_') ||
         existingCode.startsWith('TEMPLATE_'))
@@ -126,6 +130,10 @@ export function sanitizePostgresError(
       err.message.startsWith('TASK_') ||
       err.message.startsWith('NOTIFICATION_') ||
       err.message.startsWith('SIGN_OFF_') ||
+      err.message.startsWith('HR_') ||
+      err.message.startsWith('TEAM_') ||
+      err.message.startsWith('RBAC_') ||
+      err.message.startsWith('EMPLOYEE_') ||
       err.message.startsWith('MIGRATION_') ||
       err.message.startsWith('DOCUMENT_') ||
       err.message.startsWith('TEMPLATE_')
@@ -146,6 +154,15 @@ export function sanitizePostgresError(
     denied.code = '42501';
     denied.sqlState = '42501';
     return denied;
+  }
+
+  if (sqlState === '23503') {
+    const restricted = new Error(
+      `TENANCY_FOREIGN_KEY_RESTRICT: Database operation "${contextLabel}" refused by foreign key ON DELETE RESTRICT constraint (SQLSTATE 23503).`,
+    ) as Error & { code: string; sqlState: string };
+    restricted.code = '23503';
+    restricted.sqlState = '23503';
+    return restricted;
   }
 
   const safeErr = new Error(
