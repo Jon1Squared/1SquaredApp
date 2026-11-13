@@ -183,7 +183,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    // Round-trip rollback 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
     expect(await runner.getActiveTables(ctx)).toEqual(
       expect.arrayContaining([
         'people',
@@ -214,8 +214,36 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'choice_values',
         'custom_field_definitions',
         'tenant_module_configs',
+        'pms_links',
+        'pms_extract_metadata',
+        'pms_fee_earners',
+        'pms_clients',
+        'pms_matters',
+        'pms_matter_financials',
+        'pms_fee_estimates',
+        'pms_invoices',
+        'pms_payments',
+        'pms_time_entries',
+        'pms_disbursements',
+        'pms_client_account_entries',
+        'pms_credit_control_log',
       ]),
     );
+    expect(await runner.rollbackVersion(ctx, '0013')).toBe(true);
+    const activeAfter0013Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0013Rollback).not.toContain('pms_links');
+    expect(activeAfter0013Rollback).not.toContain('pms_extract_metadata');
+    expect(activeAfter0013Rollback).not.toContain('pms_fee_earners');
+    expect(activeAfter0013Rollback).not.toContain('pms_clients');
+    expect(activeAfter0013Rollback).not.toContain('pms_matters');
+    expect(activeAfter0013Rollback).not.toContain('pms_matter_financials');
+    expect(activeAfter0013Rollback).not.toContain('pms_fee_estimates');
+    expect(activeAfter0013Rollback).not.toContain('pms_invoices');
+    expect(activeAfter0013Rollback).not.toContain('pms_payments');
+    expect(activeAfter0013Rollback).not.toContain('pms_time_entries');
+    expect(activeAfter0013Rollback).not.toContain('pms_disbursements');
+    expect(activeAfter0013Rollback).not.toContain('pms_client_account_entries');
+    expect(activeAfter0013Rollback).not.toContain('pms_credit_control_log');
     expect(await runner.rollbackVersion(ctx, '0012')).toBe(true);
     const activeAfter0012Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0012Rollback).not.toContain('firm_profiles');
@@ -301,6 +329,19 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'choice_values',
         'custom_field_definitions',
         'tenant_module_configs',
+        'pms_links',
+        'pms_extract_metadata',
+        'pms_fee_earners',
+        'pms_clients',
+        'pms_matters',
+        'pms_matter_financials',
+        'pms_fee_estimates',
+        'pms_invoices',
+        'pms_payments',
+        'pms_time_entries',
+        'pms_disbursements',
+        'pms_client_account_entries',
+        'pms_credit_control_log',
       ]),
     );
   });

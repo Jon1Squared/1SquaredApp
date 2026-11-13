@@ -117,6 +117,7 @@ export function sanitizePostgresError(
         existingCode.startsWith('CUSTOM_FIELD_') ||
         existingCode.startsWith('CHOICE_') ||
         existingCode.startsWith('FIRM_PROFILE_') ||
+        existingCode.startsWith('PMS_') ||
         existingCode.startsWith('MIGRATION_') ||
         existingCode.startsWith('DOCUMENT_') ||
         existingCode.startsWith('TEMPLATE_'))
@@ -142,6 +143,7 @@ export function sanitizePostgresError(
       err.message.startsWith('CUSTOM_FIELD_') ||
       err.message.startsWith('CHOICE_') ||
       err.message.startsWith('FIRM_PROFILE_') ||
+      err.message.startsWith('PMS_') ||
       err.message.startsWith('MIGRATION_') ||
       err.message.startsWith('DOCUMENT_') ||
       err.message.startsWith('TEMPLATE_')

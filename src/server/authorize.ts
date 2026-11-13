@@ -24,6 +24,8 @@ import {
 } from '@/domain/rbac';
 import {
   getActiveTenantConfiguration,
+  getHrAndRbacRepository,
+  getPartyRepository,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -45,7 +47,6 @@ import {
   mergeRbacConfigOverlay,
   resolvePersonPermissionSet,
 } from './rbacRuntime';
-import { getHrAndRbacRepository, getPartyRepository } from './auditAdapter';
 import {
   requireAuthenticatedActor,
   type AuthenticatedActorContext,

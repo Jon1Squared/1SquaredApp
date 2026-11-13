@@ -133,7 +133,7 @@ import {
   buildFirmFinanceRollups,
   canUserViewFinance,
 } from '../../src/domain/pms';
-import { getPmsSource } from '../../src/pms/pmsSource';
+import { getTenantPmsSource } from '../../src/pms/pmsSource';
 import { attentionList } from '../../src/domain/attention';
 import { clearStoreMemoryCache, getStore, resetStore } from '../../src/server/store';
 import {
@@ -151,6 +151,8 @@ import {
 import {
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
+  getAuditRepository,
+  getPmsRepository,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '../../src/platform/tenantRuntime';
@@ -3015,8 +3017,16 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             await syncMatterCostsRatesFromPmsAction(),
             await linkPmsRecordAction('organisation', 'O-000001', 'CL-S004'),
             await unlinkPmsRecordAction(
-              getStore().pmsLinks.find((l) => l.pmsCode === 'CL-S004')?.id ??
-                getStore().pmsLinks[0]!.id,
+              (
+                await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(
+                  testDataResetContext(),
+                )
+              ).find((l) => l.pmsCode === 'CL-S004')?.id ??
+                (
+                  await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(
+                    testDataResetContext(),
+                  )
+                )[0]!.id,
             ),
             await rerunAutomaticPmsMatchingAction(),
             await createRecordFromPmsAction('organisation', 'CL001'),
@@ -3155,7 +3165,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           revoke: ['employee:edit_core'],
         };
         await getPartyRepository().putPerson(ctx, adminPerson);
-        store.pmsLinks = store.pmsLinks.filter((l) => l.entityType !== 'employee');
+        const currentPmsLinks1 = await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(ctx);
+        await getPmsRepository().putPmsLinks(
+          ctx,
+          currentPmsLinks1.filter((l) => l.entityType !== 'employee'),
+          { replaceAll: true },
+        );
         const peopleCountBefore = (await getPartyRepository().listAllPeople(ctx)).length;
         const empFromPmsDenied = await createRecordFromPmsAction('employee', 'FE01');
         expect(isActionDenied(empFromPmsDenied)).toBe(true);
@@ -3169,7 +3184,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           revoke: ['matter:create'],
         };
         await getPartyRepository().putPerson(ctx, adminPerson);
-        store.pmsLinks = store.pmsLinks.filter((l) => l.entityType !== 'matter');
+        const currentPmsLinks2 = await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(ctx);
+        await getPmsRepository().putPmsLinks(
+          ctx,
+          currentPmsLinks2.filter((l) => l.entityType !== 'matter'),
+          { replaceAll: true },
+        );
         const mattersCountBefore = (await getMatterRepository().listAllMattersUnfiltered(ctx)).length;
         const matterFromPmsDenied = await createRecordFromPmsAction(
           'matter',
@@ -5741,8 +5761,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           'P-000004',
         );
 
-        const updatedStore = getStore();
-        const personPmsLinks = updatedStore.pmsLinks.filter(
+        const updatedPmsLinks = await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(
+          testDataResetContext(),
+        );
+        const personPmsLinks = updatedPmsLinks.filter(
           (l) =>
             l.entityType === 'person' &&
             (l.onesquaredId === survivorPerson.id || l.onesquaredId === mergedPerson.id),
@@ -5751,7 +5773,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(personPmsLinks[0]?.onesquaredId).toBe(survivorPerson.id);
         expect(personPmsLinks[0]?.pmsCode).toBe('PMS-PER-MERGED');
 
-        const orgPmsLinks = updatedStore.pmsLinks.filter(
+        const orgPmsLinks = updatedPmsLinks.filter(
           (l) =>
             l.entityType === 'organisation' &&
             (l.onesquaredId === survivorOrg.id || l.onesquaredId === mergedOrg.id),
@@ -6097,26 +6119,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
         }
 
-        // Force saveStore to fail AFTER PostgreSQL repointMergedEntityWithDelta has committed
-        let currentSavedJson = global.__oneSquaredLastSavedStoreJson;
-        let failNextSave = true;
-        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
-          configurable: true,
-          get() {
-            return currentSavedJson;
-          },
-          set(val: string | undefined) {
-            if (failNextSave) {
-              failNextSave = false;
-              throw new Error('SIMULATED_POST_PG_SAVE_STORE_FAILURE');
-            }
-            currentSavedJson = val;
-          },
-        });
+        // Force post-PG audit step to fail AFTER PostgreSQL repointMergedEntityWithDelta and partyRepo merge have committed
+        const appendAuditSpy = vi
+          .spyOn(getAuditRepository(), 'appendAuditEntries')
+          .mockRejectedValueOnce(new Error('SIMULATED_POST_PG_SAVE_STORE_FAILURE'));
 
-        await expect(
-          executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
-        ).rejects.toThrow(/SIMULATED_POST_PG_SAVE_STORE_FAILURE/);
+        try {
+          await expect(
+            executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004'),
+          ).rejects.toThrow(/SIMULATED_POST_PG_SAVE_STORE_FAILURE/);
+        } finally {
+          appendAuditSpy.mockRestore();
+        }
 
         // PostgreSQL documents and links are compensated back to their pre-merge state
         expect((await repo.getDocumentById(ctx, doc1.id))?.primaryClientId).toBe(mergedPerson.id);
@@ -6244,24 +6258,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         await linkPmsRecord('person', mergedPerson.id, 'PMS-R309', 'P-000004');
         saveStore(store);
 
-        const priorSavedJson = global.__oneSquaredLastSavedStoreJson;
         let saveAttempts = 0;
-        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
-          configurable: true,
-          get() {
-            return priorSavedJson;
-          },
-          set() {
+        const appendAuditSpy = vi
+          .spyOn(getAuditRepository(), 'appendAuditEntries')
+          .mockImplementationOnce(async () => {
             saveAttempts += 1;
-            if (saveAttempts === 1) {
-              throw new Error('SIMULATED_FIRST_SAVE_STORE_FAILURE');
-            }
-            throw new Error('SIMULATED_ROLLBACK_SAVE_STORE_FAILURE');
-          },
-        });
+            throw new Error('SIMULATED_FIRST_SAVE_STORE_FAILURE');
+          });
 
-        await expect(executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004')).rejects.toThrow('SIMULATED_FIRST_SAVE_STORE_FAILURE');
-        expect(saveAttempts).toBe(2);
+        try {
+          await expect(executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004')).rejects.toThrow('SIMULATED_FIRST_SAVE_STORE_FAILURE');
+        } finally {
+          appendAuditSpy.mockRestore();
+        }
+        expect(saveAttempts).toBe(1);
         expect(errorSpy).toHaveBeenCalledTimes(1);
         const loggedArg = String(errorSpy.mock.calls[0]?.[0] ?? '');
         const parsedLog = JSON.parse(loggedArg) as {
@@ -6471,7 +6481,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('3. each finance loader returns FORBIDDEN when its permission key is removed and returns data when granted, and fee earner gets FORBIDDEN from getFirmFinance', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
-        const store = getStore();
         const ctx = testTenantCtx('P-000001');
         const partyRepo = getPartyRepository();
         const partner = (await partyRepo.getPersonById<import('@/domain/types').Person>(ctx, 'P-000001'))!;
@@ -6574,9 +6583,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
 
         // R314: Unlinked PMS matters fail closed on all 4 matter-level loaders, while getFirmFinance includes them, and allUnlinkedPmsMatters requires finance:manage_links
-        const pms = getPmsSource();
+        const pms = await getTenantPmsSource(testDataResetContext());
+        const pmsLinks = await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(
+          testDataResetContext(),
+        );
         const linkedMatterCodes = new Set(
-          store.pmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
+          pmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
         );
         const unlinkedMatterCodes = pms
           .listMatters()
@@ -6605,13 +6617,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }
 
         // Unlink PEN001-0001 (M-000001, where FE005 has 7.0h Oct time and £3,010 unbilled WIP across Sept+Oct) and verify getMyFinanceFigures excludes it
-        const penLinkIdx = store.pmsLinks.findIndex(
+        const penLink = pmsLinks.find(
           (l) => l.entityType === 'matter' && l.pmsCode === 'PEN001-0001',
         );
-        expect(penLinkIdx).toBeGreaterThanOrEqual(0);
-        const [removedPenLink] = store.pmsLinks.splice(penLinkIdx, 1);
+        expect(penLink).toBeDefined();
+        await getPmsRepository().deletePmsLinkById(testDataResetContext(), penLink!.id);
         const feMineWithoutPen = await getMyFinanceFigures('P-000002');
-        store.pmsLinks.splice(penLinkIdx, 0, removedPenLink!);
+        await getPmsRepository().putPmsLink(testDataResetContext(), penLink!);
         expect(isActionDenied(feMineWithoutPen)).toBe(false);
         if (!isActionDenied(feMine) && !isActionDenied(feMineWithoutPen)) {
           expect(
@@ -6686,7 +6698,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const matterRepo = getMatterRepository();
         const partyRepo = getPartyRepository();
         const allMatters = await matterRepo.listAllMattersUnfiltered<import('@/domain/types').Matter>(ctx);
-        const pms = getPmsSource();
+        const pms = await getTenantPmsSource(testDataResetContext());
         const extractInfo = pms.getExtractInfo();
 
         // BAY001-0001 (M-000014, Bay Cafés Ltd): mark as staff matter restricted to P-000001
@@ -7102,11 +7114,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect((await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)).length).toBe(tasksBeforeR315);
 
         // 2b. R337: An unlinked PMS code whose text equals the matterNumber of an accessible 1Squared matter returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note, and invalid amountGbp values are rejected
-        const harLinkIdx = store.pmsLinks.findIndex(
+        const allPmsLinksR337 = await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(ctx);
+        const removedHarLink = allPmsLinksR337.find(
           (l) => l.entityType === 'matter' && l.pmsCode === 'HAR001-0003',
         );
-        expect(harLinkIdx).toBeGreaterThanOrEqual(0);
-        const [removedHarLink] = store.pmsLinks.splice(harLinkIdx, 1);
+        expect(removedHarLink).toBeDefined();
+        await getPmsRepository().deletePmsLinkById(ctx, removedHarLink!.id);
         const signOffsBeforeR337 = (await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length;
         try {
           const unlinkedBill = await requestMatterBillAction('HAR001-0003');
@@ -7140,7 +7153,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect((await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length).toBe(signOffsBeforeR337);
           expect((await getPartyRepository().listAllNotes(ctx)).length).toBe(notesBeforeR315);
         } finally {
-          store.pmsLinks.splice(harLinkIdx, 0, removedHarLink!);
+          await getPmsRepository().putPmsLink(ctx, removedHarLink!);
         }
 
         for (const invalidAmount of [0, -100, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -7154,7 +7167,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect((await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length).toBe(signOffsBeforeR337);
 
         // 2c. R372: A linked matter code whose PMS matter is missing from the PMS database returns FORBIDDEN on all 3 actions and writes no task, sign-off, or note
-        store.pmsLinks.push({
+        const existingM1Links = (await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(ctx)).filter(
+          (l) => l.entityType === 'matter' && l.onesquaredId === 'M-000001',
+        );
+        for (const l of existingM1Links) {
+          await getPmsRepository().deletePmsLinkById(ctx, l.id);
+        }
+        await getPmsRepository().putPmsLink(ctx, {
           id: 'PMSL-R372-MISSING-PMS',
           entityType: 'matter',
           onesquaredId: 'M-000001',
@@ -7195,8 +7214,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           expect((await getTaskWorkflowRepository().listAllSignOffsUnfiltered(ctx)).length).toBe(signOffsBeforeR337);
           expect((await getPartyRepository().listAllNotes(ctx)).length).toBe(notesBeforeR315);
         } finally {
-          const idx = store.pmsLinks.findIndex((l) => l.id === 'PMSL-R372-MISSING-PMS');
-          if (idx >= 0) store.pmsLinks.splice(idx, 1);
+          await getPmsRepository().deletePmsLinkById(ctx, 'PMSL-R372-MISSING-PMS');
+          for (const l of existingM1Links) {
+            await getPmsRepository().putPmsLink(ctx, l);
+          }
         }
 
         // 3. Revoke finance:credit_control on partner: all 3 actions return FORBIDDEN mentioning finance:credit_control
@@ -8008,10 +8029,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(emailAudit?.newValue).toBe('sian.renamed@notalawfirm.example');
 
         // R383 & R394: Creating an employee from PMS requires mfaVerified === true (fails closed without MFA even when no actor session is active) and writes the Employee sign-in email audit entry when MFA is verified
-        getStore().pmsLinks = getStore().pmsLinks.filter(
-          (l) => !(l.entityType === 'employee' && l.pmsCode === 'FE001'),
+        const fe001Links = (await getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(ctx)).filter(
+          (l) => l.entityType === 'employee' && l.pmsCode === 'FE001',
         );
-        saveStore(getStore());
+        for (const l of fe001Links) {
+          await getPmsRepository().deletePmsLinkById(ctx, l.id);
+        }
         setTestEntraSessionOverride({
           personId: adminPerson.id,
           tenantId: 'not-a-law-firm',

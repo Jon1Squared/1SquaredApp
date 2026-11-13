@@ -51,7 +51,7 @@ import type {
   TaskSettings,
   Team,
 } from '@/domain/types';
-import { getPmsSource } from '@/pms/pmsSource';
+import { getCachedDefaultWorkbookDataset } from '@/pms/importPms';
 import { buildSeedLists } from '@/seed/lists';
 import {
   buildDemoData,
@@ -238,10 +238,10 @@ function buildInitialPmsLinks(
   existingLinks: PmsLink[] = [],
   nowIso: string = new Date().toISOString(),
 ): PmsLink[] {
-  const pms = getPmsSource();
-  const pmsClients = pms.listClients();
-  const pmsFeeEarners = pms.listFeeEarners();
-  const pmsMatters = pms.listMatters();
+  const pmsDataset = getCachedDefaultWorkbookDataset();
+  const pmsClients = pmsDataset.clients;
+  const pmsFeeEarners = pmsDataset.feeEarners;
+  const pmsMatters = pmsDataset.matters;
 
   const seededMatterLinks = buildInitialSeedMatterPmsLinks(
     matters,
@@ -254,9 +254,9 @@ function buildInitialPmsLinks(
     organisations,
     people,
     matters,
-    pmsClients,
-    pmsFeeEarners,
-    pmsMatters,
+    [...pmsClients],
+    [...pmsFeeEarners],
+    [...pmsMatters],
     nowIso,
     true,
   );
@@ -295,7 +295,7 @@ export function createSeedStore(
     matterPartyTaxonomy,
     today.toISOString(),
   );
-  const pmsFeeEarners = getPmsSource().listFeeEarners();
+  const pmsFeeEarners = [...getCachedDefaultWorkbookDataset().feeEarners];
   const matterCostsConfig = syncRateCardsWithPmsFeeEarners(
     createDefaultMatterCostsConfig(partyMigration.values, today.toISOString(), {
       clientProfileCode: tenantCfg.tenantId,
@@ -740,6 +740,9 @@ function hydrateMissingMovedStoreFields(parsed: FirmStore): void {
   if (!Array.isArray(parsed.keyDateCalendarSyncs)) {
     parsed.keyDateCalendarSyncs = [];
   }
+  if (!Array.isArray(parsed.pmsLinks)) {
+    parsed.pmsLinks = [];
+  }
 }
 
 export function getStore(): FirmStore {
@@ -863,7 +866,7 @@ export function getStore(): FirmStore {
           displayName: tenantCfg.displayName,
           primaryDomain: tenantCfg.branding.primaryDomain,
         }),
-        getPmsSource().listFeeEarners(),
+        [...getCachedDefaultWorkbookDataset().feeEarners],
         global.__oneSquaredStore.values,
       );
       addedSeedItems = true;
@@ -1023,7 +1026,7 @@ export function getStore(): FirmStore {
             displayName: tenantCfg.displayName,
             primaryDomain: tenantCfg.branding.primaryDomain,
           }),
-          getPmsSource().listFeeEarners(),
+          [...getCachedDefaultWorkbookDataset().feeEarners],
           parsed.values,
         );
         migrated = true;
@@ -1144,7 +1147,11 @@ const MOVED_TO_POSTGRES_STORE_KEYS: ReadonlySet<string> = new Set([
   'matterPartyTaxonomy',
   'matterPartyMigrationReport',
   'matterCostsConfig',
+  'formSections',
+  'dismissedDuplicates',
+  'workTypeProfiles',
   'counters',
+  'pmsLinks',
 ]);
 
 function serializeUnmigratedStoreForPersistence(

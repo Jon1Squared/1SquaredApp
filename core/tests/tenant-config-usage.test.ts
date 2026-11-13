@@ -615,15 +615,15 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       'matterCosts.partnerSignOffThresholdGbp': 'S0-23',
       'matterCosts.rateCards': 'S0-23',
       'matterCosts.disbursementPresets': 'S0-23',
-      'integrations.pmsConnectionSecretVaultRef': 'S0-18',
-      'integrations.companiesHouseApiKeyVaultRef': 'S0-18',
-      'integrations.pmsSync.enabled': 'S0-18',
-      'integrations.pmsSync.providerKey': 'S0-18',
-      'integrations.pmsSync.syncMode': 'S0-18',
-      'integrations.pmsSync.matterCodeAllocation': 'S0-18',
-      'integrations.pmsSync.clientCodeAllocation': 'S0-18',
-      'integrations.pmsSync.pollIntervalMinutes': 'S0-18',
-      'integrations.pmsSync.fieldMappings': 'S0-18',
+      'integrations.pmsConnectionSecretVaultRef': 'backlog',
+      'integrations.companiesHouseApiKeyVaultRef': 'backlog',
+      'integrations.pmsSync.enabled': 'backlog',
+      'integrations.pmsSync.providerKey': 'backlog',
+      'integrations.pmsSync.syncMode': 'backlog',
+      'integrations.pmsSync.matterCodeAllocation': 'backlog',
+      'integrations.pmsSync.clientCodeAllocation': 'backlog',
+      'integrations.pmsSync.pollIntervalMinutes': 'backlog',
+      'integrations.pmsSync.fieldMappings': 'backlog',
       'documentGeneration.usage.retentionMonths': 'S0-19',
       'documentGeneration.customDocumentTypes': 'backlog',
       'documentAccess.autoRemediateDrift': 'S0-25',
@@ -929,7 +929,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         withNotices.structuredReservedSettings.some(
           (n) =>
             n.path === 'integrations.pmsConnectionSecretVaultRef' &&
-            n.forSlice === 'S0-18',
+            n.forSlice === 'backlog',
         ),
       ).toBe(true);
     }

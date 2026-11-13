@@ -1538,7 +1538,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'Updated concurrently while hook was waiting',
       );
 
-      // Now verify that when a hook allows proceed after 50ms, a concurrent update to the same matter queues behind saveMatterRecord on the FIFO lock so neither write is lost (R448)
+      // Now verify that when a hook allows proceed after 50ms, a concurrent update to the same matter bumps row_version in PostgreSQL so saveMatterRecord refuses the stale save with MATTER_CONCURRENCY_CONFLICT and never overwrites the concurrent update
       hookMode = 'allow_after_50ms';
       // Wait until the save is inside the hook (after it has read its baseline) rather than a fixed delay
       const staleHookEntered = new Promise<void>((resolve) => {
@@ -1548,19 +1548,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         saveMatterRecord(
           {
             ...refreshedTarget,
-            title: 'Concurrent Matter Save During Allow Hook',
+            title: 'Stale Overwrite Attempt',
           },
           { id: refreshedTarget.id, byId: carys.id, saveMode: 'submit_cleared' },
         ),
       );
       await staleHookEntered;
       onHookEntered = null;
-      // S0-15: saveMatterRecord and updateMatterConflictRecord now both run inside the
-      // FIFO withJsonStoreWriteLock, so the concurrent update queues behind the save
-      // instead of racing it. The no-lost-update guarantee is now provided by
-      // serialisation: the update must complete after the save and both must persist.
-      const completionOrder: string[] = [];
-      const queuedUpdatePromise = runWithActiveActorSession(
+      const queuedUpdateRes = await runWithActiveActorSession(
         actorSession,
         async () =>
           updateMatterConflictRecord(
@@ -1572,29 +1567,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             },
             carys.id,
           ),
-      ).then((res) => {
-        completionOrder.push('conflict-update');
-        return res;
-      });
-      const staleSaveRes = await staleSavePromise.then((res) => {
-        completionOrder.push('matter-save');
-        return res;
-      });
-      const queuedUpdateRes = await queuedUpdatePromise;
-      expect(completionOrder).toEqual(['matter-save', 'conflict-update']);
-      expect(staleSaveRes.errors).toBeUndefined();
-      expect(staleSaveRes.matter?.title).toBe(
-        'Concurrent Matter Save During Allow Hook',
       );
-      // The queued update now sees the freshly opened matter and succeeds against it,
-      // persisting its reviewerMessage on top of the opened matter (R448).
       expect(queuedUpdateRes.errors).toBeUndefined();
       expect(queuedUpdateRes.matter).not.toBeNull();
+      const staleSaveRes = await staleSavePromise;
+      expect(staleSaveRes.matter).toBeNull();
+      expect(staleSaveRes.errors?.conflict).toMatch(
+        /changed by someone else while you were saving/i,
+      );
       const finalTarget = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
         testTenantCtx(carys.id),
         refreshedTarget.id,
       ))!;
-      expect(finalTarget.title).toBe('Concurrent Matter Save During Allow Hook');
+      expect(finalTarget.title).not.toBe('Stale Overwrite Attempt');
       expect(finalTarget.conflictCheckRecord?.reviewerMessage).toBe(
         'Second concurrent update during allow hook',
       );
@@ -2117,21 +2102,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(hireRes.errors).toBeUndefined();
       expect(hireRes.person?.isEmployee).toBe(true);
-      // S0-15: savePersonRecord queues behind the in-flight saveMatterRecord on the FIFO
-      // withJsonStoreWriteLock, so the matter save completes first and the hire is then
-      // applied on top; both the opened matter title and isStaffMatter must persist (R448).
+      // Hiring the client updates the matter's staff-matter restriction metadata in PostgreSQL
+      // (incrementing row_version), so the in-flight saveMatterRecord fails optimistic concurrency
+      // control with MATTER_CONCURRENCY_CONFLICT and isStaffMatter remains true.
       const hireRaceSaveRes = await hireRaceSavePromise;
-      expect(hireRaceSaveRes.errors).toBeUndefined();
-      expect(hireRaceSaveRes.matter?.title).toBe(
-        'R144 Concurrent Client Hire Matter Opened',
+      expect(hireRaceSaveRes.matter).toBeNull();
+      expect(hireRaceSaveRes.errors?.conflict).toMatch(
+        /changed by someone else while you were saving/i,
       );
       const finalDraftMatter = (await getMatterRepository().getMatterById(
         testTenantCtx(draftMatter.responsiblePartnerId || carys.id),
         draftMatter.id,
       ))!;
-      expect(finalDraftMatter.title).toBe(
-        'R144 Concurrent Client Hire Matter Opened',
-      );
+      expect(finalDraftMatter.title).toBe('R144 Concurrent Client Hire Matter');
       expect(finalDraftMatter.isStaffMatter).toBe(true);
     } finally {
       setActiveTenantConfigForTesting(null);

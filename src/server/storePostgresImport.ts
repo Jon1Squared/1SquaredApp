@@ -20,6 +20,7 @@ import {
   TenantKeyDateRepository,
   TenantMatterRepository,
   TenantPartyRepository,
+  TenantPmsRepository,
   TenantTaskWorkflowRepository,
   type FirmAuditEntryInput,
   type MatterRestrictionMetadata,
@@ -40,6 +41,7 @@ import {
   type TenantOrganisationRecord,
   type TenantPersonOrganisationLinkRecord,
   type TenantPersonRecord,
+  type TenantPmsLinkRecord,
   type TenantQuoteRecord,
   type TenantRbacConfigOverridePayload,
   type TenantSignOffRecord,
@@ -50,6 +52,7 @@ import { isMatterRestrictedForKeyDates } from '@/domain/keyDates';
 import { canPersonAccessMatter } from '@/domain/rbac';
 import type { Matter, Person, Team } from '@/domain/types';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import { getCachedDefaultWorkbookDataset } from '@/pms/importPms';
 import { getStore, type FirmStore } from './store';
 
 export type ImportableStoreModule =
@@ -60,6 +63,7 @@ export type ImportableStoreModule =
   | 'tasks'
   | 'hr'
   | 'catalogues'
+  | 'pms'
   | 'documents'
   | 'document-store'
   | 'key-dates'
@@ -73,6 +77,7 @@ export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
   'tasks',
   'hr',
   'catalogues',
+  'pms',
   'documents',
   'document-store',
   'key-dates',
@@ -132,6 +137,7 @@ export interface ImportStoreModulesResult {
     choiceValues: number;
     customFieldDefinitions: number;
     tenantModuleConfigs: number;
+    pmsLinks: number;
     documentTemplates: number;
     documentTemplateVersions: number;
     documents: number;
@@ -241,6 +247,12 @@ export async function clearMigratedPostgresModulesForTenant(options: {
     const catalogueRepo = new TenantCatalogueRepository();
     await catalogueRepo.clearTenantData(ctx);
   }
+  if (modules.includes('pms')) {
+    const pmsRepo = new TenantPmsRepository();
+    await pmsRepo.clearTenantData(ctx, {
+      keepExtractTables: options.resetMatterNumberSequences !== true,
+    });
+  }
   if (modules.includes('parties')) {
     const partyRepo = new TenantPartyRepository();
     await partyRepo.clearTenantData(ctx);
@@ -297,6 +309,7 @@ export async function importFirmStoreModulesToPostgres(
     choiceValues: 0,
     customFieldDefinitions: 0,
     tenantModuleConfigs: 0,
+    pmsLinks: 0,
     documentTemplates: 0,
     documentTemplateVersions: 0,
     documents: 0,
@@ -770,6 +783,37 @@ export async function importFirmStoreModulesToPostgres(
     ) {
       throw new Error(
         'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection catalogues/configs row counts did not match imported totals.',
+      );
+    }
+  }
+
+  if (modules.includes('pms')) {
+    const pmsRepo = new TenantPmsRepository();
+    const pmsLinks = (store.pmsLinks ?? []) as unknown as TenantPmsLinkRecord[];
+
+    await pmsRepo.withTenantTransaction(ctx, async () => {
+      if (store.isCleanDeployment) {
+        await pmsRepo.clearTenantData(ctx);
+      } else {
+        const defaultDataset = getCachedDefaultWorkbookDataset();
+        const existingInfo = await pmsRepo.getExtractInfo(ctx);
+        if (
+          !existingInfo.asAtDate ||
+          existingInfo.asAtDate !== defaultDataset.extractInfo.asAtDate ||
+          existingInfo.sourceFile !== defaultDataset.extractInfo.sourceFile
+        ) {
+          await pmsRepo.importExtractDataset(ctx, defaultDataset);
+        }
+        await pmsRepo.putPmsLinks(ctx, pmsLinks, { replaceAll: true });
+        counts.pmsLinks = pmsLinks.length;
+      }
+    });
+
+    const verifyPmsRepo = new TenantPmsRepository();
+    const verifiedPmsCounts = await verifyPmsRepo.countAllTenantPmsRows(ctx);
+    if (verifiedPmsCounts.pmsLinks < counts.pmsLinks) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection pms_links row count did not match imported total.',
       );
     }
   }

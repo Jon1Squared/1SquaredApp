@@ -22,7 +22,7 @@ import {
 import {
   getMatterRepository,
   getPartyRepository,
-} from '@/server/auditAdapter';
+} from '@/platform/tenantRuntime';
 import { setAuditAdapterFailureHookForTesting } from '@/server/testSupport/auditTestSupport';
 import {
   createSignedEntraSessionCookie,
@@ -858,7 +858,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
 
     try {
       const preAuditIds = new Set(
-        (await freshAuditRepo.listFirmAuditEntriesPage(ctx, { limit: 100 })).entries.map(
+        (await freshAuditRepo.listFirmAuditEntriesPage(ctx, { limit: 500 })).entries.map(
           (e) => e.id,
         ),
       );
@@ -950,7 +950,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
 
       // Verify zero new audit entries were committed during the rolled-back writes
       const recentAudit = await freshAuditRepo.listFirmAuditEntriesPage(ctx, {
-        limit: 100,
+        limit: 500,
       });
       expect(
         recentAudit.entries.filter((e) => !preAuditIds.has(e.id)),

@@ -1536,6 +1536,333 @@ DROP TABLE IF EXISTS firm_profiles;
 `.trim(),
 };
 
+export const PMS_PER_TENANT_MIGRATION_0013: TenantMigrationDefinition = {
+  version: '0013',
+  name: '0013_pms_per_tenant_expand',
+  description:
+    'Creates tenant-scoped tables for pms_links, pms_extract_metadata, per-tenant PMS extract tables, pms_matter_financials, and pms_credit_control_log (S0-18).',
+  dependsOn: ['0012'],
+  tablesChanged: [
+    'pms_links',
+    'pms_extract_metadata',
+    'pms_fee_earners',
+    'pms_clients',
+    'pms_matters',
+    'pms_matter_financials',
+    'pms_fee_estimates',
+    'pms_invoices',
+    'pms_payments',
+    'pms_time_entries',
+    'pms_disbursements',
+    'pms_client_account_entries',
+    'pms_credit_control_log',
+  ],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_pms_link_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS pms_links (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  onesquared_id TEXT NOT NULL,
+  pms_code TEXT NOT NULL,
+  match_status TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  match_reason TEXT NOT NULL,
+  linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  linked_by_id TEXT NULL,
+  last_synced_at TIMESTAMPTZ NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pms_links_tenant_entity_osid
+  ON pms_links (tenant_id, entity_type, onesquared_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pms_links_tenant_entity_code
+  ON pms_links (tenant_id, entity_type, pms_code);
+
+CREATE TABLE IF NOT EXISTS pms_extract_metadata (
+  tenant_id TEXT NOT NULL,
+  as_at_date TEXT NOT NULL,
+  source_name TEXT NOT NULL,
+  imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS pms_fee_earners (
+  tenant_id TEXT NOT NULL,
+  fee_earner_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  grade TEXT NOT NULL,
+  department TEXT NOT NULL,
+  office TEXT NOT NULL,
+  charge_out_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, fee_earner_id)
+);
+
+CREATE TABLE IF NOT EXISTS pms_clients (
+  tenant_id TEXT NOT NULL,
+  client_code TEXT NOT NULL,
+  client_name TEXT NOT NULL,
+  client_type TEXT NOT NULL,
+  company_number TEXT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, client_code)
+);
+
+CREATE TABLE IF NOT EXISTS pms_matters (
+  tenant_id TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  client_code TEXT NOT NULL,
+  matter_description TEXT NOT NULL,
+  department TEXT NOT NULL,
+  work_type TEXT NOT NULL,
+  responsible_partner_id TEXT NOT NULL,
+  acting_fee_earner_id TEXT NOT NULL,
+  billing_basis TEXT NOT NULL,
+  fee_estimate DOUBLE PRECISION NOT NULL DEFAULT 0,
+  matter_status TEXT NOT NULL,
+  open_date TEXT NULL,
+  close_date TEXT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, matter_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_matters_tenant_client
+  ON pms_matters (tenant_id, client_code);
+
+CREATE INDEX IF NOT EXISTS idx_pms_matters_tenant_fe
+  ON pms_matters (tenant_id, acting_fee_earner_id);
+
+CREATE TABLE IF NOT EXISTS pms_matter_financials (
+  tenant_id TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  client_code TEXT NOT NULL,
+  matter_description TEXT NOT NULL,
+  department TEXT NOT NULL,
+  work_type TEXT NOT NULL,
+  responsible_partner_id TEXT NOT NULL,
+  acting_fee_earner_id TEXT NOT NULL,
+  billing_basis TEXT NOT NULL,
+  matter_status TEXT NOT NULL,
+  open_date TEXT NULL,
+  close_date TEXT NULL,
+  current_fee_estimate DOUBLE PRECISION NOT NULL DEFAULT 0,
+  wip_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+  wip_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+  total_time_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+  billed_fees_ex_vat DOUBLE PRECISION NOT NULL DEFAULT 0,
+  billed_disb_ex_vat DOUBLE PRECISION NOT NULL DEFAULT 0,
+  billed_vat DOUBLE PRECISION NOT NULL DEFAULT 0,
+  billed_total_inc_vat DOUBLE PRECISION NOT NULL DEFAULT 0,
+  cash_received DOUBLE PRECISION NOT NULL DEFAULT 0,
+  outstanding_debt DOUBLE PRECISION NOT NULL DEFAULT 0,
+  unbilled_disbursements DOUBLE PRECISION NOT NULL DEFAULT 0,
+  client_account_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, matter_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_fin_tenant_client
+  ON pms_matter_financials (tenant_id, client_code);
+
+CREATE INDEX IF NOT EXISTS idx_pms_fin_tenant_fe
+  ON pms_matter_financials (tenant_id, acting_fee_earner_id);
+
+CREATE TABLE IF NOT EXISTS pms_fee_estimates (
+  tenant_id TEXT NOT NULL,
+  estimate_id TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  estimate_date TEXT NOT NULL,
+  estimated_fees_ex_vat DOUBLE PRECISION NOT NULL DEFAULT 0,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, estimate_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_estimates_tenant_matter
+  ON pms_fee_estimates (tenant_id, matter_code, version);
+
+CREATE TABLE IF NOT EXISTS pms_invoices (
+  tenant_id TEXT NOT NULL,
+  invoice_number TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  client_code TEXT NOT NULL,
+  invoice_date TEXT NOT NULL,
+  due_date TEXT NOT NULL,
+  status TEXT NOT NULL,
+  total_inc_vat DOUBLE PRECISION NOT NULL DEFAULT 0,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, invoice_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_invoices_tenant_matter
+  ON pms_invoices (tenant_id, matter_code, invoice_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pms_invoices_tenant_client
+  ON pms_invoices (tenant_id, client_code);
+
+CREATE TABLE IF NOT EXISTS pms_payments (
+  tenant_id TEXT NOT NULL,
+  receipt_id TEXT NOT NULL,
+  invoice_number TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  client_code TEXT NOT NULL,
+  payment_date TEXT NOT NULL,
+  amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, receipt_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_payments_tenant_invoice
+  ON pms_payments (tenant_id, invoice_number);
+
+CREATE INDEX IF NOT EXISTS idx_pms_payments_tenant_matter
+  ON pms_payments (tenant_id, matter_code);
+
+CREATE INDEX IF NOT EXISTS idx_pms_payments_tenant_client
+  ON pms_payments (tenant_id, client_code);
+
+CREATE INDEX IF NOT EXISTS idx_pms_payments_tenant_date
+  ON pms_payments (tenant_id, payment_date);
+
+CREATE TABLE IF NOT EXISTS pms_time_entries (
+  tenant_id TEXT NOT NULL,
+  time_id TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  fee_earner_id TEXT NOT NULL,
+  entry_date TEXT NOT NULL,
+  hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+  value DOUBLE PRECISION NOT NULL DEFAULT 0,
+  billing_status TEXT NOT NULL,
+  invoice_number TEXT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, time_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_time_tenant_matter
+  ON pms_time_entries (tenant_id, matter_code, entry_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pms_time_tenant_fe
+  ON pms_time_entries (tenant_id, fee_earner_id);
+
+CREATE INDEX IF NOT EXISTS idx_pms_time_tenant_date
+  ON pms_time_entries (tenant_id, entry_date DESC);
+
+CREATE TABLE IF NOT EXISTS pms_disbursements (
+  tenant_id TEXT NOT NULL,
+  disbursement_id TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  entry_date TEXT NOT NULL,
+  amount_ex_vat DOUBLE PRECISION NOT NULL DEFAULT 0,
+  billing_status TEXT NOT NULL,
+  invoice_number TEXT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, disbursement_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_disb_tenant_matter
+  ON pms_disbursements (tenant_id, matter_code, entry_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pms_disb_tenant_date
+  ON pms_disbursements (tenant_id, entry_date DESC);
+
+CREATE TABLE IF NOT EXISTS pms_client_account_entries (
+  tenant_id TEXT NOT NULL,
+  transaction_id TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  client_code TEXT NOT NULL,
+  entry_date TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+  balance_after DOUBLE PRECISION NOT NULL DEFAULT 0,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_client_acct_tenant_matter
+  ON pms_client_account_entries (tenant_id, matter_code, entry_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pms_client_acct_tenant_client
+  ON pms_client_account_entries (tenant_id, client_code);
+
+CREATE INDEX IF NOT EXISTS idx_pms_client_acct_tenant_date
+  ON pms_client_account_entries (tenant_id, entry_date DESC);
+
+CREATE TABLE IF NOT EXISTS pms_credit_control_log (
+  tenant_id TEXT NOT NULL,
+  id BIGSERIAL NOT NULL,
+  invoice_number TEXT NOT NULL,
+  matter_code TEXT NOT NULL,
+  action_type TEXT NOT NULL,
+  notes TEXT NOT NULL,
+  actor_name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_cc_log_tenant_invoice
+  ON pms_credit_control_log (tenant_id, invoice_number, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pms_cc_log_tenant_matter
+  ON pms_credit_control_log (tenant_id, matter_code, id DESC);
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS idx_pms_cc_log_tenant_matter;
+DROP INDEX IF EXISTS idx_pms_cc_log_tenant_invoice;
+DROP TABLE IF EXISTS pms_credit_control_log;
+
+DROP INDEX IF EXISTS idx_pms_client_acct_tenant_date;
+DROP INDEX IF EXISTS idx_pms_client_acct_tenant_client;
+DROP INDEX IF EXISTS idx_pms_client_acct_tenant_matter;
+DROP TABLE IF EXISTS pms_client_account_entries;
+
+DROP INDEX IF EXISTS idx_pms_disb_tenant_date;
+DROP INDEX IF EXISTS idx_pms_disb_tenant_matter;
+DROP TABLE IF EXISTS pms_disbursements;
+
+DROP INDEX IF EXISTS idx_pms_time_tenant_date;
+DROP INDEX IF EXISTS idx_pms_time_tenant_fe;
+DROP INDEX IF EXISTS idx_pms_time_tenant_matter;
+DROP TABLE IF EXISTS pms_time_entries;
+
+DROP INDEX IF EXISTS idx_pms_payments_tenant_date;
+DROP INDEX IF EXISTS idx_pms_payments_tenant_client;
+DROP INDEX IF EXISTS idx_pms_payments_tenant_matter;
+DROP INDEX IF EXISTS idx_pms_payments_tenant_invoice;
+DROP TABLE IF EXISTS pms_payments;
+
+DROP INDEX IF EXISTS idx_pms_invoices_tenant_client;
+DROP INDEX IF EXISTS idx_pms_invoices_tenant_matter;
+DROP TABLE IF EXISTS pms_invoices;
+
+DROP INDEX IF EXISTS idx_pms_estimates_tenant_matter;
+DROP TABLE IF EXISTS pms_fee_estimates;
+
+DROP INDEX IF EXISTS idx_pms_fin_tenant_fe;
+DROP INDEX IF EXISTS idx_pms_fin_tenant_client;
+DROP TABLE IF EXISTS pms_matter_financials;
+
+DROP INDEX IF EXISTS idx_pms_matters_tenant_fe;
+DROP INDEX IF EXISTS idx_pms_matters_tenant_client;
+DROP TABLE IF EXISTS pms_matters;
+
+DROP TABLE IF EXISTS pms_clients;
+DROP TABLE IF EXISTS pms_fee_earners;
+DROP TABLE IF EXISTS pms_extract_metadata;
+
+DROP INDEX IF EXISTS idx_pms_links_tenant_entity_code;
+DROP INDEX IF EXISTS idx_pms_links_tenant_entity_osid;
+DROP TABLE IF EXISTS pms_links;
+
+DROP SEQUENCE IF EXISTS public.tenant_pms_link_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -1549,6 +1876,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   INTAKE_QUOTES_TASKS_MIGRATION_0010,
   HR_TEAMS_AND_RBAC_MIGRATION_0011,
   CATALOGUES_AND_CONFIG_MIGRATION_0012,
+  PMS_PER_TENANT_MIGRATION_0013,
 ];
 
 export function validateMigrationCatalogueOrder(

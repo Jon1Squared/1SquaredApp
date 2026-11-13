@@ -54,18 +54,20 @@ Runtime rate cards and partner sign-off thresholds are currently stored in the f
 
 ### Integrations and PMS synchronisation
 
+Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metadata\`, \`pms_fee_earners\`, \`pms_clients\`, \`pms_matters\`, \`pms_matter_financials\`, \`pms_fee_estimates\`, \`pms_invoices\`, \`pms_payments\`, \`pms_time_entries\`, \`pms_disbursements\`, \`pms_client_account_entries\`, \`pms_credit_control_log\`) and \`pms_links\` are stored in each tenant's PostgreSQL database via \`TenantPmsRepository\` (\`S0-18\`, \`0013_pms_per_tenant_expand\`). \`loadAndValidateTenantConfig\` deep-merges \`base.integrations.pmsSync\` and \`overlay.integrations.pmsSync\` so environment overlays can override individual \`pmsSync\` fields without wiping \`base.json\` defaults (\`R411\`). Live external PMS adapter synchronisation and live Companies House API integration (\`F17\`) remain reserved for the post-Stage-0 backlog (Owner Decision 3):
+
 | Setting | Default | Status | Notes |
 |---|---|---|---|
 | \`integrations.aiProviderChoice\` | \`"disabled"\` | Active | \`"anthropic"\`, \`"azure_openai_uk"\`, or \`"disabled"\` (ADR-0031) |
-| \`integrations.pmsConnectionSecretVaultRef\` | Required | Reserved (S0-18) | Key Vault reference for live tenant-scoped PMS database connection secret resolution |
-| \`integrations.companiesHouseApiKeyVaultRef\` | Required | Reserved (S0-18) | Key Vault reference for live Companies House API integration |
-| \`integrations.pmsSync.enabled\` | \`true\` | Reserved (S0-18) | Live tenant-scoped PMS synchronisation |
-| \`integrations.pmsSync.providerKey\` | \`"generic_sql"\` | Reserved (S0-18) | Live tenant-scoped PMS adapter selection |
-| \`integrations.pmsSync.syncMode\` | \`"two_way"\` | Reserved (S0-18) | Live tenant-scoped PMS sync direction control |
-| \`integrations.pmsSync.matterCodeAllocation\` | \`"onesquared"\` | Reserved (S0-18) | Live tenant-scoped PMS matter number allocation |
-| \`integrations.pmsSync.clientCodeAllocation\` | \`"onesquared"\` | Reserved (S0-18) | Live tenant-scoped PMS client code allocation |
-| \`integrations.pmsSync.pollIntervalMinutes\` | \`15\` | Reserved (S0-18) | Live tenant-scoped PMS delta polling interval |
-| \`integrations.pmsSync.fieldMappings\` | \`[]\` | Reserved (S0-18) | Live tenant-scoped PMS field-level synchronisation |
+| \`integrations.pmsConnectionSecretVaultRef\` | Required | Reserved (backlog) | Key Vault reference reserved for post-Stage-0 live tenant-scoped PMS database connection secret resolution |
+| \`integrations.companiesHouseApiKeyVaultRef\` | Required | Reserved (backlog, F17) | Key Vault reference reserved for post-Stage-0 live Companies House API integration (\`F17\`) |
+| \`integrations.pmsSync.enabled\` | \`true\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS synchronisation |
+| \`integrations.pmsSync.providerKey\` | \`"generic_sql"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS adapter selection |
+| \`integrations.pmsSync.syncMode\` | \`"two_way"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS sync direction control |
+| \`integrations.pmsSync.matterCodeAllocation\` | \`"onesquared"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS matter number allocation |
+| \`integrations.pmsSync.clientCodeAllocation\` | \`"onesquared"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS client code allocation |
+| \`integrations.pmsSync.pollIntervalMinutes\` | \`15\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS delta polling interval |
+| \`integrations.pmsSync.fieldMappings\` | \`[]\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS field-level synchronisation |
 
 ### Custom fields, extensions, RBAC, documents and key dates
 

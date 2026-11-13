@@ -142,11 +142,11 @@ import {
   getActiveTenantConfiguration,
   getMatterRepository,
   getPartyRepository,
+  getPmsRepository,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import { guardedAction } from '@/server/authorize';
 import { createVerifiedSessionActorFromEntraSession } from '@/server/entraAuth';
-import { getStore } from '@/server/store';
 import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
 
 function revalidateAll() {
@@ -803,8 +803,9 @@ export async function linkPmsRecordAction(
 }
 
 export async function unlinkPmsRecordAction(linkId: string) {
-  return guardedAction('unlinkPmsRecordAction', async ({ personId: byId }) => {
-    if (!getStore().pmsLinks.some((l) => l.id === linkId)) {
+  return guardedAction('unlinkPmsRecordAction', async ({ personId: byId, tenantContext }) => {
+    const existing = await getPmsRepository().getPmsLinkById(tenantContext, linkId);
+    if (!existing) {
       return buildActionDenied('FORBIDDEN', `PMS link "${linkId}" not found.`);
     }
     await unlinkPmsRecord(linkId, byId);

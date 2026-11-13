@@ -23,15 +23,13 @@ import {
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import {
   getActiveTenantConfiguration,
-  setActiveTenantConfigForTesting,
-} from '@/platform/tenantRuntime';
-import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
-import {
   getIntakeQuoteRepository,
   getMatterRepository,
   getPartyRepository,
   getTaskWorkflowRepository,
-} from '@/server/auditAdapter';
+  setActiveTenantConfigForTesting,
+} from '@/platform/tenantRuntime';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   createSignedEntraSessionCookie,
   setTestEntraSessionOverride,

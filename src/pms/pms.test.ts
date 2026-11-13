@@ -1,41 +1,46 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
-import { buildPmsDatabaseFromWorkbook, resolveWorkbookPath } from './importPms';
-import * as pmsSourceModule from './pmsSource';
-import { DemoDbPmsSource } from './pmsSource';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { getPmsRepository } from '@/platform/tenantRuntime';
+import { resetAllDemoData } from '@/server/services';
+import { testDataResetContext } from '@/test/testTenantContexts';
+import {
+  importPmsWorkbookToPostgres,
+  parsePmsWorkbookDataset,
+  resolveWorkbookPath,
+} from './importPms';
+import { getTenantPmsSource } from './pmsSource';
 import { openXlsxWorkbook, parseMoney } from './xlsxReader';
 
 describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
-  it('builds the SQLite database idempotently from 1Squared_PMS_Demo_Data.xlsx', () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-test-'));
-    const tmpDbPath = path.join(tmpDir, 'pms-demo.sqlite');
-    try {
-      const run1 = buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
-      const run2 = buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
-      expect(run1.asAtDate).toBe('2026-10-16');
-      expect(run1.counts).toEqual({
-        fee_earners: 8,
-        clients: 10,
-        matters: 20,
-        fee_estimates: 23,
-        time_entries: 740,
-        disbursements: 16,
-        invoices: 51,
-        payments: 40,
-        client_account: 15,
-      });
-      expect(run2.counts).toEqual(run1.counts);
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
+  beforeAll(async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    await importPmsWorkbookToPostgres(testDataResetContext());
   });
 
-  it('reproduces every row and total of check_matters via v_matter_financials', () => {
+  it('imports the PMS workbook idempotently into PostgreSQL via TenantPmsRepository from 1Squared_PMS_Demo_Data.xlsx', async () => {
+    const ctx = testDataResetContext();
+    const run1 = await importPmsWorkbookToPostgres(ctx);
+    const run2 = await importPmsWorkbookToPostgres(ctx);
+    expect(run1.asAtDate).toBe('2026-10-16');
+    expect(run1.counts).toEqual({
+      fee_earners: 8,
+      clients: 10,
+      matters: 20,
+      fee_estimates: 23,
+      time_entries: 740,
+      disbursements: 16,
+      invoices: 51,
+      payments: 40,
+      client_account: 15,
+    });
+    expect(run2.counts).toEqual(run1.counts);
+  });
+
+  it('reproduces every row and total of check_matters via TenantPmsRepository', async () => {
     const wb = openXlsxWorkbook(resolveWorkbookPath());
     const checkMatrix = wb.getSheetMatrix('check_matters');
-    const source = new DemoDbPmsSource();
+    const source = await getTenantPmsSource(testDataResetContext());
     const matters = source.getAllMatterFinancials();
     const byCode = new Map(matters.map((m) => [m.matter_code, m]));
 
@@ -93,10 +98,10 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(pugLedger[pugLedger.length - 1]?.running_balance).toBe(33510.6);
   });
 
-  it('reproduces every row of check_aged_debt (invoices and client buckets) via v_invoice_balances and domain rollups', async () => {
+  it('reproduces every row of check_aged_debt (invoices and client buckets) via TenantPmsRepository and domain rollups', async () => {
     const wb = openXlsxWorkbook(resolveWorkbookPath());
     const checkMatrix = wb.getSheetMatrix('check_aged_debt');
-    const source = new DemoDbPmsSource();
+    const source = await getTenantPmsSource(testDataResetContext());
 
     const agedInvoices = source.getAgedDebt();
     const invByNo = new Map(agedInvoices.map((i) => [i.invoice_number, i]));
@@ -181,7 +186,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { buildFeeEarnerWeeklyTime, buildFirmFinanceRollups } = await import('@/domain/pms');
     const wb = openXlsxWorkbook(resolveWorkbookPath());
     const checkMatrix = wb.getSheetMatrix('check_fee_earners');
-    const source = new DemoDbPmsSource();
+    const source = await getTenantPmsSource(testDataResetContext());
     const rollups = buildFirmFinanceRollups({
       asAtDate: source.getExtractInfo().asAtDate,
       matterFinancials: source.getAllMatterFinancials(),
@@ -372,33 +377,38 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   });
 
   it('handles an extract with no as-at date or a malformed as-at date without throwing or falling back to October (R338)', async () => {
-    const { DatabaseSync } = await import('node:sqlite');
     const {
       buildFeeEarnerWeeklyTime,
       buildFirmFinanceRollups,
       formatPmsAsAtLabel,
       PMS_AS_AT_UNAVAILABLE_LABEL,
     } = await import('@/domain/pms');
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-r338-'));
-    const tmpDbPath = path.join(tmpDir, 'pms-r338.sqlite');
+    const ctx = testDataResetContext();
+    const pmsRepo = getPmsRepository();
     try {
-      buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath });
-      const customSource = new DemoDbPmsSource(tmpDbPath);
-
       for (const badDate of ['', 'not-a-date', '2026-02-31']) {
-        const db = new DatabaseSync(tmpDbPath);
-        try {
-          if (badDate === '') {
-            db.exec(`DELETE FROM extract_info;`);
-          } else {
-            db.exec(`DELETE FROM extract_info;`);
-            db.prepare(
-              `INSERT INTO extract_info (as_at_date, imported_at, source_file) VALUES (?, ?, ?)`,
-            ).run(badDate, '2026-11-09T09:00:00Z', 'bad.xlsx');
+        await pmsRepo.withTenantTransaction(ctx, async (tx) => {
+          await tx.query(
+            'DELETE FROM public.pms_extract_metadata WHERE tenant_id = $1',
+            [ctx.tenantId],
+          );
+          if (badDate !== '') {
+            await tx.query(
+              `INSERT INTO public.pms_extract_metadata (
+                 tenant_id, as_at_date, source_name, imported_at, metadata_json
+               ) VALUES ($1, $2, $3, $4::timestamptz, $5::jsonb)`,
+              [
+                ctx.tenantId,
+                badDate,
+                'bad.xlsx',
+                '2026-11-09T09:00:00Z',
+                JSON.stringify({ asAtDate: badDate, sourceFile: 'bad.xlsx' }),
+              ],
+            );
           }
-        } finally {
-          db.close();
-        }
+        });
+        await pmsRepo.loadTenantPmsSnapshot(ctx);
+        const customSource = await getTenantPmsSource(ctx);
 
         const info = customSource.getExtractInfo();
         expect(info.asAtDate).toBe('');
@@ -438,71 +448,69 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
           await import('@/server/financeServices');
         const { getClientPmsViewBundle, getMatterPmsViewBundle } =
           await import('@/server/services');
-        const getPmsSpy = vi
-          .spyOn(pmsSourceModule, 'getPmsSource')
-          .mockReturnValue(customSource);
-        try {
-          const rowsRes = await getMatterFinanceRows('P-000001');
-          expect(isActionDenied(rowsRes)).toBe(false);
-          if (!isActionDenied(rowsRes)) {
-            expect(rowsRes.pmsExtractInfo.asAtDate).toBe('');
-            expect(rowsRes.pmsExtractInfo.sourceFile).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
-            expect(rowsRes.allMatterFins).toEqual([]);
-            expect(rowsRes.pmsSummaryByMatterId).toEqual({});
-          }
 
-          const myRes = await getMyFinanceFigures('P-000002');
-          expect(isActionDenied(myRes)).toBe(false);
-          if (!isActionDenied(myRes)) {
-            expect(myRes.myFeeEarnerFigures).toBeNull();
-            expect(myRes.myWeeklyTime).toBeNull();
-          }
+        const rowsRes = await getMatterFinanceRows('P-000001');
+        expect(isActionDenied(rowsRes)).toBe(false);
+        if (!isActionDenied(rowsRes)) {
+          expect(rowsRes.pmsExtractInfo.asAtDate).toBe('');
+          expect(rowsRes.pmsExtractInfo.sourceFile).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
+          expect(rowsRes.allMatterFins).toEqual([]);
+          expect(rowsRes.pmsSummaryByMatterId).toEqual({});
+        }
 
-          const firmRes = await getFirmFinance('P-000001');
-          expect(isActionDenied(firmRes)).toBe(false);
-          if (!isActionDenied(firmRes)) {
-            expect(firmRes.pmsExtractInfo.asAtDate).toBe('');
-            expect(firmRes.pmsExtractInfo.sourceFile).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
-            expect(firmRes.allFeeEarnerPerformance).toEqual([]);
-            expect(firmRes.pmsMonthlyFeesBilled).toEqual({ months: [], yearToDateTotal: 0 });
-            expect(firmRes.allClientFins).toEqual([]);
-          }
+        const myRes = await getMyFinanceFigures('P-000002');
+        expect(isActionDenied(myRes)).toBe(false);
+        if (!isActionDenied(myRes)) {
+          expect(myRes.myFeeEarnerFigures).toBeNull();
+          expect(myRes.myWeeklyTime).toBeNull();
+        }
 
-          const matterBundleRes = await getMatterPmsViewBundle('M-000001', 'P-000004');
-          expect(isActionDenied(matterBundleRes)).toBe(false);
-          if (!isActionDenied(matterBundleRes)) {
-            expect(matterBundleRes.extractInfo.asAtDate).toBe('');
-            expect(matterBundleRes.extractInfo.sourceFile).toBe(
-              PMS_AS_AT_UNAVAILABLE_LABEL,
-            );
-            expect(matterBundleRes.matterBundle).toBeNull();
-            expect(matterBundleRes.allUnlinkedPmsMatters.length).toBeGreaterThan(0);
-          }
+        const firmRes = await getFirmFinance('P-000001');
+        expect(isActionDenied(firmRes)).toBe(false);
+        if (!isActionDenied(firmRes)) {
+          expect(firmRes.pmsExtractInfo.asAtDate).toBe('');
+          expect(firmRes.pmsExtractInfo.sourceFile).toBe(PMS_AS_AT_UNAVAILABLE_LABEL);
+          expect(firmRes.allFeeEarnerPerformance).toEqual([]);
+          expect(firmRes.pmsMonthlyFeesBilled).toEqual({ months: [], yearToDateTotal: 0 });
+          expect(firmRes.allClientFins).toEqual([]);
+        }
 
-          const clientBundleRes = await getClientPmsViewBundle(
-            'organisation',
-            'O-000001',
-            'P-000001',
+        const matterBundleRes = await getMatterPmsViewBundle('M-000001', 'P-000004');
+        expect(isActionDenied(matterBundleRes)).toBe(false);
+        if (!isActionDenied(matterBundleRes)) {
+          expect(matterBundleRes.extractInfo.asAtDate).toBe('');
+          expect(matterBundleRes.extractInfo.sourceFile).toBe(
+            PMS_AS_AT_UNAVAILABLE_LABEL,
           );
-          expect(isActionDenied(clientBundleRes)).toBe(false);
-          if (!isActionDenied(clientBundleRes)) {
-            expect(clientBundleRes.extractInfo.asAtDate).toBe('');
-            expect(clientBundleRes.extractInfo.sourceFile).toBe(
-              PMS_AS_AT_UNAVAILABLE_LABEL,
-            );
-            expect(clientBundleRes.clientBundle).toBeNull();
-            expect(Object.keys(clientBundleRes.oneSquaredMatterIdByPmsCode).length).toBeGreaterThan(0);
-          }
-        } finally {
-          getPmsSpy.mockRestore();
+          expect(matterBundleRes.matterBundle).toBeNull();
+          expect(matterBundleRes.allUnlinkedPmsMatters.length).toBeGreaterThan(0);
+        }
+
+        const clientBundleRes = await getClientPmsViewBundle(
+          'organisation',
+          'O-000001',
+          'P-000001',
+        );
+        expect(isActionDenied(clientBundleRes)).toBe(false);
+        if (!isActionDenied(clientBundleRes)) {
+          expect(clientBundleRes.extractInfo.asAtDate).toBe('');
+          expect(clientBundleRes.extractInfo.sourceFile).toBe(
+            PMS_AS_AT_UNAVAILABLE_LABEL,
+          );
+          expect(clientBundleRes.clientBundle).toBeNull();
+          expect(Object.keys(clientBundleRes.oneSquaredMatterIdByPmsCode).length).toBeGreaterThan(0);
         }
       }
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      await pmsRepo.putExtractMetadata(ctx, {
+        asAtDate: '2026-10-16',
+        sourceFile: '1Squared_PMS_Demo_Data.xlsx',
+        importedAt: '2026-10-16T09:00:00.000Z',
+      });
     }
   });
 
-  it('validates README as-at date parsing, buildPmsDatabaseFromWorkbook date validation, and --as-at CLI overrides (R359)', async () => {
+  it('validates README as-at date parsing, parsePmsWorkbookDataset date validation, and --as-at / --tenant CLI overrides (R359, S0-18)', async () => {
     const {
       extractAsAtDateFromWorkbook,
       parseImportPmsCliArgs,
@@ -560,16 +568,15 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       }),
     ).toBeNull();
 
-    // 3. buildPmsDatabaseFromWorkbook throws on bad date or empty explicit override, and --as-at overrides README
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-r359-'));
-    const tmpDbPath = path.join(tmpDir, 'pms-r359.sqlite');
+    // 3. parsePmsWorkbookDataset & importPmsWorkbookToPostgres throw on bad date or empty explicit override, and --as-at / --tenant overrides work
+    const ctx = testDataResetContext();
     try {
       expect(() =>
-        buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath, asAtDate: '2026-02-30' }),
+        parsePmsWorkbookDataset({ asAtDate: '2026-02-30' }),
       ).toThrow(/Invalid or missing PMS extract as-at date "2026-02-30"/);
 
       expect(() =>
-        buildPmsDatabaseFromWorkbook({ dbPath: tmpDbPath, asAtDate: '' }),
+        parsePmsWorkbookDataset({ asAtDate: '' }),
       ).toThrow(/Invalid or missing PMS extract as-at date ""/);
 
       const parsedOverride = parseImportPmsCliArgs(['--as-at', '2026-11-30']);
@@ -577,16 +584,21 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       expect(parseImportPmsCliArgs(['--as-at=2026-11-30'])).toEqual({
         asAtDate: '2026-11-30',
       });
+      expect(
+        parseImportPmsCliArgs(['--tenant', 'not-a-law-firm', '--as-at=2026-11-30']),
+      ).toEqual({
+        tenant: 'not-a-law-firm',
+        asAtDate: '2026-11-30',
+      });
 
-      const imported = buildPmsDatabaseFromWorkbook({
-        dbPath: tmpDbPath,
+      const imported = await importPmsWorkbookToPostgres(ctx, {
         ...parsedOverride,
       });
       expect(imported.asAtDate).toBe('2026-11-30');
-      const customSource = new DemoDbPmsSource(tmpDbPath);
+      const customSource = await getTenantPmsSource(ctx);
       expect(customSource.getExtractInfo().asAtDate).toBe('2026-11-30');
 
-      // 4. --as-at with no value or --as-at= fails instead of falling back to README
+      // 4. --as-at or --tenant with no value fails instead of falling back
       expect(() => parseImportPmsCliArgs(['--as-at'])).toThrow(
         /Missing value for --as-at/,
       );
@@ -599,15 +611,21 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       expect(() => parseImportPmsCliArgs(['--as-at=   '])).toThrow(
         /Empty value for --as-at=/,
       );
+      expect(() => parseImportPmsCliArgs(['--tenant'])).toThrow(
+        /Missing value for --tenant/,
+      );
+      expect(() => parseImportPmsCliArgs(['--tenant='])).toThrow(
+        /Empty value for --tenant=/,
+      );
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      await importPmsWorkbookToPostgres(ctx);
     }
   });
 
   it('automatically links PMS clients and fee earners and preserves manual links', async () => {
     const { computeAutomaticPmsLinks } = await import('@/domain/pms');
     const { buildDemoData } = await import('@/seed/demo');
-    const source = new DemoDbPmsSource();
+    const source = await getTenantPmsSource(testDataResetContext());
     const demo = buildDemoData();
 
     const pmsClients = source.listClients();
@@ -765,7 +783,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(cmd.mappedFields.client_reference).toBe('PO-9988');
 
     // Inbound reconciliation: bidirectional fee_estimate updates 1Squared, while onesquared_master title reports a discrepancy without overwriting
-    const source = new DemoDbPmsSource();
+    const source = await getTenantPmsSource(testDataResetContext());
     const pmsRow = source.getAllMatterFinancials()[0]!;
     const reconciled = reconcilePmsInboundMatterCommercials(
       {
@@ -794,7 +812,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   });
 
   it('enforces Ofcom drama phone ranges and allow-listed invented email domains across imported PMS data and seed (R49, R74)', async () => {
-    const source = new DemoDbPmsSource();
+    const source = await getTenantPmsSource(testDataResetContext());
     const clients = source.listClients();
     const feeEarners = source.listFeeEarners();
 

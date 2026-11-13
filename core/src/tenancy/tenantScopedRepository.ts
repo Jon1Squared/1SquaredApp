@@ -23,7 +23,7 @@ import {
   type TenantPostgresPoolManager,
 } from './postgresPoolManager';
 
-export const CORE_REQUIRED_SCHEMA_VERSION = '0012';
+export const CORE_REQUIRED_SCHEMA_VERSION = '0013';
 
 export interface TenantQueryResult<TRow = Record<string, unknown>> {
   readonly rows: TRow[];
@@ -98,6 +98,17 @@ export function getActiveTenantTransactionState(): {
     databaseName: store.databaseName,
     readOnly: store.readOnly,
   };
+}
+
+export function hasActiveTenantTransaction(ctx: TenantContext): boolean {
+  const existingScope = getActiveTenantTxStorage()?.getStore();
+  return Boolean(
+    existingScope &&
+      !existingScope.closed &&
+      !existingScope.readOnly &&
+      existingScope.tenantId === ctx.tenantId &&
+      existingScope.databaseName === ctx.postgresDatabaseName,
+  );
 }
 
 function createSchemaNotReadyError(params: {
