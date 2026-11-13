@@ -1863,7 +1863,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     expect(step3ListControl.some((kd) => kd.id === testKeyDateId)).toBe(true);
   });
 
-  it('R478: two-replica interleaving test — when Replica A loads inputs, Replica B removes user U and commits, and Replica A runs former read-path callers or a concurrent person write, U is not written back to restricted_access_user_ids_json and cannot see the matter key dates', async () => {
+  it('R478 & R479: two-replica interleaving test — when Replica A loads inputs, Replica B removes user U (including team-lead access) and commits, and Replica A runs former read-path callers, a concurrent person write, or saveMatterRecord, U is not written back to restricted_access_user_ids_json and cannot see the matter key dates', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     const adminCtx = makeTenantCtx('not-a-law-firm', 'P-000001');
     const adminSession = makeActorSession('P-000001');
@@ -2148,5 +2148,136 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     expect(
       await keyDateRepo.listKeyDatesForMatter(userUCtx, staffMatter.id, userU),
     ).toHaveLength(0);
+
+    // Interleaving 3 (R479 — team-lead access removed while saveMatterRecord is in flight):
+    // 1. Grant team-lead restricted matter access and make U a team lead so U is in restricted_access_user_ids_json.
+    // 2. Replica A loads its pre-transaction inputs for saveMatterRecord.
+    // 3. Replica B removes U's team-lead access via saveTeamRecord and commits.
+    // 4. Replica A finishes saveMatterRecord.
+    // 5. On a fresh connection, U is not in restricted_access_user_ids_json.
+    const rbacTeamLeadPatch = {
+      relationshipGrants: [
+        {
+          relationship: 'is_team_lead_of_any_team' as const,
+          permissions: ['matter:restricted:access' as const],
+        },
+      ],
+    };
+    const rbacUpdateA = await runInReplicaA(adminSessionA, () =>
+      replicaA.updateTenantRbacConfig(
+        rbacTeamLeadPatch,
+        positiveControlUserId,
+        { mfaVerified: true },
+      ),
+    );
+    expect(rbacUpdateA.ok).toBe(true);
+    await runInReplicaB(adminSessionB, () =>
+      replicaB.updateTenantRbacConfig(
+        rbacTeamLeadPatch,
+        positiveControlUserId,
+        { mfaVerified: true },
+      ),
+    );
+
+    const targetTeam = getStore().teams.find((t) => t.id === userUTeamId)!;
+    const originalTeamLeadIds = targetTeam.leadIds.filter((id) => id !== userU);
+    const addTeamLeadRes = await runInReplicaA(adminSessionA, () =>
+      replicaA.saveTeamRecord(
+        {
+          id: targetTeam.id,
+          name: targetTeam.name,
+          description: targetTeam.description,
+          practiceAreaIds: targetTeam.practiceAreaIds,
+          leadIds: Array.from(new Set([...originalTeamLeadIds, userU])),
+          memberIds: Array.from(new Set([...targetTeam.memberIds, userU])),
+          active: true,
+        },
+        positiveControlUserId,
+      ),
+    );
+    expect(addTeamLeadRes.team).toBeDefined();
+    expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
+
+    const latestStaffMatterBeforeTeamRace = (
+      await matterRepoA.getMatterById<import('@/domain/types').Matter>(
+        adminCtx,
+        staffMatter.id,
+        {
+          viewerUserId: positiveControlUserId,
+          hasRestrictedMatterAccess: true,
+        },
+      )
+    )!;
+    expect(latestStaffMatterBeforeTeamRace).not.toBeNull();
+
+    let bRemovedTeamLeadDuringAMatterSave = false;
+    const spyTeamInterleave = vi
+      .spyOn(matterRepoA, 'listAllMattersUnfiltered')
+      .mockImplementationOnce(async (ctx) => {
+        const loadedMatters = await origListAllMattersA(ctx);
+        expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
+
+        const removeTeamLeadRes = await runInReplicaB(adminSessionB, () =>
+          replicaB.saveTeamRecord(
+            {
+              id: targetTeam.id,
+              name: targetTeam.name,
+              description: targetTeam.description,
+              practiceAreaIds: targetTeam.practiceAreaIds,
+              leadIds: originalTeamLeadIds,
+              memberIds: targetTeam.memberIds,
+              active: true,
+            },
+            positiveControlUserId,
+          ),
+        );
+        expect(removeTeamLeadRes.team).toBeDefined();
+        bRemovedTeamLeadDuringAMatterSave = true;
+        return loadedMatters;
+      });
+
+    try {
+      const saveMatterRes = await runInReplicaA(adminSessionA, () =>
+        replicaA.saveMatterRecord(
+          {
+            ...latestStaffMatterBeforeTeamRace,
+            title: `${latestStaffMatterBeforeTeamRace.title} (R479 Team Interleave)`,
+          },
+          {
+            id: staffMatter.id,
+            byId: positiveControlUserId,
+            expectedRowVersion: latestStaffMatterBeforeTeamRace.rowVersion ?? 1,
+          },
+        ),
+      );
+      expect(saveMatterRes.errors).toBeUndefined();
+      expect(saveMatterRes.matter).not.toBeNull();
+      expect(bRemovedTeamLeadDuringAMatterSave).toBe(true);
+    } finally {
+      spyTeamInterleave.mockRestore();
+    }
+
+    const afterTeamInterleaveIds = await readRestrictedIdsOnFreshConnection();
+    expect(afterTeamInterleaveIds).toContain(positiveControlUserId);
+    expect(afterTeamInterleaveIds).not.toContain(userU);
+    expect(
+      await keyDateRepo.listKeyDatesForMatter(userUCtx, staffMatter.id, userU),
+    ).toHaveLength(0);
+
+    // R479 signature check: neither syncAffectedMattersRestrictionsInTx nor putMatterWithInTxRestrictions accepts `teams`
+    const servicesSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/server/services.ts'),
+      'utf8',
+    );
+    const syncSigMatch = servicesSource.match(
+      /async function syncAffectedMattersRestrictionsInTx\([\s\S]*?\): Promise<void>/,
+    );
+    const putSigMatch = servicesSource.match(
+      /async function putMatterWithInTxRestrictions\([\s\S]*?\): Promise<Matter>/,
+    );
+    expect(syncSigMatch).not.toBeNull();
+    expect(putSigMatch).not.toBeNull();
+    expect(syncSigMatch![0]).not.toMatch(/\bteams\b/);
+    expect(putSigMatch![0]).not.toMatch(/\bteams\b/);
   });
 });

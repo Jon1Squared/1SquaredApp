@@ -136,6 +136,31 @@ async function ensureLocalWindowsPostgresIfNeeded() {
 async function run() {
   await ensureLocalWindowsPostgresIfNeeded();
 
+  const generatedRegistryPath = path.join(
+    process.cwd(),
+    'src',
+    'platform',
+    'generated',
+    'extensionRegistry.ts',
+  );
+  if (!fs.existsSync(generatedRegistryPath)) {
+    const genArgs = ['tsx', 'scripts/generate-extension-registry.ts'];
+    const genRes = isWin
+      ? spawnSync([npxCmd, ...genArgs].join(' '), {
+          stdio: 'inherit',
+          env: process.env,
+          shell: true,
+        })
+      : spawnSync(npxCmd, genArgs, {
+          stdio: 'inherit',
+          env: process.env,
+          shell: false,
+        });
+    if (genRes.status !== 0) {
+      process.exit(genRes.status ?? 1);
+    }
+  }
+
   const args = ['tsx', '--conditions', 'react-server', 'scripts/provision-test-postgres.ts'];
   const res = isWin
     ? spawnSync([npxCmd, ...args].join(' '), {

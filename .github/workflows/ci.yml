@@ -79,9 +79,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate extension registry
+        run: npm run generate:extensions
+
       - name: Start PgBouncer in transaction mode (port 6432) and provision test PostgreSQL databases (R401, R402)
         run: |
-          node scripts/setup-test-postgres.mjs
           sudo apt-get update -qq
           sudo apt-get install -y -qq pgbouncer postgresql-client
           cat <<'EOF' | sudo tee /etc/pgbouncer/pgbouncer.ini > /dev/null
@@ -111,9 +113,7 @@ jobs:
             sleep 0.5
           done
           pg_isready -h 127.0.0.1 -p 6432
-
-      - name: Generate extension registry
-        run: npm run generate:extensions
+          node scripts/setup-test-postgres.mjs
 
       - name: TypeScript typecheck
         run: npx tsc --noEmit
@@ -193,9 +193,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate extension registry
+        run: npm run generate:extensions
+
       - name: Start PgBouncer in transaction mode (port 6432) and provision test PostgreSQL databases (R401, R402)
         run: |
-          node scripts/setup-test-postgres.mjs
           sudo apt-get update -qq
           sudo apt-get install -y -qq pgbouncer postgresql-client
           cat <<'EOF' | sudo tee /etc/pgbouncer/pgbouncer.ini > /dev/null
@@ -225,6 +227,7 @@ jobs:
             sleep 0.5
           done
           pg_isready -h 127.0.0.1 -p 6432
+          node scripts/setup-test-postgres.mjs
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
