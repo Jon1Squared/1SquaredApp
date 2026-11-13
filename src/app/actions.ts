@@ -763,12 +763,22 @@ export async function prepareEnquiryConversionAction(
   });
 }
 
-export async function anonymiseExpiredEnquiriesAction(specificEnquiryId?: string) {
-  return guardedAction('anonymiseExpiredEnquiriesAction', async ({ personId: byId }) => {
-    const count = await anonymiseExpiredEnquiries(byId, specificEnquiryId);
-    revalidateAll();
-    return { count };
-  });
+export async function anonymiseExpiredEnquiriesAction(
+  specificEnquiryId?: string,
+  options?: { nowIso?: string; timeZone?: string },
+) {
+  return guardedAction(
+    'anonymiseExpiredEnquiriesAction',
+    async ({ personId: byId, tenantContext }) => {
+      const count = await anonymiseExpiredEnquiries(byId, specificEnquiryId, {
+        tenantCtx: tenantContext,
+        nowIso: options?.nowIso,
+        timeZone: options?.timeZone,
+      });
+      revalidateAll();
+      return { count };
+    },
+  );
 }
 
 export async function linkPmsRecordAction(

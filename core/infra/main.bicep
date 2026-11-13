@@ -94,7 +94,7 @@ param enableKeyDateRemindersJob bool = true
 param enableUsageRetentionPurgeJob bool = true
 
 @description('Enable the hourly enquiry-retention-anonymise scheduled Container Apps job (S0-19b)')
-param enableEnquiryAnonymisationJob bool = false
+param enableEnquiryAnonymisationJob bool = true
 
 @description('Microsoft Entra ID application (client) ID for OIDC sign-in (required; no empty default)')
 @minLength(1)

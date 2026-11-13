@@ -32,6 +32,8 @@ import {
 
 export type JobTriggerSource = 'scheduled' | 'manual';
 export type JobRunStatus = 'running' | 'succeeded' | 'failed';
+export type JobSummaryScope = 'single' | 'bulk';
+export type JobSummaryValue = number | JobSummaryScope;
 
 export interface JobRunRecord {
   readonly tenantId: string;
@@ -45,7 +47,7 @@ export interface JobRunRecord {
   readonly finishedAt: string | null;
   readonly correlationId: string;
   readonly errorCode: string | null;
-  readonly summary: Readonly<Record<string, number>>;
+  readonly summary: Readonly<Record<string, JobSummaryValue>>;
 }
 
 export type ControlledJobRunOutcome<TResult> =
@@ -137,17 +139,18 @@ export function resolveTenantLocalDateAndHour(
 
 export function sanitizeJobSummaryCounts(
   raw: Record<string, unknown> | null | undefined,
-): Record<string, number> {
-  const clean: Record<string, number> = {};
+): Record<string, JobSummaryValue> {
+  const clean: Record<string, JobSummaryValue> = {};
   if (!raw || typeof raw !== 'object') {
     return clean;
   }
   for (const [k, v] of Object.entries(raw)) {
-    if (
-      /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(k) &&
-      typeof v === 'number' &&
-      Number.isFinite(v)
-    ) {
+    if (!/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(k)) {
+      continue;
+    }
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      clean[k] = v;
+    } else if (k === 'scope' && (v === 'single' || v === 'bulk')) {
       clean[k] = v;
     }
   }
@@ -211,7 +214,7 @@ export class TenantJobRunRepository extends TenantScopedRepository {
         readonly nowIso: string;
       }) => Promise<{
         readonly result: TResult;
-        readonly summary: Record<string, number>;
+        readonly summary: Record<string, JobSummaryValue>;
       }>;
     },
   ): Promise<ControlledJobRunOutcome<TResult>> {
@@ -254,7 +257,9 @@ export class TenantJobRunRepository extends TenantScopedRepository {
             };
           }
 
-          // 2. For scheduled runs, check if any succeeded row (scheduled OR manual) already exists for (tenant_id, job_key, local_date)
+          // 2. For scheduled runs, check if any bulk succeeded row (scheduled OR manual bulk)
+          //    already exists for (tenant_id, job_key, local_date). A single-enquiry manual run
+          //    (summary_json->>'scope' = 'single') does not suppress the daily bulk sweep.
           if (params.triggerSource === 'scheduled') {
             const existingRes = await tx.query<DbJobRunRow>(
               `SELECT *
@@ -263,6 +268,7 @@ export class TenantJobRunRepository extends TenantScopedRepository {
                   AND job_key = $2
                   AND local_date = $3
                   AND status = 'succeeded'
+                  AND COALESCE(summary_json->>'scope', 'bulk') <> 'single'
                 ORDER BY finished_at DESC NULLS LAST, started_at DESC
                 LIMIT 1`,
               [ctx.tenantId, params.jobKey, localDate],
@@ -339,36 +345,46 @@ export class TenantJobRunRepository extends TenantScopedRepository {
         };
       }
 
+      const errorCode = sanitizeJobErrorCode(err);
+      const isManualAuthDenial =
+        params.triggerSource === 'manual' &&
+        ((err as { name?: string })?.name === 'AuthorisationError' ||
+          errorCode === 'FORBIDDEN' ||
+          errorCode === 'UNAUTHENTICATED' ||
+          errorCode === 'MFA_REQUIRED' ||
+          errorCode === 'KEY_DATE_PERMISSION_DENIED');
+
       // Record a status = 'failed' row in a short second autonomous transaction so failure history
       // is preserved without blocking retry on the next hourly tick.
-      const errorCode = sanitizeJobErrorCode(err);
-      const failedAtIso = new Date().toISOString();
-      try {
-        await this.withAutonomousTenantTransaction(ctx, async (failTx) => {
-          await failTx.query(
-            `INSERT INTO public.job_runs (
-               tenant_id, id, job_key, local_date, trigger_source, triggered_by_id,
-               status, started_at, finished_at, correlation_id, error_code, summary_json
-             ) VALUES (
-               $1, $2, $3, $4, $5, $6,
-               'failed', $7::timestamptz, $8::timestamptz, $9, $10, '{}'::jsonb
-             )`,
-            [
-              ctx.tenantId,
-              runId,
-              params.jobKey,
-              localDate,
-              params.triggerSource,
-              params.triggeredById,
-              startedAtIso,
-              failedAtIso,
-              ctx.correlationId,
-              errorCode,
-            ],
-          );
-        });
-      } catch {
-        // Best-effort failure record (e.g. if the database connection itself is unavailable)
+      if (!isManualAuthDenial) {
+        const failedAtIso = new Date().toISOString();
+        try {
+          await this.withAutonomousTenantTransaction(ctx, async (failTx) => {
+            await failTx.query(
+              `INSERT INTO public.job_runs (
+                 tenant_id, id, job_key, local_date, trigger_source, triggered_by_id,
+                 status, started_at, finished_at, correlation_id, error_code, summary_json
+               ) VALUES (
+                 $1, $2, $3, $4, $5, $6,
+                 'failed', $7::timestamptz, $8::timestamptz, $9, $10, '{}'::jsonb
+               )`,
+              [
+                ctx.tenantId,
+                runId,
+                params.jobKey,
+                localDate,
+                params.triggerSource,
+                params.triggeredById,
+                startedAtIso,
+                failedAtIso,
+                ctx.correlationId,
+                errorCode,
+              ],
+            );
+          });
+        } catch {
+          // Best-effort failure record (e.g. if the database connection itself is unavailable)
+        }
       }
 
       throw err;

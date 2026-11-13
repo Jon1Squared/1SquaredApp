@@ -8,7 +8,7 @@
 | Branch | `s0-19b-anonymisation-job`, from `s0-19-scheduler`, targeting `develop` |
 | Change class | Core feature / scheduled retention job (`core/src/domain/rbac/registry.ts`, `src/server/actionPermissions.ts`, `src/server/services.ts`, `scripts/run-job.ts` -> `dist/jobs/run-job.mjs`, `core/infra/modules/platform.bicep`). |
 | Size | S |
-| Depends on | S0-17a (`enquiries` and `enquiry_settings` in PostgreSQL), S0-19 (`guardedJob`, `job_runs` `0013`, `pg_try_advisory_xact_lock`, bundled `dist/jobs/run-job.mjs`, job failure alert rule). |
+| Depends on | S0-17a (`enquiries` and `enquiry_settings` in PostgreSQL), S0-19 (`guardedJob`, `job_runs` `0014`, `pg_try_advisory_xact_lock`, bundled `dist/jobs/run-job.mjs`, job failure alert rule). |
 | Blocking manual tasks | Azure subscription access (`docs/roadmap/stage-0-plan.md` §8) to observe live Azure Container Apps scheduled execution; local and CI execution is unblocked. |
 | Baseline | `develop` at `52390b9` |
 
@@ -20,7 +20,7 @@ Checked against `develop` (`52390b9`):
    - `anonymiseExpiredEnquiries(byId, specificEnquiryId?)` (`src/server/services.ts:8924-8970`, hardened in `S0-03` to fix `B3`) requires `enquiry:anonymise`, loads `retentionMonths` from `enquirySettings`, and **always** evaluates `isReadyForRetentionAnonymisation(enq, months, now)` (`src/domain/enquiries.ts:1553-1563` — refusing `Converted` enquiries, open enquiries, already-anonymised enquiries, and any closed enquiry within the retention cutoff) for both single-enquiry and bulk calls, wiping personal details and writing an audit entry (`:8956-8965`) with zero personal data.
    - However, it runs only when triggered manually via `anonymiseExpiredEnquiriesAction` (`src/app/actions.ts:747-753`, `P9`).
 2. **Scheduler infrastructure ready from S0-13, S0-13b, S0-14 and S0-19:**
-   - `tenantRegistry.ts`, `guardedJob` (`system:<jobKey>`), `JOB_PERMISSIONS`, `job_runs` (`0013`), `pg_try_advisory_xact_lock`, `dist/jobs/run-job.mjs`, and the `Microsoft.Insights/scheduledQueryRules` failure/timeout alert rule are all in place, and `core/infra/modules/platform.bicep` already declares the parameterised `enquiry-retention-anonymise` job resource (`['node', 'dist/jobs/run-job.mjs', 'enquiry-retention-anonymise']`).
+   - `tenantRegistry.ts`, `guardedJob` (`system:<jobKey>`), `JOB_PERMISSIONS`, `job_runs` (`0014`), `pg_try_advisory_xact_lock`, `dist/jobs/run-job.mjs`, and the `Microsoft.Insights/scheduledQueryRules` failure/timeout alert rule are all in place, and `core/infra/modules/platform.bicep` already declares the parameterised `enquiry-retention-anonymise` job resource (`['node', 'dist/jobs/run-job.mjs', 'enquiry-retention-anonymise']`).
 
 ## Files and changes
 
@@ -64,7 +64,7 @@ Checked against `develop` (`52390b9`):
 
 ## Rollback
 
-- No schema migration in `S0-19b` (uses `enquiries` from `0009` and `job_runs` from `0013`). Disable `enableEnquiryAnonymisationJob` or revert `s0-19b-anonymisation-job`; manual buttons continue working. *(Already-anonymised PII is irreversibly scrubbed by design.)*
+- No schema migration in `S0-19b` (uses `enquiries` from `0010` and `job_runs` from `0014`). Disable `enableEnquiryAnonymisationJob` or revert `s0-19b-anonymisation-job`; manual buttons continue working. *(Already-anonymised PII is irreversibly scrubbed by design.)*
 
 ## Pull request description must state
 
