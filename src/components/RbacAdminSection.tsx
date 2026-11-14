@@ -8,7 +8,7 @@ import {
 } from '@/app/actions';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import {
-  ALL_PERMISSION_KEYS,
+  ALL_USER_PERMISSION_KEYS,
   PERMISSION_REGISTRY,
   type PermissionKey,
   type RbacConfiguration,
@@ -317,7 +317,7 @@ export function RbacAdminSection({
               Central RBAC &amp; 1Squared Entra ID Federation
             </h2>
             <p className="muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-              Single permission registry ({ALL_PERMISSION_KEYS.length} permissions),
+              Single permission registry ({ALL_USER_PERMISSION_KEYS.length} permissions),
               schema-validated role &amp; department grants, Microsoft Entra ID OIDC
               claim mapping, and MFA-gated per-person overrides.
             </p>
@@ -628,7 +628,7 @@ export function RbacAdminSection({
                 </tr>
               </thead>
               <tbody>
-                {ALL_PERMISSION_KEYS.map((permKey) => {
+                {ALL_USER_PERMISSION_KEYS.map((permKey) => {
                   const entry = PERMISSION_REGISTRY[permKey];
                   const granted =
                     localRbac.roles[selectedRoleKey]?.permissions.includes(
@@ -732,7 +732,7 @@ export function RbacAdminSection({
               marginBottom: 20,
             }}
           >
-            {ALL_PERMISSION_KEYS.map((permKey) => {
+            {ALL_USER_PERMISSION_KEYS.map((permKey) => {
               const checked = (
                 localRbac.departmentGrants[selectedDeptId] ?? []
               ).includes(permKey);
@@ -1136,7 +1136,7 @@ export function RbacAdminSection({
               </tr>
             </thead>
             <tbody>
-              {ALL_PERMISSION_KEYS.map((permKey) => {
+              {ALL_USER_PERMISSION_KEYS.map((permKey) => {
                 const isGranted = overrideGrant.includes(permKey);
                 const isRevoked = overrideRevoke.includes(permKey);
                 const actorHoldsPerm = actorPerms.has(permKey);

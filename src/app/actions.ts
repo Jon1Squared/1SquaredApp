@@ -765,15 +765,12 @@ export async function prepareEnquiryConversionAction(
 
 export async function anonymiseExpiredEnquiriesAction(
   specificEnquiryId?: string,
-  options?: { nowIso?: string; timeZone?: string },
 ) {
   return guardedAction(
     'anonymiseExpiredEnquiriesAction',
     async ({ personId: byId, tenantContext }) => {
       const count = await anonymiseExpiredEnquiries(byId, specificEnquiryId, {
         tenantCtx: tenantContext,
-        nowIso: options?.nowIso,
-        timeZone: options?.timeZone,
       });
       revalidateAll();
       return { count };
@@ -1586,9 +1583,7 @@ export async function acknowledgeKeyDateReminderAction(keyDateId: string) {
   });
 }
 
-export async function runKeyDateReminderSchedulerAction(options?: {
-  nowIso?: string;
-}) {
+export async function runKeyDateReminderSchedulerAction() {
   return guardedAction('runKeyDateReminderSchedulerAction', async (actor) => {
     const tenantCtx = resolveCurrentTenantContext(
       createVerifiedSessionActorFromEntraSession(actor.session),
@@ -1598,7 +1593,6 @@ export async function runKeyDateReminderSchedulerAction(options?: {
       session: actor.session,
       byId: actor.personId,
       mfaVerified: actor.mfaVerified,
-      nowIso: options?.nowIso,
     });
     revalidateAll();
     return res;
@@ -1607,19 +1601,17 @@ export async function runKeyDateReminderSchedulerAction(options?: {
 
 export async function queryKeyDatesTeamDiaryAction(
   query: TeamDiaryQuery,
-  todayIso?: string,
 ) {
   return guardedAction('queryKeyDatesTeamDiaryAction', async ({ personId: byId }) =>
-    queryKeyDatesTeamDiaryRecord(query, byId, todayIso),
+    queryKeyDatesTeamDiaryRecord(query, byId),
   );
 }
 
 export async function getKeyDateExceptionsReportAction(
   filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
-  todayIso?: string,
 ) {
   return guardedAction('getKeyDateExceptionsReportAction', async ({ personId: byId }) =>
-    getKeyDateExceptionsReportRecord(filter, byId, todayIso),
+    getKeyDateExceptionsReportRecord(filter, byId),
   );
 }
 
@@ -1629,10 +1621,9 @@ export async function exportKeyDateExceptionsReportAction(
     kinds?: KeyDateExceptionKind[];
     format?: 'csv' | 'json';
   } = {},
-  todayIso?: string,
 ) {
   return guardedAction('exportKeyDateExceptionsReportAction', async ({ personId: byId }) => {
-    const res = await exportKeyDateExceptionsReportRecord(filter, byId, todayIso);
+    const res = await exportKeyDateExceptionsReportRecord(filter, byId);
     revalidateAll();
     return res;
   });

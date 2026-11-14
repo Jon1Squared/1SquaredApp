@@ -775,6 +775,7 @@ const pmsRepositoryInstance = new TenantPmsRepository();
 const jobRunRepositoryInstance = new TenantJobRunRepository();
 const auditRepositoryInstance = new TenantAuditRepository();
 let auditRepositoryOverrideForTesting: TenantAuditRepository | null = null;
+let jobRunRepositoryOverrideForTesting: TenantJobRunRepository | null = null;
 
 export function getPartyRepository(): TenantPartyRepository {
   return partyRepositoryInstance;
@@ -805,7 +806,18 @@ export function getPmsRepository(): TenantPmsRepository {
 }
 
 export function getJobRunRepository(): TenantJobRunRepository {
-  return jobRunRepositoryInstance;
+  return jobRunRepositoryOverrideForTesting ?? jobRunRepositoryInstance;
+}
+
+export function setJobRunRepositoryOverrideForTesting(
+  override: TenantJobRunRepository | null,
+): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setJobRunRepositoryOverrideForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  jobRunRepositoryOverrideForTesting = override;
 }
 
 export function getAuditRepository(): TenantAuditRepository {

@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import ts from 'typescript';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ALL_BUILTIN_ROLE_KEYS,
@@ -36,9 +39,11 @@ import {
   executeUsageRetentionPurgeForTenant,
   getKeyDateRepository,
   getKeyDatesConfig,
+  recordKeyDateNotApplicableRecord,
   resetAllDemoData,
   runKeyDateReminderSchedulerRecord,
   runScheduledKeyDateRemindersJobSweep,
+  saveMatterRecord,
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
   verifyProposedKeyDateRecord,
@@ -50,13 +55,27 @@ import { runKeyDateReminderSchedulerAction } from '../../src/app/actions';
 import { runMigrateJobSweep, executeCliJobRunner } from '../../scripts/run-job';
 import {
   runAsTestActor,
+  setJobRunBeforeCommitHookForTesting,
   setTestActorSession,
   testTenantCtx,
 } from '../../src/server/testSupport/auditTestSupport';
 import { setTestEntraSessionOverride } from '../../src/server/entraAuth';
 import { isActionDenied } from '../../src/domain/actionResult';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
-import type { Matter, Person, Task } from '../../src/domain/types';
+import type { Matter, NotificationItem, Person, Task } from '../../src/domain/types';
+
+async function withFakeClock<T>(
+  isoTime: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(isoTime));
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 function makeTestRegistryEntry(
   tenantId = 'not-a-law-firm',
@@ -82,6 +101,7 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
   beforeEach(async () => {
     setActiveTenantConfigForTesting(null);
     setTestEntraSessionOverride(undefined);
+    setJobRunBeforeCommitHookForTesting(null);
     const ctx = testTenantCtx('P-000001', {
       roles: ['admin', 'managing_partner'],
       mfaVerified: true,
@@ -412,17 +432,17 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
 
       // 1. Manual run via runKeyDateReminderSchedulerRecord (at 00:15 UTC = 01:15 BST on 2027-08-20 — before 02:00 local window, manual runs immediately)
       const manualNowIso = '2027-08-20T00:15:00.000Z';
-      const manualRes = await runAsTestActor(
-        'P-000001',
-        async () =>
-          runKeyDateReminderSchedulerRecord({
-            tenantCtx: ctx,
-            byId: 'P-000001',
-            mfaVerified: true,
-            nowIso: manualNowIso,
-            timeZone: 'Europe/London',
-          }),
-        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      const manualRes = await withFakeClock(manualNowIso, async () =>
+        runAsTestActor(
+          'P-000001',
+          async () =>
+            runKeyDateReminderSchedulerRecord({
+              tenantCtx: ctx,
+              byId: 'P-000001',
+              mfaVerified: true,
+            }),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
       );
       expect(manualRes.ok).toBe(true);
       expect(manualRes.jobStatus).toBe('succeeded');
@@ -453,10 +473,13 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         tenants: [entry],
       });
 
-      const scheduledSameDay = await runScheduledKeyDateRemindersJobSweep({
-        registry,
-        nowIso: '2027-08-20T01:05:00.000Z', // 02:05 BST on 2027-08-20
-      });
+      const scheduledSameDay = await withFakeClock(
+        '2027-08-20T01:05:00.000Z', // 02:05 BST on 2027-08-20
+        async () =>
+          runScheduledKeyDateRemindersJobSweep({
+            registry,
+          }),
+      );
       expect(scheduledSameDay.exitCode).toBe(0);
       expect(scheduledSameDay.succeededTenants).toEqual([]);
       expect(scheduledSameDay.skippedTenants).toEqual([
@@ -468,10 +491,13 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       ]);
 
       // 3. Scheduled tick on a subsequent local day (2027-08-22 at 02:05 BST = 01:05 UTC, when due date is today -> 1d stage) executes with system:key-date-reminders
-      const scheduledNextDay = await runScheduledKeyDateRemindersJobSweep({
-        registry,
-        nowIso: '2027-08-22T01:05:00.000Z', // 02:05 BST on 2027-08-22
-      });
+      const scheduledNextDay = await withFakeClock(
+        '2027-08-22T01:05:00.000Z', // 02:05 BST on 2027-08-22
+        async () =>
+          runScheduledKeyDateRemindersJobSweep({
+            registry,
+          }),
+      );
       expect(scheduledNextDay.exitCode).toBe(0);
       expect(scheduledNextDay.succeededTenants).toEqual(['not-a-law-firm']);
 
@@ -573,20 +599,20 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         mfaVerified: true,
       });
       try {
-        const [scheduledSweep, manualActionRes] = await Promise.all([
-          runScheduledKeyDateRemindersJobSweep({
-            registry,
-            nowIso: concurrentNowIso,
-          }),
-          runAsTestActor(
-            'P-000001',
-            () =>
-              runKeyDateReminderSchedulerAction({
-                nowIso: concurrentNowIso,
+        const [scheduledSweep, manualActionRes] = await withFakeClock(
+          concurrentNowIso,
+          async () =>
+            Promise.all([
+              runScheduledKeyDateRemindersJobSweep({
+                registry,
               }),
-            { roles: ['admin', 'managing_partner'], mfaVerified: true },
-          ),
-        ]);
+              runAsTestActor(
+                'P-000001',
+                () => runKeyDateReminderSchedulerAction(),
+                { roles: ['admin', 'managing_partner'], mfaVerified: true },
+              ),
+            ]),
+        );
 
         expect(scheduledSweep.exitCode).toBe(0);
         expect(isActionDenied(manualActionRes)).toBe(false);
@@ -774,18 +800,26 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         tenants: [entry],
       });
 
-      // 1. Tick at 02:05 BST on 2027-09-15 (01:05 UTC) throws after staging reminder/task/audit writes
-      const failedSweep = await runScheduledKeyDateRemindersJobSweep({
-        registry,
-        nowIso: '2027-09-15T01:05:00.000Z',
-        onAfterWorkBeforeCommitByTenant: {
-          'not-a-law-firm': () => {
-            const err = new Error('Simulated mid-transaction failure');
-            (err as Error & { code?: string }).code = 'SIMULATED_TX_FAILURE';
-            throw err;
-          },
-        },
+      // 1. Tick at 02:05 BST on 2027-09-15 (01:05 UTC) throws after staging reminder/task/audit writes (via test-only R450/R482 hook)
+      setJobRunBeforeCommitHookForTesting(({ ctx: hookCtx }) => {
+        if (hookCtx.tenantId === 'not-a-law-firm') {
+          const err = new Error('Simulated mid-transaction failure');
+          (err as Error & { code?: string }).code = 'SIMULATED_TX_FAILURE';
+          throw err;
+        }
       });
+      let failedSweep;
+      try {
+        failedSweep = await withFakeClock(
+          '2027-09-15T01:05:00.000Z',
+          async () =>
+            runScheduledKeyDateRemindersJobSweep({
+              registry,
+            }),
+        );
+      } finally {
+        setJobRunBeforeCommitHookForTesting(null);
+      }
       expect(failedSweep.exitCode).toBe(1);
       expect(failedSweep.failedTenants).toEqual([
         { tenantId: 'not-a-law-firm', errorCode: 'SIMULATED_TX_FAILURE' },
@@ -822,10 +856,13 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       expect(runsAfterFailure[0]!.errorCode).toBe('SIMULATED_TX_FAILURE');
 
       // 2. Next hourly tick at 03:05 BST on 2027-09-15 (02:05 UTC) retries and succeeds
-      const retrySweep = await runScheduledKeyDateRemindersJobSweep({
-        registry,
-        nowIso: '2027-09-15T02:05:00.000Z',
-      });
+      const retrySweep = await withFakeClock(
+        '2027-09-15T02:05:00.000Z',
+        async () =>
+          runScheduledKeyDateRemindersJobSweep({
+            registry,
+          }),
+      );
       expect(retrySweep.exitCode).toBe(0);
       expect(retrySweep.succeededTenants).toEqual(['not-a-law-firm']);
 
@@ -926,12 +963,15 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         correlationId: 'corr-ue-2m',
       });
 
-      const outcome = await executeUsageRetentionPurgeForTenant(ctx, {
-        triggerSource: 'scheduled',
-        triggeredById: 'system:usage-retention-purge',
-        timeZone: 'Europe/London',
-        nowIso: '2026-06-20T01:10:00.000Z', // 02:10 BST on 2026-06-20
-      });
+      const outcome = await withFakeClock(
+        '2026-06-20T01:10:00.000Z', // 02:10 BST on 2026-06-20
+        async () =>
+          executeUsageRetentionPurgeForTenant(ctx, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:usage-retention-purge',
+            timeZone: 'Europe/London',
+          }),
+      );
       expect(outcome.outcome).toBe('executed');
       if (outcome.outcome === 'executed') {
         expect(outcome.result.retentionMonths).toBe(12);
@@ -1027,6 +1067,21 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         },
       );
       expect(unknownExit).toBe(1);
+
+      // R481: Verify CLI runner rejects --now and any extra flags with JOB_RUNNER_USAGE_ERROR and exit code 1
+      for (const badArgs of [
+        ['node', 'dist/jobs/run-job.mjs', 'key-date-reminders', '--now', '2099-01-01T00:00:00.000Z'],
+        ['node', 'dist/jobs/run-job.mjs', 'usage-retention-purge', '--now', '2099-01-01T00:00:00.000Z'],
+        ['node', 'dist/jobs/run-job.mjs', 'migrate', '--unknown-flag'],
+      ]) {
+        const flagStderr: string[] = [];
+        const flagExit = await executeCliJobRunner(badArgs, {
+          stdout: (line) => stdoutLines.push(line),
+          stderr: (line) => flagStderr.push(line),
+        });
+        expect(flagExit).toBe(1);
+        expect(flagStderr.join('')).toMatch(/JOB_RUNNER_USAGE_ERROR/);
+      }
     });
 
     it('synchronises two isolated module graphs (vi.resetModules()) via PostgreSQL pg_try_advisory_xact_lock and job_runs with zero in-process lock state (Lesson 1 & Lesson 2)', async () => {
@@ -1038,6 +1093,9 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       await jobRunRepo.clearTenantJobRuns(ctx);
 
       const modA = await import('../../src/server/services');
+      const supportA = await import(
+        '../../src/server/testSupport/auditTestSupport'
+      );
       vi.resetModules();
       const modB = await import('../../src/server/services');
       expect(modA.executeKeyDateRemindersForTenant).not.toBe(
@@ -1055,48 +1113,47 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
 
       const tickNowIso = '2026-08-12T01:15:00.000Z'; // 02:15 BST on 2026-08-12
 
-      // Start Worker A in module graph A and hold inside the transaction while holding pg_try_advisory_xact_lock
-      const runAPromise = modA.executeKeyDateRemindersForTenant(ctx, {
-        triggerSource: 'scheduled',
-        triggeredById: 'system:key-date-reminders',
-        timeZone: 'Europe/London',
-        nowIso: tickNowIso,
-        onAfterWorkBeforeCommit: async () => {
+      await withFakeClock(tickNowIso, async () => {
+        supportA.setJobRunBeforeCommitHookForTesting(async () => {
           enteredWorkA();
           await holdPromiseA;
-        },
+        });
+        try {
+          // Start Worker A in module graph A and hold inside the transaction while holding pg_try_advisory_xact_lock
+          const runAPromise = modA.executeKeyDateRemindersForTenant(ctx, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            timeZone: 'Europe/London',
+          });
+
+          await enteredPromiseA;
+
+          // While Worker A holds the transaction advisory lock in PostgreSQL, Worker B (isolated module graph B) attempts the same tenant job
+          const outcomeBWhileRunning =
+            await modB.executeKeyDateRemindersForTenant(ctx, {
+              triggerSource: 'scheduled',
+              triggeredById: 'system:key-date-reminders',
+              timeZone: 'Europe/London',
+            });
+          expect(outcomeBWhileRunning.outcome).toBe('already_running');
+
+          // Release Worker A so its transaction commits the succeeded row in job_runs
+          releaseHoldA();
+          const outcomeA = await runAPromise;
+          expect(outcomeA.outcome).toBe('executed');
+
+          // Now Worker B runs again after Worker A committed; it sees the succeeded row in job_runs and returns already_succeeded_today
+          const outcomeBAfterCommit =
+            await modB.executeKeyDateRemindersForTenant(ctx, {
+              triggerSource: 'scheduled',
+              triggeredById: 'system:key-date-reminders',
+              timeZone: 'Europe/London',
+            });
+          expect(outcomeBAfterCommit.outcome).toBe('already_succeeded_today');
+        } finally {
+          supportA.setJobRunBeforeCommitHookForTesting(null);
+        }
       });
-
-      await enteredPromiseA;
-
-      // While Worker A holds the transaction advisory lock in PostgreSQL, Worker B (isolated module graph B) attempts the same tenant job
-      const outcomeBWhileRunning = await modB.executeKeyDateRemindersForTenant(
-        ctx,
-        {
-          triggerSource: 'scheduled',
-          triggeredById: 'system:key-date-reminders',
-          timeZone: 'Europe/London',
-          nowIso: tickNowIso,
-        },
-      );
-      expect(outcomeBWhileRunning.outcome).toBe('already_running');
-
-      // Release Worker A so its transaction commits the succeeded row in job_runs
-      releaseHoldA();
-      const outcomeA = await runAPromise;
-      expect(outcomeA.outcome).toBe('executed');
-
-      // Now Worker B runs again after Worker A committed; it sees the succeeded row in job_runs and returns already_succeeded_today
-      const outcomeBAfterCommit = await modB.executeKeyDateRemindersForTenant(
-        ctx,
-        {
-          triggerSource: 'scheduled',
-          triggeredById: 'system:key-date-reminders',
-          timeZone: 'Europe/London',
-          nowIso: tickNowIso,
-        },
-      );
-      expect(outcomeBAfterCommit.outcome).toBe('already_succeeded_today');
 
       const runs = await jobRunRepo.listJobRuns(ctx, {
         jobKey: 'key-date-reminders',
@@ -1104,6 +1161,395 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       });
       expect(runs).toHaveLength(1);
       expect(runs[0]!.status).toBe('succeeded');
+    });
+
+    it('skips key dates marked not-applicable on both staff matters and ordinary matters during scheduled and non-access manual runs while processing active ordinary key dates (R483)', async () => {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const adminCtx = testTenantCtx('P-000001', {
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      });
+      const jobRunRepo = getJobRunRepository();
+      await jobRunRepo.clearTenantJobRuns(adminCtx);
+
+      const people = await getPartyRepository().listAllPeople<Person>(adminCtx);
+      const matters =
+        await getMatterRepository().listAllMattersUnfiltered<Matter>(adminCtx);
+      const baseMatter = matters.find((m) => !m.isStaffMatter)!;
+      const staffEmployeeClient = people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          p.id !== 'P-000002' &&
+          p.id !== 'P-000003',
+      )!;
+
+      // Grant P-000003 keydate:configure so P-000003 can trigger the manual scheduler without being on the staff matter's restrictedAccessUserIds
+      const grantRes = await runAsTestActor(
+        'P-000001',
+        async () =>
+          updatePersonPermissionOverrides(
+            'P-000003',
+            {
+              grant: ['keydate:configure'],
+              revoke: [],
+              reason: 'Grant keydate:configure for R483 manual scheduler test',
+            },
+            'P-000001',
+            { mfaVerified: true },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(grantRes.ok).toBe(true);
+
+      // 1. Create a restricted staff matter accessible only to P-000001 and P-000002 (NOT P-000003 and NOT system:key-date-reminders)
+      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      void _omittedId;
+      const staffMatterSave = await runAsTestActor(
+        'P-000001',
+        async () =>
+          saveMatterRecord(
+            {
+              ...matterTemplate,
+              title: 'R483 Confidential Staff Matter',
+              clientId: staffEmployeeClient.id,
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000002',
+              leadFeeEarnerId: 'P-000001',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              agreedFeeCapGbp: 5000,
+              feeEstimateGbp: 5000,
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      const staffMatter = staffMatterSave.matter!;
+      expect(staffMatter.isStaffMatter).toBe(true);
+      expect(staffMatter.restrictedAccessUserIds).not.toContain('P-000003');
+      expect(staffMatter.restrictedAccessUserIds).not.toContain(
+        'system:key-date-reminders',
+      );
+
+      const kdConfig = await getKeyDatesConfig({
+        ctx: adminCtx,
+        userId: 'P-000001',
+      });
+      const manualTypes = (kdConfig.keyDateTypes ?? []).filter(
+        (t) => t.allowManualEntry !== false,
+      );
+      const naKeyDateType = manualTypes[0]!;
+      const activeKeyDateType = manualTypes[1] ?? manualTypes[0]!;
+      const secondOrdinaryMatter =
+        matters.find((m) => !m.isStaffMatter && m.id !== baseMatter.id) ??
+        baseMatter;
+
+      // Helper to create and verify a confirmed key date due on 2027-10-10
+      const createAndConfirmKeyDate = async (
+        matterId: string,
+        keyDateTypeId: string,
+        title: string,
+      ) => {
+        const kd = await runAsTestActor(
+          'P-000001',
+          async () => {
+            const created = await createOrProposeKeyDateRecord(
+              {
+                matterId,
+                keyDateTypeId,
+                title,
+                dueDate: '2027-10-10',
+                intent: 'propose',
+              },
+              'P-000001',
+            );
+            expect(created.ok).toBe(true);
+            return created.keyDate!;
+          },
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        );
+        if (kd.status === 'awaiting_verification') {
+          await runAsTestActor(
+            'P-000002',
+            async () => {
+              const verified = await verifyProposedKeyDateRecord(
+                kd.id,
+                'P-000002',
+              );
+              expect(verified.ok).toBe(true);
+            },
+            { roles: ['admin', 'partner'], mfaVerified: true },
+          );
+        }
+        return kd;
+      };
+
+      // Set up:
+      // (a) Staff matter key date marked not-applicable
+      const kdStaffNa = await createAndConfirmKeyDate(
+        staffMatter.id,
+        naKeyDateType.id,
+        'R483 Staff Matter Not-Applicable Key Date',
+      );
+      const staffNaRes = await runAsTestActor(
+        'P-000001',
+        async () =>
+          recordKeyDateNotApplicableRecord(
+            {
+              matterId: staffMatter.id,
+              keyDateTypeId: naKeyDateType.id,
+              reason: 'Staff matter key date type is not applicable (R483)',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(staffNaRes.ok).toBe(true);
+
+      // (b) Ordinary matter key date marked not-applicable (control 1)
+      const kdOrdinaryNa = await createAndConfirmKeyDate(
+        baseMatter.id,
+        naKeyDateType.id,
+        'R483 Ordinary Matter Not-Applicable Key Date',
+      );
+      const ordNaRes = await runAsTestActor(
+        'P-000001',
+        async () =>
+          recordKeyDateNotApplicableRecord(
+            {
+              matterId: baseMatter.id,
+              keyDateTypeId: naKeyDateType.id,
+              reason: 'Ordinary matter key date type is not applicable (R483)',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(ordNaRes.ok).toBe(true);
+
+      // (c) Ordinary matter active key date NOT marked not-applicable (positive control 2)
+      const kdOrdinaryActive = await createAndConfirmKeyDate(
+        secondOrdinaryMatter.id,
+        activeKeyDateType.id,
+        'R483 Ordinary Matter Active Control Key Date',
+      );
+
+      // Run 1: Manual run by P-000003 (outside staffMatter.restrictedAccessUserIds) on 2027-10-10
+      const manualCtxP3 = testTenantCtx('P-000003', {
+        roles: ['partner'],
+        mfaVerified: true,
+      });
+      const manualResP3 = await withFakeClock(
+        '2027-10-10T00:30:00.000Z',
+        async () =>
+          runAsTestActor(
+            'P-000003',
+            async () =>
+              runKeyDateReminderSchedulerRecord({
+                tenantCtx: manualCtxP3,
+                byId: 'P-000003',
+                mfaVerified: true,
+              }),
+            { roles: ['partner'], mfaVerified: true },
+          ),
+      );
+      expect(manualResP3.ok).toBe(true);
+      expect(manualResP3.jobStatus).toBe('succeeded');
+
+      // Run 2: Scheduled job on 2027-10-11 at 02:10 BST (01:10 UTC) as system:key-date-reminders
+      const entry = makeTestRegistryEntry();
+      const registry = validateTenantRegistry({
+        schemaVersion: '1.0.0',
+        environment: 'test',
+        hostingMode: 'multi_tenant',
+        tenants: [entry],
+      });
+      const scheduledRes = await withFakeClock(
+        '2027-10-11T01:10:00.000Z',
+        async () =>
+          runScheduledKeyDateRemindersJobSweep({
+            registry,
+          }),
+      );
+      expect(scheduledRes.exitCode).toBe(0);
+      expect(scheduledRes.succeededTenants).toEqual(['not-a-law-firm']);
+
+      // Verify neither manual (P-000003) nor scheduled (system:key-date-reminders) created any reminder state, task, notification, or escalation for kdStaffNa or kdOrdinaryNa
+      const allReminderStates =
+        await getKeyDateRepository().listAllReminderStatesUnfilteredForScheduler(
+          adminCtx,
+        );
+      expect(
+        allReminderStates.find((rs) => rs.keyDateId === kdStaffNa.id),
+      ).toBeUndefined();
+      expect(
+        allReminderStates.find((rs) => rs.keyDateId === kdOrdinaryNa.id),
+      ).toBeUndefined();
+
+      const staffNaTaskKey = buildKeyDateReminderIdempotencyKey(
+        kdStaffNa.id,
+        adminCtx.tenantId,
+      );
+      const ordNaTaskKey = buildKeyDateReminderIdempotencyKey(
+        kdOrdinaryNa.id,
+        adminCtx.tenantId,
+      );
+      const ordActiveTaskKey = buildKeyDateReminderIdempotencyKey(
+        kdOrdinaryActive.id,
+        adminCtx.tenantId,
+      );
+
+      const allTasks =
+        await getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(
+          adminCtx,
+        );
+      expect(
+        allTasks.filter((t) => t.idempotencyKey === staffNaTaskKey),
+      ).toHaveLength(0);
+      expect(
+        allTasks.filter((t) => t.idempotencyKey === ordNaTaskKey),
+      ).toHaveLength(0);
+
+      const allNotifications =
+        await getTaskWorkflowRepository().listAllNotificationsUnfiltered<NotificationItem>(
+          adminCtx,
+        );
+      expect(
+        allNotifications.filter((n) => n.title.includes(kdStaffNa.title)),
+      ).toHaveLength(0);
+      expect(
+        allNotifications.filter((n) => n.title.includes(kdOrdinaryNa.title)),
+      ).toHaveLength(0);
+
+      // Positive control: kdOrdinaryActive has both its reminder state (at overdue stage -1 on 2027-10-11) and its single reminder task
+      const activeReminderState = allReminderStates.find(
+        (rs) => rs.keyDateId === kdOrdinaryActive.id,
+      );
+      expect(activeReminderState).toBeDefined();
+      expect(activeReminderState!.currentStageDaysBefore).toBe(-1);
+      expect(
+        allTasks.filter((t) => t.idempotencyKey === ordActiveTaskKey),
+      ).toHaveLength(1);
+    });
+
+    it('enforces server-only clocks in src/app/actions.ts and forbids onAfterWorkBeforeCommit in production code (R480, R482)', async () => {
+      const repoRoot = path.resolve(__dirname, '../..');
+      const actionsPath = path.join(repoRoot, 'src/app/actions.ts');
+      const sourceText = fs.readFileSync(actionsPath, 'utf8');
+      const sourceFile = ts.createSourceFile(
+        actionsPath,
+        sourceText,
+        ts.ScriptTarget.Latest,
+        true,
+      );
+
+      const forbiddenClockNames = new Set([
+        'now',
+        'nowIso',
+        'todayIso',
+        'timeZone',
+      ]);
+      const violations: string[] = [];
+
+      const inspectTypeNode = (fnName: string, node: ts.TypeNode | undefined) => {
+        if (!node) return;
+        if (ts.isTypeLiteralNode(node)) {
+          for (const member of node.members) {
+            if (ts.isPropertySignature(member) && member.name) {
+              const memberName = member.name.getText(sourceFile);
+              if (forbiddenClockNames.has(memberName)) {
+                violations.push(`${fnName} parameter field "${memberName}"`);
+              }
+            }
+          }
+        } else if (ts.isUnionTypeNode(node) || ts.isIntersectionTypeNode(node)) {
+          for (const sub of node.types) {
+            inspectTypeNode(fnName, sub);
+          }
+        }
+      };
+
+      for (const stmt of sourceFile.statements) {
+        if (
+          ts.isFunctionDeclaration(stmt) &&
+          stmt.name &&
+          stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+        ) {
+          const fnName = stmt.name.text;
+          for (const param of stmt.parameters) {
+            const paramName = param.name.getText(sourceFile);
+            if (forbiddenClockNames.has(paramName)) {
+              violations.push(`${fnName} parameter "${paramName}"`);
+            }
+            inspectTypeNode(fnName, param.type);
+          }
+        }
+      }
+      expect(violations).toEqual([]);
+
+      // Verify extra caller-supplied arguments to runKeyDateReminderSchedulerAction are ignored
+      const ctx = testTenantCtx('P-000001', {
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      });
+      await getJobRunRepository().clearTenantJobRuns(ctx);
+      setTestActorSession('P-000001', {
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      });
+      try {
+        const res = await withFakeClock('2026-11-14T10:00:00.000Z', async () =>
+          runAsTestActor(
+            'P-000001',
+            async () =>
+              (
+                runKeyDateReminderSchedulerAction as unknown as (
+                  ...args: unknown[]
+                ) => Promise<{ jobRun?: { localDate: string } }>
+              )({
+                nowIso: '2099-01-01T00:00:00.000Z',
+                timeZone: 'Pacific/Kiritimati',
+              }),
+            { roles: ['admin', 'managing_partner'], mfaVerified: true },
+          ),
+        );
+        expect(res.jobRun?.localDate).toBe('2026-11-14');
+      } finally {
+        setTestActorSession(null);
+      }
+
+      // R482: Verify onAfterWorkBeforeCommit does not appear anywhere in production code (src/, core/src/, scripts/) outside src/server/testSupport/
+      const prodDirs = [
+        path.join(repoRoot, 'src'),
+        path.join(repoRoot, 'core/src'),
+        path.join(repoRoot, 'scripts'),
+      ];
+      const testSupportDir = path.join(repoRoot, 'src/server/testSupport');
+      const hookHits: string[] = [];
+
+      const walkDir = (dir: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (full.startsWith(testSupportDir)) continue;
+          if (entry.isDirectory()) {
+            if (entry.name === '__tests__') continue;
+            walkDir(full);
+          } else if (
+            entry.isFile() &&
+            /\.(ts|tsx|mjs|js)$/.test(entry.name) &&
+            !entry.name.endsWith('.test.ts')
+          ) {
+            const content = fs.readFileSync(full, 'utf8');
+            if (content.includes('onAfterWorkBeforeCommit')) {
+              hookHits.push(path.relative(repoRoot, full));
+            }
+          }
+        }
+      };
+      for (const dir of prodDirs) {
+        walkDir(dir);
+      }
+      expect(hookHits).toEqual([]);
     });
   });
 });
