@@ -140,14 +140,6 @@ export async function runMigrateJobSweep(options?: {
   };
 }
 
-function parseOptionalNowArg(args: readonly string[]): string | undefined {
-  const idx = args.indexOf('--now');
-  if (idx >= 0 && args[idx + 1]) {
-    return args[idx + 1]!.trim();
-  }
-  return undefined;
-}
-
 export async function executeCliJobRunner(
   argv: readonly string[],
   io: {
@@ -159,7 +151,7 @@ export async function executeCliJobRunner(
   const writeErr = io.stderr ?? ((msg: string) => process.stderr.write(msg));
 
   const args = argv.slice(2);
-  if (args.includes('--list')) {
+  if (args.length === 1 && args[0] === '--list') {
     writeOut(
       `${JSON.stringify({
         runner: 'onesquared-job-runner',
@@ -177,6 +169,13 @@ export async function executeCliJobRunner(
     return 1;
   }
 
+  if (args.length > 1) {
+    writeErr(
+      'JOB_RUNNER_USAGE_ERROR: Unexpected CLI arguments or flags. Scheduled jobs accept only `--list` or `<job-name>`.\n',
+    );
+    return 1;
+  }
+
   const descriptor = REGISTERED_CLI_JOBS.find((j) => j.name === jobName);
   if (!descriptor) {
     writeErr(
@@ -184,8 +183,6 @@ export async function executeCliJobRunner(
     );
     return 1;
   }
-
-  const nowIso = parseOptionalNowArg(args);
 
   if (jobName === 'migrate') {
     const summary = await runMigrateJobSweep();
@@ -200,7 +197,7 @@ export async function executeCliJobRunner(
   }
 
   if (jobName === 'key-date-reminders') {
-    const summary = await runScheduledKeyDateRemindersJobSweep({ nowIso });
+    const summary = await runScheduledKeyDateRemindersJobSweep();
     writeOut(
       `${JSON.stringify({
         event: 'job.key-date-reminders.completed',
@@ -213,7 +210,7 @@ export async function executeCliJobRunner(
   }
 
   if (jobName === 'usage-retention-purge') {
-    const summary = await runScheduledUsageRetentionPurgeJobSweep({ nowIso });
+    const summary = await runScheduledUsageRetentionPurgeJobSweep();
     writeOut(
       `${JSON.stringify({
         event: 'job.usage-retention-purge.completed',

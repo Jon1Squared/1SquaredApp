@@ -9472,10 +9472,16 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       correlationId: 'corr-ue-bravo-recent',
     });
 
-    const purgeSummary = await runScheduledUsageRetentionPurgeJobSweep({
-      registry,
-      nowIso: sweepNowIso,
-    });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(sweepNowIso));
+    let purgeSummary;
+    try {
+      purgeSummary = await runScheduledUsageRetentionPurgeJobSweep({
+        registry,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
     expect(purgeSummary.exitCode).toBe(0);
     expect(purgeSummary.succeededTenants).toEqual(['tenant-alpha', 'tenant-bravo']);
 

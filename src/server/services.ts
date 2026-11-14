@@ -16788,7 +16788,7 @@ export async function recordKeyDateNotApplicableRecord(
       const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
       const idempotencyKeys = new Set(
         matchingKeyDateIds.map((kdId) =>
-          buildKeyDateReminderIdempotencyKey(ctx.tenantId, kdId),
+          buildKeyDateReminderIdempotencyKey(kdId, ctx.tenantId),
         ),
       );
       for (const t of storeTasks) {
@@ -16965,11 +16965,7 @@ export interface ExecuteKeyDateRemindersForTenantOptions {
   readonly triggeredById: string;
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
-  readonly nowIso?: string;
   readonly statementTimeoutMs?: number;
-  readonly onAfterWorkBeforeCommit?: (
-    ctx: TenantContext,
-  ) => Promise<void> | void;
 }
 
 /**
@@ -16996,7 +16992,8 @@ export async function executeKeyDateRemindersForTenant(
   const tenantConfig = getActiveTenantConfiguration();
   const effectiveTimeZone =
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
-  const nowIso = options.nowIso ?? new Date().toISOString();
+  const now = new Date();
+  const nowIso = now.toISOString();
 
   return getJobRunRepository().executeControlledTenantJobRun(ctx, {
     jobKey: 'key-date-reminders',
@@ -17004,7 +17001,7 @@ export async function executeKeyDateRemindersForTenant(
     triggeredById: options.triggeredById,
     timeZone: effectiveTimeZone,
     targetLocalHour: options.defaultRunHourLocal ?? 2,
-    now: new Date(nowIso),
+    now,
     statementTimeoutMs: options.statementTimeoutMs,
     work: async ({ localDate }) => {
       const keyDateRepo = getKeyDateRepository();
@@ -17178,10 +17175,6 @@ export async function executeKeyDateRemindersForTenant(
         values,
       });
 
-      if (options.onAfterWorkBeforeCommit) {
-        await options.onAfterWorkBeforeCommit(ctx);
-      }
-
       const summary: KeyDateRemindersJobSummary = {
         evaluatedCount: result.evaluatedCount,
         stagesAdvancedCount: result.stagesAdvancedCount,
@@ -17211,11 +17204,7 @@ export interface ExecuteUsageRetentionPurgeForTenantOptions {
   readonly triggeredById?: string;
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
-  readonly nowIso?: string;
   readonly statementTimeoutMs?: number;
-  readonly onAfterWorkBeforeCommit?: (
-    ctx: TenantContext,
-  ) => Promise<void> | void;
 }
 
 /**
@@ -17237,7 +17226,8 @@ export async function executeUsageRetentionPurgeForTenant(
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const triggeredById =
     options.triggeredById?.trim() || 'system:usage-retention-purge';
-  const nowIso = options.nowIso ?? new Date().toISOString();
+  const now = new Date();
+  const nowIso = now.toISOString();
 
   return getJobRunRepository().executeControlledTenantJobRun(ctx, {
     jobKey: 'usage-retention-purge',
@@ -17245,7 +17235,7 @@ export async function executeUsageRetentionPurgeForTenant(
     triggeredById,
     timeZone: effectiveTimeZone,
     targetLocalHour: options.defaultRunHourLocal ?? 2,
-    now: new Date(nowIso),
+    now,
     statementTimeoutMs: options.statementTimeoutMs,
     work: async ({ localDate }) => {
       const docRepo = getDocumentRepository();
@@ -17278,10 +17268,6 @@ export async function executeUsageRetentionPurgeForTenant(
         },
       ]);
 
-      if (options.onAfterWorkBeforeCommit) {
-        await options.onAfterWorkBeforeCommit(ctx);
-      }
-
       const summary: UsageRetentionPurgeJobSummary = {
         purgedEventsCount: purged.purgedEventsCount,
         purgedSummaryBucketsCount: purged.purgedSummaryBucketsCount,
@@ -17312,13 +17298,9 @@ export interface ScheduledTenantJobSweepSummary {
 
 export async function runScheduledKeyDateRemindersJobSweep(options?: {
   readonly registry?: TenantRegistry;
-  readonly nowIso?: string;
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
-  readonly onAfterWorkBeforeCommitByTenant?: Readonly<
-    Record<string, (ctx: TenantContext) => Promise<void> | void>
-  >;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -17346,10 +17328,7 @@ export async function runScheduledKeyDateRemindersJobSweep(options?: {
             triggeredById: 'system:key-date-reminders',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
-            nowIso: options?.nowIso,
             statementTimeoutMs: timeoutMs,
-            onAfterWorkBeforeCommit:
-              options?.onAfterWorkBeforeCommitByTenant?.[entry.tenantId],
           }),
         {
           registry,
@@ -17384,13 +17363,9 @@ export async function runScheduledKeyDateRemindersJobSweep(options?: {
 
 export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
   readonly registry?: TenantRegistry;
-  readonly nowIso?: string;
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
-  readonly onAfterWorkBeforeCommitByTenant?: Readonly<
-    Record<string, (ctx: TenantContext) => Promise<void> | void>
-  >;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -17418,10 +17393,7 @@ export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
             triggeredById: 'system:usage-retention-purge',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
-            nowIso: options?.nowIso,
             statementTimeoutMs: timeoutMs,
-            onAfterWorkBeforeCommit:
-              options?.onAfterWorkBeforeCommitByTenant?.[entry.tenantId],
           }),
         {
           registry,
@@ -17460,8 +17432,6 @@ export async function runKeyDateReminderSchedulerRecord(
     session?: VerifiedEntraSessionPayload | null;
     byId: string;
     mfaVerified?: boolean;
-    nowIso?: string;
-    timeZone?: string;
   } | null,
 ): Promise<{
   ok: boolean;
@@ -17595,8 +17565,6 @@ export async function runKeyDateReminderSchedulerRecord(
     const outcome = await executeKeyDateRemindersForTenant(effectiveTenantCtx!, {
       triggerSource: 'manual',
       triggeredById: actor.id,
-      nowIso: options?.nowIso,
-      timeZone: options?.timeZone,
     });
 
     if (outcome.outcome === 'executed') {
