@@ -8,6 +8,7 @@ import {
 } from '@platform/core';
 import type { PlatformEnvironment } from '@platform/core-api';
 import { isPrivilegedPersonForEmailLinking } from '../src/domain/rbac';
+import { isNonLiveDemoEnvironment } from '../src/platform/tenantRuntime';
 import {
   applyEntraObjectIdMapToStore,
   loadCommittedSeedStore,
@@ -69,7 +70,9 @@ export async function runSeedDemoTenant(
   const warn = options.warnLogger ?? ((line: string) => console.warn(line));
 
   const writeSnapshot = args.includes('--write-snapshot');
-  const force = args.includes('--force');
+  const force =
+    args.includes('--force') ||
+    env.SEED_DEMO_FORCE?.trim().toLowerCase() === 'true';
 
   let entraMapPath: string | null = null;
   for (let i = 0; i < args.length; i += 1) {
@@ -129,7 +132,10 @@ export async function runSeedDemoTenant(
     (env.PLATFORM_HOSTING_MODE as 'single_tenant' | 'multi_tenant' | undefined) ??
       'multi_tenant',
   );
-  if (tenantConfig.environment === 'live') {
+  if (
+    tenantConfig.environment === 'live' ||
+    !isNonLiveDemoEnvironment(tenantConfig)
+  ) {
     throw new Error('Refusing to seed demo data in the live environment.');
   }
 
@@ -176,6 +182,7 @@ export async function runSeedDemoTenant(
   seedStore.isCleanDeployment = false;
 
   let mappedEntraPersonas = 0;
+  const envEntraMapRaw = env.DEMO_ENTRA_MAP_JSON?.trim();
   if (entraMapPath) {
     const resolvedMapPath = path.resolve(rootDir, entraMapPath);
     if (!fs.existsSync(resolvedMapPath)) {
@@ -188,6 +195,23 @@ export async function runSeedDemoTenant(
       ) as Record<string, string>;
     } catch {
       throw new Error('Entra map file is not valid JSON.');
+    }
+    const applied = applyEntraObjectIdMapToStore(seedStore, rawMap);
+    mappedEntraPersonas = applied.mappedCount;
+  } else if (envEntraMapRaw) {
+    let rawMap: Record<string, string>;
+    try {
+      const parsed = JSON.parse(envEntraMapRaw) as unknown;
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        throw new Error('Not a JSON object');
+      }
+      rawMap = parsed as Record<string, string>;
+    } catch {
+      throw new Error('DEMO_ENTRA_MAP_JSON is not valid JSON.');
     }
     const applied = applyEntraObjectIdMapToStore(seedStore, rawMap);
     mappedEntraPersonas = applied.mappedCount;
@@ -220,9 +244,10 @@ export async function runSeedDemoTenant(
         tenantId: tenantConfig.tenantId,
         environment: tenantConfig.environment,
         unboundPrivilegedPersonas,
-        warning: entraMapPath
-          ? `${unboundPrivilegedPersonas} privileged ${unboundPrivilegedPersonas === 1 ? 'persona remains' : 'personas remain'} unbound and never link by email; include ${unboundPrivilegedPersonas === 1 ? 'it' : 'them'} in --entra-map or bind in Admin -> Users.`
-          : `seed:demo ran without --entra-map: ${unboundPrivilegedPersonas} privileged ${unboundPrivilegedPersonas === 1 ? 'persona remains' : 'personas remain'} unbound and never link by email; pass --entra-map or bind them in Admin -> Users.`,
+        warning:
+          entraMapPath || envEntraMapRaw
+            ? `${unboundPrivilegedPersonas} privileged ${unboundPrivilegedPersonas === 1 ? 'persona remains' : 'personas remain'} unbound and never link by email; include ${unboundPrivilegedPersonas === 1 ? 'it' : 'them'} in --entra-map or bind in Admin -> Users.`
+            : `seed:demo ran without --entra-map: ${unboundPrivilegedPersonas} privileged ${unboundPrivilegedPersonas === 1 ? 'persona remains' : 'personas remain'} unbound and never link by email; pass --entra-map or bind them in Admin -> Users.`,
       }),
     );
   }
@@ -239,8 +264,10 @@ export async function runSeedDemoTenant(
   return result;
 }
 
+const entryBasename = process.argv[1] ? path.basename(process.argv[1]) : '';
 const isMainModule =
   Boolean(process.argv[1]) &&
+  /^seed-demo-tenant\.[cm]?[jt]s$/i.test(entryBasename) &&
   import.meta.url === pathToFileURL(path.resolve(process.argv[1]!)).href;
 
 if (isMainModule) {

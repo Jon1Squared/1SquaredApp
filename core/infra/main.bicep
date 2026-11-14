@@ -60,14 +60,16 @@ param defaultCostCentre string = 'CC-PLATFORM'
 @description('Per-tenant deployment entries for Model B hosted multi-tenant environments (defaults to [tenantSlug] when empty)')
 param tenants TenantDeploymentInput[] = []
 
-@description('Name of the Azure Container Registry hosting the immutable application image')
+@description('Two-stage deployment toggle: false deploys foundation (VNet, DNS, ACR, Key Vaults, Identities, PostgreSQL, Storage); true also deploys Container Apps Environment, web app, and jobs')
+param deployApps bool = true
+
+@description('Name of the Azure Container Registry hosting the immutable application image (defaults to a globally unique name per resource group and environment)')
 @minLength(5)
 @maxLength(50)
-param containerRegistryName string
+param containerRegistryName string = 'acronesquared${environment}${take(uniqueString(resourceGroup().id), 6)}'
 
-@description('Immutable container image reference for the web Container App and jobs')
-@minLength(1)
-param appContainerImage string
+@description('Immutable container image reference for the web Container App and jobs (required when deployApps is true)')
+param appContainerImage string = ''
 
 @description('Whether to provision Azure Blob Storage & Defender for Storage malware scanning by default')
 param enableCloudBlobStorage bool = false
@@ -93,6 +95,15 @@ param enableUsageRetentionPurgeJob bool = true
 @description('Enable the hourly enquiry-retention-anonymise scheduled Container Apps job (S0-19b)')
 param enableEnquiryAnonymisationJob bool = true
 
+@description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
+param enableSeedDemoJob bool = environment != 'live'
+
+@description('Whether the optional ideal-postcodes-api-key secret exists in the Platform Key Vault and should be mounted into the web Container App')
+param enableIdealPostcodesSecret bool = false
+
+@description('Whether the optional anthropic-api-key secret exists in the Platform Key Vault and should be mounted into the web Container App')
+param enableAnthropicSecret bool = false
+
 @description('Microsoft Entra ID application (client) ID for OIDC sign-in (required; no empty default)')
 @minLength(1)
 param entraClientId string
@@ -100,9 +111,9 @@ param entraClientId string
 @description('Microsoft Entra ID directory (tenant) ID for OIDC sign-in')
 param entraTenantId string = subscription().tenantId
 
-@description('Microsoft Entra ID OIDC callback redirect URI (required; no empty default)')
+@description('Microsoft Entra ID OIDC callback redirect URI (updated to https://<fqdn>/api/auth/callback/microsoft-entra-id once the web Container App FQDN is known)')
 @minLength(1)
-param entraRedirectUri string
+param entraRedirectUri string = 'https://placeholder.invalid/api/auth/callback/microsoft-entra-id'
 
 @description('Tenant configuration package directory relative to application root')
 param tenantPackageDir string = 'client-${tenantSlug}'
@@ -142,6 +153,7 @@ module platform 'modules/platform.bicep' = {
     hostingMode: hostingMode
     location: location
     platformSlug: platformSlug
+    deployApps: deployApps
     vnetAddressPrefix: vnetAddressPrefix
     containerAppsSubnetPrefix: containerAppsSubnetPrefix
     postgresSubnetPrefix: postgresSubnetPrefix
@@ -154,6 +166,9 @@ module platform 'modules/platform.bicep' = {
     enableKeyDateRemindersJob: enableKeyDateRemindersJob
     enableUsageRetentionPurgeJob: enableUsageRetentionPurgeJob
     enableEnquiryAnonymisationJob: enableEnquiryAnonymisationJob
+    enableSeedDemoJob: enableSeedDemoJob
+    enableIdealPostcodesSecret: enableIdealPostcodesSecret
+    enableAnthropicSecret: enableAnthropicSecret
     entraClientId: entraClientId
     entraTenantId: entraTenantId
     entraRedirectUri: entraRedirectUri
@@ -193,6 +208,8 @@ module tenantDeployments 'modules/tenant.bicep' = [
 
 output hostingModeConfigured string = hostingMode
 output primaryRegion string = location
+output containerRegistryName string = platform.outputs.containerRegistryName
+output containerRegistryLoginServer string = platform.outputs.containerRegistryLoginServer
 output containerAppsEnvironmentId string = platform.outputs.containerAppsEnvironmentId
 output webContainerAppName string = platform.outputs.webContainerAppName
 output webContainerAppFqdn string = platform.outputs.webContainerAppFqdn
@@ -206,7 +223,9 @@ output platformKeyVaultUri string = platform.outputs.platformKeyVaultUri
 output applicationInsightsName string = platform.outputs.applicationInsightsName
 output jobFailureAlertRuleName string = platform.outputs.jobFailureAlertRuleName
 output sharedPostgresServerFqdn string = platform.outputs.sharedPostgresServerFqdn
+output provisionJobName string = platform.outputs.provisionJobName
 output migrateJobName string = platform.outputs.migrateJobName
+output seedDemoJobName string = platform.outputs.seedDemoJobName
 output tenantOutputs array = [
   for (tenant, idx) in effectiveTenants: {
     tenantSlug: tenantDeployments[idx].outputs.tenantSlug

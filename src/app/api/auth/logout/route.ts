@@ -3,11 +3,12 @@ import { guardedRoute } from '@/server/authorize';
 import {
   ENTRA_PKCE_COOKIE,
   ENTRA_SESSION_COOKIE,
+  resolvePublicAppOrigin,
 } from '@/server/entraAuth';
 import { USER_COOKIE } from '@/server/services';
 
 function buildLogoutResponse(request: NextRequest) {
-  const destUrl = new URL('/?signedOut=1', request.url);
+  const destUrl = new URL('/?signedOut=1', resolvePublicAppOrigin(request.url));
   const response = NextResponse.redirect(destUrl, { status: 303 });
   response.cookies.delete(ENTRA_SESSION_COOKIE);
   response.cookies.delete(ENTRA_PKCE_COOKIE);

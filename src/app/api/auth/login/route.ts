@@ -4,6 +4,7 @@ import {
   createPkceChallenge,
   ENTRA_PKCE_COOKIE,
   getEntraEnvStatus,
+  resolvePublicAppOrigin,
   sanitizeReturnToPath,
   shouldUseSecureCookies,
 } from '@/server/entraAuth';
@@ -11,12 +12,13 @@ import {
 export const GET = guardedRoute(
   'GET /api/auth/login',
   async (request: NextRequest) => {
+    const appOrigin = resolvePublicAppOrigin(request.url);
     const rawReturnTo = request.nextUrl.searchParams.get('returnTo') || '/';
-    const returnTo = sanitizeReturnToPath(rawReturnTo, new URL(request.url).origin);
+    const returnTo = sanitizeReturnToPath(rawReturnTo, appOrigin);
     const status = getEntraEnvStatus();
 
     if (!status.configured) {
-      const errUrl = new URL('/', request.url);
+      const errUrl = new URL('/', appOrigin);
       errUrl.searchParams.set(
         'authError',
         `Please configure ${status.missingOrPlaceholderVars.join(', ')} in .env.local and restart the dev server.`,
@@ -36,7 +38,7 @@ export const GET = guardedRoute(
       });
       return response;
     } catch (err) {
-      const errUrl = new URL('/', request.url);
+      const errUrl = new URL('/', appOrigin);
       errUrl.searchParams.set(
         'authError',
         err instanceof Error ? err.message : 'Failed to start Entra ID sign-in.',

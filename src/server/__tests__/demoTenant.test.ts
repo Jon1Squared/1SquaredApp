@@ -4,7 +4,16 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   loadAndValidateTenantConfig,
+  quotePgIdentifier,
+  resolvePostgresMigrateUser,
+  resolvePostgresRuntimeUser,
 } from '@platform/core';
+import { provisionEntraPostgresClusterRolesAndDatabases } from '../../../core/src/tenancy/postgresAdminBootstrap';
+import { resolvePublicAppOrigin } from '@/server/entraAuth';
+import {
+  runProvisionJobSweep,
+  runSeedDemoJobSweep,
+} from '../../../scripts/run-job';
 import {
   computeMatterOpeningChecklistProgress,
   isMatterConflictCheckAwaitingDecision,
@@ -842,6 +851,145 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     } finally {
       warnSpy.mockRestore();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('17. runSeedDemoTenant supports DEMO_ENTRA_MAP_JSON and SEED_DEMO_FORCE=true, and runSeedDemoJobSweep refuses live while succeeding in demo', async () => {
+    const demoCtx = makeDemoEnvTenantCtx();
+    const res = await runSeedDemoTenant({
+      args: [],
+      env: {
+        ...process.env,
+        PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+        PLATFORM_ENVIRONMENT: 'demo',
+        SEED_DEMO_FORCE: 'true',
+        DEMO_ENTRA_MAP_JSON: JSON.stringify({
+          'P-000001': '44444444-5555-4666-8777-888888880001',
+        }),
+      },
+      logger: () => {},
+      warnLogger: () => {},
+    });
+    expect(res.mappedEntraPersonas).toBe(1);
+    const people = await getPartyRepository().listAllPeople(demoCtx);
+    expect(people.find((p) => p.id === 'P-000001')?.entraObjectId).toBe(
+      '44444444-5555-4666-8777-888888880001',
+    );
+
+    // Invalid DEMO_ENTRA_MAP_JSON reports fixed message without echoing secret content
+    await expect(
+      runSeedDemoTenant({
+        args: ['--force'],
+        env: {
+          ...process.env,
+          PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+          PLATFORM_ENVIRONMENT: 'demo',
+          DEMO_ENTRA_MAP_JSON: 'secret-token-should-not-leak',
+        },
+        logger: () => {},
+      }),
+    ).rejects.toThrow('DEMO_ENTRA_MAP_JSON is not valid JSON.');
+
+    // runSeedDemoJobSweep refuses live tenants
+    const liveSummary = await runSeedDemoJobSweep({
+      registry: {
+        schemaVersion: '1.0',
+        environment: 'live',
+        hostingMode: 'multi_tenant',
+        tenants: [
+          {
+            tenantId: 'not-a-law-firm',
+            slug: 'not_a_law_firm',
+            environment: 'live',
+            enabled: true,
+            postgresHost: '127.0.0.1',
+            postgresDatabaseName: 'pg_tenant_not_a_law_firm_live',
+            postgresRoleName: 'role_tenant_not_a_law_firm_live',
+            keyVaultUri: 'https://kv-notalawfirm-live.vault.azure.net/',
+            packageDir: 'client-not-a-law-firm',
+            timeZone: 'Europe/London',
+          },
+        ],
+      },
+      force: true,
+    });
+    expect(liveSummary.exitCode).toBe(1);
+    expect(liveSummary.failedTenants).toEqual([
+      { tenantId: 'not-a-law-firm', errorCode: 'SEED_DEMO_LIVE_FORBIDDEN' },
+    ]);
+
+    // runProvisionJobSweep invokes the provisioner under guardedJob('provision', ...)
+    const provisionSummary = await runProvisionJobSweep({
+      registry: {
+        schemaVersion: '1.0',
+        environment: 'demo',
+        hostingMode: 'multi_tenant',
+        tenants: [
+          {
+            tenantId: 'not-a-law-firm',
+            slug: 'not_a_law_firm',
+            environment: 'demo',
+            enabled: true,
+            postgresHost: '127.0.0.1',
+            postgresDatabaseName: 'pg_tenant_not_a_law_firm_demo',
+            postgresRoleName: 'role_tenant_not_a_law_firm_demo',
+            keyVaultUri: 'https://kv-notalawfirm-demo.vault.azure.net/',
+            packageDir: 'client-not-a-law-firm',
+            timeZone: 'Europe/London',
+          },
+        ],
+      },
+      provisioner: async (opts) => ({
+        databasesProvisioned: opts.tenants.map(
+          (t) => `pg_tenant_${t.tenantId.replace(/-/g, '_')}_${t.environment}`,
+        ),
+      }),
+    });
+    expect(provisionSummary.exitCode).toBe(0);
+    expect(provisionSummary.succeededTenants).toEqual(['not-a-law-firm']);
+    expect(provisionSummary.databasesProvisioned).toEqual([
+      'pg_tenant_not_a_law_firm_demo',
+    ]);
+  });
+
+  it('18. resolvePublicAppOrigin, resolvePostgresRuntimeUser, resolvePostgresMigrateUser, and provisionEntraPostgresClusterRolesAndDatabases enforce Container Apps & Entra PostgreSQL contracts', async () => {
+    vi.stubEnv(
+      'ENTRA_REDIRECT_URI',
+      'https://ca-web-platform-demo.uksouth.azurecontainerapps.io/api/auth/callback/microsoft-entra-id',
+    );
+    try {
+      expect(resolvePublicAppOrigin('http://0.0.0.0:3000/api/auth/login')).toBe(
+        'https://ca-web-platform-demo.uksouth.azurecontainerapps.io',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(resolvePublicAppOrigin('http://localhost:3000/api/auth/login')).toBe(
+      'http://localhost:3000',
+    );
+
+    vi.stubEnv('PLATFORM_POSTGRES_USER', 'id-runtime-platform-demo');
+    try {
+      expect(resolvePostgresRuntimeUser()).toBe('id-runtime-platform-demo');
+      expect(resolvePostgresMigrateUser()).toBe('id-runtime-platform-demo');
+      expect(quotePgIdentifier('id-runtime-platform-demo')).toBe(
+        '"id-runtime-platform-demo"',
+      );
+      expect(quotePgIdentifier('id-migrate-platform-demo')).toBe(
+        '"id-migrate-platform-demo"',
+      );
+      expect(() => quotePgIdentifier('id-runtime"; DROP ROLE--')).toThrow(
+        /TENANCY_SQL_IDENTIFIER_REJECTED/,
+      );
+      await expect(
+        provisionEntraPostgresClusterRolesAndDatabases({
+          tenants: [{ tenantId: 'not-a-law-firm', environment: 'demo' }],
+        }),
+      ).rejects.toThrow(
+        /PLATFORM_POSTGRES_RUNTIME_USER and PLATFORM_POSTGRES_MIGRATE_USER must be distinct principals/,
+      );
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 });

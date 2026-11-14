@@ -28,6 +28,9 @@ param location string
 @minLength(2)
 param platformSlug string
 
+@description('Two-stage deployment toggle: false deploys foundation (VNet, DNS, ACR, Key Vaults, Identities, PostgreSQL); true also deploys Container Apps Environment, web app, and jobs')
+param deployApps bool = true
+
 @description('Virtual network CIDR address prefix (parameterised per environment/spoke to avoid hub-and-spoke peering collisions)')
 param vnetAddressPrefix string = '10.24.0.0/16'
 
@@ -43,11 +46,10 @@ param privateEndpointsSubnetPrefix string = '10.24.2.0/27'
 @description('Name of the Azure Container Registry hosting the immutable application image')
 @minLength(5)
 @maxLength(50)
-param containerRegistryName string
+param containerRegistryName string = 'acronesquared${environment}${take(uniqueString(resourceGroup().id), 6)}'
 
-@description('Immutable container image reference (registry/repository@sha256:... or tag) for the web app and jobs')
-@minLength(1)
-param appContainerImage string
+@description('Immutable container image reference (registry/repository@sha256:... or tag) for the web app and jobs (required when deployApps is true)')
+param appContainerImage string = ''
 
 @description('Whether to deploy the optional headless LibreOffice PDF converter internal Container App')
 param enablePdfConverterContainerApp bool = false
@@ -67,6 +69,15 @@ param enableUsageRetentionPurgeJob bool = true
 @description('Enable the hourly enquiry-retention-anonymise scheduled Container Apps job (S0-19b)')
 param enableEnquiryAnonymisationJob bool = true
 
+@description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
+param enableSeedDemoJob bool = environment != 'live'
+
+@description('Whether the optional ideal-postcodes-api-key secret exists in the Platform Key Vault and should be mounted into the web Container App')
+param enableIdealPostcodesSecret bool = false
+
+@description('Whether the optional anthropic-api-key secret exists in the Platform Key Vault and should be mounted into the web Container App')
+param enableAnthropicSecret bool = false
+
 @description('Microsoft Entra ID application (client) ID for OIDC sign-in (required; no empty default)')
 @minLength(1)
 param entraClientId string
@@ -74,9 +85,9 @@ param entraClientId string
 @description('Microsoft Entra ID directory (tenant) ID for OIDC sign-in')
 param entraTenantId string = subscription().tenantId
 
-@description('Microsoft Entra ID OIDC callback redirect URI (required; no empty default)')
+@description('Microsoft Entra ID OIDC callback redirect URI (updated to https://<fqdn>/api/auth/callback/microsoft-entra-id once the web Container App FQDN is known)')
 @minLength(1)
-param entraRedirectUri string
+param entraRedirectUri string = 'https://placeholder.invalid/api/auth/callback/microsoft-entra-id'
 
 @description('Tenant configuration package directory relative to application root')
 @minLength(1)
@@ -145,17 +156,26 @@ var sharedPostgresServerName = take('psql-${resourceSuffix}', 63)
 var containerAppsEnvName = take('cae-${resourceSuffix}', 60)
 var webContainerAppName = take('ca-web-${resourceSuffix}', 32)
 var pdfConverterAppName = take('ca-pdf-${resourceSuffix}', 32)
+var provisionJobName = take('caj-provision-${environment}', 32)
 var migrateJobName = take('caj-migrate-${environment}', 32)
+var seedDemoJobName = take('caj-seed-demo-${environment}', 32)
 var keyDateRemindersJobName = take('caj-kd-rem-${environment}', 32)
 var usagePurgeJobName = take('caj-doc-prg-${environment}', 32)
 var enquiryAnonymiseJobName = take('caj-enq-anon-${environment}', 32)
 var jobFailureAlertRuleName = take('alrt-jobs-${resourceSuffix}', 60)
 
+var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
+  ? fail('SEED_DEMO_LIVE_FORBIDDEN: enableSeedDemoJob cannot be true when environment is live.')
+  : true
+var deployAppsImageGuard = (deployApps && empty(appContainerImage))
+  ? fail('APP_CONTAINER_IMAGE_REQUIRED: appContainerImage is required when deployApps is true.')
+  : true
+
 var keyVaultDnsSuffix = az.environment().suffixes.keyvaultDns
 var keyVaultPrivateDnsZoneName = 'privatelink${replace(keyVaultDnsSuffix, '.vault.', '.vaultcore.')}'
 var postgresPrivateDnsZoneName = 'privatelink.postgres.database.azure.com'
 var blobPrivateDnsZoneName = 'privatelink.blob.${az.environment().suffixes.storage}'
-var acrLoginServer = '${containerRegistryName}.${az.environment().suffixes.acrLoginServer}'
+var acrLoginServer = containerRegistry.properties.loginServer
 
 // Built-in Azure RBAC role definitions
 var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId(
@@ -168,7 +188,7 @@ var acrPullRoleDefinitionId = subscriptionResourceId(
 )
 var monitoringMetricsPublisherRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
-  '3913510d-42f4-4f42-8a64-420c390055eb'
+  '3913510d-42f4-4e42-8a64-420c390055eb'
 )
 
 var platformTags = {
@@ -177,8 +197,17 @@ var platformTags = {
   hostingMode: hostingMode
 }
 
-resource containerRegistry 'Microsoft.ContainerRegistry/registries@2025-04-01' existing = {
+resource containerRegistry 'Microsoft.ContainerRegistry/registries@2025-04-01' = {
   name: containerRegistryName
+  location: location
+  tags: platformTags
+  sku: {
+    name: environment == 'live' ? 'Premium' : 'Basic'
+  }
+  properties: {
+    adminUserEnabled: false
+    publicNetworkAccess: 'Enabled'
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +484,7 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 // Local (instrumentation-key) auth is disabled, so telemetry must authenticate with
 // Entra ID: each identity that emits telemetry needs Monitoring Metrics Publisher (R422).
 resource runtimeAppInsightsMetricsPublisherRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(appInsights.id, runtimeIdentity.id, '3913510d-42f4-4f42-8a64-420c390055eb')
+  name: guid(appInsights.id, runtimeIdentity.id, '3913510d-42f4-4e42-8a64-420c390055eb')
   scope: appInsights
   properties: {
     roleDefinitionId: monitoringMetricsPublisherRoleDefinitionId
@@ -465,7 +494,7 @@ resource runtimeAppInsightsMetricsPublisherRole 'Microsoft.Authorization/roleAss
 }
 
 resource migrateAppInsightsMetricsPublisherRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(appInsights.id, migrateIdentity.id, '3913510d-42f4-4f42-8a64-420c390055eb')
+  name: guid(appInsights.id, migrateIdentity.id, '3913510d-42f4-4e42-8a64-420c390055eb')
   scope: appInsights
   properties: {
     roleDefinitionId: monitoringMetricsPublisherRoleDefinitionId
@@ -478,6 +507,9 @@ resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
   name: jobFailureAlertRuleName
   location: location
   tags: platformTags
+  dependsOn: [
+    appInsights
+  ]
   properties: {
     description: 'Raises an alert whenever a 1Squared Container Apps job (migrate, store-import, key-date-reminders, usage-retention-purge, enquiry-retention-anonymise) fails or times out (ADR 0030 §7).'
     enabled: true
@@ -491,14 +523,26 @@ resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
       allOf: [
         {
           query: '''
-union
-  (ContainerAppSystemLogs_CL
+union isfuzzy=true
+  (
+    union isfuzzy=true
+      (datatable(JobName_s:string, Reason_s:string, Log_s:string)[]),
+      (ContainerAppSystemLogs_CL)
     | where JobName_s startswith "caj-"
-    | where Reason_s in ("BackOffLimitExceeded", "DeadlineExceeded", "Failed") or Log_s has_any ("Job execution failed", "DeadlineExceeded")),
-  (AppTraces
-    | where Properties has "job.tenant.failed"),
-  (AppExceptions
-    | where Properties has "jobKey")
+    | where Reason_s in ("BackOffLimitExceeded", "DeadlineExceeded", "Failed") or Log_s has_any ("Job execution failed", "DeadlineExceeded")
+  ),
+  (
+    union isfuzzy=true
+      (datatable(Properties:dynamic)[]),
+      (AppTraces)
+    | where Properties has "job.tenant.failed"
+  ),
+  (
+    union isfuzzy=true
+      (datatable(Properties:dynamic)[]),
+      (AppExceptions)
+    | where Properties has "jobKey"
+  )
 '''
           timeAggregation: 'Count'
           operator: 'GreaterThan'
@@ -575,6 +619,12 @@ module sharedPostgresEntraAdmin 'postgres-entra-admin.bicep' = {
   }
 }
 
+// Azure Database for PostgreSQL Flexible Server supports built-in PgBouncer on GeneralPurpose
+// and MemoryOptimized tiers; Burstable SKUs reject pgbouncer.enabled with
+// ServerParameterToCMSPgBouncerNotSupportedForBurstable and connect on 5432 with SET LOCAL ROLE.
+var enablePgBouncer = postgresSkuTier != 'Burstable'
+var runtimePostgresPort = enablePgBouncer ? '6432' : '5432'
+
 resource pgRequireSecureTransport 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = {
   parent: sharedPostgresServer
   name: 'require_secure_transport'
@@ -582,6 +632,9 @@ resource pgRequireSecureTransport 'Microsoft.DBforPostgreSQL/flexibleServers/con
     value: 'ON'
     source: 'user-override'
   }
+  dependsOn: [
+    sharedPostgresEntraAdmin
+  ]
 }
 
 resource pgMinTlsVersion 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = {
@@ -596,7 +649,7 @@ resource pgMinTlsVersion 'Microsoft.DBforPostgreSQL/flexibleServers/configuratio
   ]
 }
 
-resource pgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = {
+resource pgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (enablePgBouncer) {
   parent: sharedPostgresServer
   name: 'pgbouncer.enabled'
   properties: {
@@ -608,7 +661,7 @@ resource pgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/configurati
   ]
 }
 
-resource pgBouncerPoolMode 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = {
+resource pgBouncerPoolMode 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (enablePgBouncer) {
   parent: sharedPostgresServer
   name: 'pgbouncer.pool_mode'
   properties: {
@@ -653,6 +706,29 @@ resource containerAppsEnv 'Microsoft.App/managedEnvironments@2025-07-01' = {
 }
 
 var platformVaultUri = platformKeyVault.properties.vaultUri
+var postgresRuntimeRoleName = runtimeIdentityName
+var postgresMigrateRoleName = migrateIdentityName
+var postgresRuntimePrincipalId = runtimeIdentity.properties.principalId
+
+var optionalIdealPostcodesKvSecret = enableIdealPostcodesSecret
+  ? [
+      {
+        name: 'ideal-postcodes-api-key'
+        keyVaultUrl: '${platformVaultUri}secrets/ideal-postcodes-api-key'
+        identity: runtimeIdentity.id
+      }
+    ]
+  : []
+
+var optionalAnthropicKvSecret = enableAnthropicSecret
+  ? [
+      {
+        name: 'anthropic-api-key'
+        keyVaultUrl: '${platformVaultUri}secrets/anthropic-api-key'
+        identity: runtimeIdentity.id
+      }
+    ]
+  : []
 
 var runtimeKeyVaultSecrets = [
   {
@@ -670,16 +746,8 @@ var runtimeKeyVaultSecrets = [
     keyVaultUrl: '${platformVaultUri}secrets/blob-signing-key'
     identity: runtimeIdentity.id
   }
-  {
-    name: 'ideal-postcodes-api-key'
-    keyVaultUrl: '${platformVaultUri}secrets/ideal-postcodes-api-key'
-    identity: runtimeIdentity.id
-  }
-  {
-    name: 'anthropic-api-key'
-    keyVaultUrl: '${platformVaultUri}secrets/anthropic-api-key'
-    identity: runtimeIdentity.id
-  }
+  ...optionalIdealPostcodesKvSecret
+  ...optionalAnthropicKvSecret
 ]
 
 var runtimeCommonEnv = [
@@ -705,7 +773,7 @@ var runtimeCommonEnv = [
   }
   {
     name: 'PLATFORM_POSTGRES_PORT'
-    value: '6432'
+    value: runtimePostgresPort
   }
   {
     name: 'PLATFORM_POSTGRES_AUTH_MODE'
@@ -720,6 +788,10 @@ var runtimeCommonEnv = [
     value: runtimeIdentity.name
   }
   {
+    name: 'PLATFORM_POSTGRES_RUNTIME_USER'
+    value: postgresRuntimeRoleName
+  }
+  {
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: appInsights.properties.ConnectionString
   }
@@ -728,6 +800,24 @@ var runtimeCommonEnv = [
     value: runtimeIdentity.properties.clientId
   }
 ]
+
+var optionalIdealPostcodesEnv = enableIdealPostcodesSecret
+  ? [
+      {
+        name: 'IDEAL_POSTCODES_API_KEY'
+        secretRef: 'ideal-postcodes-api-key'
+      }
+    ]
+  : []
+
+var optionalAnthropicEnv = enableAnthropicSecret
+  ? [
+      {
+        name: 'ANTHROPIC_API_KEY'
+        secretRef: 'anthropic-api-key'
+      }
+    ]
+  : []
 
 var webSecretEnv = [
   {
@@ -754,17 +844,11 @@ var webSecretEnv = [
     name: 'PLATFORM_BLOB_SIGNING_KEY'
     secretRef: 'blob-signing-key'
   }
-  {
-    name: 'IDEAL_POSTCODES_API_KEY'
-    secretRef: 'ideal-postcodes-api-key'
-  }
-  {
-    name: 'ANTHROPIC_API_KEY'
-    secretRef: 'anthropic-api-key'
-  }
+  ...optionalIdealPostcodesEnv
+  ...optionalAnthropicEnv
 ]
 
-var pdfConverterEnv = enablePdfConverterContainerApp
+var pdfConverterEnv = (deployApps && enablePdfConverterContainerApp)
   ? [
       {
         name: 'DOC_CONVERTER_URL'
@@ -773,7 +857,7 @@ var pdfConverterEnv = enablePdfConverterContainerApp
     ]
   : []
 
-resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (enablePdfConverterContainerApp) {
+resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && enablePdfConverterContainerApp) {
   name: pdfConverterAppName
   location: location
   tags: platformTags
@@ -823,7 +907,7 @@ resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if 
   ]
 }
 
-resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = {
+resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard) {
   name: webContainerAppName
   location: location
   tags: platformTags
@@ -905,12 +989,129 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = {
     runtimeAcrPullRole
     runtimeAppInsightsMetricsPublisherRole
     platformKeyVaultDnsZoneGroup
+    pgMinTlsVersion
     pgBouncerPoolMode
   ]
 }
 
+// Manual PostgreSQL Entra role and tenant database provisioning job: uses migrateIdentity and direct port 5432 (R401, R402, R403, R404)
+resource provisionJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps) {
+  name: provisionJobName
+  location: location
+  tags: platformTags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${migrateIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: containerAppsEnv.id
+    workloadProfileName: 'Consumption'
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 1800
+      replicaRetryLimit: 0
+      manualTriggerConfig: {
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        {
+          server: acrLoginServer
+          identity: migrateIdentity.id
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'provision'
+          image: appContainerImage
+          command: [
+            'node'
+            'dist/jobs/run-job.mjs'
+            'provision'
+          ]
+          env: [
+            {
+              name: 'NODE_ENV'
+              value: 'production'
+            }
+            {
+              name: 'PLATFORM_HOSTING_MODE'
+              value: hostingMode
+            }
+            {
+              name: 'PLATFORM_ENVIRONMENT'
+              value: environment
+            }
+            {
+              name: 'PLATFORM_TENANT_PACKAGE_DIR'
+              value: tenantPackageDir
+            }
+            {
+              name: 'PLATFORM_POSTGRES_HOST'
+              value: sharedPostgresServer.properties.fullyQualifiedDomainName
+            }
+            {
+              name: 'PLATFORM_POSTGRES_PORT'
+              value: '5432'
+            }
+            {
+              name: 'PLATFORM_POSTGRES_MIGRATE_PORT'
+              value: '5432'
+            }
+            {
+              name: 'PLATFORM_POSTGRES_AUTH_MODE'
+              value: 'entra_managed_identity'
+            }
+            {
+              name: 'PLATFORM_POSTGRES_CLIENT_ID'
+              value: migrateIdentity.properties.clientId
+            }
+            {
+              name: 'PLATFORM_POSTGRES_USER'
+              value: migrateIdentity.name
+            }
+            {
+              name: 'PLATFORM_POSTGRES_MIGRATE_USER'
+              value: postgresMigrateRoleName
+            }
+            {
+              name: 'PLATFORM_POSTGRES_RUNTIME_USER'
+              value: postgresRuntimeRoleName
+            }
+            {
+              name: 'PLATFORM_POSTGRES_RUNTIME_PRINCIPAL_ID'
+              value: postgresRuntimePrincipalId
+            }
+            {
+              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+              value: appInsights.properties.ConnectionString
+            }
+            {
+              name: 'AZURE_CLIENT_ID'
+              value: migrateIdentity.properties.clientId
+            }
+          ]
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+        }
+      ]
+    }
+  }
+  dependsOn: [
+    migrateAcrPullRole
+    migrateAppInsightsMetricsPublisherRole
+    sharedPostgresEntraAdmin
+  ]
+}
+
 // Manual pre-traffic schema migration job: uses migrateIdentity and direct port 5432 (R401, R402, R403, R404)
-resource migrateJob 'Microsoft.App/jobs@2025-07-01' = {
+resource migrateJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps) {
   name: migrateJobName
   location: location
   tags: platformTags
@@ -990,6 +1191,14 @@ resource migrateJob 'Microsoft.App/jobs@2025-07-01' = {
               value: migrateIdentity.name
             }
             {
+              name: 'PLATFORM_POSTGRES_MIGRATE_USER'
+              value: postgresMigrateRoleName
+            }
+            {
+              name: 'PLATFORM_POSTGRES_RUNTIME_USER'
+              value: postgresRuntimeRoleName
+            }
+            {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
               value: appInsights.properties.ConnectionString
             }
@@ -1014,7 +1223,7 @@ resource migrateJob 'Microsoft.App/jobs@2025-07-01' = {
 }
 
 // Hourly scheduled Container Apps jobs (ADR 0030, R404)
-resource keyDateRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (enableSchedulerJobs && enableKeyDateRemindersJob) {
+resource keyDateRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enableSchedulerJobs && enableKeyDateRemindersJob) {
   name: keyDateRemindersJobName
   location: location
   tags: platformTags
@@ -1067,11 +1276,12 @@ resource keyDateRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (enableSchedul
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
     runtimeAppInsightsMetricsPublisherRole
+    pgMinTlsVersion
     pgBouncerPoolMode
   ]
 }
 
-resource usageRetentionPurgeJob 'Microsoft.App/jobs@2025-07-01' = if (enableSchedulerJobs && enableUsageRetentionPurgeJob) {
+resource usageRetentionPurgeJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enableSchedulerJobs && enableUsageRetentionPurgeJob) {
   name: usagePurgeJobName
   location: location
   tags: platformTags
@@ -1124,11 +1334,12 @@ resource usageRetentionPurgeJob 'Microsoft.App/jobs@2025-07-01' = if (enableSche
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
     runtimeAppInsightsMetricsPublisherRole
+    pgMinTlsVersion
     pgBouncerPoolMode
   ]
 }
 
-resource enquiryAnonymisationJob 'Microsoft.App/jobs@2025-07-01' = if (enableSchedulerJobs && enableEnquiryAnonymisationJob) {
+resource enquiryAnonymisationJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enableSchedulerJobs && enableEnquiryAnonymisationJob) {
   name: enquiryAnonymiseJobName
   location: location
   tags: platformTags
@@ -1181,6 +1392,87 @@ resource enquiryAnonymisationJob 'Microsoft.App/jobs@2025-07-01' = if (enableSch
     runtimePlatformKvSecretsUserRole
     runtimeAcrPullRole
     runtimeAppInsightsMetricsPublisherRole
+    pgMinTlsVersion
+    pgBouncerPoolMode
+  ]
+}
+
+// Manual non-live demo tenant seed job: uses runtimeIdentity on PgBouncer port 6432 (ADR 0026, ADR 0030)
+resource seedDemoJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && environment != 'live' && enableSeedDemoJob && seedDemoLiveGuard) {
+  name: seedDemoJobName
+  location: location
+  tags: platformTags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${runtimeIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: containerAppsEnv.id
+    workloadProfileName: 'Consumption'
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 1800
+      replicaRetryLimit: 0
+      manualTriggerConfig: {
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        {
+          server: acrLoginServer
+          identity: runtimeIdentity.id
+        }
+      ]
+      secrets: concat(
+        runtimeKeyVaultSecrets,
+        [
+          {
+            name: 'demo-entra-map'
+            keyVaultUrl: '${platformVaultUri}secrets/demo-entra-map'
+            identity: runtimeIdentity.id
+          }
+        ]
+      )
+    }
+    template: {
+      containers: [
+        {
+          name: 'seed-demo'
+          image: appContainerImage
+          command: [
+            'node'
+            'dist/jobs/run-job.mjs'
+            'seed-demo'
+          ]
+          env: concat(
+            runtimeCommonEnv,
+            [
+              {
+                name: 'PLATFORM_BLOB_SIGNING_KEY'
+                secretRef: 'blob-signing-key'
+              }
+              {
+                name: 'DEMO_ENTRA_MAP_JSON'
+                secretRef: 'demo-entra-map'
+              }
+            ]
+          )
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+        }
+      ]
+    }
+  }
+  dependsOn: [
+    runtimePlatformKvSecretsUserRole
+    runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
+    platformKeyVaultDnsZoneGroup
+    pgMinTlsVersion
     pgBouncerPoolMode
   ]
 }
@@ -1191,9 +1483,11 @@ output privateEndpointsSubnetId string = privateEndpointsSubnet.id
 output keyVaultPrivateDnsZoneId string = keyVaultPrivateDnsZone.id
 output postgresPrivateDnsZoneId string = postgresPrivateDnsZone.id
 output blobPrivateDnsZoneId string = blobPrivateDnsZone.id
+output containerRegistryName string = containerRegistry.name
+output containerRegistryLoginServer string = containerRegistry.properties.loginServer
 output containerAppsEnvironmentId string = containerAppsEnv.id
-output webContainerAppName string = webContainerApp.name
-output webContainerAppFqdn string = webContainerApp.properties.configuration.ingress.fqdn
+output webContainerAppName string = deployApps ? webContainerApp!.name : webContainerAppName
+output webContainerAppFqdn string = deployApps ? webContainerApp!.properties.configuration.ingress.fqdn : ''
 output pdfConverterContainerEnabled bool = enablePdfConverterContainerApp
 output runtimeIdentityId string = runtimeIdentity.id
 output runtimeIdentityPrincipalId string = runtimeIdentity.properties.principalId
@@ -1208,5 +1502,7 @@ output applicationInsightsName string = appInsights.name
 output jobFailureAlertRuleName string = jobFailureAlertRule.name
 output sharedPostgresServerName string = sharedPostgresServer.name
 output sharedPostgresServerFqdn string = sharedPostgresServer.properties.fullyQualifiedDomainName
-output migrateJobName string = migrateJob.name
+output provisionJobName string = deployApps ? provisionJob!.name : provisionJobName
+output migrateJobName string = deployApps ? migrateJob!.name : migrateJobName
+output seedDemoJobName string = (deployApps && environment != 'live' && enableSeedDemoJob) ? seedDemoJob!.name : seedDemoJobName
 

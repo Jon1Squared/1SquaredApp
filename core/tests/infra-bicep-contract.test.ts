@@ -108,21 +108,38 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     // Web app uses runtimeIdentity on PgBouncer port 6432 and waits for RBAC role assignments
     const webAppBlock = platformNoComments.slice(
       platformNoComments.indexOf('resource webContainerApp'),
-      platformNoComments.indexOf('resource migrateJob'),
+      platformNoComments.indexOf('resource provisionJob'),
     );
     expect(webAppBlock).toContain("'${runtimeIdentity.id}': {}");
     expect(webAppBlock).not.toContain('migrateIdentity');
     expect(webAppBlock).toContain('runtimePlatformKvSecretsUserRole');
     expect(webAppBlock).toContain('runtimeAcrPullRole');
 
-    //Runtime common env uses port 6432 (PgBouncer)
+    // Runtime common env uses runtimePostgresPort ('6432' on GeneralPurpose/MemoryOptimized with PgBouncer, '5432' on Burstable)
     const runtimeEnvBlock = platformBicep.slice(
       platformBicep.indexOf('var runtimeCommonEnv ='),
-      platformBicep.indexOf('var webSecretEnv ='),
+      platformBicep.indexOf('var optionalIdealPostcodesEnv ='),
     );
     expect(runtimeEnvBlock).toContain("name: 'PLATFORM_POSTGRES_PORT'");
-    expect(runtimeEnvBlock).toContain("value: '6432'");
+    expect(runtimeEnvBlock).toContain('value: runtimePostgresPort');
+    expect(platformBicep).toContain(
+      "var runtimePostgresPort = enablePgBouncer ? '6432' : '5432'",
+    );
     expect(runtimeEnvBlock).toContain('runtimeIdentity.properties.clientId');
+
+    // Provision job uses migrateIdentity ONLY and connects directly to port 5432 bypassing PgBouncer
+    const provisionJobBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource provisionJob'),
+      platformNoComments.indexOf('resource migrateJob'),
+    );
+    expect(provisionJobBlock).toContain("'${migrateIdentity.id}': {}");
+    expect(provisionJobBlock).not.toContain('runtimeIdentity');
+    expect(provisionJobBlock).toContain("name: 'PLATFORM_POSTGRES_PORT'");
+    expect(provisionJobBlock).toContain("name: 'PLATFORM_POSTGRES_MIGRATE_PORT'");
+    expect(provisionJobBlock).toContain("value: '5432'");
+    expect(provisionJobBlock).not.toContain("value: '6432'");
+    expect(provisionJobBlock).toContain('migrateAcrPullRole');
+    expect(provisionJobBlock).toContain('sharedPostgresEntraAdmin');
 
     // Migrate job uses migrateIdentity ONLY and connects directly to port 5432 bypassing PgBouncer
     const migrateJobBlock = platformNoComments.slice(
@@ -266,7 +283,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
 
   it('grants Monitoring Metrics Publisher on Application Insights to both identities and exposes AZURE_CLIENT_ID, because local auth is disabled (R422)', () => {
     expect(platformBicep).toContain('DisableLocalAuth: true');
-    expect(platformBicep).toContain("'3913510d-42f4-4f42-8a64-420c390055eb'");
+    expect(platformBicep).toContain("'3913510d-42f4-4e42-8a64-420c390055eb'");
     for (const [roleName, identity] of [
       ['runtimeAppInsightsMetricsPublisherRole', 'runtimeIdentity'],
       ['migrateAppInsightsMetricsPublisherRole', 'migrateIdentity'],
@@ -286,7 +303,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
 
     const runtimeEnvBlock = platformBicep.slice(
       platformBicep.indexOf('var runtimeCommonEnv ='),
-      platformBicep.indexOf('var webSecretEnv ='),
+      platformBicep.indexOf('var optionalIdealPostcodesEnv ='),
     );
     expect(runtimeEnvBlock).toMatch(
       /name: 'AZURE_CLIENT_ID'\s+value: runtimeIdentity\.properties\.clientId/,
@@ -297,15 +314,21 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
         platformNoComments.indexOf(`resource ${name} `),
         platformNoComments.indexOf(`resource ${next} `),
       );
+    const provisionJobBlock = resourceBlock('provisionJob', 'migrateJob');
+    expect(provisionJobBlock).toMatch(
+      /name: 'AZURE_CLIENT_ID'\s+value: migrateIdentity\.properties\.clientId/,
+    );
+    expect(provisionJobBlock).toContain('migrateAppInsightsMetricsPublisherRole');
     const migrateJobBlock = resourceBlock('migrateJob', 'keyDateRemindersJob');
     expect(migrateJobBlock).toMatch(
       /name: 'AZURE_CLIENT_ID'\s+value: migrateIdentity\.properties\.clientId/,
     );
     expect(migrateJobBlock).toContain('migrateAppInsightsMetricsPublisherRole');
     for (const [name, next] of [
-      ['webContainerApp', 'migrateJob'],
+      ['webContainerApp', 'provisionJob'],
       ['keyDateRemindersJob', 'usageRetentionPurgeJob'],
       ['usageRetentionPurgeJob', 'enquiryAnonymisationJob'],
+      ['enquiryAnonymisationJob', 'seedDemoJob'],
     ] as const) {
       expect(resourceBlock(name, next), name).toContain(
         'runtimeAppInsightsMetricsPublisherRole',
@@ -313,7 +336,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     }
     expect(
       platformNoComments.slice(
-        platformNoComments.indexOf('resource enquiryAnonymisationJob '),
+        platformNoComments.indexOf('resource seedDemoJob '),
       ),
     ).toContain('runtimeAppInsightsMetricsPublisherRole');
   });
@@ -353,7 +376,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(tenantBicep).not.toMatch(/take\('st\$\{sanitizedSlug\}/);
   });
 
-  it('compiles main.bicep into a valid ARM template with zero Bicep errors or warnings when Bicep CLI is installed', () => {
+  it('compiles main.bicep and demo.bicepparam into valid ARM templates and passes bicep lint with zero errors or warnings when Bicep CLI is installed', () => {
     const bicepBin = resolveOptionalBicepBinary();
     if (!bicepBin) {
       return;
@@ -367,5 +390,63 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     const compiledArm = JSON.parse(res.stdout);
     expect(compiledArm.$schema).toContain('deploymentTemplate.json');
     expect(compiledArm.resources).toBeDefined();
+
+    const lintRes = spawnSync(bicepBin, ['lint', MAIN_BICEP_PATH], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    expect(lintRes.stderr?.trim() ?? '').toBe('');
+    expect(lintRes.status).toBe(0);
+
+    const demoParamPath = path.join(INFRA_DIR, 'parameters', 'demo.bicepparam');
+    const paramRes = spawnSync(
+      bicepBin,
+      ['build-params', demoParamPath, '--stdout'],
+      {
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    expect(paramRes.stderr?.trim() ?? '').toBe('');
+    expect(paramRes.status).toBe(0);
+    const compiledParams = JSON.parse(paramRes.stdout) as {
+      parametersJson: string;
+    };
+    const parsedParams = JSON.parse(compiledParams.parametersJson) as {
+      parameters: Record<string, { value: unknown }>;
+    };
+    expect(parsedParams.parameters.environment?.value).toBe('demo');
+    expect(parsedParams.parameters.tenantSlug?.value).toBe('not-a-law-firm');
+    expect(parsedParams.parameters.entraClientId?.value).toBe(
+      '0a1a7a83-367f-426b-aaa3-70c288541d1d',
+    );
+    expect(parsedParams.parameters.entraTenantId?.value).toBe(
+      'f8218d9a-e055-463f-add2-f03679aad7f2',
+    );
+  });
+
+  it('provisions Azure Container Registry, supports two-stage deployApps toggle, optional API secret toggles, provisionJob, and non-live seedDemoJob guard (S0-11b)', () => {
+    expect(platformBicep).toContain(
+      "resource containerRegistry 'Microsoft.ContainerRegistry/registries@2025-04-01' = {",
+    );
+    expect(platformBicep).not.toContain(
+      "resource containerRegistry 'Microsoft.ContainerRegistry/registries@2025-04-01' existing",
+    );
+    expect(platformBicep).toContain("name: environment == 'live' ? 'Premium' : 'Basic'");
+    expect(platformBicep).toContain('adminUserEnabled: false');
+    expect(mainBicep).toContain('output containerRegistryName string');
+    expect(mainBicep).toContain('output containerRegistryLoginServer string');
+
+    expect(mainBicep).toContain('param deployApps bool = true');
+    expect(platformBicep).toContain('param deployApps bool = true');
+    expect(platformBicep).toContain('param enableIdealPostcodesSecret bool = false');
+    expect(platformBicep).toContain('param enableAnthropicSecret bool = false');
+    expect(platformBicep).toContain("param enableSeedDemoJob bool = environment != 'live'");
+    expect(platformBicep).toContain(
+      "fail('SEED_DEMO_LIVE_FORBIDDEN: enableSeedDemoJob cannot be true when environment is live.')",
+    );
+    expect(platformBicep).toContain("'provision'");
+    expect(platformBicep).toContain("'seed-demo'");
+    expect(platformBicep).toContain("name: 'DEMO_ENTRA_MAP_JSON'");
   });
 });

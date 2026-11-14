@@ -1,153 +1,297 @@
-# Demo Environment Deployment Runbook (S0-11b)
+# Demo Environment Deployment Runbook (`not-a-law-firm` / `environment: "demo"`)
 
-This runbook covers deploying, seeding and resetting the standalone **Not A Law Firm LLP** demo environment (`tenantId: "not-a-law-firm"`, `environment: "demo"`), as specified in [ADR 0026](../decisions/0026-separate-demo-tenant.md).
+This runbook covers the end-to-end deployment of the standalone **Not A Law Firm LLP** demo environment (`tenantId: "not-a-law-firm"`, `environment: "demo"`) on Azure Container Apps and Azure Database for PostgreSQL Flexible Server in `uksouth` (ADR 0024, ADR 0026, ADR 0028, ADR 0030, `S0-11b`).
 
-## 1. Architecture & Tenancy Note
+## Architectural Guarantees
 
-- **Same build everywhere (Rule 6):** The demo deployment runs the exact same production application build (`npm run build && npm start`) as live client deployments. Demo Mode, the persona switcher, sample document seeding, and data reset are enabled exclusively by tenant configuration (`environment: "demo"` and `featureFlags.enableDemoMode: true` in `client-not-a-law-firm/config/environments/demo.json`), never by `NODE_ENV`.
-- **Pre-S0-17 vs post-S0-17 topology:** Before S0-17 (multi-tenant routing and PostgreSQL store), the demo environment is deployed as its own App Service instance (`environment=demo`, `tenantPackageDir=client-not-a-law-firm`). After S0-17 lands, the demo becomes a tenant (`not-a-law-firm`) inside the shared non-live multi-tenant deployment, with its own isolated database, storage container, and Key Vault secret prefix.
-- **Outbound email (ADR 0027):** No `EmailSender` service is wired in Stage 0 until S0-26 lands. The demo deployment sends **no outbound email**. When S0-26 introduces outbound email, non-live environments (`dev`, `test`, `training`, `demo`) will enforce the recipient allow-list (`@notalawfirm.example` and configured operator test addresses).
+- **Same build everywhere (Rule 6):** The demo deployment runs the exact same immutable production container image (`Dockerfile`, `NODE_ENV=production`) as live client deployments. Demo Mode, the persona switcher, sample document seeding, and in-app data reset are enabled exclusively by tenant configuration (`environment: "demo"` and `featureFlags.enableDemoMode: true` in [demo.json](../../client-not-a-law-firm/config/environments/demo.json)), never by `NODE_ENV`.
+- **Two-stage Bicep deployment (`deployApps` toggle):** Because the Platform Key Vault has `publicNetworkAccess: 'Disabled'` and Container Apps validate Key Vault secret references and pull the container image at creation time, [main.bicep](../../core/infra/main.bicep) and [platform.bicep](../../core/infra/modules/platform.bicep) support a two-stage deployment:
+  - **Stage 1 (`deployApps=false`):** Provisions the VNet, Private DNS zones, User-Assigned Managed Identities (`runtimeIdentity` and `migrateIdentity`), Azure Container Registry (`Basic` SKU in non-live, `adminUserEnabled: false`, with `AcrPull` role assignments), Platform Key Vault and Tenant Key Vault (with Private Endpoints and `Key Vault Secrets User` role assignments), Log Analytics + Application Insights, PostgreSQL Flexible Server (`Standard_B1ms`, Entra ID auth only, TLS 1.2+, PgBouncer `TRANSACTION` pooling on port `6432`, `migrateIdentity` as Entra administrator), and Azure Blob Storage (`tenant-not-a-law-firm-demo`).
+  - **Stage 2 (`deployApps=true`):** Provisions the Container Apps Environment (`cae-platform-demo`), the web Container App (`ca-web-platform-demo`), the manual provisioning, migration, and demo-seeding jobs (`caj-provision-demo`, `caj-migrate-demo`, `caj-seed-demo-demo`), and the hourly scheduled jobs (`caj-kd-rem-demo`, `caj-doc-prg-demo`, `caj-enq-anon-demo`).
+- **In-VNet PostgreSQL provisioning, migration, and demo seeding:** Because PostgreSQL Flexible Server has `publicNetworkAccess: 'Disabled'` inside `snet-postgres`, database setup runs entirely inside the VNet via three manual Container Apps jobs:
+  1. `caj-provision-demo` (`node dist/jobs/run-job.mjs provision`, running as `migrateIdentity` on direct port `5432`) creates the `NOINHERIT` PostgreSQL Entra principal for `runtimeIdentity`, the `NOLOGIN` role `role_tenant_not_a_law_firm_demo`, the isolated database `pg_tenant_not_a_law_firm_demo`, and the `R402` schema privileges.
+  2. `caj-migrate-demo` (`node dist/jobs/run-job.mjs migrate`, running as `migrateIdentity` on direct port `5432`) applies all 15 expand/contract migrations (`0001`–`0015`).
+  3. `caj-seed-demo-demo` (`node dist/jobs/run-job.mjs seed-demo`, running as `runtimeIdentity` on PgBouncer port `6432`) reads the `DEMO_ENTRA_MAP_JSON` secret from Key Vault and seeds the invented demo dataset (`data/seed-not-a-law-firm.json` and `data/pms/1Squared_PMS_Demo_Data.xlsx`) into PostgreSQL.
 
-## 2. Manual Prerequisite: Microsoft Entra ID App Registration & Test Users
+---
 
-Before deploying the Bicep template, an operator with access to the demo Microsoft Entra ID directory must complete the following manual setup (Stage 0 Plan Section 8):
+## 1. Prerequisites & Pre-Configured Identifiers
 
-1. **Create the Demo App Registration:**
-   - Register a confidential web application in the demo Microsoft Entra ID tenant.
-   - Configure the OIDC redirect URI: `https://<demo-app-hostname>/api/auth/callback/microsoft-entra-id`.
-   - Record the **Application (client) ID** (`entraClientId`) and **Directory (tenant) ID** (`entraTenantId`).
-   - Generate a client secret and store it exclusively in the demo Azure Key Vault (`entra-client-secret`).
+The non-secret identifiers for the 1Squared Non-Live demo setup are pre-filled in [demo.bicepparam](../../core/infra/parameters/demo.bicepparam):
 
-2. **Create Invented Demo Test Users (One per Role):**
-   Microsoft Entra ID cannot create user principal names on `@notalawfirm.example` (an RFC 2606 reserved domain). Create the following eight test users in the demo Entra directory using the directory's own domain (for example `<alias>@<demo-directory>.onmicrosoft.com`) and invented display names only. Record each user's Entra **Object ID (`oid`)**; the `--entra-map` flag on `npm run seed:demo` binds each Entra `oid` to the seeded `Person.id` (whose in-store profile email remains on `@notalawfirm.example`):
+| Setting | Value |
+| --- | --- |
+| **Azure Subscription** | `1Squared Non-Live` |
+| **Resource Group** | `rg-onesquared-demo-uksouth` (`uksouth`) |
+| **Entra Directory (Tenant) ID (`entraTenantId`)** | `f8218d9a-e055-463f-add2-f03679aad7f2` |
+| **Demo Sign-In App Registration (`entraClientId`)** | `0a1a7a83-367f-426b-aaa3-70c288541d1d` (`1Squared Demo`) |
+| **Local Entra Persona Map (uncommitted, git-ignored)** | `data/entra-map.local.json` (maps `P-000001`–`P-000018` to the 8 demo Entra user Object IDs) |
 
-   | Home Role | Seed Person ID | Invented Display Name | Example Entra UPN (Directory Domain) | In-Store Seed Email | App Roles / Groups |
-   |---|---|---|---|---|---|
-   | `01 Fee Earner` | `P-000002` | Dafydd Evans | `dafydd.evans@<demo-tenant>.onmicrosoft.com` | `dafydd.evans@notalawfirm.example` | `fee_earner` |
-   | `02 Partner` | `P-000001` | Rhian Morgan | `rhian.morgan@<demo-tenant>.onmicrosoft.com` | `rhian.morgan@notalawfirm.example` | `partner` |
-   | `03 Legal Secretary` | `P-000010` | Nia Edwards | `nia.edwards@<demo-tenant>.onmicrosoft.com` | `nia.edwards@notalawfirm.example` | `legal_secretary` |
-   | `04 Enquiries Coordinator` | `P-000042` | Lowri Ellis | `lowri.ellis@<demo-tenant>.onmicrosoft.com` | `lowri.ellis@notalawfirm.example` | `enquiries_coordinator` |
-   | `05 Finance` | `P-000009` | Gethin Powell | `gethin.powell@<demo-tenant>.onmicrosoft.com` | `gethin.powell@notalawfirm.example` | `finance` |
-   | `06 Risk & Compliance` | `P-000003` | Bethan Rees | `bethan.rees@<demo-tenant>.onmicrosoft.com` | `bethan.rees@notalawfirm.example` | `risk_compliance` |
-   | `07 Managing Partner` | `P-000038` | Gethin Lloyd | `gethin.lloyd@<demo-tenant>.onmicrosoft.com` | `gethin.lloyd@notalawfirm.example` | `managing_partner` |
-   | `08 Admin` | `P-000004` | Huw Pritchard | `huw.pritchard@<demo-tenant>.onmicrosoft.com` | `huw.pritchard@notalawfirm.example` | `admin` (require MFA) |
+Verify your local Azure CLI session in PowerShell before starting:
 
-   **Important (S0-30 — privileged personas never link by email):** Sign-in never binds a privileged persona (any employee whose resolved roles or permissions include a permission with `requiresMfa: true` or `sensitivity: "critical"`, including `02 Partner`, `06 Risk & Compliance`, `07 Managing Partner`, and `08 Admin`) by email; an unlinked privileged user receives `"Your account needs to be linked by an administrator."` instead. Privileged demo personas **must** therefore be bound via `--entra-map` (Section 5a) or explicitly by an administrator in **Admin → Users** (**Admin → RBAC & Entra ID**). Non-privileged employees link by email only when `rbac.identityMapping.emailLinking.enabled` is `true` and their verified directory sign-in domain matches `rbac.identityMapping.emailLinking.domains` (defaulting to `branding.primaryDomain`).
-
-## 3. Infrastructure Deployment (`core/infra/main.bicep`)
-
-Deploy `core/infra/main.bicep` into the non-live UK South resource group with the following parameters:
-
-```bash
-az deployment group create \
-  --resource-group rg-onesquared-demo-uksouth \
-  --template-file core/infra/main.bicep \
-  --parameters \
-    environment=demo \
-    hostingMode=multi_tenant \
-    location=uksouth \
-    tenantSlug=not-a-law-firm \
-    tenantPackageDir=client-not-a-law-firm \
-    entraClientId="<DEMO_ENTRA_APPLICATION_CLIENT_ID>" \
-    entraTenantId="<DEMO_ENTRA_DIRECTORY_TENANT_ID>" \
-    entraRedirectUri="https://app-not-a-law-firm-demo.azurewebsites.net/api/auth/callback/microsoft-entra-id" \
-    vnetAddressPrefix="10.26.0.0/16" \
-    appServiceSubnetPrefix="10.26.1.0/24"
+```powershell
+az login --tenant f8218d9a-e055-463f-add2-f03679aad7f2
+az account set --subscription "1Squared Non-Live"
+az account show --query "{subscriptionName:name, subscriptionId:id, tenantId:tenantId, user:user.name}" -o json
 ```
 
-## 4. Key Vault Secrets
+**Expected output:** JSON showing `"subscriptionName": "1Squared Non-Live"` and `"tenantId": "f8218d9a-e055-463f-add2-f03679aad7f2"`.
 
-Populate the following secrets in the provisioned demo Key Vault (`kv-notalawfirm-demo`). Never place secret values in Bicep files, environment overlays, or source control (Rule 5):
+---
 
-| Key Vault Secret Name | App Service Setting | Purpose |
-|---|---|---|
-| `entra-client-secret` | `ENTRA_CLIENT_SECRET` | Microsoft Entra ID confidential client secret for OIDC code exchange |
-| `auth-secret` | `AUTH_SECRET` | 32+ byte random base64 HMAC-SHA256 session cookie signing key (`openssl rand -base64 32`) |
-| `blob-signing-key` | `PLATFORM_BLOB_SIGNING_KEY` | 32+ byte random base64 HMAC-SHA256 scoped blob token signing key (`openssl rand -base64 32`) |
-| `ideal-postcodes-api-key` | `IDEAL_POSTCODES_API_KEY` | Optional UK postcode lookup key (leave unset or use test key in demo) |
-| `anthropic-api-key` | `ANTHROPIC_API_KEY` | Anthropic commercial API key for AI matter extraction (`enableAiMatterExtraction: true`) |
-| `pms-connection-string` | Referenced via `kv://kv-notalawfirm-demo/pms-connection-string` | Reserved for S0-18 live PMS database connection |
-| `companies-house-api-key` | Referenced via `kv://kv-notalawfirm-demo/companies-house-api-key` | Reserved for S0-18 Companies House API integration |
+## 2. Step-by-Step Deployment Procedure (PowerShell)
 
-## 5. Seeding the Demo Store (`npm run seed:demo`)
+### Step 1: Verify the resource group and preview Stage 1 (`what-if`)
 
-Product code (`getStore()`) never auto-seeds demo records: when no runtime store file exists, the application initialises a clean empty deployment store (`createCleanDeploymentStore`). Demo data enters only through `npm run seed:demo` or the authenticated `resetAllDemoData` action.
+```powershell
+$RG = "rg-onesquared-demo-uksouth"
+az group show --name $RG --query "{name:name, location:location, provisioningState:properties.provisioningState}" -o json
 
-Under [ADR 0001](../decisions/0001-shared-repo-and-transitional-store.md), the transitional JSON store reads and writes `data/runtime-store.json` (or the file path specified in `ONESQUARED_RUNTIME_STORE_PATH`) on the filesystem where the Next.js server process runs:
-- Running `npm run seed:demo` on an engineer's workstation writes the local `data/runtime-store.json` file in that checkout.
-- To seed the deployed demo App Service instance before S0-17 replaces the transitional store with PostgreSQL, run the command against the deployed instance's persistent store path (or set `ONESQUARED_RUNTIME_STORE_PATH` to the mounted persistent store path). Because `tsx` is declared in `devDependencies`, run `npm run seed:demo` in the build/deployment environment where dev dependencies are installed (or copy the generated store file to the deployed instance's `data/runtime-store.json`).
+az deployment group what-if `
+  --resource-group $RG `
+  --template-file core/infra/main.bicep `
+  --parameters core/infra/parameters/demo.bicepparam `
+  --parameters deployApps=false
+```
 
-### 5a. Local Entra Object ID Mapping File (`--entra-map`)
+**Expected output:** `what-if` summary listing the VNet (`10.26.0.0/16`), Private DNS zones, Managed Identities, Azure Container Registry, Platform & Tenant Key Vaults, Log Analytics, Application Insights, PostgreSQL Flexible Server (`psql-platform-demo`), and Tenant Storage Account (`stnotalawfi...`), with **no** Container Apps or jobs yet.
 
-To bind the real Entra test users created in Section 2 to the seeded personas, create a local, **uncommitted** JSON file whose name matches the `.gitignore` patterns (`/data/entra-map*.json` or `*.entra-map.json`, for example `data/entra-map.local.json`) mapping each seed `personId` to its Entra `oid`:
+### Step 2: Deploy Stage 1 (Foundation Infrastructure)
 
-```json
-{
-  "P-000001": "<ENTRA_OID_FOR_RHIAN_MORGAN>",
-  "P-000002": "<ENTRA_OID_FOR_DAFYDD_EVANS>",
-  "P-000003": "<ENTRA_OID_FOR_BETHAN_REES>",
-  "P-000004": "<ENTRA_OID_FOR_HUW_PRITCHARD>",
-  "P-000009": "<ENTRA_OID_FOR_GETHIN_POWELL>",
-  "P-000010": "<ENTRA_OID_FOR_NIA_EDWARDS>",
-  "P-000038": "<ENTRA_OID_FOR_GETHIN_LLOYD>",
-  "P-000042": "<ENTRA_OID_FOR_LOWRI_ELLIS>"
+```powershell
+$Stage1 = az deployment group create `
+  --name "demo-stage1-foundation" `
+  --resource-group $RG `
+  --template-file core/infra/main.bicep `
+  --parameters core/infra/parameters/demo.bicepparam `
+  --parameters deployApps=false `
+  --query "properties.outputs" -o json | ConvertFrom-Json
+
+$ACR_NAME        = $Stage1.containerRegistryName.value
+$ACR_SERVER      = $Stage1.containerRegistryLoginServer.value
+$PLATFORM_KV     = $Stage1.platformKeyVaultName.value
+$POSTGRES_FQDN   = $Stage1.sharedPostgresServerFqdn.value
+
+[PSCustomObject]@{
+  ContainerRegistryName        = $ACR_NAME
+  ContainerRegistryLoginServer = $ACR_SERVER
+  PlatformKeyVaultName         = $PLATFORM_KV
+  SharedPostgresServerFqdn     = $POSTGRES_FQDN
 }
 ```
 
-When `--entra-map` is supplied, `seed:demo` sets `entraObjectId` **only** on the person IDs listed in the map and leaves all other seeded people without an `entraObjectId`. When `--entra-map` is omitted, `seed:demo` builds the store with `includeSyntheticEntraOids: false` (so no synthetic Entra Object IDs are written) and prints a structured warning reporting how many privileged personas remain unbound (naming no email addresses). Because privileged personas never link by email (S0-30), they **must** be bound with `--entra-map` or explicitly by an administrator in **Admin → Users** (**Admin → RBAC & Entra ID**). Non-privileged employees link by email on first sign-in only when `rbac.identityMapping.emailLinking.enabled` is `true` and their verified directory sign-in domain belongs to `rbac.identityMapping.emailLinking.domains` (defaulting to `branding.primaryDomain`). Never commit the mapping file to source control.
+**Expected output:** Provisioning succeeds in ~8–12 minutes (PostgreSQL Flexible Server takes the majority of the time) and prints the generated `ContainerRegistryName`, `ContainerRegistryLoginServer`, `PlatformKeyVaultName`, and `SharedPostgresServerFqdn`.
 
-### 5b. Running the Seed Command
+### Step 3: Build and push the immutable container image via `az acr build`
 
-Run `npm run seed:demo` with `PLATFORM_TENANT_PACKAGE_DIR` and `PLATFORM_ENVIRONMENT` set:
+Build the multi-stage `Dockerfile` remotely in Azure Container Registry (`PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm`, `PLATFORM_ENVIRONMENT=demo`) so no local Docker daemon is required:
 
-```bash
-PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm \
-PLATFORM_ENVIRONMENT=demo \
-npm run seed:demo -- --entra-map data/entra-map.local.json
+```powershell
+$GitSha = (git rev-parse --short HEAD).Trim()
+$ImageTag = "demo-$GitSha"
+$FullImage = "$ACR_SERVER/onesquared-web:$ImageTag"
+
+az acr build `
+  --registry $ACR_NAME `
+  --image "onesquared-web:$ImageTag" `
+  --image "onesquared-web:demo-latest" `
+  --build-arg PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm `
+  --build-arg PLATFORM_ENVIRONMENT=demo `
+  .
+
+Write-Host "Built image: $FullImage"
 ```
 
-Safety checks enforced by `seed:demo`:
-- Requires both `PLATFORM_TENANT_PACKAGE_DIR` and `PLATFORM_ENVIRONMENT`.
-- Refuses to run when `PLATFORM_ENVIRONMENT=live` or when the resolved tenant configuration has `environment: "live"`.
-- Refuses to run when the resolved `tenantConfig.tenantId` differs from the seed snapshot's `firmId`.
-- Refuses to overwrite a non-empty or unparseable store file unless `--force` is passed.
-- Builds fresh relative dates anchored to the current UTC date (`createSeedStore(new Date(), { includeSyntheticEntraOids: false })`) so key dates, SLA deadlines, and task due dates are always current when seeded.
-- Prints only record counts, `tenantId`, and `environment` (never person, client, or matter names), plus a structured warning on `stderr` when run without `--entra-map` (or whenever privileged personas remain unbound) stating how many privileged personas are still unbound without naming any email addresses.
+**Expected output:** `Run ID: ... was successful after ...` and the image tag `$FullImage`.
 
-To regenerate the committed seed snapshot (`data/seed-not-a-law-firm.json`, used by deterministic unit and e2e tests) from `buildDemoData` (`src/seed/demo.ts`) after updating seed fixtures:
+### Step 4: Populate the Platform Key Vault secrets (temporary firewall window)
 
-```bash
-PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm \
-PLATFORM_ENVIRONMENT=demo \
-npm run seed:demo -- --write-snapshot
+Because the Platform Key Vault has `publicNetworkAccess: 'Disabled'` (`defaultAction: 'Deny'`), grant your signed-in operator account `Key Vault Secrets Officer` on the vault, briefly allow your workstation public IP through the Key Vault firewall, write the 4 required secrets, and immediately lock `publicNetworkAccess` back to `Disabled` in a `try / finally` block:
+
+```powershell
+$SignedInUserOid = (az ad signed-in-user show --query id -o tsv).Trim()
+$KvResourceId    = (az keyvault show --name $PLATFORM_KV --resource-group $RG --query id -o tsv).Trim()
+
+# Grant Key Vault Secrets Officer (b86a8fe4-44ce-4948-aee5-eccb2c155cd7) to your operator account
+az role assignment create `
+  --assignee-object-id $SignedInUserOid `
+  --assignee-principal-type User `
+  --role "b86a8fe4-44ce-4948-aee5-eccb2c155cd7" `
+  --scope $KvResourceId | Out-Null
+
+$MyPublicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").Trim()
+$EntraClientSecretPlain = Read-Host "Paste the 1Squared Demo Entra client secret Value"
+
+# Generate 32-byte (64-hex-char) signing keys for session cookies and blob tokens
+$Bytes1 = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Fill($Bytes1)
+$AuthSecretHex = ($Bytes1 | ForEach-Object { $_.ToString("x2") }) -join ""
+$Bytes2 = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Fill($Bytes2)
+$BlobSigningKeyHex = ($Bytes2 | ForEach-Object { $_.ToString("x2") }) -join ""
+
+try {
+  az keyvault update --name $PLATFORM_KV --resource-group $RG --public-network-access Enabled --default-action Deny | Out-Null
+  az keyvault network-rule add --name $PLATFORM_KV --resource-group $RG --ip-address "$MyPublicIp/32" | Out-Null
+  Start-Sleep -Seconds 15
+
+  az keyvault secret set --vault-name $PLATFORM_KV --name "entra-client-secret" --value $EntraClientSecretPlain --query "name" -o tsv
+  az keyvault secret set --vault-name $PLATFORM_KV --name "auth-secret"         --value $AuthSecretHex         --query "name" -o tsv
+  az keyvault secret set --vault-name $PLATFORM_KV --name "blob-signing-key"    --value $BlobSigningKeyHex    --query "name" -o tsv
+  az keyvault secret set --vault-name $PLATFORM_KV --name "demo-entra-map"      --file "data/entra-map.local.json" --query "name" -o tsv
+}
+finally {
+  az keyvault network-rule remove --name $PLATFORM_KV --resource-group $RG --ip-address "$MyPublicIp/32" | Out-Null
+  az keyvault update --name $PLATFORM_KV --resource-group $RG --public-network-access Disabled --default-action Deny | Out-Null
+  Remove-Variable EntraClientSecretPlain, AuthSecretHex, BlobSigningKeyHex -ErrorAction SilentlyContinue
+}
 ```
 
-## 6. Resetting the Demo Environment
+**Expected output:** Prints the four secret names (`entra-client-secret`, `auth-secret`, `blob-signing-key`, `demo-entra-map`) and leaves `publicNetworkAccess` set to `Disabled`.
 
-The demo environment can be reset to its clean initial seed state in two ways:
+### Step 5: Deploy Stage 2 (Container Apps Environment, Web App & Jobs)
 
-1. **In-App Demo Data Administration (requires `admin:data_reset` and MFA):**
-   - Sign in as the Admin persona (`P-000004`, Huw Pritchard) with MFA verified.
-   - Navigate to **Administration → Demo data** (`/admin/demo-data`).
-   - Click **Load demo dataset** (`resetDemoDataAction`), which calls `resetAllDemoData` to restore the seeded **Not A Law Firm LLP** dataset with fresh relative dates (`includeSyntheticEntraOids: false` outside `PLATFORM_ENVIRONMENT === 'test'`), preserves `entraObjectId` bindings only when the pre-reset store was itself a seeded store (`!prevStore.isCleanDeployment`) and both the person ID and primary email match the seeded persona (so `--entra-map` bindings survive the reset without binding a user provisioned after **Clear all data** to a seeded persona), and records a `data-reset` audit entry.
-2. **CLI Re-Seed (with `--force`):**
-   ```bash
-   PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm \
-   PLATFORM_ENVIRONMENT=demo \
-   npm run seed:demo -- --force --entra-map data/entra-map.local.json
-   ```
+```powershell
+$Stage2 = az deployment group create `
+  --name "demo-stage2-apps" `
+  --resource-group $RG `
+  --template-file core/infra/main.bicep `
+  --parameters core/infra/parameters/demo.bicepparam `
+  --parameters deployApps=true `
+  --parameters containerRegistryName=$ACR_NAME `
+  --parameters appContainerImage=$FullImage `
+  --query "properties.outputs" -o json | ConvertFrom-Json
 
-## 7. Recovering from a Corrupted Runtime Store File
+$WEB_APP_NAME = $Stage2.webContainerAppName.value
+$WEB_FQDN     = $Stage2.webContainerAppFqdn.value
+$REDIRECT_URI = "https://$WEB_FQDN/api/auth/callback/microsoft-entra-id"
 
-`saveStore` writes `data/runtime-store.json` atomically via a temporary file (`<targetPath>.tmp-<pid>-<timestamp>`) and `fs.renameSync`. If `data/runtime-store.json` (or `ONESQUARED_RUNTIME_STORE_PATH`) is ever truncated or corrupted on disk, `getStore()` refuses to overwrite it and throws:
-
-```text
-Refusing to load corrupted runtime store file at <path>: not valid JSON.
+[PSCustomObject]@{
+  WebContainerAppName = $WEB_APP_NAME
+  WebContainerAppFqdn = $WEB_FQDN
+  EntraRedirectUri    = $REDIRECT_URI
+  ProvisionJobName    = $Stage2.provisionJobName.value
+  MigrateJobName      = $Stage2.migrateJobName.value
+  SeedDemoJobName     = $Stage2.seedDemoJobName.value
+}
 ```
 
-The error message logs only the file path and generic reason—never any fragment of the file's contents (Rule 5).
+**Expected output:** Prints `ca-web-platform-demo`, its public HTTPS `<fqdn>`, and the job names `caj-provision-demo`, `caj-migrate-demo`, and `caj-seed-demo-demo`.
 
-To recover:
-1. **Restore from backup:** Replace `data/runtime-store.json` with the most recent known-good backup copy.
-2. **Start with a clean store:** Delete the corrupted `data/runtime-store.json` file; on the next request `getStore()` will initialise a clean empty deployment store (`createCleanDeploymentStore`).
-3. **Re-seed the demo dataset:** Run `npm run seed:demo -- --force` (with `--entra-map` where applicable) as shown in Section 6.2 above to overwrite the corrupted file with a fresh demo store.
+### Step 6: Configure the Entra ID Redirect URI and update `ENTRA_REDIRECT_URI` on the Web App
+
+Add `$REDIRECT_URI` (`https://<fqdn>/api/auth/callback/microsoft-entra-id`) to the **1Squared Demo** (`0a1a7a83-367f-426b-aaa3-70c288541d1d`) Web redirect URIs and update the web Container App's `ENTRA_REDIRECT_URI` environment variable:
+
+```powershell
+az ad app update `
+  --id "0a1a7a83-367f-426b-aaa3-70c288541d1d" `
+  --web-redirect-uris "http://localhost:3000/api/auth/callback/microsoft-entra-id" $REDIRECT_URI
+
+az containerapp update `
+  --name $WEB_APP_NAME `
+  --resource-group $RG `
+  --set-env-vars "ENTRA_REDIRECT_URI=$REDIRECT_URI" `
+  --query "{name:name, fqdn:properties.configuration.ingress.fqdn, provisioningState:properties.provisioningState}" -o json
+```
+
+**Expected output:** `"provisioningState": "Succeeded"`.
+
+### Step 7: Run `caj-provision-demo`, `caj-migrate-demo`, and `caj-seed-demo-demo` in order
+
+Run the three manual Container Apps jobs sequentially inside the VNet:
+
+```powershell
+foreach ($JobName in @("caj-provision-demo", "caj-migrate-demo", "caj-seed-demo-demo")) {
+  Write-Host "Starting $JobName..."
+  $Exec = az containerapp job start --name $JobName --resource-group $RG -o json | ConvertFrom-Json
+  $ExecName = $Exec.name
+  do {
+    Start-Sleep -Seconds 5
+    $Status = az containerapp job execution show `
+      --name $JobName `
+      --resource-group $RG `
+      --job-execution-name $ExecName `
+      --query "properties.status" -o tsv
+    Write-Host "  $JobName ($ExecName): $Status"
+  } while ($Status -in @("Running", "Processing", "Pending"))
+
+  if ($Status -ne "Succeeded") {
+    throw "Job $JobName failed with status: $Status"
+  }
+}
+```
+
+**Expected output:** Each job transitions from `Running` to `Succeeded`.
+- To re-seed an already-seeded demo database from the CLI at any time, either use **Administration → Demo data → Load demo dataset** in the UI (requires MFA-verified Admin) or temporarily pass `SEED_DEMO_FORCE=true` to `caj-seed-demo-demo`:
+  ```powershell
+  az containerapp job update --name "caj-seed-demo-demo" --resource-group $RG --set-env-vars "SEED_DEMO_FORCE=true" | Out-Null
+  az containerapp job start  --name "caj-seed-demo-demo" --resource-group $RG
+  az containerapp job update --name "caj-seed-demo-demo" --resource-group $RG --remove-env-vars "SEED_DEMO_FORCE" | Out-Null
+  ```
+
+---
+
+## 3. Post-Deployment Verification Checklist
+
+1. **Health & Sign-In Redirect (`https://<fqdn>/login`):**
+   Open `https://$WEB_FQDN/login` in an InPrivate / Incognito browser window and click **Sign in with Microsoft Entra ID**. Verify that Microsoft Entra ID prompts for sign-in and redirects back to `https://$WEB_FQDN/api/auth/callback/microsoft-entra-id` without `AADSTS50011` or internal `0.0.0.0:3000` redirects.
+2. **MFA-Verified Admin Sign-In (`Huw Pritchard`, `P-000004`):**
+   Sign in as the demo Admin user mapped to `P-000004` (`huw.pritchard@1squared.onmicrosoft.com`) with MFA. Verify:
+   - The firm header shows **Not A Law Firm LLP**.
+   - **Matters**, **Enquiries**, **Tasks**, **People & Organisations**, **Key Dates**, and **Time & Billing** are populated with the seeded demo dataset, and all 5 seeded key dates have due dates in the future.
+   - **Administration → RBAC & Entra ID** is accessible (confirming `mfaVerified === true` and `admin:access`).
+3. **Least-Privilege Demo Persona Switcher:**
+   - While signed in as `Huw Pritchard` (Admin), use the top-right account menu **Demo persona switcher** to switch between seeded personas (Managing Partner, Partner, Fee Earner, Legal Secretary, Enquiries Coordinator, Finance, Risk & Compliance) and confirm each role's Home dashboard and left-rail navigation update immediately.
+   - Sign out (`POST /api/auth/logout`) and sign in as the Fee Earner demo user (`Rhian Morgan`, `P-000001`). Confirm that the persona switcher only offers personas whose permissions are a subset of Fee Earner and never offers Admin, Managing Partner, Partner, or Risk & Compliance.
+4. **In-App Reset Demo Data (`R326`):**
+   Sign back in as `Huw Pritchard` (Admin with MFA), open **Administration → Demo data** (`/admin/demo-data`), and trigger **Load demo dataset**. Confirm that the reset completes, audit reference numbers restart from the demo sequence with a new `data-reset` audit entry, and all 8 Entra Object ID bindings (`entraObjectId`) are preserved so demo users can continue signing in without re-running `caj-seed-demo-demo`.
+
+---
+
+## 4. Troubleshooting Common Issues
+
+| Symptom | Root Cause | Resolution |
+| --- | --- | --- |
+| **`TENANT_SCHEMA_NOT_READY`** on sign-in or page load | `caj-provision-demo` or `caj-migrate-demo` has not been executed yet, or failed before applying migration `0015`. | Run Step 7 (`caj-provision-demo` then `caj-migrate-demo`) and inspect job logs in Log Analytics (`ContainerAppConsoleLogs_CL \| where ContainerJobName_s in ("caj-provision-demo", "caj-migrate-demo")`). |
+| **`AADSTS50011: The redirect URI ... specified in the request does not match`** | The web Container App's `https://<fqdn>/api/auth/callback/microsoft-entra-id` is missing from the **1Squared Demo** App Registration (`0a1a7a83-367f-426b-aaa3-70c288541d1d`) or `ENTRA_REDIRECT_URI` on `ca-web-platform-demo` still has the Stage 1 placeholder value. | Re-run Step 6 to register `$REDIRECT_URI` on the Entra App Registration and update `ENTRA_REDIRECT_URI` on `ca-web-platform-demo`. |
+| **`ForbiddenByConnection` / `PublicNetworkAccessDisabled`** when running `az keyvault secret set` | Platform Key Vault enforces `publicNetworkAccess: 'Disabled'` (`defaultAction: 'Deny'`) at rest, or your workstation IP changed. | Run the `try / finally` block in Step 4, which temporarily enables public access for your current `$MyPublicIp/32`, waits 15 seconds for firewall propagation, writes the secrets, and disables public access again. |
+| **Container App fails to start with Key Vault secret resolution error** | One of the required secrets (`entra-client-secret`, `auth-secret`, `blob-signing-key`, or `demo-entra-map` for `caj-seed-demo-demo`) was not written to `$PLATFORM_KV` before Stage 2. | Verify all 4 secret names exist in `$PLATFORM_KV` (Step 4), then restart the revision (`az containerapp revision restart --name $WEB_APP_NAME --resource-group $RG --revision <rev>`). |
+| **`caj-seed-demo-demo` exits with `Refusing to overwrite a non-empty store without --force`** | The demo database `pg_tenant_not_a_law_firm_demo` is already seeded (idempotency guard). | No action needed if already seeded; to force a fresh CLI re-seed, use **Administration → Demo data → Load demo dataset** in the UI or pass `SEED_DEMO_FORCE=true` on `caj-seed-demo-demo`. |
+
+---
+
+## 5. Estimated Monthly Running Cost & Teardown / Pause Instructions
+
+### Estimated Monthly Running Cost (`uksouth`, Non-Live Demo SKU Profile)
+
+| Resource | SKU / Tier | Estimated Monthly Cost (GBP) |
+| --- | --- | --- |
+| **Azure Database for PostgreSQL Flexible Server** (`psql-platform-demo`) | Burstable `Standard_B1ms` (1 vCore, 2 GiB RAM), 32 GiB storage, 7-day backup | ~£12–£16 / month |
+| **Azure Container Apps** (`ca-web-platform-demo` + jobs in `cae-platform-demo`) | Consumption workload profile (`minReplicas: 1` idle vCPU/memory grant + job executions) | ~£8–£18 / month |
+| **Azure Private Endpoints & Private DNS Zones** (Platform KV, Tenant KV, Blob Storage + 3 DNS zones) | 3 Private Endpoints + 3 Private DNS zones | ~£18–£22 / month |
+| **Azure Container Registry** (`acronesquared...`) | `Basic` SKU | ~£4 / month |
+| **Azure Key Vaults & Storage Account** (`kvp...`, `kv...`, `st...`) | Standard Key Vaults + Standard LRS Blob Storage | ~£1–£3 / month |
+| **Log Analytics & Application Insights** (`law-platform-demo`, `appi-platform-demo`) | Pay-as-you-go (`PerGB2018`, 30-day retention, 2 GB/day cap; first 5 GB/month free) | ~£0–£3 / month |
+| **Estimated Total** | | **~£43–£66 / month** |
+
+### Pausing Between Demos (Cost-Saving Mode)
+
+To reduce compute costs between demos without deleting the database or secrets, stop the PostgreSQL Flexible Server (Azure stops billing compute for up to 7 days at a time) and scale `ca-web-platform-demo` to `minReplicas: 0`:
+
+```powershell
+az postgres flexible-server stop --resource-group rg-onesquared-demo-uksouth --name psql-platform-demo
+az containerapp update --resource-group rg-onesquared-demo-uksouth --name ca-web-platform-demo --min-replicas 0
+```
+
+To resume before a demo:
+
+```powershell
+az postgres flexible-server start --resource-group rg-onesquared-demo-uksouth --name psql-platform-demo
+az containerapp update --resource-group rg-onesquared-demo-uksouth --name ca-web-platform-demo --min-replicas 1
+```
+
+### Full Teardown
+
+To remove all Azure resources in the demo resource group (whilst keeping your Microsoft Entra ID app registrations and demo users intact):
+
+```powershell
+az group delete --name rg-onesquared-demo-uksouth --yes --no-wait
+```

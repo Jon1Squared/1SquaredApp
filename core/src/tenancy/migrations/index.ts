@@ -14,6 +14,8 @@ import {
   createDirectMigrationClient,
   invalidateGlobalTenantSchemaReadiness,
   quotePgIdentifier,
+  resolvePostgresMigrateUser,
+  resolvePostgresRuntimeUser,
   resolveTenantPostgresRoleName,
   sanitizePostgresError,
 } from '../postgresPoolManager';
@@ -2004,11 +2006,9 @@ export class TenantMigrationRunner {
     this.ensureContext(ctx);
     const tenantRoleName = resolveTenantPostgresRoleName(ctx);
     const tenantRoleIdent = quotePgIdentifier(tenantRoleName);
-    const runtimeUser =
-      process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
+    const runtimeUser = resolvePostgresRuntimeUser();
     const runtimeIdent = quotePgIdentifier(runtimeUser);
-    const migrateUser =
-      process.env.PLATFORM_POSTGRES_MIGRATE_USER?.trim() || 'migrate_login';
+    const migrateUser = resolvePostgresMigrateUser();
     const migrateIdent = quotePgIdentifier(migrateUser);
     const dbIdent = quotePgIdentifier(ctx.postgresDatabaseName);
 
@@ -2266,8 +2266,7 @@ export class TenantMigrationRunner {
 
         const tenantRoleName = resolveTenantPostgresRoleName(ctx);
         const tenantRoleIdent = quotePgIdentifier(tenantRoleName);
-        const runtimeUser =
-          process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
+        const runtimeUser = resolvePostgresRuntimeUser();
         const runtimeIdent = quotePgIdentifier(runtimeUser);
         for (const tableName of definition.tablesChanged) {
           const tableIdent = quotePgIdentifier(tableName);

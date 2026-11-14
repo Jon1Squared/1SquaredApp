@@ -704,6 +704,14 @@ export interface JobPolicy {
  * its `jobKey` to a `jobOnly: true` permission in `PERMISSION_REGISTRY`.
  */
 export const JOB_PERMISSIONS = {
+  provision: {
+    kind: 'job',
+    permission: 'tenant:provision',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    description:
+      'Provision per-tenant PostgreSQL databases, NOLOGIN roles, NOINHERIT runtime Entra principal, and public schema privileges.',
+  },
   migrate: {
     kind: 'job',
     permission: 'tenant:migrate',
@@ -711,6 +719,14 @@ export const JOB_PERMISSIONS = {
     timeoutMs: 120_000,
     description:
       'Apply pending per-tenant PostgreSQL expand/contract migrations across active registry tenants.',
+  },
+  'seed-demo': {
+    kind: 'job',
+    permission: 'tenant:seed_demo',
+    jobOnly: true,
+    timeoutMs: 300_000,
+    description:
+      'Seed non-live demo tenant database and blob storage with invented demo data and optional Entra ID user mapping.',
   },
   'key-date-reminders': {
     kind: 'job',

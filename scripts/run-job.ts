@@ -22,12 +22,17 @@ import {
   type TenantMigrationDefinition,
   type TenantRegistry,
 } from '@platform/core';
+import {
+  provisionPostgresClusterRolesAndDatabases,
+  type ProvisionPostgresClusterOptions,
+} from '../core/src/tenancy/postgresAdminBootstrap';
 import { guardedJob, type GuardedJobOptions } from '../src/server/authorize';
 import {
   runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledKeyDateRemindersJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
 } from '../src/server/services';
+import { runSeedDemoTenant, type SeedDemoTenantResult } from './seed-demo-tenant';
 
 export interface RegisteredCliJobDescriptor {
   readonly name: string;
@@ -39,9 +44,21 @@ export interface RegisteredCliJobDescriptor {
 export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
   Object.freeze([
     {
+      name: 'provision',
+      description:
+        'Provision per-tenant PostgreSQL databases, NOLOGIN roles, NOINHERIT runtime Entra principal, and public schema privileges on direct port 5432',
+      mode: 'manual',
+    },
+    {
       name: 'migrate',
       description:
         'Apply pending per-tenant PostgreSQL expand/contract migrations across active registry tenants on direct port 5432',
+      mode: 'manual',
+    },
+    {
+      name: 'seed-demo',
+      description:
+        'Seed non-live demo tenant database and blob storage with invented demo data and optional Entra ID user mapping',
       mode: 'manual',
     },
     {
@@ -66,6 +83,221 @@ export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
       schedule: '0 * * * *',
     },
   ]);
+
+export interface ProvisionJobRunSummary {
+  readonly exitCode: number;
+  readonly succeededTenants: string[];
+  readonly failedTenants: Array<{ tenantId: string; errorCode?: string }>;
+  readonly databasesProvisioned: string[];
+}
+
+export async function runProvisionJobSweep(options?: {
+  registry?: TenantRegistry;
+  provisioner?: (opts: ProvisionPostgresClusterOptions) => Promise<{
+    databasesProvisioned: string[];
+  }>;
+  timeoutMs?: number;
+  guardedJobOptions?: GuardedJobOptions;
+}): Promise<ProvisionJobRunSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const provisioner =
+    options?.provisioner ?? provisionPostgresClusterRolesAndDatabases;
+  const succeededTenants: string[] = [];
+  const failedTenants: Array<{ tenantId: string; errorCode?: string }> = [];
+  const databasesProvisioned: string[] = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) {
+      continue;
+    }
+    const correlationId = `job-provision-${entry.slug}-${randomUUID()}`;
+
+    try {
+      await guardedJob(
+        'provision',
+        entry,
+        async ({ tenantContext }) => {
+          const res = await provisioner({
+            tenants: [
+              {
+                tenantId: entry.tenantId,
+                environment: entry.environment,
+              },
+            ],
+          });
+          succeededTenants.push(entry.tenantId);
+          databasesProvisioned.push(...res.databasesProvisioned);
+          emitTenantTelemetryEvent({
+            eventName: 'job.provision.tenant_succeeded',
+            tenantId: entry.tenantId,
+            correlationId: tenantContext.correlationId,
+            properties: {
+              databasesProvisionedCount: res.databasesProvisioned.length,
+              databaseName: entry.postgresDatabaseName,
+            },
+          });
+          return {
+            status: 'succeeded',
+            summary: {
+              databasesProvisionedCount: res.databasesProvisioned.length,
+            },
+          };
+        },
+        {
+          registry,
+          correlationId,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+    } catch (err) {
+      const errorCode =
+        typeof (err as { code?: unknown })?.code === 'string'
+          ? String((err as { code?: unknown }).code)
+          : sanitizeJobErrorCode(err);
+      failedTenants.push({ tenantId: entry.tenantId, errorCode });
+      emitTenantTelemetryException({
+        eventName: 'job.provision.tenant_failed',
+        tenantId: entry.tenantId,
+        correlationId,
+        error: err,
+        properties: {
+          databaseName: entry.postgresDatabaseName,
+        },
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    failedTenants,
+    databasesProvisioned,
+  };
+}
+
+export interface SeedDemoJobRunSummary {
+  readonly exitCode: number;
+  readonly succeededTenants: string[];
+  readonly failedTenants: Array<{ tenantId: string; errorCode?: string }>;
+  readonly resultsByTenant: Record<string, SeedDemoTenantResult>;
+}
+
+export async function runSeedDemoJobSweep(options?: {
+  registry?: TenantRegistry;
+  force?: boolean;
+  env?: Record<string, string | undefined>;
+  rootDir?: string;
+  timeoutMs?: number;
+  guardedJobOptions?: GuardedJobOptions;
+}): Promise<SeedDemoJobRunSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const env = options?.env ?? process.env;
+  const force =
+    options?.force === true ||
+    env.SEED_DEMO_FORCE?.trim().toLowerCase() === 'true';
+  const succeededTenants: string[] = [];
+  const failedTenants: Array<{ tenantId: string; errorCode?: string }> = [];
+  const resultsByTenant: Record<string, SeedDemoTenantResult> = {};
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) {
+      continue;
+    }
+    const correlationId = `job-seed-demo-${entry.slug}-${randomUUID()}`;
+
+    try {
+      await guardedJob(
+        'seed-demo',
+        entry,
+        async ({ tenantContext }) => {
+          if (
+            entry.environment === 'live' ||
+            tenantContext.environment === 'live'
+          ) {
+            const liveErr = new Error(
+              'SEED_DEMO_LIVE_FORBIDDEN: Refusing to seed demo data in the live environment.',
+            ) as Error & { code: string };
+            liveErr.code = 'SEED_DEMO_LIVE_FORBIDDEN';
+            throw liveErr;
+          }
+
+          const res = await runSeedDemoTenant({
+            args: force ? ['--force'] : [],
+            env: {
+              ...env,
+              PLATFORM_TENANT_PACKAGE_DIR:
+                entry.packageDir ||
+                env.PLATFORM_TENANT_PACKAGE_DIR ||
+                'client-not-a-law-firm',
+              PLATFORM_ENVIRONMENT: entry.environment,
+            },
+            rootDir: options?.rootDir,
+            logger: () => {},
+            warnLogger: () => {},
+          });
+
+          succeededTenants.push(entry.tenantId);
+          resultsByTenant[entry.tenantId] = res;
+          emitTenantTelemetryEvent({
+            eventName: 'job.seed-demo.tenant_succeeded',
+            tenantId: entry.tenantId,
+            correlationId: tenantContext.correlationId,
+            properties: {
+              mappedPersonas: res.mappedEntraPersonas,
+              unboundPrivilegedPersonas: res.unboundPrivilegedPersonas,
+              peopleCount: res.counts.people,
+              organisationsCount: res.counts.organisations,
+              mattersCount: res.counts.matters,
+              enquiriesCount: res.counts.enquiries,
+              tasksCount: res.counts.tasks,
+              keyDatesCount: res.counts.keyDates,
+            },
+          });
+          return {
+            status: 'succeeded',
+            summary: {
+              mappedPersonas: res.mappedEntraPersonas,
+              peopleCount: res.counts.people,
+              mattersCount: res.counts.matters,
+              enquiriesCount: res.counts.enquiries,
+              tasksCount: res.counts.tasks,
+              keyDatesCount: res.counts.keyDates,
+            },
+          };
+        },
+        {
+          registry,
+          correlationId,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+    } catch (err) {
+      const errorCode =
+        typeof (err as { code?: unknown })?.code === 'string'
+          ? String((err as { code?: unknown }).code)
+          : sanitizeJobErrorCode(err);
+      failedTenants.push({ tenantId: entry.tenantId, errorCode });
+      emitTenantTelemetryException({
+        eventName: 'job.seed-demo.tenant_failed',
+        tenantId: entry.tenantId,
+        correlationId,
+        error: err,
+        properties: {
+          databaseName: entry.postgresDatabaseName,
+        },
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    failedTenants,
+    resultsByTenant,
+  };
+}
 
 export interface MigrateJobRunSummary {
   readonly exitCode: number;
@@ -177,7 +409,12 @@ export async function executeCliJobRunner(
     return 1;
   }
 
-  if (args.length > 1) {
+  const extraArgs = args.slice(1);
+  const isSeedDemoForceFlag =
+    jobName === 'seed-demo' &&
+    extraArgs.length === 1 &&
+    extraArgs[0] === '--force';
+  if (extraArgs.length > 0 && !isSeedDemoForceFlag) {
     writeErr(
       'JOB_RUNNER_USAGE_ERROR: Unexpected CLI arguments or flags. Scheduled jobs accept only `--list` or `<job-name>`.\n',
     );
@@ -192,6 +429,22 @@ export async function executeCliJobRunner(
     return 1;
   }
 
+  if (jobName === 'provision') {
+    const summary = await runProvisionJobSweep();
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.provision.completed',
+        succeededCount: summary.succeededTenants.length,
+        failedCount: summary.failedTenants.length,
+        databasesProvisionedCount: summary.databasesProvisioned.length,
+        ...(summary.failedTenants.length > 0
+          ? { failedTenants: summary.failedTenants }
+          : {}),
+      })}\n`,
+    );
+    return summary.exitCode;
+  }
+
   if (jobName === 'migrate') {
     const summary = await runMigrateJobSweep();
     writeOut(
@@ -199,6 +452,31 @@ export async function executeCliJobRunner(
         event: 'job.migrate.completed',
         succeededCount: summary.succeededTenants.length,
         failedCount: summary.failedTenants.length,
+        ...(summary.failedTenants.length > 0
+          ? { failedTenants: summary.failedTenants }
+          : {}),
+      })}\n`,
+    );
+    return summary.exitCode;
+  }
+
+  if (jobName === 'seed-demo') {
+    const summary = await runSeedDemoJobSweep({ force: isSeedDemoForceFlag });
+    const firstRes = Object.values(summary.resultsByTenant)[0];
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.seed-demo.completed',
+        succeededCount: summary.succeededTenants.length,
+        failedCount: summary.failedTenants.length,
+        mappedPersonas: firstRes?.mappedEntraPersonas ?? 0,
+        peopleCount: firstRes?.counts.people ?? 0,
+        mattersCount: firstRes?.counts.matters ?? 0,
+        enquiriesCount: firstRes?.counts.enquiries ?? 0,
+        tasksCount: firstRes?.counts.tasks ?? 0,
+        keyDatesCount: firstRes?.counts.keyDates ?? 0,
+        ...(summary.failedTenants.length > 0
+          ? { failedTenants: summary.failedTenants }
+          : {}),
       })}\n`,
     );
     return summary.exitCode;

@@ -34,6 +34,8 @@ COPY --from=builder --chown=node:node /app/public ./public
 COPY --from=builder --chown=node:node /app/dist/jobs ./dist/jobs
 COPY --from=builder --chown=node:node /app/core/schemas ./core/schemas
 COPY --from=builder --chown=node:node /app/${PLATFORM_TENANT_PACKAGE_DIR}/config ./${PLATFORM_TENANT_PACKAGE_DIR}/config
+COPY --from=builder --chown=node:node /app/data/seed-not-a-law-firm.json ./data/seed-not-a-law-firm.json
+COPY --from=builder --chown=node:node /app/data/pms/1Squared_PMS_Demo_Data.xlsx ./data/pms/1Squared_PMS_Demo_Data.xlsx
 
 USER node
 EXPOSE 3000

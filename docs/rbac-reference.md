@@ -23,7 +23,7 @@ Related Architecture Decision Records:
 ## 1. Central Permission Registry (`PERMISSION_REGISTRY`)
 
 Defined in `core/src/domain/rbac/registry.ts` and exported from `@platform/core`.
-Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 60 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 4 job-only permissions).
+Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 60 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 6 job-only permissions).
 
 | Permission Key | Domain | Sensitivity | Requires MFA | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -87,7 +87,9 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `keydate:waive` | `keydate` | `restricted` | No | Waive a key date with an audited reason |
 | `keydate:override_calculation` | `keydate` | `restricted` | No | Override a rule-calculated limitation or key date with a mandatory audited reason |
 | `keydate:configure` | `keydate` | `critical` | **Yes** | Configure key date types, matter type rules, reminder schedules, limitation rule sets, and business calendars |
+| `tenant:provision` | `tenancy` | `critical` | No (`jobOnly: true`) | Provision per-tenant PostgreSQL database and cluster roles in the unattended `provision` Container Apps job (`system:provision` via `guardedJob`) |
 | `tenant:migrate` | `tenancy` | `critical` | No (`jobOnly: true`) | Execute per-tenant database schema migrations in the unattended `migrate` Container Apps job (`system:migrate` via `guardedJob`) |
+| `tenant:seed_demo` | `tenancy` | `critical` | No (`jobOnly: true`) | Seed non-live demo tenant data into per-tenant PostgreSQL in the unattended `seed-demo` Container Apps job (`system:seed-demo` via `guardedJob`) |
 | `keydate:run_reminders` | `key_dates` | `critical` | No (`jobOnly: true`) | Execute the unattended daily key-date reminder and escalation sweep for a tenant (`system:key-date-reminders` via `guardedJob`) |
 | `document_generation:purge_usage` | `document_generation` | `critical` | No (`jobOnly: true`) | Execute the unattended daily document generation usage retention purge for a tenant (`system:usage-retention-purge` via `guardedJob`) |
 | `enquiry:run_retention_anonymise` | `enquiry` | `critical` | No (`jobOnly: true`) | Execute the unattended daily enquiry retention anonymisation sweep for a tenant (`system:enquiry-retention-anonymise` via `guardedJob`) |
@@ -203,7 +205,7 @@ Per [ADR-0025](./decisions/0025-permission-enforcement-pattern.md), every server
 - **Policy Registry (`src/server/actionPermissions.ts`):**
   - `ACTION_PERMISSIONS`: maps each exported server action name to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'authenticated', reason }`, or `{ kind: 'gap', slice }`.
   - `ROUTE_PERMISSIONS`: maps each `<METHOD> /api/...` route handler to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'public', reason }`, or `{ kind: 'gap', slice }`.
-  - `JOB_PERMISSIONS`: maps each registered CLI background job (`migrate`, `key-date-reminders`, `usage-retention-purge`, `enquiry-retention-anonymise`) to `{ kind: 'job', permission, jobOnly: true, enforcedBy: 'job', timeoutMs }`.
+  - `JOB_PERMISSIONS`: maps each registered CLI background job (`provision`, `migrate`, `seed-demo`, `key-date-reminders`, `usage-retention-purge`, `enquiry-retention-anonymise`) to `{ kind: 'job', permission, jobOnly: true, enforcedBy: 'job', timeoutMs }`.
   - `MAX_KNOWN_GAPS`: locks the maximum count of `gap` entries so new actions cannot ship without a permission policy and the baseline gap count can only decrease as Stage 0 slices S0-03 to S0-07 and S0-10 close them.
 - **Action, Route & Job Wrappers (`src/server/authorize.ts`):**
   - `guardedAction(name, fn)` authenticates the actor from the verified Entra ID session, resolves `TenantContext` via `resolveCurrentTenantContext`, resolves the actor's `ResolvedPermissionSet` with the session's real `mfaVerified` state and token roles, and runs `fn` inside `runWithActiveActorSession`.

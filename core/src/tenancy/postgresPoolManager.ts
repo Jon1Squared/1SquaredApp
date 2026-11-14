@@ -21,7 +21,7 @@ import { loadPgModule } from './pgDriver';
 const TENANT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$/;
 const PG_DATABASE_NAME_PATTERN = /^pg_tenant_[a-z0-9_]{2,58}$/;
 const PG_TENANT_ROLE_PATTERN = /^role_tenant_[a-z0-9_]{2,58}$/;
-const PG_SAFE_IDENT_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/;
+const PG_SAFE_IDENT_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_-]{0,62}$/;
 
 const PG_DATE_OID = 1082;
 let pgTypeParsersConfigured = false;
@@ -195,7 +195,7 @@ export function sanitizePostgresError(
   return safeErr;
 }
 
-async function acquireEntraManagedIdentityPostgresToken(
+export async function acquireEntraManagedIdentityPostgresToken(
   clientId?: string,
 ): Promise<string> {
   const resource = 'https://ossrdbms-aad.database.windows.net';
@@ -252,6 +252,22 @@ async function acquireEntraManagedIdentityPostgresToken(
 function isLocalPostgresHost(host: string): boolean {
   const lower = host.trim().toLowerCase();
   return lower === 'localhost' || lower === '127.0.0.1' || lower === '::1' || lower === 'postgres' || lower === 'pgbouncer';
+}
+
+export function resolvePostgresRuntimeUser(): string {
+  return (
+    process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() ||
+    process.env.PLATFORM_POSTGRES_USER?.trim() ||
+    'runtime_login'
+  );
+}
+
+export function resolvePostgresMigrateUser(): string {
+  return (
+    process.env.PLATFORM_POSTGRES_MIGRATE_USER?.trim() ||
+    process.env.PLATFORM_POSTGRES_USER?.trim() ||
+    'migrate_login'
+  );
 }
 
 /**
@@ -340,8 +356,7 @@ export class TenantPostgresPoolManager {
       return { pool: existing.pool, target };
     }
 
-    const runtimeUser =
-      process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
+    const runtimeUser = resolvePostgresRuntimeUser();
     const authMode = process.env.PLATFORM_POSTGRES_AUTH_MODE?.trim();
     const useEntraAuth =
       authMode === 'entra_managed_identity' ||
@@ -353,6 +368,7 @@ export class TenantPostgresPoolManager {
       ? () =>
           acquireEntraManagedIdentityPostgresToken(
             process.env.AZURE_RUNTIME_CLIENT_ID?.trim() ||
+              process.env.PLATFORM_POSTGRES_CLIENT_ID?.trim() ||
               process.env.AZURE_CLIENT_ID?.trim() ||
               undefined,
           )
@@ -489,8 +505,7 @@ export async function createDirectMigrationClient(params: {
     );
   }
   const port = Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
-  const migrateUser =
-    process.env.PLATFORM_POSTGRES_MIGRATE_USER?.trim() || 'migrate_login';
+  const migrateUser = resolvePostgresMigrateUser();
   const authMode = process.env.PLATFORM_POSTGRES_AUTH_MODE?.trim();
   const useEntraAuth =
     authMode === 'entra_managed_identity' ||
@@ -501,6 +516,7 @@ export async function createDirectMigrationClient(params: {
   const password: string = useEntraAuth
     ? await acquireEntraManagedIdentityPostgresToken(
         process.env.AZURE_MIGRATE_CLIENT_ID?.trim() ||
+          process.env.PLATFORM_POSTGRES_CLIENT_ID?.trim() ||
           process.env.AZURE_CLIENT_ID?.trim() ||
           undefined,
       )

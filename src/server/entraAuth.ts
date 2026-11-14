@@ -198,6 +198,21 @@ export function getSigningSecret(): string {
     .digest('hex');
 }
 
+export function resolvePublicAppOrigin(requestUrl: string): string {
+  const configuredRedirectUri = process.env.ENTRA_REDIRECT_URI?.trim();
+  if (configuredRedirectUri && !isPlaceholder(configuredRedirectUri)) {
+    try {
+      const parsed = new URL(configuredRedirectUri);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        return parsed.origin;
+      }
+    } catch {
+      // Fall back to requestUrl origin below
+    }
+  }
+  return new URL(requestUrl).origin;
+}
+
 export function sanitizeReturnToPath(
   returnTo: string | null | undefined,
   baseOrigin = 'http://localhost',

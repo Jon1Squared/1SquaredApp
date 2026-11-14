@@ -6,7 +6,7 @@ export const demoEnvironmentArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How the standalone Not A Law Firm LLP demo environment is configured, how persona switching and sample document seeding work, and how the demo dataset is seeded and reset.',
-  updated: '2026-11-13',
+  updated: '2026-11-14',
   body: `
 The **Demo environment** (\`environment: "demo"\`) provides a standalone, isolated deployment of **Not A Law Firm LLP** (\`tenantId: "not-a-law-firm"\`) for product walkthroughs and role demonstrations without putting any demo logic, fallback strings, or auto-seeding into live client deployments (ADR 0026, ADR 0028).
 
@@ -30,13 +30,13 @@ When \`isNonLiveDemoEnvironment()\` is \`true\` (as configured in \`client-not-a
 
 Demo data enters a non-live tenant PostgreSQL database through two controlled paths only:
 
-1. **CLI seed command (\`npm run seed:demo\`)**:
+1. **CLI and Container Apps seed job (\`npm run seed:demo\` / \`caj-seed-demo-<env>\`)**:
    - Builds fresh relative dates anchored to the current UTC date via \`createSeedStore(new Date(), { includeSyntheticEntraOids: false })\` in \`src/seed/seedStoreBuilder.ts\` (while \`--write-snapshot\` regenerates the committed \`data/seed-not-a-law-firm.json\` snapshot used by deterministic unit and e2e tests).
-   - Requires \`PLATFORM_TENANT_PACKAGE_DIR\` and \`PLATFORM_ENVIRONMENT\`, refuses to run when the environment is \`live\`, and refuses when \`tenantConfig.tenantId\` differs from the snapshot’s \`firmId\`.
-   - Checks \`TenantPartyRepository.listAllPeople(ctx)\` and refuses to overwrite a non-empty tenant database unless \`--force\` is passed.
-   - Accepts \`--entra-map <path>\` (an uncommitted local JSON mapping of seed person IDs to demo Microsoft Entra ID user Object IDs, matching \`/data/entra-map*.json\` or \`*.entra-map.json\`) and sets \`entraObjectId\` **only** on the mapped personas so real Entra sign-ins land on the corresponding seeded roles. Privileged personas (any employee whose resolved roles or permissions include a critical or MFA-gated permission, such as Admin, Managing Partner, Partner, or Risk & Compliance) **never link automatically by email** (\`S0-30\`), so they must be bound via \`--entra-map\` or explicitly by an administrator in **Admin → Users** (**Admin → RBAC & Entra ID**).
+   - Requires \`PLATFORM_TENANT_PACKAGE_DIR\` and \`PLATFORM_ENVIRONMENT\`, refuses to run when the environment is \`live\` or \`isNonLiveDemoEnvironment()\` is \`false\`, and refuses when \`tenantConfig.tenantId\` differs from the snapshot’s \`firmId\`.
+   - Checks \`TenantPartyRepository.countAllTenantPartyRows(ctx)\` and \`TenantCatalogueRepository.getFirmProfile(ctx)\` and refuses to overwrite a non-empty tenant database unless \`--force\` or \`SEED_DEMO_FORCE=true\` is passed.
+   - Accepts \`--entra-map <path>\` locally (an uncommitted JSON mapping of seed person IDs to demo Microsoft Entra ID user Object IDs, matching \`/data/entra-map*.json\` or \`*.entra-map.json\`) or \`DEMO_ENTRA_MAP_JSON\` in Azure Container Apps (populated from the \`demo-entra-map\` Key Vault secret on \`caj-seed-demo-demo\`, gated by \`enableSeedDemoJob\` and forbidden in \`live\`) and sets \`entraObjectId\` **only** on the mapped personas so real Entra sign-ins land on the corresponding seeded roles. Privileged personas (any employee whose resolved roles or permissions include a critical or MFA-gated permission, such as Admin, Managing Partner, Partner, or Risk & Compliance) **never link automatically by email** (\`S0-30\`), so they must be bound via \`--entra-map\` / \`DEMO_ENTRA_MAP_JSON\` or explicitly by an administrator in **Admin → Users** (**Admin → RBAC & Entra ID**).
    - Imports all modules (\`parties\`, \`matters\`, \`intake\`, \`quotes\`, \`tasks\`, \`hr\`, \`catalogues\`, \`pms\`, \`documents\`, \`document-store\`, \`key-dates\`, and \`audit\`) into the tenant's PostgreSQL database via \`importFirmStoreModulesToPostgres\` (\`src/server/storePostgresImport.ts\`).
-   - Logs only record counts, \`tenantId\`, and \`environment\`—never personal, client, or email details—and prints a structured warning when run without \`--entra-map\` (or whenever privileged personas remain unbound) stating how many privileged personas remain unbound without naming any email addresses.
+   - Logs only record counts, \`tenantId\`, and \`environment\`—never personal, client, email, or Entra Object ID details—and prints a structured warning when run without an Entra map (or whenever privileged personas remain unbound) stating how many privileged personas remain unbound without naming any email addresses.
 2. **In-app data reset (\`resetDemoDataAction\`)**:
    - Available under **Administration → Demo data** (\`/admin/demo-data\`, **Load demo dataset**) only when \`isDataResetAllowedEnvironment()\` is \`true\` (non-live environment with \`featureFlags.enableDemoMode: true\`).
    - Requires the \`admin:data_reset\` permission (\`admin\` role only) with verified multi-factor authentication (\`mfaVerified === true\`).

@@ -7,6 +7,7 @@ import {
   ENTRA_PKCE_COOKIE,
   ENTRA_SESSION_COOKIE,
   exchangeCodeForVerifiedEntraClaims,
+  resolvePublicAppOrigin,
   sanitizeReturnToPath,
   shouldUseSecureCookies,
   verifyPkceCookie,
@@ -16,12 +17,13 @@ import { resolveOrProvisionEntraEmployee } from '@/server/services';
 export const GET = guardedRoute(
   'GET /api/auth/callback/microsoft-entra-id',
   async (request: NextRequest) => {
+    const appOrigin = resolvePublicAppOrigin(request.url);
     const searchParams = request.nextUrl.searchParams;
     const oauthError = searchParams.get('error');
     const oauthErrorDesc = searchParams.get('error_description');
 
     if (oauthError) {
-      const errUrl = new URL('/', request.url);
+      const errUrl = new URL('/', appOrigin);
       errUrl.searchParams.set('authError', oauthErrorDesc || oauthError);
       return NextResponse.redirect(errUrl);
     }
@@ -29,7 +31,7 @@ export const GET = guardedRoute(
     const code = searchParams.get('code');
     const state = searchParams.get('state');
     if (!code || !state) {
-      const errUrl = new URL('/', request.url);
+      const errUrl = new URL('/', appOrigin);
       errUrl.searchParams.set('authError', 'Missing authorization code or state from Microsoft Entra ID.');
       return NextResponse.redirect(errUrl);
     }
@@ -63,10 +65,9 @@ export const GET = guardedRoute(
 
       const signedSession = createSignedEntraSessionCookie(sessionPayload);
 
-      const reqOrigin = new URL(request.url).origin;
-      const destPath = sanitizeReturnToPath(pkce.returnTo, reqOrigin);
-      const destUrl = new URL(destPath, reqOrigin);
-      if (destUrl.origin !== reqOrigin) {
+      const destPath = sanitizeReturnToPath(pkce.returnTo, appOrigin);
+      const destUrl = new URL(destPath, appOrigin);
+      if (destUrl.origin !== appOrigin) {
         throw new Error('Cross-origin redirect blocked.');
       }
       destUrl.searchParams.set('authSuccess', '1');
@@ -82,7 +83,7 @@ export const GET = guardedRoute(
       });
       return response;
     } catch (err) {
-      const errUrl = new URL('/', request.url);
+      const errUrl = new URL('/', appOrigin);
       errUrl.searchParams.set(
         'authError',
         err instanceof Error ? err.message : 'Entra ID authentication callback failed.',
